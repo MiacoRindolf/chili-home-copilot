@@ -268,6 +268,39 @@ def mark_reconciled(
     return updated
 
 
+def bump_last_observed(
+    db: Session,
+    intent_id: int,
+    *,
+    diff_reason: str | None = None,
+) -> bool:
+    """P0.5 — mark a bracket intent as observed by the current reconciliation
+    sweep *without* changing its ``intent_state``.
+
+    This is the crash-recovery signal: the watchdog looks at
+    ``NOW() - last_observed_at`` to detect intents whose sweeps have been
+    silently dropping (reconciler crash, scheduler stall, DB connectivity
+    issue). ``mark_reconciled`` keeps doing its transition; this helper is
+    called for *every* row the sweep classifies, including ``missing_stop`` /
+    ``orphan_stop`` / ``qty_drift`` — i.e. rows that will stay in
+    non-terminal state after the sweep.
+
+    Never advances state and never commits; the caller commits at end of
+    the sweep so a single transaction covers the batch. Returns True when
+    the target row exists and was touched.
+    """
+    result = db.execute(text("""
+        UPDATE trading_bracket_intents
+        SET last_observed_at = NOW(),
+            last_diff_reason = COALESCE(:diff_reason, last_diff_reason)
+        WHERE id = :id
+    """), {
+        "id": int(intent_id),
+        "diff_reason": (diff_reason or "")[:128] or None,
+    })
+    return bool(result.rowcount)
+
+
 # ── Diagnostics summary ────────────────────────────────────────────────
 
 
@@ -334,6 +367,7 @@ def _json_dumps(value: Any) -> str:
 __all__ = [
     "UpsertResult",
     "bracket_intent_summary",
+    "bump_last_observed",
     "mark_reconciled",
     "mode_is_active",
     "upsert_bracket_intent",

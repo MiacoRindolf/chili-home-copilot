@@ -3,24 +3,17 @@
     <div>
       <h2>Simulation Runtime</h2>
       <p>
-        CHILI-linked open positions and paper sessions share this list. Every pattern-linked position is
-        auto-managed by the monitor against <strong>Robinhood's own feed</strong> for live stocks and
-        <strong>Massive/Polygon</strong> for paper &mdash; both matching the venue that fills them. Use
-        <strong>Pause monitor</strong> on a row to opt a specific position out; <strong>Exclude synergy</strong> blocks
-        scale-ins on that row. Desk <em>Pause entries</em> blocks <strong>new</strong> automated entries and does not
-        touch existing monitors. Server needs <code>CHILI_AUTOTRADER_ENABLED=true</code> for the scheduler tick.
+        Paper and live Autopilot sessions live here. Controls, runner status, chart, fills, and event trail
+        all stay inline in each session card so the page reads as an operational list rather than a
+        selected-session side panel. CHILI-managed broker positions are shown in their own section above.
       </p>
     </div>
     <div class="ap-section-actions">
-      <div class="ap-pattern-desk-actions" id="ap-pattern-desk-controls"></div>
       <label class="ap-muted"><input type="checkbox" id="ap-show-archived" /> Show archived</label>
       <button type="button" class="ap-btn" onclick="apRefreshSessions()" aria-label="Refresh sessions">Refresh sessions</button>
-      <button type="button" class="ap-btn" id="ap-pattern-desk-refresh" aria-label="Refresh pattern positions">Refresh positions</button>
     </div>
   </div>
-  <div class="ap-banner" id="ap-pattern-desk-banner" style="display:none"></div>
   <div class="ap-section-body">
-    <div id="ap-pattern-desk-cards" class="ap-session-list" aria-live="polite"></div>
     <div id="ap-sessions" class="ap-session-list" aria-live="polite"></div>
     <div id="ap-sessions-empty" class="ap-empty" style="display:none">
       No Autopilot sessions yet. Start from an eligible symbol above to create a paper or live workflow.

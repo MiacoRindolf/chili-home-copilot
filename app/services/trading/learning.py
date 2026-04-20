@@ -127,9 +127,24 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
     cached with stale-while-revalidate: 3 min fresh, 10 min stale.
     Explicit ticker lists bypass the cache.
 
-    Phase 7: candidate-authoritative mirror reads require a **non-empty** explicit
-    ticker list. ``None``, empty list, cache/SWR refresh, and inferred universes
-    stay ``explicit_api_tickers=False`` (legacy-authoritative for mirror).
+    Prediction-mirror authority contract (this is the frozen contract
+    referenced by ``CLAUDE.md`` Hard Rule 5):
+
+    * ``explicit_api_tickers=True`` — caller passed a non-empty,
+      caller-chosen ticker list. Phase 7+ candidate-authoritative mirror
+      reads are allowed. The operator has an explicit intent, so the
+      read is safe to authorize against the mirror DB.
+    * ``explicit_api_tickers=False`` — caller passed ``None``, an empty
+      list, or the cache/SWR background refresh triggered the call.
+      These read against the legacy path; the mirror is not consulted.
+
+    The release-blocker check in ``trading_brain`` enforces that no
+    ``[chili_prediction_ops]`` line ever has
+    ``read=auth_mirror AND explicit_api_tickers=False`` together. If you
+    are about to change the signature or the branches below, read
+    ``docs/TRADING_BRAIN_LIVE_BRACKETS_ROLLOUT.md`` and the rollout docs
+    under ``docs/`` for the prediction mirror migration BEFORE editing;
+    this is not a safe-to-improvise path.
     """
     global _pred_cache, _pred_refreshing
 
@@ -410,6 +425,7 @@ def brain_apply_oos_promotion_gate(
     mean_oos_profit_factor: float | None = None,
     oos_wr_robust_min: float | None = None,
     oos_bootstrap_wr_ci_low: float | None = None,
+    walk_forward_passes_gate: bool | None = None,
 ) -> tuple[str, bool]:
     """Return ``(promotion_status, allow_active)``.
 
@@ -417,6 +433,19 @@ def brain_apply_oos_promotion_gate(
 
     Discovery-phase miners never call this — only backtest evidence paths. Optional aggregate
     OOS trade floor (``min_oos_aggregate_trades``) reduces promotion on thin short-horizon samples.
+
+    P1.3 — ``walk_forward_passes_gate`` is a tri-state:
+
+        * ``None`` — walk-forward result not supplied. When the global
+          ``chili_walk_forward_enabled`` flag is OFF this is a pass-through
+          (legacy behavior). When the flag is ON, a missing walk-forward
+          result downgrades to ``pending_oos`` — we can't promote a
+          pattern we haven't walked forward.
+        * ``True``  — walk-forward passed (see
+          ``run_walk_forward(...).passes_gate``). Continues through the
+          other gates as before.
+        * ``False`` — walk-forward failed. Hard-reject the pattern so it
+          can't be promoted on OOS-only evidence.
     """
     from ...config import settings
 
@@ -470,6 +499,17 @@ def brain_apply_oos_promotion_gate(
     if ci_floor is not None and oos_bootstrap_wr_ci_low is not None:
         if float(oos_bootstrap_wr_ci_low) < float(ci_floor):
             return "rejected_oos", False
+
+    # P1.3 — walk-forward gate. Only enforced when the feature flag is
+    # on so existing promotion flows keep working verbatim until an
+    # operator flips ``chili_walk_forward_enabled``.
+    if bool(getattr(settings, "chili_walk_forward_enabled", False)):
+        if walk_forward_passes_gate is False:
+            return "rejected_walk_forward", False
+        if walk_forward_passes_gate is None:
+            # Flag on but no walk-forward result supplied — don't promote
+            # on OOS-only evidence. Keep pattern active, flagged pending.
+            return "pending_walk_forward", True
 
     if int(oos_aggregate_trade_count or 0) < getattr(settings, "brain_min_trades_for_promotion", 30):
         return "pending_oos", True

@@ -491,8 +491,8 @@ def dispatch_alert(
         db.commit()
 
         try:
-            from ...routers.trading import _broadcast_alert_sync
-            _broadcast_alert_sync({
+            from .alert_broadcast import broadcast_alert_sync
+            broadcast_alert_sync({
                 "ticker": ticker or "",
                 "alert_type": alert_type,
                 "price": price,

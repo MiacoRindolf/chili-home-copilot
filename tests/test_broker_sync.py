@@ -281,6 +281,16 @@ class TestExecuteProposalStatus:
         p.executed_at = None
         return p
 
+    # NOTE on risk-gate mock: ``_execute_proposal`` calls
+    # ``check_new_trade_allowed(db, ...)`` inline with the test's MagicMock db.
+    # Inside that helper ``db.query(Trade).filter(...).count()`` returns a
+    # MagicMock (not an int) and the downstream ``>=`` comparison against a
+    # real int raises TypeError — which the outer except swallows and turns
+    # into ``{"status": "blocked", "error": "risk gate check failed"}``.
+    # These unit tests are exercising the broker-placement branch, not the
+    # risk gate, so we patch it to a permissive stub. Patched at the
+    # ``portfolio_risk`` origin module because ``_execute_proposal`` imports
+    # the symbol inline via ``from .portfolio_risk import check_new_trade_allowed``.
     @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
     @patch("app.services.trading.alerts._get_buying_power", return_value=10000)
     @patch("app.services.broker_service.is_connected", return_value=True)

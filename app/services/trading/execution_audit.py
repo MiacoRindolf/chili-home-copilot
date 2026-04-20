@@ -231,6 +231,36 @@ def record_execution_event(
     db.flush()
     if trade is not None:
         apply_execution_event_to_trade(trade, event_row)
+
+    # P1.1 — project the broker-native status onto a canonical state and
+    # write one row to ``trading_order_state_log`` per transition. This is
+    # additive: the state machine is opt-in via
+    # ``settings.chili_order_state_machine_enabled`` (default False), so in
+    # the rollout period this is a pure no-op. Failures here must never
+    # mask the authoritative event row that was just written.
+    try:
+        from .venue.order_state_machine import record_from_broker_status
+
+        record_from_broker_status(
+            db,
+            broker_status=status,
+            venue=venue_name,
+            source=f"execution_audit:{event_type}"[:32],
+            order_id=order_id or getattr(trade, "broker_order_id", None),
+            client_order_id=client_order_id,
+            raw_payload={
+                "event_type": event_type,
+                "broker_source": broker,
+                "requested_quantity": requested_quantity,
+                "cumulative_filled_quantity": cumulative_filled_quantity,
+                "average_fill_price": average_fill_price,
+            },
+        )
+    except Exception:
+        # Never let the state machine crash the execution event path.
+        # The event row is already flushed — that's the authoritative record.
+        pass
+
     return event_row
 
 

@@ -25,7 +25,7 @@ from ...config import settings
 from ...trading_brain.infrastructure.bracket_reconciliation_ops_log import (
     format_bracket_reconciliation_ops_line,
 )
-from .bracket_intent_writer import mark_reconciled
+from .bracket_intent_writer import bump_last_observed, mark_reconciled
 from .bracket_reconciler import (
     BrokerView,
     LocalView,
@@ -319,6 +319,22 @@ def run_reconciliation_sweep(
                     "[bracket_reconciliation] mark_reconciled failed for intent %s",
                     local.bracket_intent_id,
                 )
+        elif local.bracket_intent_id is not None:
+            # P0.5 crash-recovery signal: bump last_observed_at on every
+            # non-agree scan too, so the watchdog can distinguish
+            # "reconciler saw this and it's still broken" from
+            # "reconciler never ran / crashed before reaching this intent."
+            try:
+                bump_last_observed(
+                    db,
+                    int(local.bracket_intent_id),
+                    diff_reason=f"{decision.kind}:{decision.severity}",
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.debug(
+                    "[bracket_reconciliation] bump_last_observed failed for intent %s",
+                    local.bracket_intent_id,
+                )
 
         decisions.append({
             "trade_id": local.trade_id,
@@ -401,17 +417,42 @@ def _load_local_view(
     *,
     user_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Load one row per open live ``Trade`` + its bracket intent.
+    """Load one row per live ``Trade`` + its bracket intent that is in the
+    reconciliation sweep's scan scope.
 
-    Returned dicts feed both ``LocalView`` and the broker-view provider.
+    Scope (P0.5 — orphan-stop coverage expansion):
+
+    * Always: every open live trade (``status='open'``,
+      ``broker_source IS NOT NULL``) — the classical reconciliation path.
+    * Also: any trade whose ``BracketIntent`` has NOT yet reached a
+      terminal state (i.e. not ``reconciled`` and not
+      ``authoritative_closed``) — including trades that are
+      ``cancelled`` / ``expired`` / ``closed``. Without this, a
+      cancelled entry that left a working stop at the broker (orphan)
+      would never be scanned and never classified as ``orphan_stop``.
+
     Paper trades (``broker_source IS NULL``) are excluded on purpose:
     paper state is authoritative locally and needs no broker check.
     """
     params: dict[str, Any] = {}
-    filters = [
-        "t.status = 'open'",
-        "t.broker_source IS NOT NULL",
-    ]
+    # Two disjoint scopes joined with OR:
+    #   scope A — the classical "open live trade" scope.
+    #   scope B — the orphan candidate scope: the Trade is no longer
+    #             open, but its BracketIntent still thinks it should be
+    #             protected. These rows are exactly the ones at risk of
+    #             leaving a stop working at the broker for a position
+    #             we no longer hold.
+    scope_clause = (
+        "( (t.status = 'open' AND t.broker_source IS NOT NULL)"
+        " OR ("
+        "     bi.id IS NOT NULL"
+        "     AND t.broker_source IS NOT NULL"
+        "     AND t.status <> 'open'"
+        "     AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed')"
+        "   )"
+        " )"
+    )
+    filters = [scope_clause]
     if user_id is not None:
         filters.append("t.user_id = :uid")
         params["uid"] = int(user_id)
@@ -591,8 +632,213 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, default=str, separators=(",", ":"))
 
 
+@dataclass(frozen=True)
+class WatchdogHit:
+    """One flagged trade from ``run_missing_stop_watchdog``."""
+
+    trade_id: int
+    ticker: str | None
+    broker_source: str | None
+    kind: str                   # 'missing_stop' | 'orphan_stop' | 'never_observed'
+    severity: str
+    age_seconds: float
+    last_observed_at: str | None
+    alert_sent: bool
+    alert_skip_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class WatchdogSummary:
+    checked_at: str
+    enabled: bool
+    stale_after_sec: int
+    open_trades_scanned: int
+    hits: list[WatchdogHit] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "checked_at": self.checked_at,
+            "enabled": self.enabled,
+            "stale_after_sec": self.stale_after_sec,
+            "open_trades_scanned": self.open_trades_scanned,
+            "hits": [h.__dict__ for h in self.hits],
+        }
+
+
+def _watchdog_enabled() -> bool:
+    return bool(getattr(settings, "chili_bracket_watchdog_enabled", False))
+
+
+def _watchdog_stale_after_sec() -> int:
+    raw = getattr(settings, "chili_bracket_watchdog_stale_after_sec", 300) or 300
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = 300
+    return max(30, n)
+
+
+def run_missing_stop_watchdog(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    stale_after_sec: int | None = None,
+    enabled_override: bool | None = None,
+    alert_dispatcher: Any = None,
+) -> WatchdogSummary:
+    """P0.5 — scan open live trades and alert on stale unprotected positions.
+
+    For each open live trade with a ``BracketIntent``:
+
+    1. If no reconciliation row has been written in the lookback window,
+       classify as ``never_observed`` (crash-recovery signal — the sweep
+       hasn't run or crashed before reaching this trade).
+    2. Else, look at the *most recent* reconciliation decision for the
+       trade. If it's ``missing_stop`` or ``orphan_stop`` *and* the
+       ``observed_at`` is older than ``stale_after_sec``, the position is
+       considered unprotected; fire an alert.
+
+    Alerts are routed through :func:`alerts.dispatch_alert` (rate-limited
+    per ticker by that module). ``alert_dispatcher`` lets tests inject a
+    spy without touching the real alert path.
+
+    Returns a :class:`WatchdogSummary`. The watchdog is read-only.
+    """
+    from datetime import datetime as _dt
+
+    enabled = enabled_override if enabled_override is not None else _watchdog_enabled()
+    stale_sec = int(stale_after_sec) if stale_after_sec is not None else _watchdog_stale_after_sec()
+    checked_at = _dt.utcnow().isoformat()
+
+    if not enabled:
+        return WatchdogSummary(
+            checked_at=checked_at,
+            enabled=False,
+            stale_after_sec=stale_sec,
+            open_trades_scanned=0,
+            hits=[],
+        )
+
+    # Latest reconciliation row per trade within a generous lookback,
+    # joined to the live open-trade set. Paper trades are excluded
+    # (``broker_source IS NOT NULL``) for the same reason as the sweep.
+    params: dict[str, Any] = {"stale_sec": int(stale_sec)}
+    user_filter = ""
+    if user_id is not None:
+        user_filter = " AND t.user_id = :uid"
+        params["uid"] = int(user_id)
+
+    sql = text(f"""
+        WITH last_rec AS (
+            SELECT DISTINCT ON (trade_id)
+                trade_id, kind, severity, observed_at
+            FROM trading_bracket_reconciliation_log
+            WHERE observed_at >= (NOW() - INTERVAL '24 hours')
+            ORDER BY trade_id, observed_at DESC
+        )
+        SELECT
+            t.id AS trade_id,
+            t.ticker,
+            t.broker_source,
+            bi.id AS bracket_intent_id,
+            bi.last_observed_at,
+            r.kind,
+            r.severity,
+            r.observed_at,
+            EXTRACT(EPOCH FROM (NOW() - COALESCE(r.observed_at, bi.created_at))) AS age_sec
+        FROM trading_trades AS t
+        JOIN trading_bracket_intents AS bi ON bi.trade_id = t.id
+        LEFT JOIN last_rec AS r ON r.trade_id = t.id
+        WHERE t.status = 'open'
+          AND t.broker_source IS NOT NULL
+          AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed')
+          {user_filter}
+        ORDER BY t.id
+    """)
+    rows = db.execute(sql, params).fetchall()
+
+    hits: list[WatchdogHit] = []
+    for row in rows:
+        trade_id = int(row[0])
+        ticker = row[1]
+        broker_source = row[2]
+        last_observed_at = row[4]
+        kind = row[5]
+        severity = row[6]
+        observed_at = row[7]
+        age_sec = float(row[8]) if row[8] is not None else 0.0
+
+        hit_kind: str | None = None
+        hit_severity: str = severity or "warn"
+        if kind is None:
+            # No recent classification at all — reconciler hasn't reached
+            # this intent. Only a hit once the age crosses the threshold.
+            if age_sec >= stale_sec:
+                hit_kind = "never_observed"
+                hit_severity = "error"
+        elif kind in ("missing_stop", "orphan_stop"):
+            if age_sec >= stale_sec:
+                hit_kind = kind
+        if hit_kind is None:
+            continue
+
+        alert_sent = False
+        alert_skip_reason: str | None = None
+        try:
+            dispatcher = alert_dispatcher
+            if dispatcher is None:
+                from .alerts import dispatch_alert as dispatcher  # type: ignore
+            message = (
+                f"[bracket_watchdog] {hit_kind} on {ticker or '?'} "
+                f"(trade_id={trade_id}, age={int(age_sec)}s, "
+                f"severity={hit_severity})"
+            )
+            alert_sent = bool(
+                dispatcher(
+                    db=db,
+                    user_id=None,
+                    alert_type=f"bracket_watchdog_{hit_kind}",
+                    ticker=ticker,
+                    message=message,
+                    skip_throttle=False,
+                )
+            )
+            if not alert_sent:
+                alert_skip_reason = "throttled_or_log_only"
+        except Exception as exc:  # pragma: no cover - defensive
+            alert_skip_reason = f"dispatch_error:{type(exc).__name__}"
+
+        hits.append(WatchdogHit(
+            trade_id=trade_id,
+            ticker=ticker,
+            broker_source=broker_source,
+            kind=hit_kind,
+            severity=hit_severity,
+            age_seconds=age_sec,
+            last_observed_at=(
+                observed_at.isoformat() if hasattr(observed_at, "isoformat") else (
+                    last_observed_at.isoformat()
+                    if hasattr(last_observed_at, "isoformat") else None
+                )
+            ),
+            alert_sent=alert_sent,
+            alert_skip_reason=alert_skip_reason,
+        ))
+
+    return WatchdogSummary(
+        checked_at=checked_at,
+        enabled=True,
+        stale_after_sec=stale_sec,
+        open_trades_scanned=len(rows),
+        hits=hits,
+    )
+
+
 __all__ = [
     "SweepSummary",
+    "WatchdogHit",
+    "WatchdogSummary",
     "bracket_reconciliation_summary",
+    "run_missing_stop_watchdog",
     "run_reconciliation_sweep",
 ]

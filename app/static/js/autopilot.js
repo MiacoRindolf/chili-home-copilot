@@ -71,6 +71,24 @@
     return Math.ceil(num / 60) + 'm';
   }
 
+  function runnerEtaLabel(health) {
+    if (!health) return 'n/a';
+    var overdue = Number(health.next_tick_overdue_seconds);
+    if (isFinite(overdue) && overdue > 0) {
+      return 'overdue ' + etaLabel(overdue);
+    }
+    var eta = health.next_tick_eta_seconds;
+    if (eta == null) return 'n/a';
+    return 'in ' + etaLabel(eta);
+  }
+
+  function runnerTickLabel(health) {
+    if (!health) return 'n/a';
+    if (!health.last_tick_utc) return 'n/a';
+    var source = health.last_tick_source === 'scheduler_heartbeat' ? ' (scheduler)' : '';
+    return dateLabel(health.last_tick_utc) + source;
+  }
+
   function badge(text, cls) {
     return '<span class="ap-badge ' + esc(cls || '') + '">' + esc(text) + '</span>';
   }
@@ -193,9 +211,9 @@
       + sc('Sessions', summary.total_sessions || 0,
           'Sim ' + esc(lanes.simulation || 0) + ' &middot; Armed ' + esc(lanes['live-armed'] || 0) + ' &middot; Live ' + esc(lanes.live || 0))
       + sc('Paper Runner', runnerStateText(paperRunner),
-          'Tick: ' + esc(dateLabel(paperRunner.last_tick_utc)) + '<br>ETA: ' + esc(etaLabel(paperRunner.next_tick_eta_seconds)))
+          'Tick: ' + esc(runnerTickLabel(paperRunner)) + '<br>ETA: ' + esc(runnerEtaLabel(paperRunner)))
       + sc('Live Runner', runnerStateText(liveRunner),
-          'Tick: ' + esc(dateLabel(liveRunner.last_tick_utc)) + '<br>ETA: ' + esc(etaLabel(liveRunner.next_tick_eta_seconds)))
+          'Tick: ' + esc(runnerTickLabel(liveRunner)) + '<br>ETA: ' + esc(runnerEtaLabel(liveRunner)))
       + sc('Pending', summary.pending_paper_drafts || 0,
           'Queued ' + esc(summary.paper_runner_queued || 0) + ' &middot; Armed ' + esc(summary.armed_awaiting_runner || 0))
       + sc('Pipeline', pipelineStateText(pipeline),
@@ -680,6 +698,8 @@
     runtimeLabel: runtimeLabel,
     dateLabel: dateLabel,
     etaLabel: etaLabel,
+    runnerEtaLabel: runnerEtaLabel,
+    runnerTickLabel: runnerTickLabel,
     badge: badge,
     jsonPreview: jsonPreview,
     runnerStateText: runnerStateText,

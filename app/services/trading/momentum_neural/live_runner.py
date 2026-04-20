@@ -618,6 +618,58 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # P1.2 — venue health circuit breaker. Gate new entries when the
+        # venue's rolling-window latency / error rate crosses the threshold.
+        # Fires BEFORE autopilot_mutex because venue-sick is the more
+        # fundamental "stop" signal. Fails open (flag off or exception →
+        # healthy) so unwired environments behave unchanged. Falling back to
+        # STATE_WATCHING_LIVE keeps the session alive for retry on the next
+        # pulse once the venue recovers.
+        try:
+            from ..venue.venue_health import (
+                is_venue_degraded,
+                should_auto_switch_to_paper,
+                venue_degraded_reason,
+                canonicalize_venue,
+            )
+            _venue_key = canonicalize_venue(ef)
+            if is_venue_degraded(db, venue=_venue_key):
+                _reason = venue_degraded_reason(db, venue=_venue_key) or "unknown"
+                _auto_paper = should_auto_switch_to_paper(db, venue=_venue_key)
+                _emit(
+                    db,
+                    sess,
+                    "live_entry_blocked_by_venue_degraded",
+                    {
+                        "venue": _venue_key,
+                        "reason": _reason,
+                        "auto_switch_to_paper": _auto_paper,
+                    },
+                )
+                if _auto_paper:
+                    # Flip to paper so the session stays productive instead
+                    # of stalling. Paper mode writes no events so has no
+                    # effect on the venue health signal — recovery detected
+                    # via live events from other sessions / manual traffic.
+                    try:
+                        sess.mode = "paper"
+                    except Exception:
+                        pass
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True,
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "blocked": True,
+                    "reason": "venue_degraded",
+                }
+        except Exception:
+            # Defensive: never let a venue-health failure stall the live
+            # runner. Log and continue — the rate limiter + idempotency
+            # store handle the worst-case retry scenarios.
+            pass
+
         # P0.4 — autopilot mutual exclusion. Our own active session counts as
         # the lease holder (owner_self → allowed), so this only blocks when
         # an AutoTrader v1 live Trade is already open on the same symbol/user.
@@ -647,6 +699,74 @@ def tick_live_session(
                 "state": sess.state,
                 "blocked": True,
                 "reason": "autopilot_mutex",
+            }
+
+        # P1.4 — runtime feature-parity assertion at entry. Fetches fresh
+        # OHLCV and verifies the live indicator snapshot matches the
+        # canonical compute_all_from_df output. Fails open on any error /
+        # flag-off so unwired environments behave identically. Soft mode
+        # records + alerts without blocking; hard mode blocks critical drift.
+        #
+        # CRITICAL: short-circuit on the feature flag BEFORE any imports or
+        # OHLCV fetch. The flag defaults OFF, so every live session fires
+        # through this block — without the pre-flag guard, unwired
+        # environments pay a network fetch per entry attempt. On Windows the
+        # test suite observed this exhausting the ephemeral socket pool
+        # (WinError 10055) under the autopilot mutex regression runs.
+        _parity_blocked_feature_parity = False
+        if bool(getattr(settings, "chili_feature_parity_enabled", False)):
+            try:
+                from ..feature_parity import (
+                    DEFAULT_FEATURES as _PARITY_FEATURES,
+                    check_entry_feature_parity as _check_parity,
+                )
+                from ..indicator_core import compute_all_from_df as _pc_compute
+                from ..market_data import fetch_ohlcv_df as _pc_fetch
+                _pc_df = _pc_fetch(sess.symbol, "1h", "30d")
+                if _pc_df is not None and not _pc_df.empty:
+                    _pc_arrays = _pc_compute(_pc_df, needed=set(_PARITY_FEATURES))
+                    _pc_live: dict[str, Any] = {}
+                    for _k, _v in _pc_arrays.items():
+                        if isinstance(_v, list) and _v and _v[-1] is not None:
+                            _pc_live[_k] = _v[-1]
+                    _pc_venue = "coinbase" if str(ef).lower() in ("crypto", "coinbase_spot", "coinbase") else "robinhood"
+                    _pc_result = _check_parity(
+                        db,
+                        ticker=sess.symbol,
+                        live_snap=_pc_live,
+                        reference_df=_pc_df,
+                        features=_PARITY_FEATURES,
+                        source="momentum_neural",
+                        scan_pattern_id=getattr(variant, "scan_pattern_id", None),
+                        venue=_pc_venue,
+                    )
+                    if not _pc_result.ok:
+                        _emit(
+                            db,
+                            sess,
+                            "live_entry_blocked_by_feature_parity",
+                            {
+                                "severity": _pc_result.severity,
+                                "mode": _pc_result.mode,
+                                "n_mismatches": _pc_result.n_mismatches,
+                                "reason": _pc_result.reason,
+                                "record_id": _pc_result.record_id,
+                            },
+                        )
+                        _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                        db.flush()
+                        _parity_blocked_feature_parity = True
+            except Exception:
+                # Defensive: never let a parity-check failure stall the live
+                # runner. The check is an observability net, not a safety gate.
+                pass
+        if _parity_blocked_feature_parity:
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "blocked": True,
+                "reason": "feature_parity",
             }
 
         regime_live = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}

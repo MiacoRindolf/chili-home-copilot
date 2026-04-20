@@ -67,7 +67,7 @@ def api_create_pattern(
 ):
     from ...services.trading.public_api import create_pattern
     try:
-        p = create_pattern(db, body.dict())
+        p = create_pattern(db, body.model_dump())
         return JSONResponse({"ok": True, "pattern": {"id": p.id, "name": p.name}})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -80,7 +80,7 @@ def api_update_pattern(
     db: Session = Depends(get_db),
 ):
     from ...services.trading.public_api import update_pattern
-    data = {k: v for k, v in body.dict().items() if v is not None}
+    data = {k: v for k, v in body.model_dump().items() if v is not None}
     p = update_pattern(db, pattern_id, data)
     if not p:
         return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
