@@ -1437,12 +1437,20 @@ def place_buy_order(
         )
 
         def _do_buy():
+            # RH rejects timeInForce='gtc' on market orders ("Invalid Good
+            # Til Canceled order"). GTC is valid only for limit orders; use
+            # 'gfd' (Good-For-Day) for markets. Fractional-share + market
+            # orders especially fail with gtc. Verified against RH's own
+            # error body: the sell path produced
+            # {'non_field_errors': ['Invalid Good Til Canceled order.']}
+            # on a straightforward 80-share market sell.
+            tif = "gtc" if order_type == "limit" else "gfd"
             return rh.orders.order(
                 symbol=ticker,
                 quantity=quantity,
                 side="buy",
                 limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
-                timeInForce="gtc",
+                timeInForce=tif,
                 extendedHours=session_kwargs["extendedHours"],
                 market_hours=session_kwargs["market_hours"],
                 jsonify=True,
@@ -1521,12 +1529,16 @@ def place_sell_order(
         )
 
         def _do_sell():
+            # Same TIF rule as place_buy_order: market orders use 'gfd',
+            # limits use 'gtc'. See the comment there for the RH error
+            # that surfaced this.
+            tif = "gtc" if order_type == "limit" else "gfd"
             return rh.orders.order(
                 symbol=ticker,
                 quantity=quantity,
                 side="sell",
                 limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
-                timeInForce="gtc",
+                timeInForce=tif,
                 extendedHours=session_kwargs["extendedHours"],
                 market_hours=session_kwargs["market_hours"],
                 jsonify=True,
