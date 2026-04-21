@@ -591,7 +591,10 @@ def submit_robinhood_trade_exit(
     order_type = "market"
     limit_price: float | None = None
     reference_price: float | None = None
-    submit_base_size = str(qty)
+    # Robinhood rejects quantities with more than 8 decimal places
+    # ("Ensure that there are no more than 8 decimal places"). Symmetric
+    # with the entry path in auto_trader._execute_new_entry.
+    submit_base_size = str(round(qty, 8))
     submit_kwargs: dict[str, Any] = {
         "market_hours_override": str(window.get("market_hours") or "regular_hours"),
         "extended_hours_override": bool(window.get("market_hours") != "regular_hours"),

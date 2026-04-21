@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -30,6 +31,7 @@ from .auto_trader_synergy import (
     maybe_scale_in,
 )
 from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
+from .ops_log_prefixes import CHILI_MARKET_DATA
 
 logger = logging.getLogger(__name__)
 
@@ -140,32 +142,141 @@ def _pattern_name(db: Session, scan_pattern_id: Optional[int]) -> str | None:
     return p.name if p else None
 
 
-def _ohlcv_summary(ticker: str) -> str | None:
-    try:
-        from .market_data import fetch_ohlcv_df
+# ── Market-data fetches (Phase B) ────────────────────────────────────
+#
+# These two helpers are on the auto-trader hot path: a bad quote here sizes
+# a live order. Previously both sites swallowed every exception silently,
+# meaning a transient timeout from the quote provider returned None and
+# the gate logic blocked the alert as ``no_quote`` — indistinguishable
+# from the ticker simply not quoting. That blinded ops to provider
+# outages and made every missed entry a noop investigation.
+#
+# Phase B behavior:
+#   - Up to 3 attempts per call, exponential backoff (0.5s, 1.0s).
+#   - Timeouts (asyncio/sync) logged as ``kind=timeout`` → retry.
+#   - Transport / network errors logged as ``kind=transport`` → retry.
+#   - Empty results logged as ``kind=empty`` → retry.
+#   - Unexpected exceptions logged as ``kind=upstream`` with exc_info → retry.
+#   - Exhausted attempts log a final ``kind=exhausted`` line at WARNING.
+#   - Every outcome is prefixed ``[chili_market_data]`` so the phase-C
+#     observability registry can index it.
+#
+# Contract unchanged: both still return None on failure — no exception
+# escapes to callers. The difference is visibility. The kill switch +
+# drawdown breaker still gate the downstream execution regardless of
+# what we return here.
 
-        df = fetch_ohlcv_df(ticker, "5m", period="5d")
-        if df is None or df.empty:
-            return None
-        tail = df.tail(15)
-        if "Close" in tail.columns:
-            return tail[["Close"]].to_string(max_rows=20)[:3500]
-        return tail.to_string(max_rows=10)[:3500]
-    except Exception:
-        return None
+_MARKET_DATA_MAX_ATTEMPTS = 3
+_MARKET_DATA_BACKOFF_BASE_SEC = 0.5
+
+
+def _classify_market_data_exc(exc: BaseException) -> str:
+    """Map a raised exception to a short log-kind token.
+
+    The upstream ``fetch_*`` layer does not raise a structured taxonomy
+    today — this mapping gives the ops log a consistent vocabulary
+    without requiring a contract change to ``market_data.py``.
+    """
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    # OSError covers ConnectionError / socket timeouts / refused / reset
+    if isinstance(exc, OSError):
+        return "transport"
+    return "upstream"
+
+
+def _ohlcv_summary(ticker: str) -> str | None:
+    """Fetch a short OHLCV summary for LLM revalidation; retry + structured log."""
+    from .market_data import fetch_ohlcv_df
+
+    last_kind = "unknown"
+    last_err: str | None = None
+    for attempt in range(1, _MARKET_DATA_MAX_ATTEMPTS + 1):
+        try:
+            df = fetch_ohlcv_df(ticker, "5m", period="5d")
+            if df is None or df.empty:
+                last_kind = "empty"
+                last_err = None
+                logger.info(
+                    f"{CHILI_MARKET_DATA} source=ohlcv kind=empty ticker=%s attempt=%d",
+                    ticker, attempt,
+                )
+            else:
+                logger.debug(
+                    f"{CHILI_MARKET_DATA} source=ohlcv kind=ok ticker=%s attempt=%d rows=%d",
+                    ticker, attempt, len(df),
+                )
+                tail = df.tail(15)
+                if "Close" in tail.columns:
+                    return tail[["Close"]].to_string(max_rows=20)[:3500]
+                return tail.to_string(max_rows=10)[:3500]
+        except Exception as e:  # noqa: BLE001 — classified below, re-logged
+            last_kind = _classify_market_data_exc(e)
+            last_err = repr(e)
+            logger.warning(
+                f"{CHILI_MARKET_DATA} source=ohlcv kind=%s ticker=%s attempt=%d err=%s",
+                last_kind, ticker, attempt, last_err,
+                exc_info=(last_kind == "upstream"),
+            )
+        if attempt < _MARKET_DATA_MAX_ATTEMPTS:
+            time.sleep(_MARKET_DATA_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
+    logger.warning(
+        f"{CHILI_MARKET_DATA} source=ohlcv kind=exhausted ticker=%s attempts=%d last_kind=%s last_err=%s",
+        ticker, _MARKET_DATA_MAX_ATTEMPTS, last_kind, last_err,
+    )
+    return None
 
 
 def _current_price(ticker: str) -> float | None:
+    """Fetch the current price for gate sizing; retry + structured log."""
     from .market_data import fetch_quote
 
-    q = fetch_quote(ticker)
-    if not q:
-        return None
-    p = q.get("price") or q.get("last_price")
-    try:
-        return float(p) if p is not None else None
-    except (TypeError, ValueError):
-        return None
+    last_kind = "unknown"
+    last_err: str | None = None
+    for attempt in range(1, _MARKET_DATA_MAX_ATTEMPTS + 1):
+        try:
+            q = fetch_quote(ticker)
+            if not q:
+                last_kind = "empty"
+                last_err = None
+                logger.info(
+                    f"{CHILI_MARKET_DATA} source=quote kind=empty ticker=%s attempt=%d",
+                    ticker, attempt,
+                )
+            else:
+                raw_p = q.get("price") or q.get("last_price")
+                try:
+                    price = float(raw_p) if raw_p is not None else None
+                except (TypeError, ValueError):
+                    price = None
+                if price is None:
+                    last_kind = "empty"
+                    last_err = f"unparseable price={raw_p!r}"
+                    logger.info(
+                        f"{CHILI_MARKET_DATA} source=quote kind=empty ticker=%s attempt=%d note=unparseable",
+                        ticker, attempt,
+                    )
+                else:
+                    logger.debug(
+                        f"{CHILI_MARKET_DATA} source=quote kind=ok ticker=%s attempt=%d price=%s",
+                        ticker, attempt, price,
+                    )
+                    return price
+        except Exception as e:  # noqa: BLE001 — classified below, re-logged
+            last_kind = _classify_market_data_exc(e)
+            last_err = repr(e)
+            logger.warning(
+                f"{CHILI_MARKET_DATA} source=quote kind=%s ticker=%s attempt=%d err=%s",
+                last_kind, ticker, attempt, last_err,
+                exc_info=(last_kind == "upstream"),
+            )
+        if attempt < _MARKET_DATA_MAX_ATTEMPTS:
+            time.sleep(_MARKET_DATA_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
+    logger.warning(
+        f"{CHILI_MARKET_DATA} source=quote kind=exhausted ticker=%s attempts=%d last_kind=%s last_err=%s",
+        ticker, _MARKET_DATA_MAX_ATTEMPTS, last_kind, last_err,
+    )
+    return None
 
 
 def run_auto_trader_tick(db: Session) -> dict[str, Any]:
@@ -518,6 +629,85 @@ def _maybe_check_feature_parity(
     return f"feature_parity:{result.reason or result.severity}"
 
 
+def _execute_broker_buy(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    qty: float,
+    client_order_id: str,
+    snap: dict[str, Any],
+    llm_snap: dict[str, Any] | None,
+    out: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Place a live buy via Robinhood with the full safety envelope.
+
+    Phase D (tech-debt): previously this exact sequence was duplicated
+    between ``_execute_scale_in`` and ``_execute_new_entry`` — a
+    kill-switch fix applied to one path but not the other was
+    always-one-edit away. Centralized here so both callers share the
+    same gate order: kill-switch recheck → adapter enabled → broker
+    place → error surface.
+
+    Returns the broker result dict on success (caller writes the trade
+    row), or ``None`` if the path short-circuited. Every short-circuit
+    path also writes an ``AutoTraderRun`` audit row and increments
+    ``out["skipped"]`` so the caller can return immediately.
+    """
+    from .governance import is_kill_switch_active
+    from .venue.factory import get_adapter
+
+    # P0.5 — re-check kill switch immediately before submitting. The
+    # initial check at tick entry can go stale if an operator flips the
+    # switch while gates are evaluating (feature_parity / LLM can take
+    # seconds). Cheap (in-memory lock + bool), so no reason not to.
+    if is_kill_switch_active():
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="blocked",
+            reason="kill_switch_activated_mid_flight",
+            rule_snapshot=snap,
+            llm_snapshot=llm_snap,
+        )
+        out["skipped"] += 1
+        return None
+
+    ad = get_adapter("robinhood")
+    if ad is None or not ad.is_enabled():
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="blocked",
+            reason="rh_adapter_off",
+            rule_snapshot=snap,
+            llm_snapshot=llm_snap,
+        )
+        out["skipped"] += 1
+        return None
+    res = ad.place_market_order(
+        product_id=alert.ticker,
+        side="buy",
+        base_size=str(qty),
+        client_order_id=client_order_id,
+    )
+    if not res.get("ok"):
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="blocked",
+            reason=f"broker:{res.get('error')}",
+            rule_snapshot=snap,
+            llm_snapshot=llm_snap,
+        )
+        out["skipped"] += 1
+        return None
+    return res
+
+
 def _execute_scale_in(
     db: Session,
     uid: int,
@@ -532,56 +722,17 @@ def _execute_scale_in(
     t = plan.trade
     add_q = float(plan.added_quantity)
     if live:
-        from .governance import is_kill_switch_active
-        from .venue.factory import get_adapter
-
-        # P0.5 — re-check kill switch immediately before submitting. The
-        # initial check at tick entry can go stale if an operator flips the
-        # switch while gates are evaluating (feature_parity / LLM can take
-        # seconds). Cheap (in-memory lock + bool), so no reason not to.
-        if is_kill_switch_active():
-            _audit(
-                db,
-                user_id=uid,
-                alert=alert,
-                decision="blocked",
-                reason="kill_switch_activated_mid_flight",
-                rule_snapshot=snap,
-                llm_snapshot=llm_snap,
-            )
-            out["skipped"] += 1
-            return
-
-        ad = get_adapter("robinhood")
-        if ad is None or not ad.is_enabled():
-            _audit(
-                db,
-                user_id=uid,
-                alert=alert,
-                decision="blocked",
-                reason="rh_adapter_off",
-                rule_snapshot=snap,
-                llm_snapshot=llm_snap,
-            )
-            out["skipped"] += 1
-            return
-        res = ad.place_market_order(
-            product_id=alert.ticker,
-            side="buy",
-            base_size=str(add_q),
+        res = _execute_broker_buy(
+            db,
+            uid=uid,
+            alert=alert,
+            qty=add_q,
             client_order_id=f"atv1-{alert.id}-scale",
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
         )
-        if not res.get("ok"):
-            _audit(
-                db,
-                user_id=uid,
-                alert=alert,
-                decision="blocked",
-                reason=f"broker:{res.get('error')}",
-                rule_snapshot=snap,
-                llm_snapshot=llm_snap,
-            )
-            out["skipped"] += 1
+        if res is None:
             return
 
     t.entry_price = float(plan.new_avg_entry)
@@ -655,57 +806,53 @@ def _execute_new_entry(
     snap["notional_dial"] = dial
     snap["notional_capital_source"] = cap_source
 
-    qty = notional / px
+    # Robinhood rejects fractional quantities with >8 decimal places
+    # ("Ensure that there are no more than 8 decimal places"). Round to 8
+    # so we never over-size.
+    qty = round(notional / px, 8)
+    if qty <= 0:
+        _audit(db, user_id=uid, alert=alert, decision="skipped", reason="qty_below_precision", rule_snapshot=snap)
+        out["skipped"] += 1
+        return
+
+    # Many RH stocks (ACN, mid-to-large caps) don't support fractional
+    # shares and reject orders with qty<1 as "Order quantity cannot
+    # include fractional shares." When our dial-scaled notional yields a
+    # sub-1 qty but we can afford at least 1 share, size up to 1 share
+    # and record it. If even 1 share would exceed 2× the intended
+    # notional, skip (too expensive for the current risk envelope).
+    if qty < 1 and px > 0:
+        affordable = notional * 2.0  # allow up to 2× notional to round up
+        if px <= affordable:
+            snap["qty_upsized_reason"] = "fractional_not_supported_fallback"
+            snap["qty_before_upsize"] = round(qty, 8)
+            qty = 1
+            snap["notional_effective"] = round(px, 2)
+        else:
+            # 1 share costs more than 2× the intended notional — this
+            # ticker is too expensive to meaningfully size into the
+            # current dial envelope.
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="skipped",
+                reason="symbol_too_expensive_for_notional",
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            return
 
     if live:
-        from .governance import is_kill_switch_active
-        from .venue.factory import get_adapter
-
-        # P0.5 — re-check kill switch immediately before submitting (see
-        # note in _execute_scale_in).
-        if is_kill_switch_active():
-            _audit(
-                db,
-                user_id=uid,
-                alert=alert,
-                decision="blocked",
-                reason="kill_switch_activated_mid_flight",
-                rule_snapshot=snap,
-                llm_snapshot=llm_snap,
-            )
-            out["skipped"] += 1
-            return
-
-        ad = get_adapter("robinhood")
-        if ad is None or not ad.is_enabled():
-            _audit(
-                db,
-                user_id=uid,
-                alert=alert,
-                decision="blocked",
-                reason="rh_adapter_off",
-                rule_snapshot=snap,
-                llm_snapshot=llm_snap,
-            )
-            out["skipped"] += 1
-            return
-        res = ad.place_market_order(
-            product_id=alert.ticker,
-            side="buy",
-            base_size=str(qty),
+        res = _execute_broker_buy(
+            db,
+            uid=uid,
+            alert=alert,
+            qty=qty,
             client_order_id=f"atv1-{alert.id}-buy",
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
         )
-        if not res.get("ok"):
-            _audit(
-                db,
-                user_id=uid,
-                alert=alert,
-                decision="blocked",
-                reason=f"broker:{res.get('error')}",
-                rule_snapshot=snap,
-                llm_snapshot=llm_snap,
-            )
-            out["skipped"] += 1
+        if res is None:
             return
         raw = res.get("raw") or {}
         try:
@@ -758,7 +905,16 @@ def _execute_new_entry(
                 tr.mesh_entry_correlation_id = entry_corr
                 db.commit()
         except Exception:
-            pass
+            # Post-entry plasticity / mesh correlation is best-effort — a
+            # failure must not undo a successful order placement. Log at
+            # DEBUG so the silent-swallow audit stays clean while still
+            # leaving a trail in the app log for ops follow-up.
+            logger.debug(
+                "[autotrader] plasticity mesh correlation post-entry failed "
+                "(non-fatal) for trade_id=%s",
+                getattr(tr, "id", None),
+                exc_info=True,
+            )
         _audit(
             db,
             user_id=uid,
