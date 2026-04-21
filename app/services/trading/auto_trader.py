@@ -802,36 +802,46 @@ def _execute_new_entry(
         notional = env_notional * dial
         snap["notional_source"] = "env_dollar_dial"
     snap["notional_env"] = env_notional
-    snap["notional_effective"] = round(notional, 2)
     snap["notional_dial"] = dial
     snap["notional_capital_source"] = cap_source
 
-    # Robinhood rejects fractional quantities with >8 decimal places
-    # ("Ensure that there are no more than 8 decimal places"). Round to 8
-    # so we never over-size.
-    qty = round(notional / px, 8)
-    if qty <= 0:
-        _audit(db, user_id=uid, alert=alert, decision="skipped", reason="qty_below_precision", rule_snapshot=snap)
-        out["skipped"] += 1
-        return
+    # ─── HARDCODED NOTIONAL FLOOR (TEMP — operator request 2026-04-21) ───
+    # With equity $10k, dial 0.5, per_trade_pct 1% → ~$50 notional, too
+    # small for meaningful capture. Floor at $300 target / $350 per-share
+    # upsize ceiling so mid-priced stocks (WGS @ $70, GH @ $92, ACN @ $197)
+    # can buy 1–4 whole shares instead of sub-1 fractional (which most
+    # tickers reject server-side).
+    # REMOVE when the dial / per_trade_pct can natively produce this sizing
+    # (i.e. once equity grows or per_trade_pct is raised). Until then,
+    # these constants override the dial-derived small notional.
+    _TEMP_MIN_NOTIONAL_USD = 300.0
+    _TEMP_MAX_PER_SHARE_USD = 350.0
+    if notional < _TEMP_MIN_NOTIONAL_USD:
+        snap["notional_floored"] = True
+        snap["notional_before_floor"] = round(notional, 2)
+        snap["notional_floor_applied"] = _TEMP_MIN_NOTIONAL_USD
+        notional = _TEMP_MIN_NOTIONAL_USD
+    snap["notional_effective"] = round(notional, 2)
+    # ─────────────────────────────────────────────────────────────────────
 
-    # Many RH stocks (ACN, mid-to-large caps) don't support fractional
-    # shares and reject orders with qty<1 as "Order quantity cannot
-    # include fractional shares." When our dial-scaled notional yields a
-    # sub-1 qty but we can afford at least 1 share, size up to 1 share
-    # and record it. If even 1 share would exceed 2× the intended
-    # notional, skip (too expensive for the current risk envelope).
+    # HARDCODED (TEMP 2026-04-21): floor to whole shares rather than
+    # fractional. Most mid/large-cap RH tickers (ACN, WGS, GH, BA…)
+    # don't support fractional orders, and server-side rejection wastes
+    # a tick. Whole-share sizing sacrifices some precision but succeeds
+    # universally. REMOVE with the rest of the TEMP block when the
+    # brain-driven fractional-eligibility check ships.
+    qty_raw = notional / px
+    qty = int(qty_raw)  # whole shares only for now
+
     if qty < 1 and px > 0:
-        affordable = notional * 2.0  # allow up to 2× notional to round up
-        if px <= affordable:
+        if px <= _TEMP_MAX_PER_SHARE_USD:
             snap["qty_upsized_reason"] = "fractional_not_supported_fallback"
-            snap["qty_before_upsize"] = round(qty, 8)
+            snap["qty_before_upsize"] = round(qty_raw, 8)
             qty = 1
             snap["notional_effective"] = round(px, 2)
         else:
-            # 1 share costs more than 2× the intended notional — this
-            # ticker is too expensive to meaningfully size into the
-            # current dial envelope.
+            # px exceeds the TEMP per-share ceiling — even 1 share is
+            # too expensive for the operator's intended trade size.
             _audit(
                 db, user_id=uid, alert=alert,
                 decision="skipped",
@@ -840,6 +850,13 @@ def _execute_new_entry(
             )
             out["skipped"] += 1
             return
+    else:
+        # qty >= 1 case: update notional_effective to the integer-share
+        # actual cost (may be slightly under target — e.g. GH at $91.75
+        # gives 3 shares = $275.25, below $300 target but close enough
+        # for whole-share sizing).
+        snap["notional_effective"] = round(qty * px, 2)
+        snap["qty_raw"] = round(qty_raw, 8)
 
     if live:
         res = _execute_broker_buy(
