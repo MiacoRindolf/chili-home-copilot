@@ -1451,8 +1451,27 @@ def place_buy_order(
         result = _retry_api_call(_do_buy, label=f"BUY {ticker}")
 
         if result and isinstance(result, dict):
-            order_id = result.get("id", "")
+            order_id = result.get("id") or ""
             state = result.get("state", "unknown")
+            # Reject dict responses that lack a real order_id. RH's endpoint
+            # sometimes returns a JSON body describing a rejection
+            # (``{"detail": "Fractional order validation failed", ...}``)
+            # and the caller's contract was treating any dict as success —
+            # which wrote ``ok=True, order_id=""`` to the idempotency store
+            # and the audit row, silently stranding the trade. A genuine
+            # submission always includes ``id``; anything else is a failure.
+            if not order_id:
+                error_msg = (
+                    result.get("detail")
+                    or result.get("error")
+                    or result.get("message")
+                    or "Robinhood returned no order_id"
+                )
+                logger.error(
+                    f"[broker] BUY rejected (no order_id): {ticker} x{quantity} "
+                    f"response={result}"
+                )
+                return {"ok": False, "error": str(error_msg)[:500], "raw": result}
             logger.info(f"[broker] BUY order placed: {ticker} x{quantity} ({order_type}) -> {state}")
             _cache.pop("positions", None)
             _cache.pop("portfolio", None)
@@ -1516,8 +1535,25 @@ def place_sell_order(
         result = _retry_api_call(_do_sell, label=f"SELL {ticker}")
 
         if result and isinstance(result, dict):
-            order_id = result.get("id", "")
+            order_id = result.get("id") or ""
             state = result.get("state", "unknown")
+            # Same guard as place_buy_order: a dict response without an
+            # ``id`` is an error body, not a successful submission. Treating
+            # it as success wrote the trade + exit intent to the DB even
+            # though the broker never accepted the order, permanently
+            # stranding the position.
+            if not order_id:
+                error_msg = (
+                    result.get("detail")
+                    or result.get("error")
+                    or result.get("message")
+                    or "Robinhood returned no order_id"
+                )
+                logger.error(
+                    f"[broker] SELL rejected (no order_id): {ticker} x{quantity} "
+                    f"response={result}"
+                )
+                return {"ok": False, "error": str(error_msg)[:500], "raw": result}
             logger.info(f"[broker] SELL order placed: {ticker} x{quantity} ({order_type}) -> {state}")
             _cache.pop("positions", None)
             _cache.pop("portfolio", None)
