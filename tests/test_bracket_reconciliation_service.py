@@ -9,8 +9,13 @@ from sqlalchemy import text
 from app.models.trading import Trade
 from app.services.trading.bracket_intent import BracketIntentInput
 from app.services.trading.bracket_intent_writer import upsert_bracket_intent
-from app.services.trading.bracket_reconciler import BrokerView
+from app.services.trading.bracket_reconciler import BrokerView, LocalView, Tolerances
 from app.services.trading.bracket_reconciliation_service import (
+    SweepBatch,
+    _stage_classify_all,
+    _stage_fetch_broker,
+    _stage_load_local,
+    _stage_log_all,
     bracket_reconciliation_summary,
     run_reconciliation_sweep,
 )
@@ -290,3 +295,239 @@ class TestDiagnosticsSummary:
         assert summary["mode"] == "shadow"
         assert summary["rows_total"] >= 1
         assert isinstance(summary["sweeps_recent"], list)
+
+
+# ── Staged-sweep refactor: focused stage tests + flag-parity ──────────
+
+
+def _local(**over) -> LocalView:
+    defaults = dict(
+        trade_id=1,
+        bracket_intent_id=10,
+        ticker="AAA",
+        direction="long",
+        quantity=10.0,
+        intent_state="shadow_logged",
+        stop_price=96.0,
+        target_price=106.0,
+        broker_source="robinhood",
+        trade_status="open",
+    )
+    defaults.update(over)
+    return LocalView(**defaults)
+
+
+def _bv(**over) -> BrokerView:
+    defaults = dict(
+        available=True,
+        ticker="AAA",
+        broker_source="robinhood",
+        position_quantity=10.0,
+        stop_order_id="s",
+        stop_order_state="open",
+        stop_order_price=96.0,
+        target_order_id="t",
+        target_order_state="open",
+        target_order_price=106.0,
+    )
+    defaults.update(over)
+    return BrokerView(**defaults)
+
+
+class TestStagedClassifyStage:
+    """``_stage_classify_all`` is pure — must run without any DB / broker."""
+
+    def test_classifies_each_pair_without_db(self):
+        batch = SweepBatch(
+            sweep_id="sweep-test",
+            mode="shadow",
+            tolerances=Tolerances(),
+            local_views=[
+                _local(trade_id=1, ticker="AAA"),
+                _local(trade_id=2, ticker="BBB"),
+                _local(trade_id=3, ticker="CCC", quantity=10.0),
+            ],
+            broker_views=[
+                _bv(ticker="AAA"),
+                _bv(ticker="BBB", available=False),
+                _bv(ticker="CCC", position_quantity=9.0),
+            ],
+        )
+        decisions = _stage_classify_all(batch)
+        assert [d.kind for d in decisions] == ["agree", "broker_down", "qty_drift"]
+        assert batch.decisions is decisions
+
+    def test_empty_batch_returns_empty_decisions(self):
+        batch = SweepBatch(sweep_id="x", mode="shadow", tolerances=Tolerances())
+        assert _stage_classify_all(batch) == []
+        assert batch.decisions == []
+
+
+class TestStagedFetchBrokerStage:
+    """``_stage_fetch_broker`` must align broker views parallel to locals and
+    backfill ``available=False`` when the broker function omits a ticker."""
+
+    def test_aligns_views_and_backfills_missing_as_unavailable(self):
+        batch = SweepBatch(
+            sweep_id="x", mode="shadow", tolerances=Tolerances(),
+            local_views=[
+                _local(trade_id=1, ticker="AAA"),
+                _local(trade_id=2, ticker="BBB"),
+            ],
+        )
+
+        def broker_fn(local_rows):
+            # Intentionally only return one of the two tickers.
+            return [_bv(ticker="AAA")]
+
+        _stage_fetch_broker(batch, broker_fn)
+        assert len(batch.broker_views) == 2
+        assert batch.broker_views[0].ticker == "AAA"
+        assert batch.broker_views[0].available is True
+        assert batch.broker_views[1].ticker == "BBB"
+        assert batch.broker_views[1].available is False
+
+
+class TestStagedLoadLocalStage:
+    """``_stage_load_local`` populates ``local_views`` via the scope query."""
+
+    def test_loads_open_live_trade_with_intent(self, db, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",
+            "shadow", raising=False,
+        )
+        monkeypatch.setattr(
+            "app.services.trading.bracket_reconciliation_service.settings.brain_live_brackets_mode",
+            "shadow", raising=False,
+        )
+        t = _make_trade(db, ticker="LOAD_STAGE")
+        _intent(db, t)
+        batch = SweepBatch(sweep_id="x", mode="shadow", tolerances=Tolerances())
+        _stage_load_local(db, batch)
+        tickers = [lv.ticker for lv in batch.local_views]
+        assert "LOAD_STAGE" in tickers
+
+
+class TestStagedLogAllStage:
+    """``_stage_log_all`` writes one row per decision + bumps intents."""
+
+    def test_writes_rows_and_returns_count(self, db, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",
+            "shadow", raising=False,
+        )
+        monkeypatch.setattr(
+            "app.services.trading.bracket_reconciliation_service.settings.brain_live_brackets_mode",
+            "shadow", raising=False,
+        )
+        t = _make_trade(db, ticker="LOG_STAGE")
+        intent_id = _intent(db, t)
+        batch = SweepBatch(sweep_id="x", mode="shadow", tolerances=Tolerances())
+        _stage_load_local(db, batch)
+        _stage_fetch_broker(
+            batch,
+            _broker_fn_that_returns(
+                BrokerView(
+                    available=True, ticker="LOG_STAGE", broker_source="robinhood",
+                    position_quantity=10.0,
+                    stop_order_id="s", stop_order_state="open", stop_order_price=96.0,
+                    target_order_id="t", target_order_state="open", target_order_price=106.0,
+                )
+            ),
+        )
+        _stage_classify_all(batch)
+        rows_written = _stage_log_all(db, batch)
+        db.commit()
+        assert rows_written == len(batch.local_views)
+        assert rows_written >= 1
+        log_count = db.execute(text("""
+            SELECT COUNT(*) FROM trading_bracket_reconciliation_log
+            WHERE sweep_id = :sid
+        """), {"sid": "x"}).scalar_one()
+        assert log_count == rows_written
+        # intent_id exists to ensure the fixture wiring is real
+        assert intent_id is not None
+
+
+class TestStagedVsLegacyParity:
+    """Flag-on and flag-off must produce byte-identical ``SweepSummary``
+    fields (modulo sweep_id + took_ms). This is the exit-criteria parity
+    gate before ``brain_live_brackets_staged_sweep_enabled`` is flipped.
+    """
+
+    def _shadow(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",
+            "shadow", raising=False,
+        )
+        monkeypatch.setattr(
+            "app.services.trading.bracket_reconciliation_service.settings.brain_live_brackets_mode",
+            "shadow", raising=False,
+        )
+
+    def _flag(self, monkeypatch, value: bool):
+        monkeypatch.setattr(
+            "app.services.trading.bracket_reconciliation_service."
+            "settings.brain_live_brackets_staged_sweep_enabled",
+            value, raising=False,
+        )
+
+    def _seed_mixed_trades(self, db):
+        t_agree = _make_trade(db, ticker="AGREE_PAR")
+        _intent(db, t_agree)
+        t_qty = _make_trade(db, ticker="QTY_PAR", qty=10.0)
+        _intent(db, t_qty)
+        t_miss = _make_trade(db, ticker="MISS_PAR")
+        _intent(db, t_miss)
+        t_down = _make_trade(db, ticker="DOWN_PAR")
+        _intent(db, t_down)
+
+    def _broker_fn(self):
+        return _broker_fn_that_returns(
+            BrokerView(
+                available=True, ticker="AGREE_PAR", broker_source="robinhood",
+                position_quantity=10.0,
+                stop_order_id="s1", stop_order_state="open", stop_order_price=96.0,
+                target_order_id="t1", target_order_state="open", target_order_price=106.0,
+            ),
+            BrokerView(
+                available=True, ticker="QTY_PAR", broker_source="robinhood",
+                position_quantity=9.0,
+                stop_order_id="s2", stop_order_state="open", stop_order_price=96.0,
+            ),
+            BrokerView(
+                available=True, ticker="MISS_PAR", broker_source="robinhood",
+                position_quantity=10.0,
+            ),
+            BrokerView(available=False, ticker="DOWN_PAR", broker_source="robinhood"),
+        )
+
+    def test_staged_matches_legacy_summary(self, db, monkeypatch):
+        self._shadow(monkeypatch)
+        self._seed_mixed_trades(db)
+
+        self._flag(monkeypatch, False)
+        s_legacy = run_reconciliation_sweep(db, broker_view_fn=self._broker_fn())
+
+        self._flag(monkeypatch, True)
+        s_staged = run_reconciliation_sweep(db, broker_view_fn=self._broker_fn())
+
+        parity_fields = (
+            "mode", "trades_scanned", "brackets_checked",
+            "agree", "orphan_stop", "missing_stop",
+            "qty_drift", "state_drift", "price_drift",
+            "broker_down", "unreconciled", "rows_written",
+        )
+        for f in parity_fields:
+            assert getattr(s_legacy, f) == getattr(s_staged, f), (
+                f"SweepSummary.{f} diverged: legacy={getattr(s_legacy, f)!r}, "
+                f"staged={getattr(s_staged, f)!r}"
+            )
+        assert s_legacy.agree == 1
+        assert s_legacy.qty_drift == 1
+        assert s_legacy.missing_stop == 1
+        assert s_legacy.broker_down == 1
+
+    def test_staged_flag_defaults_to_false(self):
+        from app.config import settings
+        assert settings.brain_live_brackets_staged_sweep_enabled is False

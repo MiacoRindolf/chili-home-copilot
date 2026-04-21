@@ -34,6 +34,14 @@ from .bracket_reconciler import (
     classify_discrepancy,
 )
 
+# Structured log prefixes. Kept local — the shared ``ops_log_prefixes``
+# module landed on ``main`` after this branch diverged; duplicating the
+# literal keeps the staged-sweep refactor self-contained and matches
+# pattern-matched prod alerts on ``[bracket_reconciliation]`` /
+# ``[bracket_watchdog]``.
+BRACKET_RECONCILIATION = "[bracket_reconciliation]"
+BRACKET_WATCHDOG = "[bracket_watchdog]"
+
 logger = logging.getLogger(__name__)
 _ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
 
@@ -47,7 +55,38 @@ def _ops_log_enabled() -> bool:
     return bool(getattr(settings, "brain_live_brackets_ops_log_enabled", True))
 
 
+def _staged_sweep_enabled() -> bool:
+    return bool(getattr(settings, "brain_live_brackets_staged_sweep_enabled", False))
+
+
 def _tolerances_from_settings() -> Tolerances:
+    """Load reconciliation tolerances from settings with safe defaults.
+
+    The defaults below were calibrated during the Phase G (live-brackets
+    reconciliation) rollout against broker-truth samples from Robinhood:
+
+    * **price_drift_bps = 25.0** (0.25%). Broker-truth stop prices round
+      to instrument-specific tick sizes (e.g. $0.01 for most equities
+      above $1). Over 100 sampled stops, the observed drift between
+      CHILI's intended stop and RH's returned stop clustered under
+      ~10 bps, with outliers around 20 bps on low-priced volatile
+      tickers. 25 bps gives ~2x headroom without blurring real drift —
+      anything above 25 bps is a genuinely mis-priced stop and
+      classifies as ``price_drift``.
+    * **qty_drift_abs = 1e-6**. A pure numerical-noise threshold: SQL
+      stores quantities as floats, broker responds with strings, round-
+      tripping through ``Decimal -> float`` produces ULP-level diffs.
+      1e-6 is below the smallest fractional share RH supports (5 decimal
+      places) and above the observed float noise. Any real mismatch is
+      many orders of magnitude larger.
+
+    Change the defaults only with broker-truth resampling — a wider
+    bound masks real drift; a tighter one floods the watchdog with false
+    positives. Env overrides
+    (``BRAIN_LIVE_BRACKETS_PRICE_DRIFT_BPS`` /
+    ``BRAIN_LIVE_BRACKETS_QTY_DRIFT_ABS``) are available for incident
+    response but prefer updating the default constant after rollback.
+    """
     return Tolerances(
         price_drift_bps=float(getattr(settings, "brain_live_brackets_price_drift_bps", 25.0)),
         qty_drift_abs=float(getattr(settings, "brain_live_brackets_qty_drift_abs", 1e-6)),
@@ -90,7 +129,7 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
         from ..broker_manager import get_combined_positions  # local import
         positions = get_combined_positions() or []
     except Exception:  # pragma: no cover - defensive
-        logger.warning("[bracket_reconciliation] broker_manager_view_fn: unavailable", exc_info=True)
+        logger.warning(f"{BRACKET_RECONCILIATION} broker_manager_view_fn: unavailable", exc_info=True)
         positions = None
 
     if positions is None:
@@ -177,58 +216,328 @@ class SweepSummary:
         }
 
 
-# ── Main entry point ───────────────────────────────────────────────────
+# ── Staged-sweep data carrier ──────────────────────────────────────────
 
 
-def run_reconciliation_sweep(
+@dataclass
+class SweepBatch:
+    """Progressive batch state passed between the four sweep stages.
+
+    Each stage reads the fields it needs and appends/assigns its own output
+    (``local_views`` → ``broker_views`` → ``decisions`` → ``rows_written``).
+    The orchestrator summarizes the populated batch at the end. Stages
+    downstream of ``classify_all`` must not touch the broker or run the
+    classifier again; log_all is the only stage that writes to the DB.
+    """
+
+    sweep_id: str
+    mode: str
+    tolerances: Tolerances
+    local_views: list[LocalView] = field(default_factory=list)
+    broker_views: list[BrokerView] = field(default_factory=list)
+    decisions: list[ReconciliationDecision] = field(default_factory=list)
+    rows_written: int = 0
+
+
+def _row_to_local_view(row: dict[str, Any]) -> LocalView:
+    return LocalView(
+        trade_id=row.get("trade_id"),
+        bracket_intent_id=row.get("bracket_intent_id"),
+        ticker=row.get("ticker"),
+        direction=row.get("direction"),
+        quantity=row.get("quantity"),
+        intent_state=row.get("intent_state"),
+        stop_price=row.get("stop_price"),
+        target_price=row.get("target_price"),
+        broker_source=row.get("broker_source"),
+        trade_status=row.get("trade_status"),
+    )
+
+
+# ── Stage 1: load_local ────────────────────────────────────────────────
+
+
+def _stage_load_local(
+    db: Session, batch: SweepBatch, *, user_id: int | None = None
+) -> None:
+    """Populate ``batch.local_views`` from the live-trade + intent join.
+
+    Read-only DB query; no broker calls. See ``_load_local_view`` for the
+    SELECT shape and scope (open live trades + orphan-candidate intents).
+    """
+    rows = _load_local_view(db, user_id=user_id)
+    batch.local_views = [_row_to_local_view(r) for r in rows]
+
+
+# ── Stage 2: fetch_broker ──────────────────────────────────────────────
+
+
+def _stage_fetch_broker(batch: SweepBatch, broker_view_fn: BrokerViewFn) -> None:
+    """Ask the broker for its view of each (ticker, broker_source) key.
+
+    Writes a broker view for every local view, parallel-indexed. Missing
+    broker entries are backfilled as ``available=False`` so the classifier
+    attributes them to ``broker_down`` rather than false-positive
+    ``missing_stop``.
+    """
+    broker_input: list[dict[str, Any]] = [
+        {"ticker": lv.ticker, "broker_source": lv.broker_source}
+        for lv in batch.local_views
+    ]
+    raw_views = broker_view_fn(broker_input)
+    by_key = {(bv.ticker, bv.broker_source): bv for bv in raw_views}
+    aligned: list[BrokerView] = []
+    for lv in batch.local_views:
+        bv = by_key.get((lv.ticker, lv.broker_source))
+        if bv is None:
+            bv = BrokerView(
+                available=False,
+                ticker=lv.ticker,
+                broker_source=lv.broker_source,
+            )
+        aligned.append(bv)
+    batch.broker_views = aligned
+
+
+# ── Stage 3: classify_all (pure — no DB, no broker) ────────────────────
+
+
+def _stage_classify_all(batch: SweepBatch) -> list[ReconciliationDecision]:
+    """Classify every (local, broker) pair. Pure: safe to call with no DB.
+
+    Runs ``classify_discrepancy`` for each parallel-indexed pair. A classifier
+    exception is trapped into an ``unreconciled`` decision so a single bad
+    row can't abort the sweep. The batch is mutated to hold the decisions
+    *and* returned for convenience (tests).
+    """
+    out: list[ReconciliationDecision] = []
+    for lv, bv in zip(batch.local_views, batch.broker_views):
+        try:
+            out.append(
+                classify_discrepancy(lv, bv, tolerances=batch.tolerances)
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                f"{BRACKET_RECONCILIATION} classify_discrepancy failed for trade %s: %s",
+                lv.trade_id, exc,
+            )
+            out.append(ReconciliationDecision(
+                kind="unreconciled", severity="error",
+                delta_payload={"error": str(exc)},
+            ))
+    batch.decisions = out
+    return out
+
+
+# ── Stage 4: log_all (DB writes + intent bumps + ops-log emission) ─────
+
+
+def _stage_log_all(db: Session, batch: SweepBatch) -> int:
+    """Persist one reconciliation-log row per decision + bump intents.
+
+    Writes a ``trading_bracket_reconciliation_log`` row, calls
+    ``mark_reconciled`` on agree or ``bump_last_observed`` on non-agree
+    (P0.5 crash-recovery signal), and emits a ``[bracket_reconciliation_ops]``
+    ``event=discrepancy`` line on any non-agree outcome. All writes stay on
+    the passed-in session; the orchestrator owns the commit.
+    """
+    rows_written = 0
+    for lv, bv, decision in zip(
+        batch.local_views, batch.broker_views, batch.decisions
+    ):
+        try:
+            _write_reconciliation_row(
+                db,
+                sweep_id=batch.sweep_id,
+                mode=batch.mode,
+                local=lv,
+                broker=bv,
+                decision=decision,
+            )
+            rows_written += 1
+        except Exception:  # pragma: no cover - defensive
+            logger.warning(
+                f"{BRACKET_RECONCILIATION} failed to write log row for trade %s",
+                lv.trade_id, exc_info=True,
+            )
+
+        if decision.kind == "agree" and lv.bracket_intent_id is not None:
+            try:
+                mark_reconciled(
+                    db,
+                    int(lv.bracket_intent_id),
+                    reason="agree",
+                    mode_override=batch.mode,
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.debug(
+                    f"{BRACKET_RECONCILIATION} mark_reconciled failed for intent %s",
+                    lv.bracket_intent_id,
+                )
+        elif lv.bracket_intent_id is not None:
+            try:
+                bump_last_observed(
+                    db,
+                    int(lv.bracket_intent_id),
+                    diff_reason=f"{decision.kind}:{decision.severity}",
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.debug(
+                    f"{BRACKET_RECONCILIATION} bump_last_observed failed for intent %s",
+                    lv.bracket_intent_id,
+                )
+
+        if _ops_log_enabled() and decision.kind != "agree":
+            logger.info(
+                format_bracket_reconciliation_ops_line(
+                    event="discrepancy",
+                    mode=batch.mode,
+                    sweep_id=batch.sweep_id,
+                    trade_id=lv.trade_id,
+                    bracket_intent_id=lv.bracket_intent_id,
+                    ticker=lv.ticker,
+                    broker_source=lv.broker_source,
+                    kind=decision.kind,
+                    severity=decision.severity,
+                )
+            )
+    batch.rows_written = rows_written
+    return rows_written
+
+
+# ── Summary builders + legacy interleaved loop ─────────────────────────
+
+
+_COUNT_KINDS = (
+    "agree",
+    "orphan_stop",
+    "missing_stop",
+    "qty_drift",
+    "state_drift",
+    "price_drift",
+    "broker_down",
+    "unreconciled",
+)
+
+
+def _empty_off_summary(sweep_id: str) -> SweepSummary:
+    return SweepSummary(
+        sweep_id=sweep_id,
+        mode="off",
+        trades_scanned=0,
+        brackets_checked=0,
+        agree=0,
+        orphan_stop=0,
+        missing_stop=0,
+        qty_drift=0,
+        state_drift=0,
+        price_drift=0,
+        broker_down=0,
+        unreconciled=0,
+        took_ms=0.0,
+        rows_written=0,
+    )
+
+
+def _emit_sweep_summary_ops_log(summary: SweepSummary) -> None:
+    if not _ops_log_enabled():
+        return
+    logger.info(
+        format_bracket_reconciliation_ops_line(
+            event="sweep_summary",
+            mode=summary.mode,
+            sweep_id=summary.sweep_id,
+            trades_scanned=summary.trades_scanned,
+            brackets_checked=summary.brackets_checked,
+            agree_count=summary.agree,
+            orphan_stop=summary.orphan_stop,
+            missing_stop=summary.missing_stop,
+            qty_drift=summary.qty_drift,
+            state_drift=summary.state_drift,
+            price_drift=summary.price_drift,
+            broker_down=summary.broker_down,
+            unreconciled=summary.unreconciled,
+            took_ms=summary.took_ms,
+        )
+    )
+
+
+def _summarize_from_batch(batch: SweepBatch, *, took_ms: float) -> SweepSummary:
+    counts = {k: 0 for k in _COUNT_KINDS}
+    brackets_checked = 0
+    for lv, decision in zip(batch.local_views, batch.decisions):
+        counts[decision.kind] = counts.get(decision.kind, 0) + 1
+        if lv.bracket_intent_id is not None:
+            brackets_checked += 1
+    decisions_payload = [
+        {
+            "trade_id": lv.trade_id,
+            "bracket_intent_id": lv.bracket_intent_id,
+            "ticker": lv.ticker,
+            "broker_source": lv.broker_source,
+            "kind": d.kind,
+            "severity": d.severity,
+            "delta_payload": d.delta_payload,
+        }
+        for lv, d in zip(batch.local_views, batch.decisions)
+    ]
+    return SweepSummary(
+        sweep_id=batch.sweep_id,
+        mode=batch.mode,
+        trades_scanned=len(batch.local_views),
+        brackets_checked=brackets_checked,
+        agree=counts["agree"],
+        orphan_stop=counts["orphan_stop"],
+        missing_stop=counts["missing_stop"],
+        qty_drift=counts["qty_drift"],
+        state_drift=counts["state_drift"],
+        price_drift=counts["price_drift"],
+        broker_down=counts["broker_down"],
+        unreconciled=counts["unreconciled"],
+        took_ms=took_ms,
+        rows_written=batch.rows_written,
+        decisions=decisions_payload,
+    )
+
+
+def _run_sweep_staged(
     db: Session,
     *,
-    user_id: int | None = None,
-    broker_view_fn: BrokerViewFn | None = None,
-    mode_override: str | None = None,
+    mode: str,
+    sweep_id: str,
+    tolerances: Tolerances,
+    user_id: int | None,
+    broker_view_fn: BrokerViewFn,
 ) -> SweepSummary:
-    """Run a single reconciliation sweep across open live trades.
+    """Staged pipeline: load_local → fetch_broker → classify_all → log_all.
 
-    * Off mode → returns an empty summary without touching the DB or the
-      broker.
-    * Authoritative mode → raises ``RuntimeError``; Phase G.2 will wire
-      a dedicated writer path and flip this gate.
-    * Shadow / compare → reads broker view via ``broker_view_fn``, writes
-      one row per comparison to ``trading_bracket_reconciliation_log``.
+    Gated behind ``brain_live_brackets_staged_sweep_enabled`` (default
+    False). Tests assert SweepSummary parity against the legacy loop
+    before the flag is flipped in a follow-up PR.
     """
-    mode = _effective_mode(mode_override)
-    sweep_id = str(uuid.uuid4())
+    start = time.perf_counter()
+    batch = SweepBatch(sweep_id=sweep_id, mode=mode, tolerances=tolerances)
+    _stage_load_local(db, batch, user_id=user_id)
+    _stage_fetch_broker(batch, broker_view_fn)
+    _stage_classify_all(batch)
+    _stage_log_all(db, batch)
+    took_ms = (time.perf_counter() - start) * 1000.0
+    return _summarize_from_batch(batch, took_ms=took_ms)
 
-    if mode == "off":
-        return SweepSummary(
-            sweep_id=sweep_id,
-            mode="off",
-            trades_scanned=0,
-            brackets_checked=0,
-            agree=0,
-            orphan_stop=0,
-            missing_stop=0,
-            qty_drift=0,
-            state_drift=0,
-            price_drift=0,
-            broker_down=0,
-            unreconciled=0,
-            took_ms=0.0,
-            rows_written=0,
-        )
 
-    if mode == "authoritative":
-        raise RuntimeError(
-            "bracket_reconciliation_service.run_reconciliation_sweep refuses to run "
-            "in authoritative mode during Phase G; that cutover belongs to Phase G.2."
-        )
-
-    broker_view_fn = broker_view_fn or _noop_broker_view_fn
-    tolerances = _tolerances_from_settings()
+def _run_sweep_legacy(
+    db: Session,
+    *,
+    mode: str,
+    sweep_id: str,
+    tolerances: Tolerances,
+    user_id: int | None,
+    broker_view_fn: BrokerViewFn,
+) -> SweepSummary:
+    """Legacy interleaved loop: classify + persist + log in one pass."""
     start = time.perf_counter()
 
     local_rows = _load_local_view(db, user_id=user_id)
-
     broker_input: list[dict[str, Any]] = [
         {"ticker": r["ticker"], "broker_source": r["broker_source"]}
         for r in local_rows
@@ -236,34 +545,13 @@ def run_reconciliation_sweep(
     broker_views = broker_view_fn(broker_input)
     broker_by_ticker = {(bv.ticker, bv.broker_source): bv for bv in broker_views}
 
-    counts = {
-        "agree": 0,
-        "orphan_stop": 0,
-        "missing_stop": 0,
-        "qty_drift": 0,
-        "state_drift": 0,
-        "price_drift": 0,
-        "broker_down": 0,
-        "unreconciled": 0,
-    }
+    counts = {k: 0 for k in _COUNT_KINDS}
     brackets_checked = 0
     rows_written = 0
     decisions: list[dict[str, Any]] = []
 
     for row in local_rows:
-        local = LocalView(
-            trade_id=row.get("trade_id"),
-            bracket_intent_id=row.get("bracket_intent_id"),
-            ticker=row.get("ticker"),
-            direction=row.get("direction"),
-            quantity=row.get("quantity"),
-            intent_state=row.get("intent_state"),
-            stop_price=row.get("stop_price"),
-            target_price=row.get("target_price"),
-            broker_source=row.get("broker_source"),
-            trade_status=row.get("trade_status"),
-        )
-
+        local = _row_to_local_view(row)
         broker = broker_by_ticker.get((local.ticker, local.broker_source))
         if broker is None:
             broker = BrokerView(
@@ -278,7 +566,7 @@ def run_reconciliation_sweep(
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                "[bracket_reconciliation] classify_discrepancy failed for trade %s: %s",
+                f"{BRACKET_RECONCILIATION} classify_discrepancy failed for trade %s: %s",
                 local.trade_id, exc,
             )
             decision = ReconciliationDecision(
@@ -302,7 +590,7 @@ def run_reconciliation_sweep(
             rows_written += 1
         except Exception:  # pragma: no cover - defensive
             logger.warning(
-                "[bracket_reconciliation] failed to write log row for trade %s",
+                f"{BRACKET_RECONCILIATION} failed to write log row for trade %s",
                 local.trade_id, exc_info=True,
             )
 
@@ -316,7 +604,7 @@ def run_reconciliation_sweep(
                 )
             except Exception:  # pragma: no cover - defensive
                 logger.debug(
-                    "[bracket_reconciliation] mark_reconciled failed for intent %s",
+                    f"{BRACKET_RECONCILIATION} mark_reconciled failed for intent %s",
                     local.bracket_intent_id,
                 )
         elif local.bracket_intent_id is not None:
@@ -332,7 +620,7 @@ def run_reconciliation_sweep(
                 )
             except Exception:  # pragma: no cover - defensive
                 logger.debug(
-                    "[bracket_reconciliation] bump_last_observed failed for intent %s",
+                    f"{BRACKET_RECONCILIATION} bump_last_observed failed for intent %s",
                     local.bracket_intent_id,
                 )
 
@@ -361,14 +649,8 @@ def run_reconciliation_sweep(
                 )
             )
 
-    try:
-        db.commit()
-    except Exception:  # pragma: no cover - defensive
-        db.rollback()
-        logger.warning("[bracket_reconciliation] failed to commit sweep %s", sweep_id)
-
     took_ms = (time.perf_counter() - start) * 1000.0
-    summary = SweepSummary(
+    return SweepSummary(
         sweep_id=sweep_id,
         mode=mode,
         trades_scanned=len(local_rows),
@@ -386,26 +668,60 @@ def run_reconciliation_sweep(
         decisions=decisions,
     )
 
-    if _ops_log_enabled():
-        logger.info(
-            format_bracket_reconciliation_ops_line(
-                event="sweep_summary",
-                mode=mode,
-                sweep_id=sweep_id,
-                trades_scanned=summary.trades_scanned,
-                brackets_checked=summary.brackets_checked,
-                agree_count=summary.agree,
-                orphan_stop=summary.orphan_stop,
-                missing_stop=summary.missing_stop,
-                qty_drift=summary.qty_drift,
-                state_drift=summary.state_drift,
-                price_drift=summary.price_drift,
-                broker_down=summary.broker_down,
-                unreconciled=summary.unreconciled,
-                took_ms=summary.took_ms,
-            )
+
+# ── Main entry point ───────────────────────────────────────────────────
+
+
+def run_reconciliation_sweep(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    broker_view_fn: BrokerViewFn | None = None,
+    mode_override: str | None = None,
+) -> SweepSummary:
+    """Run a single reconciliation sweep across open live trades.
+
+    * Off mode → returns an empty summary without touching the DB or the
+      broker.
+    * Authoritative mode → raises ``RuntimeError``; Phase G.2 will wire
+      a dedicated writer path and flip this gate.
+    * Shadow / compare → dispatches to either ``_run_sweep_staged`` (when
+      ``brain_live_brackets_staged_sweep_enabled`` is True) or
+      ``_run_sweep_legacy`` (default). Both paths return a byte-identical
+      ``SweepSummary`` — the flag only changes the internal pipeline
+      shape (interleaved vs four discrete stages).
+    """
+    mode = _effective_mode(mode_override)
+    sweep_id = str(uuid.uuid4())
+
+    if mode == "off":
+        return _empty_off_summary(sweep_id)
+
+    if mode == "authoritative":
+        raise RuntimeError(
+            "bracket_reconciliation_service.run_reconciliation_sweep refuses to run "
+            "in authoritative mode during Phase G; that cutover belongs to Phase G.2."
         )
 
+    broker_view_fn = broker_view_fn or _noop_broker_view_fn
+    tolerances = _tolerances_from_settings()
+    runner = _run_sweep_staged if _staged_sweep_enabled() else _run_sweep_legacy
+    summary = runner(
+        db,
+        mode=mode,
+        sweep_id=sweep_id,
+        tolerances=tolerances,
+        user_id=user_id,
+        broker_view_fn=broker_view_fn,
+    )
+
+    try:
+        db.commit()
+    except Exception:  # pragma: no cover - defensive
+        db.rollback()
+        logger.warning(f"{BRACKET_RECONCILIATION} failed to commit sweep %s", sweep_id)
+
+    _emit_sweep_summary_ops_log(summary)
     return summary
 
 
@@ -789,7 +1105,7 @@ def run_missing_stop_watchdog(
             if dispatcher is None:
                 from .alerts import dispatch_alert as dispatcher  # type: ignore
             message = (
-                f"[bracket_watchdog] {hit_kind} on {ticker or '?'} "
+                f"{BRACKET_WATCHDOG} {hit_kind} on {ticker or '?'} "
                 f"(trade_id={trade_id}, age={int(age_sec)}s, "
                 f"severity={hit_severity})"
             )
@@ -835,6 +1151,7 @@ def run_missing_stop_watchdog(
 
 
 __all__ = [
+    "SweepBatch",
     "SweepSummary",
     "WatchdogHit",
     "WatchdogSummary",
