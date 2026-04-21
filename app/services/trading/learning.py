@@ -61,6 +61,7 @@ from .learning_predictions import (
     predict_confidence,
     predict_direction,
 )
+from .ops_log_prefixes import CHILI_BRAIN_IO
 
 
 def _get_current_predictions_impl(*args, **kwargs):
@@ -1395,7 +1396,7 @@ def take_snapshots_parallel(
     except Exception:
         _st = {}
     logger.info(
-        "[chili_brain_io] snapshot_batch tickers=%s written=%s fetch_s=%s db_write_s=%s "
+        f"{CHILI_BRAIN_IO} snapshot_batch tickers=%s written=%s fetch_s=%s db_write_s=%s "
         "workers=%s ohlcv_fetches_accounted=%s interval=%s",
         len(tickers),
         count,
@@ -8796,7 +8797,7 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
 
     _sw = io_workers_for_snapshot_batch(_snap_sched_settings)
     logger.info(
-        "[chili_brain_io] scheduled_market_snapshots_start universe_build=1 snapshot_workers=%s",
+        f"{CHILI_BRAIN_IO} scheduled_market_snapshots_start universe_build=1 snapshot_workers=%s",
         _sw,
     )
     top_tickers, _drv = build_snapshot_ticker_universe(db, user_id)
@@ -8928,7 +8929,7 @@ def run_learning_cycle(
         )
 
         logger.info(
-            "[chili_brain_io] learning_cycle_start correlation_id=%s effective_cpus=%.1f "
+            f"{CHILI_BRAIN_IO} learning_cycle_start correlation_id=%s effective_cpus=%.1f "
             "snapshot_workers=%s prediction_workers=%s high=%s med=%s provider=%s",
             _learning_status.get("correlation_id"),
             effective_cpu_budget(_lc_io_settings),
@@ -9505,7 +9506,7 @@ def run_learning_cycle(
         persist_learning_live_snapshot_force()
         report["elapsed_s"] = round(elapsed, 1)
         logger.info(
-            "[chili_brain_io] learning_cycle_end elapsed_s=%s correlation_done=1 error=%s",
+            f"{CHILI_BRAIN_IO} learning_cycle_end elapsed_s=%s correlation_done=1 error=%s",
             report["elapsed_s"],
             report.get("error"),
         )

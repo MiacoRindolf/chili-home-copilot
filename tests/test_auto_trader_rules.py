@@ -75,6 +75,11 @@ def test_passes_rule_gate_slippage_fail(_mock_port, _mock_rth):
     ctx = RuleGateContext(current_price=12.0, autotrader_open_count=0, realized_loss_today_usd=0.0)
     settings = MagicMock()
     settings.chili_autotrader_rth_only = True
+    # Required when chili_autotrader_rth_only is True: without this the gate
+    # consults ``us_stock_extended_session_open`` (which is not patched here)
+    # and short-circuits before the slippage check. MagicMock attrs default
+    # to truthy MagicMock instances, so explicitly set to False.
+    settings.chili_autotrader_allow_extended_hours = False
     settings.chili_autotrader_confidence_floor = 0.5
     settings.chili_autotrader_min_projected_profit_pct = 5.0
     settings.chili_autotrader_max_symbol_price_usd = 500.0

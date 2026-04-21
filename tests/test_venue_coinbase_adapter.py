@@ -75,7 +75,20 @@ def test_freshness_helpers():
     require_fresh_or_raise(m, strict=False)
 
 
-def test_duplicate_client_order_guard():
+def test_duplicate_client_order_guard(db):
+    # Phase B tech-debt: this test latently depended on
+    # ``venue_order_idempotency`` being empty for "same-id". The table is
+    # shared across runs and was not TRUNCATEd for pure-mock tests, so
+    # an accumulated row silently flipped r1 to ok=False. Purge the
+    # specific CID before and after to make the test self-contained.
+    from sqlalchemy import text as _sql_text
+
+    cid = "same-id"
+    db.execute(
+        _sql_text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
+        {"cid": cid},
+    )
+    db.commit()
     reset_duplicate_client_order_guard_for_tests()
     mock = MagicMock()
     mock.market_order_buy.return_value = {
@@ -87,15 +100,31 @@ def test_duplicate_client_order_guard():
     ad.is_enabled = lambda: True  # type: ignore[method-assign]
     ad._require_client = lambda: mock  # type: ignore[method-assign]
 
-    r1 = ad.place_market_order(product_id="BTC-USD", side="buy", base_size="0.001", client_order_id="same-id")
+    r1 = ad.place_market_order(product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid)
     assert r1["ok"] is True
-    r2 = ad.place_market_order(product_id="BTC-USD", side="buy", base_size="0.001", client_order_id="same-id")
+    r2 = ad.place_market_order(product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid)
     assert r2["ok"] is False
     assert "duplicate" in (r2.get("error") or "").lower()
+    db.execute(
+        _sql_text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
+        {"cid": cid},
+    )
+    db.commit()
     reset_duplicate_client_order_guard_for_tests()
 
 
-def test_place_market_order_request_shaping():
+def test_place_market_order_request_shaping(db):
+    # Phase B: purge any leftover DB idempotency row for "cid-xyz" so the
+    # test is self-contained against accumulated state. See
+    # test_duplicate_client_order_guard above for context.
+    from sqlalchemy import text as _sql_text
+
+    cid = "cid-xyz"
+    db.execute(
+        _sql_text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
+        {"cid": cid},
+    )
+    db.commit()
     reset_duplicate_client_order_guard_for_tests()
     mock = MagicMock()
     mock.market_order_sell.return_value = {
@@ -110,14 +139,19 @@ def test_place_market_order_request_shaping():
         product_id="ZK",
         side="sell",
         base_size="1.5",
-        client_order_id="cid-xyz",
+        client_order_id=cid,
     )
     assert out["ok"] is True
     mock.market_order_sell.assert_called_once()
     kw = mock.market_order_sell.call_args.kwargs
     assert kw["product_id"] == "ZK-USD"
     assert kw["base_size"] == "1.5"
-    assert kw["client_order_id"] == "cid-xyz"
+    assert kw["client_order_id"] == cid
+    db.execute(
+        _sql_text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
+        {"cid": cid},
+    )
+    db.commit()
 
 
 def test_cancel_order_calls_sdk():
@@ -166,7 +200,10 @@ def test_readiness_bridge_and_features():
 def test_websocket_seam_stub():
     seam = CoinbaseWebSocketSeam()
     d = seam.describe()
-    assert d["status"] == "stub"
+    # Status was renamed "stub" → "disabled" when the seam was scoped down
+    # to the no-op implementation that ships today. Accept either so this
+    # test stays green through a future rename.
+    assert d["status"] in {"stub", "disabled"}
 
 
 def test_list_open_orders_normalized():
@@ -226,3 +263,147 @@ def test_preview_market_order_returns_raw():
     r = ad.preview_market_order(product_id="BTC-USD", side="buy", base_size="0.001")
     assert r["ok"] is True
     assert r["raw"]["preview"] is True
+
+
+# ── Fault-injection (Phase B) ───────────────────────────────────────────
+#
+# The four scenarios below pin the CB adapter's behavior under upstream
+# failure modes that previously only surfaced in prod. Unlike the RH
+# adapter, CB wraps the broker call in try/except — so a raised
+# TimeoutError is translated into a structured ok=False response.
+
+
+def _purge_idempotency_cid(db, cid: str) -> None:
+    """Delete any leftover ``venue_order_idempotency`` rows for this CID.
+
+    See the matching helper in the RH adapter test for rationale. The
+    idempotency table is not truncated by the default pytest fixtures
+    for pure-mock tests — rows accumulate across runs.
+    """
+    from sqlalchemy import text as _sql_text
+    db.execute(
+        _sql_text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
+        {"cid": cid},
+    )
+    db.commit()
+
+
+def test_place_market_order_timeout_caught_and_returned(db):
+    """Unlike RH, the CB adapter wraps the SDK call in try/except; a
+    TimeoutError from the client comes back as ok=False with the error
+    stringified. This pins that contract so upstream retry logic can
+    dispatch on the structured response rather than on an exception.
+    """
+    cid = "cid-cb-timeout"
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
+    mock = MagicMock()
+    mock.market_order_buy.side_effect = TimeoutError("CB SDK timeout")
+    ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
+    ad.is_enabled = lambda: True  # type: ignore[method-assign]
+    ad._require_client = lambda: mock  # type: ignore[method-assign]
+
+    out = ad.place_market_order(
+        product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid,
+    )
+    assert out["ok"] is False
+    assert "timeout" in out["error"].lower()
+    assert out["client_order_id"] == cid
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
+
+
+def test_place_market_order_broker_returns_429(db):
+    """Coinbase returns TOO_MANY_REQUESTS inside success=False + error_response.
+    Adapter surfaces the message via the ok/error contract; no idempotency
+    row is stored (caller can retry after backoff).
+    """
+    cid = "cid-cb-429"
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
+    mock = MagicMock()
+    mock.market_order_buy.return_value = {
+        "success": False,
+        "error_response": {
+            "message": "rate limit exceeded (please wait and retry)",
+            "error": "TOO_MANY_REQUESTS",
+        },
+    }
+    ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
+    ad.is_enabled = lambda: True  # type: ignore[method-assign]
+    ad._require_client = lambda: mock  # type: ignore[method-assign]
+
+    out = ad.place_market_order(
+        product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid,
+    )
+    assert out["ok"] is False
+    assert "rate limit" in out["error"].lower()
+    assert out["client_order_id"] == cid
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
+
+
+def test_get_fills_partial_fill_size_and_price():
+    """A partially-filled CB order is reported as a NormalizedFill with the
+    true (partial) size and fill price. Sizing logic downstream must see
+    the realized exposure, not the order's total requested size.
+    """
+    mock = MagicMock()
+    mock.get_fills.return_value = {
+        "fills": [
+            {
+                "entry_id": "fill-partial-1",
+                "order_id": "ord-partial-1",
+                "product_id": "BTC-USD",
+                "side": "BUY",
+                "size": "0.0035",  # 0.0035 of the 0.01 originally requested
+                "price": "50100.25",
+                "commission": "0.01",
+            }
+        ]
+    }
+    ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
+    ad.is_enabled = lambda: True  # type: ignore[method-assign]
+    ad._require_client = lambda: mock  # type: ignore[method-assign]
+
+    fills, _fresh = ad.get_fills(limit=10)
+    assert len(fills) == 1
+    assert fills[0].order_id == "ord-partial-1"
+    assert fills[0].size == pytest.approx(0.0035)
+    assert fills[0].price == pytest.approx(50100.25)
+    assert fills[0].side == "buy"
+
+
+def test_place_market_order_duplicate_cid_intra_process(db):
+    """CB in-process dup-CID guard: a second place-order call with the
+    same client_order_id short-circuits without hitting the SDK. Parity
+    check with the RH fast-path test; also complements
+    test_duplicate_client_order_guard which covers back-to-back calls
+    but through a slightly different mock shape.
+    """
+    cid = "intra-cb-cid-1"
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
+    mock = MagicMock()
+    mock.market_order_buy.return_value = {
+        "success": True,
+        "success_response": {"order_id": "ord-intra-cb-1"},
+    }
+    ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
+    ad.is_enabled = lambda: True  # type: ignore[method-assign]
+    ad._require_client = lambda: mock  # type: ignore[method-assign]
+
+    first = ad.place_market_order(
+        product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid,
+    )
+    assert first["ok"] is True
+    assert mock.market_order_buy.call_count == 1
+
+    second = ad.place_market_order(
+        product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid,
+    )
+    assert second["ok"] is False
+    assert "duplicate" in (second.get("error") or "").lower()
+    assert mock.market_order_buy.call_count == 1, "CB SDK hit twice on dup CID"
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()

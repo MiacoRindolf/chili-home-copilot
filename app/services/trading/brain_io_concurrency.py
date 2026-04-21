@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .ops_log_prefixes import CHILI_BRAIN_IO
+
 logger = logging.getLogger(__name__)
 
 
@@ -146,7 +148,7 @@ def log_brain_io_profile(log: logging.Logger | None = None) -> None:
         host = float(os.cpu_count() or 4)
         cg = cgroup_cpu_limit()
         _log.info(
-            "[chili_brain_io] concurrency profile host_cpus=%.1f cgroup_cpus=%s effective=%.1f "
+            f"{CHILI_BRAIN_IO} concurrency profile host_cpus=%.1f cgroup_cpus=%s effective=%.1f "
             "snapshot_workers=%s prediction_workers=%s high/med/low=%s/%s/%s",
             host,
             f"{cg:.2f}" if cg is not None else "none",
@@ -158,7 +160,7 @@ def log_brain_io_profile(log: logging.Logger | None = None) -> None:
             io_workers_low(s),
         )
     except Exception as e:
-        _log.warning("[chili_brain_io] could not log concurrency profile: %s", e)
+        _log.warning(f"{CHILI_BRAIN_IO} could not log concurrency profile: %s", e)
 
 
 class BrainIoCycleStats:

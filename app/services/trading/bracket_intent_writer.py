@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from sqlalchemy import text
@@ -27,16 +28,49 @@ from ...trading_brain.infrastructure.bracket_intent_ops_log import (
 from .bracket_intent import BracketIntentInput, BracketIntentResult, compute_bracket_intent
 
 logger = logging.getLogger(__name__)
-_ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
 
 
-def _effective_mode(override: str | None = None) -> str:
-    m = (override or getattr(settings, "brain_live_brackets_mode", "off") or "off").lower()
-    return m if m in _ALLOWED_MODES else "off"
+class IntentMode(str, Enum):
+    """Live-bracket rollout mode. Values are persisted in
+    ``trading_bracket_intents.intent_state`` and referenced by the brain
+    config surface (``settings.brain_live_brackets_mode``) — values must
+    stay byte-identical (Phase G ops-log contract).
+
+    Subclassing ``str`` keeps the enum JSON-serializable and lets the
+    string comparisons in SQL fragments continue to work untouched.
+    """
+
+    OFF = "off"
+    SHADOW = "shadow"
+    COMPARE = "compare"
+    AUTHORITATIVE = "authoritative"
+
+
+# Prefix used in persisted ``intent_state`` column values. When the live
+# bracket writer lands the Phase-G.2 state, it will write strings like
+# ``"authoritative_submitted"``, ``"authoritative_reconciled"``, etc. —
+# anything starting with this prefix must be protected from shadow-mode
+# overwrite.
+_AUTHORITATIVE_STATE_PREFIX = IntentMode.AUTHORITATIVE.value
+
+# Modes that emit a shadow/compare dual-write; neither is authoritative.
+_SHADOWING_MODES: frozenset[IntentMode] = frozenset({IntentMode.SHADOW, IntentMode.COMPARE})
+
+
+def _effective_mode(override: str | None = None) -> IntentMode:
+    raw = (
+        override
+        or getattr(settings, "brain_live_brackets_mode", IntentMode.OFF.value)
+        or IntentMode.OFF.value
+    ).lower()
+    try:
+        return IntentMode(raw)
+    except ValueError:
+        return IntentMode.OFF
 
 
 def mode_is_active(override: str | None = None) -> bool:
-    return _effective_mode(override) != "off"
+    return _effective_mode(override) is not IntentMode.OFF
 
 
 def _ops_log_enabled() -> bool:
@@ -80,25 +114,25 @@ def upsert_bracket_intent(
     the mode is off.
     """
     mode = _effective_mode(mode_override)
-    if mode == "off":
+    if mode is IntentMode.OFF:
         return None
 
     if bracket_result is None:
         bracket_result = compute_bracket_intent(bracket_input)
 
-    new_state = "shadow_logged" if mode == "shadow" else "intent"
-    shadow_flag = mode in ("shadow", "compare")
+    new_state = "shadow_logged" if mode is IntentMode.SHADOW else "intent"
+    shadow_flag = mode in _SHADOWING_MODES
 
     existing = db.execute(text("""
         SELECT id, intent_state FROM trading_bracket_intents WHERE trade_id = :tid
     """), {"tid": int(trade_id)}).fetchone()
 
-    if existing and (existing[1] or "").startswith("authoritative"):
+    if existing and (existing[1] or "").startswith(_AUTHORITATIVE_STATE_PREFIX):
         if _ops_log_enabled():
             logger.info(
                 format_bracket_intent_ops_line(
                     event="intent_write_skipped",
-                    mode=mode,
+                    mode=mode.value,
                     trade_id=trade_id,
                     bracket_intent_id=int(existing[0]),
                     ticker=bracket_input.ticker,
@@ -201,7 +235,7 @@ def upsert_bracket_intent(
         logger.info(
             format_bracket_intent_ops_line(
                 event="intent_write",
-                mode=mode,
+                mode=mode.value,
                 trade_id=trade_id,
                 bracket_intent_id=new_id,
                 ticker=bracket_input.ticker,
@@ -241,9 +275,13 @@ def mark_reconciled(
     row was updated.
     """
     mode = _effective_mode(mode_override)
-    if mode == "off":
+    if mode is IntentMode.OFF:
         return False
 
+    # NB: the ``LIKE 'authoritative%'`` clause uses the string prefix
+    # directly because SQL parameter substitution can't templatize a
+    # LIKE pattern without introducing complexity; the literal matches
+    # ``_AUTHORITATIVE_STATE_PREFIX`` by construction.
     result = db.execute(text("""
         UPDATE trading_bracket_intents
         SET intent_state = 'reconciled',
@@ -260,7 +298,7 @@ def mark_reconciled(
         logger.info(
             format_bracket_intent_ops_line(
                 event="mark_reconciled",
-                mode=mode,
+                mode=mode.value,
                 bracket_intent_id=intent_id,
                 reason=reason[:128] if reason else None,
             )

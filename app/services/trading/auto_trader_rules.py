@@ -2,14 +2,56 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, Trade
+from .ops_log_prefixes import CHILI_RISK_CACHE
 
 logger = logging.getLogger(__name__)
+
+
+# ── Learned-threshold constants (Phase D) ────────────────────────────
+#
+# These numeric factors translate a pattern's historical record from the
+# M.1 regime-performance ledger into a per-alert threshold override. Each
+# constant has an operator-configurable env counterpart that acts as an
+# upper or lower guard — the operator stays in charge of the envelope;
+# the brain can only tighten inside it (lower the confidence floor when
+# the pattern is genuinely strong, or raise the minimum-profit floor to
+# keep mean-reverters out of the book).
+#
+# The specific factors were calibrated during the M.1 cold-start rollout
+# (2025-Q4). Changing any of them moves every live gate, so treat them
+# as a configuration surface — add a regression test when you touch one.
+
+# Confidence floor = env_floor, but replaceable by
+# (pattern.hit_rate × CONFIDENCE_LEARNING_FACTOR) when a pattern has
+# confident cells. 0.85 means "trust 85% of the observed win rate" —
+# leaves ~15 percentage points of safety margin vs a freshly-promoted
+# pattern over-claiming.
+CONFIDENCE_LEARNING_FACTOR: float = 0.85
+
+# Absolute confidence lower bound — even a learned pattern with a great
+# hit rate can't drop the floor below this. Keeps the gate from
+# silently trusting one lucky hot streak.
+CONFIDENCE_ABSOLUTE_FLOOR: float = 0.55
+
+# Minimum-projected-profit floor = env_min_pp, but replaceable by
+# (pattern.expectancy × 100 × LEARNED_PROFIT_MULTIPLIER) when the
+# pattern has confident expectancy. 0.7 means "require 70% of
+# historical expected move" — conservative bias for live entries.
+LEARNED_PROFIT_MULTIPLIER: float = 0.7
+
+# Absolute floor on the minimum-projected-profit gate when the learned
+# value would otherwise fall below this. 6.0% covers half a typical
+# spread-and-slippage round trip on a $20-$100 ticker; anything below
+# that is within noise.
+MIN_PROFIT_PCT_FLOOR: float = 6.0
 
 
 @dataclass
@@ -21,17 +63,141 @@ class RuleGateContext:
     realized_loss_today_usd: float  # negative sum of closed autotrader PnL today (0 if none)
 
 
-def resolve_effective_capital(db: Session, settings: Any) -> tuple[float, str]:
-    """Return (capital_usd, source).
+@dataclass(frozen=True)
+class RuleGateSettings:
+    """Typed per-tick snapshot of the ``chili_autotrader_*`` settings.
 
-    Phase 1: prefer live broker equity over the ``chili_autotrader_assumed_capital_usd``
-    env default. The env value was a stale $25,000 assumption; real equity comes
-    from ``broker_service.get_portfolio()`` which now works end-to-end (Phase 1
-    of the phoenix-advisory fix). Fallback to the env value if the broker is
-    unreachable or returns zero/missing equity — never go to 0, which would
-    zero out every Kelly / notional calculation downstream.
+    Phase D (tech-debt): the rule-gate code used to read ~13 settings via
+    scattered ``getattr(settings, "chili_autotrader_...", default)`` calls
+    — the defaults ended up duplicated at every callsite and drifting
+    (capital fallback 25k vs 10k vs 100k in different paths). This
+    dataclass is the single place those defaults live. ``passes_rule_gate``
+    and ``resolve_effective_capital`` build one per call via
+    :meth:`from_settings`.
+
+    Defaults here MUST match the operator-facing defaults in
+    ``app/config.py``; they exist as a belt-and-braces fallback when the
+    config surface is bypassed (tests that pass a SimpleNamespace,
+    paper-mode bootstraps, etc.).
     """
-    fallback = float(getattr(settings, "chili_autotrader_assumed_capital_usd", 25_000.0))
+
+    # Capital / sizing
+    assumed_capital_usd: float = 25_000.0
+
+    # Session gating
+    rth_only: bool = True
+    allow_extended_hours: bool = False
+
+    # Thresholds
+    confidence_floor: float = 0.7
+    min_projected_profit_pct: float = 12.0
+    max_symbol_price_usd: float = 50.0
+    max_entry_slippage_pct: float = 1.0
+
+    # Daily loss caps (percent-of-equity preferred; dollar is fallback)
+    daily_loss_cap_pct: float = 1.5
+    daily_loss_cap_usd: float = 150.0
+
+    # Concurrency
+    max_concurrent: int = 3
+
+    # Broker-equity TTL cache (Phase B)
+    broker_equity_cache_enabled: bool = False
+    broker_equity_cache_ttl_seconds: int = 300
+    broker_equity_cache_max_stale_seconds: int = 900
+
+    @classmethod
+    def from_settings(cls, source: Any) -> "RuleGateSettings":
+        """Build a snapshot from any object exposing the ``chili_autotrader_*``
+        attributes (``app.config.Settings``, pytest ``SimpleNamespace``,
+        mock, etc.). Missing attributes fall back to the dataclass default.
+        """
+        def g(name: str, default: Any) -> Any:
+            return getattr(source, name, default)
+
+        return cls(
+            assumed_capital_usd=float(g("chili_autotrader_assumed_capital_usd", cls.assumed_capital_usd)),
+            rth_only=bool(g("chili_autotrader_rth_only", cls.rth_only)),
+            allow_extended_hours=bool(g("chili_autotrader_allow_extended_hours", cls.allow_extended_hours)),
+            confidence_floor=float(g("chili_autotrader_confidence_floor", cls.confidence_floor)),
+            min_projected_profit_pct=float(
+                g("chili_autotrader_min_projected_profit_pct", cls.min_projected_profit_pct)
+            ),
+            max_symbol_price_usd=float(g("chili_autotrader_max_symbol_price_usd", cls.max_symbol_price_usd)),
+            max_entry_slippage_pct=float(
+                g("chili_autotrader_max_entry_slippage_pct", cls.max_entry_slippage_pct)
+            ),
+            daily_loss_cap_pct=float(g("chili_autotrader_daily_loss_cap_pct", cls.daily_loss_cap_pct)),
+            daily_loss_cap_usd=float(g("chili_autotrader_daily_loss_cap_usd", cls.daily_loss_cap_usd)),
+            max_concurrent=int(g("chili_autotrader_max_concurrent", cls.max_concurrent)),
+            broker_equity_cache_enabled=bool(
+                g("chili_autotrader_broker_equity_cache_enabled", cls.broker_equity_cache_enabled)
+            ),
+            broker_equity_cache_ttl_seconds=int(
+                g("chili_autotrader_broker_equity_cache_ttl_seconds", cls.broker_equity_cache_ttl_seconds)
+            ),
+            broker_equity_cache_max_stale_seconds=int(
+                g(
+                    "chili_autotrader_broker_equity_cache_max_stale_seconds",
+                    cls.broker_equity_cache_max_stale_seconds,
+                )
+            ),
+        )
+
+
+# ── Broker-equity TTL cache (Phase B) ────────────────────────────────
+#
+# ``resolve_effective_capital`` is called 3-4 times per auto-trader tick
+# (inside ``resolve_brain_risk_context`` + twice inside ``passes_rule_gate``
+# + once from the auto_trader entry point). Every call hit ``broker_service``
+# directly — so when the broker flapped, a single tick amplified into
+# 3-4 failing API calls, tripping rate limits and clobbering retry budget
+# exactly when graceful degradation matters most.
+#
+# The cache is gated behind ``chili_autotrader_broker_equity_cache_enabled``
+# (default False) so the rollout can soak in paper mode for 2+ sessions
+# before being enabled on live accounts. When disabled, every call goes
+# straight to the broker as before.
+#
+# Keyed on broker name ("robinhood" today; future multi-broker support
+# slots in naturally). Stored fields: equity, source tag, cached_at ts.
+# A ``cache:fresh`` value is returned whole; a ``cache:stale`` value is
+# returned only when the broker is currently unreachable and the stale
+# age is within ``max_stale_seconds``.
+#
+# Logged outcomes (prefix ``[chili_risk_cache]``):
+#   - hit_fresh    — returned cache value within TTL
+#   - miss_refresh — cache miss or expired; broker call succeeded
+#   - miss_no_data — cache miss, broker returned None / disconnected / raised
+#   - stale_serve  — broker unreachable; served aged cache value
+#   - stale_expired — broker unreachable AND cache too old → fallback
+#   - disabled     — feature flag is off; bypassing the cache entirely
+
+_BrokerEquityEntry = tuple[float, str, float]  # (equity, source, cached_at)
+_broker_equity_cache: dict[str, _BrokerEquityEntry] = {}
+_broker_equity_cache_lock = threading.Lock()
+
+
+def reset_broker_equity_cache_for_tests() -> None:
+    """Clear the broker-equity TTL cache (pytest helper)."""
+    with _broker_equity_cache_lock:
+        _broker_equity_cache.clear()
+
+
+def _broker_equity_cache_get(key: str) -> Optional[_BrokerEquityEntry]:
+    with _broker_equity_cache_lock:
+        return _broker_equity_cache.get(key)
+
+
+def _broker_equity_cache_put(key: str, equity: float, source: str) -> None:
+    with _broker_equity_cache_lock:
+        _broker_equity_cache[key] = (equity, source, time.monotonic())
+
+
+def _fetch_broker_equity_once(
+    fallback: float,
+) -> tuple[float, str]:
+    """Single uncached broker-equity lookup. Returns (equity, source)."""
     try:
         from .. import broker_service
         if not broker_service.is_connected():
@@ -50,6 +216,82 @@ def resolve_effective_capital(db: Session, settings: Any) -> tuple[float, str]:
     except Exception:
         logger.debug("[autotrader] live capital resolve failed — using fallback", exc_info=True)
         return fallback, "fallback:exception"
+
+
+def resolve_effective_capital(db: Session, settings: Any) -> tuple[float, str]:
+    """Return (capital_usd, source).
+
+    Phase 1: prefer live broker equity over the ``chili_autotrader_assumed_capital_usd``
+    env default. The env value was a stale $25,000 assumption; real equity comes
+    from ``broker_service.get_portfolio()`` which now works end-to-end (Phase 1
+    of the phoenix-advisory fix). Fallback to the env value if the broker is
+    unreachable or returns zero/missing equity — never go to 0, which would
+    zero out every Kelly / notional calculation downstream.
+
+    Phase B (tech-debt): a TTL cache in front of the broker lookup prevents a
+    flapping broker from amplifying into a per-tick retry storm. Gated behind
+    ``chili_autotrader_broker_equity_cache_enabled`` (default False).
+    """
+    # Phase D: read all knobs via the typed RuleGateSettings snapshot.
+    # ``resolve_effective_capital`` is called 3-4x per tick (see the Phase B
+    # comment above); building one snapshot per call keeps that cost
+    # constant.
+    gs = RuleGateSettings.from_settings(settings)
+    fallback = gs.assumed_capital_usd
+    cache_on = gs.broker_equity_cache_enabled
+    if not cache_on:
+        logger.debug(f"{CHILI_RISK_CACHE} disabled key=robinhood")
+        return _fetch_broker_equity_once(fallback)
+
+    ttl = gs.broker_equity_cache_ttl_seconds
+    max_stale = gs.broker_equity_cache_max_stale_seconds
+    key = "robinhood"  # single-broker today; key by broker name when multi-broker lands
+    now = time.monotonic()
+    entry = _broker_equity_cache_get(key)
+
+    # Fresh cache hit.
+    if entry is not None:
+        equity, src, cached_at = entry
+        age = now - cached_at
+        if age < ttl and src == "broker_equity":
+            logger.debug(
+                f"{CHILI_RISK_CACHE} hit_fresh key=%s equity=%s age_s=%.1f ttl_s=%d",
+                key, equity, age, ttl,
+            )
+            return equity, "cache:fresh"
+
+    # Cache miss or expired — attempt a refresh.
+    equity, src = _fetch_broker_equity_once(fallback)
+    if src == "broker_equity":
+        _broker_equity_cache_put(key, equity, src)
+        logger.info(
+            f"{CHILI_RISK_CACHE} miss_refresh key=%s equity=%s",
+            key, equity,
+        )
+        return equity, src
+
+    # Broker unreachable / returned unusable value. Serve stale if possible.
+    if entry is not None:
+        prev_equity, prev_src, prev_cached_at = entry
+        stale_age = now - prev_cached_at
+        if prev_src == "broker_equity" and stale_age <= (ttl + max_stale):
+            logger.warning(
+                f"{CHILI_RISK_CACHE} stale_serve key=%s equity=%s stale_age_s=%.1f "
+                "budget_s=%d refresh_src=%s",
+                key, prev_equity, stale_age, ttl + max_stale, src,
+            )
+            return prev_equity, "cache:stale"
+        logger.warning(
+            f"{CHILI_RISK_CACHE} stale_expired key=%s stale_age_s=%.1f budget_s=%d "
+            "refresh_src=%s fallback=%s",
+            key, stale_age, ttl + max_stale, src, equity,
+        )
+    else:
+        logger.info(
+            f"{CHILI_RISK_CACHE} miss_no_data key=%s refresh_src=%s fallback=%s",
+            key, src, equity,
+        )
+    return equity, src
 
 
 def resolve_brain_risk_context(
@@ -242,7 +484,8 @@ def resolve_effective_slippage_pct(
     the function returns ``insufficient_data`` — in that case we fall back to
     the env default rather than mistakenly locking in some arbitrary value.
     """
-    fallback = float(getattr(settings, "chili_autotrader_max_entry_slippage_pct", 1.0))
+    # Phase D: typed snapshot so the default (1.0%) lives in exactly one place.
+    fallback = RuleGateSettings.from_settings(settings).max_entry_slippage_pct
     if user_id is None:
         return fallback, "fallback:no_user"
     try:
@@ -304,19 +547,25 @@ def passes_rule_gate(
     resolves its owning user from settings; pass it here so the rule gate can
     attribute the portfolio check to the right account.
     """
+    # Phase D: snapshot the autotrader settings once per gate call. Every
+    # field below references ``gs.<name>`` instead of getattr; defaults
+    # live in RuleGateSettings.from_settings so a typo at a single callsite
+    # can no longer silently change the threshold.
+    gs = RuleGateSettings.from_settings(settings)
+
     snap: dict[str, Any] = {
         "ticker": alert.ticker,
         "alert_id": alert.id,
         "for_new_entry": for_new_entry,
     }
 
-    if getattr(settings, "chili_autotrader_rth_only", True):
+    if gs.rth_only:
         from .pattern_imminent_alerts import (
             us_stock_extended_session_open,
             us_stock_session_open,
         )
 
-        allow_ext = bool(getattr(settings, "chili_autotrader_allow_extended_hours", False))
+        allow_ext = gs.allow_extended_hours
         session_open = (
             us_stock_extended_session_open() if allow_ext else us_stock_session_open()
         )
@@ -336,14 +585,17 @@ def passes_rule_gate(
 
     conf = alert_confidence_from_score(alert)
     snap["confidence"] = conf
-    env_floor = float(getattr(settings, "chili_autotrader_confidence_floor", 0.7))
+    env_floor = gs.confidence_floor
     # Learned floor: 85% of historical hit_rate, clamped to [0.55, env_floor].
     # Clamping to env_floor as an upper bound means the brain can LOWER the
     # floor below env (when a pattern is genuinely strong) but never raise it
     # above what the operator configured — keeps the operator in charge of
     # the outer envelope.
     if pat_ctx.get("hit_rate") is not None:
-        learned_floor = max(0.55, min(env_floor, float(pat_ctx["hit_rate"]) * 0.85))
+        learned_floor = max(
+            CONFIDENCE_ABSOLUTE_FLOOR,
+            min(env_floor, float(pat_ctx["hit_rate"]) * CONFIDENCE_LEARNING_FACTOR),
+        )
         floor = learned_floor
         snap["confidence_floor_source"] = "pattern_hit_rate"
     else:
@@ -357,13 +609,16 @@ def passes_rule_gate(
     target = alert.target_price
     ppp = projected_profit_pct(entry, target)
     snap["projected_profit_pct"] = ppp
-    env_min_pp = float(getattr(settings, "chili_autotrader_min_projected_profit_pct", 12.0))
+    env_min_pp = gs.min_projected_profit_pct
     # Learned min profit: 70% of historical expectancy-pct, floored at 6% so a
     # mean-reversion pattern with a tiny expectancy doesn't trigger entries
     # that can't clear real spreads. Expectancy is signed — patterns with
     # non-positive expectancy keep the env floor.
     if pat_ctx.get("expectancy") is not None and float(pat_ctx["expectancy"]) > 0:
-        learned_min_pp = max(6.0, float(pat_ctx["expectancy"]) * 100 * 0.7)
+        learned_min_pp = max(
+            MIN_PROFIT_PCT_FLOOR,
+            float(pat_ctx["expectancy"]) * 100 * LEARNED_PROFIT_MULTIPLIER,
+        )
         min_pp = min(env_min_pp, learned_min_pp)
         snap["min_profit_source"] = "pattern_expectancy"
     else:
@@ -381,7 +636,7 @@ def passes_rule_gate(
 
     px = float(ctx.current_price)
     snap["current_price"] = px
-    max_px = float(getattr(settings, "chili_autotrader_max_symbol_price_usd", 50.0))
+    max_px = gs.max_symbol_price_usd
     if px > max_px:
         return False, "symbol_price_above_cap", snap
 
@@ -413,13 +668,13 @@ def passes_rule_gate(
     # Daily loss cap: prefer a percent-of-equity cap (dial-scaled) over the
     # static dollar cap. Falls back to the env dollar cap when equity is
     # unavailable — preserves current behavior in degraded environments.
-    cap_pct = float(getattr(settings, "chili_autotrader_daily_loss_cap_pct", 1.5))  # 1.5% of equity default
+    cap_pct = gs.daily_loss_cap_pct  # 1.5% of equity default
     equity_for_cap, _ = resolve_effective_capital(db, settings)
     if equity_for_cap > 0 and cap_pct > 0:
         cap_loss = equity_for_cap * (cap_pct / 100.0) * dial
         snap["daily_loss_cap_source"] = "equity_pct_dial"
     else:
-        cap_loss = float(getattr(settings, "chili_autotrader_daily_loss_cap_usd", 150.0)) * dial
+        cap_loss = gs.daily_loss_cap_usd * dial
         snap["daily_loss_cap_source"] = "env_dollar_dial"
     snap["daily_loss_cap_usd"] = round(cap_loss, 2)
     snap["realized_loss_today_usd"] = ctx.realized_loss_today_usd
@@ -427,7 +682,7 @@ def passes_rule_gate(
         return False, "daily_loss_cap_already_hit", snap
 
     if for_new_entry:
-        base_max_c = int(getattr(settings, "chili_autotrader_max_concurrent", 3))
+        base_max_c = gs.max_concurrent
         # Dial-scaled concurrency. Floor at 1 so a deeply defensive dial still
         # allows one probe position instead of fully muting the autotrader.
         max_c = max(1, int(round(base_max_c * dial)))

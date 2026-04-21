@@ -1,4 +1,33 @@
-"""Phase 5: compare-only + optional candidate-authoritative mirror reads (request-local; no cache mutation)."""
+"""Phase 5: compare-only + optional candidate-authoritative mirror reads (request-local; no cache mutation).
+
+## Legacy-fallback retirement (tracked — Phase D tech-debt 2026-Q2)
+
+Every ``read=fallback_*`` outcome in `[chili_prediction_ops]` is a case
+where the mirror path could not serve the request (miss, empty, stale,
+parity mismatch, ineligible, unexpected error) and we delegated back to
+the legacy list. The fallbacks exist because Phase 5 rolled out before
+the mirror's steady-state completeness was proven in prod.
+
+**Retirement plan:** once two full quarters of production soak show
+``fallback_miss`` + ``fallback_empty`` + ``fallback_stale`` at < 0.5%
+of explicit-ticker reads (measured via `[chili_prediction_ops]` logs),
+the fallback branches here become dead code and can be pulled out in
+favor of returning the mirror value OR a clean error. Soak window
+target: **2026-Q4 review, 2027-Q1 retirement PR**.
+
+**Retirement is a new phase (Phase 9 in the roadmap), not an edit.**
+Per Hard Rule 5 + ADR-004, authority changes require a new phase with
+design + tests + soak + rollout doc. Phase 9 is the ONLY place legacy
+reads may be removed. Do not short-circuit by deleting fallback
+branches in an unrelated PR — that rewrites the authority contract
+without the gating discipline.
+
+Key parity-fail outcomes to watch during soak (see
+``docs/TRADING_SLO.md``):
+  - ``read=fallback_parity`` — drives Phase-9 readiness
+  - ``read=fallback_stale`` — hints at learning-cycle latency (SLO 2)
+  - ``read=fallback_miss`` — dual-write integrity signal
+"""
 
 from __future__ import annotations
 

@@ -1,5 +1,36 @@
 # `app/trading_brain` — Phase 1 scaffolding + Phase 2 mirror
 
+## Current phase & rollout status
+
+_Last updated: Phase C tech-debt (2026-Q2). Update this table whenever a flag default changes or a new phase ships._
+
+| Phase | Status | Default flag state | What it covers |
+|---|---|---|---|
+| 1 | ✅ Shipped | N/A (code present always) | Models, protocol ports, stage catalog |
+| 2 | ✅ Shipped — default OFF | `brain_cycle_shadow_write_enabled=False`, `brain_status_dual_read_enabled=False`, `brain_lease_shadow_write_enabled=False` | Shadow mirror of learning cycle + stage jobs |
+| 3 | ✅ Shipped — default OFF | `brain_cycle_lease_enforcement_enabled=False` | Single-flight lease admission (dedicated session) |
+| 4 | ✅ Shipped — default OFF | `brain_prediction_dual_write_enabled=False` | Append-only prediction mirror writes |
+| 5 | ✅ Shipped — default OFF | `brain_prediction_read_compare_enabled=False`, `brain_prediction_read_authoritative_enabled=False`, `brain_prediction_read_max_age_seconds=900` | Read-side compare + candidate-authoritative |
+| 6 | ✅ Shipped — default OFF | `brain_prediction_ops_log_enabled=False` | One-line INFO ops log per prediction path |
+| 7 | ✅ Shipped — enforcement always on when `brain_prediction_ops_log_enabled=True` | N/A (logic gate, not a flag) | Authority hardening: never `auth_mirror` without `explicit_api_tickers=true` — release blocker |
+| 8 | ✅ Shipped — ops docs only | N/A | Rollout procedure + release-blocker grep |
+| 9 | 🗓️ **Planned** — retirement target **2027-Q1** | (future) | Retire the legacy-fallback branches in `prediction_read_phase5.py` after two quarters of `fallback_*` rates < 0.5%. Must follow the phase-addition discipline in [ADR-004](../../docs/adr/004-prediction-mirror-authority.md) — a new phase, not a side-edit. |
+
+**Onboarding quickstart:**
+
+- Contributors changing code under `app/trading_brain/` should read [docs/CONTRIBUTOR_SAFETY.md](../../docs/CONTRIBUTOR_SAFETY.md) first.
+- Rollback procedure: [docs/PHASE_ROLLBACK_RUNBOOK.md](../../docs/PHASE_ROLLBACK_RUNBOOK.md) + [scripts/rollback-prediction-mirror.ps1](../../scripts/rollback-prediction-mirror.ps1) (idempotent, supports `-WhatIf`).
+- Release-blocker grep (pre-merge gate when touching authority): [scripts/check_chili_prediction_ops_release_blocker.ps1](../../scripts/check_chili_prediction_ops_release_blocker.ps1).
+- SLOs + alert rules: [docs/TRADING_SLO.md](../../docs/TRADING_SLO.md).
+
+**To enable a phase in a deployment:**
+
+1. Flip the flag in `.env` (per-env deployment-specific)
+2. Restart `chili` + `brain-worker` containers (flags are read at import time)
+3. Soak per [TRADING_BRAIN_PREDICTION_MIRROR_ROLLOUT.md](../../docs/TRADING_BRAIN_PREDICTION_MIRROR_ROLLOUT.md)
+4. Run the release-blocker grep
+5. Promote to next phase only after soak window is clean
+
 ## Scope
 
 - **Models:** SQLAlchemy tables in [`app/models/trading_brain_phase1.py`](../models/trading_brain_phase1.py). Migrations `048`–`051` create `brain_*` tables (including Phase 4 prediction mirror).

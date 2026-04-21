@@ -63,6 +63,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from .bracket_reconciler import ReconciliationDecision
+from .ops_log_prefixes import BRACKET_WRITER_G2
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,7 @@ def resize_stop_for_partial_fill(
         cancel_res = adapter.cancel_order(prior_stop_order_id) or {}
     except Exception as exc:
         logger.warning(
-            "[bracket_writer_g2] cancel_order raised for intent=%s order=%s: %s",
+            f"{BRACKET_WRITER_G2} cancel_order raised for intent=%s order=%s: %s",
             bracket_intent_id, prior_stop_order_id, exc, exc_info=True,
         )
         return WriterAction(
@@ -219,7 +220,7 @@ def resize_stop_for_partial_fill(
         )
     if not cancel_res.get("ok"):
         logger.warning(
-            "[bracket_writer_g2] cancel failed intent=%s order=%s error=%s",
+            f"{BRACKET_WRITER_G2} cancel failed intent=%s order=%s error=%s",
             bracket_intent_id, prior_stop_order_id, cancel_res.get("error"),
         )
         return WriterAction(
@@ -246,7 +247,7 @@ def resize_stop_for_partial_fill(
         )
     except Exception as exc:
         logger.warning(
-            "[bracket_writer_g2] place_limit_order_gtc raised for intent=%s: %s",
+            f"{BRACKET_WRITER_G2} place_limit_order_gtc raised for intent=%s: %s",
             bracket_intent_id, exc, exc_info=True,
         )
         return WriterAction(
@@ -256,7 +257,7 @@ def resize_stop_for_partial_fill(
         )
     if not place_res.get("ok"):
         logger.critical(
-            "[bracket_writer_g2] PRIOR STOP CANCELLED BUT REPLACEMENT FAILED "
+            f"{BRACKET_WRITER_G2} PRIOR STOP CANCELLED BUT REPLACEMENT FAILED "
             "intent=%s order=%s error=%s — position is currently unprotected",
             bracket_intent_id, prior_stop_order_id, place_res.get("error"),
         )
@@ -269,7 +270,7 @@ def resize_stop_for_partial_fill(
 
     new_oid = place_res.get("order_id") or ""
     logger.info(
-        "[bracket_writer_g2] resize_stop intent=%s ticker=%s qty=%s price=%s "
+        f"{BRACKET_WRITER_G2} resize_stop intent=%s ticker=%s qty=%s price=%s "
         "old=%s new=%s",
         bracket_intent_id, ticker, expected_qty, stop_price,
         prior_stop_order_id, new_oid,
@@ -348,7 +349,7 @@ def place_missing_stop(
         )
     except Exception as exc:
         logger.warning(
-            "[bracket_writer_g2] place_missing_stop raised for intent=%s: %s",
+            f"{BRACKET_WRITER_G2} place_missing_stop raised for intent=%s: %s",
             bracket_intent_id, exc, exc_info=True,
         )
         return WriterAction(
@@ -357,7 +358,7 @@ def place_missing_stop(
         )
     if not place_res.get("ok"):
         logger.warning(
-            "[bracket_writer_g2] place_missing_stop broker error intent=%s: %s",
+            f"{BRACKET_WRITER_G2} place_missing_stop broker error intent=%s: %s",
             bracket_intent_id, place_res.get("error"),
         )
         return WriterAction(
@@ -368,7 +369,7 @@ def place_missing_stop(
 
     new_oid = place_res.get("order_id") or ""
     logger.info(
-        "[bracket_writer_g2] place_missing_stop intent=%s ticker=%s qty=%s "
+        f"{BRACKET_WRITER_G2} place_missing_stop intent=%s ticker=%s qty=%s "
         "price=%s new_order=%s",
         bracket_intent_id, ticker, local_quantity, stop_price, new_oid,
     )

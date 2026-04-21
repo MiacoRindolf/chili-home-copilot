@@ -93,7 +93,11 @@ def test_ops_log_enabled_single_info_line_na_na(
     monkeypatch.setattr(settings, "brain_prediction_dual_write_enabled", False, raising=False)
     monkeypatch.setattr(settings, "brain_prediction_read_compare_enabled", False, raising=False)
     monkeypatch.setattr(settings, "brain_prediction_read_authoritative_enabled", False, raising=False)
-    caplog.set_level(logging.INFO, logger="app.services.trading.learning")
+    # Scope the level to the parent package so messages from both ``learning``
+    # (original integration location) and ``learning_predictions`` (post-
+    # extract location; b3a6b6d + Phase-D follow-up restored the ops-log
+    # emit there) are captured.
+    caplog.set_level(logging.INFO, logger="app.services.trading")
     _run_get_current_predictions_impl_stub(db, explicit_api_tickers=True)
     hits = [r for r in caplog.records if CHILI_PREDICTION_OPS_PREFIX in r.getMessage()]
     assert len(hits) == 1
@@ -111,7 +115,11 @@ def test_ops_log_dual_write_ok_when_enabled(
     monkeypatch.setattr(settings, "brain_prediction_dual_write_enabled", True, raising=False)
     monkeypatch.setattr(settings, "brain_prediction_read_compare_enabled", False, raising=False)
     monkeypatch.setattr(settings, "brain_prediction_read_authoritative_enabled", False, raising=False)
-    caplog.set_level(logging.INFO, logger="app.services.trading.learning")
+    # Scope the level to the parent package so messages from both ``learning``
+    # (original integration location) and ``learning_predictions`` (post-
+    # extract location; b3a6b6d + Phase-D follow-up restored the ops-log
+    # emit there) are captured.
+    caplog.set_level(logging.INFO, logger="app.services.trading")
     with patch(
         "app.trading_brain.infrastructure.prediction_mirror_session.brain_prediction_mirror_write_dedicated"
     ) as w:

@@ -1,4 +1,41 @@
-"""Version-tracked schema migrations for PostgreSQL. Run at app startup."""
+"""Version-tracked schema migrations for PostgreSQL. Run at app startup.
+
+## Migration ID contract (Hard Rule 6, CLAUDE.md)
+
+Migration IDs are **sequential and never reused**. This file is effectively
+append-only with respect to already-registered IDs:
+
+1. **Never reuse an ID.** Every entry in ``MIGRATIONS`` has a unique
+   ``version_id`` string. Reusing an ID that is already in the
+   ``schema_version`` table of any deployed environment is effectively
+   unrecoverable without backups — the new migration would silently skip
+   on that environment while still running on fresh ones, producing a
+   silent schema drift.
+2. **Never renumber historical IDs.** Downstream ``schema_version`` rows
+   reference the literal string. Renaming ``"007_backfill_project_members"``
+   to ``"007_backfill_v2"`` would re-execute the migration on every existing
+   deployment and double-apply it on fresh ones.
+3. **Never delete a migration function.** Once a migration has shipped, its
+   code path stays in this file even if the table it touched is later
+   dropped. Deleting it breaks the startup import of ``run_migrations``
+   in environments where the version_id is still unapplied.
+4. **Retirement, not deletion.** If a migration must be decommissioned
+   (e.g. it references a dropped table and new environments can skip it),
+   add an entry to ``RETIRED_MIGRATIONS`` below with the retirement date,
+   but keep its function defined and keep it in ``MIGRATIONS``. Retired
+   entries are asserted to never collide with live ``MIGRATIONS`` IDs.
+5. **Idempotent bodies.** Every migration body guards every ALTER / INSERT
+   with an existence check so re-running on a mis-tracked environment is
+   a no-op, not a crash.
+
+The ``_assert_migration_ids_unique`` check below enforces (1) and (4) at
+startup: if anyone accidentally introduces a collision the app raises
+``RuntimeError`` before any DB writes happen. A standalone verifier lives
+at ``scripts/verify-migration-ids.ps1`` for CI / precommit use.
+
+See also: ``docs/PHASE_ROLLBACK_RUNBOOK.md`` for how migrations interact
+with the prediction-mirror phase flags.
+"""
 from __future__ import annotations
 
 import logging
@@ -7,6 +44,52 @@ from sqlalchemy import inspect as sa_inspect, text
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.engine import Engine
+
+
+# ── Retired migrations ────────────────────────────────────────────────
+#
+# Map of retired ``version_id`` → short reason + retirement date.
+# Entries here are asserted to **not collide** with live ``MIGRATIONS``
+# entries. When retiring, keep the ``_migration_NNN_*`` function body in
+# this file (so historical ``schema_version`` rows still resolve); just
+# remove the tuple from ``MIGRATIONS`` below and add the ID here.
+#
+# Example:
+#     RETIRED_MIGRATIONS: dict[str, str] = {
+#         "042_trade_attribution_exit_tca": "superseded by 099; retired 2026-06-01",
+#     }
+RETIRED_MIGRATIONS: dict[str, str] = {}
+
+
+def _assert_migration_ids_unique() -> None:
+    """Fail fast if ``MIGRATIONS`` has a duplicate ID or collides with retired IDs.
+
+    Called once at the top of ``run_migrations``. Raising here is the
+    safest outcome — better to refuse to start the app than to silently
+    apply a migration twice or skip it on half the fleet.
+    """
+    ids = [vid for vid, _fn in MIGRATIONS]
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for vid in ids:
+        if vid in seen:
+            dupes.append(vid)
+        seen.add(vid)
+    if dupes:
+        raise RuntimeError(
+            "Migration ID reuse detected in MIGRATIONS list: "
+            f"{sorted(set(dupes))}. Migration IDs are sequential and never "
+            "reused — see the Migration ID contract at the top of "
+            "app/migrations.py."
+        )
+    retired_collision = sorted(seen & set(RETIRED_MIGRATIONS))
+    if retired_collision:
+        raise RuntimeError(
+            "Migration ID collides with a retired ID: "
+            f"{retired_collision}. A retired ID must not be reused; pick a "
+            "new sequential ID. See RETIRED_MIGRATIONS at the top of "
+            "app/migrations.py."
+        )
 
 
 def _tables(conn) -> set:
@@ -9858,7 +9941,12 @@ MIGRATIONS = [
 
 
 def run_migrations(engine: Engine) -> None:
-    """Create schema_version table if missing, then run any migrations not yet applied."""
+    """Create schema_version table if missing, then run any migrations not yet applied.
+
+    Fails fast (before any DB writes) if a migration ID is duplicated or
+    collides with a retired ID — see ``_assert_migration_ids_unique``.
+    """
+    _assert_migration_ids_unique()
     with engine.connect() as conn:
         conn.execute(text(
             "CREATE TABLE IF NOT EXISTS schema_version ("

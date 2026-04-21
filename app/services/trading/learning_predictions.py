@@ -26,6 +26,7 @@ from .market_data import (
 )
 from .portfolio import get_watchlist
 from .brain_io_concurrency import io_workers_for_predictions
+from .ops_log_prefixes import CHILI_BRAIN_IO
 
 logger = logging.getLogger(__name__)
 
@@ -539,11 +540,94 @@ def _get_current_predictions_impl(
                 results.append(entry)
 
     logger.info(
-        "[chili_brain_io] predictions_batch tickers=%s workers=%s results=%s",
+        f"{CHILI_BRAIN_IO} predictions_batch tickers=%s workers=%s results=%s",
         len(ticker_batch),
         _workers,
         len(results),
     )
     results.sort(key=lambda x: abs(x["score"]), reverse=True)
+
+    # ── Phase 4 dual-write + Phase 5 read + Phase 6 ops-log ───────────
+    #
+    # Preserved from pre-refactor `learning.py`; the b3a6b6d "extract live
+    # prediction pipeline" commit moved _get_current_predictions_impl here
+    # and silently dropped this integration block, which meant Phase 6
+    # observability never actually emitted at runtime and the Phase 7
+    # release-blocker grep was hollow (no matching log lines existed).
+    # Restored in the Phase-D tech-debt follow-up.
+    #
+    # Contract (frozen by ADR-004 + Hard Rule 5): the ``[chili_prediction_ops]``
+    # log line format and field order MUST NOT change. Do not add fields,
+    # rename keys, or reorder — ops alerts + release-blocker grep pattern-
+    # match on the exact string.
+    from ...config import settings as _pred_mirror_settings
+    from ...trading_brain.infrastructure.prediction_ops_log import (
+        DUAL_WRITE_FAIL,
+        DUAL_WRITE_NA,
+        DUAL_WRITE_OK,
+        DUAL_WRITE_SKIP_EMPTY,
+        READ_ERROR,
+        READ_NA,
+        format_chili_prediction_ops_line,
+        universe_fingerprint_fp16,
+    )
+
+    dual_write_outcome = DUAL_WRITE_NA
+    dw_enabled = False
+    try:
+        dw_enabled = bool(getattr(_pred_mirror_settings, "brain_prediction_dual_write_enabled", False))
+        if not dw_enabled:
+            pass
+        elif not results:
+            dual_write_outcome = DUAL_WRITE_SKIP_EMPTY
+        else:
+            from ...trading_brain.infrastructure.prediction_line_mapper import (
+                prediction_universe_fingerprint,
+            )
+            from ...trading_brain.infrastructure.prediction_mirror_session import (
+                brain_prediction_mirror_write_dedicated,
+            )
+
+            _fp = prediction_universe_fingerprint(ticker_batch)
+            brain_prediction_mirror_write_dedicated(
+                legacy_rows=results,
+                universe_fingerprint=_fp,
+                ticker_count=len(ticker_batch),
+            )
+            dual_write_outcome = DUAL_WRITE_OK
+    except Exception:
+        logger.warning("[brain_prediction_dual_write] hook failed (legacy return preserved)", exc_info=True)
+        if dw_enabled and results:
+            dual_write_outcome = DUAL_WRITE_FAIL
+
+    _fp16 = universe_fingerprint_fp16(ticker_batch)
+    from ...trading_brain.infrastructure.prediction_read_phase5 import (
+        PredictionReadOpsMeta,
+        phase5_apply_prediction_read,
+    )
+
+    read_meta = PredictionReadOpsMeta(read=READ_NA, fp16=_fp16)
+    try:
+        results, read_meta = phase5_apply_prediction_read(
+            results=results,
+            ticker_batch=ticker_batch,
+            explicit_api_tickers=explicit_api_tickers,
+        )
+    except Exception:
+        logger.warning("[brain_prediction_read] hook_failed legacy preserved", exc_info=True)
+        read_meta = PredictionReadOpsMeta(read=READ_ERROR, fp16=_fp16)
+
+    if getattr(_pred_mirror_settings, "brain_prediction_ops_log_enabled", False):
+        logger.info(
+            format_chili_prediction_ops_line(
+                dual_write=dual_write_outcome,
+                read=read_meta.read,
+                explicit_api_tickers=explicit_api_tickers,
+                fp16=read_meta.fp16,
+                snapshot_id=read_meta.snapshot_id,
+                line_count=read_meta.line_count,
+            )
+        )
+
     return results
 
