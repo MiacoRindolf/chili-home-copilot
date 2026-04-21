@@ -28,10 +28,19 @@ _VENUE = "coinbase"
 def reset_duplicate_client_order_guard_for_tests() -> None:
     """Clear in-process duplicate client_order_id cache (pytest only).
 
-    Does NOT truncate the DB table — tests that need a clean DB row set
-    should use their own fixtures.
+    Also resets the shared ``rate_limiter`` bucket state. Tests that
+    exercise ``place_market_order`` / ``place_limit_order`` paths all
+    consume rate-limiter tokens; without resetting, a long test suite
+    would occasionally see spurious ``rate_limited`` responses once
+    bucket budget exhausted across sibling tests. Phase B adds this
+    reset so fault-injection tests can assume a pristine rate-limiter
+    state at entry.
+
+    Does NOT truncate the DB idempotency table — tests that need a
+    clean DB row set should use their own fixtures.
     """
     idempotency_store.reset_for_tests()
+    rate_limiter.reset_for_tests()
 
 
 def _as_dict(resp: Any) -> dict[str, Any]:
@@ -489,15 +498,22 @@ class CoinbaseSpotAdapter(VenueAdapter):
             rd = _as_dict(resp)
             ok = bool(rd.get("success"))
             sr = _as_dict(rd.get("success_response"))
-            oid = sr.get("order_id") or cid
-            if ok or oid:
+            # Broker-provided order_id on success; may be missing on some partial
+            # acknowledgements. Phase B (tech-debt) fix: do NOT fall back to
+            # ``cid`` here — that made ``if ok or oid:`` below evaluate True for
+            # every call (cid is always non-empty), silently turning broker-side
+            # 429s and validation errors into ok=True. Real success requires the
+            # broker's ``success`` flag.
+            broker_oid = sr.get("order_id") or None
+            if ok:
+                oid = broker_oid or cid
                 idempotency_store.remember(
                     cid,
                     venue=_VENUE,
                     symbol=pid,
                     side=side_l,
                     qty=float(base_size or 0.0),
-                    broker_order_id=oid if oid != cid else None,
+                    broker_order_id=broker_oid,
                     status="submitted",
                 )
                 # Broker accepted → emit ACK transition keyed on the
@@ -507,7 +523,7 @@ class CoinbaseSpotAdapter(VenueAdapter):
                         to_state=order_state_machine.OrderState.ACK,
                         venue=_VENUE,
                         source="cb_place_market",
-                        order_id=oid if oid != cid else None,
+                        order_id=broker_oid,
                         client_order_id=cid,
                         broker_status="accepted",
                         raw_payload={"product_id": pid, "order_id": oid},

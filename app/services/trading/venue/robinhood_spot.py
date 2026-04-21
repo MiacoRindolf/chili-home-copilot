@@ -26,6 +26,25 @@ logger = logging.getLogger(__name__)
 _VENUE = "robinhood"
 
 
+def reset_duplicate_client_order_guard_for_tests() -> None:
+    """Clear in-process duplicate client_order_id cache (pytest only).
+
+    Parity with ``coinbase_spot.reset_duplicate_client_order_guard_for_tests`` —
+    both venues share the same ``idempotency_store`` memory guard, but
+    exposing the symbol here lets Robinhood-specific tests reset state by
+    importing from ``robinhood_spot`` directly (matches the discoverability
+    pattern the Coinbase tests already use).
+
+    Also resets the shared ``rate_limiter`` bucket state — see the
+    matching Coinbase helper for rationale (Phase B tech-debt).
+
+    Does NOT truncate the DB ``venue_order_idempotency`` table — tests that
+    need a clean DB row set should use their own fixtures.
+    """
+    idempotency_store.reset_for_tests()
+    rate_limiter.reset_for_tests()
+
+
 # ── Helpers ────────────────────────────────────────────────────────────
 
 

@@ -493,6 +493,71 @@ def _backfill_backtests():
         _log.warning(f"Backtest backfill failed: {e}")
 
 
+def _warn_dual_path_broker_credentials(_settings) -> None:
+    """Log a WARNING if both ``.env`` plaintext broker creds AND encrypted
+    vault entries are present.
+
+    The ``.env`` fallback (``robinhood_username``/``coinbase_api_key`` etc.)
+    is deprecated — see the comment at ``app/config.py`` ~line 153. When a
+    user-owned ``BrokerCredential`` row exists, the plaintext fallback
+    silently shadows it during a partial migration. This helper surfaces
+    that condition at startup so the state is visible.
+
+    Called from ``_run_deferred_startup`` after the DB is ready. Failures
+    are logged at DEBUG and swallowed — startup must never fail on a
+    diagnostic.
+    """
+    _log = logging.getLogger("chili.startup")
+    try:
+        env_rh = any(
+            (getattr(_settings, attr, "") or "").strip()
+            for attr in ("robinhood_username", "robinhood_password", "robinhood_totp_secret")
+        )
+        env_cb = any(
+            (getattr(_settings, attr, "") or "").strip()
+            for attr in ("coinbase_api_key", "coinbase_api_secret")
+        )
+        if not (env_rh or env_cb):
+            return  # Only .env-less deployments: nothing to warn about.
+
+        # Count vault rows per broker. A single-query COUNT keeps this cheap
+        # even on large deployments.
+        from .db import SessionLocal
+        from .models.core import BrokerCredential
+
+        with SessionLocal() as session:
+            vault_rh = (
+                session.query(BrokerCredential)
+                .filter(BrokerCredential.broker == "robinhood")
+                .count()
+            )
+            vault_cb = (
+                session.query(BrokerCredential)
+                .filter(BrokerCredential.broker == "coinbase")
+                .count()
+            )
+
+        dual_rh = env_rh and vault_rh > 0
+        dual_cb = env_cb and vault_cb > 0
+        if dual_rh or dual_cb:
+            parts = []
+            if dual_rh:
+                parts.append(f"Robinhood (.env + {vault_rh} vault row(s))")
+            if dual_cb:
+                parts.append(f"Coinbase (.env + {vault_cb} vault row(s))")
+            _log.warning(
+                "[startup] Dual-path broker credentials detected: %s. "
+                "The .env plaintext fallback is deprecated (app/config.py ~line "
+                "153); per-user encrypted BrokerCredential rows are the "
+                "intended path. Consider removing the .env values once all "
+                "users have migrated. See docs/KILL_SWITCH_RUNBOOK.md for the "
+                "incident playbook if both paths conflict.",
+                "; ".join(parts),
+            )
+    except Exception:
+        _log.debug("[startup] dual-path broker cred check failed", exc_info=True)
+
+
 def _run_deferred_startup() -> None:
     """Heavy startup work (runs in a daemon thread).
 
@@ -516,6 +581,12 @@ def _run_deferred_startup() -> None:
         # Robinhood restore can block on device approval / MFA — must not run in lifespan
         # before yield or HTTP never becomes ready (empty reply / TLS handshake failure).
         _restore_broker_sessions()
+        # Broker credential dual-path visibility. `.env` plaintext broker creds are
+        # deprecated (see app/config.py ~lines 153-159): the per-user encrypted
+        # BrokerCredential vault is the intended path. If both are populated, surface
+        # it at startup so the plaintext fallback isn't silently shadowing a vault
+        # migration. Phase A of the tech-debt plan requires this visibility.
+        _warn_dual_path_broker_credentials(_settings)
         # Hard Rule 1/2: kill-switch state must survive restarts. Without this,
         # a tripped breaker silently disarms on every redeploy.
         try:

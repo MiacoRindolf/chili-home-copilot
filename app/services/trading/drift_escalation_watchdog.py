@@ -38,6 +38,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from .ops_log_prefixes import DRIFT_ESCALATION
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +170,7 @@ def run_drift_escalation_watchdog(
         ).fetchall()
     except Exception:
         logger.warning(
-            "[drift_escalation] log query failed; returning empty summary",
+            f"{DRIFT_ESCALATION} log query failed; returning empty summary",
             exc_info=True,
         )
         rows = []
@@ -210,7 +211,7 @@ def run_drift_escalation_watchdog(
             if dispatcher is None:
                 from .alerts import dispatch_alert as dispatcher  # type: ignore
             message = (
-                f"[drift_escalation] {kind} on {ticker or '?'} "
+                f"{DRIFT_ESCALATION} {kind} on {ticker or '?'} "
                 f"(intent_id={intent_id} trade_id={trade_id}) "
                 f"persisted for {streak} consecutive sweeps"
             )

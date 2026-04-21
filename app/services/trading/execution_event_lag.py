@@ -40,6 +40,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from .ops_log_prefixes import EXECUTION_EVENT_LAG
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ def measure_execution_event_lag(
         ).fetchall()
     except Exception:
         logger.warning(
-            "[execution_event_lag] query failed; returning empty gauge",
+            f"{EXECUTION_EVENT_LAG} query failed; returning empty gauge",
             exc_info=True,
         )
         rows = []
@@ -191,26 +192,26 @@ def run_execution_event_lag_tick(db: Session) -> dict[str, Any]:
     try:
         summary = measure_execution_event_lag(db, lookback_seconds=lookback)
     except Exception:
-        logger.exception("[execution_event_lag] measure failed")
+        logger.exception(f"{EXECUTION_EVENT_LAG} measure failed")
         return {"ok": False, "error": "measure_failed"}
 
     if summary.breach == "error":
         logger.error(
-            "[execution_event_lag] lag breach=ERROR p95=%.0fms threshold=%.0fms "
+            f"{EXECUTION_EVENT_LAG} lag breach=ERROR p95=%.0fms threshold=%.0fms "
             "samples=%s lookback=%ss max=%s",
             summary.p95_ms or 0.0, summary.error_threshold_ms,
             summary.sample_size, summary.lookback_seconds, summary.max_ms,
         )
     elif summary.breach == "warn":
         logger.warning(
-            "[execution_event_lag] lag breach=WARN p95=%.0fms threshold=%.0fms "
+            f"{EXECUTION_EVENT_LAG} lag breach=WARN p95=%.0fms threshold=%.0fms "
             "samples=%s lookback=%ss",
             summary.p95_ms or 0.0, summary.warn_threshold_ms,
             summary.sample_size, summary.lookback_seconds,
         )
     else:
         logger.debug(
-            "[execution_event_lag] ok p50=%s p95=%s samples=%s",
+            f"{EXECUTION_EVENT_LAG} ok p50=%s p95=%s samples=%s",
             summary.p50_ms, summary.p95_ms, summary.sample_size,
         )
 

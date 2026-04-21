@@ -187,6 +187,41 @@ class Settings(BaseSettings):
 
     # Phase 3: single-flight via `brain_cycle_lease` using dedicated DB sessions (admission only; legacy status authoritative for UI).
     brain_cycle_lease_enforcement_enabled: bool = False
+
+    # Prediction-mirror rollout flags (phases 4-6). See ADR-004 and
+    # `app/trading_brain/README.md` for the phase contract. All default
+    # False; enable progressively per `docs/TRADING_BRAIN_PREDICTION_MIRROR_ROLLOUT.md`.
+    # These flags were read via ``getattr(settings, ..., default)`` throughout the
+    # trading-brain code for most of the rollout; tests that monkeypatch them
+    # hit the pydantic "no such field" rail. Declared here so strict-settings
+    # tests can toggle them directly. Phase 7's release-blocker grep on
+    # ``[chili_prediction_ops]`` depends on the ops-log-enabled flag; its value
+    # is still frozen by contract (see ADR-004).
+    brain_prediction_dual_write_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BRAIN_PREDICTION_DUAL_WRITE_ENABLED"),
+    )
+    brain_prediction_read_compare_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BRAIN_PREDICTION_READ_COMPARE_ENABLED"),
+    )
+    brain_prediction_read_authoritative_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BRAIN_PREDICTION_READ_AUTHORITATIVE_ENABLED"),
+    )
+    brain_prediction_read_max_age_seconds: int = Field(
+        default=900,
+        ge=1,
+        validation_alias=AliasChoices("BRAIN_PREDICTION_READ_MAX_AGE_SECONDS"),
+    )
+    brain_prediction_ops_log_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BRAIN_PREDICTION_OPS_LOG_ENABLED"),
+    )
+    brain_prediction_mirror_write_dedicated: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BRAIN_PREDICTION_MIRROR_WRITE_DEDICATED"),
+    )
     # Brain resource / queue tuning (raise parallel for high-core machines; watch API rate limits)
     brain_max_cpu_pct: int | None = None  # cap queue pattern workers to this % of logical CPUs (None = no cap)
     brain_backtest_parallel: int = 18     # ScanPatterns to backtest in parallel (queue step); tune vs DB pool + provider caps
@@ -1831,6 +1866,32 @@ class Settings(BaseSettings):
         ge=5,
         le=120,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_INTERVAL_SECONDS"),
+    )
+
+    # Phase B (tech-debt): TTL cache on broker-equity lookups so a flapping
+    # broker does not amplify into a per-tick retry storm. When enabled, the
+    # first call per ``chili_autotrader_broker_equity_cache_ttl_seconds`` window
+    # hits the broker; subsequent calls in-window return the cached equity
+    # tagged ``cache:fresh``. When the broker is unreachable and a prior
+    # successful value exists, the cache serves it tagged ``cache:stale``
+    # (up to ``chili_autotrader_broker_equity_cache_max_stale_seconds``) so
+    # the sizing logic degrades gracefully instead of collapsing to the env
+    # default. Defaults disabled — flip to true after a paper-mode soak.
+    chili_autotrader_broker_equity_cache_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_BROKER_EQUITY_CACHE_ENABLED"),
+    )
+    chili_autotrader_broker_equity_cache_ttl_seconds: int = Field(
+        default=300,  # 5 min fresh window
+        ge=10,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_BROKER_EQUITY_CACHE_TTL_SECONDS"),
+    )
+    chili_autotrader_broker_equity_cache_max_stale_seconds: int = Field(
+        default=900,  # serve stale up to 15 min during a broker outage
+        ge=0,
+        le=7200,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_BROKER_EQUITY_CACHE_MAX_STALE_SECONDS"),
     )
 
     brain_market_snapshot_scheduler_enabled: bool = Field(

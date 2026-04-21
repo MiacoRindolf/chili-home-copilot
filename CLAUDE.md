@@ -105,12 +105,12 @@ Phased (2 through 8) migration to persist predictions authoritatively in DB. **T
 
 These come from `.cursor/rules/` and are non-negotiable:
 
-1. **Kill switch before any automated trade.** `ensemble_promotion_check` must pass before a pattern goes live.
-2. **Drawdown breaker before sizing.** If it trips, trades are blocked until manual reset.
+1. **Kill switch before any automated trade.** `ensemble_promotion_check` must pass before a pattern goes live. See [docs/KILL_SWITCH_RUNBOOK.md](docs/KILL_SWITCH_RUNBOOK.md) for activation / reset / audit procedures.
+2. **Drawdown breaker before sizing.** If it trips, trades are blocked until manual reset. See [docs/DRAWDOWN_BREAKER_RUNBOOK.md](docs/DRAWDOWN_BREAKER_RUNBOOK.md) for the incident playbook.
 3. **Data-first, code-second.** When symptoms look like wrong FKs / contaminated linkage, fix the DB + add a migration. Do **not** paper over it with a router/service filter — that hides corruption from other consumers.
 4. **Tests must use a `_test`-suffixed DB.** The guard in `conftest.py` is there because fixtures TRUNCATE. Do not bypass it.
-5. **Prediction mirror authority is frozen** (see above).
-6. **Migrations are sequential and idempotent.** Check the last `_migration_NNN_` number before adding; never reuse IDs.
+5. **Prediction mirror authority is frozen** (see above). See [docs/PHASE_ROLLBACK_RUNBOOK.md](docs/PHASE_ROLLBACK_RUNBOOK.md) for rollback procedures when a phase flag misbehaves (rollback only — forward migrations need a new phase).
+6. **Migrations are sequential and idempotent.** Check the last `_migration_NNN_` number before adding; never reuse IDs. Enforced at app startup by `_assert_migration_ids_unique` in `app/migrations.py`; run `.\scripts\verify-migration-ids.ps1` to check ahead of merge.
 
 ## Workflow rules
 

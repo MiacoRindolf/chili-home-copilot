@@ -144,7 +144,13 @@ def test_place_market_order_buy(mock_conn, mock_buy, monkeypatch):
 
     assert result["ok"] is True
     assert result["order_id"] == "ord1"
-    mock_buy.assert_called_once_with("AAPL", 10.0, order_type="market")
+    # Adapter forwards market/extended-hours overrides as kwargs (None when unset).
+    mock_buy.assert_called_once_with(
+        "AAPL", 10.0,
+        order_type="market",
+        market_hours_override=None,
+        extended_hours_override=None,
+    )
 
 
 @patch("app.services.broker_service.place_sell_order")
@@ -159,7 +165,12 @@ def test_place_market_order_sell(mock_conn, mock_sell, monkeypatch):
     result = adapter.place_market_order(product_id="AAPL", side="sell", base_size="5")
 
     assert result["ok"] is True
-    mock_sell.assert_called_once_with("AAPL", 5.0, order_type="market")
+    mock_sell.assert_called_once_with(
+        "AAPL", 5.0,
+        order_type="market",
+        market_hours_override=None,
+        extended_hours_override=None,
+    )
 
 
 @patch("app.services.broker_service.place_buy_order")
@@ -250,3 +261,150 @@ def test_execution_family_registry_includes_robinhood():
     assert is_momentum_automation_implemented(EXECUTION_FAMILY_ROBINHOOD_SPOT)
     factory = resolve_live_spot_adapter_factory(EXECUTION_FAMILY_ROBINHOOD_SPOT)
     assert factory is RobinhoodSpotAdapter
+
+
+# ── Fault-injection (Phase B) ───────────────────────────────────────────
+#
+# The four scenarios below pin the RH adapter's behavior under upstream
+# failure modes that previously only surfaced in prod. They complement
+# (not replace) the DB-level dup-CID test above, so the adapter's
+# contract is pinned against timeouts, broker-side 429s, partial fills,
+# and the in-process dup-CID fast path.
+
+
+def _purge_idempotency_cid(db, cid: str) -> None:
+    """Delete any leftover ``venue_order_idempotency`` rows for this CID.
+
+    Fault-injection tests below use the real DB idempotency table (shared
+    by all adapter tests) but do NOT use the per-test ``db`` fixture's
+    TRUNCATE — they're fast unit tests that pin adapter behavior. This
+    helper ensures a clean slate for the specific CIDs each test uses.
+    """
+    from sqlalchemy import text as _sql_text
+    db.execute(
+        _sql_text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
+        {"cid": cid},
+    )
+    db.commit()
+
+
+@patch("app.services.broker_service.place_buy_order")
+@patch("app.services.broker_service.is_connected", return_value=True)
+def test_place_market_order_timeout_propagates(mock_conn, mock_buy, db, monkeypatch):
+    """RH adapter does NOT wrap broker_service; a TimeoutError bubbles out.
+
+    This pins today's behavior so the Phase B `_current_price` retry loop
+    (which DOES catch TimeoutError and retries) is unambiguously the layer
+    that handles transient upstream timeouts — the adapter stays dumb.
+    """
+    from app.config import settings
+    from app.services.trading.venue.robinhood_spot import (
+        reset_duplicate_client_order_guard_for_tests,
+    )
+
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    mock_buy.side_effect = TimeoutError("RH upstream timeout after 30s")
+
+    adapter = RobinhoodSpotAdapter()
+    with pytest.raises(TimeoutError, match="upstream timeout"):
+        adapter.place_market_order(product_id="AAPL", side="buy", base_size="10")
+
+
+@patch("app.services.broker_service.place_buy_order")
+@patch("app.services.broker_service.is_connected", return_value=True)
+def test_place_market_order_broker_returns_429(mock_conn, mock_buy, db, monkeypatch):
+    """Broker-side 429 (upstream rate limit) surfaces as ok=False with the
+    raw error intact. REJECTED state gets recorded; no idempotency row is
+    committed (so the caller can legitimately retry after backoff).
+    """
+    from app.config import settings
+    from app.services.trading.venue.robinhood_spot import (
+        reset_duplicate_client_order_guard_for_tests,
+    )
+
+    cid = "cid-429-1"
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    mock_buy.return_value = {
+        "ok": False,
+        "error": "rate_limited_by_broker",
+        "status_code": 429,
+        "raw": {"detail": "Request throttled"},
+    }
+
+    adapter = RobinhoodSpotAdapter()
+    out = adapter.place_market_order(
+        product_id="AAPL", side="buy", base_size="1", client_order_id=cid,
+    )
+    assert out["ok"] is False
+    assert out["error"] == "rate_limited_by_broker"
+    assert out["status_code"] == 429
+    _purge_idempotency_cid(db, cid)
+
+
+@patch("app.services.broker_service.get_order_by_id")
+@patch("app.services.broker_service.is_connected", return_value=True)
+def test_get_order_partial_fill_reports_working(mock_conn, mock_get, monkeypatch):
+    """A partially-filled RH order maps to status='working' (via map_rh_status)
+    with filled_size reflecting the partial. Sizers downstream must see
+    both the in-flight size and the known fill, not a terminal 'open'.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    mock_get.return_value = _mock_rh_order(
+        order_id="partial-1",
+        state="partially_filled",
+        qty=4.0,  # 4 of 10 filled
+        avg_price=150.25,
+    )
+
+    adapter = RobinhoodSpotAdapter()
+    order, _fresh = adapter.get_order("partial-1")
+
+    assert order is not None
+    assert order.order_id == "partial-1"
+    assert order.status == "working"  # partially_filled maps to working, not open
+    assert order.filled_size == 4.0
+    assert order.average_filled_price == 150.25
+
+
+@patch("app.services.broker_service.place_buy_order")
+@patch("app.services.broker_service.is_connected", return_value=True)
+def test_place_market_order_duplicate_cid_intra_process(mock_conn, mock_buy, db, monkeypatch):
+    """In-process memory guard: two back-to-back calls with the same CID
+    inside the same adapter instance must short-circuit the second call,
+    even when the DB idempotency row lookup has not yet been written
+    (network-partition scenario). Complements the DB-level dup-CID test
+    above by exercising the fast-path branch in is_duplicate().
+    """
+    from app.config import settings
+    from app.services.trading.venue.robinhood_spot import (
+        reset_duplicate_client_order_guard_for_tests,
+    )
+
+    cid = "intra-proc-cid-1"
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    mock_buy.return_value = {"ok": True, "order_id": "ord-intra-1", "state": "queued", "raw": {}}
+
+    adapter = RobinhoodSpotAdapter()
+    first = adapter.place_market_order(
+        product_id="AAPL", side="buy", base_size="1", client_order_id=cid,
+    )
+    assert first["ok"] is True
+    assert mock_buy.call_count == 1
+
+    # Second call with the same CID — must NOT hit the broker again.
+    second = adapter.place_market_order(
+        product_id="AAPL", side="buy", base_size="1", client_order_id=cid,
+    )
+    assert second["ok"] is False
+    assert second["error"] == "duplicate_client_order_id"
+    assert mock_buy.call_count == 1, "broker hit twice — in-process guard missed"
+
+    _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
