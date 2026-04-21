@@ -1769,12 +1769,36 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     _update_proposal_on_fill(db, trade)
 
             elif rh_state in ("cancelled", "canceled", "rejected", "failed"):
-                trade.status = "cancelled"
-                cancelled += 1
-                logger.info(
-                    f"[broker] Order {trade.broker_order_id} for {trade.ticker} {rh_state}"
-                )
-                _update_proposal_on_cancel(db, trade, rh_state)
+                # Safety gate: refuse to mark cancelled if the order actually
+                # has fills. RH's state field can briefly report a terminal
+                # status during transient routing/canceling of unfilled
+                # portions, even while ``cumulative_quantity`` shows the
+                # order executed. We saw autotrader-placed WGS/GH/INFQ get
+                # silently cancelled in our DB while RH confirmed them
+                # filled — the resulting "phantom cancel" broke
+                # autotrader_open_count and forced broker_sync to re-import
+                # the real positions as fresh broker_sync rows.
+                cum = 0.0
+                try:
+                    cum = float(rh_order.get("cumulative_quantity") or 0)
+                except (TypeError, ValueError):
+                    cum = 0.0
+                if cum > 0:
+                    logger.warning(
+                        "[broker] Order %s for %s reports state=%s but cumulative_quantity=%s — "
+                        "treating as FILLED (RH state anomaly)",
+                        trade.broker_order_id, trade.ticker, rh_state, cum,
+                    )
+                    trade.status = "open"
+                    trade.broker_status = "filled"
+                    filled += 1
+                else:
+                    trade.status = "cancelled"
+                    cancelled += 1
+                    logger.info(
+                        f"[broker] Order {trade.broker_order_id} for {trade.ticker} {rh_state}"
+                    )
+                    _update_proposal_on_cancel(db, trade, rh_state)
 
             synced += 1
 
@@ -1827,12 +1851,30 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 **normalized,
             )
             if rh_state in ("cancelled", "canceled", "rejected", "failed"):
-                cancelled += 1
-                synced += 1
-                logger.info(
-                    f"[broker] Reconcile: {trade.ticker} (open locally) was {rh_state} on RH -> set cancelled"
-                )
-                _update_proposal_on_cancel(db, trade, rh_state)
+                # Same safety as the working-trades path above: if the
+                # order shows fills, trust cumulative_quantity over the
+                # state field. A filled order whose state later reads
+                # "cancelled" shouldn't be flipped to cancelled locally.
+                cum = 0.0
+                try:
+                    cum = float(rh_order.get("cumulative_quantity") or 0)
+                except (TypeError, ValueError):
+                    cum = 0.0
+                if cum > 0:
+                    logger.warning(
+                        "[broker] Reconcile: %s reports state=%s but cum=%s — leaving as open (RH state anomaly)",
+                        trade.ticker, rh_state, cum,
+                    )
+                    # Do not call apply_execution_event_to_trade-derived
+                    # mutation; record_execution_event above already wrote
+                    # the audit row. Leave trade.status=open untouched.
+                else:
+                    cancelled += 1
+                    synced += 1
+                    logger.info(
+                        f"[broker] Reconcile: {trade.ticker} (open locally) was {rh_state} on RH -> set cancelled"
+                    )
+                    _update_proposal_on_cancel(db, trade, rh_state)
         except Exception as e:
             logger.debug(f"[broker] Reconcile open trade {trade.ticker}: {e}")
 

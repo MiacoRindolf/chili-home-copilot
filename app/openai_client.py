@@ -234,6 +234,47 @@ def _groq_stack_configured() -> bool:
     return bool(settings.llm_api_key and settings.llm_api_key.strip())
 
 
+# ── Auth-failure short-circuit ───────────────────────────────────────
+#
+# When a provider's API key is invalid, every call raises a 401. Logging
+# the full error at INFO per call is pure noise — the cascade falls
+# through to the next provider regardless. We detect the first 401 per
+# provider base-url, log it once at WARNING, then skip further calls to
+# that URL for the lifetime of the process. A process restart (e.g.
+# after key rotation via env) resets the skip set.
+_auth_failed_urls: set[str] = set()
+_auth_lock = threading.Lock()
+
+
+def _mark_auth_failed(base_url: str, trace_id: str, err_text: str) -> None:
+    key = (base_url or "").strip().rstrip("/")
+    with _auth_lock:
+        if key in _auth_failed_urls:
+            return
+        _auth_failed_urls.add(key)
+    log_info(
+        trace_id,
+        f"auth_failed base_url={key} — suppressing further calls this process "
+        f"(rotate env key + restart to re-enable): {err_text[:120]}",
+    )
+
+
+def _is_auth_failed(base_url: str) -> bool:
+    key = (base_url or "").strip().rstrip("/")
+    with _auth_lock:
+        return key in _auth_failed_urls
+
+
+def _looks_like_auth_error(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return (
+        "invalid api key" in s
+        or "invalid_api_key" in s
+        or "401" in s
+        or "unauthorized" in s
+    )
+
+
 def _premium_configured() -> bool:
     return bool(settings.premium_api_key and settings.premium_api_key.strip())
 
@@ -362,6 +403,8 @@ def _log_cascade_order_once(trace_id: str) -> None:
 def _chat_openai(prompt, messages, user_message, trace_id, max_tokens, strict_escalation):
     if not _openai_official_configured():
         return None
+    if _is_auth_failed(PAID_OPENAI_BASE_URL):
+        return None
     if _near_daily_limit(PAID_OPENAI_BASE_URL):
         log_info(trace_id, f"openai_primary skipped (daily tokens ~{_provider_used(PAID_OPENAI_BASE_URL)})")
         return None
@@ -372,12 +415,20 @@ def _chat_openai(prompt, messages, user_message, trace_id, max_tokens, strict_es
             return result
         log_info(trace_id, f"openai_primary weak ({len(result['reply'])} chars)")
     except Exception as e:
+        if _looks_like_auth_error(e):
+            _mark_auth_failed(PAID_OPENAI_BASE_URL, trace_id, str(e))
+            return None
         log_info(trace_id, f"openai_primary_error={e}")
     return None
 
 
 def _chat_groq(prompt, messages, user_message, trace_id, max_tokens, strict_escalation):
     if not _groq_stack_configured():
+        return None
+    # Skip entirely if a prior call already determined this base_url is
+    # auth-failed. The auth-failure marker is keyed per URL so the
+    # OpenAI stack is still considered independently.
+    if _is_auth_failed(settings.llm_base_url):
         return None
     if not _near_daily_limit(settings.llm_base_url):
         try:
@@ -387,6 +438,9 @@ def _chat_groq(prompt, messages, user_message, trace_id, max_tokens, strict_esca
                 return result
             log_info(trace_id, f"primary reply weak ({len(result['reply'])} chars), trying secondary")
         except Exception as e:
+            if _looks_like_auth_error(e):
+                _mark_auth_failed(settings.llm_base_url, trace_id, str(e))
+                return None
             log_info(trace_id, f"primary_error={e}")
     else:
         log_info(trace_id, f"primary groq skipped (daily tokens ~{_provider_used(settings.llm_base_url)})")
@@ -410,6 +464,9 @@ def _chat_groq(prompt, messages, user_message, trace_id, max_tokens, strict_esca
                 return None
             return result
     except Exception as e:
+        if _looks_like_auth_error(e):
+            _mark_auth_failed(settings.llm_base_url, trace_id, str(e))
+            return None
         log_info(trace_id, f"secondary_error={e}")
     return None
 
