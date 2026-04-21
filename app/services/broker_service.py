@@ -1074,9 +1074,25 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     for trade in stale:
         # Reconciliation confirmation window: only auto-close if the position
         # has been missing for longer than _RECONCILE_CONFIRM_WINDOW seconds.
-        # This prevents premature closes during transient API glitches.
-        last_sync = getattr(trade, "last_broker_sync", None)
-        if last_sync and (datetime.utcnow() - last_sync).total_seconds() < _RECONCILE_CONFIRM_WINDOW:
+        # This prevents premature closes during transient API glitches AND
+        # during RH's fractional-share settlement delay (small orders can
+        # take a minute to appear in the positions endpoint after placement).
+        #
+        # Use whichever reference timestamp is MOST RECENT — a fresh trade
+        # created by the autotrader has ``last_broker_sync = NULL`` but a
+        # valid ``entry_date`` / ``submitted_at``; without this fallback the
+        # first sync after creation auto-closes the trade before RH has even
+        # reflected the position. Before the fix this killed every
+        # autotrader entry within seconds of placement.
+        refs = [
+            getattr(trade, "last_broker_sync", None),
+            getattr(trade, "submitted_at", None),
+            getattr(trade, "entry_date", None),
+        ]
+        ref_ts = max((r for r in refs if r is not None), default=None)
+        if ref_ts is not None and (
+            (datetime.utcnow() - ref_ts).total_seconds() < _RECONCILE_CONFIRM_WINDOW
+        ):
             logger.debug(
                 "[broker] %s missing from RH but within %ds confirm window — skipping",
                 trade.ticker, _RECONCILE_CONFIRM_WINDOW,
