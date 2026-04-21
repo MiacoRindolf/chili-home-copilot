@@ -528,6 +528,6 @@ class TestStagedVsLegacyParity:
         assert s_legacy.missing_stop == 1
         assert s_legacy.broker_down == 1
 
-    def test_staged_flag_defaults_to_false(self):
+    def test_staged_flag_defaults_to_true(self):
         from app.config import settings
-        assert settings.brain_live_brackets_staged_sweep_enabled is False
+        assert settings.brain_live_brackets_staged_sweep_enabled is True

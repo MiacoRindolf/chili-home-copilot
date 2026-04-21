@@ -302,9 +302,10 @@ class Settings(BaseSettings):
     # Phase G staged-sweep refactor: routes run_reconciliation_sweep through
     # four discrete stages (load_local / fetch_broker / classify_all / log_all)
     # instead of the legacy interleaved loop. Byte-for-byte SweepSummary parity
-    # is asserted by tests before flipping this to True in a follow-up PR.
+    # is asserted by ``TestStagedVsLegacyParity::test_staged_matches_legacy_summary``;
+    # flipped to True after the refactor landed cleanly.
     brain_live_brackets_staged_sweep_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("BRAIN_LIVE_BRACKETS_STAGED_SWEEP_ENABLED"),
     )
 
