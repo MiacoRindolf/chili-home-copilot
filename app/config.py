@@ -299,6 +299,14 @@ class Settings(BaseSettings):
     brain_live_brackets_reconciliation_interval_s: int = 60
     brain_live_brackets_price_drift_bps: float = 25.0
     brain_live_brackets_qty_drift_abs: float = 1e-6
+    # Phase G staged-sweep refactor: routes run_reconciliation_sweep through
+    # four discrete stages (load_local / fetch_broker / classify_all / log_all)
+    # instead of the legacy interleaved loop. Byte-for-byte SweepSummary parity
+    # is asserted by tests before flipping this to True in a follow-up PR.
+    brain_live_brackets_staged_sweep_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BRAIN_LIVE_BRACKETS_STAGED_SWEEP_ENABLED"),
+    )
 
     # Canonical position sizer (Phase H) — Kelly-from-NetEdgeRanker with
     # hard correlation bucket caps + single-ticker notional cap. Shadow
