@@ -9867,6 +9867,51 @@ def _migration_164_cpcv_shadow_eval_log(conn) -> None:
     conn.commit()
 
 
+def _migration_165_regime_snapshot_and_tagging(conn) -> None:
+    """Q1.T2: Gaussian HMM regime labels + posteriors; tag trading_snapshots."""
+    tables = _tables(conn)
+    if "trading_snapshots" not in tables:
+        conn.commit()
+        return
+
+    if "regime_snapshot" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE regime_snapshot (
+                    as_of TIMESTAMPTZ PRIMARY KEY,
+                    regime TEXT NOT NULL CHECK (regime IN ('bull','chop','bear')),
+                    posterior JSONB NOT NULL,
+                    features JSONB NOT NULL,
+                    model_version TEXT NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_regime_snapshot_model_version "
+                "ON regime_snapshot (model_version, as_of)"
+            )
+        )
+        conn.commit()
+
+    cols = _columns(conn, "trading_snapshots")
+    if "regime" not in cols:
+        conn.execute(text("ALTER TABLE trading_snapshots ADD COLUMN regime TEXT"))
+    if "regime_posterior" not in cols:
+        conn.execute(
+            text("ALTER TABLE trading_snapshots ADD COLUMN regime_posterior JSONB")
+        )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_snapshot_regime "
+            "ON trading_snapshots (regime, bar_start_at) WHERE regime IS NOT NULL"
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -10033,6 +10078,7 @@ MIGRATIONS = [
     ("162_project_domain_recovery", _migration_162_project_domain_recovery),
     ("163_cpcv_promotion_gate_evidence", _migration_163_cpcv_promotion_gate_evidence),
     ("164_cpcv_shadow_eval_log", _migration_164_cpcv_shadow_eval_log),
+    ("165_regime_snapshot_and_tagging", _migration_165_regime_snapshot_and_tagging),
 ]
 
 

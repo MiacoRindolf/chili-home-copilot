@@ -418,6 +418,22 @@ class MarketSnapshot(Base):
     bar_interval: Optional[str] = Column(String(16), nullable=True, index=True)
     bar_start_at: Optional[datetime] = Column(DateTime, nullable=True, index=True)
     snapshot_legacy: bool = Column(Boolean, nullable=False, default=True)
+    # Q1.T2: HMM regime tag at bar (nullable when classifier off or no snapshot yet)
+    regime: Optional[str] = Column(String(16), nullable=True, index=True)
+    regime_posterior: Optional[dict] = Column(JSONB, nullable=True)
+
+
+class RegimeSnapshot(Base):
+    """Daily (or bar-timed) 3-state HMM regime decode for macro features (Q1.T2)."""
+
+    __tablename__ = "regime_snapshot"
+    __table_args__ = (Index("ix_regime_snapshot_model_version", "model_version", "as_of"),)
+
+    as_of: datetime = Column(DateTime, primary_key=True)
+    regime: str = Column(String(16), nullable=False)
+    posterior: dict = Column(JSONB, nullable=False)
+    features: dict = Column(JSONB, nullable=False)
+    model_version: str = Column(String(128), nullable=False)
 
 
 class TradingInsightEvidence(Base):

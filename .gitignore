@@ -58,3 +58,6 @@ rq.json
 
 # Local scratch shell commits
 .commit_msg.txt
+
+# Q1.T2 Gaussian HMM regime artifacts (warm-start weights; do not commit)
+regime_models/
