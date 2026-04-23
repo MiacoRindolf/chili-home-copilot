@@ -167,7 +167,7 @@ function loadCpcvShadowFunnel() {
     if (!d.ok || !d.rows || d.rows.length === 0) {
       el.innerHTML = (d.view_available === false)
         ? 'Shadow log not available yet (run app migrations through <code>164_cpcv_shadow_eval_log</code>).'
-        : 'No CPCV shadow evaluations in the last 7 days. Rows appear when promotion attempts run after migration 164.';
+        : 'No CPCV evaluations in the last 7 days — shadow data populates as the brain runs mining cycles.';
       return;
     }
     var lines = ['<table style="width:100%;border-collapse:collapse;font-size:10px">'];

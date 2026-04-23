@@ -10,7 +10,9 @@ Usage (repo root, conda ``chili-env``)::
     conda run -n chili-env python scripts/backfill_cpcv_metrics.py --commit
 
 Dry-run (default): evaluates CPCV, logs per-pattern lines, prints a summary including
-demotions by scanner bucket. Exits with code **2** if would-demote count exceeds **20%**
+demotions by scanner bucket. **No database writes**: no ``commit()``, no shadow-log inserts
+(``persist_cpcv_shadow_eval`` is not used by this script). The session is rolled back on
+exit when not ``--commit``. Exits with code **2** if would-demote count exceeds **20%**
 of evaluated patterns (operator review gate).
 
 Rollback SQL (see docs/CPCV_PROMOTION_GATE_RUNBOOK.md)::
@@ -184,6 +186,11 @@ def main() -> int:
 
         return review_exit
     finally:
+        if not do_commit:
+            try:
+                db.rollback()
+            except Exception:
+                pass
         db.close()
 
 

@@ -1,10 +1,18 @@
 """CPCV / DSR / PBO promotion gate (Q1.T1)."""
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
 import numpy as np
 import pytest
+from sqlalchemy import text
 
 from app.config import settings
+from app.models.trading import PatternTradeRow, ScanPattern
 from app.services.trading.mining_validation import compute_deflated_sharpe_ratio, compute_pbo
 from app.services.trading.promotion_gate import (
     CPCV_FEATURE_NAMES,
@@ -155,3 +163,96 @@ def test_purged_cv_splits_respect_sample_count():
     for tr, te in splits[:3]:
         te_idx = np.concatenate(te) if isinstance(te, (list, tuple)) else np.asarray(te)
         assert len(np.intersect1d(np.asarray(tr, dtype=int), te_idx)) == 0
+
+
+def test_backfill_dry_run_is_write_free(db):
+    """``scripts/backfill_cpcv_metrics.py --dry-run`` must not INSERT/UPDATE/commit."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "scripts" / "backfill_cpcv_metrics.py"
+    assert script.is_file()
+
+    pat = ScanPattern(
+        name="CPCV dry-run fixture",
+        rules_json={},
+        origin="mined",
+        lifecycle_stage="promoted",
+    )
+    db.add(pat)
+    db.flush()
+
+    base = datetime.utcnow() - timedelta(days=400)
+    for i in range(35):
+        db.add(
+            PatternTradeRow(
+                scan_pattern_id=pat.id,
+                ticker="FAKE",
+                as_of_ts=base + timedelta(days=i),
+                timeframe="1d",
+                outcome_return_pct=0.01 * (i % 5),
+                features_json={"entry_price": 100.0, "rsi_14": 45.0 + i * 0.01},
+            )
+        )
+    db.execute(
+        text(
+            """
+            INSERT INTO cpcv_shadow_eval_log (
+                scan_pattern_id, scanner, would_pass_cpcv, passed_prior_gates,
+                deflated_sharpe, pbo, cpcv_n_paths, pattern_name, skipped
+            )
+            VALUES (
+                :sid, 'swing', false, true,
+                0.5, 0.1, 10, 'fixture', false
+            )
+            """
+        ),
+        {"sid": pat.id},
+    )
+    db.commit()
+
+    def _counts():
+        return {
+            "scan_patterns": int(db.execute(text("SELECT COUNT(*) FROM scan_patterns")).scalar_one()),
+            "trading_pattern_trades": int(
+                db.execute(text("SELECT COUNT(*) FROM trading_pattern_trades")).scalar_one()
+            ),
+            "cpcv_shadow_eval_log": int(
+                db.execute(text("SELECT COUNT(*) FROM cpcv_shadow_eval_log")).scalar_one()
+            ),
+            "trading_pit_audit_log": int(
+                db.execute(text("SELECT COUNT(*) FROM trading_pit_audit_log")).scalar_one()
+            ),
+        }
+
+    def _pat_snapshot():
+        row = db.execute(
+            text(
+                "SELECT lifecycle_stage, cpcv_n_paths, promotion_gate_passed "
+                "FROM scan_patterns WHERE id = :id"
+            ),
+            {"id": pat.id},
+        ).one()
+        return row[0], row[1], row[2]
+
+    before_counts = _counts()
+    before_pat = _pat_snapshot()
+    assert before_counts["scan_patterns"] >= 1
+    assert before_counts["cpcv_shadow_eval_log"] >= 1
+
+    env = os.environ.copy()
+    assert (env.get("DATABASE_URL") or "").strip(), "DATABASE_URL must be set (pytest sets from TEST_DATABASE_URL)"
+
+    proc = subprocess.run(
+        [sys.executable, str(script), "--dry-run"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode in (0, 2), proc.stdout + "\n" + proc.stderr
+
+    db.expire_all()
+    after_counts = _counts()
+    after_pat = _pat_snapshot()
+    assert after_counts == before_counts
+    assert after_pat == before_pat

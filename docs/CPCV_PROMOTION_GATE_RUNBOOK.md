@@ -98,3 +98,7 @@ If **any one trading day** has **> 50%** of promotion attempts that **reached** 
 3. Investigate `promotion_gate_reasons` and shadow funnel asymmetry by scanner.
 
 *Automation (cron/monitor flipping the flag) is optional; until wired, operators perform the above manually when the metric fires.*
+
+## Production-shape dry-run (cheat sheet)
+
+Point **`DATABASE_URL`** at a Postgres database that mirrors production **shape** (same schema as app migrations through **163** and **164** — `scan_patterns` CPCV columns + `cpcv_shadow_eval_log` / `cpcv_shadow_funnel_v`). If those migrations are not applied yet, run the app once against that database (or apply migrations via your normal deploy path) so ORM queries and the shadow view exist. Use a **dedicated** database name ending in `_test` for any environment where pytest truncates; for a read-only rehearsal on a copy of prod data, use a **snapshot/clone** URL, never the live trading writer. From the repo root, with conda env **`chili-env`**: `conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run` (default is dry-run; omit `--commit`). Exit code **0** means the run finished and would-demote share is ≤20% of evaluated patterns; exit **2** means would-demote **>**20% — **do not** run with `--commit`, copy the full console summary (including scanner bucket breakdown) back to the operator channel, and wait for review before any commit or demotion.
