@@ -1,5 +1,9 @@
 # Regime classifier runbook (Q1.T2)
 
+Every **`regime_snapshot`** row satisfies **`posterior[regime] >= 0.5 * max(posterior.values())`**. This is enforced at write time by **`assert_regime_posterior_row_consistent`** in the backfill path and validated by **`tests/test_regime_classifier.py::test_regime_label_posterior_consistency`** on every default **`pytest`** run (no optional marker — do not bypass).
+
+**Production-shape rehearsal:** for dry-runs against real market + macro history (not the empty `chili_test` fixture DB), point **`DATABASE_URL`** at **[`chili_staging`](STAGING_DATABASE.md)** (daily refresh from `chili`) or an equivalent clone.
+
 ## Flag
 
 - **Env:** `CHILI_REGIME_CLASSIFIER_ENABLED` → Settings: `chili_regime_classifier_enabled`.
@@ -42,6 +46,16 @@ Five inputs (point-in-time):
 - **Decode:** incremental from last `regime_snapshot.as_of` through last completed session.
 - **Monitor:** new `model_version` hash each retrain; posterior entropy should not collapse to a single state for months; compare Ops heatmap (`/brain` → Regime × scanner Sharpe) week-over-week.
 
+### Warm-start health
+
+- Each fit logs **`[regime_classifier] HMM fit monitor: n_iter=… converged=… loglik_history_len=…`** (from hmmlearn’s **`ConvergenceMonitor`**).
+- **Staleness signal:** if **`n_iter`** stays at the **minimum** (often **~2**) for **many consecutive weeks** and **recent** `regime_snapshot` labels **never** move while markets clearly regime-shift, suspect **warm-start stagnation** (parameters stay glued to the previous artifact despite new training rows).
+- **Mitigation:** run a **cold** fit periodically (e.g. **quarterly**): set **`CHILI_REGIME_FORCE_COLD_FIT=true`** (Settings: **`chili_regime_force_cold_fit`**) for one weekly cycle (or one **`scripts/backfill_regime.py --commit`** run), then unset. That **skips** loading **`regime_models/`** for warm-start so EM re-initializes from the current training window. Afterward, verify label distribution and recent posteriors before leaving the flag on.
+
+### Regression guard (CI)
+
+- **`test_regime_label_posterior_consistency`** must stay in the default test suite (same collection as other **`tests/test_regime_classifier.py`** tests). It guards against re-pairing **Viterbi** path labels with **single-frame** `score_samples` posteriors.
+
 ## Label-flip incident
 
 If a retrain suddenly permutes economic meaning (e.g. “bull” days align with known bear markets):
@@ -58,7 +72,7 @@ conda run -n chili-env python scripts/backfill_regime.py --dry-run
 conda run -n chili-env python scripts/backfill_regime.py --commit
 ```
 
-Dry-run rolls back the session and does not write `regime_models/` artifacts; `--commit` persists snapshots, tags `trading_snapshots` where `bar_start_at` matches, and saves a new artifact.
+Dry-run rolls back the session and does not write `regime_models/` artifacts; `--commit` persists snapshots, tags `trading_snapshots` where `bar_start_at` matches, and saves a new artifact. Set **`CHILI_REGIME_FORCE_COLD_FIT=true`** to force a **cold** training fit for that run (no warm-start from disk).
 
 ## Rollback
 

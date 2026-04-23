@@ -794,6 +794,8 @@ class Settings(BaseSettings):
     chili_cpcv_promotion_gate_enabled: bool = False
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
     chili_regime_classifier_enabled: bool = False
+    # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).
+    chili_regime_force_cold_fit: bool = False
     chili_regime_classifier_random_state: int = 42
     chili_regime_classifier_n_iter: int = 200
     chili_regime_classifier_weekly_cron_dow: str = "sun"
@@ -847,6 +849,12 @@ class Settings(BaseSettings):
     # Database â€” PostgreSQL only (required). See .env.example and docs/DATABASE_POSTGRES.md.
     # Example (host â†’ Docker Compose postgres): postgresql://chili:chili@localhost:5433/chili
     database_url: str = Field(..., description="PostgreSQL connection URL")
+    # Optional: same server, `chili_staging` — full copy of prod for operator dry-runs (CPCV, etc.). See docs/STAGING_DATABASE.md.
+    staging_database_url: str = Field(
+        default="",
+        description="Optional PostgreSQL URL for production-shaped staging (e.g. chili_staging on localhost:5433)",
+        validation_alias=AliasChoices("STAGING_DATABASE_URL", "staging_database_url"),
+    )
     # Pool: brain worker + parallel queue backtests can hold many connections; default 30 is too small.
     database_pool_size: int = 25
     database_max_overflow: int = 55
@@ -2222,6 +2230,23 @@ class Settings(BaseSettings):
             raise ValueError(
                 "DATABASE_URL must be a PostgreSQL URL "
                 "(postgresql://... or postgresql+psycopg2://...). See .env.example."
+            )
+        return url
+
+    @field_validator("staging_database_url")
+    @classmethod
+    def _optional_postgres_staging_url(cls, v: str) -> str:
+        url = (v or "").strip()
+        if not url:
+            return ""
+        lowered = url.lower()
+        if not (
+            lowered.startswith("postgresql://")
+            or lowered.startswith("postgresql+psycopg2://")
+            or lowered.startswith("postgresql+psycopg://")
+        ):
+            raise ValueError(
+                "STAGING_DATABASE_URL must be a PostgreSQL URL or empty. See docs/STAGING_DATABASE.md."
             )
         return url
 

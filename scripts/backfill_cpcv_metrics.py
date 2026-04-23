@@ -3,6 +3,10 @@
 Demotes patterns that fail :func:`promotion_gate_passes` to ``lifecycle_stage='challenged'``
 (pruning remains lifecycle-driven elsewhere).
 
+For a **production-shaped** database (real promoted/live rows), use ``chili_staging`` and
+point ``DATABASE_URL`` at it for the run — see ``docs/STAGING_DATABASE.md``. Do **not** use
+``chili_test`` for this dry-run (pytest data is usually empty of promoted patterns).
+
 Usage (repo root, conda ``chili-env``)::
 
     conda run -n chili-env python scripts/backfill_cpcv_metrics.py

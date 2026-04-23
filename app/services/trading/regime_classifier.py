@@ -122,19 +122,27 @@ def build_regime_features(
 
     spy = fetch_ohlcv_df("SPY", interval="1d", start=start_s, end=end_s)
     vix = fetch_ohlcv_df("^VIX", interval="1d", start=start_s, end=end_s)
+    if vix is None or vix.empty:
+        vix = fetch_ohlcv_df("VIX", interval="1d", start=start_s, end=end_s)
     if spy is None or spy.empty or "Close" not in spy.columns:
         logger.warning("[regime_classifier] SPY OHLCV empty for feature build")
         return pd.DataFrame(columns=list(FEATURE_NAMES))
 
     spy = spy.sort_index()
+    if isinstance(spy.index, pd.DatetimeIndex) and spy.index.tz is not None:
+        spy.index = spy.index.tz_convert("UTC").tz_localize(None)
     close = spy["Close"].astype(float)
     log_ret = np.log(close / close.shift(1))
     rv21 = log_ret.rolling(21).std() * np.sqrt(252.0)
     mom126 = np.log(close / close.shift(126))
 
+    # VIX: ``trading_macro_regime_snapshots.vix`` overrides yfinance when present (authoritative
+    # for point-in-time macro sweeps). yfinance ``^VIX`` is best-effort fallback only.
     vix_close = None
     if vix is not None and not vix.empty and "Close" in vix.columns:
         vix_s = vix.sort_index()["Close"].astype(float)
+        if isinstance(vix_s.index, pd.DatetimeIndex) and vix_s.index.tz is not None:
+            vix_s.index = vix_s.index.tz_convert("UTC").tz_localize(None)
 
         def _vix_on(ts: pd.Timestamp) -> float | None:
             try:
@@ -151,12 +159,18 @@ def build_regime_features(
             return None
 
         vix_close = _vix_on
+    else:
+        logger.warning(
+            "[regime_classifier] yfinance ^VIX/VIX OHLCV unavailable; "
+            "VIX feature uses trading_macro_regime_snapshots.vix only (no OHLCV fallback)"
+        )
 
     macro = _load_macro_yield_vix_map(
         db, buf_start.date(), end_n.date() + timedelta(days=1)
     )
 
     records: list[tuple[pd.Timestamp, float, float, float, float, float]] = []
+    warned_yf_vix_miss = False
     for ts, _ in close.loc[start_n : end_n].items():
         ts = pd.Timestamp(ts)
         ts_naive = ts.tz_localize(None) if ts.tzinfo else ts
@@ -167,7 +181,14 @@ def build_regime_features(
         yld_px, vix_macro = macro.get(d, (None, None))
         vx = float(vix_macro) if vix_macro is not None and not pd.isna(vix_macro) else None
         if vx is None and vix_close is not None:
-            vx = vix_close(ts_naive)
+            yf_vx = vix_close(ts_naive)
+            if yf_vx is None and not warned_yf_vix_miss:
+                logger.warning(
+                    "[regime_classifier] yfinance VIX fallback missed at least one bar "
+                    "(macro vix also missing for that date); those rows are dropped unless macro fills vix"
+                )
+                warned_yf_vix_miss = True
+            vx = yf_vx
         try:
             y = float(yld_px) if yld_px is not None and not pd.isna(yld_px) else None
         except (TypeError, ValueError):
@@ -251,6 +272,22 @@ def fit_regime_model(
         except Exception:
             pass
     model.fit(X)
+    mon = getattr(model, "monitor_", None)
+    if mon is not None:
+        logger.info(
+            "[regime_classifier] HMM fit monitor: n_iter=%s converged=%s loglik_history_len=%s",
+            getattr(mon, "iter", None),
+            getattr(mon, "converged", None),
+            len(getattr(mon, "history", []) or []),
+        )
+        if not getattr(mon, "converged", True):
+            logger.warning(
+                "[regime_classifier] HMM fit did not converge within n_iter=%s (warm-start fits are "
+                "especially sensitive); train_index_range=%s..%s",
+                n_iter,
+                feature_df.index.min(),
+                feature_df.index.max(),
+            )
     ts0 = train_start or feature_df.index.min().to_pydatetime()
     ts1 = train_end or feature_df.index.max().to_pydatetime()
     ver = compute_model_version_hash(
@@ -275,12 +312,66 @@ def relabel_by_mean_return(model: Any) -> dict[int, str]:
     }
 
 
+def regime_and_posterior_for_sequence(
+    model: Any,
+    X: np.ndarray,
+    label_map: Mapping[int, str],
+) -> tuple[list[str], list[dict[str, float]]]:
+    """Forward-backward marginal posteriors for each row of ``X`` as one sequence.
+
+    For timestep *t*, uses the full sequence *X* so marginals match transition structure.
+    Each returned ``regime`` is ``argmax(posterior)`` for that row, so stored labels always
+    agree with the stored posterior dict (up to float tie-breaking).
+    """
+    Xf = np.asarray(X, dtype=float)
+    _, gammas = model.score_samples(Xf)
+    gammas = np.asarray(gammas, dtype=float)
+    regimes: list[str] = []
+    posts: list[dict[str, float]] = []
+    n_states = gammas.shape[1]
+    for i in range(len(Xf)):
+        probs = gammas[i]
+        d = {label_map[k]: float(probs[k]) for k in range(n_states)}
+        regimes.append(max(d, key=d.get))
+        posts.append(d)
+    return regimes, posts
+
+
+def assert_regime_posterior_row_consistent(
+    regime: str,
+    posterior: Mapping[str, float],
+    *,
+    min_frac_of_max: float = 0.5,
+) -> None:
+    """Guardrail: ``regime`` must not disagree wildly with ``posterior``.
+
+    ``min_frac_of_max`` (default 0.5) allows legitimate marginal-vs-Viterbi tension on
+    close calls; it still catches permuted label maps (e.g. regime mass ~0 vs argmax ~1).
+    """
+    if not posterior:
+        raise ValueError("posterior is empty")
+    mx = float(max(posterior.values()))
+    pr = float(posterior.get(regime, 0.0))
+    argmax_l = max(posterior, key=posterior.get)
+    thr = min_frac_of_max * mx - 1e-9
+    if pr < thr:
+        raise AssertionError(
+            "regime/posterior inconsistent: "
+            f"regime={regime!r} p(regime)={pr} max_p={mx} argmax={argmax_l!r} posterior={dict(posterior)}"
+        )
+
+
 def predict_regime(
     model: Any,
     features: np.ndarray,
     label_map: Mapping[int, str],
 ) -> tuple[str, dict[str, float]]:
-    """Return (label, posterior_dict) where values sum to ~1."""
+    """Return (label, posterior_dict) for a **single** observation sequence of length 1.
+
+    Uses only ``startprob_`` and emissions for that row — **not** the same posterior as
+    timestep *t* inside a longer sequence. For persisted ``regime_snapshot`` rows decoded
+    from multi-day history, use :func:`regime_and_posterior_for_sequence` instead.
+    """
     x = np.asarray(features, dtype=float).reshape(1, -1)
     _, post = model.score_samples(x)
     probs = np.asarray(post[0], dtype=float)
@@ -483,8 +574,14 @@ def run_weekly_regime_retrain(db: Session) -> dict[str, Any]:
 
     rs = int(getattr(settings, "chili_regime_classifier_random_state", 42) or 42)
     n_iter = int(getattr(settings, "chili_regime_classifier_n_iter", 200) or 200)
-    prior_art = load_latest_regime_artifact()
-    warm = prior_art["model"] if prior_art else None
+    warm = None
+    if getattr(settings, "chili_regime_force_cold_fit", False):
+        logger.info(
+            "[regime_classifier] weekly retrain: chili_regime_force_cold_fit=True — cold EM fit (no artifact warm-start)"
+        )
+    else:
+        prior_art = load_latest_regime_artifact()
+        warm = prior_art["model"] if prior_art else None
 
     model, ver = fit_regime_model(
         feat_train,
@@ -515,12 +612,11 @@ def run_weekly_regime_retrain(db: Session) -> dict[str, Any]:
         return {"ok": False, "reason": "decode_empty"}
 
     X = feat_decode[list(FEATURE_NAMES)].values.astype(float)
-    _, states = model.decode(X)
+    regime_list, post_list = regime_and_posterior_for_sequence(model, X, label_map)
     for i, ts in enumerate(feat_decode.index):
-        raw = int(states[i])
-        lab = label_map[raw]
+        lab = regime_list[i]
+        post = post_list[i]
         xrow = X[i]
-        _, post = predict_regime(model, xrow, label_map)
         feat_row = {k: float(xrow[j]) for j, k in enumerate(FEATURE_NAMES)}
         ts_db = ts.to_pydatetime()
         if ts_db.tzinfo:

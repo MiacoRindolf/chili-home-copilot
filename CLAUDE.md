@@ -42,7 +42,7 @@ Postgres is mapped to **5433** (not 5432). Ollama on 11434.
 
 ### Tests
 
-`tests/conftest.py` **hard-fails** if `TEST_DATABASE_URL` is unset or its DB name doesn't end in `_test`. This guard exists because the fixture truncates tables — running it against live `chili` would wipe production data.
+`tests/conftest.py` **hard-fails** if `TEST_DATABASE_URL` is unset or its DB name doesn't end in `_test`. This guard exists because the fixture truncates tables — running it against live `chili` would wipe production data. For **production-shaped** data (CPCV dry-runs, regime rehearsal, etc.), use **`chili_staging`** (refreshed from `chili` per [`docs/STAGING_DATABASE.md`](docs/STAGING_DATABASE.md)) — not `chili_test`.
 
 ```bash
 set TEST_DATABASE_URL=postgresql://chili:chili@localhost:5433/chili_test
@@ -136,6 +136,7 @@ These come from `.cursor/rules/` and are non-negotiable:
 
 - `TEST_DATABASE_URL` — pytest; must end in `_test`
 - `DATABASE_URL` — Postgres connection for app
+- `STAGING_DATABASE_URL` — optional; `chili_staging` (prod-shaped copy for operator scripts; see `docs/STAGING_DATABASE.md`)
 - `CHILI_TLS` — `1` for HTTPS (default in Docker)
 - `CHILI_PORT` — override default 8000
 - `CHILI_PYTEST` — `1` skips migrations on startup (set by conftest)

@@ -12,12 +12,15 @@ Dry-run (default): builds features, fits model, logs row counts — **no DB writ
 (session rolled back on exit). The backfill script does **not** gate on
 ``chili_regime_classifier_enabled`` (operators may rehearse on a clone); enable the flag
 for live weekly retrains and snapshot auto-tagging in the app.
+For production-like macro/OHLC history, set ``DATABASE_URL`` to ``chili_staging`` (see
+``docs/STAGING_DATABASE.md``) — not ``chili_test``.
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -30,12 +33,13 @@ from app.db import SessionLocal  # noqa: E402
 from app.models.trading import MarketSnapshot, RegimeSnapshot  # noqa: E402
 from app.services.trading.regime_classifier import (  # noqa: E402
     FEATURE_NAMES,
+    assert_regime_posterior_row_consistent,
     build_regime_features,
     fit_regime_model,
     load_latest_regime_artifact,
+    regime_and_posterior_for_sequence,
     relabel_by_mean_return,
     save_regime_artifact,
-    predict_regime,
 )
 
 logger = logging.getLogger("backfill_regime")
@@ -77,9 +81,14 @@ def main() -> int:
         rs = int(getattr(settings, "chili_regime_classifier_random_state", 42) or 42)
         n_iter = int(getattr(settings, "chili_regime_classifier_n_iter", 200) or 200)
         warm = None
-        art = load_latest_regime_artifact()
-        if art:
-            warm = art.get("model")
+        if getattr(settings, "chili_regime_force_cold_fit", False):
+            logger.info(
+                "[backfill_regime] chili_regime_force_cold_fit=True — cold EM fit (no regime_models warm-start)"
+            )
+        else:
+            art = load_latest_regime_artifact()
+            if art:
+                warm = art.get("model")
 
         model, ver = fit_regime_model(
             feat_train,
@@ -95,17 +104,48 @@ def main() -> int:
 
         X = feat[list(FEATURE_NAMES)].values.astype(float)
         _, states = model.decode(X)
+        decoded_labels = [label_map[int(states[i])] for i in range(len(feat))]
+        regime_dist = Counter(decoded_labels)
+        logger.info(
+            "regime_distribution (Viterbi path, n=%s): bull=%s chop=%s bear=%s",
+            len(decoded_labels),
+            regime_dist.get("bull", 0),
+            regime_dist.get("chop", 0),
+            regime_dist.get("bear", 0),
+        )
+
+        regime_list, post_list = regime_and_posterior_for_sequence(model, X, label_map)
+        regime_dist_m = Counter(regime_list)
+        logger.info(
+            "regime_distribution (marginal argmax, n=%s): bull=%s chop=%s bear=%s",
+            len(regime_list),
+            regime_dist_m.get("bull", 0),
+            regime_dist_m.get("chop", 0),
+            regime_dist_m.get("bear", 0),
+        )
+
+        sanity_idx = list(range(min(10, len(X))))
+        if len(X) > 10:
+            sanity_idx.append(len(X) - 1)
+        try:
+            for j in sanity_idx:
+                assert_regime_posterior_row_consistent(regime_list[j], post_list[j])
+        except AssertionError as e:
+            logger.error("regime/posterior sanity check failed after fit: %s", e)
+            return 1
+
         n_snap = 0
         n_tag = 0
+        n_would_tag = 0
         for i, ts in enumerate(feat.index):
-            raw = int(states[i])
-            lab = label_map[raw]
+            lab = regime_list[i]
+            post = post_list[i]
             xrow = X[i]
-            _, post = predict_regime(model, xrow, label_map)
             feat_row = {k: float(xrow[j]) for j, k in enumerate(FEATURE_NAMES)}
             ts_db = ts.to_pydatetime()
             if ts_db.tzinfo:
                 ts_db = ts_db.replace(tzinfo=None)
+            n_would_tag += db.query(MarketSnapshot).filter(MarketSnapshot.bar_start_at == ts_db).count()
             if do_commit:
                 prev = db.query(RegimeSnapshot).filter(RegimeSnapshot.as_of == ts_db).first()
                 if prev is None:
@@ -135,8 +175,15 @@ def main() -> int:
             db.commit()
 
         logger.info("--- regime backfill summary ---")
-        logger.info("feature_rows=%s train_rows=%s model_version=%s", len(feat), len(feat_train), ver)
-        logger.info("regime_snapshot_rows_touched=%s snapshot_tags_touched=%s", n_snap, n_tag)
+        logger.info("feature_rows_evaluated=%s train_rows=%s model_version=%s", len(feat), len(feat_train), ver)
+        if do_commit:
+            logger.info("regime_snapshot_rows_written=%s trading_snapshots_tagged=%s", n_snap, n_tag)
+        else:
+            logger.info(
+                "would_write_regime_snapshot_rows=%s would_tag_trading_snapshots=%s",
+                len(feat),
+                n_would_tag,
+            )
         logger.info("commit=%s", do_commit)
         return 0
     finally:
