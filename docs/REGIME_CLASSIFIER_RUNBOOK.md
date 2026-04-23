@@ -2,6 +2,8 @@
 
 Every **`regime_snapshot`** row satisfies **`posterior[regime] >= 0.5 * max(posterior.values())`**. This is enforced at write time by **`assert_regime_posterior_row_consistent`** in the backfill path and validated by **`tests/test_regime_classifier.py::test_regime_label_posterior_consistency`** on every default **`pytest`** run (no optional marker — do not bypass).
 
+**Production-shape rehearsal:** for dry-runs against real market + macro history (not the empty `chili_test` fixture DB), point **`DATABASE_URL`** at **[`chili_staging`](../docs/STAGING_DATABASE.md)** (daily refresh from `chili`) or an equivalent clone.
+
 ## Flag
 
 - **Env:** `CHILI_REGIME_CLASSIFIER_ENABLED` → Settings: `chili_regime_classifier_enabled`.

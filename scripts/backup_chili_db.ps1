@@ -3,6 +3,11 @@
 # - Keeps the 14 most recent backups; older dumps auto-pruned.
 # - Runs pg_dump inside the postgres container so no local psql install is needed.
 #
+# Staging refresh (run after this backup, e.g. +30 min): copies the latest .dump into
+# database `chili_staging` for production-shaped script dry-runs. See:
+#   scripts/refresh_staging_from_backup.ps1
+#   docs/STAGING_DATABASE.md
+#
 # Register as a daily scheduled task with (run from an elevated PowerShell):
 #   schtasks /Create /TN "CHILI pg_dump daily" /SC DAILY /ST 03:30 ^
 #     /TR "powershell -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\backup_chili_db.ps1" ^

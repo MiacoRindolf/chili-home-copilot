@@ -8,6 +8,12 @@ CHILI uses **PostgreSQL only** for the relational database. Set `DATABASE_URL` i
 
 That is the same database the `chili` container uses (`postgresql://chili:chili@postgres:5432/chili` on the Docker network).
 
+## Staging database (`chili_staging`)
+
+For **production-shaped** data (e.g. promoted/live `scan_patterns`, real trade depth) **without** hitting the live `chili` writer and **without** using `chili_test` (pytest **truncates** tables), use a separate database **`chili_staging`** on the same Postgres instance. It is **overwritten** on a schedule from a `pg_dump` of `chili` (or the latest backup file). Set `DATABASE_URL` to `postgresql://chili:chili@localhost:5433/chili_staging` when running dry-run scripts; optional `STAGING_DATABASE_URL` in `.env` records that URL for operators and future tooling.
+
+**Full runbook:** [STAGING_DATABASE.md](STAGING_DATABASE.md) (one-time `CREATE DATABASE`, `scripts/refresh_staging_from_backup.ps1`, scheduled task, RDS notes).
+
 ## Docker Compose (bundled database)
 
 The repo `docker-compose.yml` defines a **`postgres`** service and wires the **`chili`** app to it:
