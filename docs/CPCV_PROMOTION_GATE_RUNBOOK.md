@@ -55,7 +55,19 @@ conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run
 conda run -n chili-env python scripts/backfill_cpcv_metrics.py --commit
 ```
 
-Failing patterns (when not `skipped`) are set to `lifecycle_stage = 'challenged'`.
+- **Default** is dry-run (no writes) unless `--commit` is passed.
+- Dry-run prints counts: evaluated, would-pass CPCV, would-demote, and would-demote **by scanner** (`swing` / `day` / `breakout` / `momentum` / `patterns`).
+- Exit code **2** if would-demote **> 20%** of evaluated patterns — **do not** run `--commit` until operators review.
+
+Failing patterns (when not `skipped`) are set to `lifecycle_stage = 'challenged'` only with `--commit`.
+
+Requires migration **163** (`scan_patterns` CPCV columns) applied before ORM-backed backfill against production-shaped DBs.
+
+## Shadow funnel (7d)
+
+- **Table / view:** `cpcv_shadow_eval_log`, `cpcv_shadow_funnel_v` (migration **164**). Rollback: [ROADMAP_DEVIATION_002.md](ROADMAP_DEVIATION_002.md).
+- **API:** `GET /api/brain/cpcv_shadow_funnel`
+- **UI:** Trading Brain → **Ops** tab → **CPCV shadow funnel (7d)** panel under pattern lifecycle counters.
 
 ## Investigation checklist
 
@@ -63,6 +75,26 @@ Failing patterns (when not `skipped`) are set to `lifecycle_stage = 'challenged'
 2. Inspect `scan_patterns.promotion_gate_reasons` and `oos_validation_json.ensemble_promotion_gate` for OOS flows.
 3. Confirm `TEST_DATABASE_URL` uses a `*_test` DB for any pytest that truncates.
 
-## Live rollout (operator)
+## Rollout calendar (concrete)
 
-Recommended: **14 days shadow** (flag off) → enforce on **Momentum** family only (operational filter / config — document operator steps) for 14 days → expand if strike rate and realized OOS Sharpe delta ≥ 0.
+Use **US equity (NYSE) trading days** only. Record **T0** in the operator change calendar (first shadow session).
+
+**Example anchor:** T0 = **2026-04-22** (Wednesday). Replace with the real go-live date if different.
+
+| Phase | Trading days (inclusive) | `CHILI_CPCV_PROMOTION_GATE_ENABLED` | Scope |
+|-------|--------------------------|--------------------------------------|--------|
+| **Shadow** | **Day 1–14** (T0 = day 1) | `false` | All families: CPCV runs, rows append to `cpcv_shadow_eval_log`, `/brain` funnel updates; **no** CPCV block. |
+| **Momentum-only enforce** | **Day 15–28** | `true` | Enforce CPCV **only** on the Momentum scanner lane (operator defines which patterns qualify — config or allowlist). |
+| **All-families enforce** | **Day 29+** | `true` **only if** the **cumulative Sharpe delta** for the momentum-only window (days 15–28) is **≥ 0** vs the documented baseline (e.g. equal-weight or flag-off counterfactual). Otherwise extend momentum-only or stay in shadow. |
+
+**During days 15–28:** Measure Sharpe (or pre-approved paper KPI) **daily** for the momentum-only cohort vs baseline; keep a short operator log for the day-29 decision.
+
+### Rollback trigger (single-day)
+
+If **any one trading day** has **> 50%** of promotion attempts that **reached** the CPCV gate rejected (`detail["blocked"] == "cpcv_promotion_gate_failed"` among those attempts):
+
+1. Set `CHILI_CPCV_PROMOTION_GATE_ENABLED=false` and restart app + workers.
+2. Notify operators (incident channel / on-call per org policy).
+3. Investigate `promotion_gate_reasons` and shadow funnel asymmetry by scanner.
+
+*Automation (cron/monitor flipping the flag) is optional; until wired, operators perform the above manually when the metric fires.*
