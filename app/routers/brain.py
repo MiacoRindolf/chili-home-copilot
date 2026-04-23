@@ -291,6 +291,33 @@ def api_brain_cpcv_shadow_funnel(db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, "rows": rows, "view_available": True})
 
 
+@router.get("/api/brain/regime_sharpe_heatmap")
+def api_brain_regime_sharpe_heatmap(db: Session = Depends(get_db)):
+    """30d Sharpe by HMM regime × scanner (closed trades); needs migration 165 + flag optional."""
+    if not getattr(settings, "chili_regime_classifier_enabled", False):
+        return JSONResponse(
+            {
+                "ok": False,
+                "reason": "flag_off",
+                "message": "Regime classifier not yet enabled",
+            }
+        )
+    try:
+        from ..services.trading.regime_classifier import build_regime_scanner_sharpe_heatmap
+
+        payload = build_regime_scanner_sharpe_heatmap(db)
+    except Exception as exc:
+        logger.debug("[brain] regime_sharpe_heatmap unavailable: %s", exc)
+        return JSONResponse(
+            {
+                "ok": False,
+                "reason": "schema_or_error",
+                "message": "Regime heatmap not available yet (apply migration 165_regime_snapshot_and_tagging).",
+            }
+        )
+    return JSONResponse(payload)
+
+
 @router.get("/api/brain/trading/network-graph")
 def api_brain_trading_network_graph(db: Session = Depends(get_db)):
     """Neural mesh graph for Trading Brain Network (skill-tree UI)."""

@@ -188,6 +188,57 @@ function loadCpcvShadowFunnel() {
   });
 }
 
+function loadRegimeSharpeHeatmap() {
+  var el = document.getElementById('bw-regime-heatmap-body');
+  if (!el) return;
+  function cellColor(sh, n) {
+    if (sh == null || n < 10) return 'var(--text-muted)';
+    if (sh >= 0.5) return '#22c55e';
+    if (sh <= -0.5) return '#ef4444';
+    return 'var(--text-secondary)';
+  }
+  fetch('/api/brain/regime_sharpe_heatmap').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) {
+      if (d.reason === 'flag_off') {
+        el.innerHTML = 'Regime classifier not yet enabled.';
+        return;
+      }
+      el.innerHTML = 'Regime heatmap not available yet (run migration <code>165_regime_snapshot_and_tagging</code>).';
+      return;
+    }
+    if (!d.model_version) {
+      el.innerHTML = 'Regime data populates after first weekly fit.';
+      return;
+    }
+    var regimes = d.regimes || [];
+    var scanners = d.scanners || [];
+    var sm = d.sharpe_matrix || [];
+    var nm = d.n_trades_matrix || [];
+    var lines = ['<div style="font-size:9px;color:var(--text-muted);margin-bottom:6px">model ' + escHtml(String(d.model_version || '')) + ' · as_of ' + escHtml(String(d.as_of || '')) + '</div>'];
+    lines.push('<table style="width:100%;border-collapse:collapse;font-size:10px">');
+    lines.push('<tr><th align="left">regime</th>');
+    scanners.forEach(function(sc) {
+      lines.push('<th align="right">' + escHtml(String(sc)) + '</th>');
+    });
+    lines.push('</tr>');
+    for (var ri = 0; ri < regimes.length; ri++) {
+      lines.push('<tr><td>' + escHtml(String(regimes[ri])) + '</td>');
+      for (var si = 0; si < scanners.length; si++) {
+        var sh = sm[ri] ? sm[ri][si] : null;
+        var nn = nm[ri] ? nm[ri][si] : 0;
+        var txt = (sh == null || nn < 10) ? '—' : Number(sh).toFixed(2);
+        var col = cellColor(sh, nn);
+        lines.push('<td align="right" style="color:' + col + '" title="n=' + String(nn) + '">' + txt + '</td>');
+      }
+      lines.push('</tr>');
+    }
+    lines.push('</table>');
+    el.innerHTML = lines.join('');
+  }).catch(function() {
+    el.textContent = 'Could not load regime heatmap.';
+  });
+}
+
 function loadBrainWorkerStatus() {
   return fetch('/api/trading/brain/worker/status').then(function(r){return r.json();}).then(function(d) {
     if (d.ok) {
@@ -199,6 +250,7 @@ function loadBrainWorkerStatus() {
       renderOperatorDeskFromBoard(window._oppBoardLastGoodPayload);
     }
     loadCpcvShadowFunnel();
+    loadRegimeSharpeHeatmap();
   }).catch(function(){});
 }
 
