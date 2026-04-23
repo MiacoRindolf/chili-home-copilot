@@ -146,11 +146,11 @@ class ProductOwnerAgent(AgentBase):
         """Pull repo metadata, languages, frameworks, and insights from Code Brain."""
         repos = (
             db.query(CodeRepo)
-            .filter(CodeRepo.active.is_(True), CodeRepo.user_id == user_id)
+            .filter(CodeRepo.active.is_(True))
+            .filter((CodeRepo.user_id == user_id) | (CodeRepo.user_id.is_(None)))
+            .limit(5)
             .all()
         )
-        if not repos:
-            repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).limit(5).all()
         if not repos:
             return "No repositories registered yet."
 
@@ -170,13 +170,13 @@ class ProductOwnerAgent(AgentBase):
                 f"Languages: {langs or 'unknown'} | Frameworks: {fws or 'none detected'}"
             )
 
-        insights = (
-            db.query(CodeInsight)
-            .filter(CodeInsight.active.is_(True))
-            .order_by(CodeInsight.confidence.desc())
-            .limit(15)
-            .all()
-        )
+        repo_ids = [int(repo.id) for repo in repos]
+        insights_q = db.query(CodeInsight).filter(CodeInsight.active.is_(True))
+        if repo_ids:
+            insights_q = insights_q.filter(CodeInsight.repo_id.in_(repo_ids))
+        else:
+            insights_q = insights_q.filter(CodeInsight.repo_id == -1)
+        insights = insights_q.order_by(CodeInsight.confidence.desc()).limit(15).all()
         if insights:
             parts.append("\nDiscovered patterns & conventions:")
             for ins in insights:
@@ -655,8 +655,12 @@ class ProductOwnerAgent(AgentBase):
             q = q.filter(POQuestion.status == status)
         return q.order_by(POQuestion.priority.desc(), POQuestion.asked_at.desc()).limit(limit).all()
 
-    def answer_question(self, db: Session, question_id: int, answer: str) -> POQuestion | None:
-        q = db.query(POQuestion).get(question_id)
+    def answer_question(self, db: Session, user_id: int, question_id: int, answer: str) -> POQuestion | None:
+        q = (
+            db.query(POQuestion)
+            .filter(POQuestion.id == question_id, POQuestion.user_id == user_id)
+            .first()
+        )
         if not q:
             return None
         q.status = "answered"
@@ -666,8 +670,12 @@ class ProductOwnerAgent(AgentBase):
         db.refresh(q)
         return q
 
-    def skip_question(self, db: Session, question_id: int) -> POQuestion | None:
-        q = db.query(POQuestion).get(question_id)
+    def skip_question(self, db: Session, user_id: int, question_id: int) -> POQuestion | None:
+        q = (
+            db.query(POQuestion)
+            .filter(POQuestion.id == question_id, POQuestion.user_id == user_id)
+            .first()
+        )
         if not q:
             return None
         q.status = "skipped"
@@ -693,21 +701,22 @@ class ProductOwnerAgent(AgentBase):
 
     def push_requirement_to_planner(self, db: Session, user_id: int, requirement_id: int, project_id: int | None = None) -> dict:
         """Create a planner task from a PO requirement."""
-        req = db.query(PORequirement).get(requirement_id)
+        req = (
+            db.query(PORequirement)
+            .filter(PORequirement.id == requirement_id, PORequirement.user_id == user_id)
+            .first()
+        )
         if not req:
             return {"ok": False, "error": "Requirement not found"}
 
         try:
-            from ...planner_service import create_task, list_projects, list_all_projects
+            from ...planner_service import create_task, list_projects
 
             if not project_id:
                 projects = list_projects(db, user_id)
                 if not projects:
-                    projects = list_all_projects(db)
-                if projects:
-                    project_id = projects[0]["id"]
-                else:
                     return {"ok": False, "error": "No planner project found — create one first"}
+                project_id = projects[0]["id"]
 
             task = create_task(
                 db,

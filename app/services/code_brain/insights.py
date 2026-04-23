@@ -202,6 +202,7 @@ def mine_insights(db: Session, repo_id: int, user_id: Optional[int] = None) -> D
 def get_insights(
     db: Session,
     repo_id: Optional[int] = None,
+    repo_ids: Optional[List[int]] = None,
     category: Optional[str] = None,
     active_only: bool = True,
 ) -> List[Dict]:
@@ -211,6 +212,10 @@ def get_insights(
         q = q.filter(CodeInsight.active.is_(True))
     if repo_id is not None:
         q = q.filter(CodeInsight.repo_id == repo_id)
+    elif repo_ids is not None:
+        if not repo_ids:
+            return []
+        q = q.filter(CodeInsight.repo_id.in_(repo_ids))
     if category:
         q = q.filter(CodeInsight.category == category)
 

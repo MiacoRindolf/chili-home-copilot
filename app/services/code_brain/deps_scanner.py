@@ -216,11 +216,19 @@ def scan_dependencies(db: Session, repo_id: int) -> Dict[str, Any]:
     return {"scanned": len(all_deps), "alerts": alert_count}
 
 
-def get_dep_health(db: Session, repo_id: Optional[int] = None) -> Dict[str, Any]:
+def get_dep_health(
+    db: Session,
+    repo_id: Optional[int] = None,
+    repo_ids: Optional[List[int]] = None,
+) -> Dict[str, Any]:
     """Return active dependency alerts grouped by severity."""
     q = db.query(CodeDepAlert).filter(CodeDepAlert.resolved.is_(False))
     if repo_id is not None:
         q = q.filter(CodeDepAlert.repo_id == repo_id)
+    elif repo_ids is not None:
+        if not repo_ids:
+            return {"total": 0, "critical": 0, "warn": 0, "info": 0, "alerts": {"critical": [], "warn": [], "info": []}}
+        q = q.filter(CodeDepAlert.repo_id.in_(repo_ids))
     alerts = q.order_by(CodeDepAlert.severity.desc(), CodeDepAlert.detected_at.desc()).all()
 
     grouped: Dict[str, List[Dict[str, Any]]] = {"critical": [], "warn": [], "info": []}

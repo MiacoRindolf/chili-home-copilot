@@ -1,5 +1,6 @@
 (function () {
   var _projectBootstrap = null;
+  var _selectedCodeRepoId = null;
   var _codePollTimer = null;
 
   function el(id) {
@@ -10,6 +11,20 @@
     var node = document.createElement("div");
     node.textContent = value == null ? "" : String(value);
     return node.innerHTML;
+  }
+
+  function _bootstrapSelectedRepoId() {
+    var selected = _projectBootstrap && _projectBootstrap.workspace && _projectBootstrap.workspace.selected_repo;
+    var repoId = selected && selected.id ? parseInt(selected.id, 10) : NaN;
+    return Number.isFinite(repoId) && repoId > 0 ? repoId : null;
+  }
+
+  function _currentCodeRepoId() {
+    var repoSel = document.querySelector("#code-repos .code-repo-card.active");
+    var repoId = repoSel ? parseInt(repoSel.getAttribute("data-repo-id") || "", 10) : NaN;
+    if (Number.isFinite(repoId) && repoId > 0) return repoId;
+    if (Number.isFinite(_selectedCodeRepoId) && _selectedCodeRepoId > 0) return _selectedCodeRepoId;
+    return _bootstrapSelectedRepoId();
   }
 
   function summaryCardHtml(label, value, note) {
@@ -98,6 +113,7 @@
     var capabilities = (data && data.capabilities) || {};
     var profile = (handoff.summary && handoff.summary.profile) || {};
     var ops = (handoff.summary && handoff.summary.ops_hints) || {};
+    var selectedRepo = workspace.selected_repo || {};
 
     var taskCardValue = "No task";
     var taskCardNote = "Open a planner task in Brain to unlock task-scoped suggest, apply, and validation.";
@@ -152,6 +168,12 @@
     if (ops.workspace_reason) {
       taskBits.push({ label: "Status", value: ops.workspace_reason });
     }
+    if (selectedRepo.name) {
+      taskBits.push({ label: "Selected repo", value: selectedRepo.name });
+    }
+    if (selectedRepo.reason) {
+      taskBits.push({ label: "Repo choice", value: selectedRepo.reason });
+    }
     if (capabilities.suggest && !capabilities.suggest.enabled) {
       taskBits.push({ label: "Suggest", value: capabilities.suggest.reason || "Unavailable" });
     }
@@ -172,6 +194,7 @@
 
   function applyBootstrap(data) {
     _projectBootstrap = data || null;
+    _selectedCodeRepoId = _bootstrapSelectedRepoId();
     renderChecklist(data && data.workspace ? data.workspace.setup_checklist : []);
     renderWorkspaceSummary(data || {});
 
@@ -368,13 +391,21 @@
       .then(function (data) {
         if (!data || !data.ok) return;
         var repos = data.repos || [];
+        var preferredRepoId = _currentCodeRepoId();
+        var hasPreferredRepo = !!preferredRepoId && repos.some(function (repo) {
+          return parseInt(repo.id, 10) === preferredRepoId;
+        });
         if (!repos.length) {
+          _selectedCodeRepoId = null;
           container.innerHTML =
             '<div style="text-align:center;padding:20px;color:var(--text-muted)">' +
             '<div style="font-size:32px;margin-bottom:8px">&#x1F4C1;</div>' +
             '<div style="font-size:12px;font-weight:600;margin-bottom:4px">No repositories registered</div>' +
             '<div style="font-size:11px">Click <strong>+ Add Repo</strong> above to get started</div></div>';
           return;
+        }
+        if (!hasPreferredRepo) {
+          _selectedCodeRepoId = parseInt(repos[0].id, 10);
         }
         var html = "";
         repos.forEach(function (repo, index) {
@@ -395,7 +426,7 @@
             .join("");
           html +=
             '<div class="code-repo-card' +
-            (index === 0 ? " active" : "") +
+            ((hasPreferredRepo ? preferredRepoId === parseInt(repo.id, 10) : index === 0) ? " active" : "") +
             '" data-repo-id="' +
             escHtml(repo.id) +
             '">' +
@@ -437,6 +468,7 @@
             Array.prototype.forEach.call(container.querySelectorAll(".code-repo-card"), function (node) {
               node.classList.toggle("active", node === card);
             });
+            _selectedCodeRepoId = parseInt(card.getAttribute("data-repo-id") || "", 10);
             loadCodeGraph();
             loadCodeTrends();
           });
@@ -696,19 +728,8 @@
   }
 
   function loadCodeGraph() {
-    var repoSel = document.querySelector("#code-repos .code-repo-card.active");
-    var repoId = repoSel ? repoSel.getAttribute("data-repo-id") : "";
+    var repoId = _currentCodeRepoId();
     if (!repoId) {
-      fetch("/api/brain/code/repos")
-        .then(function (response) {
-          return response.json();
-        })
-        .then(function (data) {
-          if (data && data.ok && data.repos && data.repos.length) {
-            _fetchGraph(data.repos[0].id);
-          }
-        })
-        .catch(function () {});
       return;
     }
     _fetchGraph(repoId);
@@ -790,19 +811,8 @@
   }
 
   function loadCodeTrends() {
-    var repoSel = document.querySelector("#code-repos .code-repo-card.active");
-    var repoId = repoSel ? repoSel.getAttribute("data-repo-id") : "";
+    var repoId = _currentCodeRepoId();
     if (!repoId) {
-      fetch("/api/brain/code/repos")
-        .then(function (response) {
-          return response.json();
-        })
-        .then(function (data) {
-          if (data && data.ok && data.repos && data.repos.length) {
-            _fetchTrends(data.repos[0].id);
-          }
-        })
-        .catch(function () {});
       return;
     }
     _fetchTrends(repoId);
@@ -1038,10 +1048,11 @@
     var container = el("code-search-results");
     if (!container) return;
     container.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">Searching...</div>';
+    var repoId = _currentCodeRepoId();
     fetch("/api/brain/code/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: query, use_llm: !!useLlm }),
+      body: JSON.stringify({ query: query, repo_id: repoId, use_llm: !!useLlm }),
     })
       .then(function (response) {
         return response.json();

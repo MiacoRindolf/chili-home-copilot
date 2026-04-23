@@ -6,6 +6,7 @@ from pathlib import Path
 from app.models import PlanProject, PlanTask, ProjectMember
 from app.models.code_brain import CodeRepo
 from app.models.coding_task import PlanTaskCodingProfile
+import app.services.coding_task.workspaces as workspace_mod
 
 
 def test_project_bootstrap_guest_is_read_only(client, db):
@@ -57,6 +58,8 @@ def test_project_bootstrap_with_bound_workspace(paired_client, db):
     assert data["ok"] is True
     assert data["workspace"]["repo_count"] == 1
     assert data["workspace"]["indexed_repo_count"] == 1
+    assert data["workspace"]["selected_repo"]["id"] == repo.id
+    assert data["workspace"]["selected_repo"]["source"] == "task_bound"
     assert data["planner_handoff"]["available"] is True
     profile = data["planner_handoff"]["summary"]["profile"]
     assert profile["code_repo_id"] == repo.id
@@ -184,6 +187,39 @@ def test_project_bootstrap_legacy_repo_index_without_code_repo(paired_client, db
     assert data["capabilities"]["validate"]["enabled"] is False
 
 
+def test_project_bootstrap_legacy_repo_index_matching_repo_stays_read_only(paired_client, db, monkeypatch):
+    client, user = paired_client
+    repo_root = Path(__file__).resolve().parents[1]
+    repo = CodeRepo(
+        user_id=user.id,
+        path=str(repo_root),
+        host_path=str(repo_root),
+        container_path="/workspace",
+        name="legacy-match",
+        file_count=9,
+        total_lines=90,
+        last_indexed=datetime.utcnow(),
+        active=True,
+    )
+    db.add(repo)
+    db.flush()
+    task = _seed_task_with_profile(db, user, repo=None, repo_index=0)
+    monkeypatch.setattr(workspace_mod, "list_workspace_roots", lambda: [repo_root])
+
+    r = client.get(f"/api/brain/project/bootstrap?planner_task_id={task.id}")
+    assert r.status_code == 200
+    data = r.json()
+    profile = data["planner_handoff"]["summary"]["profile"]
+    assert profile["workspace_bound"] is False
+    assert profile["code_repo_id"] is None
+    assert data["workspace"]["selected_repo"]["id"] == repo.id
+    assert data["workspace"]["selected_repo"]["source"] == "legacy_profile_fallback"
+    assert "legacy repo_index binding" in (data["workspace"]["selected_repo"]["reason"] or "")
+    assert data["capabilities"]["suggest"]["enabled"] is False
+    assert data["capabilities"]["apply"]["enabled"] is False
+    assert data["capabilities"]["validate"]["enabled"] is False
+
+
 def test_project_bootstrap_disabled_by_feature_flag(client, db, monkeypatch):
     """Kill switch: when ``settings.project_domain_enabled`` is False the
     bootstrap endpoint must return 503 so the front end fails closed without a redeploy.
@@ -198,3 +234,42 @@ def test_project_bootstrap_disabled_by_feature_flag(client, db, monkeypatch):
     assert isinstance(detail, dict)
     assert detail.get("disabled") is True
     assert detail.get("domain") == "project"
+
+
+def test_project_bootstrap_selects_reachable_fallback_when_bound_repo_is_unreachable(paired_client, db):
+    client, user = paired_client
+    unreachable_repo = CodeRepo(
+        user_id=user.id,
+        path="Z:\\brain-missing-bound",
+        host_path="Z:\\brain-missing-bound",
+        name="bound-missing",
+        active=True,
+    )
+    reachable_repo = CodeRepo(
+        user_id=user.id,
+        path=str(Path(__file__).resolve().parents[1]),
+        host_path=str(Path(__file__).resolve().parents[1]),
+        container_path="/workspace",
+        name="reachable-workspace",
+        file_count=7,
+        total_lines=70,
+        last_indexed=datetime.utcnow(),
+        active=True,
+    )
+    db.add_all([unreachable_repo, reachable_repo])
+    db.flush()
+    task = _seed_task_with_profile(db, user, repo=unreachable_repo, repo_index=0)
+
+    r = client.get(f"/api/brain/project/bootstrap?planner_task_id={task.id}")
+    assert r.status_code == 200
+    data = r.json()
+    selected_repo = data["workspace"]["selected_repo"]
+    assert selected_repo["id"] == reachable_repo.id
+    assert selected_repo["source"] == "reachable_fallback"
+    assert "first reachable workspace" in (selected_repo["reason"] or "")
+
+    analysis = client.get(f"/api/brain/project/analysis/latest?planner_task_id={task.id}")
+    assert analysis.status_code == 200
+    snapshot = analysis.json()["snapshot"]
+    assert snapshot["summary"]["repo_id"] == reachable_repo.id
+    assert snapshot["summary"]["repo_source"] == "reachable_fallback"

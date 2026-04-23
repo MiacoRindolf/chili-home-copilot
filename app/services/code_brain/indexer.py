@@ -59,7 +59,7 @@ SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
     ".mypy_cache", ".pytest_cache", ".tox", "dist", "build",
     ".next", ".nuxt", ".svelte-kit", "target", "out", ".idea",
-    ".vscode", ".cursor", "vendor", "coverage", ".turbo",
+    ".vscode", ".cursor", ".claude", "vendor", "coverage", ".turbo",
 }
 
 SKIP_EXTENSIONS = {
@@ -130,6 +130,8 @@ def scan_repo(db: Session, repo_id: int, max_files: int = 0) -> Dict:
             "Registered workspace is not reachable from the current runtime. "
             "Check host/container path mapping before indexing."
         )
+        repo.language_stats = None
+        repo.framework_tags = None
         repo.file_count = 0
         repo.total_lines = 0
         repo.last_indexed = None
@@ -203,11 +205,67 @@ def scan_repo(db: Session, repo_id: int, max_files: int = 0) -> Dict:
     }
 
 
-def get_registered_repos(db: Session, user_id: Optional[int] = None) -> List[Dict]:
+def get_accessible_repo_query(
+    db: Session,
+    user_id: Optional[int] = None,
+    *,
+    include_shared: bool = True,
+):
     q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
-    if user_id is not None:
-        q = q.filter(CodeRepo.user_id == user_id)
-    repos = q.all()
+    if user_id is None:
+        return q
+    if include_shared:
+        return q.filter(or_(CodeRepo.user_id == user_id, CodeRepo.user_id.is_(None)))
+    return q.filter(CodeRepo.user_id == user_id)
+
+
+def get_accessible_repos(
+    db: Session,
+    user_id: Optional[int] = None,
+    *,
+    include_shared: bool = True,
+) -> List[CodeRepo]:
+    return get_accessible_repo_query(
+        db,
+        user_id=user_id,
+        include_shared=include_shared,
+    ).order_by(CodeRepo.id.asc()).all()
+
+
+def get_accessible_repo_ids(
+    db: Session,
+    user_id: Optional[int] = None,
+    *,
+    include_shared: bool = True,
+) -> List[int]:
+    return [int(repo.id) for repo in get_accessible_repos(db, user_id=user_id, include_shared=include_shared)]
+
+
+def get_accessible_repo(
+    db: Session,
+    repo_id: int,
+    user_id: Optional[int] = None,
+    *,
+    include_shared: bool = True,
+) -> CodeRepo | None:
+    return (
+        get_accessible_repo_query(
+            db,
+            user_id=user_id,
+            include_shared=include_shared,
+        )
+        .filter(CodeRepo.id == int(repo_id))
+        .first()
+    )
+
+
+def get_registered_repos(
+    db: Session,
+    user_id: Optional[int] = None,
+    *,
+    include_shared: bool = False,
+) -> List[Dict]:
+    repos = get_accessible_repos(db, user_id=user_id, include_shared=include_shared)
     result = []
     for r in repos:
         result.append({
@@ -275,8 +333,11 @@ def register_repo(db: Session, path: str, name: Optional[str] = None, user_id: O
     }
 
 
-def unregister_repo(db: Session, repo_id: int) -> Dict:
-    repo = db.query(CodeRepo).filter(CodeRepo.id == repo_id).first()
+def unregister_repo(db: Session, repo_id: int, user_id: Optional[int] = None) -> Dict:
+    q = db.query(CodeRepo).filter(CodeRepo.id == repo_id)
+    if user_id is not None:
+        q = q.filter(CodeRepo.user_id == user_id)
+    repo = q.first()
     if not repo:
         return {"error": "Repo not found"}
     repo.active = False

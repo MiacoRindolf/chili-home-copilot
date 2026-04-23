@@ -7,7 +7,9 @@ from ..models import PlanTask
 from . import planner_service
 from .code_brain import indexer as cb_indexer
 from .coding_task.service import build_handoff_dict
+from .coding_task.workspaces import select_runtime_workspace_repo_for_task
 from .project_analysis import latest_analysis_snapshot
+from .project_brain import registry as pb_registry
 from .project_domain_runs import kind_status_payload, list_timeline, status_payload
 
 
@@ -42,7 +44,11 @@ def build_project_bootstrap_payload(
     code_status = kind_status_payload(db, "index", user_id=user_id)
     project_status = status_payload(db, user_id=user_id)
 
-    repos = [] if is_guest else cb_indexer.get_registered_repos(db, user_id=user_id)
+    repos = [] if is_guest else cb_indexer.get_registered_repos(
+        db,
+        user_id=user_id,
+        include_shared=True,
+    )
     repo_count = len(repos)
     indexed_repo_count = sum(
         1
@@ -62,6 +68,24 @@ def build_project_bootstrap_payload(
         is_guest=is_guest,
     )
     handoff = build_handoff_dict(db, task, user_id=user_id) if task is not None else None
+    selected_repo = {
+        "id": None,
+        "name": None,
+        "path": None,
+        "reachable": False,
+        "indexed": False,
+        "source": "none",
+        "reason": "Pair this device to work with repos and task handoffs." if is_guest else "No reachable registered workspace is available.",
+        "bound_repo_id": None,
+        "bound_repo_name": None,
+        "bound_repo_reachable": False,
+    }
+    if not is_guest:
+        selected_repo = select_runtime_workspace_repo_for_task(
+            db,
+            task.id if task is not None else None,
+            user_id=user_id,
+        )
     profile = (handoff or {}).get("profile") or {}
     ops_hints = (handoff or {}).get("ops_hints") or {}
     workspace_bound = bool(profile.get("workspace_bound"))
@@ -72,6 +96,7 @@ def build_project_bootstrap_payload(
     latest_analysis = None if is_guest else latest_analysis_snapshot(
         db, user_id=user_id, planner_task_id=planner_task_id
     )
+    agent_defs = pb_registry.list_agents()
 
     checklist = [
         {
@@ -128,6 +153,7 @@ def build_project_bootstrap_payload(
         "workspace": {
             "repo_count": repo_count,
             "indexed_repo_count": indexed_repo_count,
+            "selected_repo": selected_repo,
             "repos": repos,
             "empty_state": repo_count == 0,
             "web_reachable_count": sum(1 for repo in repos if repo.get("reachable_in_web")),
@@ -141,8 +167,8 @@ def build_project_bootstrap_payload(
             "summary": handoff,
         },
         "agents": {
-            "registered_count": 8,
-            "active_count": 8,
+            "registered_count": len(agent_defs),
+            "active_count": sum(1 for agent in agent_defs if agent.get("active")),
             "running": bool(project_status.get("running")),
             "unread_messages": 0,
         },
