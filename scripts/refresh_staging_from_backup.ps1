@@ -8,13 +8,15 @@
 #   schtasks /Create /TN "CHILI refresh staging" /SC DAILY /ST 04:00 /RL HIGHEST /F /TR "powershell -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\refresh_staging_from_backup.ps1"
 #
 # On restore failure, chili_staging may be empty or missing — re-run after fixing the dump path or container.
+# Optional: -ParallelJobs 4  →  pg_restore -j 4 (faster on large DBs; 0 = omit -j)
 
 [CmdletBinding()]
 param(
     [string] $Container = 'chili-home-copilot-postgres-1',
     [string] $BackupDir  = 'D:\CHILI-Docker\backup',
     [string] $StagingDb  = 'chili_staging',
-    [string] $PostgresDb = 'postgres'
+    [string] $PostgresDb = 'postgres',
+    [int]    $ParallelJobs = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +24,7 @@ $ErrorActionPreference = 'Stop'
 $logDir = Join-Path $BackupDir 'logs'
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$log   = Join-Path $logDir "staging_refresh_backup_$stamp.log"
+$log   = Join-Path $logDir "staging_refresh_$stamp.log"
 
 function Write-Log([string] $m) {
     $line = "[$(Get-Date -Format o)] $m"
@@ -62,8 +64,12 @@ try {
         exit 1
     }
 
-    Write-Log "pg_restore into $StagingDb (may take several minutes)..."
-    & docker exec $Container pg_restore -U chili -d $StagingDb --no-owner --no-privileges $tmpInContainer 2>>$log
+    Write-Log "pg_restore into $StagingDb (may take several minutes) parallel=$ParallelJobs..."
+    if ($ParallelJobs -gt 1) {
+        & docker exec $Container pg_restore -U chili -d $StagingDb --no-owner --no-privileges -j $ParallelJobs $tmpInContainer 2>>$log
+    } else {
+        & docker exec $Container pg_restore -U chili -d $StagingDb --no-owner --no-privileges $tmpInContainer 2>>$log
+    }
     $restoreCode = $LASTEXITCODE
     & docker exec $Container rm -f $tmpInContainer 2>>$log | Out-Null
 

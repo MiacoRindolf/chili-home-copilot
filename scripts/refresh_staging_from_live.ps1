@@ -3,6 +3,7 @@
 # Same drop/create/restore flow as refresh_staging_from_backup.ps1; heavier read load on `chili` during pg_dump.
 #
 # See docs/STAGING_DATABASE.md.
+# Optional: -ParallelJobs 4  →  pg_restore -j 4 (0 = omit -j)
 
 [CmdletBinding()]
 param(
@@ -10,7 +11,8 @@ param(
     [string] $SourceDb   = 'chili',
     [string] $StagingDb  = 'chili_staging',
     [string] $PostgresDb = 'postgres',
-    [string] $LogBackupDir = 'D:\CHILI-Docker\backup\logs'
+    [string] $LogBackupDir = 'D:\CHILI-Docker\backup\logs',
+    [int]    $ParallelJobs = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,7 +52,11 @@ try {
         exit 1
     }
 
-    & docker exec $Container pg_restore -U chili -d $StagingDb --no-owner --no-privileges $tmpInContainer 2>>$log
+    if ($ParallelJobs -gt 1) {
+        & docker exec $Container pg_restore -U chili -d $StagingDb --no-owner --no-privileges -j $ParallelJobs $tmpInContainer 2>>$log
+    } else {
+        & docker exec $Container pg_restore -U chili -d $StagingDb --no-owner --no-privileges $tmpInContainer 2>>$log
+    }
     $rc = $LASTEXITCODE
     & docker exec $Container rm -f $tmpInContainer 2>>$log | Out-Null
 

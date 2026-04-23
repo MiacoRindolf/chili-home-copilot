@@ -51,7 +51,26 @@ Or set `STAGING_DATABASE_URL` in `.env` and copy it when running scripts (the ap
 | [`scripts/refresh_staging_from_live.ps1`](../scripts/refresh_staging_from_live.ps1) (optional) | `pg_dump` of live `chili` → `pg_restore` into `chili_staging` when no fresh backup file exists |
 | [`scripts/backup_and_refresh_staging.ps1`](../scripts/backup_and_refresh_staging.ps1) | Runs **backup** then **staging refresh** in one invocation (single scheduled task) |
 
-**Order of operations:** run **backup** first, then **staging refresh** (e.g. 03:30 backup, 04:00 refresh). Logs: `D:\CHILI-Docker\backup\logs\` (backup and `staging_refresh_*.log`).
+**Order of operations:** run **backup** first, then **staging refresh** (e.g. 03:30 backup, 04:00 refresh). Logs: `D:\CHILI-Docker\backup\logs\` (files match `staging_refresh*.log`).
+
+### Post-refresh validation (manual)
+
+After the first successful refresh, spot-check that `chili_staging` matches `chili` in scale (same schema, copied data). From the host, using the same container and user as the scripts:
+
+```powershell
+# Row counts: promoted/live patterns (should match `chili` if refresh succeeded)
+docker exec -i chili-home-copilot-postgres-1 psql -U chili -d chili -c "SELECT lifecycle_stage, count(*) FROM scan_patterns GROUP BY 1 ORDER BY 1;"
+docker exec -i chili-home-copilot-postgres-1 psql -U chili -d chili_staging -c "SELECT lifecycle_stage, count(*) FROM scan_patterns GROUP BY 1 ORDER BY 1;"
+```
+
+**Production-shape dry-runs (no writes):** point at staging for the command only:
+
+```powershell
+$env:DATABASE_URL = "postgresql://chili:chili@localhost:5433/chili_staging"
+conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run
+```
+
+Use the same `DATABASE_URL` override for `scripts/backfill_regime.py` and other `SessionLocal()` maintenance scripts. See [CPCV_PROMOTION_GATE_RUNBOOK.md](CPCV_PROMOTION_GATE_RUNBOOK.md) and [REGIME_CLASSIFIER_RUNBOOK.md](REGIME_CLASSIFIER_RUNBOOK.md) for interpretation — not for `chili_test`.
 
 **Scheduled task (example — adjust paths and container name):**
 
@@ -75,6 +94,10 @@ For **RDS** or a remote server:
 1. Run `pg_dump` from a bastion or CI (or download an automated backup) to a **custom-format** file on disk.
 2. Copy that file into the same layout `refresh_staging_from_backup.ps1` expects **or** copy it to `/tmp` in the **staging** Postgres and run the same `DROP DATABASE` / `CREATE DATABASE` / `pg_restore` pattern with `psql` / `pg_restore` from that environment.
 3. Network, IAM, and credentials are **operator-specific**; this repo only documents the **pattern** (format + full replace by drop/create).
+
+### Optional: faster `pg_restore`
+
+The refresh scripts accept **`-ParallelJobs N`** (default **0** = single job). When `N` is 2 or more, `pg_restore -j N` is used (valid for custom-format dumps). Use on larger databases if CPU and disk allow; on small dev DBs, leave at 0.
 
 ## See also
 

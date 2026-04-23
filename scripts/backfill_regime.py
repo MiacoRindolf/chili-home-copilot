@@ -12,6 +12,8 @@ Dry-run (default): builds features, fits model, logs row counts — **no DB writ
 (session rolled back on exit). The backfill script does **not** gate on
 ``chili_regime_classifier_enabled`` (operators may rehearse on a clone); enable the flag
 for live weekly retrains and snapshot auto-tagging in the app.
+For production-like macro/OHLC history, set ``DATABASE_URL`` to ``chili_staging`` (see
+``docs/STAGING_DATABASE.md``) — not ``chili_test``.
 """
 from __future__ import annotations
 
