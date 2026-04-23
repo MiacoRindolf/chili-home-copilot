@@ -38,6 +38,8 @@ $env:DATABASE_URL = "postgresql://chili:chili@localhost:5433/chili_staging"
 conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run
 ```
 
+**Windows `10055` / “No buffer space”** when connecting to `localhost:5433` — see **Winsock 10055** under [DATABASE_POSTGRES.md](DATABASE_POSTGRES.md) (Troubleshooting): run the script **inside** Compose with `DATABASE_URL=...@postgres:5432/...` so traffic does not use the exhausted host loopback.
+
 Or set `STAGING_DATABASE_URL` in `.env` and copy it when running scripts (the app may expose `chili_staging_url` in settings for future UX; it is not required for `DATABASE_URL`-driven scripts).
 
 **Do not** set `TEST_DATABASE_URL` to `chili_staging` — the test harness requires a database name ending in `_test` and **truncates** tables.
