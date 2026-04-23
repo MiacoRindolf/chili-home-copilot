@@ -723,6 +723,16 @@ class ScanPattern(Base):
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
+    # CPCV / DSR / PBO promotion evidence (Q1.T1); see app/services/trading/promotion_gate.py
+    cpcv_n_paths: Optional[int] = Column(Integer, nullable=True)
+    cpcv_median_sharpe: Optional[float] = Column(Float, nullable=True)
+    cpcv_median_sharpe_by_regime: Optional[dict] = Column(JSONB, nullable=True)
+    deflated_sharpe: Optional[float] = Column(Float, nullable=True)
+    pbo: Optional[float] = Column(Float, nullable=True)
+    n_effective_trials: Optional[int] = Column(Integer, nullable=True)
+    promotion_gate_passed: Optional[bool] = Column(Boolean, nullable=True)
+    promotion_gate_reasons: Optional[list] = Column(JSONB, nullable=True)
+
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 
 

@@ -9773,6 +9773,36 @@ def _migration_158_plasticity_pre_live_snapshot(conn) -> None:
     conn.commit()
 
 
+def _migration_163_cpcv_promotion_gate_evidence(conn) -> None:
+    """CPCV / DSR / PBO evidence columns on scan_patterns (Q1.T1 promotion gate)."""
+    tables = _tables(conn)
+    if "scan_patterns" not in tables:
+        conn.commit()
+        return
+    cols = _columns(conn, "scan_patterns")
+    additions = {
+        "cpcv_n_paths": "INTEGER",
+        "cpcv_median_sharpe": "DOUBLE PRECISION",
+        "cpcv_median_sharpe_by_regime": "JSONB",
+        "deflated_sharpe": "DOUBLE PRECISION",
+        "pbo": "DOUBLE PRECISION",
+        "n_effective_trials": "INTEGER",
+        "promotion_gate_passed": "BOOLEAN DEFAULT FALSE",
+        "promotion_gate_reasons": "JSONB",
+    }
+    for col_name, col_type in additions.items():
+        if col_name not in cols:
+            conn.execute(text(f"ALTER TABLE scan_patterns ADD COLUMN {col_name} {col_type}"))
+    conn.commit()
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_patterns_promotion_gate_updated "
+            "ON scan_patterns (promotion_gate_passed, updated_at)"
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -9937,6 +9967,7 @@ MIGRATIONS = [
     ("160_exec_events_venue_ts_index", _migration_160_exec_events_venue_ts_index),
     ("161_trade_broker_order_id_unique", _migration_161_trade_broker_order_id_unique),
     ("162_project_domain_recovery", _migration_162_project_domain_recovery),
+    ("163_cpcv_promotion_gate_evidence", _migration_163_cpcv_promotion_gate_evidence),
 ]
 
 
