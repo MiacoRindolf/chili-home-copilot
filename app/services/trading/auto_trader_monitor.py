@@ -351,6 +351,8 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
 
         stop = float(t.stop_loss or 0)
         tgt = float(t.take_profit or 0)
+        side = (t.direction or "long").lower()
+        is_long = side == "long"
         if stop <= 0 and tgt <= 0:
             # No levels after seed attempt — refuse to manage blindly.
             summary.setdefault("skipped_no_levels", []).append(int(t.id))
@@ -376,8 +378,12 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
             db.commit()
             summary.setdefault("stranded_cleared", []).append(int(t.id))
 
-        hit_stop = stop > 0 and px <= stop
-        hit_target = tgt > 0 and px >= tgt
+        if is_long:
+            hit_stop = stop > 0 and px <= stop
+            hit_target = tgt > 0 and px >= tgt
+        else:
+            hit_stop = stop > 0 and px >= stop
+            hit_target = tgt > 0 and px <= tgt
         monitor_exit_meta = _fresh_monitor_exit_meta(
             latest_monitor_decisions.get(int(t.id))
         )
