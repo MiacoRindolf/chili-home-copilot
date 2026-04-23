@@ -97,6 +97,41 @@ def cpcv_vertical_max_bars(bar_interval: str) -> int:
     return max(5, int(round(60.0 * (bpy / 252.0))))
 
 
+SCANNER_BUCKETS: tuple[str, ...] = ("swing", "day", "breakout", "momentum", "patterns")
+
+
+def infer_scanner_bucket(pat: Any) -> str:
+    """Coarse scanner lane for CPCV dry-run / shadow funnel (not a persisted FK).
+
+    Order: momentum → breakout → day (intraday timeframe) → patterns (mined/builtin) → swing (daily default).
+    """
+    name = (getattr(pat, "name", None) or "").lower()
+    tf = (getattr(pat, "timeframe", None) or "1d").strip().lower()
+    hypo = (getattr(pat, "hypothesis_family", None) or "").lower()
+    origin = (getattr(pat, "origin", None) or "").lower()
+
+    if "momentum" in name or "momentum" in hypo:
+        return "momentum"
+    if any(
+        x in name
+        for x in (
+            "breakout",
+            "squeeze",
+            "nr7",
+            "narrow range",
+            "vcp",
+            "compression",
+            "expansion",
+        )
+    ):
+        return "breakout"
+    if tf not in ("1d", "d", "day", "1day", ""):
+        return "day"
+    if origin in ("mined", "builtin"):
+        return "patterns"
+    return "swing"
+
+
 def _flatten_test_indices(te: Any) -> np.ndarray:
     if isinstance(te, (list, tuple)):
         return np.concatenate([np.asarray(x, dtype=int) for x in te])
@@ -602,8 +637,10 @@ def cpcv_eval_to_scan_pattern_fields(eval_payload: Mapping[str, Any]) -> dict[st
 __all__ = [
     "CPCV_FEATURE_NAMES",
     "LGBM_CPCV_PARAMS",
+    "SCANNER_BUCKETS",
     "bars_per_year",
     "cpcv_vertical_max_bars",
+    "infer_scanner_bucket",
     "evaluate_pattern_cpcv",
     "finalize_promotion_with_cpcv",
     "promotion_gate_passes",
