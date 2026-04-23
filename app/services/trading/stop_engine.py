@@ -761,15 +761,29 @@ def evaluate_all(
 
     for trade in trades:
         try:
-            brain = _build_brain_context(trade, db)
-            market = _fetch_market_context(trade.ticker)
-            result = evaluate_trade(trade, market, db, brain=brain)
-            summary["total_checked"] += 1
+            # Wrap each trade evaluation in a SAVEPOINT so one poisoned
+            # update (e.g. a constraint violation on ``_apply_stop_to_trade``
+            # or a bracket-intent insert) doesn't abort the outer
+            # transaction and cause every subsequent ``_record_stop_decision``
+            # in the batch to fail with ``InFailedSqlTransaction``. With a
+            # savepoint, the failure rolls back only that trade's writes
+            # while the surrounding batch commit still succeeds.
+            with db.begin_nested():
+                brain = _build_brain_context(trade, db)
+                market = _fetch_market_context(trade.ticker)
+                result = evaluate_trade(trade, market, db, brain=brain)
+                summary["total_checked"] += 1
 
-            if result.alert_event and result.alert_event != "DATA_STALE":
-                _record_stop_decision(db, trade.id, result)
-                _apply_stop_to_trade(db, trade, result)
-                _maybe_emit_bracket_intent(db, trade, brain)
+                if result.alert_event and result.alert_event != "DATA_STALE":
+                    _record_stop_decision(db, trade.id, result)
+                    _apply_stop_to_trade(db, trade, result)
+                    _maybe_emit_bracket_intent(db, trade, brain)
+                # Flush pending SQL inside the savepoint so per-trade
+                # errors (constraint violations, bad ORM state) surface
+                # here and get rolled back to the savepoint — not at the
+                # outer ``db.commit()``, where they would poison the whole
+                # batch with ``InFailedSqlTransaction``.
+                db.flush()
 
             if result.alert_event:
                 if _should_suppress_alert(trade.id, result.alert_event, recent_decisions, adaptive_cooldowns):

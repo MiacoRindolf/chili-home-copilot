@@ -30,6 +30,63 @@ def _workspace_query(db: Session, user_id: int | None = None) -> Query:
     return q.filter(or_(CodeRepo.user_id == user_id, CodeRepo.user_id.is_(None)))
 
 
+def list_accessible_workspace_repos(
+    db: Session,
+    *,
+    user_id: int | None = None,
+) -> list[CodeRepo]:
+    return _workspace_query(db, user_id=user_id).order_by(CodeRepo.id.asc()).all()
+
+
+def first_reachable_workspace_repo(
+    db: Session,
+    *,
+    user_id: int | None = None,
+) -> CodeRepo | None:
+    for repo in list_accessible_workspace_repos(db, user_id=user_id):
+        if resolve_repo_runtime_path(repo) is not None:
+            return repo
+    return None
+
+
+def _repo_indexed(repo: CodeRepo | None) -> bool:
+    return bool(
+        repo
+        and not repo.last_index_error
+        and (
+            repo.last_successful_indexed_at
+            or repo.last_indexed
+            or (repo.last_successful_file_count or repo.file_count or 0) > 0
+        )
+    )
+
+
+def _repo_display_path(repo: CodeRepo | None) -> str | None:
+    if repo is None:
+        return None
+    runtime_path = resolve_repo_runtime_path(repo)
+    if runtime_path is not None:
+        return str(runtime_path)
+    raw = repo.host_path or repo.path
+    if not raw:
+        return None
+    try:
+        return str(Path(raw).resolve())
+    except OSError:
+        return str(raw)
+
+
+def _repo_summary(repo: CodeRepo | None) -> dict:
+    runtime_path = resolve_repo_runtime_path(repo) if repo is not None else None
+    return {
+        "id": int(repo.id) if repo is not None else None,
+        "name": repo.name if repo is not None else None,
+        "path": _repo_display_path(repo),
+        "reachable": runtime_path is not None,
+        "indexed": _repo_indexed(repo),
+    }
+
+
 def list_workspace_roots() -> list[Path]:
     return envelope.list_code_repo_roots()
 
@@ -78,6 +135,17 @@ def get_active_workspace_repo(
     )
 
 
+def get_bound_workspace_repo_for_profile(
+    db: Session,
+    profile: PlanTaskCodingProfile | None,
+    *,
+    user_id: int | None = None,
+) -> CodeRepo | None:
+    if profile is None:
+        return None
+    return get_active_workspace_repo(db, profile.code_repo_id, user_id=user_id)
+
+
 def resolve_workspace_repo_from_legacy_index(
     db: Session,
     repo_index: int | None,
@@ -123,7 +191,7 @@ def lookup_workspace_repo_for_profile(
 ) -> CodeRepo | None:
     if profile is None:
         return None
-    repo = get_active_workspace_repo(db, profile.code_repo_id, user_id=user_id)
+    repo = get_bound_workspace_repo_for_profile(db, profile, user_id=user_id)
     if repo is not None:
         return repo
     return resolve_workspace_repo_from_legacy_index(db, profile.repo_index, user_id=user_id)
@@ -135,7 +203,7 @@ def workspace_binding_reason(
     *,
     user_id: int | None = None,
 ) -> str | None:
-    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    repo = get_bound_workspace_repo_for_profile(db, profile, user_id=user_id)
     if repo is not None:
         if resolve_repo_runtime_path(repo) is None:
             return "The bound workspace is registered but not reachable from this runtime."
@@ -144,6 +212,9 @@ def workspace_binding_reason(
         return "No workspace is bound to this task yet."
     if profile.code_repo_id is not None:
         return "The bound workspace is inactive or unavailable."
+    legacy_repo = resolve_workspace_repo_from_legacy_index(db, profile.repo_index, user_id=user_id)
+    if legacy_repo is not None:
+        return "This task still relies on a legacy repo_index binding. Rebind it to a registered workspace."
     if legacy_workspace_root(profile.repo_index) is not None:
         return "The legacy repo_index points to a directory that is not registered as a workspace."
     return "No registered workspace matches this task profile."
@@ -155,7 +226,7 @@ def build_workspace_binding_dict(
     *,
     user_id: int | None = None,
 ) -> dict:
-    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    repo = get_bound_workspace_repo_for_profile(db, profile, user_id=user_id)
     legacy_root = legacy_workspace_root(profile.repo_index if profile else 0)
     effective_repo_id = int(repo.id) if repo is not None else (
         int(profile.code_repo_id) if profile and profile.code_repo_id is not None else None
@@ -171,7 +242,88 @@ def build_workspace_binding_dict(
         ),
         "sub_path": (profile.sub_path or "") if profile is not None else "",
         "workspace_bound": repo is not None,
+        "repo_reachable": bool(repo is not None and resolve_repo_runtime_path(repo) is not None),
     }
+
+
+def select_runtime_workspace_repo(
+    db: Session,
+    profile: PlanTaskCodingProfile | None,
+    *,
+    user_id: int | None = None,
+) -> dict:
+    bound_repo = get_bound_workspace_repo_for_profile(db, profile, user_id=user_id)
+    legacy_repo = None
+    if bound_repo is None and profile is not None and profile.code_repo_id is None:
+        legacy_repo = resolve_workspace_repo_from_legacy_index(db, profile.repo_index, user_id=user_id)
+    selected_repo = None
+    source = "none"
+    reason = ""
+
+    if bound_repo is not None and resolve_repo_runtime_path(bound_repo) is not None:
+        selected_repo = bound_repo
+        source = "task_bound"
+        reason = "Using the task's bound workspace."
+    elif legacy_repo is not None and resolve_repo_runtime_path(legacy_repo) is not None:
+        selected_repo = legacy_repo
+        source = "legacy_profile_fallback"
+        reason = (
+            "This task still relies on a legacy repo_index binding. "
+            "Read-only views are using that workspace until you rebind it."
+        )
+    else:
+        fallback_repo = first_reachable_workspace_repo(db, user_id=user_id)
+        if fallback_repo is not None:
+            selected_repo = fallback_repo
+            source = "reachable_fallback"
+            if bound_repo is not None:
+                reason = (
+                    "The bound workspace is not reachable from this runtime, "
+                    "so read-only views are using the first reachable workspace."
+                )
+            elif legacy_repo is not None:
+                reason = (
+                    "This task still relies on a legacy repo_index binding. "
+                    "Read-only views are using the first reachable workspace until you rebind it."
+                )
+            elif profile is not None:
+                binding_reason = workspace_binding_reason(db, profile, user_id=user_id)
+                if binding_reason:
+                    reason = binding_reason + " Read-only views are using the first reachable workspace."
+                else:
+                    reason = "Read-only views are using the first reachable workspace."
+            else:
+                reason = "Using the first reachable registered workspace."
+        else:
+            binding_reason = workspace_binding_reason(db, profile, user_id=user_id)
+            reason = binding_reason or "No reachable registered workspace is available."
+
+    selected = _repo_summary(selected_repo)
+    bound = _repo_summary(bound_repo)
+    return {
+        **selected,
+        "source": source,
+        "reason": reason,
+        "bound_repo_id": bound.get("id"),
+        "bound_repo_name": bound.get("name"),
+        "bound_repo_reachable": bool(bound.get("reachable")),
+    }
+
+
+def select_runtime_workspace_repo_for_task(
+    db: Session,
+    task_id: int | None,
+    *,
+    user_id: int | None = None,
+) -> dict:
+    profile = None
+    if task_id is not None:
+        profile = (
+            db.query(PlanTaskCodingProfile)
+            .filter(PlanTaskCodingProfile.task_id == task_id)
+            .first()
+        )
+    return select_runtime_workspace_repo(db, profile, user_id=user_id)
 
 
 def bind_profile_workspace(
@@ -230,7 +382,7 @@ def require_bound_repo(
     """Return the active CodeRepo for ``profile`` or raise WorkspaceUnbound
     with an actionable reason. Use from mutation endpoints to fail closed.
     """
-    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    repo = get_bound_workspace_repo_for_profile(db, profile, user_id=user_id)
     if repo is None:
         reason = workspace_binding_reason(db, profile, user_id=user_id) or (
             "Task workspace is not bound to an active registered repo."
@@ -245,7 +397,7 @@ def resolve_profile_cwd(
     *,
     user_id: int | None = None,
 ) -> Path:
-    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    repo = get_bound_workspace_repo_for_profile(db, profile, user_id=user_id)
     if repo is None:
         reason = workspace_binding_reason(db, profile, user_id=user_id) or (
             "Task workspace is not bound to an active registered repo. Rebind the task to a Project workspace first."

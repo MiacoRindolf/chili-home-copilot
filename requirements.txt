@@ -40,6 +40,13 @@ requests-cache>=1.0.0
 # models (meta ML, pattern classifiers) and reload them across restarts.
 # Validate with a full learning cycle on fresh data before bumping.
 scikit-learn>=1.3.0,<3
+# skfolio: CombinatorialPurgedCV for CPCV promotion gate (Q1.T1). 0.11.x fails to
+# import on Python 3.11 (typing bug); 0.20.1 verified — see docs/ROADMAP_DEVIATION_001.md.
+skfolio==0.20.1
+# hmmlearn: 3-state Gaussian HMM for regime classification (Q1.T2).
+# Verified on Python 3.11 + NumPy 2 compatibility + scikit-learn >=1.3 compat
+# at time of pin. Re-verify when bumping.
+hmmlearn==0.3.3
 lightgbm>=4.0.0  # optional GPU meta-learner when BRAIN_USE_GPU_ML=true
 ta>=0.11.0
 finvizfinance>=1.0.0

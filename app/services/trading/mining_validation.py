@@ -258,23 +258,13 @@ def decay_signals_from_walk_forward_windows(
     return out
 
 
-def check_promotion_ready(
+def _promotion_min_ensemble_hypothesis(
     filtered: list[dict[str, Any]],
     *,
-    min_trades: int = MIN_TRADES_FOR_PROMOTION,
-    n_hypotheses_tested: int = 1,
+    min_trades: int,
+    n_hypotheses_tested: int,
 ) -> tuple[bool, dict[str, Any]]:
-    """Combined promotion gate: minimum sample + ensemble + multiple hypothesis correction.
-
-    Args:
-        filtered: Historical row dicts with ret_5d.
-        min_trades: Minimum evidence count before promotion is considered.
-        n_hypotheses_tested: How many patterns were tested in this cycle
-            (for Bonferroni-style alpha correction).
-
-    Returns:
-        (ready, detail_dict) where ready is True only if all gates pass.
-    """
+    """Minimum sample + ensemble + optional multiple-hypothesis correction (no CPCV)."""
     detail: dict[str, Any] = {}
 
     if len(filtered) < min_trades:
@@ -306,8 +296,57 @@ def check_promotion_ready(
             detail["blocked"] = "hypothesis_correction_failed"
             return False, detail
 
+    return True, detail
+
+
+def _finalize_cpcv_promotion_ready(
+    detail: dict[str, Any],
+    filtered: list[dict[str, Any]],
+    *,
+    n_hypotheses_tested: int,
+) -> tuple[bool, dict[str, Any]]:
+    from .promotion_gate import finalize_promotion_with_cpcv
+
+    detail = finalize_promotion_with_cpcv(
+        detail,
+        filtered,
+        n_hypotheses_tested=n_hypotheses_tested,
+    )
+    if detail.get("blocked") == "cpcv_promotion_gate_failed":
+        return False, detail
     detail["ready"] = True
     return True, detail
+
+
+def check_promotion_ready(
+    filtered: list[dict[str, Any]],
+    *,
+    min_trades: int = MIN_TRADES_FOR_PROMOTION,
+    n_hypotheses_tested: int = 1,
+) -> tuple[bool, dict[str, Any]]:
+    """Combined promotion gate: minimum sample + ensemble + multiple hypothesis correction.
+
+    Args:
+        filtered: Historical row dicts with ret_5d.
+        min_trades: Minimum evidence count before promotion is considered.
+        n_hypotheses_tested: How many patterns were tested in this cycle
+            (for Bonferroni-style alpha correction).
+
+    Returns:
+        (ready, detail_dict) where ready is True only if all gates pass.
+    """
+    ok, detail = _promotion_min_ensemble_hypothesis(
+        filtered,
+        min_trades=min_trades,
+        n_hypotheses_tested=n_hypotheses_tested,
+    )
+    if not ok:
+        return False, detail
+    return _finalize_cpcv_promotion_ready(
+        detail,
+        filtered,
+        n_hypotheses_tested=n_hypotheses_tested,
+    )
 
 
 # ── Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014) ────────────
@@ -528,13 +567,12 @@ def check_promotion_ready_v2(
     if n_hypotheses_tested is None:
         n_hypotheses_tested = max(get_trial_count(), 1)
 
-    # Run the existing v1 gate first
-    ok_v1, detail = check_promotion_ready(
+    ok_base, detail = _promotion_min_ensemble_hypothesis(
         filtered,
         min_trades=min_trades,
         n_hypotheses_tested=n_hypotheses_tested,
     )
-    if not ok_v1:
+    if not ok_base:
         return False, detail
 
     # DSR gate (hard when data available)
@@ -564,6 +602,9 @@ def check_promotion_ready_v2(
     else:
         detail["temporal_holdout"] = {"skipped": True, "reason": "no_holdout_provided"}
 
-    detail["ready"] = True
     detail["promotion_version"] = "v2"
-    return True, detail
+    return _finalize_cpcv_promotion_ready(
+        detail,
+        filtered,
+        n_hypotheses_tested=n_hypotheses_tested,
+    )

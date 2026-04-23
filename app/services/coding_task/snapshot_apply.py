@@ -16,8 +16,7 @@ from ...models.coding_task import (
 from ..code_brain.runtime import resolve_repo_runtime_path
 from .envelope import subprocess_safe_env, truncate_text
 from .workspaces import (
-    WorkspaceUnbound,
-    lookup_workspace_repo_for_profile,
+    get_bound_workspace_repo_for_profile,
     workspace_binding_reason,
 )
 
@@ -43,7 +42,7 @@ def get_suggestion_row_for_apply(
 
 def _repo_root_for_task(db: Session, task: PlanTask, user_id: int) -> Path | None:
     prof = db.query(PlanTaskCodingProfile).filter(PlanTaskCodingProfile.task_id == task.id).first()
-    repo = lookup_workspace_repo_for_profile(db, prof, user_id=user_id)
+    repo = get_bound_workspace_repo_for_profile(db, prof, user_id=user_id)
     if repo is None:
         return None
     return resolve_repo_runtime_path(repo)

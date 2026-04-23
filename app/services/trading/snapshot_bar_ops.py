@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 
@@ -95,6 +96,12 @@ def upsert_market_snapshot(
         existing.pe_ratio = pe_ratio
         existing.market_cap_b = market_cap_b
         existing.snapshot_legacy = False
+        try:
+            from .regime_classifier import attach_regime_to_market_snapshot
+
+            attach_regime_to_market_snapshot(db, existing)
+        except Exception:
+            pass
         return
 
     row = MarketSnapshot(
@@ -113,6 +120,12 @@ def upsert_market_snapshot(
         snapshot_legacy=False,
     )
     db.add(row)
+    try:
+        from .regime_classifier import attach_regime_to_market_snapshot
+
+        attach_regime_to_market_snapshot(db, row)
+    except Exception:
+        pass
     try:
         db.flush()
     except IntegrityError:

@@ -13,7 +13,7 @@ from sqlalchemy import func
 from ...config import settings
 from ...models.code_brain import (
     CodeDepAlert, CodeDependency, CodeHotspot, CodeInsight,
-    CodeLearningEvent, CodeRepo, CodeReview, CodeSearchEntry, CodeSnapshot,
+    CodeLearningEvent, CodeQualitySnapshot, CodeRepo, CodeReview, CodeSearchEntry, CodeSnapshot,
 )
 from ..project_domain_runs import finish_run, record_completed_run, start_run
 from . import indexer, analyzer, git_miner, insights as insights_mod
@@ -63,8 +63,34 @@ def _log_event(db: Session, repo_id: Optional[int], event_type: str, description
         db.rollback()
 
 
+def _repo_has_live_index(repo: CodeRepo | None) -> bool:
+    return bool(
+        repo
+        and not repo.last_index_error
+        and resolve_repo_runtime_path(repo) is not None
+        and (
+            repo.last_indexed
+            or repo.last_successful_indexed_at
+            or (repo.last_successful_file_count or repo.file_count or 0) > 0
+        )
+    )
+
+
+def _fresh_metric_repo_ids(repos: list[CodeRepo]) -> list[int]:
+    return [int(repo.id) for repo in repos if _repo_has_live_index(repo)]
+
+
+def _first_live_repo(repos: list[CodeRepo]) -> CodeRepo | None:
+    for repo in repos:
+        if _repo_has_live_index(repo):
+            return repo
+    return None
+
+
 def _mark_repo_stale(db: Session, repo: CodeRepo, reason: str) -> None:
     repo.last_index_error = reason[:4000]
+    repo.language_stats = None
+    repo.framework_tags = None
     repo.file_count = 0
     repo.total_lines = 0
     repo.last_indexed = None
@@ -72,6 +98,9 @@ def _mark_repo_stale(db: Session, repo: CodeRepo, reason: str) -> None:
     db.query(CodeHotspot).filter(CodeHotspot.repo_id == repo.id).delete()
     db.query(CodeDependency).filter(CodeDependency.repo_id == repo.id).delete()
     db.query(CodeSearchEntry).filter(CodeSearchEntry.repo_id == repo.id).delete()
+    db.query(CodeDepAlert).filter(CodeDepAlert.repo_id == repo.id).delete()
+    db.query(CodeReview).filter(CodeReview.repo_id == repo.id).delete()
+    db.query(CodeQualitySnapshot).filter(CodeQualitySnapshot.repo_id == repo.id).delete()
     db.query(CodeInsight).filter(CodeInsight.repo_id == repo.id).update({"active": False})
     db.flush()
 
@@ -95,7 +124,7 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
     report: Dict[str, Any] = {}
 
     try:
-        repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+        repos = indexer.get_accessible_repos(db, user_id=user_id, include_shared=True)
 
         if not repos and settings.code_brain_repos:
             for rp in settings.code_brain_repos.split(","):
@@ -103,7 +132,7 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
                 if rp:
                     result = indexer.register_repo(db, rp, user_id=user_id)
                     logger.info("[code-brain] Auto-registered repo: %s -> %s", rp, result)
-            repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+            repos = indexer.get_accessible_repos(db, user_id=user_id, include_shared=True)
 
         if not repos:
             _learning_status["running"] = False
@@ -318,22 +347,38 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
 
 def get_code_brain_metrics(db: Session, user_id: Optional[int] = None) -> Dict[str, Any]:
     """Aggregate metrics for the Code Brain dashboard."""
-    repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+    repos = indexer.get_accessible_repos(db, user_id=user_id, include_shared=True)
+    repo_ids = _fresh_metric_repo_ids(repos)
     total_files = sum(r.file_count for r in repos)
     total_lines = sum(r.total_lines for r in repos)
 
-    insight_count = db.query(func.count(CodeInsight.id)).filter(CodeInsight.active.is_(True)).scalar() or 0
-    hotspot_count = db.query(func.count(CodeHotspot.id)).scalar() or 0
+    if repo_ids:
+        insight_count = (
+            db.query(func.count(CodeInsight.id))
+            .filter(CodeInsight.active.is_(True), CodeInsight.repo_id.in_(repo_ids))
+            .scalar()
+            or 0
+        )
+        hotspot_count = (
+            db.query(func.count(CodeHotspot.id))
+            .filter(CodeHotspot.repo_id.in_(repo_ids))
+            .scalar()
+            or 0
+        )
+    else:
+        insight_count = 0
+        hotspot_count = 0
 
-    avg_complexity = (
-        db.query(func.avg(CodeSnapshot.complexity_score))
-        .filter(CodeSnapshot.complexity_score > 0)
-        .scalar()
-    ) or 0.0
+    avg_q = db.query(func.avg(CodeSnapshot.complexity_score)).filter(CodeSnapshot.complexity_score > 0)
+    if repo_ids:
+        avg_q = avg_q.filter(CodeSnapshot.repo_id.in_(repo_ids))
+    else:
+        avg_q = avg_q.filter(CodeSnapshot.repo_id == -1)
+    avg_complexity = avg_q.scalar() or 0.0
 
     lang_totals: Dict[str, int] = {}
     for r in repos:
-        if r.language_stats:
+        if r.language_stats and int(r.id) in repo_ids:
             try:
                 stats = __import__("json").loads(r.language_stats)
                 for lang, count in stats.items():
@@ -341,30 +386,46 @@ def get_code_brain_metrics(db: Session, user_id: Optional[int] = None) -> Dict[s
             except Exception:
                 pass
 
-    top_hotspots = (
-        db.query(CodeHotspot)
-        .order_by(CodeHotspot.combined_score.desc())
-        .limit(10)
-        .all()
-    )
+    top_hotspots_q = db.query(CodeHotspot)
+    if repo_ids:
+        top_hotspots_q = top_hotspots_q.filter(CodeHotspot.repo_id.in_(repo_ids))
+    else:
+        top_hotspots_q = top_hotspots_q.filter(CodeHotspot.repo_id == -1)
+    top_hotspots = top_hotspots_q.order_by(CodeHotspot.combined_score.desc()).limit(10).all()
 
-    recent_events = (
-        db.query(CodeLearningEvent)
-        .order_by(CodeLearningEvent.created_at.desc())
-        .limit(20)
-        .all()
-    )
+    recent_events_q = db.query(CodeLearningEvent)
+    if repo_ids:
+        recent_events_q = recent_events_q.filter(
+            (CodeLearningEvent.repo_id.is_(None)) | (CodeLearningEvent.repo_id.in_(repo_ids))
+        )
+    else:
+        recent_events_q = recent_events_q.filter(CodeLearningEvent.repo_id.is_(None))
+    recent_events = recent_events_q.order_by(CodeLearningEvent.created_at.desc()).limit(20).all()
 
-    circular_count = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True)).scalar() or 0
-    dep_alert_count = db.query(func.count(CodeDepAlert.id)).filter(CodeDepAlert.resolved.is_(False)).scalar() or 0
-    review_count = db.query(func.count(CodeReview.id)).scalar() or 0
+    circular_q = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True))
+    dep_alert_q = db.query(func.count(CodeDepAlert.id)).filter(CodeDepAlert.resolved.is_(False))
+    review_q = db.query(func.count(CodeReview.id))
+    if repo_ids:
+        circular_q = circular_q.filter(CodeDependency.repo_id.in_(repo_ids))
+        dep_alert_q = dep_alert_q.filter(CodeDepAlert.repo_id.in_(repo_ids))
+        review_q = review_q.filter(CodeReview.repo_id.in_(repo_ids))
+    else:
+        circular_q = circular_q.filter(CodeDependency.repo_id == -1)
+        dep_alert_q = dep_alert_q.filter(CodeDepAlert.repo_id == -1)
+        review_q = review_q.filter(CodeReview.repo_id == -1)
+    circular_count = circular_q.scalar() or 0
+    dep_alert_count = dep_alert_q.scalar() or 0
+    review_count = review_q.scalar() or 0
 
     trend_deltas = {}
-    if repos:
+    trend_repo = _first_live_repo(repos)
+    if trend_repo is not None:
         try:
-            trend_deltas = trends_mod.compute_trend_deltas(db, repos[0].id)
+            trend_deltas = trends_mod.compute_trend_deltas(db, trend_repo.id)
         except Exception:
             pass
+    else:
+        trend_deltas = {"available": False}
 
     return {
         "repos": len(repos),
@@ -406,12 +467,7 @@ def get_code_chat_context(db: Session, user_id: Optional[int] = None) -> str:
     Designed to be appended to the LLM system prompt so Chili has persistent
     knowledge of the user's codebases without re-scanning on every request.
     """
-    repos = (
-        db.query(CodeRepo)
-        .filter(CodeRepo.active.is_(True))
-        .order_by(CodeRepo.name.asc())
-        .all()
-    )
+    repos = indexer.get_accessible_repos(db, user_id=user_id, include_shared=True)
     if not repos:
         return ""
 
@@ -493,7 +549,8 @@ def get_code_chat_context(db: Session, user_id: Optional[int] = None) -> str:
 
     # Recent review findings
     try:
-        reviews = reviewer_mod.get_recent_reviews(db, limit=3)
+        metric_repo_ids = _fresh_metric_repo_ids(repos)
+        reviews = reviewer_mod.get_recent_reviews(db, repo_ids=metric_repo_ids, limit=3)
         critical_findings = []
         for rev in reviews:
             for f in (rev.get("findings") or []):
@@ -517,8 +574,9 @@ def get_project_metrics(db: Session, user_id: Optional[int] = None, lens: Option
     """Return metrics, optionally filtered through a role lens."""
     if lens:
         from .lenses import get_lens_metrics
-        repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
-        repo_id = repos[0].id if repos else None
+        repos = indexer.get_accessible_repos(db, user_id=user_id, include_shared=True)
+        repo = _first_live_repo(repos)
+        repo_id = repo.id if repo is not None else -1
         return get_lens_metrics(db, lens, repo_id=repo_id)
     return get_code_brain_metrics(db, user_id=user_id)
 

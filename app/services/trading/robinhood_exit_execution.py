@@ -471,6 +471,68 @@ def _prepare_offhours_limit(
     }
 
 
+def _cancel_external_working_sells(
+    ticker: str,
+    *,
+    keep_order_id: str | None,
+    adapter: Any,
+) -> list[dict[str, Any]]:
+    """Cancel any WORKING sell orders on ``ticker`` that weren't placed by
+    this autotrader. Returns a list of ``{order_id, ok, error?}`` results.
+
+    Why: Robinhood's ``held_for_sell`` accounting means a dangling manual
+    GTC limit (or any sell in ``confirmed``/``queued``/``unconfirmed``)
+    blocks every subsequent autotrader exit with "Not enough shares to
+    sell." This sweep is conservative — it only touches the ticker being
+    exited right now, and it preserves any order the autotrader itself
+    knows about (``keep_order_id``).
+    """
+    cancelled: list[dict[str, Any]] = []
+    try:
+        import robin_stocks.robinhood as rh  # type: ignore
+    except Exception:
+        return cancelled
+
+    try:
+        open_orders = rh.orders.get_all_open_stock_orders() or []
+    except Exception:
+        logger.warning("[rh_exit] external-sell sweep: get_all_open_stock_orders failed", exc_info=True)
+        return cancelled
+
+    _ACTIVE_RH_STATES = {"queued", "unconfirmed", "confirmed", "partially_filled", "new"}
+    for order in open_orders:
+        order_id = str(order.get("id") or "")
+        if not order_id:
+            continue
+        if keep_order_id and order_id == keep_order_id:
+            continue
+        side = str(order.get("side") or "").lower()
+        state = str(order.get("state") or "").lower()
+        if side != "sell" or state not in _ACTIVE_RH_STATES:
+            continue
+        inst_url = str(order.get("instrument") or "")
+        try:
+            sym = rh.stocks.get_symbol_by_url(inst_url)
+        except Exception:
+            sym = ""
+        if (sym or "").upper() != ticker.upper():
+            continue
+
+        res = adapter.cancel_order(order_id)
+        cancelled.append({"order_id": order_id, **res})
+        if res.get("ok"):
+            logger.info(
+                "[rh_exit] cancelled external working sell %s %s qty=%s state=%s",
+                ticker, order_id, order.get("quantity"), state,
+            )
+        else:
+            logger.warning(
+                "[rh_exit] failed to cancel external sell %s %s: %s",
+                ticker, order_id, res.get("error"),
+            )
+    return cancelled
+
+
 def cancel_pending_exit_order(
     db: Session,
     trade: Trade,
@@ -588,6 +650,20 @@ def submit_robinhood_trade_exit(
             "next_eligible_session_at": window.get("next_eligible_session_at"),
         }
 
+    # Cancel any stale working sell orders on this ticker that were placed
+    # outside the autotrader (e.g. manual GTC take-profit limits from prior
+    # strategies). Robinhood reserves those shares in ``held_for_sell`` and
+    # rejects every subsequent sell on the same position with
+    # ``{"detail": "Not enough shares to sell."}``, silently stranding the
+    # stop-loss engine. Autotrader-created orders are already handled above
+    # via ``cancel_pending_exit_order`` / ``trade.pending_exit_order_id``;
+    # this sweep only covers sells the autotrader didn't place.
+    _cancel_external_working_sells(
+        trade.ticker,
+        keep_order_id=str(trade.pending_exit_order_id or "") or None,
+        adapter=adapter,
+    )
+
     order_type = "market"
     limit_price: float | None = None
     reference_price: float | None = None
@@ -679,7 +755,31 @@ def submit_robinhood_trade_exit(
         return {"ok": False, "error": str(exc)}
 
     if not res.get("ok"):
-        return {"ok": False, "error": res.get("error") or "sell_failed"}
+        broker_error = str(res.get("error") or "sell_failed")
+        # Always emit an audit row so monitor rejections show up in
+        # ``trading_autotrader_runs`` instead of only in broker logs —
+        # otherwise repeated silent rejections look like a stopped job.
+        try:
+            _record_autotrader_run(
+                db,
+                trade,
+                decision=f"{audit_decision_prefix}_rejected",
+                reason=broker_error[:200],
+                snapshot=_audit_snapshot(
+                    trade,
+                    exit_reason=exit_reason,
+                    monitor_exit_meta=monitor_exit_meta,
+                    extra={
+                        "broker_error": broker_error,
+                        "order_type": order_type,
+                        "limit_price": limit_price,
+                        "submit_base_size": submit_base_size,
+                    },
+                ),
+            )
+        except Exception:
+            logger.exception("[rh_exit] failed to record broker-reject audit trade=%s", trade.id)
+        return {"ok": False, "error": broker_error}
 
     raw = dict(res.get("raw") or {})
     state = str(res.get("state") or raw.get("state") or "submitted").lower()

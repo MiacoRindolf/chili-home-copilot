@@ -30,8 +30,10 @@ from .workflow_state import sync_task_workflow_state
 from .workspaces import (
     bind_profile_workspace,
     build_workspace_binding_dict,
-    lookup_workspace_repo_for_profile,
+    first_reachable_workspace_repo,
+    get_bound_workspace_repo_for_profile,
     resolve_profile_cwd,
+    select_runtime_workspace_repo_for_task,
     workspace_binding_reason,
 )
 
@@ -77,9 +79,9 @@ def _ops_hints_dict(db: Session, task: PlanTask, *, user_id: int | None = None) 
     p = db.query(PlanTaskCodingProfile).filter(PlanTaskCodingProfile.task_id == task.id).first()
     ri = p.repo_index if p else 0
     repo_index_valid = len(roots) == 0 or (0 <= ri < len(roots))
-    repo = lookup_workspace_repo_for_profile(db, p, user_id=user_id)
+    repo = get_bound_workspace_repo_for_profile(db, p, user_id=user_id)
     cwd_resolvable = False
-    if p is not None:
+    if p is not None and repo is not None:
         try:
             resolve_profile_cwd(db, p, user_id=user_id)
             cwd_resolvable = True
@@ -481,6 +483,7 @@ def build_handoff_dict(db: Session, task: PlanTask, *, user_id: int | None = Non
         },
         "brief": brief_out,
         "profile": _profile_dict(db, task.id, user_id=user_id),
+        "selected_repo": select_runtime_workspace_repo_for_task(db, task.id, user_id=user_id),
         "ops_hints": _ops_hints_dict(db, task, user_id=user_id),
         "validation_latest": validation_latest,
         "blockers": blockers_out,
@@ -554,10 +557,7 @@ def get_run_detail_dict(db: Session, task_id: int, run_id: int) -> dict | None:
 
 
 def _first_active_repo(db: Session, user_id: int | None = None) -> CodeRepo | None:
-    q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
-    if user_id is not None:
-        q = q.filter((CodeRepo.user_id == user_id) | (CodeRepo.user_id.is_(None)))
-    return q.first()
+    return first_reachable_workspace_repo(db, user_id=user_id)
 
 
 def run_autonomous_task(

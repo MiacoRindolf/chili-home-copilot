@@ -742,6 +742,27 @@ def _run_divergence_sweep_daily_job():
     run_scheduler_job_guarded("divergence_sweep_daily", _work)
 
 
+def _run_weekly_regime_retrain_job():
+    """Fit / decode 3-state HMM regimes (Q1.T2); gated by ``chili_regime_classifier_enabled``."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "chili_regime_classifier_enabled", False):
+        return
+
+    from ..db import SessionLocal
+    from .trading.regime_classifier import run_weekly_regime_retrain
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            out = run_weekly_regime_retrain(db)
+            logger.info("[scheduler] regime_classifier_weekly: %s", out)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("regime_classifier_weekly", _work)
+
+
 def _run_macro_regime_daily_job():
     """Phase L.17 - daily macro-regime snapshot sweep (shadow mode only).
 
@@ -3230,6 +3251,39 @@ def start_scheduler():
             logger.exception(
                 "[scheduler] failed to register divergence_sweep_daily job"
             )
+
+        # Q1.T2: weekly Gaussian HMM regime retrain (gated).
+        try:
+            if include_web_light and getattr(
+                settings, "chili_regime_classifier_enabled", False
+            ):
+                _rg_dow = str(
+                    getattr(settings, "chili_regime_classifier_weekly_cron_dow", "sun")
+                    or "sun"
+                )
+                _rg_hour = int(
+                    getattr(settings, "chili_regime_classifier_weekly_cron_hour", 4) or 4
+                )
+                _rg_minute = int(
+                    getattr(
+                        settings, "chili_regime_classifier_weekly_cron_minute", 15
+                    )
+                    or 15
+                )
+                _scheduler.add_job(
+                    _run_weekly_regime_retrain_job,
+                    trigger=CronTrigger(
+                        day_of_week=_rg_dow, hour=_rg_hour, minute=_rg_minute
+                    ),
+                    id="regime_classifier_weekly",
+                    name=(
+                        f"Regime HMM weekly ({_rg_dow} {_rg_hour:02d}:{_rg_minute:02d})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register regime_classifier_weekly job")
 
         # Phase L.17: daily macro-regime snapshot sweep (shadow mode only).
         try:

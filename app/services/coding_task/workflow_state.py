@@ -26,7 +26,7 @@ from ...models.coding_task import (
     PlanTaskCodingProfile,
 )
 from ...models.project_domain import ProjectDomainRun
-from .workspaces import lookup_workspace_repo_for_profile
+from .workspaces import get_bound_workspace_repo_for_profile
 
 
 # States, ordered from cold to done. A task may skip forward (e.g. the user
@@ -96,7 +96,7 @@ def compute_state(db: Session, task: PlanTask, *, user_id: int | None = None) ->
         .filter(PlanTaskCodingProfile.task_id == task.id)
         .first()
     )
-    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    repo = get_bound_workspace_repo_for_profile(db, profile, user_id=user_id)
     bound = repo is not None
     indexed = bool(
         bound

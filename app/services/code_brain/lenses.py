@@ -18,6 +18,7 @@ from ...models.code_brain import (
     CodeDepAlert, CodeDependency, CodeHotspot, CodeInsight,
     CodeLearningEvent, CodeRepo, CodeReview, CodeSnapshot,
 )
+from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,22 @@ def _matches_any(file_path: str, patterns: List[str]) -> bool:
     return False
 
 
+def _repo_freshness(db: Session, repo_id: Optional[int]) -> dict[str, Any]:
+    if repo_id is None:
+        return {"trusted": True, "reason": None}
+    repo = db.query(CodeRepo).filter(CodeRepo.id == repo_id).first()
+    if repo is None:
+        return {"trusted": False, "reason": "Repo not found."}
+    if repo.last_index_error:
+        return {"trusted": False, "reason": repo.last_index_error}
+    if resolve_repo_runtime_path(repo) is None:
+        return {
+            "trusted": False,
+            "reason": "Registered workspace is not reachable from this runtime.",
+        }
+    return {"trusted": True, "reason": None}
+
+
 def get_lens(name: str) -> Optional[Lens]:
     return LENS_REGISTRY.get(name)
 
@@ -187,20 +204,28 @@ def get_lens_metrics(db: Session, lens_name: str, repo_id: Optional[int] = None)
     lens = LENS_REGISTRY.get(lens_name)
     if not lens:
         return {"error": f"Unknown lens: {lens_name}"}
+    freshness = _repo_freshness(db, repo_id)
 
     repo_filter = []
-    if repo_id:
-        repo_filter = [CodeHotspot.repo_id == repo_id]
+    if repo_id is not None:
+        repo_filter = [CodeHotspot.repo_id == (repo_id if freshness.get("trusted") else -1)]
 
     all_hotspots = db.query(CodeHotspot).filter(*repo_filter).order_by(CodeHotspot.combined_score.desc()).limit(100).all()
     filtered_hotspots = [h for h in all_hotspots if _matches_any(h.file_path, lens.file_patterns)]
 
-    all_insights = db.query(CodeInsight).filter(CodeInsight.active.is_(True)).all()
+    insight_q = db.query(CodeInsight).filter(CodeInsight.active.is_(True))
+    if repo_id is not None and freshness.get("trusted"):
+        insight_q = insight_q.filter(CodeInsight.repo_id == repo_id)
+    elif repo_id is not None:
+        insight_q = insight_q.filter(CodeInsight.repo_id == -1)
+    all_insights = insight_q.all()
     filtered_insights = [i for i in all_insights if i.category in lens.insight_categories]
 
     all_snapshots_q = db.query(CodeSnapshot)
-    if repo_id:
+    if repo_id is not None and freshness.get("trusted"):
         all_snapshots_q = all_snapshots_q.filter(CodeSnapshot.repo_id == repo_id)
+    elif repo_id is not None:
+        all_snapshots_q = all_snapshots_q.filter(CodeSnapshot.repo_id == -1)
     all_snapshots = all_snapshots_q.all()
     filtered_snapshots = [s for s in all_snapshots if _matches_any(s.file_path, lens.file_patterns)]
 
@@ -213,18 +238,33 @@ def get_lens_metrics(db: Session, lens_name: str, repo_id: Optional[int] = None)
     dep_alerts = 0
     circular_count = 0
     if lens_name in ("architect", "devops", "security", "pm"):
-        dep_alerts = db.query(func.count(CodeDepAlert.id)).filter(CodeDepAlert.resolved.is_(False)).scalar() or 0
+        dep_alert_q = db.query(func.count(CodeDepAlert.id)).filter(CodeDepAlert.resolved.is_(False))
+        if repo_id is not None and freshness.get("trusted"):
+            dep_alert_q = dep_alert_q.filter(CodeDepAlert.repo_id == repo_id)
+        elif repo_id is not None:
+            dep_alert_q = dep_alert_q.filter(CodeDepAlert.repo_id == -1)
+        dep_alerts = dep_alert_q.scalar() or 0
     if lens_name in ("architect", "pm"):
-        circular_count = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True)).scalar() or 0
+        circular_q = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True))
+        if repo_id is not None and freshness.get("trusted"):
+            circular_q = circular_q.filter(CodeDependency.repo_id == repo_id)
+        elif repo_id is not None:
+            circular_q = circular_q.filter(CodeDependency.repo_id == -1)
+        circular_count = circular_q.scalar() or 0
 
-    review_count = db.query(func.count(CodeReview.id)).scalar() or 0
+    review_q = db.query(func.count(CodeReview.id))
+    if repo_id is not None and freshness.get("trusted"):
+        review_q = review_q.filter(CodeReview.repo_id == repo_id)
+    elif repo_id is not None:
+        review_q = review_q.filter(CodeReview.repo_id == -1)
+    review_count = review_q.scalar() or 0
 
-    recent_events = (
-        db.query(CodeLearningEvent)
-        .order_by(CodeLearningEvent.created_at.desc())
-        .limit(10)
-        .all()
-    )
+    events_q = db.query(CodeLearningEvent)
+    if repo_id is not None and freshness.get("trusted"):
+        events_q = events_q.filter(CodeLearningEvent.repo_id == repo_id)
+    elif repo_id is not None:
+        events_q = events_q.filter(CodeLearningEvent.repo_id == -1)
+    recent_events = events_q.order_by(CodeLearningEvent.created_at.desc()).limit(10).all()
 
     return {
         "lens": lens_name,
@@ -239,6 +279,7 @@ def get_lens_metrics(db: Session, lens_name: str, repo_id: Optional[int] = None)
         "dep_alert_count": dep_alerts,
         "circular_dep_count": circular_count,
         "review_count": review_count,
+        "freshness": freshness,
         "top_hotspots": [
             {
                 "file": h.file_path,
@@ -274,8 +315,10 @@ def get_lens_hotspots(db: Session, lens_name: str, repo_id: Optional[int] = None
     lens = LENS_REGISTRY.get(lens_name)
     if not lens:
         return []
+    if repo_id is not None and not _repo_freshness(db, repo_id).get("trusted"):
+        return []
     q = db.query(CodeHotspot)
-    if repo_id:
+    if repo_id is not None:
         q = q.filter(CodeHotspot.repo_id == repo_id)
     all_hotspots = q.order_by(CodeHotspot.combined_score.desc()).limit(200).all()
     filtered = [h for h in all_hotspots if _matches_any(h.file_path, lens.file_patterns)]
@@ -296,11 +339,13 @@ def get_lens_insights(db: Session, lens_name: str, repo_id: Optional[int] = None
     lens = LENS_REGISTRY.get(lens_name)
     if not lens:
         return []
+    if repo_id is not None and not _repo_freshness(db, repo_id).get("trusted"):
+        return []
     q = db.query(CodeInsight).filter(
         CodeInsight.active.is_(True),
         CodeInsight.category.in_(lens.insight_categories),
     )
-    if repo_id:
+    if repo_id is not None:
         q = q.filter(CodeInsight.repo_id == repo_id)
     results = q.order_by(CodeInsight.confidence.desc()).limit(limit).all()
     return [
@@ -321,7 +366,10 @@ def get_lens_chat_context(db: Session, lens_name: str, user_id: Optional[int] = 
     if not lens:
         return ""
 
-    metrics = get_lens_metrics(db, lens_name)
+    from ..coding_task.workspaces import first_reachable_workspace_repo
+
+    repo = first_reachable_workspace_repo(db, user_id=user_id)
+    metrics = get_lens_metrics(db, lens_name, repo_id=(int(repo.id) if repo is not None else -1))
     parts: List[str] = [
         f"[Project Brain — {lens.label} perspective]",
         lens.context_role,

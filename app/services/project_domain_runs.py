@@ -118,7 +118,7 @@ def latest_run(
 ) -> ProjectDomainRun | None:
     q = db.query(ProjectDomainRun)
     if user_id is not None:
-        q = q.filter((ProjectDomainRun.user_id == user_id) | (ProjectDomainRun.user_id.is_(None)))
+        q = q.filter(ProjectDomainRun.user_id == user_id)
     if run_kind:
         q = q.filter(ProjectDomainRun.run_kind == run_kind)
     if task_id is not None:
@@ -129,7 +129,7 @@ def latest_run(
 def status_payload(db: Session, *, user_id: int | None = None) -> dict[str, Any]:
     q = db.query(ProjectDomainRun).filter(ProjectDomainRun.status == "running")
     if user_id is not None:
-        q = q.filter((ProjectDomainRun.user_id == user_id) | (ProjectDomainRun.user_id.is_(None)))
+        q = q.filter(ProjectDomainRun.user_id == user_id)
     running = q.order_by(ProjectDomainRun.started_at.desc(), ProjectDomainRun.id.desc()).first()
     latest = latest_run(db, user_id=user_id)
     if running is not None:
@@ -162,7 +162,7 @@ def kind_status_payload(db: Session, run_kind: str, *, user_id: int | None = Non
         ProjectDomainRun.status == "running",
     )
     if user_id is not None:
-        q = q.filter((ProjectDomainRun.user_id == user_id) | (ProjectDomainRun.user_id.is_(None)))
+        q = q.filter(ProjectDomainRun.user_id == user_id)
     running = q.order_by(ProjectDomainRun.started_at.desc(), ProjectDomainRun.id.desc()).first()
     return {
         "running": running is not None,
@@ -182,6 +182,6 @@ def list_timeline(
 ) -> list[dict[str, Any]]:
     q = db.query(ProjectDomainRun)
     if user_id is not None:
-        q = q.filter((ProjectDomainRun.user_id == user_id) | (ProjectDomainRun.user_id.is_(None)))
+        q = q.filter(ProjectDomainRun.user_id == user_id)
     rows = q.order_by(ProjectDomainRun.created_at.desc(), ProjectDomainRun.id.desc()).limit(limit).all()
     return [_run_payload(row) for row in rows]

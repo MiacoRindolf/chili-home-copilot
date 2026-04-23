@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from ...models.code_brain import CodeInsight, CodeRepo, CodeSearchEntry, CodeSnapshot
+from . import indexer as indexer_mod
 from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
@@ -149,15 +150,25 @@ def index_symbols(db: Session, repo_id: int) -> Dict[str, Any]:
     return {"indexed": symbol_count}
 
 
-def search_code(db: Session, query: str, repo_id: Optional[int] = None, limit: int = 20) -> List[Dict[str, Any]]:
+def search_code(
+    db: Session,
+    query: str,
+    repo_id: Optional[int] = None,
+    repo_ids: Optional[List[int]] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
     """Multi-strategy code search: symbol name, file path, docstring/signature."""
     q_lower = query.lower().strip()
     if not q_lower:
         return []
 
     base_q = db.query(CodeSearchEntry)
-    if repo_id:
+    if repo_id is not None:
         base_q = base_q.filter(CodeSearchEntry.repo_id == repo_id)
+    elif repo_ids is not None:
+        if not repo_ids:
+            return []
+        base_q = base_q.filter(CodeSearchEntry.repo_id.in_(repo_ids))
 
     # Strategy 1: exact symbol name match
     exact = base_q.filter(CodeSearchEntry.symbol_name.ilike(f"%{q_lower}%")).limit(limit).all()
@@ -199,14 +210,31 @@ def search_code(db: Session, query: str, repo_id: Optional[int] = None, limit: i
     return results[:limit]
 
 
-def search_with_llm(db: Session, query: str, repo_id: Optional[int] = None, user_id: Optional[int] = None) -> Dict[str, Any]:
+def search_with_llm(
+    db: Session,
+    query: str,
+    repo_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    repo_ids: Optional[List[int]] = None,
+) -> Dict[str, Any]:
     """Natural-language code search: gather search results + insights, ask LLM."""
-    code_results = search_code(db, query, repo_id=repo_id, limit=15)
+    if repo_id is None and repo_ids is None and user_id is not None:
+        repo_ids = indexer_mod.get_accessible_repo_ids(db, user_id=user_id, include_shared=True)
+
+    code_results = search_code(db, query, repo_id=repo_id, repo_ids=repo_ids, limit=15)
 
     insight_q = db.query(CodeInsight).filter(CodeInsight.active.is_(True))
-    if repo_id:
+    if repo_id is not None:
         insight_q = insight_q.filter(CodeInsight.repo_id == repo_id)
-    insights = insight_q.limit(10).all()
+    elif repo_ids is not None:
+        if not repo_ids:
+            insights = []
+        else:
+            insights = insight_q.filter(CodeInsight.repo_id.in_(repo_ids)).limit(10).all()
+    else:
+        insights = insight_q.limit(10).all()
+    if repo_id is not None or repo_ids is None:
+        insights = insight_q.limit(10).all()
 
     context_parts = [f"Search results for: {query}"]
     for r in code_results[:10]:

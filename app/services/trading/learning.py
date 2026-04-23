@@ -2171,6 +2171,7 @@ def mine_patterns(
 
     # Phase 1a: reset trial counter and split data into discovery/holdout
     from .mining_validation import (
+        MIN_TRADES_FOR_PROMOTION,
         reset_trial_counter, increment_trial_counter, get_trial_count,
         check_promotion_ready, check_promotion_ready_v2,
         temporal_holdout_split,
@@ -2214,7 +2215,7 @@ def mine_patterns(
 
         def _check(filtered, label, conditions=None, _minr=min_ret_pct, _mtf=mine_tf):
             increment_trial_counter()
-            if len(filtered) < MIN_SAMPLES:
+            if len(filtered) < max(MIN_SAMPLES, MIN_TRADES_FOR_PROMOTION):
                 return
 
             if _cpcv_on:
@@ -2235,7 +2236,7 @@ def mine_patterns(
                 _holdout_filtered = [r for r in holdout_rows if _matches_filter(r, conditions)]
                 _ready, _detail = check_promotion_ready_v2(
                     filtered,
-                    min_trades=MIN_SAMPLES,
+                    min_trades=max(MIN_SAMPLES, MIN_TRADES_FOR_PROMOTION),
                     returns_for_dsr=_returns_for_dsr,
                     holdout_rows=holdout_rows,
                     holdout_predicate=lambda r: _matches_filter(r, conditions),
@@ -2243,7 +2244,7 @@ def mine_patterns(
             else:
                 _ready, _detail = check_promotion_ready(
                     filtered,
-                    min_trades=MIN_SAMPLES,
+                    min_trades=max(MIN_SAMPLES, MIN_TRADES_FOR_PROMOTION),
                     n_hypotheses_tested=max(get_trial_count(), 1),
                 )
             if not _ready:
@@ -2274,6 +2275,31 @@ def mine_patterns(
                         avg_return_pct=avg_5d,
                         evidence_count=len(filtered),
                     )
+
+                if sp_id and _detail:
+                    from .promotion_gate import (
+                        cpcv_eval_to_scan_pattern_fields,
+                        persist_cpcv_shadow_eval,
+                    )
+                    from ...models.trading import ScanPattern as _ScanPatternCPCV
+
+                    _cpcv_patch = cpcv_eval_to_scan_pattern_fields(
+                        (_detail.get("cpcv_promotion_gate") or {})
+                    )
+                    _sp_row = db.query(_ScanPatternCPCV).filter(_ScanPatternCPCV.id == sp_id).first()
+                    if _sp_row:
+                        if _cpcv_patch:
+                            for _ck, _cv in _cpcv_patch.items():
+                                setattr(_sp_row, _ck, _cv)
+                        try:
+                            persist_cpcv_shadow_eval(
+                                db, _sp_row, _detail.get("cpcv_promotion_gate") or {}
+                            )
+                        except Exception:
+                            logger.debug(
+                                "[mine_patterns] cpcv_shadow_log failed",
+                                exc_info=True,
+                            )
 
                 save_insight(db, user_id, pattern, confidence=min(0.9, wr),
                              wins=wins, losses=len(filtered) - wins,
@@ -7025,6 +7051,7 @@ def test_pattern_hypothesis(
     from ...models.trading import BacktestResult as _BT
     from ...models.trading import PatternTradeRow as _PTR
     from .mining_validation import check_promotion_ready
+    from .promotion_gate import cpcv_eval_to_scan_pattern_fields, normalize_ptr_row_features
 
     _ptr_rows = (
         db.query(_PTR)
@@ -7035,18 +7062,31 @@ def test_pattern_hypothesis(
         .order_by(_PTR.as_of_ts.asc())
         .all()
     )
-    _ensemble_rows = [
-        {
-            "ret_5d": float(r.outcome_return_pct or 0.0),
-            "bar_start_utc": r.as_of_ts,
-        }
-        for r in _ptr_rows
-    ]
+    _ensemble_rows = []
+    for r in _ptr_rows:
+        _fj = r.features_json if isinstance(r.features_json, dict) else {}
+        _row_d = normalize_ptr_row_features(
+            outcome_return_pct=r.outcome_return_pct,
+            as_of_ts=r.as_of_ts,
+            ticker=r.ticker,
+            timeframe=r.timeframe,
+            features_json=_fj,
+        )
+        _row_d["ret_5d"] = float(r.outcome_return_pct or 0.0)
+        _ensemble_rows.append(_row_d)
     _ensemble_ok, _ensemble_detail = check_promotion_ready(
         _ensemble_rows,
         min_trades=30,
         n_hypotheses_tested=max(1, int(total or 1)),
     )
+    try:
+        from .promotion_gate import persist_cpcv_shadow_eval
+
+        persist_cpcv_shadow_eval(
+            db, pattern, _ensemble_detail.get("cpcv_promotion_gate") or {}
+        )
+    except Exception:
+        logger.debug("[learning] cpcv_shadow_log failed", exc_info=True)
     oos_validation_merged["ensemble_promotion_gate"] = _ensemble_detail
     if prom_stat == "promoted" and not _ensemble_ok:
         prom_stat = "rejected_oos"
@@ -7070,6 +7110,7 @@ def test_pattern_hypothesis(
         "oos_evaluated_at": datetime.utcnow(),
         "oos_validation_json": oos_validation_merged,
     }
+    patch.update(cpcv_eval_to_scan_pattern_fields((_ensemble_detail.get("cpcv_promotion_gate") or {})))
     if not allow_active:
         patch["active"] = False
     if prom_stat == "promoted" and getattr(_oset, "brain_paper_book_on_promotion", False):

@@ -180,10 +180,19 @@ def review_recent_commits(db: Session, repo_id: int, user_id: Optional[int] = No
     return {"reviewed": reviewed_count, "skipped": len(already_reviewed)}
 
 
-def get_recent_reviews(db: Session, repo_id: Optional[int] = None, limit: int = 20) -> List[Dict[str, Any]]:
+def get_recent_reviews(
+    db: Session,
+    repo_id: Optional[int] = None,
+    repo_ids: Optional[List[int]] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
     q = db.query(CodeReview).order_by(CodeReview.reviewed_at.desc())
     if repo_id is not None:
         q = q.filter(CodeReview.repo_id == repo_id)
+    elif repo_ids is not None:
+        if not repo_ids:
+            return []
+        q = q.filter(CodeReview.repo_id.in_(repo_ids))
     rows = q.limit(limit).all()
     return [
         {

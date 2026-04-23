@@ -11,6 +11,7 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -274,6 +275,47 @@ def api_brain_trading_metrics(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
     stats = ts.get_brain_stats(db, ctx["user_id"])
     return JSONResponse({"ok": True, **stats})
+
+
+@router.get("/api/brain/cpcv_shadow_funnel")
+def api_brain_cpcv_shadow_funnel(db: Session = Depends(get_db)):
+    """7-day CPCV shadow funnel rollup per scanner (``cpcv_shadow_funnel_v``)."""
+    try:
+        result = db.execute(
+            text("SELECT * FROM cpcv_shadow_funnel_v ORDER BY scanner")
+        )
+        rows = [dict(row._mapping) for row in result]
+    except Exception as exc:
+        logger.debug("[brain] cpcv_shadow_funnel unavailable: %s", exc)
+        return JSONResponse({"ok": True, "rows": [], "view_available": False})
+    return JSONResponse({"ok": True, "rows": rows, "view_available": True})
+
+
+@router.get("/api/brain/regime_sharpe_heatmap")
+def api_brain_regime_sharpe_heatmap(db: Session = Depends(get_db)):
+    """30d Sharpe by HMM regime × scanner (closed trades); needs migration 165 + flag optional."""
+    if not getattr(settings, "chili_regime_classifier_enabled", False):
+        return JSONResponse(
+            {
+                "ok": False,
+                "reason": "flag_off",
+                "message": "Regime classifier not yet enabled",
+            }
+        )
+    try:
+        from ..services.trading.regime_classifier import build_regime_scanner_sharpe_heatmap
+
+        payload = build_regime_scanner_sharpe_heatmap(db)
+    except Exception as exc:
+        logger.debug("[brain] regime_sharpe_heatmap unavailable: %s", exc)
+        return JSONResponse(
+            {
+                "ok": False,
+                "reason": "schema_or_error",
+                "message": "Regime heatmap not available yet (apply migration 165_regime_snapshot_and_tagging).",
+            }
+        )
+    return JSONResponse(payload)
 
 
 @router.get("/api/brain/trading/network-graph")

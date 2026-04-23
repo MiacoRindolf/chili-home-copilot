@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...models.code_brain import CodeHotspot, CodeInsight, CodeRepo, CodeSnapshot
 from . import insights as insights_mod
-from .indexer import get_registered_repos
+from .indexer import get_accessible_repo_ids, get_accessible_repos
 from .runtime import resolve_repo_runtime_path
 from .search import search_code
 
@@ -25,7 +25,12 @@ _MAX_FILE_LINES = 600
 _MAX_FILES_PER_EDIT = 8
 
 
-def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[str, Any]:
+def _gather_context(
+    db: Session,
+    repo_id: Optional[int],
+    prompt: str,
+    user_id: Optional[int] = None,
+) -> Dict[str, Any]:
     """Build rich context from the Code Brain for the LLM."""
     context: Dict[str, Any] = {
         "repos": [],
@@ -35,10 +40,13 @@ def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[st
     }
 
     if repo_id:
-        repo = db.query(CodeRepo).filter(CodeRepo.id == repo_id, CodeRepo.active.is_(True)).first()
-        repos = [repo] if repo else []
+        repos = []
+        for repo in get_accessible_repos(db, user_id=user_id, include_shared=True):
+            if int(repo.id) == int(repo_id):
+                repos = [repo]
+                break
     else:
-        repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+        repos = get_accessible_repos(db, user_id=user_id, include_shared=True)
 
     for repo in repos:
         lang_stats = json.loads(repo.language_stats) if repo.language_stats else {}
@@ -53,7 +61,8 @@ def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[st
             "frameworks": repo.framework_tags.split(",") if repo.framework_tags else [],
         })
 
-    all_insights = insights_mod.get_insights(db, repo_id=repo_id)
+    repo_ids = [int(repo.id) for repo in repos]
+    all_insights = insights_mod.get_insights(db, repo_id=repo_id, repo_ids=repo_ids if repo_id is None else None)
     context["insights"] = all_insights[:30]
 
     for repo in repos:
@@ -298,7 +307,7 @@ async def run_code_agent(
     if not is_configured():
         return {"error": "LLM not configured. Set LLM_API_KEY or PREMIUM_API_KEY in .env"}
 
-    context = _gather_context(db, repo_id, prompt)
+    context = _gather_context(db, repo_id, prompt, user_id=user_id)
 
     if not context["repos"]:
         return {"error": "No repos registered. Add a repo first via the Brain UI."}

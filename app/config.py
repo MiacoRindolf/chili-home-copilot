@@ -789,6 +789,16 @@ class Settings(BaseSettings):
     brain_mine_patterns_max_tickers: int = 1000
     # Require stability across chronological segments before save_insight from mine_patterns.
     brain_mining_purged_cpcv_enabled: bool = True
+    # When True, CPCV + DSR + PBO gate blocks promotion after ensemble/DSR/holdout (HR1 path).
+    # Default OFF: metrics computed at promotion-attempt time only; shadow / logging only.
+    chili_cpcv_promotion_gate_enabled: bool = False
+    # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
+    chili_regime_classifier_enabled: bool = False
+    chili_regime_classifier_random_state: int = 42
+    chili_regime_classifier_n_iter: int = 200
+    chili_regime_classifier_weekly_cron_dow: str = "sun"
+    chili_regime_classifier_weekly_cron_hour: int = 4
+    chili_regime_classifier_weekly_cron_minute: int = 15
     # Extra SPY-regime × motif checks at end of mine_patterns.
     brain_regime_mining_enabled: bool = True
     # OHLC-derived ``learned_v1`` block on get_indicator_snapshot JSON.

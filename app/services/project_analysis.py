@@ -6,10 +6,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ..models import CodeRepo, PlanTask, ProjectAnalysisSnapshot
+from ..models import PlanTask, ProjectAnalysisSnapshot
 from . import planner_service
 from .code_brain import lenses as cb_lenses
 from .coding_task.service import build_handoff_dict
+from .coding_task.workspaces import select_runtime_workspace_repo_for_task
 from .project_domain_runs import list_timeline
 
 PERSPECTIVE_ORDER = (
@@ -38,14 +39,6 @@ def _task_for_analysis(
     if not planner_service._user_can_access(db, task.project_id, user_id):
         return None
     return task
-
-
-def _first_repo_id(db: Session, user_id: int | None = None) -> int | None:
-    q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
-    if user_id is not None:
-        q = q.filter((CodeRepo.user_id == user_id) | (CodeRepo.user_id.is_(None)))
-    row = q.order_by(CodeRepo.id.asc()).first()
-    return int(row.id) if row is not None else None
 
 
 def _status_from_metrics(metrics: dict[str, Any]) -> str:
@@ -125,28 +118,34 @@ def build_analysis_payload(
 ) -> dict[str, Any]:
     task = _task_for_analysis(db, planner_task_id=planner_task_id, user_id=user_id)
     handoff = build_handoff_dict(db, task, user_id=user_id) if task is not None else None
-    repo_id = (
-        ((handoff or {}).get("profile") or {}).get("code_repo_id")
-        or _first_repo_id(db, user_id=user_id)
+    selected_repo = select_runtime_workspace_repo_for_task(
+        db,
+        task.id if task is not None else None,
+        user_id=user_id,
     )
+    repo_id = selected_repo.get("id")
+    metrics_repo_id = repo_id if repo_id is not None else -1
 
     perspectives: dict[str, dict[str, Any]] = {
         "product": _product_perspective(handoff),
     }
     for key, label, lens_name in PERSPECTIVE_ORDER[1:]:
-        metrics = cb_lenses.get_lens_metrics(db, lens_name, repo_id=repo_id)
+        metrics = cb_lenses.get_lens_metrics(db, lens_name, repo_id=metrics_repo_id)
         perspectives[key] = _perspective_from_metrics(key, label, metrics)
 
     timeline = list_timeline(db, user_id=user_id, limit=20)
     summary = {
         "planner_task_id": planner_task_id,
         "repo_id": repo_id,
+        "repo_source": selected_repo.get("source"),
+        "repo_reason": selected_repo.get("reason"),
         "perspective_count": len(perspectives),
         "timeline_count": len(timeline),
         "generated_from": "single_report",
     }
     return {
         "summary": summary,
+        "selected_repo": selected_repo,
         "perspectives": perspectives,
         "timeline": timeline,
         "planner_handoff": handoff,
@@ -185,7 +184,7 @@ def latest_analysis_snapshot(
 ) -> dict[str, Any] | None:
     q = db.query(ProjectAnalysisSnapshot)
     if user_id is not None:
-        q = q.filter((ProjectAnalysisSnapshot.user_id == user_id) | (ProjectAnalysisSnapshot.user_id.is_(None)))
+        q = q.filter(ProjectAnalysisSnapshot.user_id == user_id)
     if planner_task_id is not None:
         q = q.filter(ProjectAnalysisSnapshot.task_id == planner_task_id)
     row = q.order_by(ProjectAnalysisSnapshot.created_at.desc(), ProjectAnalysisSnapshot.id.desc()).first()
