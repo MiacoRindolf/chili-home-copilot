@@ -9,8 +9,9 @@ Usage (repo root, conda ``chili-env``)::
     conda run -n chili-env python scripts/backfill_regime.py --commit
 
 Dry-run (default): builds features, fits model, logs row counts — **no DB writes**
-(session rolled back on exit). Requires ``chili_regime_classifier_enabled`` only for
-``--commit`` path; dry-run exercises pipelines without persisting tags.
+(session rolled back on exit). The backfill script does **not** gate on
+``chili_regime_classifier_enabled`` (operators may rehearse on a clone); enable the flag
+for live weekly retrains and snapshot auto-tagging in the app.
 """
 from __future__ import annotations
 
