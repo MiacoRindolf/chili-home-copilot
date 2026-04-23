@@ -16,9 +16,11 @@ from app.models.trading import MarketSnapshot, RegimeSnapshot
 from app.services.trading.regime_classifier import (
     FEATURE_NAMES,
     FEATURE_SPEC_V1,
+    assert_regime_posterior_row_consistent,
     compute_model_version_hash,
     fit_regime_model,
     predict_regime,
+    regime_and_posterior_for_sequence,
     relabel_by_mean_return,
 )
 
@@ -94,6 +96,18 @@ def test_posterior_sums_to_one():
     x = df.iloc[-1].values.astype(float)
     _lab, post = predict_regime(model, x, lm)
     assert abs(sum(post.values()) - 1.0) < 1e-6
+
+
+def test_regime_label_posterior_consistency():
+    df = _synth_feature_frame(600, seed=11)
+    model, _ = fit_regime_model(df, n_iter=100, random_state=3, covariance_type="diag")
+    lm = relabel_by_mean_return(model)
+    X = df[list(FEATURE_NAMES)].values.astype(float)
+    regimes, posts = regime_and_posterior_for_sequence(model, X, lm)
+    assert len(regimes) == len(posts) == len(X)
+    for reg, post in zip(regimes, posts):
+        assert_regime_posterior_row_consistent(reg, post)
+        assert reg == max(post, key=post.get)
 
 
 def test_viterbi_decode_matches_sampled_states():
@@ -205,6 +219,16 @@ def test_backfill_regime_dry_run_is_write_free(db, monkeypatch):
         "app.services.trading.regime_classifier.build_regime_features",
         _fake_bf,
     )
+
+    def _fake_batch(_m, X, _lm):
+        d = {"bull": 0.2, "chop": 0.6, "bear": 0.2}
+        n = len(X)
+        return ["chop"] * n, [dict(d) for _ in range(n)]
+
+    monkeypatch.setattr(
+        "app.services.trading.regime_classifier.regime_and_posterior_for_sequence",
+        _fake_batch,
+    )
     mod = _load_backfill_module()
     _sm, _sv = fit_regime_model(
         _synth_feature_frame(220, seed=9),
@@ -214,11 +238,6 @@ def test_backfill_regime_dry_run_is_write_free(db, monkeypatch):
     )
 
     monkeypatch.setattr(mod, "fit_regime_model", lambda *a, **k: (_sm, _sv))
-    monkeypatch.setattr(
-        mod,
-        "predict_regime",
-        lambda *_a, **_k: ("chop", {"bull": 0.2, "chop": 0.6, "bear": 0.2}),
-    )
 
     before_rs = int(db.execute(text("SELECT COUNT(*) FROM regime_snapshot")).scalar_one())
     before_ms = int(db.execute(text("SELECT COUNT(*) FROM trading_snapshots")).scalar_one())
