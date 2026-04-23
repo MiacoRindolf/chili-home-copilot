@@ -99,6 +99,10 @@ def test_posterior_sums_to_one():
 
 
 def test_regime_label_posterior_consistency():
+    """Regression: regime string must match full-sequence marginal posteriors (not Viterbi + 1-frame gamma).
+
+    Collected by default ``pytest`` with other tests in this module (no skip/markers).
+    """
     df = _synth_feature_frame(600, seed=11)
     model, _ = fit_regime_model(df, n_iter=100, random_state=3, covariance_type="diag")
     lm = relabel_by_mean_return(model)

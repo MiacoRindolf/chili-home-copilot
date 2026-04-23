@@ -794,6 +794,8 @@ class Settings(BaseSettings):
     chili_cpcv_promotion_gate_enabled: bool = False
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
     chili_regime_classifier_enabled: bool = False
+    # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).
+    chili_regime_force_cold_fit: bool = False
     chili_regime_classifier_random_state: int = 42
     chili_regime_classifier_n_iter: int = 200
     chili_regime_classifier_weekly_cron_dow: str = "sun"

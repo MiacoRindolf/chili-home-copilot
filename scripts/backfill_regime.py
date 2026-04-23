@@ -79,9 +79,14 @@ def main() -> int:
         rs = int(getattr(settings, "chili_regime_classifier_random_state", 42) or 42)
         n_iter = int(getattr(settings, "chili_regime_classifier_n_iter", 200) or 200)
         warm = None
-        art = load_latest_regime_artifact()
-        if art:
-            warm = art.get("model")
+        if getattr(settings, "chili_regime_force_cold_fit", False):
+            logger.info(
+                "[backfill_regime] chili_regime_force_cold_fit=True — cold EM fit (no regime_models warm-start)"
+            )
+        else:
+            art = load_latest_regime_artifact()
+            if art:
+                warm = art.get("model")
 
         model, ver = fit_regime_model(
             feat_train,
