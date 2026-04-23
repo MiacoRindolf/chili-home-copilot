@@ -102,3 +102,17 @@ If **any one trading day** has **> 50%** of promotion attempts that **reached** 
 ## Production-shape dry-run (cheat sheet)
 
 Point **`DATABASE_URL`** at a Postgres database that mirrors production **shape** (same schema as app migrations through **163** and **164** — `scan_patterns` CPCV columns + `cpcv_shadow_eval_log` / `cpcv_shadow_funnel_v`). If those migrations are not applied yet, run the app once against that database (or apply migrations via your normal deploy path) so ORM queries and the shadow view exist. Use a **dedicated** database name ending in `_test` for any environment where pytest truncates; for a read-only rehearsal on a copy of prod data, use a **snapshot/clone** URL, never the live trading writer. From the repo root, with conda env **`chili-env`**: `conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run` (default is dry-run; omit `--commit`). Exit code **0** means the run finished and would-demote share is ≤20% of evaluated patterns; exit **2** means would-demote **>**20% — **do not** run with `--commit`, copy the full console summary (including scanner bucket breakdown) back to the operator channel, and wait for review before any commit or demotion.
+
+### Interpreting dry-run results
+
+Signals to capture from the dry-run output
+
+Exit code. 0 = demote share ≤ 20% (safe to consider --commit). 2 = > 20% (do not --commit without operator review).
+Summary block. promoted_or_live_total, evaluated, would_pass_cpcv_gate, would_demote_total. Compute demote rate = would_demote_total / evaluated when evaluated > 0.
+Per-scanner demote lines. would_demote_scanner[...] — the asymmetry diagnostic. Compare to the current promoted-pattern mix per scanner; disproportionate demotes on a single scanner indicate that scanner has been promoting on weak OOS evidence.
+
+Three readings
+
+< 10% demotes, breakdown roughly proportional to promoted mix. Gate is conservative-but-fair. Action: --commit in a maintenance window, then begin the 14-day shadow → momentum-only enforce calendar. Q1.T2 (regime classifier) can start the same session.
+10–20% demotes but skewed (e.g. 80% of demotes from day-trade or momentum scanners). This is the operator-perception-gap diagnostic firing — those scanners have been promoting on weak OOS evidence; the new gate correctly catches them. Action: still --commit, but extend shadow window to 21 days. Expect those scanners to need Q1.T4 (StrategyParameter adaptive thresholds) and Q1.T2 (regime tagging) before they can repromote at scale. This is not a failure; it is the gate doing its job.
+Exit code 2 (> 20% demotes). Stop. Do not --commit. Paste the per-scanner breakdown for operator review. Most likely interpretation: the existing gate has been substantially over-promoting and the new gate correctly tightens — but at > 20%, understand why before letting lifecycle state flow. Possible short-term mitigation: temporarily relax DSR threshold from 0.95 to 0.90 while building regime/feature infrastructure in Q1.T2 and Q1.T4, then ratchet back to 0.95 once those upgrades land. Any threshold change must be a separate PR with its own runbook entry; do not edit thresholds inline.
