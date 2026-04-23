@@ -9803,6 +9803,70 @@ def _migration_163_cpcv_promotion_gate_evidence(conn) -> None:
     conn.commit()
 
 
+def _migration_164_cpcv_shadow_eval_log(conn) -> None:
+    """Append-only log for CPCV shadow funnel (7d operator view on /brain)."""
+    tables = _tables(conn)
+    if "scan_patterns" not in tables:
+        conn.commit()
+        return
+    if "cpcv_shadow_eval_log" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE cpcv_shadow_eval_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    scan_pattern_id INTEGER NOT NULL REFERENCES scan_patterns(id) ON DELETE CASCADE,
+                    scanner TEXT NOT NULL,
+                    evaluated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    would_pass_cpcv BOOLEAN NOT NULL,
+                    passed_prior_gates BOOLEAN NOT NULL DEFAULT TRUE,
+                    deflated_sharpe DOUBLE PRECISION,
+                    pbo DOUBLE PRECISION,
+                    cpcv_n_paths INTEGER,
+                    pattern_name TEXT,
+                    skipped BOOLEAN NOT NULL DEFAULT FALSE
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cpcv_shadow_eval_log_evaluated "
+                "ON cpcv_shadow_eval_log (evaluated_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cpcv_shadow_eval_log_scanner_time "
+                "ON cpcv_shadow_eval_log (scanner, evaluated_at DESC)"
+            )
+        )
+        conn.commit()
+
+    conn.execute(text("DROP VIEW IF EXISTS cpcv_shadow_funnel_v"))
+    conn.execute(
+        text(
+            """
+            CREATE VIEW cpcv_shadow_funnel_v AS
+            SELECT
+                scanner,
+                COUNT(*)::bigint AS n_evaluated,
+                COUNT(*) FILTER (WHERE would_pass_cpcv)::bigint AS n_would_pass_cpcv,
+                COUNT(*) FILTER (WHERE passed_prior_gates)::bigint AS n_actually_passed_existing_gate,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY deflated_sharpe) AS median_dsr,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY pbo) AS median_pbo,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY cpcv_n_paths::double precision)
+                    AS median_cpcv_paths
+            FROM cpcv_shadow_eval_log
+            WHERE evaluated_at >= (CURRENT_TIMESTAMP - INTERVAL '7 days')
+              AND NOT skipped
+            GROUP BY scanner
+            """
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -9968,6 +10032,7 @@ MIGRATIONS = [
     ("161_trade_broker_order_id_unique", _migration_161_trade_broker_order_id_unique),
     ("162_project_domain_recovery", _migration_162_project_domain_recovery),
     ("163_cpcv_promotion_gate_evidence", _migration_163_cpcv_promotion_gate_evidence),
+    ("164_cpcv_shadow_eval_log", _migration_164_cpcv_shadow_eval_log),
 ]
 
 

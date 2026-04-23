@@ -2277,17 +2277,29 @@ def mine_patterns(
                     )
 
                 if sp_id and _detail:
-                    from .promotion_gate import cpcv_eval_to_scan_pattern_fields
+                    from .promotion_gate import (
+                        cpcv_eval_to_scan_pattern_fields,
+                        persist_cpcv_shadow_eval,
+                    )
                     from ...models.trading import ScanPattern as _ScanPatternCPCV
 
                     _cpcv_patch = cpcv_eval_to_scan_pattern_fields(
                         (_detail.get("cpcv_promotion_gate") or {})
                     )
-                    if _cpcv_patch:
-                        _sp_row = db.query(_ScanPatternCPCV).filter(_ScanPatternCPCV.id == sp_id).first()
-                        if _sp_row:
+                    _sp_row = db.query(_ScanPatternCPCV).filter(_ScanPatternCPCV.id == sp_id).first()
+                    if _sp_row:
+                        if _cpcv_patch:
                             for _ck, _cv in _cpcv_patch.items():
                                 setattr(_sp_row, _ck, _cv)
+                        try:
+                            persist_cpcv_shadow_eval(
+                                db, _sp_row, _detail.get("cpcv_promotion_gate") or {}
+                            )
+                        except Exception:
+                            logger.debug(
+                                "[mine_patterns] cpcv_shadow_log failed",
+                                exc_info=True,
+                            )
 
                 save_insight(db, user_id, pattern, confidence=min(0.9, wr),
                              wins=wins, losses=len(filtered) - wins,
@@ -7067,6 +7079,14 @@ def test_pattern_hypothesis(
         min_trades=30,
         n_hypotheses_tested=max(1, int(total or 1)),
     )
+    try:
+        from .promotion_gate import persist_cpcv_shadow_eval
+
+        persist_cpcv_shadow_eval(
+            db, pattern, _ensemble_detail.get("cpcv_promotion_gate") or {}
+        )
+    except Exception:
+        logger.debug("[learning] cpcv_shadow_log failed", exc_info=True)
     oos_validation_merged["ensemble_promotion_gate"] = _ensemble_detail
     if prom_stat == "promoted" and not _ensemble_ok:
         prom_stat = "rejected_oos"

@@ -634,6 +634,50 @@ def cpcv_eval_to_scan_pattern_fields(eval_payload: Mapping[str, Any]) -> dict[st
     return out
 
 
+def persist_cpcv_shadow_eval(db: Any, scan_pattern: Any, eval_payload: Mapping[str, Any]) -> None:
+    """Append one CPCV evaluation row for :obj:`cpcv_shadow_funnel_v` (7d brain panel).
+
+    No-op on empty payload or missing ``scan_pattern.id``. Swallows DB errors (e.g. migration
+    not applied) so promotion never fails on telemetry.
+    """
+    if not eval_payload:
+        return
+    sid = getattr(scan_pattern, "id", None)
+    if sid is None:
+        return
+    try:
+        from sqlalchemy import text
+
+        skipped = bool(eval_payload.get("skipped"))
+        would_pass = bool(eval_payload.get("promotion_gate_passed"))
+        scanner = infer_scanner_bucket(scan_pattern)
+        pname = (getattr(scan_pattern, "name", None) or "")[:500]
+        db.execute(
+            text(
+                """
+                INSERT INTO cpcv_shadow_eval_log (
+                    scan_pattern_id, scanner, would_pass_cpcv, passed_prior_gates,
+                    deflated_sharpe, pbo, cpcv_n_paths, pattern_name, skipped
+                ) VALUES (
+                    :sid, :scanner, :wp, TRUE, :dsr, :pbo, :paths, :pname, :skipped
+                )
+                """
+            ),
+            {
+                "sid": int(sid),
+                "scanner": scanner,
+                "wp": would_pass,
+                "dsr": eval_payload.get("deflated_sharpe"),
+                "pbo": eval_payload.get("pbo"),
+                "paths": eval_payload.get("cpcv_n_paths"),
+                "pname": pname or None,
+                "skipped": skipped,
+            },
+        )
+    except Exception as exc:
+        logger.debug("[cpcv_shadow] persist skipped: %s", exc)
+
+
 __all__ = [
     "CPCV_FEATURE_NAMES",
     "LGBM_CPCV_PARAMS",
@@ -646,4 +690,5 @@ __all__ = [
     "promotion_gate_passes",
     "normalize_ptr_row_features",
     "cpcv_eval_to_scan_pattern_fields",
+    "persist_cpcv_shadow_eval",
 ]

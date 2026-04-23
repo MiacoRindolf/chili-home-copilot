@@ -11,6 +11,7 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -274,6 +275,20 @@ def api_brain_trading_metrics(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
     stats = ts.get_brain_stats(db, ctx["user_id"])
     return JSONResponse({"ok": True, **stats})
+
+
+@router.get("/api/brain/cpcv_shadow_funnel")
+def api_brain_cpcv_shadow_funnel(db: Session = Depends(get_db)):
+    """7-day CPCV shadow funnel rollup per scanner (``cpcv_shadow_funnel_v``)."""
+    try:
+        result = db.execute(
+            text("SELECT * FROM cpcv_shadow_funnel_v ORDER BY scanner")
+        )
+        rows = [dict(row._mapping) for row in result]
+    except Exception as exc:
+        logger.debug("[brain] cpcv_shadow_funnel unavailable: %s", exc)
+        return JSONResponse({"ok": True, "rows": [], "view_available": False})
+    return JSONResponse({"ok": True, "rows": rows, "view_available": True})
 
 
 @router.get("/api/brain/trading/network-graph")

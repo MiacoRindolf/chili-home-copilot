@@ -154,6 +154,40 @@ function _updateBwCycleChart() {
   }
 }
 
+function loadCpcvShadowFunnel() {
+  var el = document.getElementById('bw-cpcv-shadow-body');
+  if (!el) return;
+  function fmtMetric(x) {
+    if (x == null || x === '') return '-';
+    var n = Number(x);
+    if (isNaN(n)) return '-';
+    return n.toFixed(4);
+  }
+  fetch('/api/brain/cpcv_shadow_funnel').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok || !d.rows || d.rows.length === 0) {
+      el.innerHTML = (d.view_available === false)
+        ? 'Shadow log not available yet (run app migrations through <code>164_cpcv_shadow_eval_log</code>).'
+        : 'No CPCV shadow evaluations in the last 7 days. Rows appear when promotion attempts run after migration 164.';
+      return;
+    }
+    var lines = ['<table style="width:100%;border-collapse:collapse;font-size:10px">'];
+    lines.push('<tr><th align="left">scanner</th><th>n</th><th>pass CPCV</th><th>prior gate</th><th>med DSR</th><th>med PBO</th><th>med paths</th></tr>');
+    d.rows.forEach(function(row) {
+      lines.push(
+        '<tr><td>' + escHtml(String(row.scanner || '')) + '</td><td>' + escHtml(String(row.n_evaluated || 0)) +
+        '</td><td>' + escHtml(String(row.n_would_pass_cpcv || 0)) + '</td><td>' +
+        escHtml(String(row.n_actually_passed_existing_gate || 0)) + '</td><td>' +
+        fmtMetric(row.median_dsr) + '</td><td>' + fmtMetric(row.median_pbo) + '</td><td>' +
+        fmtMetric(row.median_cpcv_paths) + '</td></tr>'
+      );
+    });
+    lines.push('</table>');
+    el.innerHTML = lines.join('');
+  }).catch(function() {
+    el.textContent = 'Could not load CPCV shadow funnel.';
+  });
+}
+
 function loadBrainWorkerStatus() {
   return fetch('/api/trading/brain/worker/status').then(function(r){return r.json();}).then(function(d) {
     if (d.ok) {
@@ -164,6 +198,7 @@ function loadBrainWorkerStatus() {
     if (typeof renderOperatorDeskFromBoard === 'function' && window._oppBoardLastGoodPayload) {
       renderOperatorDeskFromBoard(window._oppBoardLastGoodPayload);
     }
+    loadCpcvShadowFunnel();
   }).catch(function(){});
 }
 

@@ -12,9 +12,24 @@ from app.services.trading.promotion_gate import (
     bars_per_year,
     cpcv_vertical_max_bars,
     finalize_promotion_with_cpcv,
+    infer_scanner_bucket,
     normalize_mining_row_features,
     promotion_gate_passes,
 )
+
+
+class _Pat:
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_infer_scanner_bucket_heuristics():
+    assert infer_scanner_bucket(_Pat(name="Momentum x", timeframe="1d")) == "momentum"
+    assert infer_scanner_bucket(_Pat(name="BB squeeze", timeframe="1d", origin="mined")) == "breakout"
+    assert infer_scanner_bucket(_Pat(name="Other", timeframe="5m", origin="user")) == "day"
+    assert infer_scanner_bucket(_Pat(name="Other", timeframe="1d", origin="mined")) == "patterns"
+    assert infer_scanner_bucket(_Pat(name="Other", timeframe="1d", origin="user")) == "swing"
 
 
 def test_cpcv_feature_vector_order_and_lgbm_params_locked():
