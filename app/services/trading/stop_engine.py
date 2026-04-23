@@ -186,6 +186,9 @@ class StopDecisionResult:
     state: StopState
     old_stop: float | None
     new_stop: float | None
+    # Persisted into Trade.take_profit when _compute_initial_stop runs so the
+    # live monitor uses the same target the engine used for TARGET_HIT.
+    new_take_profit: float | None = None
     alert_event: str | None = None
     recommended_action: str = "hold"
     reason: str = ""
@@ -378,6 +381,7 @@ def evaluate_trade(
             trade.stop_model, crypto, brain,
         )
         result.new_stop = stop
+        result.new_take_profit = target
         result.alert_event = "STOP_TIGHTENED"
         result.reason = f"initial stop computed (strategy={brain.pattern_name or trade.stop_model}, regime={brain.regime})"
         result.inputs = {
@@ -620,6 +624,18 @@ def _apply_stop_to_trade(db: Session, trade, result: StopDecisionResult) -> None
     if result.watermark_updated and result.new_watermark is not None:
         trade.high_watermark = result.new_watermark
         changed = True
+    if result.new_take_profit is not None:
+        try:
+            nt = float(result.new_take_profit)
+        except (TypeError, ValueError):
+            nt = 0.0
+        if nt > 0:
+            rd = 8 if _is_crypto(getattr(trade, "ticker", "") or "") else 4
+            rounded = round(nt, rd)
+            cur = float(trade.take_profit or 0)
+            if trade.take_profit is None or round(cur, rd) != rounded:
+                trade.take_profit = rounded
+                changed = True
     if changed:
         db.add(trade)
 

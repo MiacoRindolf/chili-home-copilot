@@ -37,6 +37,21 @@ logger = logging.getLogger(__name__)
 
 AUTOTRADER_VERSION = "v1"
 
+
+def _autotrader_tick_note(
+    out: dict[str, Any],
+    *,
+    kind: str,
+    reason: str,
+    alert: BreakoutAlert | None = None,
+) -> None:
+    """Record the latest tick outcome for a single INFO summary line."""
+    out["tick_last_kind"] = kind
+    out["tick_last_reason"] = (reason or "")[:500]
+    if alert is not None:
+        out["tick_last_alert_id"] = int(alert.id)
+        out["tick_last_ticker"] = (alert.ticker or "").upper()
+
 # Namespace byte for advisory locks so we can't collide with other
 # subsystems that also use pg_advisory_lock on alert-shaped ints. The
 # lock key is (NAMESPACE << 32) | breakout_alert_id — fits a signed
@@ -304,7 +319,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     # the configured autotrader user is the intended behavior (single-tenant
     # deployment). Use ``OR`` so explicit-user alerts are still honored.
     ar = aliased(AutoTraderRun)
-    candidates = (
+    candidate_base = (
         db.query(BreakoutAlert)
         .outerjoin(ar, ar.breakout_alert_id == BreakoutAlert.id)
         .filter(
@@ -312,12 +327,22 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),
             ar.id.is_(None),
         )
-        .order_by(BreakoutAlert.id.asc())
-        .limit(5)
-        .all()
+    )
+    candidate_pool = int(candidate_base.count())
+    candidates = (
+        candidate_base.order_by(BreakoutAlert.id.asc()).limit(5).all()
     )
 
-    out: dict[str, Any] = {"processed": 0, "placed": 0, "scaled_in": 0, "skipped": 0}
+    out: dict[str, Any] = {
+        "processed": 0,
+        "placed": 0,
+        "scaled_in": 0,
+        "skipped": 0,
+        "tick_last_kind": None,
+        "tick_last_reason": None,
+        "tick_last_alert_id": None,
+        "tick_last_ticker": None,
+    }
 
     for alert in candidates:
         # P0.2 — acquire advisory lock before the TOCTOU window. Without
@@ -325,6 +350,12 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         # audit-row check and both call place_market_order. The lock is
         # held until we explicitly unlock or the session closes.
         if not _try_claim_alert(db, int(alert.id)):
+            _autotrader_tick_note(
+                out,
+                kind="unclaimed",
+                reason="advisory_lock_busy",
+                alert=alert,
+            )
             continue
 
         try:
@@ -332,6 +363,12 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             # outer candidate query and our claim).
             db.expire_all()
             if breakout_alert_already_processed(db, int(alert.id)):
+                _autotrader_tick_note(
+                    out,
+                    kind="skipped",
+                    reason="already_processed_race",
+                    alert=alert,
+                )
                 continue
 
             try:
@@ -339,9 +376,28 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             except Exception as e:
                 logger.exception("[autotrader] alert %s failed: %s", alert.id, e)
                 _audit(db, user_id=uid, alert=alert, decision="error", reason=str(e)[:500])
+                _autotrader_tick_note(
+                    out, kind="error", reason=str(e)[:500], alert=alert
+                )
             out["processed"] += 1
         finally:
             _release_alert_claim(db, int(alert.id))
+
+    logger.info(
+        "[autotrader] tick uid=%s candidate_pool=%d batch=%d processed=%d placed=%d "
+        "scaled_in=%d skipped=%d last_kind=%s last_reason=%s last_alert_id=%s last_ticker=%s",
+        uid,
+        candidate_pool,
+        len(candidates),
+        out["processed"],
+        out["placed"],
+        out["scaled_in"],
+        out["skipped"],
+        out.get("tick_last_kind") or "-",
+        out.get("tick_last_reason") or "-",
+        out.get("tick_last_alert_id") if out.get("tick_last_alert_id") is not None else "-",
+        out.get("tick_last_ticker") or "-",
+    )
 
     return {"ok": True, **out}
 
@@ -357,6 +413,7 @@ def _process_one_alert(
     if px is None:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason="no_quote")
         out["skipped"] += 1
+        _autotrader_tick_note(out, kind="skipped", reason="no_quote", alert=alert)
         return
 
     live = bool(runtime.get("live_orders_effective"))
@@ -396,6 +453,9 @@ def _process_one_alert(
         if int(existing_trade.scan_pattern_id or 0) == int(alert.scan_pattern_id or 0):
             _audit(db, user_id=uid, alert=alert, decision="skipped", reason="duplicate_pattern_already_open")
             out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="skipped", reason="duplicate_pattern_already_open", alert=alert
+            )
             return
         if scale_plan is None:
             reason = (
@@ -405,18 +465,25 @@ def _process_one_alert(
             )
             _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason)
             out["skipped"] += 1
+            _autotrader_tick_note(out, kind="skipped", reason=reason, alert=alert)
             return
 
     if not live and existing_paper is not None:
         if int(existing_paper.scan_pattern_id or 0) == int(alert.scan_pattern_id or 0):
             _audit(db, user_id=uid, alert=alert, decision="skipped", reason="duplicate_pattern_paper_open")
             out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="skipped", reason="duplicate_pattern_paper_open", alert=alert
+            )
             return
         if getattr(settings, "chili_autotrader_synergy_enabled", False):
             _audit(db, user_id=uid, alert=alert, decision="skipped", reason="paper_synergy_not_supported")
+            skip_reason = "paper_synergy_not_supported"
         else:
             _audit(db, user_id=uid, alert=alert, decision="skipped", reason="synergy_disabled_second_signal")
+            skip_reason = "synergy_disabled_second_signal"
         out["skipped"] += 1
+        _autotrader_tick_note(out, kind="skipped", reason=skip_reason, alert=alert)
         return
 
     for_new = scale_plan is None
@@ -433,14 +500,16 @@ def _process_one_alert(
             from .venue.venue_health import is_venue_degraded, venue_degraded_reason
             if is_venue_degraded(db, venue="robinhood"):
                 reason_detail = venue_degraded_reason(db, venue="robinhood") or "unknown"
+                rsn = f"venue_degraded:robinhood:{reason_detail}"[:255]
                 _audit(
                     db,
                     user_id=uid,
                     alert=alert,
                     decision="blocked",
-                    reason=f"venue_degraded:robinhood:{reason_detail}"[:255],
+                    reason=rsn,
                 )
                 out["skipped"] += 1
+                _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
                 return
         except Exception:
             # Defensive: venue-health module failure must never block the
@@ -465,14 +534,16 @@ def _process_one_alert(
             user_id=uid,
         )
         if not gate.get("allowed"):
+            rsn = f"autopilot_mutex:{gate.get('reason')}:owner={gate.get('owner') or 'none'}"
             _audit(
                 db,
                 user_id=uid,
                 alert=alert,
                 decision="blocked",
-                reason=f"autopilot_mutex:{gate.get('reason')}:owner={gate.get('owner') or 'none'}",
+                reason=rsn,
             )
             out["skipped"] += 1
+            _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
             return
 
     ok, reason, snap = passes_rule_gate(
@@ -481,6 +552,7 @@ def _process_one_alert(
     if not ok:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)
         out["skipped"] += 1
+        _autotrader_tick_note(out, kind="skipped", reason=str(reason), alert=alert)
         return
 
     llm_snap: dict[str, Any] | None = None
@@ -504,6 +576,7 @@ def _process_one_alert(
                 llm_snapshot=llm_snap,
             )
             out["skipped"] += 1
+            _autotrader_tick_note(out, kind="blocked", reason="llm_not_viable", alert=alert)
             return
 
     # P1.4 — runtime feature-parity assertion at entry. Fetches a fresh
@@ -524,16 +597,18 @@ def _process_one_alert(
             source="auto_trader_v1",
         )
         if _parity_blocked is not None:
+            rsn = _parity_blocked[:255]
             _audit(
                 db,
                 user_id=uid,
                 alert=alert,
                 decision="blocked",
-                reason=_parity_blocked[:255],
+                reason=rsn,
                 rule_snapshot=snap,
                 llm_snapshot=llm_snap,
             )
             out["skipped"] += 1
+            _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
             return
 
     if scale_plan is not None:
@@ -672,6 +747,9 @@ def _execute_broker_buy(
             llm_snapshot=llm_snap,
         )
         out["skipped"] += 1
+        _autotrader_tick_note(
+            out, kind="blocked", reason="kill_switch_activated_mid_flight", alert=alert
+        )
         return None
 
     ad = get_adapter("robinhood")
@@ -686,6 +764,7 @@ def _execute_broker_buy(
             llm_snapshot=llm_snap,
         )
         out["skipped"] += 1
+        _autotrader_tick_note(out, kind="blocked", reason="rh_adapter_off", alert=alert)
         return None
     res = ad.place_market_order(
         product_id=alert.ticker,
@@ -704,6 +783,12 @@ def _execute_broker_buy(
             llm_snapshot=llm_snap,
         )
         out["skipped"] += 1
+        _autotrader_tick_note(
+            out,
+            kind="blocked",
+            reason=f"broker:{res.get('error')}",
+            alert=alert,
+        )
         return None
     return res
 
@@ -761,6 +846,7 @@ def _execute_scale_in(
         trade_id=t.id,
     )
     out["scaled_in"] += 1
+    _autotrader_tick_note(out, kind="scaled_in", reason="ok", alert=alert)
 
 
 def _execute_new_entry(
@@ -776,6 +862,7 @@ def _execute_new_entry(
     if px <= 0:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason="bad_px", rule_snapshot=snap)
         out["skipped"] += 1
+        _autotrader_tick_note(out, kind="skipped", reason="bad_px", alert=alert)
         return
 
     # Phase 3: notional = min(dial-scaled equity slice, env fallback).
@@ -849,6 +936,9 @@ def _execute_new_entry(
                 rule_snapshot=snap,
             )
             out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="skipped", reason="symbol_too_expensive_for_notional", alert=alert
+            )
             return
     else:
         # qty >= 1 case: update notional_effective to the integer-share
@@ -943,6 +1033,7 @@ def _execute_new_entry(
             trade_id=tr.id,
         )
         out["placed"] += 1
+        _autotrader_tick_note(out, kind="placed", reason="live_robinhood", alert=alert)
         return
 
     # Paper
@@ -977,6 +1068,7 @@ def _execute_new_entry(
             llm_snapshot=llm_snap,
         )
         out["skipped"] += 1
+        _autotrader_tick_note(out, kind="blocked", reason="paper_open_failed", alert=alert)
         return
 
     _audit(
@@ -990,3 +1082,4 @@ def _execute_new_entry(
         trade_id=None,
     )
     out["placed"] += 1
+    _autotrader_tick_note(out, kind="placed", reason="paper", alert=alert)
