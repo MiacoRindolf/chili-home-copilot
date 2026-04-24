@@ -3197,6 +3197,14 @@ def _brain_graph_edge_type_for_seed(source_node_id: str, signal_type: str, polar
     return "dataflow"
 
 
+def _brain_node_state_activation_ts_column(conn) -> str:
+    """SQLAlchemy create_all uses last_activated_at; migration 086 DDL used staleness_at until 103 renames."""
+    cols = _columns(conn, "brain_node_states")
+    if "last_activated_at" in cols:
+        return "last_activated_at"
+    return "staleness_at"
+
+
 def _migration_086_trading_brain_neural_mesh(conn) -> None:
     """Trading Brain v2: Postgres-backed neural mesh (nodes, edges, activation queue, states)."""
     if "brain_graph_nodes" not in _tables(conn):
@@ -3501,14 +3509,15 @@ def _migration_086_trading_brain_neural_mesh(conn) -> None:
                 {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "etype": etype, "gv": gv, "gcfg": gcfg},
             )
 
+    ts_col = _brain_node_state_activation_ts_column(conn)
     for nid, _, _, _, _, _, _ in nodes_seed:
         conn.execute(
             text(
-                """
+                f"""
                 INSERT INTO brain_node_states (
-                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                    node_id, activation_score, confidence, local_state, {ts_col}, updated_at
                 )
-                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (:nid, 0.0, 0.5, '{{}}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT (node_id) DO NOTHING
                 """
             ),
@@ -3578,14 +3587,15 @@ def _migration_087_neural_mesh_seed_expand_v15(conn) -> None:
             },
         )
 
+    ts_col = _brain_node_state_activation_ts_column(conn)
     for nid, _, _, _, _, _, _ in nodes:
         conn.execute(
             text(
-                """
+                f"""
                 INSERT INTO brain_node_states (
-                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                    node_id, activation_score, confidence, local_state, {ts_col}, updated_at
                 )
-                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (:nid, 0.0, 0.5, '{{}}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT (node_id) DO NOTHING
                 """
             ),
@@ -3728,6 +3738,7 @@ def _migration_089_momentum_neural_mesh(conn) -> None:
             {"role": "momentum_evolution", "observer": True},
         ),
     ]
+    ts_col = _brain_node_state_activation_ts_column(conn)
     for nid, layer, ntype, label, is_obs, fth, cd, dmeta in nodes:
         conn.execute(
             text(
@@ -3759,11 +3770,11 @@ def _migration_089_momentum_neural_mesh(conn) -> None:
         )
         conn.execute(
             text(
-                """
+                f"""
                 INSERT INTO brain_node_states (
-                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                    node_id, activation_score, confidence, local_state, {ts_col}, updated_at
                 )
-                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (:nid, 0.0, 0.5, '{{}}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT (node_id) DO NOTHING
                 """
             ),
@@ -3895,6 +3906,7 @@ def _migration_092_speculative_momentum_neural_subgraph(conn) -> None:
             {"role": "speculative_signal", "engine": "speculative_momentum", "signal": "exhaustion"},
         ),
     ]
+    ts_col = _brain_node_state_activation_ts_column(conn)
     for nid, layer, ntype, label, is_obs, fth, cd, dmeta in nodes:
         conn.execute(
             text(
@@ -3926,11 +3938,11 @@ def _migration_092_speculative_momentum_neural_subgraph(conn) -> None:
         )
         conn.execute(
             text(
-                """
+                f"""
                 INSERT INTO brain_node_states (
-                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                    node_id, activation_score, confidence, local_state, {ts_col}, updated_at
                 )
-                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (:nid, 0.0, 0.5, '{{}}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT (node_id) DO NOTHING
                 """
             ),
@@ -4871,6 +4883,7 @@ def _migration_102_learning_cycle_neural_nodes(conn) -> None:
     ]
 
     all_nodes = cluster_nodes + step_nodes
+    ts_col = _brain_node_state_activation_ts_column(conn)
     for nid, layer, ntype, label, is_obs, fth, cd, dmeta in all_nodes:
         conn.execute(
             text(
@@ -4902,11 +4915,11 @@ def _migration_102_learning_cycle_neural_nodes(conn) -> None:
         )
         conn.execute(
             text(
-                """
+                f"""
                 INSERT INTO brain_node_states (
-                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                    node_id, activation_score, confidence, local_state, {ts_col}, updated_at
                 )
-                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (:nid, 0.0, 0.5, '{{}}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT (node_id) DO NOTHING
                 """
             ),
