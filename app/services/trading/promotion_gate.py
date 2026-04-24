@@ -1,4 +1,4 @@
-"""CPCV + DSR + PBO promotion gate (Q1.T1).
+"""CPCV + DSR + PBO promotion gate (Q1.T1, extended Q1.T1.6).
 
 **HR1 (kill switch):** When ``CHILI_CPCV_PROMOTION_GATE_ENABLED`` is True, no caller may
 treat a pattern as promotion-ready without running :func:`finalize_promotion_with_cpcv`
@@ -6,7 +6,11 @@ from :func:`check_promotion_ready` / :func:`check_promotion_ready_v2` in
 ``mining_validation`` (the only intended call sites). Do not add a parallel promotion
 path that bypasses that funnel.
 
-**Model / label contract (locked for Q2.T6 meta-classifier reuse):**
+**Q1.T1.6 — Evaluator routing:** ``scan_patterns.pattern_evidence_kind`` chooses
+**realized_pnl** (default: CPCV on realized trade returns, no classifier) vs **ml_signal**
+(legacy triple-barrier + LightGBM below).
+
+**Model / label contract (``ml_signal`` only; locked for Q2.T6 meta-classifier reuse):**
   * **Classifier:** ``lightgbm.LGBMClassifier`` with
     ``n_estimators=200``, ``num_leaves=31``, ``min_data_in_leaf=100``,
     ``learning_rate=0.02``, ``objective="multiclass"``, ``num_class=3``,
@@ -326,7 +330,8 @@ def _label_rows_barrier(
             rets.append(float(label.realized_return_pct))
             regimes.append(str(r.get("regime") or "unknown"))
 
-    if len(xs) < 30:
+    min_lb = int(getattr(settings, "chili_cpcv_min_trades", 15))
+    if len(xs) < min_lb:
         return None
     return np.vstack(xs), np.array(ys, dtype=int), np.array(rets, dtype=float), regimes
 
@@ -362,18 +367,303 @@ def _regime_median_sharpes_from_path(
     return out
 
 
+def _cpcv_autoscaled_purge_embargo(n: int, purge_frac: float, embargo_frac: float) -> tuple[int, int]:
+    pf = float(max(0.0, min(0.5, purge_frac)))
+    ef = float(max(0.0, min(0.5, embargo_frac)))
+    return max(2, int(pf * n)), max(1, int(ef * n))
+
+
+def _cpcv_build_feasible_cv_and_splits(
+    X: np.ndarray,
+    n_folds: int,
+    n_test_folds: int,
+    purged_size: int,
+    embargo_size: int,
+) -> tuple[CombinatorialPurgedCV | None, int, int, list | None]:
+    """Shrink purge/embargo until each train fold can absorb purge+embargo (López de Prado)."""
+    ps, es = purged_size, embargo_size
+    cap = max(200, X.shape[0] + 50)
+    for _ in range(cap):
+        try:
+            cv = CombinatorialPurgedCV(
+                n_folds=n_folds,
+                n_test_folds=n_test_folds,
+                purged_size=ps,
+                embargo_size=es,
+            )
+            splits = list(cv.split(X))
+        except Exception:
+            splits = []
+        if splits:
+            min_tr = min(np.asarray(tr, dtype=int).size for tr, _te in splits)
+            if min_tr > ps + es:
+                return cv, ps, es, splits
+        if ps > 2:
+            ps -= 1
+        elif es > 1:
+            es -= 1
+        else:
+            break
+    return None, purged_size, embargo_size, None
+
+
+def _bar_start_ts(row: Mapping[str, Any]) -> float:
+    b = row.get("bar_start_utc")
+    if isinstance(b, datetime):
+        return b.timestamp()
+    if hasattr(b, "timestamp"):
+        try:
+            return float(b.timestamp())  # type: ignore[no-any-return]
+        except Exception:
+            pass
+    return 0.0
+
+
+def filtered_rows_to_realized_series(
+    filtered: list[dict[str, Any]],
+) -> tuple[list[float], list[datetime] | None]:
+    """Time-order rows and extract realized returns + timestamps for T1.6 CPCV."""
+    ordered = sorted(filtered, key=_bar_start_ts)
+    rets: list[float] = []
+    ts: list[datetime] = []
+    for r in ordered:
+        b = r.get("bar_start_utc")
+        if not isinstance(b, datetime):
+            continue
+        rets.append(float(r.get("ret_5d") or 0))
+        ts.append(b)
+    if len(rets) < len(ordered):
+        return [float(r.get("ret_5d") or 0) for r in ordered], None
+    return rets, ts if len(ts) == len(rets) else None
+
+
+def trade_sequence_annualization(
+    n: int,
+    trade_timestamps: list[datetime] | None,
+    bar_interval_fallback: str,
+) -> float:
+    """Effective periods-per-year for trade-level returns (span from first to last trade)."""
+    if n >= 2 and trade_timestamps and len(trade_timestamps) == n:
+        ts_sorted = sorted(trade_timestamps)
+        t0, t1 = ts_sorted[0], ts_sorted[-1]
+        span_sec = float(t1.timestamp()) - float(t0.timestamp())
+        years = max(span_sec / (365.25 * 24 * 3600), 1.0 / 252.0)
+        eff = float(n) / years
+        return float(min(252.0, max(1.0, eff)))
+    return bars_per_year((bar_interval_fallback or "1d").strip() or "1d")
+
+
+def evaluate_pattern_cpcv_realized_pnl(
+    pattern_id: int | None,
+    trade_returns: list[float] | np.ndarray,
+    trade_timestamps: list[datetime] | None,
+    *,
+    n_hypotheses_tested: int,
+    n_target_paths: int | None = None,
+    purged_size: int | None = None,
+    embargo_size: int | None = None,
+    bar_interval_hint: str | None = None,
+    max_labeled_rows: int | None = None,
+) -> dict[str, Any]:
+    """CPCV on the pattern's realized trade PnL sequence (no classifier, no triple-barrier).
+
+    Each test fold's OOS metric is the annualized Sharpe of realized ``outcome_return_pct``
+    values in that fold. DSR and PBO use the same return stream with
+    :func:`app.services.trading.mining_validation.compute_deflated_sharpe_ratio` /
+    :func:`app.services.trading.mining_validation.compute_pbo` (two-column CSCV: realized vs
+    time-shifted copy).
+    """
+    pid_for_seed = int(pattern_id) if pattern_id is not None else 0
+    rets = np.asarray(trade_returns, dtype=float).ravel()
+    n = int(rets.size)
+    if n < 1:
+        return {
+            "skipped": True,
+            "reason": "empty_returns",
+            "cpcv_n_paths": 0,
+            "cpcv_median_sharpe": None,
+            "cpcv_median_sharpe_by_regime": None,
+            "deflated_sharpe": None,
+            "pbo": None,
+            "n_effective_trials": int(max(1, n_hypotheses_tested)),
+            "evaluator": "realized_pnl",
+        }
+
+    ts_list = trade_timestamps
+    if ts_list is not None and len(ts_list) != n:
+        ts_list = None
+
+    cap = int(max_labeled_rows) if max_labeled_rows is not None else int(
+        getattr(settings, "chili_cpcv_max_labeled_rows", 0) or 0
+    )
+    if cap > 0 and n > cap:
+        rng = np.random.default_rng(42 + pid_for_seed)
+        pick = rng.choice(n, size=cap, replace=False)
+        pick.sort()
+        rets = rets[pick]
+        if ts_list is not None:
+            ts_list = [ts_list[int(i)] for i in pick.tolist()]
+        n = int(cap)
+
+    min_tr = int(getattr(settings, "chili_cpcv_min_trades", 15))
+    if n < min_tr:
+        return {
+            "skipped": True,
+            "reason": "insufficient_trades",
+            "cpcv_n_paths": 0,
+            "cpcv_median_sharpe": None,
+            "cpcv_median_sharpe_by_regime": None,
+            "deflated_sharpe": None,
+            "pbo": None,
+            "n_effective_trials": int(max(1, n_hypotheses_tested)),
+            "evaluator": "realized_pnl",
+        }
+
+    periods_py = trade_sequence_annualization(n, ts_list, bar_interval_hint or "1d")
+
+    purge_frac = float(getattr(settings, "chili_cpcv_purge_frac", 0.05))
+    embargo_frac = float(getattr(settings, "chili_cpcv_embargo_frac", 0.02))
+    target_cap = int(getattr(settings, "chili_cpcv_target_paths_max", 100))
+    if purged_size is not None and embargo_size is not None:
+        ps, es = max(2, int(purged_size)), max(1, int(embargo_size))
+    else:
+        ps, es = _cpcv_autoscaled_purge_embargo(n, purge_frac, embargo_frac)
+
+    if n_target_paths is None:
+        n_paths_budget = min(target_cap, max(10, n // 5))
+    else:
+        n_paths_budget = int(n_target_paths)
+
+    X = np.arange(n, dtype=float).reshape(-1, 1)
+    try:
+        t_train = min(252, max(min_tr, n // 2))
+        n_folds, n_test_folds = optimal_folds_number(
+            n_observations=n,
+            target_train_size=t_train,
+            target_n_test_paths=min(n_paths_budget, max(2, n // 15)),
+        )
+        n_folds = max(5, min(n_folds, max(5, n // 10)))
+        n_test_folds = max(2, min(n_test_folds, n_folds - 2))
+        cv, ps, es, splits = _cpcv_build_feasible_cv_and_splits(
+            X, n_folds, n_test_folds, ps, es
+        )
+        if cv is None or not splits:
+            return {
+                "skipped": True,
+                "reason": "cv_infeasible_for_sample_size",
+                "cpcv_n_paths": 0,
+                "cpcv_median_sharpe": None,
+                "cpcv_median_sharpe_by_regime": None,
+                "deflated_sharpe": None,
+                "pbo": None,
+                "n_effective_trials": int(max(1, n_hypotheses_tested)),
+                "evaluator": "realized_pnl",
+            }
+    except Exception as exc:
+        return {
+            "skipped": True,
+            "reason": f"cv_config:{exc}",
+            "cpcv_n_paths": 0,
+            "cpcv_median_sharpe": None,
+            "cpcv_median_sharpe_by_regime": None,
+            "deflated_sharpe": None,
+            "pbo": None,
+            "n_effective_trials": int(max(1, n_hypotheses_tested)),
+            "evaluator": "realized_pnl",
+        }
+
+    sharpes: list[float] = []
+    min_train_floor = max(10, min_tr)
+    min_test_floor = max(3, min(5, n // 25))
+
+    try:
+        for train_idx, test_idx in splits:
+            te = _flatten_test_indices(test_idx)
+            tr = np.asarray(train_idx, dtype=int)
+            if tr.size < min_train_floor or te.size < min_test_floor:
+                continue
+            oos = rets[te]
+            sharpes.append(_sharpe_annualized(oos, periods_py))
+    except Exception as exc:
+        return {
+            "skipped": True,
+            "reason": f"cv_loop:{exc}",
+            "cpcv_n_paths": 0,
+            "cpcv_median_sharpe": None,
+            "cpcv_median_sharpe_by_regime": None,
+            "deflated_sharpe": None,
+            "pbo": None,
+            "n_effective_trials": int(max(1, n_hypotheses_tested)),
+            "evaluator": "realized_pnl",
+        }
+
+    if len(sharpes) < 1:
+        return {
+            "skipped": True,
+            "reason": "no_cv_paths",
+            "cpcv_n_paths": 0,
+            "cpcv_median_sharpe": None,
+            "cpcv_median_sharpe_by_regime": None,
+            "deflated_sharpe": None,
+            "pbo": None,
+            "n_effective_trials": int(max(1, n_hypotheses_tested)),
+            "evaluator": "realized_pnl",
+        }
+
+    from .mining_validation import compute_deflated_sharpe_ratio, compute_pbo
+
+    n_eff = int(max(1, n_hypotheses_tested))
+    dsr_pack = compute_deflated_sharpe_ratio(
+        rets.tolist(),
+        n_trials=n_eff,
+        annualization=periods_py,
+    )
+    dsr_val = dsr_pack.get("dsr")
+
+    pbo_val = None
+    r_alt = np.roll(rets, max(1, n // 4))
+    mat = np.column_stack([rets, r_alt])
+    for npart in (8, 6, 4):
+        if n < 2 * npart:
+            continue
+        try:
+            pbo_pack = compute_pbo(
+                mat, n_partitions=npart, n_combos=100, rng_seed=42 + pid_for_seed
+            )
+            pbo_val = pbo_pack.get("pbo")
+            if pbo_val is not None:
+                break
+        except Exception:
+            continue
+
+    return {
+        "skipped": False,
+        "cpcv_n_paths": len(sharpes),
+        "cpcv_median_sharpe": float(np.median(sharpes)),
+        "cpcv_median_sharpe_by_regime": None,
+        "deflated_sharpe": dsr_val,
+        "pbo": pbo_val,
+        "n_effective_trials": n_eff,
+        "deflated_sharpe_detail": dsr_pack,
+        "n_labeled_samples": int(n),
+        "n_trades": int(n),
+        "evaluator": "realized_pnl",
+    }
+
+
 def evaluate_pattern_cpcv(
     pattern_id: int | None,
     filtered: list[dict[str, Any]],
     *,
     n_hypotheses_tested: int,
-    n_target_paths: int = 100,
-    purged_size: int = 20,
-    embargo_size: int = 5,
+    n_target_paths: int | None = None,
+    purged_size: int | None = None,
+    embargo_size: int | None = None,
     bar_interval_hint: str | None = None,
+    max_labeled_rows: int | None = None,
 ) -> dict[str, Any]:
     """Run Combinatorial Purged CV with LightGBM; compute DSR, PBO, path Sharpes."""
-    del pattern_id  # reserved for logging / future DB correlation
+    pid_for_seed = int(pattern_id) if pattern_id is not None else 0
 
     base_iv = (
         bar_interval_hint
@@ -398,7 +688,27 @@ def evaluate_pattern_cpcv(
 
     X, y_lgb, barrier_rets, regimes = prep
     n = X.shape[0]
-    if n < 30:
+
+    cap = int(max_labeled_rows) if max_labeled_rows is not None else int(
+        getattr(settings, "chili_cpcv_max_labeled_rows", 0) or 0
+    )
+    if cap > 0 and n > cap:
+        logger.info(
+            "[cpcv_promotion_gate] subsampling labeled rows %s -> %s for CPCV (cap)",
+            n,
+            cap,
+        )
+        rng = np.random.default_rng(42 + pid_for_seed)
+        pick = rng.choice(n, size=cap, replace=False)
+        pick.sort()
+        X = X[pick]
+        y_lgb = y_lgb[pick]
+        barrier_rets = barrier_rets[pick]
+        regimes = [regimes[int(i)] for i in pick.tolist()]
+        n = int(cap)
+
+    min_tr = int(getattr(settings, "chili_cpcv_min_trades", 15))
+    if n < min_tr:
         return {
             "skipped": True,
             "reason": "insufficient_rows_after_barrier",
@@ -410,21 +720,50 @@ def evaluate_pattern_cpcv(
             "n_effective_trials": int(max(1, n_hypotheses_tested)),
         }
 
+    purge_frac = float(getattr(settings, "chili_cpcv_purge_frac", 0.05))
+    embargo_frac = float(getattr(settings, "chili_cpcv_embargo_frac", 0.02))
+    target_cap = int(getattr(settings, "chili_cpcv_target_paths_max", 100))
+    if purged_size is not None and embargo_size is not None:
+        ps, es = max(2, int(purged_size)), max(1, int(embargo_size))
+    else:
+        ps, es = _cpcv_autoscaled_purge_embargo(n, purge_frac, embargo_frac)
+
+    if n_target_paths is None:
+        n_paths_budget = min(target_cap, max(10, n // 5))
+    else:
+        n_paths_budget = int(n_target_paths)
+
     try:
-        t_train = min(252, max(30, n // 2))
+        t_train = min(252, max(min_tr, n // 2))
         n_folds, n_test_folds = optimal_folds_number(
             n_observations=n,
             target_train_size=t_train,
-            target_n_test_paths=min(n_target_paths, max(2, n // 15)),
+            target_n_test_paths=min(n_paths_budget, max(2, n // 15)),
         )
         n_folds = max(5, min(n_folds, max(5, n // 10)))
         n_test_folds = max(2, min(n_test_folds, n_folds - 2))
-        cv = CombinatorialPurgedCV(
-            n_folds=n_folds,
-            n_test_folds=n_test_folds,
-            purged_size=purged_size,
-            embargo_size=embargo_size,
+        cv, ps, es, splits = _cpcv_build_feasible_cv_and_splits(
+            X, n_folds, n_test_folds, ps, es
         )
+        if cv is None or not splits:
+            logger.info(
+                "[cpcv_promotion_gate] CV infeasible: n=%s folds=%s/%s purge=%s embargo=%s",
+                n,
+                n_folds,
+                n_test_folds,
+                ps,
+                es,
+            )
+            return {
+                "skipped": True,
+                "reason": "cv_infeasible_for_sample_size",
+                "cpcv_n_paths": 0,
+                "cpcv_median_sharpe": None,
+                "cpcv_median_sharpe_by_regime": None,
+                "deflated_sharpe": None,
+                "pbo": None,
+                "n_effective_trials": int(max(1, n_hypotheses_tested)),
+            }
     except Exception as exc:
         logger.info("[cpcv_promotion_gate] CV config failed: %s", exc)
         return {
@@ -442,12 +781,14 @@ def evaluate_pattern_cpcv(
     path_regime_medians: dict[str, list[float]] = {}
     clf_template = _lgbm_classifier()
 
+    min_train_floor = max(10, min_tr)
+    min_test_floor = max(3, min(5, n // 25))
+
     try:
-        splits = list(cv.split(X))
         for train_idx, test_idx in splits:
             te = _flatten_test_indices(test_idx)
             tr = np.asarray(train_idx, dtype=int)
-            if tr.size < 30 or te.size < 5:
+            if tr.size < min_train_floor or te.size < min_test_floor:
                 continue
             clf = _lgbm_classifier()
             clf.fit(X[tr], y_lgb[tr])
@@ -527,43 +868,54 @@ def evaluate_pattern_cpcv(
         "deflated_sharpe_detail": dsr_pack,
         "n_labeled_samples": int(n),
         "n_trades": int(n),
+        "evaluator": "ml_signal",
     }
 
 
 def promotion_gate_passes(metrics: Mapping[str, Any]) -> tuple[bool, list[str]]:
-    """Return (ok, reasons) against Q1.T1 thresholds."""
-    reasons: list[str] = []
+    """Return (ok, reasons) against Q1.T1 thresholds.
+
+    When ``ok`` is True and ``n_trades`` is below full-confidence minimum (30 by default),
+    reasons include ``provisional_sample_size`` (wider CIs; see runbook).
+    """
+    failures: list[str] = []
     if metrics.get("skipped"):
-        reasons.append(str(metrics.get("reason") or "skipped"))
-        return False, reasons
+        failures.append(str(metrics.get("reason") or "skipped"))
+        return False, failures
 
     n_tr = int(metrics.get("n_trades") or metrics.get("n_labeled_samples") or 0)
-    if n_tr < 30:
-        reasons.append("n_trades_lt_30")
+    min_tr = int(getattr(settings, "chili_cpcv_min_trades", 15))
+    full_conf = int(getattr(settings, "chili_cpcv_full_confidence_min_trades", 30))
+    if n_tr < min_tr:
+        failures.append("n_trades_below_min")
 
     dsr = metrics.get("deflated_sharpe")
     if dsr is None:
-        reasons.append("dsr_missing")
+        failures.append("dsr_missing")
     elif float(dsr) < 0.95:
-        reasons.append("dsr_below_0_95")
+        failures.append("dsr_below_0_95")
 
     pbo = metrics.get("pbo")
     if pbo is None:
-        reasons.append("pbo_missing")
+        failures.append("pbo_missing")
     elif float(pbo) > 0.2:
-        reasons.append("pbo_above_0_2")
+        failures.append("pbo_above_0_2")
 
     n_paths = int(metrics.get("cpcv_n_paths") or 0)
     if n_paths < 50:
-        reasons.append("cpcv_n_paths_lt_50")
+        failures.append("cpcv_n_paths_lt_50")
 
     med_sh = metrics.get("cpcv_median_sharpe")
     if med_sh is None:
-        reasons.append("median_sharpe_missing")
+        failures.append("median_sharpe_missing")
     elif float(med_sh) < 0.5:
-        reasons.append("median_sharpe_below_0_5")
+        failures.append("median_sharpe_below_0_5")
 
-    return (len(reasons) == 0), reasons
+    ok = len(failures) == 0
+    reasons = list(failures)
+    if ok and n_tr < full_conf:
+        reasons.append("provisional_sample_size")
+    return ok, reasons
 
 
 def finalize_promotion_with_cpcv(
@@ -571,18 +923,49 @@ def finalize_promotion_with_cpcv(
     filtered: list[dict[str, Any]],
     *,
     n_hypotheses_tested: int,
+    scan_pattern: Any | None = None,
 ) -> dict[str, Any]:
     """Run CPCV evaluation and merge into *detail*; may set ``detail["blocked"]``.
 
     Call only from ``check_promotion_ready`` / ``check_promotion_ready_v2`` after
     prior gates pass (immediately before setting ready=True).
+
+    ``scan_pattern.pattern_evidence_kind`` selects **realized_pnl** (trade-return CPCV,
+    default) vs **ml_signal** (triple-barrier + LightGBM). When *scan_pattern* is
+    omitted, **realized_pnl** is used (mining rows without a persisted pattern row).
     """
     enforce = bool(getattr(settings, "chili_cpcv_promotion_gate_enabled", False))
-    eval_payload = evaluate_pattern_cpcv(
-        None,
-        filtered,
-        n_hypotheses_tested=n_hypotheses_tested,
-    )
+    kind = "realized_pnl"
+    if scan_pattern is not None:
+        raw_k = getattr(scan_pattern, "pattern_evidence_kind", None) or "realized_pnl"
+        kind = str(raw_k).strip().lower()
+    if kind not in ("realized_pnl", "ml_signal"):
+        kind = "realized_pnl"
+
+    cap = int(getattr(settings, "chili_cpcv_max_labeled_rows", 0) or 0)
+    cap_kw: dict[str, Any] = {}
+    if cap > 0:
+        cap_kw["max_labeled_rows"] = cap
+
+    if kind == "ml_signal":
+        eval_payload = evaluate_pattern_cpcv(
+            getattr(scan_pattern, "id", None),
+            filtered,
+            n_hypotheses_tested=n_hypotheses_tested,
+            **cap_kw,
+        )
+    else:
+        rets, ts = filtered_rows_to_realized_series(filtered)
+        eval_payload = evaluate_pattern_cpcv_realized_pnl(
+            getattr(scan_pattern, "id", None) if scan_pattern else None,
+            rets,
+            ts,
+            n_hypotheses_tested=n_hypotheses_tested,
+            bar_interval_hint=(
+                getattr(scan_pattern, "timeframe", None) if scan_pattern else None
+            ),
+            **cap_kw,
+        )
     ok_metrics, reasons = promotion_gate_passes(eval_payload)
     eval_payload["promotion_gate_passed"] = ok_metrics
     eval_payload["promotion_gate_reasons"] = reasons
@@ -631,6 +1014,11 @@ def cpcv_eval_to_scan_pattern_fields(eval_payload: Mapping[str, Any]) -> dict[st
     out["n_effective_trials"] = eval_payload.get("n_effective_trials")
     out["promotion_gate_passed"] = bool(eval_payload.get("promotion_gate_passed"))
     out["promotion_gate_reasons"] = eval_payload.get("promotion_gate_reasons") or []
+    # Invariant (pairs with migration 166): no gate outcome without CPCV path evidence.
+    if "promotion_gate_passed" in out and out.get("cpcv_n_paths") is None:
+        raise AssertionError(
+            "promotion_gate_passed without cpcv_n_paths — CPCV evidence required for a gate outcome"
+        )
     return out
 
 
@@ -686,6 +1074,9 @@ __all__ = [
     "cpcv_vertical_max_bars",
     "infer_scanner_bucket",
     "evaluate_pattern_cpcv",
+    "evaluate_pattern_cpcv_realized_pnl",
+    "filtered_rows_to_realized_series",
+    "trade_sequence_annualization",
     "finalize_promotion_with_cpcv",
     "promotion_gate_passes",
     "normalize_ptr_row_features",

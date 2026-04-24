@@ -9912,6 +9912,261 @@ def _migration_165_regime_snapshot_and_tagging(conn) -> None:
     conn.commit()
 
 
+def _migration_166_scan_patterns_promotion_gate_null_default(conn) -> None:
+    """CPCV: promotion_gate_passed default NULL; unevaluated rows not FALSE; gate implies CPCV.
+
+    Migration 163 added ``promotion_gate_passed BOOLEAN DEFAULT FALSE``, so rows without CPCV
+    evidence looked like gate failures. This clears that ambiguity.
+
+    Rollback (manual):
+
+        ALTER TABLE scan_patterns DROP CONSTRAINT IF EXISTS chk_scan_patterns_promotion_gate_requires_cpcv;
+        ALTER TABLE scan_patterns ALTER COLUMN promotion_gate_passed SET DEFAULT FALSE;
+    """
+    tables = _tables(conn)
+    if "scan_patterns" not in tables:
+        conn.commit()
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "promotion_gate_passed" not in cols:
+        conn.commit()
+        return
+
+    conn.execute(
+        text(
+            """
+            UPDATE scan_patterns
+            SET promotion_gate_passed = NULL,
+                promotion_gate_reasons = NULL
+            WHERE cpcv_n_paths IS NULL
+              AND (
+                promotion_gate_passed IS NOT NULL
+                OR promotion_gate_reasons IS NOT NULL
+              )
+            """
+        )
+    )
+    conn.commit()
+
+    conn.execute(
+        text(
+            "ALTER TABLE scan_patterns ALTER COLUMN promotion_gate_passed DROP DEFAULT"
+        )
+    )
+    conn.commit()
+
+    row = conn.execute(
+        text(
+            """
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            WHERE t.relname = 'scan_patterns'
+              AND c.conname = 'chk_scan_patterns_promotion_gate_requires_cpcv'
+            """
+        )
+    ).fetchone()
+    if not row:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE scan_patterns ADD CONSTRAINT chk_scan_patterns_promotion_gate_requires_cpcv
+                CHECK (promotion_gate_passed IS NULL OR cpcv_n_paths IS NOT NULL) NOT VALID
+                """
+            )
+        )
+        conn.commit()
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns VALIDATE CONSTRAINT "
+                "chk_scan_patterns_promotion_gate_requires_cpcv"
+            )
+        )
+    conn.commit()
+
+
+def _migration_167_unified_signals_table(conn) -> None:
+    """Q1.T3 phase 1: unified per-scan signal rows (additive; consumers in later PRs).
+
+    Rollback (manual)::
+
+        DROP TABLE IF EXISTS unified_signals;
+    """
+    if "unified_signals" in _tables(conn):
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            """
+            CREATE TABLE unified_signals (
+                signal_id TEXT PRIMARY KEY,
+                scanner TEXT NOT NULL,
+                strategy_family TEXT NOT NULL,
+                pattern_id TEXT NULL,
+                symbol TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                side TEXT NOT NULL,
+                horizon TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                entry_price NUMERIC(28, 10) NOT NULL,
+                stop_price NUMERIC(28, 10) NOT NULL,
+                take_profit_price NUMERIC(28, 10) NULL,
+                atr NUMERIC(28, 10) NOT NULL,
+                expected_return NUMERIC(28, 10) NOT NULL,
+                expected_vol NUMERIC(28, 10) NOT NULL,
+                confidence DOUBLE PRECISION NOT NULL,
+                deflated_sharpe DOUBLE PRECISION NULL,
+                pbo DOUBLE PRECISION NULL,
+                regime TEXT NULL,
+                regime_posterior JSONB NULL,
+                llm_rationale TEXT NULL,
+                features JSONB NOT NULL DEFAULT '{}'::jsonb,
+                rule_fires JSONB NOT NULL DEFAULT '[]'::jsonb,
+                gate_status TEXT NOT NULL,
+                gate_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+                CONSTRAINT chk_unified_signals_gate_status CHECK (
+                    gate_status IN ('proposed', 'gated_ok', 'gated_reject')
+                ),
+                CONSTRAINT chk_unified_signals_side CHECK (
+                    side IN ('long', 'short', 'flat')
+                )
+            )
+            """
+        )
+    )
+    conn.commit()
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_unified_signals_symbol_created_at "
+            "ON unified_signals (symbol, created_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_unified_signals_scanner_horizon_gate "
+            "ON unified_signals (scanner, horizon, gate_status)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_unified_signals_strategy_family_created_at "
+            "ON unified_signals (strategy_family, created_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_unified_signals_pattern_id_created_at "
+            "ON unified_signals (pattern_id, created_at)"
+        )
+    )
+    conn.commit()
+
+
+def _migration_168_restore_pattern_1047_cpcv_miscalibration(conn) -> None:
+    """Restore pattern 1047 after incorrect CPCV demotion (classifier vs realized PnL).
+
+    Pre–Q1.T1.6 CPCV used a LightGBM classifier on triple-barrier labels, which for
+    rule-based patterns can disagree sharply with realized ``trading_pattern_trades``
+    outcomes (e.g. 158 trades, positive mean return vs negative median path Sharpe).
+    This migration resets lifecycle to **promoted** and clears CPCV gate columns so
+    T1.6 realized-PnL CPCV can repopulate evidence.
+
+    Rollback (manual): set ``lifecycle_stage`` back to ``challenged`` and/or rerun
+    historical backfill if operators choose to re-apply the old metrics.
+
+    See: Q1.T1.6 ``evaluate_pattern_cpcv_realized_pnl`` and runbook evaluator routing.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    row = conn.execute(text("SELECT 1 FROM scan_patterns WHERE id = 1047")).fetchone()
+    if not row:
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            """
+            UPDATE scan_patterns
+            SET lifecycle_stage = 'promoted',
+                promotion_gate_passed = NULL,
+                promotion_gate_reasons = NULL,
+                cpcv_n_paths = NULL,
+                cpcv_median_sharpe = NULL,
+                cpcv_median_sharpe_by_regime = NULL,
+                deflated_sharpe = NULL,
+                pbo = NULL,
+                n_effective_trials = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1047
+            """
+        )
+    )
+    conn.commit()
+
+
+def _migration_169_scan_patterns_pattern_evidence_kind(conn) -> None:
+    """Q1.T1.6: route CPCV — ``realized_pnl`` (trade-return sequence) vs ``ml_signal`` (LightGBM).
+
+    Default ``realized_pnl`` for rule-based patterns; ``ml_signal`` reserved for future
+    ML-signal patterns using the legacy triple-barrier + classifier evaluator.
+
+    Rollback (manual)::
+
+        ALTER TABLE scan_patterns DROP CONSTRAINT IF EXISTS chk_scan_patterns_pattern_evidence_kind;
+        ALTER TABLE scan_patterns DROP COLUMN IF EXISTS pattern_evidence_kind;
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "pattern_evidence_kind" not in cols:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE scan_patterns ADD COLUMN pattern_evidence_kind TEXT NOT NULL DEFAULT 'realized_pnl'
+                """
+            )
+        )
+        conn.commit()
+    row = conn.execute(
+        text(
+            """
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            WHERE t.relname = 'scan_patterns'
+              AND c.conname = 'chk_scan_patterns_pattern_evidence_kind'
+            """
+        )
+    ).fetchone()
+    if not row:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE scan_patterns ADD CONSTRAINT chk_scan_patterns_pattern_evidence_kind
+                CHECK (pattern_evidence_kind IN ('realized_pnl', 'ml_signal')) NOT VALID
+                """
+            )
+        )
+        conn.commit()
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns VALIDATE CONSTRAINT "
+                "chk_scan_patterns_pattern_evidence_kind"
+            )
+        )
+    conn.commit()
+    conn.execute(
+        text(
+            """
+            UPDATE scan_patterns
+            SET pattern_evidence_kind = 'realized_pnl'
+            WHERE lifecycle_stage IN ('promoted', 'live')
+            """
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -10079,6 +10334,16 @@ MIGRATIONS = [
     ("163_cpcv_promotion_gate_evidence", _migration_163_cpcv_promotion_gate_evidence),
     ("164_cpcv_shadow_eval_log", _migration_164_cpcv_shadow_eval_log),
     ("165_regime_snapshot_and_tagging", _migration_165_regime_snapshot_and_tagging),
+    (
+        "166_scan_patterns_promotion_gate_null_default",
+        _migration_166_scan_patterns_promotion_gate_null_default,
+    ),
+    ("167_unified_signals_table", _migration_167_unified_signals_table),
+    (
+        "168_restore_pattern_1047_cpcv_miscalibration",
+        _migration_168_restore_pattern_1047_cpcv_miscalibration,
+    ),
+    ("169_scan_patterns_pattern_evidence_kind", _migration_169_scan_patterns_pattern_evidence_kind),
 ]
 
 

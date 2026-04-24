@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: chili
+          POSTGRES_PASSWORD: chili
+          POSTGRES_DB: chili_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chili -d chili_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://chili:chili@localhost:5432/chili_test
+      DATABASE_URL: postgresql://chili:chili@localhost:5432/chili_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Wait for Postgres
+        shell: bash
+        run: |
+          for _ in $(seq 1 30); do
+            if python -c "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',5432)); s.close()" 2>/dev/null; then
+              echo "Postgres accepting connections on 5432"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres not reachable on 5432"
+          exit 1
+
+      - name: Run migrations
+        run: python -c "from app.db import engine; from app.migrations import run_migrations; run_migrations(engine)"
+
+      - name: Verify migration IDs
+        run: bash scripts/verify-migration-ids.sh
+
+      - name: Pytest
+        run: pytest tests/ -v --tb=short -rs

@@ -756,6 +756,26 @@ def generate_strategy_proposals(
         db.add(proposal)
         db.flush()
 
+        try:
+            from .contracts.signal_emit import emit_signal_for_strategy_proposal
+
+            emit_signal_for_strategy_proposal(
+                db,
+                pick=pick,
+                proposal=proposal,
+                trade_class=trade_class,
+                timeframe_label=timeframe,
+                scanner=pick.get("scanner") or "top_pick",
+                strategy_family=(pat.name if pat else "pattern_scan"),
+                commit=False,
+            )
+        except Exception as _use:
+            logger.debug(
+                "[unified_signal] proposal emit skipped: %s",
+                _use,
+                exc_info=True,
+            )
+
         sms_msg = format_strategy_proposed(
             ticker, price, stop, target, rr_ratio,
             projected_profit_pct, confidence,
@@ -976,6 +996,27 @@ def create_proposal_from_pick(
         db.rollback()
         logger.exception("create_proposal_from_pick commit failed")
         return None, f"Database error: {e!s}"
+
+    try:
+        from .contracts.signal_emit import emit_signal_for_strategy_proposal
+
+        _sf = pick.get("pattern_name") or getattr(_pat_gate, "name", None) or "pattern_scan"
+        emit_signal_for_strategy_proposal(
+            db,
+            pick=pick,
+            proposal=proposal,
+            trade_class=trade_class,
+            timeframe_label=timeframe,
+            scanner=pick.get("scanner") or "top_pick",
+            strategy_family=str(_sf),
+            commit=True,
+        )
+    except Exception as _use:
+        logger.debug(
+            "[unified_signal] create_proposal_from_pick emit skipped: %s",
+            _use,
+            exc_info=True,
+        )
 
     logger.info(f"[alerts] Created proposal from pick: {ticker} @ ${price}")
     return _proposal_to_dict(proposal), None

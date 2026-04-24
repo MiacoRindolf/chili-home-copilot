@@ -14,11 +14,18 @@ from sqlalchemy import text
 from app.config import settings
 from app.models.trading import PatternTradeRow, ScanPattern
 from app.services.trading.mining_validation import compute_deflated_sharpe_ratio, compute_pbo
+from skfolio.model_selection import optimal_folds_number
+
 from app.services.trading.promotion_gate import (
     CPCV_FEATURE_NAMES,
     LGBM_CPCV_PARAMS,
+    _cpcv_autoscaled_purge_embargo,
+    _cpcv_build_feasible_cv_and_splits,
+    _sharpe_annualized,
     bars_per_year,
     cpcv_vertical_max_bars,
+    evaluate_pattern_cpcv,
+    evaluate_pattern_cpcv_realized_pnl,
     finalize_promotion_with_cpcv,
     infer_scanner_bucket,
     normalize_mining_row_features,
@@ -97,6 +104,96 @@ def test_promotion_gate_passes_thresholds():
     assert "cpcv_n_paths_lt_50" in reasons2
 
 
+def test_provisional_promotion_tier_15_to_30_trades():
+    ok, reasons = promotion_gate_passes(
+        {
+            "skipped": False,
+            "cpcv_n_paths": 50,
+            "cpcv_median_sharpe": 0.6,
+            "deflated_sharpe": 0.96,
+            "pbo": 0.15,
+            "n_trades": 20,
+        }
+    )
+    assert ok is True
+    assert "provisional_sample_size" in reasons
+
+
+def test_strict_promotion_tier_30_plus_trades():
+    ok, reasons = promotion_gate_passes(
+        {
+            "skipped": False,
+            "cpcv_n_paths": 50,
+            "cpcv_median_sharpe": 0.6,
+            "deflated_sharpe": 0.96,
+            "pbo": 0.15,
+            "n_trades": 50,
+        }
+    )
+    assert ok is True
+    assert "provisional_sample_size" not in reasons
+
+
+def test_cpcv_autoscales_purge_embargo_for_small_data():
+    """~CHILI-scale n: autoscaled purge/embargo fit inside smallest train fold."""
+    n = 158
+    X = np.random.default_rng(42).normal(size=(n, len(CPCV_FEATURE_NAMES)))
+    ps, es = _cpcv_autoscaled_purge_embargo(n, 0.05, 0.02)
+    assert ps == max(2, int(0.05 * n))
+    assert es == max(1, int(0.02 * n))
+    min_tr = 15
+    t_train = min(252, max(min_tr, n // 2))
+    target_cap = 100
+    n_paths_budget = min(target_cap, max(10, n // 5))
+    n_folds, n_test_folds = optimal_folds_number(
+        n_observations=n,
+        target_train_size=t_train,
+        target_n_test_paths=min(n_paths_budget, max(2, n // 15)),
+    )
+    n_folds = max(5, min(n_folds, max(5, n // 10)))
+    n_test_folds = max(2, min(n_test_folds, n_folds - 2))
+    cv, aps, aes, splits = _cpcv_build_feasible_cv_and_splits(
+        X, n_folds, n_test_folds, ps, es
+    )
+    assert cv is not None and splits
+    min_fold = min(np.asarray(tr, dtype=int).size for tr, _ in splits)
+    assert min_fold > aps + aes
+
+
+def test_cpcv_preflight_returns_clear_reason_when_infeasible(monkeypatch):
+    def _prep(_rows: list):
+        n = 40
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(n, len(CPCV_FEATURE_NAMES)))
+        y_lgb = rng.integers(0, 3, size=n)
+        barrier_rets = rng.normal(0, 0.01, size=n)
+        regimes = ["bull"] * n
+        return X, y_lgb, barrier_rets, regimes
+
+    class _BrokenPurgedCV:
+        def __init__(self, **_kw):
+            pass
+
+        def split(self, _X):
+            raise RuntimeError("forced_split_failure")
+
+    monkeypatch.setattr(
+        "app.services.trading.promotion_gate._label_rows_barrier",
+        _prep,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.promotion_gate.CombinatorialPurgedCV",
+        _BrokenPurgedCV,
+    )
+    out = evaluate_pattern_cpcv(
+        1,
+        [{"ret_5d": 0.01, "timeframe": "1d"}],
+        n_hypotheses_tested=1,
+    )
+    assert out.get("skipped") is True
+    assert out.get("reason") == "cv_infeasible_for_sample_size"
+
+
 def test_bars_per_year_and_vertical_cap():
     assert bars_per_year("1d") == 252.0
     assert cpcv_vertical_max_bars("1d") == 60
@@ -123,7 +220,12 @@ def test_finalize_shadow_does_not_block_on_failed_metrics(monkeypatch):
     )
     monkeypatch.setattr(settings, "chili_cpcv_promotion_gate_enabled", False)
     detail: dict = {"ensemble": {}}
-    out = finalize_promotion_with_cpcv(detail, [{"ret_5d": 1.0}], n_hypotheses_tested=1)
+    out = finalize_promotion_with_cpcv(
+        detail,
+        [{"ret_5d": 1.0}],
+        n_hypotheses_tested=1,
+        scan_pattern=_Pat(id=1, pattern_evidence_kind="ml_signal", timeframe="1d"),
+    )
     assert out.get("blocked") != "cpcv_promotion_gate_failed"
     assert "cpcv_promotion_gate" in out
 
@@ -148,8 +250,116 @@ def test_finalize_enforced_blocks(monkeypatch):
     )
     monkeypatch.setattr(settings, "chili_cpcv_promotion_gate_enabled", True)
     detail = {}
-    out = finalize_promotion_with_cpcv(detail, [{"ret_5d": 1.0}], n_hypotheses_tested=1)
+    out = finalize_promotion_with_cpcv(
+        detail,
+        [{"ret_5d": 1.0}],
+        n_hypotheses_tested=1,
+        scan_pattern=_Pat(id=1, pattern_evidence_kind="ml_signal", timeframe="1d"),
+    )
     assert out.get("blocked") == "cpcv_promotion_gate_failed"
+
+
+def test_evaluate_pattern_cpcv_max_labeled_rows_subsamples(monkeypatch):
+    """Huge labeled sets are capped before CV to avoid OOM (backfill / prod-shaped DB)."""
+
+    def _fake_prep(_rows: list) -> tuple:
+        n = 2000
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(n, len(CPCV_FEATURE_NAMES)))
+        y_lgb = rng.integers(0, 3, size=n)
+        barrier_rets = rng.normal(0, 0.01, size=n)
+        regimes = ["bull"] * n
+        return X, y_lgb, barrier_rets, regimes
+
+    monkeypatch.setattr(
+        "app.services.trading.promotion_gate._label_rows_barrier",
+        _fake_prep,
+    )
+    out = evaluate_pattern_cpcv(
+        99,
+        [{"ret_5d": 0.01, "timeframe": "1d"}],
+        n_hypotheses_tested=1,
+        max_labeled_rows=400,
+    )
+    assert out.get("skipped") is False, out.get("reason")
+    assert int(out.get("n_labeled_samples") or 0) == 400
+
+
+def test_cpcv_realized_pnl_matches_direct_sharpe_on_single_path():
+    rets = np.array([0.2, -0.1, 0.15, 0.05, -0.02, 0.08])
+    ann = 1.0
+    direct = float(np.mean(rets) / np.std(rets, ddof=1) * np.sqrt(ann))
+    assert abs(_sharpe_annualized(rets, ann) - direct) < 1e-9
+
+
+def test_cpcv_realized_pnl_on_pattern_1047_fixture():
+    rng = np.random.default_rng(1047)
+    n = 158
+    # Synthetic n=158 series (positive drift, moderate vol) — stable DSR > 0.5 in CI;
+    # live pattern 1047 metrics come from DB via backfill after T1.6.
+    rets = rng.normal(0.25, 1.2, n).tolist()
+    base = datetime(2025, 4, 1)
+    step = 180.0 / max(n - 1, 1)
+    ts = [base + timedelta(days=i * step) for i in range(n)]
+    out = evaluate_pattern_cpcv_realized_pnl(1047, rets, ts, n_hypotheses_tested=1)
+    assert out.get("skipped") is not True, out
+    assert out.get("evaluator") == "realized_pnl"
+    assert out.get("deflated_sharpe") is not None
+    assert float(out["deflated_sharpe"]) > 0.5
+
+
+def test_pattern_evidence_kind_routing(monkeypatch):
+    called: list[str] = []
+
+    def _ml(*_a, **_k):
+        called.append("ml")
+        return {"skipped": True, "reason": "ml_skip", "n_trades": 0, "cpcv_n_paths": 0}
+
+    def _rl(*_a, **_k):
+        called.append("rl")
+        return {"skipped": True, "reason": "rl_skip", "n_trades": 0, "cpcv_n_paths": 0}
+
+    monkeypatch.setattr("app.services.trading.promotion_gate.evaluate_pattern_cpcv", _ml)
+    monkeypatch.setattr(
+        "app.services.trading.promotion_gate.evaluate_pattern_cpcv_realized_pnl",
+        _rl,
+    )
+    finalize_promotion_with_cpcv(
+        {},
+        [],
+        n_hypotheses_tested=1,
+        scan_pattern=_Pat(pattern_evidence_kind="ml_signal"),
+    )
+    assert called == ["ml"]
+    called.clear()
+    finalize_promotion_with_cpcv(
+        {},
+        [],
+        n_hypotheses_tested=1,
+        scan_pattern=_Pat(pattern_evidence_kind="realized_pnl"),
+    )
+    assert called == ["rl"]
+    called.clear()
+    finalize_promotion_with_cpcv({}, [], n_hypotheses_tested=1, scan_pattern=None)
+    assert called == ["rl"]
+
+
+def test_promotion_gate_thresholds_apply_to_both_evaluators():
+    base = {
+        "skipped": False,
+        "cpcv_n_paths": 50,
+        "cpcv_median_sharpe": 0.6,
+        "deflated_sharpe": 0.96,
+        "pbo": 0.15,
+        "n_trades": 40,
+    }
+    ok_a, r_a = promotion_gate_passes({**base, "evaluator": "realized_pnl"})
+    ok_b, r_b = promotion_gate_passes({**base, "evaluator": "ml_signal"})
+    assert ok_a is ok_b is True
+    assert r_a == r_b == []
+    ok2, r2 = promotion_gate_passes({**base, "cpcv_n_paths": 10})
+    assert ok2 is False
+    assert "cpcv_n_paths_lt_50" in r2
 
 
 def test_purged_cv_splits_respect_sample_count():

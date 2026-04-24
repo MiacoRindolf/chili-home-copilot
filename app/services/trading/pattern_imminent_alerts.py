@@ -421,6 +421,23 @@ def _insert_imminent_breakout_alert(
         timeframe=(pat.timeframe or "1d")[:10],
     )
     db.add(row)
+    db.flush()
+    try:
+        from .contracts.signal_emit import emit_signal_for_breakout_alert
+
+        emit_signal_for_breakout_alert(
+            db,
+            row,
+            scanner="pattern_imminent",
+            strategy_family=pat.name or f"pattern_{pat.id}",
+            commit=False,
+        )
+    except Exception as _use:
+        logger.debug(
+            "[unified_signal] imminent breakout emit skipped: %s",
+            _use,
+            exc_info=True,
+        )
     db.commit()
 
 

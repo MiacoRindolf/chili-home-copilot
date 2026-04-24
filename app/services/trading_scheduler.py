@@ -1798,6 +1798,23 @@ def _record_breakout_alert(
                 scan_pattern_id=_spid,
             )
             db.add(row)
+            db.flush()
+            try:
+                from .trading.contracts.signal_emit import emit_signal_for_breakout_alert
+
+                emit_signal_for_breakout_alert(
+                    db,
+                    row,
+                    scanner=f"scheduler_{alert_tier}",
+                    strategy_family=str(setup.get("sector") or "breakout_scan"),
+                    commit=False,
+                )
+            except Exception as _use:
+                logger.debug(
+                    "[unified_signal] scheduler breakout emit skipped: %s",
+                    _use,
+                    exc_info=True,
+                )
             db.commit()
         finally:
             db.close()
@@ -2706,6 +2723,51 @@ def _run_scheduler_worker_heartbeat():
         db.close()
 
 
+def _run_weekly_cpcv_backfill_job() -> None:
+    """Sunday 04:00 America/New_York: CPCV backfill with ``--commit`` (canonical ``DATABASE_URL``).
+
+    Gated by ``chili_cpcv_weekly_backfill_enabled`` (job is only registered when True).
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    def _work() -> None:
+        root = Path(__file__).resolve().parents[2]
+        script = root / "scripts" / "backfill_cpcv_metrics.py"
+        logger.info("[cpcv_weekly_backfill] phase=started script=%s", script)
+        proc = subprocess.run(
+            [sys.executable, "-u", str(script), "--commit"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=7200,
+            env=os.environ.copy(),
+        )
+        logger.info(
+            "[cpcv_weekly_backfill] phase=summary exit_code=%s",
+            proc.returncode,
+        )
+        if proc.stdout:
+            tail_lines = proc.stdout.strip().splitlines()[-12:]
+            logger.info(
+                "[cpcv_weekly_backfill] log_tail=%s",
+                " | ".join(tail_lines)[:2400],
+            )
+        if proc.stderr and proc.returncode != 0:
+            logger.warning(
+                "[cpcv_weekly_backfill] stderr_tail=%s",
+                proc.stderr[-2400:],
+            )
+        logger.info(
+            "[cpcv_weekly_backfill] phase=finished exit_code=%s",
+            proc.returncode,
+        )
+
+    run_scheduler_job_guarded("weekly_cpcv_backfill", _work)
+
+
 def start_scheduler():
     """Start the background scheduler. Safe to call multiple times."""
     global _scheduler
@@ -3284,6 +3346,27 @@ def start_scheduler():
                 )
         except Exception:
             logger.exception("[scheduler] failed to register regime_classifier_weekly job")
+
+        # Q1.T1: weekly CPCV backfill on heavy workers (Sun 04:00 ET; subprocess ``--commit``).
+        try:
+            if include_heavy and getattr(
+                settings, "chili_cpcv_weekly_backfill_enabled", False
+            ):
+                _scheduler.add_job(
+                    _run_weekly_cpcv_backfill_job,
+                    trigger=CronTrigger(
+                        day_of_week="sun",
+                        hour=4,
+                        minute=0,
+                        timezone="America/New_York",
+                    ),
+                    id="weekly_cpcv_backfill",
+                    name="Weekly CPCV backfill (Sun 04:00 America/New_York; --commit)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register weekly_cpcv_backfill job")
 
         # Phase L.17: daily macro-regime snapshot sweep (shadow mode only).
         try:

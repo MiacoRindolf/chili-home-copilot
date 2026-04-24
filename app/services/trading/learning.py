@@ -7078,6 +7078,7 @@ def test_pattern_hypothesis(
         _ensemble_rows,
         min_trades=30,
         n_hypotheses_tested=max(1, int(total or 1)),
+        scan_pattern=pattern,
     )
     try:
         from .promotion_gate import persist_cpcv_shadow_eval

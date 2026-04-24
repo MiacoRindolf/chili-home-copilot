@@ -41,5 +41,18 @@ DROP TABLE IF EXISTS regime_snapshot;
 
 ## Tech debt (follow-ups)
 
+### Pattern promotion vs CPCV evidence asymmetry (Q1.T2.5)
+
+Many **`promoted` / `live`** `scan_patterns` rows have **little or no** usable history in **`trading_pattern_trades`** (PTR) for CPCV (e.g. zero rows after joins, or &lt; minimum labeled count after triple-barrier labeling). The **legacy ensemble / promotion path** (non-CPCV) can still elevate patterns to promoted/live, while the **CPCV gate** cannot score them until PTR-backed evidence exists.
+
+**Implication:** With **`CHILI_CPCV_PROMOTION_GATE_ENABLED=false`**, CPCV metrics may be missing or skipped for those rows; with the flag **on** in a future PR, **new** promotions that fail CPCV would be blocked, but **existing** promoted/live patterns without CPCV evidence sit in a **gray zone** (not auto-demoted by this stack unless a backfill or policy says so).
+
+**Open questions (deferred post–Q1.T1.5):**
+
+1. Should promoted/live rows **without** CPCV evidence be **auto-demoted** (or flagged) when enforcement flips on?
+2. Should **new** promotions require CPCV-eligible evidence from day one, with patterns **accumulating** PTR in **`validated`** (or similar) until they pass CPCV?
+
+Documenting now so flipping the flag does not surprise operators; no behavior change in this note.
+
 - **Yield slope proxy drift:** The regime classifier consumes **`yield_curve_slope_proxy`** from Phase L.17 macro snapshots, not a real **DGS10 − DGS2** (FRED) series. If regime label quality looks noisy in the **first ~30 days** of shadow operation, treat proxy drift vs. true curve slope as a **likely** cause and investigate before chasing HMM hyperparameters. Replacing the proxy with a real FRED feed becomes a ticket **when** label quality materially matters for gates or research.
 - **T2 full-upsert parity test vs. DB contention:** A full upsert parity test for regime tagging is **deferred** where CI/shared DB contention makes deterministic fixtures flaky. **`test_flag_off_is_noop`** guards the highest-risk path (flag off ⇒ no writes). Revisit a full parity test when contention is resolved or an isolated DB fixture is available.

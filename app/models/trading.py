@@ -748,6 +748,10 @@ class ScanPattern(Base):
     n_effective_trials: Optional[int] = Column(Integer, nullable=True)
     promotion_gate_passed: Optional[bool] = Column(Boolean, nullable=True)
     promotion_gate_reasons: Optional[list] = Column(JSONB, nullable=True)
+    # Q1.T1.6: CPCV evaluator — realized trade PnL sequence vs ML triple-barrier classifier.
+    pattern_evidence_kind: str = Column(
+        String(20), nullable=False, default="realized_pnl",
+    )
 
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 

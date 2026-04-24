@@ -1,5 +1,17 @@
 """Recompute CPCV / DSR / PBO metrics for promoted or live scan_patterns.
 
+**Evaluator (Q1.T1.6):** uses ``scan_patterns.pattern_evidence_kind``. **realized_pnl**
+(default) runs trade-sequence CPCV on ``trading_pattern_trades.outcome_return_pct``;
+**ml_signal** runs the legacy LightGBM + triple-barrier evaluator.
+
+**One-time / gap-fill:** This CLI backfills rows that already reached ``promoted`` or ``live``
+but never got CPCV columns (e.g. after a migration). **New promotions** get CPCV from the
+normal mining funnel via :func:`finalize_promotion_with_cpcv` in ``mining_validation`` when
+``check_promotion_ready*`` runs — no cron required for that path.
+
+By default only rows with ``cpcv_n_paths IS NULL`` are selected so reruns **resume** after
+crashes. Pass ``--all`` to re-evaluate every promoted/live pattern (full recompute).
+
 Demotes patterns that fail :func:`promotion_gate_passes` to ``lifecycle_stage='challenged'``
 (pruning remains lifecycle-driven elsewhere).
 
@@ -16,8 +28,13 @@ Usage (repo root, conda ``chili-env``)::
 Dry-run (default): evaluates CPCV, logs per-pattern lines, prints a summary including
 demotions by scanner bucket. **No database writes**: no ``commit()``, no shadow-log inserts
 (``persist_cpcv_shadow_eval`` is not used by this script). The session is rolled back on
-exit when not ``--commit``. Exits with code **2** if would-demote count exceeds **20%**
-of evaluated patterns (operator review gate).
+exit when not ``--commit``.
+
+With ``--commit``, each evaluated pattern is **committed immediately** after its log line
+so a crash or OOM later does not lose earlier updates. Patterns are processed **newest
+first** (``scan_patterns.updated_at`` descending, then ``id`` descending).
+
+Exits with code **2** if would-demote count exceeds **20%** of evaluated patterns (operator review gate).
 
 Rollback SQL (see docs/CPCV_PROMOTION_GATE_RUNBOOK.md)::
 
@@ -29,6 +46,7 @@ Rollback SQL (see docs/CPCV_PROMOTION_GATE_RUNBOOK.md)::
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import logging
 import sys
 from collections import Counter
@@ -39,11 +57,26 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+if importlib.util.find_spec("skfolio") is None:
+    sys.stderr.write(
+        "backfill_cpcv_metrics: missing dependency `skfolio` (CPCV promotion gate).\n"
+        "Use the repo conda env — plain `python` on PATH is usually wrong:\n"
+        "  conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run\n"
+        "See docs/CPCV_PROMOTION_GATE_RUNBOOK.md.\n"
+    )
+    raise SystemExit(1)
+
+from sqlalchemy import desc  # noqa: E402
+
+from app.config import settings  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
 from app.models.trading import PatternTradeRow, ScanPattern  # noqa: E402
 from app.services.trading.promotion_gate import (  # noqa: E402
+    CPCV_FEATURE_NAMES,
     cpcv_eval_to_scan_pattern_fields,
     evaluate_pattern_cpcv,
+    evaluate_pattern_cpcv_realized_pnl,
+    filtered_rows_to_realized_series,
     infer_scanner_bucket,
     normalize_ptr_row_features,
     promotion_gate_passes,
@@ -92,6 +125,23 @@ def main() -> int:
         help="Explicit dry-run (same as default when --commit is not passed).",
     )
     ap.add_argument("--hypotheses", type=int, default=1, help="n_hypotheses_tested for DSR.")
+    ap.add_argument(
+        "--max-labeled-rows",
+        type=int,
+        default=20_000,
+        help=(
+            "Cap labeled rows per pattern before CPCV (avoids OOM on huge PTR histories). "
+            "Use 0 for no cap (uses CHILI_CPCV_MAX_LABELED_ROWS from env if set)."
+        ),
+    )
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Include every promoted/live row. Default: only "
+            "``cpcv_n_paths IS NULL`` (resume / skip already backfilled)."
+        ),
+    )
     args = ap.parse_args()
 
     if args.commit and args.dry_run:
@@ -104,42 +154,111 @@ def main() -> int:
 
     db = SessionLocal()
     try:
-        pats = (
-            db.query(ScanPattern)
-            .filter(ScanPattern.lifecycle_stage.in_(("promoted", "live")))
-            .all()
+        base_pf = db.query(ScanPattern).filter(
+            ScanPattern.lifecycle_stage.in_(("promoted", "live"))
         )
+        n_promoted_live_db = base_pf.count()
+        q = base_pf
+        if not args.all:
+            q = q.filter(ScanPattern.cpcv_n_paths.is_(None))
+        pats = q.order_by(desc(ScanPattern.updated_at), desc(ScanPattern.id)).all()
+        logger.info(
+            "candidates=%s promoted_or_live_db_total=%s filter=%s",
+            len(pats),
+            n_promoted_live_db,
+            "none (--all)" if args.all else "cpcv_n_paths IS NULL",
+        )
+        cap_kw: dict = {}
+        if int(args.max_labeled_rows) > 0:
+            cap_kw["max_labeled_rows"] = int(args.max_labeled_rows)
+
+        min_ptr = int(getattr(settings, "chili_cpcv_min_trades", 15))
         for pat in pats:
             rows = _rows_for_pattern(db, pat.id)
-            if len(rows) < 30:
+            if len(rows) < min_ptr:
                 logger.info("skip id=%s name=%s (rows=%s)", pat.id, pat.name, len(rows))
                 n_skip += 1
                 continue
 
-            n_evaluated += 1
             bucket = infer_scanner_bucket(pat)
-            payload = evaluate_pattern_cpcv(
+            feat_dim = len(CPCV_FEATURE_NAMES)
+            n_ptr = len(rows)
+            logger.info(
+                "[cpcv_backfill] pattern_id=%s scanner=%s feature_count=%s row_count=%s",
                 pat.id,
-                rows,
-                n_hypotheses_tested=max(1, int(args.hypotheses)),
+                bucket,
+                feat_dim,
+                n_ptr,
             )
+            try:
+                _kind = (getattr(pat, "pattern_evidence_kind", None) or "realized_pnl").strip().lower()
+                if _kind == "ml_signal":
+                    payload = evaluate_pattern_cpcv(
+                        pat.id,
+                        rows,
+                        n_hypotheses_tested=max(1, int(args.hypotheses)),
+                        **cap_kw,
+                    )
+                else:
+                    _rets, _ts = filtered_rows_to_realized_series(rows)
+                    payload = evaluate_pattern_cpcv_realized_pnl(
+                        pat.id,
+                        _rets,
+                        _ts,
+                        n_hypotheses_tested=max(1, int(args.hypotheses)),
+                        bar_interval_hint=getattr(pat, "timeframe", None),
+                        **cap_kw,
+                    )
+            except Exception:
+                logger.exception(
+                    "[cpcv_backfill] evaluation_failed pattern_id=%s scanner=%s "
+                    "feature_count=%s row_count=%s (skipping)",
+                    pat.id,
+                    bucket,
+                    feat_dim,
+                    n_ptr,
+                )
+                continue
+
             ok, reasons = promotion_gate_passes(payload)
             payload["promotion_gate_passed"] = ok
             payload["promotion_gate_reasons"] = reasons
             patch = cpcv_eval_to_scan_pattern_fields(payload)
 
             would_demote = (not ok) and (not payload.get("skipped"))
-            if would_demote:
-                n_demote_would += 1
-                demote_by_scanner[bucket] += 1
-            if ok:
-                n_pass += 1
 
             action = "no_change"
             if would_demote:
                 action = "DEMOTE_TO_CHALLENGED" if do_commit else "would_demote_to_challenged"
             elif do_commit and patch:
                 action = "patch_cpcv_columns"
+
+            if do_commit:
+                for k, v in patch.items():
+                    setattr(pat, k, v)
+                if would_demote:
+                    pat.lifecycle_stage = "challenged"
+                    pat.lifecycle_changed_at = datetime.utcnow()
+                try:
+                    db.commit()
+                except Exception:
+                    logger.exception(
+                        "backfill_cpcv_metrics: commit failed id=%s name=%s",
+                        pat.id,
+                        pat.name,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    continue
+
+            n_evaluated += 1
+            if would_demote:
+                n_demote_would += 1
+                demote_by_scanner[bucket] += 1
+            if ok:
+                n_pass += 1
 
             logger.info(
                 "id=%s scanner=%s action=%s ok=%s skipped=%s paths=%s dsr=%s pbo=%s reasons=%s",
@@ -154,20 +273,11 @@ def main() -> int:
                 reasons,
             )
 
-            if do_commit:
-                for k, v in patch.items():
-                    setattr(pat, k, v)
-                if would_demote:
-                    pat.lifecycle_stage = "challenged"
-                    pat.lifecycle_changed_at = datetime.utcnow()
-
-        if do_commit:
-            db.commit()
-
         # ── Summary (production-shape report) ─────────────────────────────
         logger.info("--- CPCV backfill summary ---")
-        logger.info("promoted_or_live_total=%s", len(pats))
-        logger.info("evaluated (>=30 PTR rows)=%s", n_evaluated)
+        logger.info("promoted_or_live_db_total=%s", n_promoted_live_db)
+        logger.info("this_run_candidates=%s", len(pats))
+        logger.info("evaluated (>=min_PTR rows, min=%s)=%s", min_ptr, n_evaluated)
         logger.info("would_pass_cpcv_gate=%s", n_pass)
         logger.info("would_demote_total=%s", n_demote_would)
         for b in SCANNER_BUCKETS:
