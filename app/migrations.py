@@ -9970,8 +9970,15 @@ def _migration_166_scan_patterns_promotion_gate_null_default(conn) -> None:
             text(
                 """
                 ALTER TABLE scan_patterns ADD CONSTRAINT chk_scan_patterns_promotion_gate_requires_cpcv
-                CHECK (promotion_gate_passed IS NULL OR cpcv_n_paths IS NOT NULL)
+                CHECK (promotion_gate_passed IS NULL OR cpcv_n_paths IS NOT NULL) NOT VALID
                 """
+            )
+        )
+        conn.commit()
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns VALIDATE CONSTRAINT "
+                "chk_scan_patterns_promotion_gate_requires_cpcv"
             )
         )
     conn.commit()
