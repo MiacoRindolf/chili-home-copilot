@@ -1784,9 +1784,12 @@ def _migration_044_trading_insight_scan_pattern_constraints(conn) -> None:
                 "INSERT INTO scan_patterns (name, description, rules_json, origin, asset_class, "
                 "timeframe, confidence, evidence_count, backtest_count, score_boost, min_base_score, "
                 "active, generation, ticker_scope, trade_count, backtest_priority, promotion_status, "
+                "oos_validation_json, queue_tier, paper_book_json, regime_affinity_json, lifecycle_stage, "
                 "created_at, updated_at) "
                 "VALUES (:name, :desc, '{}', 'legacy_unlinked', 'all', '1d', 0.0, 0, 0, 0.0, 0.0, "
-                "FALSE, 0, 'universal', 0, 0, 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                "FALSE, 0, 'universal', 0, 0, 'legacy', "
+                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ),
             {
                 "name": sent_name,
