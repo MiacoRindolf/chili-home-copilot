@@ -46,6 +46,8 @@ Or set `STAGING_DATABASE_URL` in `.env` and copy it when running scripts (the ap
 
 ## Daily refresh (Docker + Windows)
 
+**Canonical local checkout (this project / live app):** `C:\dev\chili-home-copilot` — scheduled-task examples and script headers in this doc use that path. Only the Docker **container name** may need changing (`docker ps`); paths should not.
+
 | Script | Role |
 |--------|------|
 | [`scripts/backup_chili_db.ps1`](../scripts/backup_chili_db.ps1) | `pg_dump` of `chili` → `D:\CHILI-Docker\backup\chili_YYYYMMDD_HHmm.dump` |
@@ -74,13 +76,19 @@ conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run
 
 Use the same `DATABASE_URL` override for `scripts/backfill_regime.py` and other `SessionLocal()` maintenance scripts. See [CPCV_PROMOTION_GATE_RUNBOOK.md](CPCV_PROMOTION_GATE_RUNBOOK.md) and [REGIME_CLASSIFIER_RUNBOOK.md](REGIME_CLASSIFIER_RUNBOOK.md) for interpretation — not for `chili_test`.
 
-**Scheduled task (example — adjust paths and container name):**
+**Scheduled task:** run **`schtasks /Create` from an elevated PowerShell** (Run as administrator); a normal session returns “Access is denied.”
+
+**Typical two-task setup:** **03:30** backup → **04:00** `chili_staging` refresh. Register the refresh task (after your backup task exists) with:
 
 ```powershell
-schtasks /Create /TN "CHILI backup and staging" /SC DAILY /ST 03:45 /RL HIGHEST /F /TR "powershell -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\backup_and_refresh_staging.ps1"
+schtasks /Create /TN "CHILI refresh staging" /SC DAILY /ST 04:00 /RL HIGHEST /F /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\refresh_staging_from_backup.ps1"
 ```
 
-Or keep two tasks (03:30 backup, 04:00 `refresh_staging_from_backup.ps1` only).
+**Or** a single job that runs `backup_and_refresh_staging.ps1` (chain backup + refresh); pick a time that finishes the dump before the refresh step (e.g. 03:45 if backup alone is ~minutes):
+
+```powershell
+schtasks /Create /TN "CHILI backup and staging" /SC DAILY /ST 03:45 /RL HIGHEST /F /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\backup_and_refresh_staging.ps1"
+```
 
 ### Failure behavior
 
