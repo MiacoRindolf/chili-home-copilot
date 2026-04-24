@@ -11,7 +11,7 @@
 
 - New and backfilled **promoted/live** rows default to **`realized_pnl`** (migration **169**).
 - Set **`ml_signal`** only when a pattern is explicitly an ML-signal strategy that should use the classifier evaluator.
-- **Promotion thresholds** (`DSR ≥ 0.95`, `PBO ≤ 0.2`, `cpcv_n_paths ≥ 50`, median path Sharpe ≥ 0.5, `n_trades ≥ 15`) apply to **both** evaluators; only the input series and path Sharpe construction differ.
+- **Promotion thresholds** (`DSR ≥ 0.95`, `PBO ≤ 0.2`, median path Sharpe ≥ 0.5, `n_trades ≥ 15`, and **graded** `cpcv_n_paths` — see below) apply to **both** evaluators; only the input series and path Sharpe construction differ.
 
 After deploying T1.6, run a **manual** `backfill_cpcv_metrics.py` once against canonical chili (see below) so promoted/live patterns pick up metrics from the correct evaluator. Keep **`CHILI_CPCV_PROMOTION_GATE_ENABLED=false`** until operators review that rerun.
 
@@ -27,11 +27,11 @@ After deploying T1.6, run a **manual** `backfill_cpcv_metrics.py` once against c
 |--------|------|
 | `deflated_sharpe` | ≥ 0.95 |
 | `pbo` | ≤ 0.2 |
-| `cpcv_n_paths` | ≥ 50 |
+| `cpcv_n_paths` | **Graded (Q1.T1.7)** — see **`cpcv_n_paths` tiers** below (defaults: full **≥ 50**, provisional **20–49**, fail **&lt; 20**). |
 | `cpcv_median_sharpe` | ≥ 0.5 (annualized, path median) |
 | Effective sample (`n_trades`) | ≥ **`CHILI_CPCV_MIN_TRADES`** (default **15**): **ML** path = rows after triple-barrier labeling; **realized_pnl** path = realized PTR trades with `outcome_return_pct`. See sample-size tiers below. |
 
-### Sample-size tiers (Q1.T1.5)
+### Sample-size tiers — `n_trades` (Q1.T1.5)
 
 DSR and CPCV are well-defined for modest **n**; confidence intervals widen as **n** shrinks. The gate uses three bands (defaults; tune via settings):
 
@@ -39,9 +39,21 @@ DSR and CPCV are well-defined for modest **n**; confidence intervals widen as **
 |------|--------------------------------------|---------|
 | **Insufficient** | **&lt; 15** (`chili_cpcv_min_trades`) | No CPCV / gate outcome — skip or insufficient evidence. |
 | **Provisional** | **15 ≤ n &lt; 30** | Gate may **pass** if all metric thresholds hold; `promotion_gate_reasons` includes **`provisional_sample_size`** (wider CIs; not full-confidence promotion). |
-| **Full confidence** | **≥ 30** (`chili_cpcv_full_confidence_min_trades`) | Pass/fail on metrics only; no provisional tag. |
+| **Full confidence** | **≥ 30** (`chili_cpcv_full_confidence_min_trades`) | Pass/fail on metrics only; no trade-count provisional tag. |
 
 Rationale: CHILI pattern-scale datasets are smaller than institutional backtests; **15** keeps CPCV and DSR usable while **30** remains the bar for treating evidence as “full” promotion strength.
+
+### Sample-size tiers — `cpcv_n_paths` (Q1.T1.7)
+
+Parallel to **`n_trades`**: combinatorial path count is capped by sample size; a single institutional-style floor (**50** paths) can reject strong realized-PnL CPCV on ~100–200 trades.
+
+| Tier | `cpcv_n_paths` | Meaning |
+|------|----------------|--------|
+| **Infeasible / insufficient paths** | **&lt; 20** (`chili_cpcv_n_paths_provisional_min`) | **Fail** with **`cpcv_n_paths_below_provisional_min`** (floor is not lowered below 20). |
+| **Provisional** | **20 ≤ paths &lt; 50** (upper bound `chili_cpcv_n_paths_full_min`) | Gate may **pass** if DSR, PBO, median Sharpe, and `n_trades` rules all pass; reasons include **`provisional_small_paths`** (alongside **`provisional_sample_size`** when `n_trades` is also in the 15–29 band). |
+| **Full confidence (paths)** | **≥ 50** (`chili_cpcv_n_paths_full_min`) | No path-count provisional tag when all other checks pass. |
+
+When both trade count and path count sit in provisional bands, **`provisional_sample_size`** and **`provisional_small_paths`** may appear together on a passing row.
 
 ### Small-sample CPCV (purge / embargo / paths)
 
@@ -52,9 +64,11 @@ Rationale: CHILI pattern-scale datasets are smaller than institutional backtests
 | `CHILI_CPCV_PURGE_FRAC` | `chili_cpcv_purge_frac` | `0.05` |
 | `CHILI_CPCV_EMBARGO_FRAC` | `chili_cpcv_embargo_frac` | `0.02` |
 | `CHILI_CPCV_MIN_TRADES` | `chili_cpcv_min_trades` | `15` |
+| `CHILI_CPCV_N_PATHS_PROVISIONAL_MIN` | `chili_cpcv_n_paths_provisional_min` | `20` |
+| `CHILI_CPCV_N_PATHS_FULL_MIN` | `chili_cpcv_n_paths_full_min` | `50` |
 | `CHILI_CPCV_TARGET_PATHS` | `chili_cpcv_target_paths_max` | `100` |
 
-Full-confidence boundary (provisional vs not) is **`chili_cpcv_full_confidence_min_trades`** (default **30**); not exposed as env in the first pass — change in code/settings profile if needed.
+Full-confidence boundary for **trade count** is **`chili_cpcv_full_confidence_min_trades`** (default **30**); for **path count**, **`chili_cpcv_n_paths_full_min`** (default **50**). Adjust in code or env as needed.
 
 ## Enable / disable
 
@@ -64,9 +78,10 @@ Full-confidence boundary (provisional vs not) is **`chili_cpcv_full_confidence_m
 
 ## Interpret reject rates
 
-- High `cpcv_n_paths_lt_50`: not enough combinatorial paths — often too few labeled rows after triple-barrier filtering; check data depth and autoscaled purge/embargo (or env overrides).
+- `cpcv_n_paths_below_provisional_min`: path count is below the **20** floor — not enough combinatorial paths for a meaningful CPCV read; often too few trades or infeasible CV after triple-barrier filtering. Check data depth and autoscaled purge/embargo (or env overrides).
 - `cv_infeasible_for_sample_size`: even after shrinking purge/embargo, no fold satisfies **train &gt; purge + embargo**; need more labeled rows or looser fractions (operator env).
-- `provisional_sample_size` in reasons (with **pass**): acceptable under small-sample policy; treat as provisional promotion until **n ≥ 30** (default full-confidence band).
+- `provisional_sample_size` in reasons (with **pass**): acceptable under small-sample policy; treat as provisional promotion until **`n_trades` ≥ 30** (default full-confidence band for trades).
+- `provisional_small_paths` in reasons (with **pass**): path count is in the **20–49** band; treat as provisional until **`cpcv_n_paths` ≥ 50** (default full-confidence band for paths) or policy says otherwise.
 - `dsr_below_0_95`: selection-bias-adjusted Sharpe is weak on **barrier** returns — edge may be luck or multiple testing.
 - `pbo_above_0_2`: CSCV-style PBO on strategy vs buy-and-hold barrier returns suggests instability.
 - `median_sharpe_below_0_5`: CPCV path OOS Sharpe median is weak.
