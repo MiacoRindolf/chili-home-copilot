@@ -10167,6 +10167,48 @@ def _migration_169_scan_patterns_pattern_evidence_kind(conn) -> None:
     conn.commit()
 
 
+def _migration_170_restore_pattern_1047_n_paths_threshold_second(conn) -> None:
+    """Second restoration of pattern 1047 (CPCV gate calibration).
+
+    **First restoration:** migration **168** after ML-signal (classifier) CPCV
+    miscalibration vs realized ``trading_pattern_trades``.
+
+    **This migration:** T1.6 backfill demoted 1047 on ``cpcv_n_paths_lt_50`` alone
+    (institutional 50-path bar unreachable at ~158 trades). Q1.T1.7 adds graded
+    ``n_paths`` thresholds (provisional 20–49 vs full 50+). This reset clears gate
+    columns and sets **promoted** so a post-merge backfill can persist provisional
+    evidence under the new policy.
+
+    SQL mirrors **168**; rollback is the same manual note as 168.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    row = conn.execute(text("SELECT 1 FROM scan_patterns WHERE id = 1047")).fetchone()
+    if not row:
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            """
+            UPDATE scan_patterns
+            SET lifecycle_stage = 'promoted',
+                promotion_gate_passed = NULL,
+                promotion_gate_reasons = NULL,
+                cpcv_n_paths = NULL,
+                cpcv_median_sharpe = NULL,
+                cpcv_median_sharpe_by_regime = NULL,
+                deflated_sharpe = NULL,
+                pbo = NULL,
+                n_effective_trials = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1047
+            """
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -10344,6 +10386,10 @@ MIGRATIONS = [
         _migration_168_restore_pattern_1047_cpcv_miscalibration,
     ),
     ("169_scan_patterns_pattern_evidence_kind", _migration_169_scan_patterns_pattern_evidence_kind),
+    (
+        "170_restore_pattern_1047_n_paths_threshold_second",
+        _migration_170_restore_pattern_1047_n_paths_threshold_second,
+    ),
 ]
 
 
