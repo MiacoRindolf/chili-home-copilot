@@ -6297,21 +6297,22 @@ def _migration_118_dynamic_trade_plan_monitor(conn) -> None:
         ("nm_position_monitor", "nm_action_alerts", "monitor_alert", 0.65, "excitatory"),
         ("nm_lc_monitor_review", "nm_evidence_quality", "monitor_feedback", 0.5, "excitatory"),
     ]:
+        etype = _brain_graph_edge_type_for_seed(src, sig, pol)
         conn.execute(text("""
             INSERT INTO brain_graph_edges
                 (source_node_id, target_node_id, signal_type, weight, polarity,
                  delay_ms, min_confidence, enabled, graph_version,
-                 edge_type, created_at, updated_at)
+                 edge_type, min_source_confidence, created_at, updated_at)
             SELECT :src, :tgt, :sig, :w, :pol,
                    0, 0.0, true, 1,
-                   'dataflow', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                   :etype, 0.0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             WHERE EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :src)
               AND EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :tgt)
               AND NOT EXISTS (
                   SELECT 1 FROM brain_graph_edges
                   WHERE source_node_id = :src AND target_node_id = :tgt AND signal_type = :sig
               )
-        """), {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol})
+        """), {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "etype": etype})
 
     conn.commit()
 
@@ -6532,17 +6533,18 @@ def _migration_120_monitor_learning_engine(conn) -> None:
             "WHERE source_node_id = :src AND target_node_id = :tgt AND signal_type = :sig"
         ), {"src": src, "tgt": tgt, "sig": sig}).fetchone()
         if not exists:
+            etype = _brain_graph_edge_type_for_seed(src, sig, "excitatory")
             conn.execute(text("""
                 INSERT INTO brain_graph_edges
                     (source_node_id, target_node_id, signal_type, weight, polarity,
                      delay_ms, min_confidence, enabled, graph_version,
-                     edge_type, created_at, updated_at)
+                     edge_type, min_source_confidence, created_at, updated_at)
                 SELECT :src, :tgt, :sig, 0.5, 'excitatory',
                        0, 0.0, true, 1,
-                       'dataflow', NOW(), NOW()
+                       :etype, 0.0, NOW(), NOW()
                 WHERE EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :src)
                   AND EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :tgt)
-            """), {"src": src, "tgt": tgt, "sig": sig})
+            """), {"src": src, "tgt": tgt, "sig": sig, "etype": etype})
 
     conn.commit()
 
