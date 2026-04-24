@@ -4160,9 +4160,11 @@ def _migration_090_momentum_neural_persistence(conn) -> None:
                 """
                 INSERT INTO momentum_strategy_variants (
                     family, variant_key, version, label, params_json, is_active, execution_family,
+                    refinement_meta_json,
                     created_at, updated_at
                 ) VALUES (
                     :family, :family, 1, :label, '{}'::jsonb, TRUE, 'coinbase_spot',
+                    '{}'::jsonb,
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
                 ON CONFLICT (family, variant_key, version) DO NOTHING
