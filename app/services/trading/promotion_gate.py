@@ -371,9 +371,10 @@ def evaluate_pattern_cpcv(
     purged_size: int = 20,
     embargo_size: int = 5,
     bar_interval_hint: str | None = None,
+    max_labeled_rows: int | None = None,
 ) -> dict[str, Any]:
     """Run Combinatorial Purged CV with LightGBM; compute DSR, PBO, path Sharpes."""
-    del pattern_id  # reserved for logging / future DB correlation
+    pid_for_seed = int(pattern_id) if pattern_id is not None else 0
 
     base_iv = (
         bar_interval_hint
@@ -398,6 +399,25 @@ def evaluate_pattern_cpcv(
 
     X, y_lgb, barrier_rets, regimes = prep
     n = X.shape[0]
+
+    cap = int(max_labeled_rows) if max_labeled_rows is not None else int(
+        getattr(settings, "chili_cpcv_max_labeled_rows", 0) or 0
+    )
+    if cap > 0 and n > cap:
+        logger.info(
+            "[cpcv_promotion_gate] subsampling labeled rows %s -> %s for CPCV (cap)",
+            n,
+            cap,
+        )
+        rng = np.random.default_rng(42 + pid_for_seed)
+        pick = rng.choice(n, size=cap, replace=False)
+        pick.sort()
+        X = X[pick]
+        y_lgb = y_lgb[pick]
+        barrier_rets = barrier_rets[pick]
+        regimes = [regimes[int(i)] for i in pick.tolist()]
+        n = int(cap)
+
     if n < 30:
         return {
             "skipped": True,
@@ -631,6 +651,11 @@ def cpcv_eval_to_scan_pattern_fields(eval_payload: Mapping[str, Any]) -> dict[st
     out["n_effective_trials"] = eval_payload.get("n_effective_trials")
     out["promotion_gate_passed"] = bool(eval_payload.get("promotion_gate_passed"))
     out["promotion_gate_reasons"] = eval_payload.get("promotion_gate_reasons") or []
+    # Invariant (pairs with migration 166): no gate outcome without CPCV path evidence.
+    if "promotion_gate_passed" in out and out.get("cpcv_n_paths") is None:
+        raise AssertionError(
+            "promotion_gate_passed without cpcv_n_paths — CPCV evidence required for a gate outcome"
+        )
     return out
 
 

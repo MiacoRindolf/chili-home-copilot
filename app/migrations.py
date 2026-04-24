@@ -9912,6 +9912,67 @@ def _migration_165_regime_snapshot_and_tagging(conn) -> None:
     conn.commit()
 
 
+def _migration_166_scan_patterns_promotion_gate_null_default(conn) -> None:
+    """CPCV: promotion_gate_passed default NULL; unevaluated rows not FALSE; gate implies CPCV.
+
+    Migration 163 added ``promotion_gate_passed BOOLEAN DEFAULT FALSE``, so rows without CPCV
+    evidence looked like gate failures. This clears that ambiguity.
+
+    Rollback (manual):
+
+        ALTER TABLE scan_patterns DROP CONSTRAINT IF EXISTS chk_scan_patterns_promotion_gate_requires_cpcv;
+        ALTER TABLE scan_patterns ALTER COLUMN promotion_gate_passed SET DEFAULT FALSE;
+    """
+    tables = _tables(conn)
+    if "scan_patterns" not in tables:
+        conn.commit()
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "promotion_gate_passed" not in cols:
+        conn.commit()
+        return
+
+    conn.execute(
+        text(
+            """
+            UPDATE scan_patterns
+            SET promotion_gate_passed = NULL,
+                promotion_gate_reasons = NULL
+            WHERE cpcv_n_paths IS NULL
+            """
+        )
+    )
+    conn.commit()
+
+    conn.execute(
+        text(
+            "ALTER TABLE scan_patterns ALTER COLUMN promotion_gate_passed DROP DEFAULT"
+        )
+    )
+    conn.commit()
+
+    row = conn.execute(
+        text(
+            """
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            WHERE t.relname = 'scan_patterns'
+              AND c.conname = 'chk_scan_patterns_promotion_gate_requires_cpcv'
+            """
+        )
+    ).fetchone()
+    if not row:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE scan_patterns ADD CONSTRAINT chk_scan_patterns_promotion_gate_requires_cpcv
+                CHECK (promotion_gate_passed IS NULL OR cpcv_n_paths IS NOT NULL)
+                """
+            )
+        )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -10079,6 +10140,10 @@ MIGRATIONS = [
     ("163_cpcv_promotion_gate_evidence", _migration_163_cpcv_promotion_gate_evidence),
     ("164_cpcv_shadow_eval_log", _migration_164_cpcv_shadow_eval_log),
     ("165_regime_snapshot_and_tagging", _migration_165_regime_snapshot_and_tagging),
+    (
+        "166_scan_patterns_promotion_gate_null_default",
+        _migration_166_scan_patterns_promotion_gate_null_default,
+    ),
 ]
 
 
