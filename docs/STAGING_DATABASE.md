@@ -38,11 +38,15 @@ $env:DATABASE_URL = "postgresql://chili:chili@localhost:5433/chili_staging"
 conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run
 ```
 
+**Windows `10055` / “No buffer space”** when connecting to `localhost:5433` — see **Winsock 10055** under [DATABASE_POSTGRES.md](DATABASE_POSTGRES.md) (Troubleshooting): run the script **inside** Compose with `DATABASE_URL=...@postgres:5432/...` so traffic does not use the exhausted host loopback.
+
 Or set `STAGING_DATABASE_URL` in `.env` and copy it when running scripts (the app may expose `chili_staging_url` in settings for future UX; it is not required for `DATABASE_URL`-driven scripts).
 
 **Do not** set `TEST_DATABASE_URL` to `chili_staging` — the test harness requires a database name ending in `_test` and **truncates** tables.
 
 ## Daily refresh (Docker + Windows)
+
+**Canonical local checkout (this project / live app):** `C:\dev\chili-home-copilot` — scheduled-task examples and script headers in this doc use that path. Only the Docker **container name** may need changing (`docker ps`); paths should not.
 
 | Script | Role |
 |--------|------|
@@ -72,13 +76,19 @@ conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run
 
 Use the same `DATABASE_URL` override for `scripts/backfill_regime.py` and other `SessionLocal()` maintenance scripts. See [CPCV_PROMOTION_GATE_RUNBOOK.md](CPCV_PROMOTION_GATE_RUNBOOK.md) and [REGIME_CLASSIFIER_RUNBOOK.md](REGIME_CLASSIFIER_RUNBOOK.md) for interpretation — not for `chili_test`.
 
-**Scheduled task (example — adjust paths and container name):**
+**Scheduled task:** run **`schtasks /Create` from an elevated PowerShell** (Run as administrator); a normal session returns “Access is denied.”
+
+**Typical two-task setup:** **03:30** backup → **04:00** `chili_staging` refresh. Register the refresh task (after your backup task exists) with:
 
 ```powershell
-schtasks /Create /TN "CHILI backup and staging" /SC DAILY /ST 03:45 /RL HIGHEST /F /TR "powershell -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\backup_and_refresh_staging.ps1"
+schtasks /Create /TN "CHILI refresh staging" /SC DAILY /ST 04:00 /RL HIGHEST /F /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\refresh_staging_from_backup.ps1"
 ```
 
-Or keep two tasks (03:30 backup, 04:00 `refresh_staging_from_backup.ps1` only).
+**Or** a single job that runs `backup_and_refresh_staging.ps1` (chain backup + refresh); pick a time that finishes the dump before the refresh step (e.g. 03:45 if backup alone is ~minutes):
+
+```powershell
+schtasks /Create /TN "CHILI backup and staging" /SC DAILY /ST 03:45 /RL HIGHEST /F /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\backup_and_refresh_staging.ps1"
+```
 
 ### Failure behavior
 

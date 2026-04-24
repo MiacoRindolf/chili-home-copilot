@@ -51,7 +51,8 @@ try {
         exit 1
     }
 
-    $term = "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datistemplate = false AND datname = '$StagingDb' AND pid <> pg_backend_pid();"
+    # pg_stat_activity has datname/pid only — not datistemplate (that is on pg_database)
+    $term = "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$StagingDb' AND pid <> pg_backend_pid();"
     & docker exec $Container psql -U chili -d $PostgresDb -c $term 2>>$log
     & docker exec $Container psql -U chili -d $PostgresDb -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS $StagingDb WITH (FORCE);" 2>>$log
     if ($LASTEXITCODE -ne 0) {

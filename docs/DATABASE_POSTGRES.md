@@ -84,4 +84,22 @@ If you are not using Compose, you can run a standalone Postgres and set `DATABAS
 
 - **`DATABASE_URL is required`** — Add a non-empty PostgreSQL URL to `.env`.
 - **`DATABASE_URL must be a PostgreSQL URL`** — Use `postgresql://` or `postgresql+psycopg2://`, not SQLite or other drivers unless you extend validation in `app/config.py`.
-- **Windows: `No buffer space available` / Winsock `10055` when connecting to `localhost:5433`** — OS socket pool exhaustion (often with Docker/Git heavy use). Try: set `DATABASE_URL` to use **`127.0.0.1`** instead of **`localhost`**, restart Docker or reboot, or run maintenance scripts via Docker on the Compose network (see merge section above). CLI scripts `merge_sqlite_into_postgres.py`, `dedupe_scan_patterns_by_rules.py`, and `audit_postgres_merge_redundancy.py` retry once with IPv4 automatically when this error appears on `localhost`.
+
+### Windows: `No buffer space available` / Winsock `10055` (socket pool exhaustion)
+
+This is a **host** limitation: too many sockets in `TIME_WAIT` or ephemeral ports exhausted (common with Docker Desktop, Git, IDEs, and many short-lived DB connections). It is **not** “Postgres is down” — the server may be fine while the **client** cannot open a new TCP connection to `127.0.0.1:5433` or `localhost:5433`.
+
+**Try in order:**
+
+1. **Restart Docker Desktop**, then retry.
+2. **Reboot Windows** if restarts do not clear it.
+3. Use **`127.0.0.1`** instead of **`localhost`** (avoids IPv6 `::1` split-brain). If both still fail with `10055`, the host pool is still exhausted—go to (4).
+4. **Run the script inside the Compose network** (bypasses the Windows loopback path entirely). Use hostname **`postgres`** and port **`5432`** (in-container), not `localhost:5433`. From the repo root, with the `chili` service up:
+
+   ```powershell
+   docker compose exec -w /workspace -e DATABASE_URL=postgresql://chili:chili@postgres:5432/chili_staging chili python scripts/backfill_cpcv_metrics.py --dry-run
+   ```
+
+   Adjust database name (`chili` / `chili_staging` / `chili_test`) and script path as needed. The `chili` image installs from **`requirements.txt` at `docker compose build` time** — not on every `exec`. If you see `ModuleNotFoundError` (e.g. `skfolio`, `lightgbm`), rebuild and recreate: `docker compose build chili` then `docker compose up -d chili`. Dependencies on the **host** `conda` env do not apply inside the container.
+
+CLI scripts `merge_sqlite_into_postgres.py`, `dedupe_scan_patterns_by_rules.py`, and `audit_postgres_merge_redundancy.py` retry once with IPv4 automatically when this error appears on `localhost`.
