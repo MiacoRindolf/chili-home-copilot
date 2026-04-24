@@ -1231,10 +1231,12 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
             "(name, description, rules_json, origin, asset_class, timeframe, confidence, "
             " evidence_count, backtest_count, score_boost, min_base_score, "
             " active, generation, ticker_scope, trade_count, backtest_priority, "
-            " promotion_status, created_at, updated_at) "
+            " promotion_status, oos_validation_json, queue_tier, paper_book_json, "
+            " regime_affinity_json, lifecycle_stage, created_at, updated_at) "
             "VALUES (:name, :desc, :rules, 'user_seeded', 'all', '1d', 0.5, "
             " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, "
-            " 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', "
+            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
             "desc": pat["desc"],
@@ -1258,6 +1260,13 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
     active_val = "TRUE"
     for pat in _PATTERNS:
         pat_desc = f"{pat['name']} \u2014 {pat['desc']}"
+        sp_row = conn.execute(
+            text("SELECT id FROM scan_patterns WHERE name = :n LIMIT 1"),
+            {"n": pat["name"]},
+        ).fetchone()
+        if not sp_row:
+            continue
+        scan_pattern_id = int(sp_row[0])
         for uid in user_ids:
             existing = conn.execute(
                 text(
@@ -1270,10 +1279,10 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
                 continue
             conn.execute(text(
                 "INSERT INTO trading_insights "
-                "(user_id, pattern_description, confidence, evidence_count, "
+                "(user_id, scan_pattern_id, pattern_description, confidence, evidence_count, "
                 " last_seen, created_at, active, win_count, loss_count) "
-                f"VALUES (:uid, :desc, 0.5, 0, {now_sql}, {now_sql}, {active_val}, 0, 0)"
-            ), {"uid": uid, "desc": pat_desc})
+                f"VALUES (:uid, :spid, :desc, 0.5, 0, {now_sql}, {now_sql}, {active_val}, 0, 0)"
+            ), {"uid": uid, "spid": scan_pattern_id, "desc": pat_desc})
     conn.commit()
 
 
