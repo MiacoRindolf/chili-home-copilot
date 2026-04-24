@@ -1,5 +1,9 @@
 """Recompute CPCV / DSR / PBO metrics for promoted or live scan_patterns.
 
+**Evaluator (Q1.T1.6):** uses ``scan_patterns.pattern_evidence_kind``. **realized_pnl**
+(default) runs trade-sequence CPCV on ``trading_pattern_trades.outcome_return_pct``;
+**ml_signal** runs the legacy LightGBM + triple-barrier evaluator.
+
 **One-time / gap-fill:** This CLI backfills rows that already reached ``promoted`` or ``live``
 but never got CPCV columns (e.g. after a migration). **New promotions** get CPCV from the
 normal mining funnel via :func:`finalize_promotion_with_cpcv` in ``mining_validation`` when
@@ -71,6 +75,8 @@ from app.services.trading.promotion_gate import (  # noqa: E402
     CPCV_FEATURE_NAMES,
     cpcv_eval_to_scan_pattern_fields,
     evaluate_pattern_cpcv,
+    evaluate_pattern_cpcv_realized_pnl,
+    filtered_rows_to_realized_series,
     infer_scanner_bucket,
     normalize_ptr_row_features,
     promotion_gate_passes,
@@ -185,12 +191,24 @@ def main() -> int:
                 n_ptr,
             )
             try:
-                payload = evaluate_pattern_cpcv(
-                    pat.id,
-                    rows,
-                    n_hypotheses_tested=max(1, int(args.hypotheses)),
-                    **cap_kw,
-                )
+                _kind = (getattr(pat, "pattern_evidence_kind", None) or "realized_pnl").strip().lower()
+                if _kind == "ml_signal":
+                    payload = evaluate_pattern_cpcv(
+                        pat.id,
+                        rows,
+                        n_hypotheses_tested=max(1, int(args.hypotheses)),
+                        **cap_kw,
+                    )
+                else:
+                    _rets, _ts = filtered_rows_to_realized_series(rows)
+                    payload = evaluate_pattern_cpcv_realized_pnl(
+                        pat.id,
+                        _rets,
+                        _ts,
+                        n_hypotheses_tested=max(1, int(args.hypotheses)),
+                        bar_interval_hint=getattr(pat, "timeframe", None),
+                        **cap_kw,
+                    )
             except Exception:
                 logger.exception(
                     "[cpcv_backfill] evaluation_failed pattern_id=%s scanner=%s "

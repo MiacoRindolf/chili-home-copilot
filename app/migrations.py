@@ -10062,6 +10062,111 @@ def _migration_167_unified_signals_table(conn) -> None:
     conn.commit()
 
 
+def _migration_168_restore_pattern_1047_cpcv_miscalibration(conn) -> None:
+    """Restore pattern 1047 after incorrect CPCV demotion (classifier vs realized PnL).
+
+    Pre–Q1.T1.6 CPCV used a LightGBM classifier on triple-barrier labels, which for
+    rule-based patterns can disagree sharply with realized ``trading_pattern_trades``
+    outcomes (e.g. 158 trades, positive mean return vs negative median path Sharpe).
+    This migration resets lifecycle to **promoted** and clears CPCV gate columns so
+    T1.6 realized-PnL CPCV can repopulate evidence.
+
+    Rollback (manual): set ``lifecycle_stage`` back to ``challenged`` and/or rerun
+    historical backfill if operators choose to re-apply the old metrics.
+
+    See: Q1.T1.6 ``evaluate_pattern_cpcv_realized_pnl`` and runbook evaluator routing.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    row = conn.execute(text("SELECT 1 FROM scan_patterns WHERE id = 1047")).fetchone()
+    if not row:
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            """
+            UPDATE scan_patterns
+            SET lifecycle_stage = 'promoted',
+                promotion_gate_passed = NULL,
+                promotion_gate_reasons = NULL,
+                cpcv_n_paths = NULL,
+                cpcv_median_sharpe = NULL,
+                cpcv_median_sharpe_by_regime = NULL,
+                deflated_sharpe = NULL,
+                pbo = NULL,
+                n_effective_trials = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1047
+            """
+        )
+    )
+    conn.commit()
+
+
+def _migration_169_scan_patterns_pattern_evidence_kind(conn) -> None:
+    """Q1.T1.6: route CPCV — ``realized_pnl`` (trade-return sequence) vs ``ml_signal`` (LightGBM).
+
+    Default ``realized_pnl`` for rule-based patterns; ``ml_signal`` reserved for future
+    ML-signal patterns using the legacy triple-barrier + classifier evaluator.
+
+    Rollback (manual)::
+
+        ALTER TABLE scan_patterns DROP CONSTRAINT IF EXISTS chk_scan_patterns_pattern_evidence_kind;
+        ALTER TABLE scan_patterns DROP COLUMN IF EXISTS pattern_evidence_kind;
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "pattern_evidence_kind" not in cols:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE scan_patterns ADD COLUMN pattern_evidence_kind TEXT NOT NULL DEFAULT 'realized_pnl'
+                """
+            )
+        )
+        conn.commit()
+    row = conn.execute(
+        text(
+            """
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            WHERE t.relname = 'scan_patterns'
+              AND c.conname = 'chk_scan_patterns_pattern_evidence_kind'
+            """
+        )
+    ).fetchone()
+    if not row:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE scan_patterns ADD CONSTRAINT chk_scan_patterns_pattern_evidence_kind
+                CHECK (pattern_evidence_kind IN ('realized_pnl', 'ml_signal')) NOT VALID
+                """
+            )
+        )
+        conn.commit()
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns VALIDATE CONSTRAINT "
+                "chk_scan_patterns_pattern_evidence_kind"
+            )
+        )
+    conn.commit()
+    conn.execute(
+        text(
+            """
+            UPDATE scan_patterns
+            SET pattern_evidence_kind = 'realized_pnl'
+            WHERE lifecycle_stage IN ('promoted', 'live')
+            """
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -10234,6 +10339,11 @@ MIGRATIONS = [
         _migration_166_scan_patterns_promotion_gate_null_default,
     ),
     ("167_unified_signals_table", _migration_167_unified_signals_table),
+    (
+        "168_restore_pattern_1047_cpcv_miscalibration",
+        _migration_168_restore_pattern_1047_cpcv_miscalibration,
+    ),
+    ("169_scan_patterns_pattern_evidence_kind", _migration_169_scan_patterns_pattern_evidence_kind),
 ]
 
 

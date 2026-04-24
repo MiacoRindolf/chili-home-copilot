@@ -16,7 +16,7 @@ import logging
 import math
 import random
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import numpy as np
 from scipy import stats as sp_stats
@@ -304,6 +304,7 @@ def _finalize_cpcv_promotion_ready(
     filtered: list[dict[str, Any]],
     *,
     n_hypotheses_tested: int,
+    scan_pattern: Optional[Any] = None,
 ) -> tuple[bool, dict[str, Any]]:
     from .promotion_gate import finalize_promotion_with_cpcv
 
@@ -311,6 +312,7 @@ def _finalize_cpcv_promotion_ready(
         detail,
         filtered,
         n_hypotheses_tested=n_hypotheses_tested,
+        scan_pattern=scan_pattern,
     )
     if detail.get("blocked") == "cpcv_promotion_gate_failed":
         return False, detail
@@ -323,6 +325,7 @@ def check_promotion_ready(
     *,
     min_trades: int = MIN_TRADES_FOR_PROMOTION,
     n_hypotheses_tested: int = 1,
+    scan_pattern: Optional[Any] = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Combined promotion gate: minimum sample + ensemble + multiple hypothesis correction.
 
@@ -346,6 +349,7 @@ def check_promotion_ready(
         detail,
         filtered,
         n_hypotheses_tested=n_hypotheses_tested,
+        scan_pattern=scan_pattern,
     )
 
 
@@ -558,6 +562,7 @@ def check_promotion_ready_v2(
     dsr_threshold: float = 0.95,
     holdout_rows: list[dict[str, Any]] | None = None,
     holdout_predicate: Callable[[dict[str, Any]], bool] | None = None,
+    scan_pattern: Optional[Any] = None,
 ) -> tuple[bool, dict[str, Any]]:
     """V2 promotion gate: ensemble + DSR + temporal holdout.
 
@@ -607,4 +612,5 @@ def check_promotion_ready_v2(
         detail,
         filtered,
         n_hypotheses_tested=n_hypotheses_tested,
+        scan_pattern=scan_pattern,
     )

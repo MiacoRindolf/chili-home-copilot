@@ -1,5 +1,20 @@
 # CPCV promotion gate runbook (Q1.T1)
 
+## Evaluator routing (Q1.T1.6)
+
+`scan_patterns.pattern_evidence_kind` selects which CPCV implementation runs inside `finalize_promotion_with_cpcv` and in `scripts/backfill_cpcv_metrics.py`:
+
+| Value | Use case | Mechanism |
+|--------|-----------|-----------|
+| **`realized_pnl`** (default) | Rule-based patterns with a `trading_pattern_trades` history | **Trade-sequence CPCV:** combinatorial purged CV on the time-ordered realized `outcome_return_pct` series. Each OOS fold’s score is the annualized Sharpe of realized returns in that fold. **DSR** / **PBO** use that same return stream (no triple-barrier relabeling, no LightGBM). |
+| **`ml_signal`** | Future ML-driven signal patterns | **Legacy path:** triple-barrier labels + `LGBMClassifier` on feature rows (Q1.T1 contract), unchanged. |
+
+- New and backfilled **promoted/live** rows default to **`realized_pnl`** (migration **169**).
+- Set **`ml_signal`** only when a pattern is explicitly an ML-signal strategy that should use the classifier evaluator.
+- **Promotion thresholds** (`DSR ≥ 0.95`, `PBO ≤ 0.2`, `cpcv_n_paths ≥ 50`, median path Sharpe ≥ 0.5, `n_trades ≥ 15`) apply to **both** evaluators; only the input series and path Sharpe construction differ.
+
+After deploying T1.6, run a **manual** `backfill_cpcv_metrics.py` once against canonical chili (see below) so promoted/live patterns pick up metrics from the correct evaluator. Keep **`CHILI_CPCV_PROMOTION_GATE_ENABLED=false`** until operators review that rerun.
+
 ## Flag
 
 - **Env:** `CHILI_CPCV_PROMOTION_GATE_ENABLED` (Settings: `chili_cpcv_promotion_gate_enabled`).
@@ -14,7 +29,7 @@
 | `pbo` | ≤ 0.2 |
 | `cpcv_n_paths` | ≥ 50 |
 | `cpcv_median_sharpe` | ≥ 0.5 (annualized, path median) |
-| Labeled samples (`n_trades`) after triple-barrier | ≥ **`CHILI_CPCV_MIN_TRADES`** (default **15**) to run CPCV; see sample-size tiers below |
+| Effective sample (`n_trades`) | ≥ **`CHILI_CPCV_MIN_TRADES`** (default **15**): **ML** path = rows after triple-barrier labeling; **realized_pnl** path = realized PTR trades with `outcome_return_pct`. See sample-size tiers below. |
 
 ### Sample-size tiers (Q1.T1.5)
 
