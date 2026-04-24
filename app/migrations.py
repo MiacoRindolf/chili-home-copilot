@@ -9939,6 +9939,10 @@ def _migration_166_scan_patterns_promotion_gate_null_default(conn) -> None:
             SET promotion_gate_passed = NULL,
                 promotion_gate_reasons = NULL
             WHERE cpcv_n_paths IS NULL
+              AND (
+                promotion_gate_passed IS NOT NULL
+                OR promotion_gate_reasons IS NOT NULL
+              )
             """
         )
     )
