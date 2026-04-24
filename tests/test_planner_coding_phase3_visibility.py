@@ -30,10 +30,13 @@ def test_post_validation_summary_shows_run_and_read_path_idempotent(paired_clien
     db.add(ProjectMember(project_id=p.id, user_id=user.id, role="owner"))
     t = PlanTask(project_id=p.id, title="Vis task", reporter_id=user.id)
     db.add(t)
-    db.add(CodeRepo(user_id=user.id, path=str(tmp_path), name="workspace", active=True))
+    repo = CodeRepo(user_id=user.id, path=str(tmp_path), name="workspace", active=True)
+    db.add(repo)
     db.commit()
     tid = t.id
+    repo_id = repo.id
 
+    client.put(f"/api/planner/tasks/{tid}/coding/profile", json={"code_repo_id": repo_id})
     client.put(f"/api/planner/tasks/{tid}/coding/brief", json={"body": "Brief for validation."})
     client.post(f"/api/planner/tasks/{tid}/coding/brief/approve")
 
@@ -71,7 +74,7 @@ def test_post_validation_summary_shows_run_and_read_path_idempotent(paired_clien
 
 
 def test_validation_preflight_error_then_summary_still_idempotent(paired_client, db):
-    """400 validation (no repos) does not break; GET summary remains idempotent."""
+    """409 workspace_unbound does not break; GET summary remains idempotent."""
     client, user = paired_client
     p = PlanProject(user_id=user.id, name="P3Pre", key="P3P")
     db.add(p)
@@ -86,7 +89,8 @@ def test_validation_preflight_error_then_summary_still_idempotent(paired_client,
     client.post(f"/api/planner/tasks/{tid}/coding/brief/approve")
 
     r = client.post(f"/api/planner/tasks/{tid}/coding/validation/run")
-    assert r.status_code == 400
+    assert r.status_code == 409
+    assert r.json()["workspace_unbound"] is True
 
     st0 = db.execute(
         text("SELECT coding_readiness_state FROM plan_tasks WHERE id=:i"),

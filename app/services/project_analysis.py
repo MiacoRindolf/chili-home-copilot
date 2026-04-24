@@ -11,7 +11,7 @@ from . import planner_service
 from .code_brain import lenses as cb_lenses
 from .coding_task.service import build_handoff_dict
 from .coding_task.workspaces import select_runtime_workspace_repo_for_task
-from .project_domain_runs import list_timeline
+from .project_domain_feed import list_operator_feed
 
 PERSPECTIVE_ORDER = (
     ("product", "Product", None),
@@ -130,10 +130,10 @@ def build_analysis_payload(
         "product": _product_perspective(handoff),
     }
     for key, label, lens_name in PERSPECTIVE_ORDER[1:]:
-        metrics = cb_lenses.get_lens_metrics(db, lens_name, repo_id=metrics_repo_id)
+        metrics = cb_lenses.get_lens_metrics(db, lens_name, repo_id=metrics_repo_id, user_id=user_id)
         perspectives[key] = _perspective_from_metrics(key, label, metrics)
 
-    timeline = list_timeline(db, user_id=user_id, limit=20)
+    timeline = list_operator_feed(db, user_id=user_id, limit=20)
     summary = {
         "planner_task_id": planner_task_id,
         "repo_id": repo_id,

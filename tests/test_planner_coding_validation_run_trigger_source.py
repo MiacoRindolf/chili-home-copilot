@@ -31,8 +31,10 @@ def _ready_task(db, user):
 
 
 def _register_workspace(db, user, path: Path):
-    db.add(CodeRepo(user_id=user.id, path=str(path), name="workspace", active=True))
+    repo = CodeRepo(user_id=user.id, path=str(path), name="workspace", active=True)
+    db.add(repo)
     db.commit()
+    return repo.id
 
 
 def test_validation_run_post_no_json_defaults_manual_trigger(paired_client, db, tmp_path: Path):
@@ -40,7 +42,8 @@ def test_validation_run_post_no_json_defaults_manual_trigger(paired_client, db, 
     tid = _ready_task(db, user)
     tmp_path = tmp_path.resolve()
     (tmp_path / ".git").mkdir()
-    _register_workspace(db, user, tmp_path)
+    repo_id = _register_workspace(db, user, tmp_path)
+    client.put(f"/api/planner/tasks/{tid}/coding/profile", json={"code_repo_id": repo_id})
     client.put(f"/api/planner/tasks/{tid}/coding/brief", json={"body": "Brief."})
     client.post(f"/api/planner/tasks/{tid}/coding/brief/approve")
 
@@ -59,7 +62,8 @@ def test_validation_run_post_post_apply_trigger(paired_client, db, tmp_path: Pat
     tid = _ready_task(db, user)
     tmp_path = tmp_path.resolve()
     (tmp_path / ".git").mkdir()
-    _register_workspace(db, user, tmp_path)
+    repo_id = _register_workspace(db, user, tmp_path)
+    client.put(f"/api/planner/tasks/{tid}/coding/profile", json={"code_repo_id": repo_id})
     client.put(f"/api/planner/tasks/{tid}/coding/brief", json={"body": "Brief."})
     client.post(f"/api/planner/tasks/{tid}/coding/brief/approve")
 
@@ -80,7 +84,8 @@ def test_validation_run_post_empty_json_manual(paired_client, db, tmp_path: Path
     tid = _ready_task(db, user)
     tmp_path = tmp_path.resolve()
     (tmp_path / ".git").mkdir()
-    _register_workspace(db, user, tmp_path)
+    repo_id = _register_workspace(db, user, tmp_path)
+    client.put(f"/api/planner/tasks/{tid}/coding/profile", json={"code_repo_id": repo_id})
     client.put(f"/api/planner/tasks/{tid}/coding/brief", json={"body": "Brief."})
     client.post(f"/api/planner/tasks/{tid}/coding/brief/approve")
 

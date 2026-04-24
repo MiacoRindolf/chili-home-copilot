@@ -3,17 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from app.models import PlanProject, PlanTask, ProjectAnalysisSnapshot, ProjectDomainRun, ProjectMember, User
+from app.models import AgentMessage, PlanProject, PlanTask, ProjectAnalysisSnapshot, ProjectDomainRun, ProjectMember, User
 from app.models.code_brain import (
     CodeDepAlert,
     CodeHotspot,
     CodeInsight,
+    CodeLearningEvent,
     CodeQualitySnapshot,
     CodeRepo,
     CodeReview,
     CodeSearchEntry,
     CodeSnapshot,
 )
+from app.services.code_brain.learning import get_code_brain_metrics
 from app.services.code_brain.learning import run_code_learning_cycle
 
 
@@ -38,6 +40,85 @@ def test_project_status_reads_durable_runs(paired_client, db):
     assert body["running"] is False
     assert body["run_kind"] == "analysis"
     assert body["last_run"] is not None
+
+
+def test_project_messages_and_analysis_merge_operator_feed_sources(paired_client, db):
+    client, user = paired_client
+    repo = CodeRepo(
+        user_id=user.id,
+        path=str(Path(__file__).resolve().parents[1]),
+        host_path=str(Path(__file__).resolve().parents[1]),
+        container_path="/workspace",
+        name="workspace",
+        active=True,
+    )
+    db.add(repo)
+    db.flush()
+    db.add(
+        ProjectDomainRun(
+            user_id=user.id,
+            repo_id=repo.id,
+            run_kind="analysis",
+            status="completed",
+            title="Run project analysis",
+            started_at=datetime(2026, 4, 24, 14, 59, 0),
+            finished_at=datetime(2026, 4, 24, 14, 59, 10),
+            created_at=datetime(2026, 4, 24, 14, 59, 10),
+        )
+    )
+    db.add(
+        CodeLearningEvent(
+            user_id=None,
+            repo_id=repo.id,
+            event_type="index_error",
+            description="workspace: Registered workspace is not reachable from this runtime.",
+            created_at=datetime(2026, 4, 24, 15, 0, 0),
+        )
+    )
+    db.add(
+        AgentMessage(
+            from_agent="product_owner",
+            to_agent="project_manager",
+            user_id=user.id,
+            message_type="finding",
+            content_json='{"title":"Need auth hardening","severity":"critical"}',
+            acknowledged=False,
+            created_at=datetime(2026, 4, 24, 15, 1, 0),
+        )
+    )
+    db.add(
+        CodeLearningEvent(
+            user_id=None,
+            repo_id=None,
+            event_type="cycle",
+            description="Code learning cycle completed in 7.5s: 6 repos, 4 insights",
+            created_at=datetime(2026, 4, 24, 15, 2, 0),
+        )
+    )
+    db.commit()
+
+    feed_response = client.get("/api/brain/project/messages")
+    assert feed_response.status_code == 200
+    messages = feed_response.json()["messages"]
+    assert [row["source"] for row in messages[:4]] == [
+        "code_learning",
+        "agent_message",
+        "code_learning",
+        "project_run",
+    ]
+    assert messages[0]["summary"] == "Code learning cycle completed."
+    assert messages[1]["summary"] == "Need auth hardening"
+    assert messages[1]["status"] == "unread"
+    assert messages[2]["status"] == "failed"
+    assert messages[2]["repo_id"] == repo.id
+    assert messages[3]["summary"] == "Run project analysis"
+
+    latest_response = client.get("/api/brain/project/analysis/latest")
+    assert latest_response.status_code == 200
+    snapshot = latest_response.json()["snapshot"]
+    assert snapshot["status"] == "ephemeral"
+    assert snapshot["summary"]["timeline_count"] == 4
+    assert snapshot["timeline"][0]["source"] == "code_learning"
 
 
 def test_project_analysis_run_and_latest_snapshot(paired_client, db):
@@ -159,6 +240,92 @@ def test_code_learning_cycle_marks_unreachable_repo_stale(db):
     insight = db.query(CodeInsight).filter(CodeInsight.repo_id == repo.id).first()
     assert insight is not None
     assert insight.active is False
+
+
+def test_code_learning_scheduler_owned_repo_rows_are_user_scoped(db):
+    user = User(name="SchedulerOwner")
+    db.add(user)
+    db.flush()
+    repo = CodeRepo(
+        user_id=user.id,
+        path="Z:\\missing-owned-project",
+        host_path="Z:\\missing-owned-project",
+        name="owned-missing",
+        active=True,
+    )
+    db.add(repo)
+    db.commit()
+
+    result = run_code_learning_cycle(db)
+    assert result["ok"] is True
+
+    run_rows = (
+        db.query(ProjectDomainRun)
+        .filter(ProjectDomainRun.repo_id == repo.id, ProjectDomainRun.run_kind == "index")
+        .all()
+    )
+    assert len(run_rows) == 1
+    assert run_rows[0].user_id == user.id
+
+    repo_events = (
+        db.query(CodeLearningEvent)
+        .filter(CodeLearningEvent.repo_id == repo.id, CodeLearningEvent.event_type == "index_error")
+        .all()
+    )
+    assert len(repo_events) == 1
+    assert repo_events[0].user_id == user.id
+
+    cycle_events = db.query(CodeLearningEvent).filter(
+        CodeLearningEvent.repo_id.is_(None),
+        CodeLearningEvent.event_type == "cycle",
+    ).all()
+    assert len(cycle_events) == 1
+    assert cycle_events[0].user_id == user.id
+
+
+def test_code_metrics_recent_events_exclude_foreign_cycle_rows(paired_client, db):
+    _client, user = paired_client
+    other = User(name="OtherMetricsUser")
+    db.add(other)
+    db.flush()
+    repo = CodeRepo(
+        user_id=user.id,
+        path=str(Path(__file__).resolve().parents[1]),
+        host_path=str(Path(__file__).resolve().parents[1]),
+        container_path="/workspace",
+        name="workspace",
+        file_count=4,
+        total_lines=40,
+        last_indexed=datetime.utcnow(),
+        active=True,
+    )
+    db.add(repo)
+    db.flush()
+    db.add(
+        CodeLearningEvent(
+            user_id=other.id,
+            repo_id=None,
+            event_type="cycle",
+            description="Other user cycle",
+            created_at=datetime(2026, 4, 24, 17, 0, 0),
+        )
+    )
+    db.add(
+        CodeLearningEvent(
+            user_id=user.id,
+            repo_id=None,
+            event_type="cycle",
+            description="Current user cycle",
+            created_at=datetime(2026, 4, 24, 17, 1, 0),
+        )
+    )
+    db.commit()
+
+    metrics = get_code_brain_metrics(db, user.id)
+    events = metrics["recent_events"]
+    descriptions = [row["description"] for row in events]
+    assert "Current user cycle" in descriptions
+    assert "Other user cycle" not in descriptions
 
 
 def test_project_router_requires_pairing(client, db):

@@ -18,6 +18,7 @@ from ...models.code_brain import (
     CodeDepAlert, CodeDependency, CodeHotspot, CodeInsight,
     CodeLearningEvent, CodeRepo, CodeReview, CodeSnapshot,
 )
+from .events import learning_event_visibility_clause
 from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
@@ -199,7 +200,13 @@ def list_lenses() -> List[Dict[str, Any]]:
     ]
 
 
-def get_lens_metrics(db: Session, lens_name: str, repo_id: Optional[int] = None) -> Dict[str, Any]:
+def get_lens_metrics(
+    db: Session,
+    lens_name: str,
+    repo_id: Optional[int] = None,
+    *,
+    user_id: Optional[int] = None,
+) -> Dict[str, Any]:
     """Return metrics filtered through a specific lens."""
     lens = LENS_REGISTRY.get(lens_name)
     if not lens:
@@ -260,6 +267,12 @@ def get_lens_metrics(db: Session, lens_name: str, repo_id: Optional[int] = None)
     review_count = review_q.scalar() or 0
 
     events_q = db.query(CodeLearningEvent)
+    visibility_clause = learning_event_visibility_clause(
+        user_id=user_id,
+        repo_ids=([repo_id] if repo_id is not None and repo_id >= 0 else []),
+    )
+    if visibility_clause is not None:
+        events_q = events_q.filter(visibility_clause)
     if repo_id is not None and freshness.get("trusted"):
         events_q = events_q.filter(CodeLearningEvent.repo_id == repo_id)
     elif repo_id is not None:
@@ -369,7 +382,12 @@ def get_lens_chat_context(db: Session, lens_name: str, user_id: Optional[int] = 
     from ..coding_task.workspaces import first_reachable_workspace_repo
 
     repo = first_reachable_workspace_repo(db, user_id=user_id)
-    metrics = get_lens_metrics(db, lens_name, repo_id=(int(repo.id) if repo is not None else -1))
+    metrics = get_lens_metrics(
+        db,
+        lens_name,
+        repo_id=(int(repo.id) if repo is not None else -1),
+        user_id=user_id,
+    )
     parts: List[str] = [
         f"[Project Brain — {lens.label} perspective]",
         lens.context_role,
