@@ -3617,16 +3617,17 @@ def _migration_087_neural_mesh_seed_expand_v15(conn) -> None:
         ("nm_evidence_bt", "nm_promotion_demotion_monitor", "evidence_ok", 0.42, "excitatory"),
     ]
     for src, tgt, sig, w, pol in edges:
+        etype = _brain_graph_edge_type_for_seed(src, sig, pol)
         conn.execute(
             text(
                 """
                 INSERT INTO brain_graph_edges (
                     source_node_id, target_node_id, signal_type, weight, polarity,
-                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, delay_ms, min_confidence, min_source_confidence, enabled, graph_version, gate_config,
                     created_at, updated_at
                 )
                 SELECT :src, :tgt, :sig, :w, :pol,
-                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0, 0.0, 0.0, TRUE, :gv, NULL,
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
                   AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
@@ -3637,7 +3638,7 @@ def _migration_087_neural_mesh_seed_expand_v15(conn) -> None:
                   )
                 """
             ),
-            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv},
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "etype": etype, "gv": gv},
         )
 
     conn.commit()
