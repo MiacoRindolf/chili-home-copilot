@@ -100,6 +100,6 @@ This is a **host** limitation: too many sockets in `TIME_WAIT` or ephemeral port
    docker compose exec -w /workspace -e DATABASE_URL=postgresql://chili:chili@postgres:5432/chili_staging chili python scripts/backfill_cpcv_metrics.py --dry-run
    ```
 
-   Adjust database name (`chili` / `chili_staging` / `chili_test`) and script path as needed. Requires the `chili` image to contain the same Python dependencies as your script (e.g. `lightgbm` for CPCV backfill). If a package is missing in the image, use `docker compose run --rm` with a custom image, or install deps in `chili-env` on the host only **after** the machine recovers from `10055`.
+   Adjust database name (`chili` / `chili_staging` / `chili_test`) and script path as needed. The `chili` image installs from **`requirements.txt` at `docker compose build` time** — not on every `exec`. If you see `ModuleNotFoundError` (e.g. `skfolio`, `lightgbm`), rebuild and recreate: `docker compose build chili` then `docker compose up -d chili`. Dependencies on the **host** `conda` env do not apply inside the container.
 
 CLI scripts `merge_sqlite_into_postgres.py`, `dedupe_scan_patterns_by_rules.py`, and `audit_postgres_merge_redundancy.py` retry once with IPv4 automatically when this error appears on `localhost`.
