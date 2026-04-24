@@ -242,7 +242,6 @@ def build_workspace_binding_dict(
         ),
         "sub_path": (profile.sub_path or "") if profile is not None else "",
         "workspace_bound": repo is not None,
-        "repo_reachable": bool(repo is not None and resolve_repo_runtime_path(repo) is not None),
     }
 
 
