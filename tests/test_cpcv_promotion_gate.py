@@ -100,8 +100,9 @@ def test_promotion_gate_passes_thresholds():
             "n_trades": 40,
         }
     )
-    assert ok2 is False
-    assert "cpcv_n_paths_lt_50" in reasons2
+    assert ok2 is True
+    assert "provisional_small_paths" in reasons2
+    assert "provisional_sample_size" not in reasons2
 
 
 def test_provisional_promotion_tier_15_to_30_trades():
@@ -359,7 +360,68 @@ def test_promotion_gate_thresholds_apply_to_both_evaluators():
     assert r_a == r_b == []
     ok2, r2 = promotion_gate_passes({**base, "cpcv_n_paths": 10})
     assert ok2 is False
-    assert "cpcv_n_paths_lt_50" in r2
+    assert "cpcv_n_paths_below_provisional_min" in r2
+
+
+def test_n_paths_full_confidence_at_or_above_50():
+    ok, reasons = promotion_gate_passes(
+        {
+            "skipped": False,
+            "cpcv_n_paths": 60,
+            "cpcv_median_sharpe": 0.6,
+            "deflated_sharpe": 0.96,
+            "pbo": 0.15,
+            "n_trades": 40,
+        }
+    )
+    assert ok is True
+    assert reasons == []
+
+
+def test_n_paths_provisional_between_20_and_50():
+    ok, reasons = promotion_gate_passes(
+        {
+            "skipped": False,
+            "cpcv_n_paths": 30,
+            "cpcv_median_sharpe": 0.6,
+            "deflated_sharpe": 0.96,
+            "pbo": 0.15,
+            "n_trades": 40,
+        }
+    )
+    assert ok is True
+    assert "provisional_small_paths" in reasons
+
+
+def test_n_paths_below_provisional_min_fails():
+    ok, reasons = promotion_gate_passes(
+        {
+            "skipped": False,
+            "cpcv_n_paths": 15,
+            "cpcv_median_sharpe": 0.6,
+            "deflated_sharpe": 0.96,
+            "pbo": 0.15,
+            "n_trades": 40,
+        }
+    )
+    assert ok is False
+    assert "cpcv_n_paths_below_provisional_min" in reasons
+
+
+def test_pattern_1047_fixture_passes_provisional():
+    rng = np.random.default_rng(1047)
+    n = 158
+    rets = rng.normal(0.25, 1.2, n).tolist()
+    base = datetime(2025, 4, 1)
+    step = 180.0 / max(n - 1, 1)
+    ts = [base + timedelta(days=i * step) for i in range(n)]
+    out = evaluate_pattern_cpcv_realized_pnl(1047, rets, ts, n_hypotheses_tested=1)
+    assert out.get("skipped") is not True, out
+    n_paths = int(out.get("cpcv_n_paths") or 0)
+    assert 20 <= n_paths < 50, n_paths
+    ok, reasons = promotion_gate_passes(out)
+    assert ok is True
+    assert "provisional_small_paths" in reasons
 
 
 def test_purged_cv_splits_respect_sample_count():
