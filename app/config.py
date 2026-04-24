@@ -804,6 +804,9 @@ class Settings(BaseSettings):
     chili_cpcv_target_paths_max: int = 100
     # n_trades in [min_trades, full_confidence) ⇒ gate may pass with ``provisional_sample_size`` tag.
     chili_cpcv_full_confidence_min_trades: int = 30
+    # When True, scheduler-worker runs ``scripts/backfill_cpcv_metrics.py --commit`` weekly (Sun 04:00 ET).
+    # Default OFF until operator validates a manual backfill run.
+    chili_cpcv_weekly_backfill_enabled: bool = False
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
     chili_regime_classifier_enabled: bool = False
     # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).
