@@ -51,8 +51,9 @@ jobs:
           echo "Postgres not reachable on 5432"
           exit 1
 
-      - name: Run migrations
-        run: python -c "from app.db import engine; from app.migrations import run_migrations; run_migrations(engine)"
+      - name: Bootstrap schema and run migrations
+        run: |
+          python -c "from app.db import Base, engine; from app.models import User, Device; Base.metadata.create_all(bind=engine); from app.migrations import run_migrations; run_migrations(engine)"
 
       - name: Verify migration IDs
         run: bash scripts/verify-migration-ids.sh
