@@ -1798,6 +1798,23 @@ def _record_breakout_alert(
                 scan_pattern_id=_spid,
             )
             db.add(row)
+            db.flush()
+            try:
+                from .trading.contracts.signal_emit import emit_signal_for_breakout_alert
+
+                emit_signal_for_breakout_alert(
+                    db,
+                    row,
+                    scanner=f"scheduler_{alert_tier}",
+                    strategy_family=str(setup.get("sector") or "breakout_scan"),
+                    commit=False,
+                )
+            except Exception as _use:
+                logger.debug(
+                    "[unified_signal] scheduler breakout emit skipped: %s",
+                    _use,
+                    exc_info=True,
+                )
             db.commit()
         finally:
             db.close()

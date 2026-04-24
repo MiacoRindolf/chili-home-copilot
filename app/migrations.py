@@ -9984,6 +9984,84 @@ def _migration_166_scan_patterns_promotion_gate_null_default(conn) -> None:
     conn.commit()
 
 
+def _migration_167_unified_signals_table(conn) -> None:
+    """Q1.T3 phase 1: unified per-scan signal rows (additive; consumers in later PRs).
+
+    Rollback (manual)::
+
+        DROP TABLE IF EXISTS unified_signals;
+    """
+    if "unified_signals" in _tables(conn):
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            """
+            CREATE TABLE unified_signals (
+                signal_id TEXT PRIMARY KEY,
+                scanner TEXT NOT NULL,
+                strategy_family TEXT NOT NULL,
+                pattern_id TEXT NULL,
+                symbol TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                side TEXT NOT NULL,
+                horizon TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                entry_price NUMERIC(28, 10) NOT NULL,
+                stop_price NUMERIC(28, 10) NOT NULL,
+                take_profit_price NUMERIC(28, 10) NULL,
+                atr NUMERIC(28, 10) NOT NULL,
+                expected_return NUMERIC(28, 10) NOT NULL,
+                expected_vol NUMERIC(28, 10) NOT NULL,
+                confidence DOUBLE PRECISION NOT NULL,
+                deflated_sharpe DOUBLE PRECISION NULL,
+                pbo DOUBLE PRECISION NULL,
+                regime TEXT NULL,
+                regime_posterior JSONB NULL,
+                llm_rationale TEXT NULL,
+                features JSONB NOT NULL DEFAULT '{}'::jsonb,
+                rule_fires JSONB NOT NULL DEFAULT '[]'::jsonb,
+                gate_status TEXT NOT NULL,
+                gate_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+                CONSTRAINT chk_unified_signals_gate_status CHECK (
+                    gate_status IN ('proposed', 'gated_ok', 'gated_reject')
+                ),
+                CONSTRAINT chk_unified_signals_side CHECK (
+                    side IN ('long', 'short', 'flat')
+                )
+            )
+            """
+        )
+    )
+    conn.commit()
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_unified_signals_symbol_created_at "
+            "ON unified_signals (symbol, created_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_unified_signals_scanner_horizon_gate "
+            "ON unified_signals (scanner, horizon, gate_status)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_unified_signals_strategy_family_created_at "
+            "ON unified_signals (strategy_family, created_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_unified_signals_pattern_id_created_at "
+            "ON unified_signals (pattern_id, created_at)"
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -10155,6 +10233,7 @@ MIGRATIONS = [
         "166_scan_patterns_promotion_gate_null_default",
         _migration_166_scan_patterns_promotion_gate_null_default,
     ),
+    ("167_unified_signals_table", _migration_167_unified_signals_table),
 ]
 
 

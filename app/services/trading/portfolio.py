@@ -300,6 +300,22 @@ def assign_scan_pattern_to_trade(
     )
     db.add(alert)
     db.flush()
+    try:
+        from .contracts.signal_emit import emit_signal_for_breakout_alert
+
+        emit_signal_for_breakout_alert(
+            db,
+            alert,
+            scanner="user_assigned_breakout",
+            strategy_family=pattern.name or f"pattern_{pattern.id}",
+            commit=False,
+        )
+    except Exception as _use:
+        logger.debug(
+            "[unified_signal] user_assigned emit skipped: %s",
+            _use,
+            exc_info=True,
+        )
     trade.scan_pattern_id = pattern.id
     trade.related_alert_id = alert.id
     db.commit()
