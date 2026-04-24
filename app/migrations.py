@@ -861,10 +861,12 @@ def _migration_028_seed_rsi_ema_breakout_pattern(conn) -> None:
                 "(name, description, rules_json, origin, asset_class, timeframe, confidence, "
                 " evidence_count, backtest_count, score_boost, min_base_score, "
                 " active, generation, ticker_scope, trade_count, backtest_priority, "
-                " promotion_status, created_at, updated_at) "
+                " promotion_status, oos_validation_json, queue_tier, paper_book_json, "
+                " regime_affinity_json, lifecycle_stage, created_at, updated_at) "
                 "VALUES (:name, :desc, :rules, :origin, :ac, '1d', 0.0, 0, 0, 1.5, 4.0, "
                 " TRUE, 0, 'universal', 0, 0, "
-                " 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', "
+                " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ), {
                 "name": pat_name,
                 "desc": (
