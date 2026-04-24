@@ -3184,6 +3184,19 @@ def _migration_085_brain_worker_learning_live_json(conn) -> None:
     conn.commit()
 
 
+def _brain_graph_edge_type_for_seed(source_node_id: str, signal_type: str, polarity: str) -> str:
+    """Classify edge_type for mesh seed INSERTs; matches migration 103 backfill rules."""
+    if polarity == "inhibitory":
+        return "veto"
+    if source_node_id.startswith("nm_evidence"):
+        return "evidence"
+    if source_node_id.startswith("nm_meta"):
+        return "feedback"
+    if signal_type in ("cluster_chain", "step_completed"):
+        return "control"
+    return "dataflow"
+
+
 def _migration_086_trading_brain_neural_mesh(conn) -> None:
     """Trading Brain v2: Postgres-backed neural mesh (nodes, edges, activation queue, states)."""
     if "brain_graph_nodes" not in _tables(conn):
@@ -3452,22 +3465,23 @@ def _migration_086_trading_brain_neural_mesh(conn) -> None:
         ("nm_universe_scan", "nm_event_bus", "universe_tick", 0.7, "excitatory", None),
     ]
     for src, tgt, sig, w, pol, gcfg in edges_seed:
+        etype = _brain_graph_edge_type_for_seed(src, sig, pol)
         if gcfg is None:
             conn.execute(
                 text(
                     """
                     INSERT INTO brain_graph_edges (
                         source_node_id, target_node_id, signal_type, weight, polarity,
-                        delay_ms, min_confidence, enabled, graph_version, gate_config,
+                        edge_type, delay_ms, min_confidence, min_source_confidence, enabled, graph_version, gate_config,
                         created_at, updated_at
                     ) VALUES (
                         :src, :tgt, :sig, :w, :pol,
-                        0, 0.0, TRUE, :gv, NULL,
+                        :etype, 0, 0.0, 0.0, TRUE, :gv, NULL,
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                     """
                 ),
-                {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv},
+                {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "etype": etype, "gv": gv},
             )
         else:
             conn.execute(
@@ -3475,16 +3489,16 @@ def _migration_086_trading_brain_neural_mesh(conn) -> None:
                     """
                     INSERT INTO brain_graph_edges (
                         source_node_id, target_node_id, signal_type, weight, polarity,
-                        delay_ms, min_confidence, enabled, graph_version, gate_config,
+                        edge_type, delay_ms, min_confidence, min_source_confidence, enabled, graph_version, gate_config,
                         created_at, updated_at
                     ) VALUES (
                         :src, :tgt, :sig, :w, :pol,
-                        0, 0.0, TRUE, :gv, CAST(:gcfg AS jsonb),
+                        :etype, 0, 0.0, 0.0, TRUE, :gv, CAST(:gcfg AS jsonb),
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                     """
                 ),
-                {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "gcfg": gcfg},
+                {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "etype": etype, "gv": gv, "gcfg": gcfg},
             )
 
     for nid, _, _, _, _, _, _ in nodes_seed:
