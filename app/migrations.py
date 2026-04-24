@@ -912,6 +912,16 @@ def _migration_029_seed_rsi_ema_insight(conn) -> None:
     """Create a TradingInsight for the seeded RSI+EMA pattern so it shows in the Brain UI."""
     if "trading_insights" not in _tables(conn):
         return
+    if "scan_patterns" not in _tables(conn):
+        return
+    pat_name = "RSI Overbought + EMA Stack + Resistance Retest Breakout"
+    pat_row = conn.execute(
+        text("SELECT id FROM scan_patterns WHERE name = :n LIMIT 1"),
+        {"n": pat_name},
+    ).fetchone()
+    if not pat_row:
+        return
+    scan_pattern_id = int(pat_row[0])
 
     pat_desc = (
         "RSI Overbought + EMA Stack + Resistance Retest Breakout — "
@@ -944,11 +954,11 @@ def _migration_029_seed_rsi_ema_insight(conn) -> None:
         active_val = "TRUE"
         conn.execute(text(
             "INSERT INTO trading_insights "
-            "(user_id, pattern_description, confidence, evidence_count, "
+            "(user_id, scan_pattern_id, pattern_description, confidence, evidence_count, "
             " last_seen, created_at, active, win_count, loss_count) "
-            f"VALUES (:uid, :desc, 0.5, 1, {now_sql}, {now_sql}, "
+            f"VALUES (:uid, :spid, :desc, 0.5, 1, {now_sql}, {now_sql}, "
             f" {active_val}, 0, 0)"
-        ), {"uid": uid, "desc": pat_desc})
+        ), {"uid": uid, "spid": scan_pattern_id, "desc": pat_desc})
     conn.commit()
 
 
