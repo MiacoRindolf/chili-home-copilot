@@ -804,6 +804,9 @@ class Settings(BaseSettings):
     chili_cpcv_target_paths_max: int = 100
     # n_trades in [min_trades, full_confidence) ⇒ gate may pass with ``provisional_sample_size`` tag.
     chili_cpcv_full_confidence_min_trades: int = 30
+    # Q1.T1.7: CPCV combinatorial path count — provisional band vs full (parallel to trade tiers).
+    chili_cpcv_n_paths_provisional_min: int = 20
+    chili_cpcv_n_paths_full_min: int = 50
     # When True, scheduler-worker runs ``scripts/backfill_cpcv_metrics.py --commit`` weekly (Sun 04:00 ET).
     # Default OFF until operator validates a manual backfill run.
     chili_cpcv_weekly_backfill_enabled: bool = False

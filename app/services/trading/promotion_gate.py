@@ -10,6 +10,10 @@ path that bypasses that funnel.
 **realized_pnl** (default: CPCV on realized trade returns, no classifier) vs **ml_signal**
 (legacy triple-barrier + LightGBM below).
 
+**Q1.T1.7 — Path-count tiers:** ``cpcv_n_paths`` uses full vs provisional bands
+(``chili_cpcv_n_paths_full_min`` / ``chili_cpcv_n_paths_provisional_min``), analogous to
+T1.5 trade-count tiers (``provisional_small_paths`` vs ``provisional_sample_size``).
+
 **Model / label contract (``ml_signal`` only; locked for Q2.T6 meta-classifier reuse):**
   * **Classifier:** ``lightgbm.LGBMClassifier`` with
     ``n_estimators=200``, ``num_leaves=31``, ``min_data_in_leaf=100``,
@@ -877,6 +881,10 @@ def promotion_gate_passes(metrics: Mapping[str, Any]) -> tuple[bool, list[str]]:
 
     When ``ok`` is True and ``n_trades`` is below full-confidence minimum (30 by default),
     reasons include ``provisional_sample_size`` (wider CIs; see runbook).
+
+    Q1.T1.7: when ``ok`` is True and ``cpcv_n_paths`` is in the provisional band
+    (``>= chili_cpcv_n_paths_provisional_min`` and ``< chili_cpcv_n_paths_full_min``),
+    reasons include ``provisional_small_paths``.
     """
     failures: list[str] = []
     if metrics.get("skipped"):
@@ -902,8 +910,10 @@ def promotion_gate_passes(metrics: Mapping[str, Any]) -> tuple[bool, list[str]]:
         failures.append("pbo_above_0_2")
 
     n_paths = int(metrics.get("cpcv_n_paths") or 0)
-    if n_paths < 50:
-        failures.append("cpcv_n_paths_lt_50")
+    paths_prov = int(getattr(settings, "chili_cpcv_n_paths_provisional_min", 20))
+    paths_full = int(getattr(settings, "chili_cpcv_n_paths_full_min", 50))
+    if n_paths < paths_prov:
+        failures.append("cpcv_n_paths_below_provisional_min")
 
     med_sh = metrics.get("cpcv_median_sharpe")
     if med_sh is None:
@@ -915,6 +925,8 @@ def promotion_gate_passes(metrics: Mapping[str, Any]) -> tuple[bool, list[str]]:
     reasons = list(failures)
     if ok and n_tr < full_conf:
         reasons.append("provisional_sample_size")
+    if ok and paths_prov <= n_paths < paths_full:
+        reasons.append("provisional_small_paths")
     return ok, reasons
 
 
