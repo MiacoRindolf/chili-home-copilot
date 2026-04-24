@@ -326,7 +326,8 @@ def _label_rows_barrier(
             rets.append(float(label.realized_return_pct))
             regimes.append(str(r.get("regime") or "unknown"))
 
-    if len(xs) < 30:
+    min_lb = int(getattr(settings, "chili_cpcv_min_trades", 15))
+    if len(xs) < min_lb:
         return None
     return np.vstack(xs), np.array(ys, dtype=int), np.array(rets, dtype=float), regimes
 
@@ -362,14 +363,54 @@ def _regime_median_sharpes_from_path(
     return out
 
 
+def _cpcv_autoscaled_purge_embargo(n: int, purge_frac: float, embargo_frac: float) -> tuple[int, int]:
+    pf = float(max(0.0, min(0.5, purge_frac)))
+    ef = float(max(0.0, min(0.5, embargo_frac)))
+    return max(2, int(pf * n)), max(1, int(ef * n))
+
+
+def _cpcv_build_feasible_cv_and_splits(
+    X: np.ndarray,
+    n_folds: int,
+    n_test_folds: int,
+    purged_size: int,
+    embargo_size: int,
+) -> tuple[CombinatorialPurgedCV | None, int, int, list | None]:
+    """Shrink purge/embargo until each train fold can absorb purge+embargo (López de Prado)."""
+    ps, es = purged_size, embargo_size
+    cap = max(200, X.shape[0] + 50)
+    for _ in range(cap):
+        try:
+            cv = CombinatorialPurgedCV(
+                n_folds=n_folds,
+                n_test_folds=n_test_folds,
+                purged_size=ps,
+                embargo_size=es,
+            )
+            splits = list(cv.split(X))
+        except Exception:
+            splits = []
+        if splits:
+            min_tr = min(np.asarray(tr, dtype=int).size for tr, _te in splits)
+            if min_tr > ps + es:
+                return cv, ps, es, splits
+        if ps > 2:
+            ps -= 1
+        elif es > 1:
+            es -= 1
+        else:
+            break
+    return None, purged_size, embargo_size, None
+
+
 def evaluate_pattern_cpcv(
     pattern_id: int | None,
     filtered: list[dict[str, Any]],
     *,
     n_hypotheses_tested: int,
-    n_target_paths: int = 100,
-    purged_size: int = 20,
-    embargo_size: int = 5,
+    n_target_paths: int | None = None,
+    purged_size: int | None = None,
+    embargo_size: int | None = None,
     bar_interval_hint: str | None = None,
     max_labeled_rows: int | None = None,
 ) -> dict[str, Any]:
@@ -418,7 +459,8 @@ def evaluate_pattern_cpcv(
         regimes = [regimes[int(i)] for i in pick.tolist()]
         n = int(cap)
 
-    if n < 30:
+    min_tr = int(getattr(settings, "chili_cpcv_min_trades", 15))
+    if n < min_tr:
         return {
             "skipped": True,
             "reason": "insufficient_rows_after_barrier",
@@ -430,21 +472,50 @@ def evaluate_pattern_cpcv(
             "n_effective_trials": int(max(1, n_hypotheses_tested)),
         }
 
+    purge_frac = float(getattr(settings, "chili_cpcv_purge_frac", 0.05))
+    embargo_frac = float(getattr(settings, "chili_cpcv_embargo_frac", 0.02))
+    target_cap = int(getattr(settings, "chili_cpcv_target_paths_max", 100))
+    if purged_size is not None and embargo_size is not None:
+        ps, es = max(2, int(purged_size)), max(1, int(embargo_size))
+    else:
+        ps, es = _cpcv_autoscaled_purge_embargo(n, purge_frac, embargo_frac)
+
+    if n_target_paths is None:
+        n_paths_budget = min(target_cap, max(10, n // 5))
+    else:
+        n_paths_budget = int(n_target_paths)
+
     try:
-        t_train = min(252, max(30, n // 2))
+        t_train = min(252, max(min_tr, n // 2))
         n_folds, n_test_folds = optimal_folds_number(
             n_observations=n,
             target_train_size=t_train,
-            target_n_test_paths=min(n_target_paths, max(2, n // 15)),
+            target_n_test_paths=min(n_paths_budget, max(2, n // 15)),
         )
         n_folds = max(5, min(n_folds, max(5, n // 10)))
         n_test_folds = max(2, min(n_test_folds, n_folds - 2))
-        cv = CombinatorialPurgedCV(
-            n_folds=n_folds,
-            n_test_folds=n_test_folds,
-            purged_size=purged_size,
-            embargo_size=embargo_size,
+        cv, ps, es, splits = _cpcv_build_feasible_cv_and_splits(
+            X, n_folds, n_test_folds, ps, es
         )
+        if cv is None or not splits:
+            logger.info(
+                "[cpcv_promotion_gate] CV infeasible: n=%s folds=%s/%s purge=%s embargo=%s",
+                n,
+                n_folds,
+                n_test_folds,
+                ps,
+                es,
+            )
+            return {
+                "skipped": True,
+                "reason": "cv_infeasible_for_sample_size",
+                "cpcv_n_paths": 0,
+                "cpcv_median_sharpe": None,
+                "cpcv_median_sharpe_by_regime": None,
+                "deflated_sharpe": None,
+                "pbo": None,
+                "n_effective_trials": int(max(1, n_hypotheses_tested)),
+            }
     except Exception as exc:
         logger.info("[cpcv_promotion_gate] CV config failed: %s", exc)
         return {
@@ -462,12 +533,14 @@ def evaluate_pattern_cpcv(
     path_regime_medians: dict[str, list[float]] = {}
     clf_template = _lgbm_classifier()
 
+    min_train_floor = max(10, min_tr)
+    min_test_floor = max(3, min(5, n // 25))
+
     try:
-        splits = list(cv.split(X))
         for train_idx, test_idx in splits:
             te = _flatten_test_indices(test_idx)
             tr = np.asarray(train_idx, dtype=int)
-            if tr.size < 30 or te.size < 5:
+            if tr.size < min_train_floor or te.size < min_test_floor:
                 continue
             clf = _lgbm_classifier()
             clf.fit(X[tr], y_lgb[tr])
@@ -551,39 +624,49 @@ def evaluate_pattern_cpcv(
 
 
 def promotion_gate_passes(metrics: Mapping[str, Any]) -> tuple[bool, list[str]]:
-    """Return (ok, reasons) against Q1.T1 thresholds."""
-    reasons: list[str] = []
+    """Return (ok, reasons) against Q1.T1 thresholds.
+
+    When ``ok`` is True and ``n_trades`` is below full-confidence minimum (30 by default),
+    reasons include ``provisional_sample_size`` (wider CIs; see runbook).
+    """
+    failures: list[str] = []
     if metrics.get("skipped"):
-        reasons.append(str(metrics.get("reason") or "skipped"))
-        return False, reasons
+        failures.append(str(metrics.get("reason") or "skipped"))
+        return False, failures
 
     n_tr = int(metrics.get("n_trades") or metrics.get("n_labeled_samples") or 0)
-    if n_tr < 30:
-        reasons.append("n_trades_lt_30")
+    min_tr = int(getattr(settings, "chili_cpcv_min_trades", 15))
+    full_conf = int(getattr(settings, "chili_cpcv_full_confidence_min_trades", 30))
+    if n_tr < min_tr:
+        failures.append("n_trades_below_min")
 
     dsr = metrics.get("deflated_sharpe")
     if dsr is None:
-        reasons.append("dsr_missing")
+        failures.append("dsr_missing")
     elif float(dsr) < 0.95:
-        reasons.append("dsr_below_0_95")
+        failures.append("dsr_below_0_95")
 
     pbo = metrics.get("pbo")
     if pbo is None:
-        reasons.append("pbo_missing")
+        failures.append("pbo_missing")
     elif float(pbo) > 0.2:
-        reasons.append("pbo_above_0_2")
+        failures.append("pbo_above_0_2")
 
     n_paths = int(metrics.get("cpcv_n_paths") or 0)
     if n_paths < 50:
-        reasons.append("cpcv_n_paths_lt_50")
+        failures.append("cpcv_n_paths_lt_50")
 
     med_sh = metrics.get("cpcv_median_sharpe")
     if med_sh is None:
-        reasons.append("median_sharpe_missing")
+        failures.append("median_sharpe_missing")
     elif float(med_sh) < 0.5:
-        reasons.append("median_sharpe_below_0_5")
+        failures.append("median_sharpe_below_0_5")
 
-    return (len(reasons) == 0), reasons
+    ok = len(failures) == 0
+    reasons = list(failures)
+    if ok and n_tr < full_conf:
+        reasons.append("provisional_sample_size")
+    return ok, reasons
 
 
 def finalize_promotion_with_cpcv(

@@ -792,6 +792,18 @@ class Settings(BaseSettings):
     # When True, CPCV + DSR + PBO gate blocks promotion after ensemble/DSR/holdout (HR1 path).
     # Default OFF: metrics computed at promotion-attempt time only; shadow / logging only.
     chili_cpcv_promotion_gate_enabled: bool = False
+    # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM
+    # (memory safety for patterns with huge trading_pattern_trades). 0 = no cap.
+    chili_cpcv_max_labeled_rows: int = 0
+    # Small-sample CPCV (Q1.T1.5): purge/embargo scale with n; target paths capped.
+    chili_cpcv_purge_frac: float = 0.05
+    chili_cpcv_embargo_frac: float = 0.02
+    # Minimum labeled rows after triple-barrier filtering for CPCV + gate evidence.
+    chili_cpcv_min_trades: int = 15
+    # Upper bound for ``min( cap, max(10, n // 5) )`` in ``optimal_folds_number`` path budget.
+    chili_cpcv_target_paths_max: int = 100
+    # n_trades in [min_trades, full_confidence) ⇒ gate may pass with ``provisional_sample_size`` tag.
+    chili_cpcv_full_confidence_min_trades: int = 30
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
     chili_regime_classifier_enabled: bool = False
     # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).

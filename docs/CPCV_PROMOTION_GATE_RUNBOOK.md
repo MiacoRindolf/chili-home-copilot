@@ -14,7 +14,32 @@
 | `pbo` | ≤ 0.2 |
 | `cpcv_n_paths` | ≥ 50 |
 | `cpcv_median_sharpe` | ≥ 0.5 (annualized, path median) |
-| Labeled samples (`n_trades`) | ≥ 30 |
+| Labeled samples (`n_trades`) after triple-barrier | ≥ **`CHILI_CPCV_MIN_TRADES`** (default **15**) to run CPCV; see sample-size tiers below |
+
+### Sample-size tiers (Q1.T1.5)
+
+DSR and CPCV are well-defined for modest **n**; confidence intervals widen as **n** shrinks. The gate uses three bands (defaults; tune via settings):
+
+| Tier | `n_trades` (labeled, post-barrier) | Meaning |
+|------|--------------------------------------|---------|
+| **Insufficient** | **&lt; 15** (`chili_cpcv_min_trades`) | No CPCV / gate outcome — skip or insufficient evidence. |
+| **Provisional** | **15 ≤ n &lt; 30** | Gate may **pass** if all metric thresholds hold; `promotion_gate_reasons` includes **`provisional_sample_size`** (wider CIs; not full-confidence promotion). |
+| **Full confidence** | **≥ 30** (`chili_cpcv_full_confidence_min_trades`) | Pass/fail on metrics only; no provisional tag. |
+
+Rationale: CHILI pattern-scale datasets are smaller than institutional backtests; **15** keeps CPCV and DSR usable while **30** remains the bar for treating evidence as “full” promotion strength.
+
+### Small-sample CPCV (purge / embargo / paths)
+
+`purge_size` and `embargo_size` **auto-scale** with labeled row count **n** (defaults: 5% and 2% of **n**, floors 2 and 1). Before `CombinatorialPurgedCV` runs, the code checks that **min train fold &gt; purge + embargo**; if not, it shrinks purge/embargo or skips with **`cv_infeasible_for_sample_size`**. Target combinatorial path budget: **`min(CHILI_CPCV_TARGET_PATHS_MAX, max(10, n // 5))`** (default cap **100**).
+
+| Env (optional) | Setting | Default |
+|----------------|---------|---------|
+| `CHILI_CPCV_PURGE_FRAC` | `chili_cpcv_purge_frac` | `0.05` |
+| `CHILI_CPCV_EMBARGO_FRAC` | `chili_cpcv_embargo_frac` | `0.02` |
+| `CHILI_CPCV_MIN_TRADES` | `chili_cpcv_min_trades` | `15` |
+| `CHILI_CPCV_TARGET_PATHS` | `chili_cpcv_target_paths_max` | `100` |
+
+Full-confidence boundary (provisional vs not) is **`chili_cpcv_full_confidence_min_trades`** (default **30**); not exposed as env in the first pass — change in code/settings profile if needed.
 
 ## Enable / disable
 
@@ -24,7 +49,9 @@
 
 ## Interpret reject rates
 
-- High `cpcv_n_paths_lt_50`: not enough combinatorial paths — often too few labeled rows after triple-barrier filtering; check data depth and `purged_size` / `embargo_size`.
+- High `cpcv_n_paths_lt_50`: not enough combinatorial paths — often too few labeled rows after triple-barrier filtering; check data depth and autoscaled purge/embargo (or env overrides).
+- `cv_infeasible_for_sample_size`: even after shrinking purge/embargo, no fold satisfies **train &gt; purge + embargo**; need more labeled rows or looser fractions (operator env).
+- `provisional_sample_size` in reasons (with **pass**): acceptable under small-sample policy; treat as provisional promotion until **n ≥ 30** (default full-confidence band).
 - `dsr_below_0_95`: selection-bias-adjusted Sharpe is weak on **barrier** returns — edge may be luck or multiple testing.
 - `pbo_above_0_2`: CSCV-style PBO on strategy vs buy-and-hold barrier returns suggests instability.
 - `median_sharpe_below_0_5`: CPCV path OOS Sharpe median is weak.
@@ -55,11 +82,21 @@ conda run -n chili-env python scripts/backfill_cpcv_metrics.py --dry-run
 conda run -n chili-env python scripts/backfill_cpcv_metrics.py --commit
 ```
 
+- **Host:** use **`conda run -n chili-env`** (or `conda activate chili-env` first). Plain `python` on PATH often lacks **`skfolio`** → `ModuleNotFoundError: No module named 'skfolio'`.
+
+- **Large patterns:** the script defaults to **`--max-labeled-rows 20000`** so CPCV subsamples before combinatorial CV + LightGBM (avoids OOM or silent process exit on patterns with very large `trading_pattern_trades`). Use **`0`** for no cap (optionally set **`CHILI_CPCV_MAX_LABELED_ROWS`** in `.env` when the kwarg is omitted). Single-pattern promotion via `evaluate_pattern_cpcv` still uses no cap unless that setting is set.
+
+- **`--commit`:** persists **each pattern in its own transaction** (commit right after that pattern’s metrics are applied) so crashes mid-run keep earlier rows. Processing order is **newest first** (`scan_patterns.updated_at` descending, then `id` descending).
+
+- **Selection (default):** only promoted/live rows with **`cpcv_n_paths IS NULL`** so you can **rerun** after a crash without redoing finished patterns. **`--all`** recomputes CPCV for every promoted/live row.
+
 - **Default** is dry-run (no writes) unless `--commit` is passed.
 - Dry-run prints counts: evaluated, would-pass CPCV, would-demote, and would-demote **by scanner** (`swing` / `day` / `breakout` / `momentum` / `patterns`).
 - Exit code **2** if would-demote **> 20%** of evaluated patterns — **do not** run `--commit` until operators review.
 
 Failing patterns (when not `skipped`) are set to `lifecycle_stage = 'challenged'` only with `--commit`.
+
+- **Where to point `DATABASE_URL`:** **`--dry-run`** on **`chili_staging`** is recommended (production-shaped, no writes). **`--commit`** for lasting effect must target the **canonical** DB (usually production **`chili`** after operator review); committing only on **`chili_staging`** is ephemeral — see [STAGING_DATABASE.md](STAGING_DATABASE.md) (“Why staging…”).
 
 Requires migration **163** (`scan_patterns` CPCV columns) applied before ORM-backed backfill against production-shaped DBs.
 

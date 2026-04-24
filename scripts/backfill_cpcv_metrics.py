@@ -64,6 +64,7 @@ if importlib.util.find_spec("skfolio") is None:
 
 from sqlalchemy import desc  # noqa: E402
 
+from app.config import settings  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
 from app.models.trading import PatternTradeRow, ScanPattern  # noqa: E402
 from app.services.trading.promotion_gate import (  # noqa: E402
@@ -165,9 +166,10 @@ def main() -> int:
         if int(args.max_labeled_rows) > 0:
             cap_kw["max_labeled_rows"] = int(args.max_labeled_rows)
 
+        min_ptr = int(getattr(settings, "chili_cpcv_min_trades", 15))
         for pat in pats:
             rows = _rows_for_pattern(db, pat.id)
-            if len(rows) < 30:
+            if len(rows) < min_ptr:
                 logger.info("skip id=%s name=%s (rows=%s)", pat.id, pat.name, len(rows))
                 n_skip += 1
                 continue
@@ -257,7 +259,7 @@ def main() -> int:
         logger.info("--- CPCV backfill summary ---")
         logger.info("promoted_or_live_db_total=%s", n_promoted_live_db)
         logger.info("this_run_candidates=%s", len(pats))
-        logger.info("evaluated (>=30 PTR rows)=%s", n_evaluated)
+        logger.info("evaluated (>=min_PTR rows, min=%s)=%s", min_ptr, n_evaluated)
         logger.info("would_pass_cpcv_gate=%s", n_pass)
         logger.info("would_demote_total=%s", n_demote_would)
         for b in SCANNER_BUCKETS:
