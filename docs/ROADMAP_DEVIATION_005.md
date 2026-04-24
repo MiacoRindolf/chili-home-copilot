@@ -25,3 +25,7 @@ Do not edit **163–169**; **170** appends only.
 ## Related tech debt
 
 Patterns with **no / thin PTR history** remain skipped by backfill until they accumulate trades (see **Q1.T2.5** in [ROADMAP_DEVIATION_003.md](ROADMAP_DEVIATION_003.md)); T1.7 does not address that orthogonal gap.
+
+## Resolution
+
+T1.7 is deployed on `main`, migration **170** applied on canonical `chili`, and the post-deploy CPCV backfill (`--commit`, exit **0**) left pattern **1047** in **`promoted`** with **`promotion_gate_passed=true`**, **`pattern_evidence_kind=realized_pnl`**, **`cpcv_n_paths=20`**, **`cpcv_median_sharpe≈0.80`**, **`deflated_sharpe=1.0`**, **`pbo=0.0`**, and **`promotion_gate_reasons`** containing **`provisional_small_paths`**. **`CHILI_CPCV_PROMOTION_GATE_ENABLED`** remains **off** (shadow mode).

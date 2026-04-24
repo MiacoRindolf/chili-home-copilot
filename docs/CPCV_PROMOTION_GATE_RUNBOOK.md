@@ -21,6 +21,22 @@ After deploying T1.6, run a **manual** `backfill_cpcv_metrics.py` once against c
 - **Default:** `false`. When off, CPCV runs **only at promotion-attempt time** (after ensemble / v2 DSR+holdout pass); metrics are logged (`[cpcv_promotion_gate]`) and persisted on `scan_patterns` when a row exists; promotion is **not** blocked by CPCV.
 - When **on**, promotion fails with `detail["blocked"] == "cpcv_promotion_gate_failed"` if thresholds are not met.
 
+## Flag-flip readiness criteria
+
+Turning on **enforcement** (`CHILI_CPCV_PROMOTION_GATE_ENABLED=true`) is **not** a config-only change: operators should treat the following as **minimum** preconditions.
+
+1. **Evidence breadth:** at least **5** patterns have been **evaluated** under **realized-PnL** CPCV with a non-NULL `cpcv_n_paths` (i.e. they produced combinatorial path evidence, not only “skipped” rows). Track with:
+
+   ```sql
+   SELECT COUNT(*) FROM scan_patterns WHERE cpcv_n_paths IS NOT NULL;
+   ```
+
+2. **Calibration stability:** **zero** patterns demoted on **any single procedural-count threshold** in a given backfill or promotion batch (catches future regressions where a tier boundary misfires while headline metrics still look fine).
+
+3. **Operator review:** the per-scanner demote distribution (if any) has been reviewed against the **three-reading playbook** in [Production-shape dry-run (cheat sheet)](#production-shape-dry-run-cheat-sheet) below (&lt;10% proportional, 10–20% skewed, exit code 2 stop).
+
+As of the T1.7 closeout backfill, only **one** promoted/live row had enough `trading_pattern_trades` history to evaluate (`n=1` above the PTR floor), so these criteria are **not** yet met. Weekly scheduled backfill (see **`CHILI_CPCV_WEEKLY_BACKFILL_ENABLED`**) is intended to grow the evaluated set as trade history accumulates; re-check the `COUNT(*)` query after each material run.
+
 ## Thresholds (all required when enforcing)
 
 | Metric | Gate |
