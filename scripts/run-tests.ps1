@@ -1,11 +1,11 @@
 # Usage: .\scripts\run-tests.ps1 [pytest-args]
 # Outputs:
 #   tests-summary.txt  - structured summary (exit code, duration, pass/fail counts)
-#   tests-output.log   - full pytest stdout+stderr
+#   tests-output.log   - full pytest stdout+stderr, streamed in real-time
 # Exit code: pytest's exit code, or 124 on timeout
 
 param(
-    [Parameter(ValueFromRemainingArguments=$true)]
+    [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$PytestArgs
 )
 
@@ -24,58 +24,82 @@ Get-Process python -ErrorAction SilentlyContinue | Where-Object {
     try { $_.CommandLine -like "*pytest*" } catch { $false }
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-$timeoutSeconds = 1800
+# 60-minute hard wrapper timeout (per-test timeout is 120s via pytest-timeout)
+$timeoutSeconds = 3600
 $logFile = "tests-output.log"
-$errFile = "tests-output.err.log"
 $summaryFile = "tests-summary.txt"
 
-Remove-Item -Path $logFile, $errFile, $summaryFile -ErrorAction SilentlyContinue
+Remove-Item -Path $logFile, $summaryFile, "tests-output.err.log" -ErrorAction SilentlyContinue
 
-$condaArgs = @("run", "-n", "chili-env", "python", "-u", "-m", "pytest") + $PytestArgs
-
-Write-Host "Running: conda $($condaArgs -join ' ')"
-$proc = Start-Process -FilePath "conda" -ArgumentList $condaArgs -RedirectStandardOutput $logFile -RedirectStandardError $errFile -PassThru -NoNewWindow
-
-if (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
-    Write-Host "TIMEOUT: pytest exceeded $timeoutSeconds seconds"
-    try { $proc.Kill() } catch {}
-    $exitCode = 124
-    $duration = (Get-Date) - $startTime
-    @"
-duration_seconds: $([math]::Round($duration.TotalSeconds, 1))
-exit_code: $exitCode
-pytest_summary: TIMEOUT after $($duration.TotalSeconds) seconds (limit: $timeoutSeconds)
-log_file: $logFile
-"@ | Set-Content $summaryFile
-    Write-Host "=== TEST RUN COMPLETE (TIMEOUT) ==="
-    Get-Content $summaryFile
-    exit $exitCode
-}
-
-$exitCode = $proc.ExitCode
-$duration = (Get-Date) - $startTime
-
-if (Test-Path $errFile) {
-    Get-Content $errFile | Add-Content $logFile
-    Remove-Item $errFile
-}
-
-$logContent = if (Test-Path $logFile) { Get-Content $logFile -Raw } else { "" }
-
-# conda.exe on Windows often leaves [Process].ExitCode unset; infer from pytest output.
-if ($null -eq $exitCode) {
-    if ($logContent -match '(?m)\b\d+\s+failed\b') {
-        $exitCode = 1
-    } elseif ($logContent -match '(?m)^=+\s*\d+\s+error') {
-        $exitCode = 1
-    } elseif ($logContent -match '(?m)\b\d+\s+passed\b') {
-        $exitCode = 0
-    } else {
-        $exitCode = 1
+# cmd.exe: one /c string so shell applies > file 2>&1 to the full conda+pytest chain (line-oriented flush)
+function Format-CmdToken([string]$a) {
+    if ($null -eq $a) { return '""' }
+    if ($a -match '[^\w\.\-\/\\:()]' -or $a -eq "") {
+        return '"' + ($a -replace '"', '""') + '"'
     }
+    return $a
 }
 
-# Final pytest banner line only (avoid matching "error" inside "UserWarning", etc.)
+# Must use a resolved conda path: Start-Process cmd does not always honor the same PATH as the interactive shell.
+$condaExe = (Get-Command conda.exe -ErrorAction Stop).Source
+$runTokens = @($condaExe, "run", "--no-capture-output", "-n", "chili-env", "python", "-u", "-m", "pytest") + $PytestArgs
+$pytestLine = ($runTokens | ForEach-Object { Format-CmdToken $_ }) -join " "
+$logFull = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $logFile))
+$innerCmd = "$pytestLine > `"$logFull`" 2>&1"
+
+Write-Host "Running: $pytestLine"
+Write-Host "Wrapper timeout: $timeoutSeconds seconds"
+Write-Host "Streaming output to: $logFile"
+Write-Host ""
+
+$proc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", $innerCmd) -PassThru -NoNewWindow
+
+# Watcher loop with heartbeat every 60 seconds, polling for completion
+$lastHeartbeat = Get-Date
+$heartbeatInterval = 60
+$exitCode = $null
+$timedOut = $false
+
+while ($true) {
+    if ($proc.HasExited) {
+        $exitCode = $proc.ExitCode
+        break
+    }
+
+    $elapsed = ((Get-Date) - $startTime).TotalSeconds
+    if ($elapsed -ge $timeoutSeconds) {
+        Write-Host "TIMEOUT: pytest exceeded $timeoutSeconds seconds, killing"
+        try {
+            # Terminate cmd and the full child tree (conda -> python -> pytest)
+            & taskkill.exe /F /T /PID $proc.Id 2>$null | Out-Null
+        } catch { }
+        $exitCode = 124
+        $timedOut = $true
+        break
+    }
+
+    $sinceHeartbeat = ((Get-Date) - $lastHeartbeat).TotalSeconds
+    if ($sinceHeartbeat -ge $heartbeatInterval) {
+        $logSize = 0
+        $lastLine = ""
+        try {
+            if (Test-Path $logFull) { $logSize = (Get-Item $logFull -ErrorAction Stop).Length }
+            if (Test-Path $logFull) { $lastLine = Get-Content $logFull -Tail 1 -ErrorAction SilentlyContinue }
+        } catch { }
+        Write-Host "[$([math]::Round($elapsed, 0))s elapsed, log=${logSize}B] $lastLine"
+        $lastHeartbeat = Get-Date
+    }
+
+    Start-Sleep -Seconds 5
+}
+
+$duration = (Get-Date) - $startTime
+$logContent = ""
+try {
+    if (Test-Path $logFull) { $logContent = Get-Content $logFull -Raw -ErrorAction Stop }
+} catch { }
+
+# Parse final pytest session banner (same as legacy wrapper; avoids "error" in UserWarning)
 $pytestSummary = "no summary line found"
 if ($logContent) {
     $bannerLines = @(
@@ -84,8 +108,18 @@ if ($logContent) {
         }
     )
     if ($bannerLines.Count -gt 0) {
-        $pytestSummary = $bannerLines[-1].Trim().Trim('=').Trim()
+        $pytestSummary = $bannerLines[-1].Trim()
     }
+}
+
+# conda/cmd on Windows can leave [Process].ExitCode unset; infer from log
+if ($null -eq $exitCode) {
+    if ($logContent -match '(?m)\b\d+\s+failed\b') { $exitCode = 1 }
+    elseif ($logContent -match '(?m)\b\d+\s+error\b' -or $logContent -match '(?m)^=+\s*\d+\s+error') { $exitCode = 1 }
+    elseif ($logContent -match '(?m)\b\d+\s+passed\b') { $exitCode = 0 }
+    elseif ($pytestSummary -match '\d+\s+failed' -or $pytestSummary -match '\d+\s+error') { $exitCode = 1 }
+    elseif ($pytestSummary -match '\d+\s+passed') { $exitCode = 0 }
+    else { $exitCode = 1 }
 }
 
 @"
@@ -93,6 +127,8 @@ duration_seconds: $([math]::Round($duration.TotalSeconds, 1))
 exit_code: $exitCode
 pytest_summary: $pytestSummary
 log_file: $logFile
+timed_out: $timedOut
+log_size_bytes: $(if (Test-Path $logFull) { (Get-Item $logFull).Length } else { 0 })
 "@ | Set-Content $summaryFile
 
 Write-Host ""
