@@ -862,10 +862,10 @@ def _migration_028_seed_rsi_ema_breakout_pattern(conn) -> None:
                 " evidence_count, backtest_count, score_boost, min_base_score, "
                 " active, generation, ticker_scope, trade_count, backtest_priority, "
                 " promotion_status, oos_validation_json, queue_tier, paper_book_json, "
-                " regime_affinity_json, lifecycle_stage, created_at, updated_at) "
+                " regime_affinity_json, lifecycle_stage, pattern_evidence_kind, created_at, updated_at) "
                 "VALUES (:name, :desc, :rules, :origin, :ac, '1d', 0.0, 0, 0, 1.5, 4.0, "
                 " TRUE, 0, 'universal', 0, 0, "
-                " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', "
+                " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
                 " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ), {
                 "name": pat_name,
@@ -1097,10 +1097,10 @@ def _migration_031_seed_ross_cameron_patterns(conn) -> None:
             " evidence_count, backtest_count, score_boost, min_base_score, "
             " active, generation, ticker_scope, trade_count, backtest_priority, "
             " promotion_status, oos_validation_json, queue_tier, paper_book_json, "
-            " regime_affinity_json, lifecycle_stage, created_at, updated_at) "
+            " regime_affinity_json, lifecycle_stage, pattern_evidence_kind, created_at, updated_at) "
             "VALUES (:name, :desc, :rules, 'user_seeded', 'stocks', '1d', 0.5, "
             " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, "
-            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', "
+            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
             " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
@@ -1232,10 +1232,10 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
             " evidence_count, backtest_count, score_boost, min_base_score, "
             " active, generation, ticker_scope, trade_count, backtest_priority, "
             " promotion_status, oos_validation_json, queue_tier, paper_book_json, "
-            " regime_affinity_json, lifecycle_stage, created_at, updated_at) "
+            " regime_affinity_json, lifecycle_stage, pattern_evidence_kind, created_at, updated_at) "
             "VALUES (:name, :desc, :rules, 'user_seeded', 'all', '1d', 0.5, "
             " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, "
-            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', "
+            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
             " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
@@ -1634,10 +1634,10 @@ def _migration_043_insight_scan_pattern_required(conn) -> None:
                 "timeframe, confidence, evidence_count, backtest_count, score_boost, min_base_score, "
                 "active, generation, ticker_scope, trade_count, backtest_priority, promotion_status, "
                 "oos_validation_json, queue_tier, paper_book_json, regime_affinity_json, lifecycle_stage, "
-                "created_at, updated_at) "
+                "pattern_evidence_kind, created_at, updated_at) "
                 "VALUES (:name, :desc, '{}', 'legacy_unlinked', 'all', '1d', 0.0, 0, 0, 0.0, 0.0, "
                 "FALSE, 0, 'universal', 0, 0, 'legacy', "
-                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', "
+                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
                 "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ),
             {
@@ -1785,10 +1785,10 @@ def _migration_044_trading_insight_scan_pattern_constraints(conn) -> None:
                 "timeframe, confidence, evidence_count, backtest_count, score_boost, min_base_score, "
                 "active, generation, ticker_scope, trade_count, backtest_priority, promotion_status, "
                 "oos_validation_json, queue_tier, paper_book_json, regime_affinity_json, lifecycle_stage, "
-                "created_at, updated_at) "
+                "pattern_evidence_kind, created_at, updated_at) "
                 "VALUES (:name, :desc, '{}', 'legacy_unlinked', 'all', '1d', 0.0, 0, 0, 0.0, 0.0, "
                 "FALSE, 0, 'universal', 0, 0, 'legacy', "
-                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', "
+                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
                 "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ),
             {
