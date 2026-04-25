@@ -56,6 +56,12 @@ conda run -n chili-env bash scripts/verify-migration-ids.sh
 
 ## Known `pytest.skip` inventory
 
+> **Note**: First T7 CI run reported 0 skipped, suggesting the conditions
+> that trigger these pytest.skip calls behave differently in fresh-CI Postgres
+> vs. dev-DB environments. The 27 entries below are the static call sites
+> in `tests/`; whether each fires in CI depends on data state at test time.
+> To be reconciled in the test-environment hardening ticket.
+
 Generated from repo root with `grep -rn "pytest.skip" tests/` (equivalent: search for `pytest.skip(` under `tests/`). **Total: 27** call sites (the prior audit expected ~27; this inventory matches).
 
 | file:line | skip reason |
@@ -87,3 +93,30 @@ Generated from repo root with `grep -rn "pytest.skip" tests/` (equivalent: searc
 | `tests/test_reconciliation_concurrent_sweeps.py:79` | `concurrency test is Postgres-only` |
 | `tests/test_reconciliation_concurrent_sweeps.py:142` | `concurrency test is Postgres-only` |
 | `tests/test_spine_feedback_edges.py:21` | `neural mesh not seeded` |
+
+## Known CI failures (baseline as of f8226dd)
+
+First run of T7 CI on a fresh Postgres 16 container produced 2607 passed,
+84 failed, 18 errors, 0 skipped (run 24935569745). The failures cluster
+into the following groups, which represent test-environment hardening
+work scoped OUT of T7:
+
+- **LLM/conversation tests** (openai_routing, conversations, voice, projects,
+  test_api LLM offline tests): expect specific offline/mock states that
+  CI's ambient environment doesn't provide. Owner: separate ticket.
+
+- **Broker adapter tests** (autotrader_*, robinhood_*, momentum_*): assume
+  adapter doubles that aren't loaded by conftest in a fresh CI env.
+  Owner: separate ticket.
+
+- **trade_assign_pattern, trades_sync, test_trading.py CRUD tests**:
+  fixture-state assumptions (~30 tests in test_trading.py expect ambient
+  user/device data that local dev DBs accumulate but CI does not).
+  Owner: separate ticket.
+
+- **Signal-to-reconcile e2e, brain_network_graph seed tests, workflow_state
+  tests**: misc. Need individual investigation.
+
+Until those tickets land, T7 CI runs as a regression baseline: new failures
+on PRs above this 84-failure floor are real regressions; same-set failures
+are pre-existing.
