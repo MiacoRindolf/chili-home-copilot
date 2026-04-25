@@ -215,7 +215,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("BRAIN_PREDICTION_READ_MAX_AGE_SECONDS"),
     )
     brain_prediction_ops_log_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("BRAIN_PREDICTION_OPS_LOG_ENABLED"),
     )
     brain_prediction_mirror_write_dedicated: bool = Field(
@@ -262,7 +262,7 @@ class Settings(BaseSettings):
     # Rollout ladder mirrors the prediction-mirror: off -> shadow -> compare -> authoritative.
     # In any mode != "authoritative" the ranker MUST NOT gate entries, exits, sizing, or promotion.
     # See docs/TRADING_BRAIN_NET_EDGE_RANKER_ROLLOUT.md.
-    brain_net_edge_ranker_mode: str = "off"
+    brain_net_edge_ranker_mode: str = "shadow"
     brain_net_edge_ops_log_enabled: bool = True
     brain_net_edge_min_samples: int = 50
     brain_net_edge_cache_ttl_s: int = 300
@@ -273,7 +273,7 @@ class Settings(BaseSettings):
     # off -> shadow -> compare -> authoritative. In any mode != "authoritative"
     # the canonical evaluator MUST NOT decide exits; it only logs parity against
     # the legacy backtest/live paths. See docs/TRADING_BRAIN_EXIT_ENGINE_ROLLOUT.md.
-    brain_exit_engine_mode: str = "off"
+    brain_exit_engine_mode: str = "shadow"
     brain_exit_engine_ops_log_enabled: bool = True
     brain_exit_engine_parity_sample_pct: float = 1.0
 
@@ -283,7 +283,7 @@ class Settings(BaseSettings):
     # off -> shadow -> compare -> authoritative. Legacy Trade.pnl and
     # PaperTrade.pnl remain authoritative until the cutover phase.
     # See docs/TRADING_BRAIN_ECONOMIC_LEDGER_ROLLOUT.md.
-    brain_economic_ledger_mode: str = "off"
+    brain_economic_ledger_mode: str = "shadow"
     brain_economic_ledger_ops_log_enabled: bool = True
     brain_economic_ledger_parity_tolerance_usd: float = 0.01
 
@@ -291,13 +291,13 @@ class Settings(BaseSettings):
     # condition indicators against an explicit allow/deny list and writes
     # results to `trading_pit_audit_log`. Shadow-only until cutover. See
     # docs/TRADING_BRAIN_PIT_HYGIENE_ROLLOUT.md.
-    brain_pit_audit_mode: str = "off"
+    brain_pit_audit_mode: str = "shadow"
     brain_pit_audit_ops_log_enabled: bool = True
 
     # Triple-barrier labels (Phase D) — replaces fixed-horizon binary labels
     # with (TP, SL, timeout) outcomes for training and economic promotion.
     # Shadow-only until cutover. See docs/TRADING_BRAIN_TRIPLE_BARRIER_ROLLOUT.md.
-    brain_triple_barrier_mode: str = "off"
+    brain_triple_barrier_mode: str = "shadow"
     brain_triple_barrier_tp_pct: float = 0.015
     brain_triple_barrier_sl_pct: float = 0.010
     brain_triple_barrier_max_bars: int = 5
@@ -312,14 +312,14 @@ class Settings(BaseSettings):
     # + capacity cap. Read-only in shadow; flipping to authoritative lets
     # NetEdgeRanker / sizing consume the per-ticker estimates. See
     # docs/TRADING_BRAIN_EXECUTION_REALISM_ROLLOUT.md.
-    brain_execution_cost_mode: str = "off"
+    brain_execution_cost_mode: str = "shadow"
     brain_execution_cost_default_fee_bps: float = 1.0
     brain_execution_cost_impact_cap_bps: float = 50.0
     brain_execution_capacity_max_adv_frac: float = 0.05
 
     # Venue-truth telemetry (Phase F) — compares expected vs realized
     # costs per fill. Shadow writes to `trading_venue_truth_log` only.
-    brain_venue_truth_mode: str = "off"
+    brain_venue_truth_mode: str = "shadow"
     brain_venue_truth_ops_log_enabled: bool = True
 
     # Live brackets + reconciliation (Phase G) — persists bracket intent
@@ -329,7 +329,7 @@ class Settings(BaseSettings):
     # reconciliation_log` are populated. Flipping to authoritative is
     # Phase G.2 and requires extending the venue adapter protocol first.
     # See docs/TRADING_BRAIN_LIVE_BRACKETS_ROLLOUT.md.
-    brain_live_brackets_mode: str = "off"
+    brain_live_brackets_mode: str = "shadow"
     brain_live_brackets_ops_log_enabled: bool = True
     brain_live_brackets_reconciliation_interval_s: int = 60
     brain_live_brackets_price_drift_bps: float = 25.0
@@ -350,7 +350,7 @@ class Settings(BaseSettings):
     # legacy sizer call-sites and NEVER changes the notional those sites
     # return. Authoritative cutover (replacing legacy sizers) is Phase
     # H.2. See docs/TRADING_BRAIN_POSITION_SIZER_ROLLOUT.md.
-    brain_position_sizer_mode: str = "off"
+    brain_position_sizer_mode: str = "shadow"
     brain_position_sizer_ops_log_enabled: bool = True
     brain_position_sizer_equity_bucket_cap_pct: float = 15.0
     brain_position_sizer_crypto_bucket_cap_pct: float = 10.0
@@ -363,7 +363,7 @@ class Settings(BaseSettings):
     # only persisted alongside PositionSizerLog rows and never applied
     # inside compute_proposal. Authoritative cutover is Phase I.2. See
     # docs/TRADING_BRAIN_RISK_DIAL_ROLLOUT.md.
-    brain_risk_dial_mode: str = "off"
+    brain_risk_dial_mode: str = "shadow"
     brain_risk_dial_ops_log_enabled: bool = True
     brain_risk_dial_default_risk_on: float = 1.0
     brain_risk_dial_default_cautious: float = 0.7
@@ -393,7 +393,7 @@ class Settings(BaseSettings):
     brain_risk_max_risk_per_trade_pct: float = 1.0
     brain_risk_max_same_ticker: int = 2
 
-    brain_capital_reweight_mode: str = "off"
+    brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"
     brain_capital_reweight_cron_hour: int = 18
@@ -401,7 +401,7 @@ class Settings(BaseSettings):
     brain_capital_reweight_max_single_bucket_pct: float = 35.0
 
     # Phase J - Drift monitor + re-cert queue (shadow rollout).
-    brain_drift_monitor_mode: str = "off"
+    brain_drift_monitor_mode: str = "shadow"
     brain_drift_monitor_ops_log_enabled: bool = True
     brain_drift_monitor_min_red_sample: int = 20
     brain_drift_monitor_min_yellow_sample: int = 10
@@ -413,12 +413,12 @@ class Settings(BaseSettings):
     brain_drift_monitor_cron_hour: int = 5
     brain_drift_monitor_cron_minute: int = 30
 
-    brain_recert_queue_mode: str = "off"
+    brain_recert_queue_mode: str = "shadow"
     brain_recert_queue_ops_log_enabled: bool = True
     brain_recert_queue_include_yellow: bool = False
 
     # Phase K - Divergence panel + ops health endpoint (shadow rollout).
-    brain_divergence_scorer_mode: str = "off"
+    brain_divergence_scorer_mode: str = "shadow"
     brain_divergence_scorer_ops_log_enabled: bool = True
     brain_divergence_scorer_min_layers_sampled: int = 1
     brain_divergence_scorer_yellow_threshold: float = 0.9
@@ -440,7 +440,7 @@ class Settings(BaseSettings):
     # by a daily scheduled sweep when mode != "off". L.17.1 never flips to
     # "authoritative"; the service layer hard-refuses that mode until the
     # L.17.2 plan is opened explicitly.
-    brain_macro_regime_mode: str = "off"
+    brain_macro_regime_mode: str = "shadow"
     brain_macro_regime_ops_log_enabled: bool = True
     brain_macro_regime_cron_hour: int = 6
     brain_macro_regime_cron_minute: int = 30
@@ -460,7 +460,7 @@ class Settings(BaseSettings):
     # mode != "off". L.18.1 never flips to "authoritative"; the service
     # layer hard-refuses that mode until the L.18.2 plan is opened
     # explicitly.
-    brain_breadth_relstr_mode: str = "off"
+    brain_breadth_relstr_mode: str = "shadow"
     brain_breadth_relstr_ops_log_enabled: bool = True
     brain_breadth_relstr_cron_hour: int = 6
     brain_breadth_relstr_cron_minute: int = 45
@@ -478,7 +478,7 @@ class Settings(BaseSettings):
     # trading_cross_asset_snapshots by a daily scheduled sweep when mode
     # != "off". L.19.1 never flips to "authoritative"; the service layer
     # hard-refuses that mode until the L.19.2 plan is opened explicitly.
-    brain_cross_asset_mode: str = "off"
+    brain_cross_asset_mode: str = "shadow"
     brain_cross_asset_ops_log_enabled: bool = True
     brain_cross_asset_cron_hour: int = 7
     brain_cross_asset_cron_minute: int = 0
@@ -499,7 +499,7 @@ class Settings(BaseSettings):
     # Additive-only: no existing consumer reads this table; L.17/L.18/L.19
     # snapshots are unchanged, and the existing ``hurst_proxy_from_closes``
     # in the momentum-neural pipeline is not touched.
-    brain_ticker_regime_mode: str = "off"
+    brain_ticker_regime_mode: str = "shadow"
     brain_ticker_regime_ops_log_enabled: bool = True
     brain_ticker_regime_cron_hour: int = 7
     brain_ticker_regime_cron_minute: int = 15
@@ -539,7 +539,7 @@ class Settings(BaseSettings):
     # opened explicitly. Additive-only: no existing consumer reads
     # this table; L.17/L.18/L.19/L.20 snapshots and
     # ``market_data.get_market_regime()`` are unchanged.
-    brain_vol_dispersion_mode: str = "off"
+    brain_vol_dispersion_mode: str = "shadow"
     brain_vol_dispersion_ops_log_enabled: bool = True
     brain_vol_dispersion_cron_hour: int = 7
     brain_vol_dispersion_cron_minute: int = 30
@@ -582,7 +582,7 @@ class Settings(BaseSettings):
     # plan is opened explicitly. Additive-only: no existing consumer
     # reads this table; L.17-L.21 snapshots and ``get_market_regime()``
     # are unchanged.
-    brain_intraday_session_mode: str = "off"
+    brain_intraday_session_mode: str = "shadow"
     brain_intraday_session_ops_log_enabled: bool = True
     # 22:00 local scheduler slot (post US cash close and after L.17-L.21
     # jobs at 06:30-07:30).
@@ -619,7 +619,7 @@ class Settings(BaseSettings):
     # Shadow-only: no sizing/promotion/stop behaviour reads this table
     # in M.1. ``mode`` supports ``off`` (default), ``shadow``, ``compare``;
     # service hard-refuses ``authoritative`` until M.2 is opened.
-    brain_pattern_regime_perf_mode: str = "off"
+    brain_pattern_regime_perf_mode: str = "shadow"
     brain_pattern_regime_perf_ops_log_enabled: bool = True
     # 23:00 local scheduler slot (after L.22 at 22:00 has landed).
     brain_pattern_regime_perf_cron_hour: int = 23
@@ -647,7 +647,7 @@ class Settings(BaseSettings):
 
     # M.2.a: NetEdgeRanker sizing tilt multiplier inside
     # ``position_sizer_emitter.emit_shadow_proposal``.
-    brain_pattern_regime_tilt_mode: str = "off"
+    brain_pattern_regime_tilt_mode: str = "shadow"
     brain_pattern_regime_tilt_ops_log_enabled: bool = True
     brain_pattern_regime_tilt_kill: bool = False
     # Multiplier bounds (hard clamp at model boundary).
@@ -662,7 +662,7 @@ class Settings(BaseSettings):
     brain_pattern_regime_tilt_max_staleness_days: int = 5
 
     # M.2.b: promotion gate inside ``governance.request_pattern_to_live``.
-    brain_pattern_regime_promotion_mode: str = "off"
+    brain_pattern_regime_promotion_mode: str = "shadow"
     brain_pattern_regime_promotion_ops_log_enabled: bool = True
     brain_pattern_regime_promotion_kill: bool = False
     # Required confident-dimension coverage for a promotion decision.
@@ -674,7 +674,7 @@ class Settings(BaseSettings):
     brain_pattern_regime_promotion_min_mean_expectancy: float = 0.0
 
     # M.2.c: kill-switch / auto-quarantine (daily sweep at 23:05).
-    brain_pattern_regime_killswitch_mode: str = "off"
+    brain_pattern_regime_killswitch_mode: str = "shadow"
     brain_pattern_regime_killswitch_ops_log_enabled: bool = True
     brain_pattern_regime_killswitch_kill: bool = False
     brain_pattern_regime_killswitch_cron_hour: int = 23
@@ -809,11 +809,11 @@ class Settings(BaseSettings):
     chili_cpcv_n_paths_full_min: int = 50
     # When True, scheduler-worker runs ``scripts/backfill_cpcv_metrics.py --commit`` weekly (Sun 04:00 ET).
     # Default OFF until operator validates a manual backfill run.
-    chili_cpcv_weekly_backfill_enabled: bool = False
+    chili_cpcv_weekly_backfill_enabled: bool = True
     # Q1.T3 phase 1: INSERT into ``unified_signals`` alongside existing payloads (default OFF).
-    chili_unified_signal_enabled: bool = False
+    chili_unified_signal_enabled: bool = True
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
-    chili_regime_classifier_enabled: bool = False
+    chili_regime_classifier_enabled: bool = True
     # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).
     chili_regime_force_cold_fit: bool = False
     chili_regime_classifier_random_state: int = 42

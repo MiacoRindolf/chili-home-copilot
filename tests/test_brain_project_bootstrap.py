@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from app.models import PlanProject, PlanTask, ProjectMember
+from app.models import AgentMessage, CodeLearningEvent, PlanProject, PlanTask, ProjectMember
 from app.models.code_brain import CodeRepo
 from app.models.coding_task import PlanTaskCodingProfile
 import app.services.coding_task.workspaces as workspace_mod
@@ -68,6 +68,52 @@ def test_project_bootstrap_with_bound_workspace(paired_client, db):
     assert data["capabilities"]["suggest"]["enabled"] is True
     assert data["capabilities"]["apply"]["enabled"] is True
     assert data["capabilities"]["validate"]["enabled"] is True
+
+
+def test_project_bootstrap_feed_merges_activity_sources_and_unread_count(paired_client, db):
+    client, user = paired_client
+    repo = CodeRepo(
+        user_id=user.id,
+        path=str(Path(__file__).resolve().parents[1]),
+        host_path=str(Path(__file__).resolve().parents[1]),
+        container_path="/workspace",
+        name="workspace",
+        active=True,
+    )
+    db.add(repo)
+    db.flush()
+    db.add(
+        CodeLearningEvent(
+            user_id=None,
+            repo_id=None,
+            event_type="cycle",
+            description="Code learning cycle completed in 9.9s: 5 repos, 3 insights",
+            created_at=datetime(2026, 4, 24, 15, 2, 0),
+        )
+    )
+    db.add(
+        AgentMessage(
+            from_agent="qa",
+            to_agent="project_manager",
+            user_id=user.id,
+            message_type="cycle_summary",
+            content_json='{"type":"cycle_complete","test_cases":4,"bugs":2,"confidence":0.81}',
+            acknowledged=False,
+            created_at=datetime(2026, 4, 24, 15, 3, 0),
+        )
+    )
+    db.commit()
+
+    response = client.get("/api/brain/project/bootstrap")
+    assert response.status_code == 200
+    data = response.json()
+    timeline = data["feed"]["timeline"]
+    assert data["agents"]["unread_messages"] == 1
+    assert data["feed"]["recent_count"] == 2
+    assert [row["source"] for row in timeline[:2]] == ["agent_message", "code_learning"]
+    assert timeline[0]["status"] == "unread"
+    assert "QA cycle" in timeline[0]["summary"]
+    assert timeline[1]["summary"] == "Code learning cycle completed."
 
 
 def _seed_task_with_profile(

@@ -33,7 +33,6 @@ from .workspaces import (
     first_reachable_workspace_repo,
     get_bound_workspace_repo_for_profile,
     resolve_profile_cwd,
-    select_runtime_workspace_repo_for_task,
     workspace_binding_reason,
 )
 
@@ -483,7 +482,6 @@ def build_handoff_dict(db: Session, task: PlanTask, *, user_id: int | None = Non
         },
         "brief": brief_out,
         "profile": _profile_dict(db, task.id, user_id=user_id),
-        "selected_repo": select_runtime_workspace_repo_for_task(db, task.id, user_id=user_id),
         "ops_hints": _ops_hints_dict(db, task, user_id=user_id),
         "validation_latest": validation_latest,
         "blockers": blockers_out,

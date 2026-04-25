@@ -28,7 +28,8 @@ from ..services.code_brain import reviewer as cb_reviewer
 from ..services.code_brain import search as cb_search
 from ..services.code_brain import trends as cb_trends
 from ..services import project_analysis
-from ..services.project_domain_runs import list_timeline, record_completed_run, status_payload
+from ..services.project_domain_feed import list_operator_feed
+from ..services.project_domain_runs import record_completed_run, status_payload
 from ..services.project_brain import learning as pb_learning
 from ..services.project_brain import registry as pb_registry
 from ..services.coding_task.workspaces import select_runtime_workspace_repo_for_task
@@ -77,21 +78,7 @@ def _resolve_visible_repo_id(db: Session, user_id: int | None, repo_id: int | No
 
 
 def _timeline_messages(db: Session, user_id: int | None) -> list[dict]:
-    messages = []
-    for item in list_timeline(db, user_id=user_id, limit=30):
-        messages.append(
-            {
-                "id": item["id"],
-                "from": "system",
-                "to": "operator",
-                "type": item["run_kind"],
-                "summary": item.get("title") or item["run_kind"],
-                "status": item.get("status"),
-                "acknowledged": True,
-                "created_at": item.get("created_at"),
-            }
-        )
-    return messages
+    return list_operator_feed(db, user_id=user_id, limit=30)
 
 
 # Code Brain domain
@@ -368,7 +355,12 @@ def api_brain_project_lens_metrics(
     if resolved_repo_id is None:
         selected_repo = select_runtime_workspace_repo_for_task(db, None, user_id=ctx["user_id"])
         resolved_repo_id = selected_repo.get("id")
-    metrics = cb_lenses.get_lens_metrics(db, lens_name, repo_id=(resolved_repo_id if resolved_repo_id is not None else -1))
+    metrics = cb_lenses.get_lens_metrics(
+        db,
+        lens_name,
+        repo_id=(resolved_repo_id if resolved_repo_id is not None else -1),
+        user_id=ctx["user_id"],
+    )
     planner_data = None
     lens_obj = cb_lenses.get_lens(lens_name)
     if lens_obj and lens_obj.planner_integration:

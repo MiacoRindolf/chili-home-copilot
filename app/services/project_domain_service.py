@@ -10,7 +10,8 @@ from .coding_task.service import build_handoff_dict
 from .coding_task.workspaces import select_runtime_workspace_repo_for_task
 from .project_analysis import latest_analysis_snapshot
 from .project_brain import registry as pb_registry
-from .project_domain_runs import kind_status_payload, list_timeline, status_payload
+from .project_domain_feed import count_unread_operator_messages, list_operator_feed
+from .project_domain_runs import kind_status_payload, status_payload
 
 
 def _capability(enabled: bool, reason: str | None = None) -> dict:
@@ -92,11 +93,12 @@ def build_project_bootstrap_payload(
     workspace_indexed = bool(ops_hints.get("workspace_indexed"))
     cwd_resolvable = bool(ops_hints.get("cwd_resolvable"))
 
-    timeline = [] if is_guest else list_timeline(db, user_id=user_id, limit=20)
+    timeline = [] if is_guest else list_operator_feed(db, user_id=user_id, limit=20)
     latest_analysis = None if is_guest else latest_analysis_snapshot(
         db, user_id=user_id, planner_task_id=planner_task_id
     )
     agent_defs = pb_registry.list_agents()
+    unread_messages = 0 if is_guest else count_unread_operator_messages(db, user_id=user_id)
 
     checklist = [
         {
@@ -170,7 +172,7 @@ def build_project_bootstrap_payload(
             "registered_count": len(agent_defs),
             "active_count": sum(1 for agent in agent_defs if agent.get("active")),
             "running": bool(project_status.get("running")),
-            "unread_messages": 0,
+            "unread_messages": unread_messages,
         },
         "feed": {
             "recent_count": len(timeline),

@@ -19,6 +19,7 @@ from ..project_domain_runs import finish_run, record_completed_run, start_run
 from . import indexer, analyzer, git_miner, insights as insights_mod
 from . import graph as graph_mod, trends as trends_mod, reviewer as reviewer_mod
 from . import deps_scanner as deps_mod, search as search_mod
+from .events import learning_event_visibility_clause, log_learning_event
 from .runtime import mark_runtime_reachability, resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
@@ -49,18 +50,25 @@ def get_code_learning_status() -> Dict[str, Any]:
     return status
 
 
-def _log_event(db: Session, repo_id: Optional[int], event_type: str, description: str, user_id: Optional[int] = None):
-    ev = CodeLearningEvent(
-        user_id=user_id,
+def _log_event(
+    db: Session,
+    repo_id: Optional[int],
+    event_type: str,
+    description: str,
+    user_id: Optional[int] = None,
+    *,
+    repo: CodeRepo | None = None,
+    repos: list[CodeRepo] | None = None,
+):
+    log_learning_event(
+        db,
         repo_id=repo_id,
         event_type=event_type,
         description=description,
+        explicit_user_id=user_id,
+        repo=repo,
+        repos=repos,
     )
-    db.add(ev)
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
 
 
 def _repo_has_live_index(repo: CodeRepo | None) -> bool:
@@ -122,6 +130,7 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
 
     start = time.time()
     report: Dict[str, Any] = {}
+    repos: list[CodeRepo] = []
 
     try:
         repos = indexer.get_accessible_repos(db, user_id=user_id, include_shared=True)
@@ -159,7 +168,7 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
                     db,
                     "index",
                     status="skipped",
-                    user_id=user_id,
+                    user_id=(user_id if user_id is not None else repo.user_id),
                     repo_id=repo.id,
                     title=f"Skipped duplicate repo {repo.name}",
                     detail={"duplicate_of_repo_id": seen_runtime_paths[key], "runtime_path": key},
@@ -187,19 +196,19 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
                     db,
                     "index",
                     status="failed",
-                    user_id=user_id,
+                    user_id=(user_id if user_id is not None else repo.user_id),
                     repo_id=repo.id,
                     title=f"Index {repo.name}",
                     error_message=reason,
                 )
                 db.commit()
-                _log_event(db, repo.id, "index_error", f"{repo.name}: {reason}", user_id)
+                _log_event(db, repo.id, "index_error", f"{repo.name}: {reason}", user_id, repo=repo)
                 continue
 
             run = start_run(
                 db,
                 "index",
-                user_id=user_id,
+                user_id=(user_id if user_id is not None else repo.user_id),
                 repo_id=repo.id,
                 title=f"Index {repo.name}",
                 detail={"runtime_path": str(runtime_path)},
@@ -225,7 +234,7 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
                     error_message=reason,
                 )
                 db.commit()
-                _log_event(db, repo.id, "index_error", f"{repo.name}: {reason}", user_id)
+                _log_event(db, repo.id, "index_error", f"{repo.name}: {reason}", user_id, repo=repo)
                 continue
 
             # Step 2: Analyze
@@ -318,7 +327,17 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
             )
             db.commit()
             _learning_status["repos_processed"] = i + 1
-            _log_event(db, repo.id, "index", f"Completed learning cycle for {repo.name}: {idx_result.get('file_count', 0)} files, {insight_result.get('discovered', 0)} insights", user_id)
+            _log_event(
+                db,
+                repo.id,
+                "index",
+                (
+                    f"Completed learning cycle for {repo.name}: "
+                    f"{idx_result.get('file_count', 0)} files, {insight_result.get('discovered', 0)} insights"
+                ),
+                user_id,
+                repo=repo,
+            )
 
         _learning_status["insights_found"] = total_insights
         _learning_status["steps_completed"] = 8
@@ -328,14 +347,28 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
         report["insights_discovered"] = total_insights
         report["ok"] = True
 
-        _log_event(db, None, "cycle", f"Code learning cycle completed in {elapsed}s: {len(repos)} repos, {total_insights} insights", user_id)
+        _log_event(
+            db,
+            None,
+            "cycle",
+            f"Code learning cycle completed in {elapsed}s: {len(repos)} repos, {total_insights} insights",
+            user_id,
+            repos=repos,
+        )
 
     except Exception as e:
         logger.exception("[code-brain] Learning cycle error: %s", e)
         _learning_status["error"] = str(e)
         report["ok"] = False
         report["error"] = str(e)
-        _log_event(db, None, "error", f"Code learning cycle error: {e}", user_id)
+        _log_event(
+            db,
+            None,
+            "error",
+            f"Code learning cycle error: {e}",
+            user_id,
+            repos=repos,
+        )
     finally:
         _learning_status["running"] = False
         _learning_status["phase"] = "idle"
@@ -394,12 +427,19 @@ def get_code_brain_metrics(db: Session, user_id: Optional[int] = None) -> Dict[s
     top_hotspots = top_hotspots_q.order_by(CodeHotspot.combined_score.desc()).limit(10).all()
 
     recent_events_q = db.query(CodeLearningEvent)
+    visibility_clause = learning_event_visibility_clause(user_id=user_id, repo_ids=repo_ids)
+    if visibility_clause is not None:
+        recent_events_q = recent_events_q.filter(visibility_clause)
     if repo_ids:
         recent_events_q = recent_events_q.filter(
-            (CodeLearningEvent.repo_id.is_(None)) | (CodeLearningEvent.repo_id.in_(repo_ids))
+            (CodeLearningEvent.user_id == user_id)
+            | (CodeLearningEvent.repo_id.is_(None))
+            | (CodeLearningEvent.repo_id.in_(repo_ids))
         )
     else:
-        recent_events_q = recent_events_q.filter(CodeLearningEvent.repo_id.is_(None))
+        recent_events_q = recent_events_q.filter(
+            (CodeLearningEvent.user_id == user_id) | (CodeLearningEvent.repo_id.is_(None))
+        )
     recent_events = recent_events_q.order_by(CodeLearningEvent.created_at.desc()).limit(20).all()
 
     circular_q = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True))
@@ -577,7 +617,7 @@ def get_project_metrics(db: Session, user_id: Optional[int] = None, lens: Option
         repos = indexer.get_accessible_repos(db, user_id=user_id, include_shared=True)
         repo = _first_live_repo(repos)
         repo_id = repo.id if repo is not None else -1
-        return get_lens_metrics(db, lens, repo_id=repo_id)
+        return get_lens_metrics(db, lens, repo_id=repo_id, user_id=user_id)
     return get_code_brain_metrics(db, user_id=user_id)
 
 
