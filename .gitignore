@@ -62,3 +62,8 @@ rq.json
 
 # Q1.T2 Gaussian HMM regime artifacts (warm-start weights; do not commit)
 regime_models/
+
+# pytest wrapper outputs (scripts/run-tests.ps1)
+tests-summary.txt
+tests-output.log
+tests-output.err.log
