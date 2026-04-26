@@ -8,6 +8,7 @@ import 'package:screen_retriever/screen_retriever.dart';
 import 'src/app_theme.dart';
 import 'src/companion/companion_shell.dart';
 import 'src/companion/desktop_powers.dart';
+import 'src/config/app_config.dart';
 import 'src/config/layout_constants.dart';
 
 Future<void> main() async {
@@ -50,6 +51,7 @@ Future<void> main() async {
     );
   }
 
+  await AppConfig.instance.load();
   runApp(const ChiliDesktopCompanion());
 }
 

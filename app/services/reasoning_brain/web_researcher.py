@@ -60,11 +60,20 @@ def refresh_research_for_top_interests(db: Session, user_id: int, trace_id: str 
             "}\n"
         )
         try:
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt="You are a precise summarization engine. Return only valid JSON.",
-                trace_id=trace_id,
-            )
+            try:
+                from ..context_brain.llm_gateway import gateway_chat
+                result = gateway_chat(
+                    messages=[{"role": "user", "content": prompt}],
+                    purpose='reasoning_web_research',
+                    system_prompt="You are a precise summarization engine. Return only valid JSON.",
+                    trace_id=trace_id,
+                )
+            except Exception:
+                result = openai_client.chat(
+                    messages=[{"role": "user", "content": prompt}],
+                    system_prompt="You are a precise summarization engine. Return only valid JSON.",
+                    trace_id=trace_id,
+                )
         except Exception as e:  # pragma: no cover - defensive
             log_info(trace_id, f"reasoning_web_research_error topic={topic!r} err={e}")
             continue

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'brain/brain_dispatch_screen.dart';
 import 'chat/chat_screen.dart';
 import 'companion/shared_chat_history.dart';
 import 'dashboard/dashboard_screen.dart';
@@ -83,6 +84,11 @@ class _AppShellState extends State<AppShell> {
                 selectedIcon: Icon(Icons.settings),
                 label: Text('Settings'),
               ),
+              NavigationRailDestination(
+                icon: Icon(Icons.psychology_outlined),
+                selectedIcon: Icon(Icons.psychology),
+                label: Text('Brain'),
+              ),
             ],
           ),
           const VerticalDivider(thickness: 1, width: 1),
@@ -107,6 +113,10 @@ class _AppShellState extends State<AppShell> {
         return SettingsScreen(
           sharedHistory: widget.sharedHistory,
           pauseListening: widget.pauseListening,
+        );
+      case 4:
+        return BrainDispatchScreen(
+          onOpenSettings: () => setState(() => _selectedIndex = 3),
         );
       default:
         return const SizedBox.shrink();

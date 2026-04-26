@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["brain"])
 
-_ALLOWED_BRAIN_DOMAINS = frozenset({"hub", "trading", "project", "reasoning"})
+_ALLOWED_BRAIN_DOMAINS = frozenset({"hub", "trading", "project", "reasoning", "context"})
 
 
 def _normalize_brain_domain_query(request: Request) -> str:
@@ -69,7 +69,7 @@ def _brain_initial_domain_for_request(
     norm = _normalize_brain_domain_query(request)
     if norm == "jobs":
         return "jobs"
-    if norm in ("trading", "project", "reasoning", "hub"):
+    if norm in ("trading", "project", "reasoning", "context", "hub"):
         return norm
     if norm == "__invalid__":
         return "hub"
@@ -204,7 +204,54 @@ def api_brain_domains(db: Session = Depends(get_db)):
             "phase": jobs_st.get("phase", "idle"),
         },
     ])
+    # Phase F — Context Brain. Adaptive LLM-context assembly: TurboQuant-style
+    # retrieve→rank→budget→compose pipeline that learns which sources matter
+    # for which intents. The status reflects whether the learning cycle is
+    # active or the brain is idle/paused.
+    context_st = _context_brain_status(db)
+    domains.append(
+        {
+            "id": "context",
+            "label": "Context",
+            "icon": "\U0001f9e9",
+            "description": (
+                "Adaptive context for every chat: classifies intent, retrieves from "
+                "9 sources in parallel, scores with learned weights, budgets, and "
+                "composes a structured prompt. Learns from outcomes."
+            ),
+            "status": context_st.get("status", "idle"),
+            "last_run": context_st.get("last_learning_cycle_at"),
+            "phase": context_st.get("mode", "idle"),
+        }
+    )
     return JSONResponse({"ok": True, "domains": domains})
+
+
+def _context_brain_status(db: Session) -> dict:
+    """Read from context_brain_runtime_state without raising. Returns
+    a dict with ``status``, ``mode``, ``last_learning_cycle_at``.
+    """
+    try:
+        from sqlalchemy import text as _t
+        row = db.execute(_t(
+            "SELECT mode, learning_enabled, last_learning_cycle_at "
+            "FROM context_brain_runtime_state WHERE id = 1"
+        )).fetchone()
+        if not row:
+            return {"status": "idle", "mode": "unknown", "last_learning_cycle_at": None}
+        mode = str(row[0] or "idle")
+        learning = bool(row[1])
+        last = row[2].isoformat() if row[2] is not None else None
+        # We surface "learning" green dot only when the brain is actively
+        # accumulating into the next learning cycle (not paused, learning enabled).
+        active = (mode in ("reactive", "learning")) and learning
+        return {
+            "status": "learning" if active else "idle",
+            "mode": mode,
+            "last_learning_cycle_at": last,
+        }
+    except Exception:
+        return {"status": "idle", "mode": "unknown", "last_learning_cycle_at": None}
 
 
 @router.get("/api/brain/status")

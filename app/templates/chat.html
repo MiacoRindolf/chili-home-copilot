@@ -236,6 +236,14 @@
       font-size: 11px; transition: all 0.15s;
     }
     .copy-btn:hover { background: var(--code-bg); color: var(--text); }
+    .thumbs-btn {
+      background: none; border: 1px solid var(--border); border-radius: 4px;
+      padding: 2px 6px; cursor: pointer; color: var(--text-secondary);
+      font-size: 13px; line-height: 1; transition: all 0.15s; margin-left: 2px;
+    }
+    .thumbs-btn:hover { background: var(--code-bg); }
+    .thumbs-btn:disabled { opacity: 0.45; cursor: default; }
+    .thumbs-btn.thumbs-voted { background: var(--code-bg); border-color: var(--text-secondary); }
     .code-copy-btn {
       position: absolute; top: 6px; right: 6px; background: var(--bg-msg-assist);
       border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px;
@@ -980,6 +988,12 @@
           footerHTML += '<span class="search-badge">web search</span>';
         }
         footerHTML += '<button class="copy-btn" title="Copy message">Copy</button>';
+        // F.7 — gateway thumbs feedback. Only render when we have a gateway_log_id
+        // (non-LLM replies like tool actions don't have one).
+        if (meta.gateway_log_id) {
+          footerHTML += '<button class="thumbs-btn thumbs-up" data-glid="' + meta.gateway_log_id + '" data-vote="1" title="This reply was helpful">&#x1F44D;</button>';
+          footerHTML += '<button class="thumbs-btn thumbs-down" data-glid="' + meta.gateway_log_id + '" data-vote="-1" title="This reply was off">&#x1F44E;</button>';
+        }
         if (timeStr) footerHTML += '<span class="ts">' + esc(timeStr) + '</span>';
         if (meta.trace_id) {
           footerHTML += '<span class="trace-id" title="Click to copy trace ID: ' + esc(meta.trace_id) + '">' + esc(meta.trace_id) + '</span>';
@@ -1007,6 +1021,28 @@
           copyText(md ? md.textContent : content, msgCopyBtn);
         };
       }
+
+      // F.7 — wire thumbs feedback. POST to /api/brain/context/gateway/thumbs.
+      div.querySelectorAll('.thumbs-btn').forEach(function(btn) {
+        btn.onclick = function() {
+          if (btn.disabled) return;
+          var glid = parseInt(btn.getAttribute('data-glid'), 10);
+          var vote = parseInt(btn.getAttribute('data-vote'), 10);
+          if (!glid) return;
+          // Disable both thumbs once one is clicked so the user only votes once.
+          div.querySelectorAll('.thumbs-btn').forEach(function(b) { b.disabled = true; });
+          btn.classList.add('thumbs-voted');
+          fetch('/api/brain/context/gateway/thumbs', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({gateway_log_id: glid, vote: vote})
+          }).catch(function() {
+            // Re-enable on failure so the user can retry.
+            div.querySelectorAll('.thumbs-btn').forEach(function(b) { b.disabled = false; });
+            btn.classList.remove('thumbs-voted');
+          });
+        };
+      });
 
       var traceEl = div.querySelector('.trace-id');
       if (traceEl) {

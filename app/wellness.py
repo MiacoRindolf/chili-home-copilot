@@ -157,12 +157,22 @@ def wellness_chat(
         log_info(trace_id, f"wellness_ollama_error={e}, falling back to groq")
         from . import openai_client
         if openai_client.is_configured():
-            result = openai_client.chat(
-                messages=messages,
-                system_prompt=system,
-                trace_id=trace_id,
-                user_message=messages[-1]["content"] if messages else "",
-            )
+            try:
+                from .services.context_brain.llm_gateway import gateway_chat
+                result = gateway_chat(
+                    messages=messages,
+                    purpose='wellness_chat',
+                    system_prompt=system,
+                    trace_id=trace_id,
+                    user_message=messages[-1]["content"] if messages else "",
+                )
+            except Exception:
+                result = openai_client.chat(
+                    messages=messages,
+                    system_prompt=system,
+                    trace_id=trace_id,
+                    user_message=messages[-1]["content"] if messages else "",
+                )
             if result["reply"]:
                 return {"reply": result["reply"], "model": result["model"] + "-wellness"}
         return {

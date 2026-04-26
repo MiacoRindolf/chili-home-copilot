@@ -305,7 +305,7 @@ function brainReadUrlDomainString() {
     var v = String(rawParam).toLowerCase();
     if (v === 'hub') return 'hub';
     if (v === 'code') return 'project';
-    if (v === 'trading' || v === 'project' || v === 'reasoning' || v === 'jobs') return v;
+    if (v === 'trading' || v === 'project' || v === 'reasoning' || v === 'jobs' || v === 'context') return v;
     return '__invalid__';
   } catch (e) {
     return null;
@@ -323,6 +323,8 @@ function showBrainHub(opts) {
   if (pr) pr.style.display = 'none';
   var rd = document.getElementById('domain-reasoning');
   if (rd) rd.style.display = 'none';
+  var ctx = document.getElementById('domain-context');
+  if (ctx) ctx.style.display = 'none';
   var back = document.getElementById('brain-nav-all-domains');
   if (back) back.style.display = 'none';
   if (!opts.skipUrl) brainSetUrlDomain('hub');
@@ -402,6 +404,8 @@ function switchDomain(domain, opts) {
   if (pr) pr.style.display = domain === 'project' ? '' : 'none';
   var rd = document.getElementById('domain-reasoning');
   if (rd) rd.style.display = domain === 'reasoning' ? '' : 'none';
+  var ctx = document.getElementById('domain-context');
+  if (ctx) ctx.style.display = domain === 'context' ? '' : 'none';
   var back = document.getElementById('brain-nav-all-domains');
   if (back) back.style.display = 'inline-block';
 
@@ -424,6 +428,201 @@ function switchDomain(domain, opts) {
     _reasoningDashboardLoaded = true;
     loadReasoningDashboard();
   }
+  if (domain === 'context') {
+    loadContextDashboard();
+  }
+}
+
+/* ── Context Brain dashboard loader (Phase F) ──────────────────── */
+function loadContextDashboard() {
+  function safe(v, fb) { return (v == null || v === '') ? (fb || '--') : v; }
+  function fmtPct(num, den) {
+    if (!den || den <= 0) return '0%';
+    return Math.round((num / den) * 100) + '%';
+  }
+  fetch('/api/brain/context/status').then(function(r){return r.json();}).then(function(d){
+    if (!d) return;
+    var rs = d.runtime_state || {};
+    document.getElementById('ctx-mode').textContent = safe(rs.mode);
+    document.getElementById('ctx-budget').textContent = safe(rs.token_budget_per_request) + ' tokens';
+    var spent = safe(rs.spent_today_distillation_usd, '0');
+    var cap = safe(rs.daily_distillation_usd_cap, '0');
+    document.getElementById('ctx-cap').textContent = '$' + spent + ' / $' + cap;
+    document.getElementById('ctx-version').textContent = 'v' + safe(rs.learned_strategy_version, '1');
+    document.getElementById('ctx-learning').textContent = rs.learning_enabled ? 'enabled' : 'paused';
+    document.getElementById('ctx-last-cycle').textContent = safe(rs.last_learning_cycle_at, 'never');
+    var info = document.getElementById('context-status-info');
+    if (info) {
+      info.textContent = 'mode=' + safe(rs.mode) + ' · '
+        + (d.learned_weights_count || 0) + ' learned weights · '
+        + (d.distillation_cache_size || 0) + ' cache entries';
+    }
+    var dist = d.intent_distribution_24h || {};
+    var keys = Object.keys(dist);
+    var intentEl = document.getElementById('ctx-intents');
+    if (intentEl) {
+      if (!keys.length) {
+        intentEl.innerHTML = '<div style="color:var(--text-muted)">No assemblies yet in the last 24h.</div>';
+      } else {
+        var rows = keys.sort(function(a,b){return dist[b]-dist[a];}).map(function(k){
+          return '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">'
+            + '<span>' + k + '</span><span style="color:var(--text-muted)">' + dist[k] + '</span></div>';
+        });
+        intentEl.innerHTML = rows.join('');
+      }
+    }
+  }).catch(function(){});
+
+  fetch('/api/brain/context/sources').then(function(r){return r.json();}).then(function(d){
+    var el = document.getElementById('ctx-sources');
+    if (!el) return;
+    var items = (d && d.items) || [];
+    if (!items.length) {
+      el.innerHTML = '<div style="color:var(--text-muted)">No source data yet.</div>';
+      return;
+    }
+    el.innerHTML = items.map(function(s){
+      var rate = Math.round((s.selection_rate || 0) * 100);
+      return '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)">'
+        + '<span><strong>' + s.source_id + '</strong></span>'
+        + '<span style="color:var(--text-muted)">'
+        +   s.total_selected + '/' + s.total_returned + ' (' + rate + '% selected)'
+        + '</span></div>';
+    }).join('');
+  }).catch(function(){});
+
+  fetch('/api/brain/context/assemblies?limit=15').then(function(r){return r.json();}).then(function(d){
+    var el = document.getElementById('ctx-assemblies');
+    if (!el) return;
+    var items = (d && d.items) || [];
+    if (!items.length) {
+      el.innerHTML = '<div style="color:var(--text-muted)">No assemblies yet — try chatting to populate this.</div>';
+      return;
+    }
+    el.innerHTML = items.map(function(a){
+      var sources = a.sources_used || {};
+      var srcKeys = Object.keys(sources);
+      var when = (a.created_at || '').replace('T',' ').slice(0,19);
+      return '<div style="padding:8px;margin:4px 0;background:var(--bg);border:1px solid var(--border);border-radius:6px">'
+        + '<div style="display:flex;justify-content:space-between;font-size:12px">'
+        +   '<span><strong>#' + a.id + '</strong> · ' + a.intent + ' (' + a.intent_confidence + ')</span>'
+        +   '<span style="color:var(--text-muted)">' + when + '</span>'
+        + '</div>'
+        + '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">'
+        +   a.total_tokens_input + '/' + a.budget_token_cap + ' tok · '
+        +   a.elapsed_ms + 'ms · '
+        +   srcKeys.join(', ')
+        + '</div></div>';
+    }).join('');
+  }).catch(function(){});
+
+  // F.4-F.6 Gateway learning loop visibility.
+  loadGatewayLearningPanel();
+}
+
+function loadGatewayLearningPanel() {
+  // Top patterns
+  fetch('/api/brain/context/gateway/patterns?min_confidence=0.4&limit=10').then(function(r){return r.json();}).then(function(d){
+    var el = document.getElementById('ctx-patterns');
+    if (!el) return;
+    var items = (d && d.items) || [];
+    if (!items.length) { el.innerHTML = '<div style="color:var(--text-muted)">No patterns yet — distiller needs gateway calls + outcomes.</div>'; return; }
+    el.innerHTML = items.map(function(p){
+      var q = (p.avg_quality === null) ? 'NA' : Number(p.avg_quality).toFixed(2);
+      var sr = (p.success_rate === null) ? 'NA' : (Number(p.success_rate)*100).toFixed(0)+'%';
+      return '<div style="padding:6px 8px;margin:3px 0;background:var(--bg);border:1px solid var(--border);border-radius:4px">'
+        + '<div style="font-weight:600">' + p.purpose + ' · ' + p.pattern_kind + ' = ' + p.pattern_key + '</div>'
+        + '<div style="font-size:11px;color:var(--text-muted)">n=' + p.sample_count + ' · q=' + q + ' · ok=' + sr + ' · conf=' + Number(p.confidence).toFixed(2) + '</div>'
+        + '</div>';
+    }).join('');
+  }).catch(function(){});
+
+  // Pending proposals
+  fetch('/api/brain/context/gateway/proposals?status=pending&limit=15').then(function(r){return r.json();}).then(function(d){
+    var el = document.getElementById('ctx-proposals');
+    if (!el) return;
+    var items = (d && d.items) || [];
+    if (!items.length) { el.innerHTML = '<div style="color:var(--text-muted)">No proposals pending.</div>'; return; }
+    el.innerHTML = items.map(function(p){
+      return '<div style="padding:6px 8px;margin:3px 0;background:var(--bg);border:1px solid var(--border);border-radius:4px">'
+        + '<div style="font-weight:600">' + p.purpose + ' · ' + p.field_name + ': ' + (p.current_value||'-') + ' → <strong>' + p.proposed_value + '</strong> [' + p.severity + ']</div>'
+        + '<div style="font-size:11px;color:var(--text-muted);margin:2px 0">' + (p.justification||'') + '</div>'
+        + '<div style="font-size:11px"><a href="#" data-act="approve" data-pid="'+p.id+'" style="color:#3aa37a">Approve</a> · '
+        +   '<a href="#" data-act="reject" data-pid="'+p.id+'" style="color:#c0463a">Reject</a></div>'
+        + '</div>';
+    }).join('');
+    // Wire approve/reject links
+    el.querySelectorAll('a[data-act]').forEach(function(a){
+      a.addEventListener('click', function(ev){
+        ev.preventDefault();
+        var act = a.getAttribute('data-act');
+        var pid = a.getAttribute('data-pid');
+        fetch('/api/brain/context/gateway/proposals/' + pid + '/decide', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({decision: act})
+        }).then(function(r){return r.json();}).then(function(){ loadGatewayLearningPanel(); }).catch(function(){});
+      });
+    });
+  }).catch(function(){});
+
+  // Recent outcomes
+  fetch('/api/brain/context/gateway/outcomes?limit=15').then(function(r){return r.json();}).then(function(d){
+    var el = document.getElementById('ctx-outcomes');
+    if (!el) return;
+    var items = (d && d.items) || [];
+    if (!items.length) { el.innerHTML = '<div style="color:var(--text-muted)">No outcomes recorded yet.</div>'; return; }
+    el.innerHTML = items.map(function(o){
+      var q = (o.quality_signal === null) ? 'NA' : Number(o.quality_signal).toFixed(2);
+      var when = (o.measured_at || '').replace('T',' ').slice(0,19);
+      return '<div style="padding:4px 8px;margin:2px 0;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:11px">'
+        + '<strong>' + (o.purpose||'?') + '</strong> · q=' + q
+        + ' · src=' + (o.outcome_source||'?')
+        + (o.thumbs_vote !== null ? ' · thumbs=' + (o.thumbs_vote>0?'+1':(o.thumbs_vote<0?'-1':'0')) : '')
+        + ' · gw#' + (o.gateway_log_id||'?')
+        + ' · <span style="color:var(--text-muted)">' + when + '</span>'
+        + '</div>';
+    }).join('');
+  }).catch(function(){});
+
+  // Learning runs
+  fetch('/api/brain/context/gateway/learn/runs?limit=8').then(function(r){return r.json();}).then(function(d){
+    var el = document.getElementById('ctx-learn-runs');
+    if (!el) return;
+    var items = (d && d.items) || [];
+    if (!items.length) { el.innerHTML = '<div style="color:var(--text-muted)">No runs yet.</div>'; return; }
+    el.innerHTML = items.map(function(r){
+      var when = (r.started_at || '').replace('T',' ').slice(0,19);
+      var ok = (r.success === true) ? '✓' : (r.success === false ? '✗' : '·');
+      var summary = r.phase === 'distiller'
+        ? ('patterns=' + r.patterns_touched)
+        : ('proposals=' + r.proposals_created + ' (auto=' + r.proposals_auto_applied + ')');
+      return '<div style="font-size:11px;padding:2px 0">'
+        + ok + ' [' + r.phase + '] ' + when + ' — ' + summary
+        + (r.error_message ? ' · err=' + r.error_message.slice(0,80) : '')
+        + '</div>';
+    }).join('');
+  }).catch(function(){});
+
+  // Wire the manual run button (idempotent — re-binds on each refresh).
+  var btn = document.getElementById('ctx-learn-run-btn');
+  if (btn && !btn.__wired) {
+    btn.__wired = true;
+    btn.addEventListener('click', function(){
+      var status = document.getElementById('ctx-learn-run-status');
+      if (status) status.textContent = 'running…';
+      btn.disabled = true;
+      fetch('/api/brain/context/gateway/learn/run?phase=both', {method:'POST'})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if (status) status.textContent = 'distill: ' + (d.distill && d.distill.patterns_touched || 0)
+            + ' · evolve: ' + (d.evolve && (d.evolve.proposals + ' (auto=' + d.evolve.auto_applied + ')') || 0);
+          loadGatewayLearningPanel();
+        })
+        .catch(function(){ if (status) status.textContent = 'failed'; })
+        .finally(function(){ btn.disabled = false; });
+    });
+  }
 }
 
 function brainApplyInitialView() {
@@ -442,7 +641,7 @@ function brainApplyInitialView() {
     }
     return;
   }
-  if (server === 'trading' || server === 'project' || server === 'reasoning') {
+  if (server === 'trading' || server === 'project' || server === 'reasoning' || server === 'context') {
     switchDomain(server, { skipUrl: true });
     return;
   }

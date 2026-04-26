@@ -3676,6 +3676,67 @@ def start_scheduler():
                 "[scheduler] failed to register pattern_regime_autopilot jobs"
             )
 
+        # F.4-F.6 — Gateway learning loop (distiller every 15min, evolver hourly).
+        # Lives on the same scheduler so the brain-worker (role=all) drives it.
+        try:
+            if role in ("all", "web"):
+                def _run_gateway_distiller_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.context_brain.distiller import (
+                            distill_patterns,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = distill_patterns(_db)
+                            logger.info(
+                                "[gateway-learning] distiller pass: %s", res
+                            )
+                        finally:
+                            _db.close()
+                    except Exception:
+                        logger.exception("[gateway-learning] distiller failed")
+
+                def _run_gateway_evolver_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.context_brain.policy_evolver import (
+                            evolve_policies,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = evolve_policies(_db)
+                            logger.info(
+                                "[gateway-learning] evolver pass: %s", res
+                            )
+                        finally:
+                            _db.close()
+                    except Exception:
+                        logger.exception("[gateway-learning] evolver failed")
+
+                _scheduler.add_job(
+                    _run_gateway_distiller_job,
+                    trigger=IntervalTrigger(minutes=15),
+                    id="gateway_distiller",
+                    name="Gateway learning distiller (every 15min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(minutes=2),
+                )
+                _scheduler.add_job(
+                    _run_gateway_evolver_job,
+                    trigger=IntervalTrigger(hours=1),
+                    id="gateway_evolver",
+                    name="Gateway policy evolver (hourly)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(minutes=10),
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register gateway learning jobs"
+            )
+
         _scheduler.start()
         _ps_note = (
             "daily prescreen 2AM America/Los_Angeles; "

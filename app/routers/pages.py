@@ -502,6 +502,13 @@ def pair_verify(body: PairVerifyBody, request: Request, db: Session = Depends(ge
     token = register_device(db, user_id=pc.user_id, label=label, client_ip=client_ip)
 
     user = db.query(User).filter(User.id == pc.user_id).first()
-    resp = JSONResponse({"ok": True, "user_name": user.name if user else "Housemate"})
+    # Token in JSON for native clients (Flutter); Set-Cookie for browsers (chat UI).
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "user_name": user.name if user else "Housemate",
+            "token": token,
+        }
+    )
     resp.set_cookie(DEVICE_COOKIE_NAME, token, httponly=True, samesite="lax")
     return resp

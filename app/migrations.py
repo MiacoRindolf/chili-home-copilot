@@ -10280,6 +10280,843 @@ def _migration_170_restore_pattern_1047_n_paths_threshold_second(conn) -> None:
     conn.commit()
 
 
+def _migration_171_chili_dispatch_tables(conn) -> None:
+    """CHILI Dispatch: autonomous coding loop tables (Phase D.0+).
+
+    See ``app/migrations_proposed/171_chili_dispatch_tables.py`` for design notes.
+    Adds ``llm_call_log`` (distillation training set), ``code_agent_runs``
+    (cycle audit), ``code_kill_switch_state`` (singleton), ``distillation_runs``
+    (fine-tune attempts), ``frozen_scope_paths`` (hard-rule guard). Idempotent
+    via ``CREATE TABLE IF NOT EXISTS`` + ``ON CONFLICT DO NOTHING``.
+    """
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS llm_call_log (
+            id            BIGSERIAL PRIMARY KEY,
+            trace_id      TEXT NOT NULL,
+            cycle_id      BIGINT,
+            provider      TEXT NOT NULL,
+            model         TEXT NOT NULL,
+            tier          INTEGER NOT NULL,
+            purpose       TEXT NOT NULL,
+            system_prompt TEXT,
+            user_prompt   TEXT NOT NULL,
+            completion    TEXT,
+            tokens_in     INTEGER,
+            tokens_out    INTEGER,
+            latency_ms    INTEGER,
+            cost_usd      NUMERIC(10, 6),
+            success       BOOLEAN,
+            weak_response BOOLEAN DEFAULT FALSE,
+            failure_kind  TEXT,
+            validation_status TEXT,
+            distillable   BOOLEAN DEFAULT FALSE,
+            created_at    TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS llm_call_log_distillable_idx "
+        "ON llm_call_log (distillable, validation_status, created_at)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS llm_call_log_trace_idx "
+        "ON llm_call_log (trace_id)"
+    ))
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS code_agent_runs (
+            id                BIGSERIAL PRIMARY KEY,
+            started_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+            finished_at       TIMESTAMP,
+            task_id           BIGINT,
+            repo_id           BIGINT,
+            cycle_step        TEXT NOT NULL,
+            decision          TEXT,
+            rule_snapshot     JSONB,
+            llm_snapshot      JSONB,
+            diff_summary      JSONB,
+            validation_run_id BIGINT,
+            branch_name       TEXT,
+            commit_sha        TEXT,
+            merged_to         TEXT,
+            escalation_reason TEXT,
+            notify_user       BOOLEAN DEFAULT FALSE,
+            notified_at       TIMESTAMP
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS code_agent_runs_started_idx "
+        "ON code_agent_runs (started_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS code_agent_runs_task_idx "
+        "ON code_agent_runs (task_id)"
+    ))
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS code_kill_switch_state (
+            id            INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+            active        BOOLEAN NOT NULL DEFAULT FALSE,
+            reason        TEXT,
+            activated_at  TIMESTAMP,
+            activated_by  TEXT,
+            consecutive_failures INTEGER DEFAULT 0,
+            last_run_id   BIGINT
+        )
+        """
+    ))
+    conn.execute(text(
+        "INSERT INTO code_kill_switch_state (id, active) "
+        "VALUES (1, false) ON CONFLICT (id) DO NOTHING"
+    ))
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS distillation_runs (
+            id                   BIGSERIAL PRIMARY KEY,
+            started_at           TIMESTAMP NOT NULL DEFAULT NOW(),
+            finished_at          TIMESTAMP,
+            base_model           TEXT NOT NULL,
+            candidate_tag        TEXT,
+            train_rows           INTEGER,
+            eval_rows            INTEGER,
+            incumbent_pass       NUMERIC(5, 4),
+            candidate_pass       NUMERIC(5, 4),
+            candidate_latency_ms INTEGER,
+            decision             TEXT,
+            decision_reason      TEXT,
+            artifact_path        TEXT
+        )
+        """
+    ))
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS frozen_scope_paths (
+            id          SERIAL PRIMARY KEY,
+            glob        TEXT NOT NULL UNIQUE,
+            severity    TEXT NOT NULL,
+            reason      TEXT NOT NULL,
+            added_at    TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    seed_rows = [
+        ('app/services/trading/**',           'block',           'CLAUDE.md Hard Rules 1-2 (kill switch, drawdown breaker)'),
+        ('app/trading_brain/**',              'block',           'CLAUDE.md Hard Rule 5 (prediction mirror authority frozen)'),
+        ('app/migrations.py',                 'review_required', 'CLAUDE.md Hard Rule 6 (sequential idempotent migrations)'),
+        ('app/services/trading/governance.py','block',           'kill switch and frozen-scope guard logic itself'),
+        ('docs/KILL_SWITCH_RUNBOOK.md',       'review_required', 'incident playbook'),
+        ('docs/PHASE_ROLLBACK_RUNBOOK.md',    'review_required', 'rollback playbook'),
+        ('docs/DRAWDOWN_BREAKER_RUNBOOK.md',  'review_required', 'incident playbook'),
+        ('certs/**',                          'block',           'TLS certs'),
+        ('.env',                              'block',           'secrets'),
+        ('docker-compose.yml',                'review_required', 'production topology'),
+    ]
+    for glob, severity, reason in seed_rows:
+        conn.execute(
+            text(
+                "INSERT INTO frozen_scope_paths (glob, severity, reason) "
+                "VALUES (:glob, :severity, :reason) "
+                "ON CONFLICT (glob) DO NOTHING"
+            ),
+            {"glob": glob, "severity": severity, "reason": reason},
+        )
+    conn.execute(text(
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'coding_tasks') THEN
+            IF NOT EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'coding_tasks' AND column_name = 'force_tier'
+            ) THEN
+              ALTER TABLE coding_tasks ADD COLUMN force_tier INTEGER;
+            END IF;
+            IF NOT EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'coding_tasks' AND column_name = 'intended_files'
+            ) THEN
+              ALTER TABLE coding_tasks ADD COLUMN intended_files JSONB;
+            END IF;
+          END IF;
+        END$$;
+        """
+    ))
+    conn.commit()
+
+
+def _migration_172_code_brain_neural_tables(conn) -> None:
+    """Code Brain neural architecture (mirror of trading brain).
+
+    Replaces the dumb 60s dispatch timer with a reactive, deterministic-first
+    routing system. Adds:
+
+      * ``code_patterns`` — mined diff archetypes / templates discovered from
+        successful llm_call_log + coding_agent_suggestion rows. The decision
+        router uses these to apply tasks WITHOUT calling an LLM when a
+        confident pattern matches.
+      * ``code_brain_events`` — durable DB-backed event queue. Replaces the
+        timer-driven cycle. Watchers enqueue events (new task ready, source
+        changed, validation failed, etc.); a single processor claims and
+        routes them.
+      * ``code_decision_router_log`` — audit row per routing decision
+        (which gate path was taken, which template matched, what novelty
+        score, what the eventual outcome was, what cost was spent).
+      * ``code_brain_runtime_state`` — singleton mode + budget + thresholds.
+        Mode in {'reactive', 'legacy_60s', 'paused'}. Daily premium-USD cap
+        enforced HERE (not in rule_gate.py which had the cost_usd-NULL bug).
+
+    Idempotent. Safe to re-run.
+    """
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS code_patterns (
+            id                BIGSERIAL PRIMARY KEY,
+            name              TEXT NOT NULL UNIQUE,
+            description       TEXT,
+            -- Matching signature
+            brief_keywords    JSONB,
+            file_glob_pattern TEXT,
+            diff_archetype    TEXT,
+            -- Template body (parameterized unified diff or Jinja-ish)
+            template_body     TEXT,
+            template_params   JSONB,
+            -- Confidence + scoring
+            confidence        NUMERIC(5, 4) DEFAULT 0.5,
+            success_count     INTEGER DEFAULT 0,
+            failure_count     INTEGER DEFAULT 0,
+            -- Provenance
+            mined_from_llm_call_ids JSONB,
+            last_used_at      TIMESTAMP,
+            created_at        TIMESTAMP DEFAULT NOW(),
+            updated_at        TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS code_patterns_archetype_idx "
+        "ON code_patterns (diff_archetype, confidence DESC)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS code_brain_events (
+            id            BIGSERIAL PRIMARY KEY,
+            event_type    TEXT NOT NULL,
+            subject_kind  TEXT,
+            subject_id    BIGINT,
+            payload       JSONB,
+            priority      SMALLINT DEFAULT 5,
+            enqueued_at   TIMESTAMP DEFAULT NOW(),
+            claimed_at    TIMESTAMP,
+            claimed_by    TEXT,
+            processed_at  TIMESTAMP,
+            outcome       TEXT,
+            error_message TEXT
+        )
+        """
+    ))
+    # Partial index for fast claim_next() — only unclaimed rows.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS code_brain_events_unclaimed_idx "
+        "ON code_brain_events (priority, enqueued_at) "
+        "WHERE claimed_at IS NULL"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS code_brain_events_subject_idx "
+        "ON code_brain_events (subject_kind, subject_id)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS code_decision_router_log (
+            id                  BIGSERIAL PRIMARY KEY,
+            event_id            BIGINT,
+            task_id             BIGINT,
+            decided_at          TIMESTAMP DEFAULT NOW(),
+            decision            TEXT NOT NULL,
+            matched_pattern_id  BIGINT,
+            pattern_confidence  NUMERIC(5, 4),
+            novelty_score       NUMERIC(5, 4),
+            rule_snapshot       JSONB,
+            -- Filled in when the routed action completes
+            completed_at        TIMESTAMP,
+            outcome             TEXT,
+            cost_usd            NUMERIC(10, 6) DEFAULT 0,
+            llm_tokens_used     INTEGER DEFAULT 0
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS code_decision_router_log_task_idx "
+        "ON code_decision_router_log (task_id, decided_at DESC)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS code_brain_runtime_state (
+            id                          INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+            mode                        TEXT NOT NULL DEFAULT 'reactive',
+            -- Daily budget cap on PREMIUM (paid) LLM calls; resets per day
+            daily_premium_usd_cap       NUMERIC(10, 2) DEFAULT 5.00,
+            spent_today_usd             NUMERIC(10, 6) DEFAULT 0,
+            spend_reset_date            DATE DEFAULT CURRENT_DATE,
+            -- Routing thresholds
+            template_min_confidence     NUMERIC(5, 4) DEFAULT 0.7,
+            novelty_premium_threshold   NUMERIC(5, 4) DEFAULT 0.6,
+            -- Distillation state
+            local_model_promoted        BOOLEAN DEFAULT FALSE,
+            local_model_tag             TEXT,
+            last_pattern_mining_at      TIMESTAMP,
+            updated_at                  TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "INSERT INTO code_brain_runtime_state (id) "
+        "VALUES (1) ON CONFLICT (id) DO NOTHING"
+    ))
+    conn.commit()
+
+
+def _migration_173_context_brain_tables(conn) -> None:
+    """Context Brain (Phase F) — TurboQuant-style retrieve→rank→compress→compose.
+
+    The Context Brain is the third domain brain (after trading and code).
+    It owns the LLM context-assembly pipeline for chat: classifies intent,
+    pulls candidates from each registered retriever, scores them with
+    learned weights, enforces a token budget, optionally distills overflow
+    via a cheap model, and composes a final structured prompt.
+
+    Tables:
+      * ``context_assembly_log`` — one row per chat assembly. Tracks intent,
+        sources used, total tokens, strategy version, and links back to
+        the chat_message_id and the resulting llm_call_log row.
+      * ``context_candidate_log`` — one row per retriever result inside an
+        assembly. Records raw score, final relevance, whether selected,
+        token count, and content hash (for distillation cache lookup).
+      * ``context_outcome_log`` — feedback layer. Linked to assembly +
+        llm_call_log + the user's downstream reaction (followed-up,
+        regenerated, dismissed, action succeeded). The learning loop
+        consumes this to update weights.
+      * ``learned_context_weights`` — global per (intent, source_id)
+        weight, learned from outcomes. UNIQUE because we chose global
+        learning over per-user (cheaper to converge, easier to validate).
+      * ``context_distillation_cache`` — content_hash → distilled_text so
+        we never pay the distiller LLM twice for identical inputs.
+      * ``context_brain_runtime_state`` — singleton (mode, token budget,
+        distillation USD cap, current strategy version).
+
+    Idempotent. Safe to re-run.
+    """
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS context_brain_runtime_state (
+            id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+            mode TEXT NOT NULL DEFAULT 'reactive',
+            -- Per-request token budget for the assembled context
+            -- (NOT including the response tokens). 8K leaves headroom in
+            -- a 32K-context model and is plenty for most chat turns.
+            token_budget_per_request INTEGER NOT NULL DEFAULT 8000,
+            -- If selected candidates exceed this many tokens, distill
+            -- the overflow via the cheap model.
+            distillation_threshold_tokens INTEGER NOT NULL DEFAULT 12000,
+            -- Daily cap on what the distiller can spend on cheap-LLM
+            -- summarization. 0.50 by default to stay miles below the
+            -- premium-LLM budget.
+            daily_distillation_usd_cap NUMERIC(10, 2) NOT NULL DEFAULT 0.50,
+            spent_today_distillation_usd NUMERIC(10, 6) NOT NULL DEFAULT 0,
+            spend_reset_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            -- Toggles
+            learning_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            distillation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            -- Bumped every time the learning cycle promotes a new weight
+            -- set. Lets us A/B-compare assembly strategies offline.
+            learned_strategy_version INTEGER NOT NULL DEFAULT 1,
+            last_learning_cycle_at TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "INSERT INTO context_brain_runtime_state (id) "
+        "VALUES (1) ON CONFLICT (id) DO NOTHING"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS context_assembly_log (
+            id BIGSERIAL PRIMARY KEY,
+            -- The chat_message that triggered this assembly (if known)
+            chat_message_id BIGINT,
+            user_id INTEGER,
+            -- Intent classification result
+            intent TEXT,
+            intent_confidence NUMERIC(5, 4),
+            -- Hash of the raw user query (debug + dedupe)
+            query_hash TEXT,
+            -- {"rag": 3, "memory": 2, "code_brain": 1, ...}
+            sources_used JSONB,
+            total_tokens_input INTEGER,
+            -- Budget cap that was in effect when this assembled
+            budget_token_cap INTEGER,
+            budget_used_pct NUMERIC(5, 2),
+            -- "v1_naive" | "v1_weighted" | future versions...
+            strategy_version INTEGER,
+            distilled BOOLEAN DEFAULT FALSE,
+            distillation_tokens_saved INTEGER,
+            -- Latency of the assembly path itself (NOT the LLM call)
+            elapsed_ms INTEGER,
+            -- Filled in once the LLM responds
+            llm_call_log_id BIGINT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS context_assembly_log_user_idx "
+        "ON context_assembly_log (user_id, created_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS context_assembly_log_intent_idx "
+        "ON context_assembly_log (intent, created_at DESC)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS context_candidate_log (
+            id BIGSERIAL PRIMARY KEY,
+            assembly_id BIGINT NOT NULL REFERENCES context_assembly_log(id) ON DELETE CASCADE,
+            source_id TEXT NOT NULL,    -- 'rag', 'memory', 'code_brain', etc.
+            -- The retriever's own confidence (cosine, distance, freshness, ...)
+            raw_score NUMERIC(8, 5),
+            -- After applying learned_weight + recency + intent_match
+            relevance_score NUMERIC(8, 5),
+            final_weight NUMERIC(8, 5),
+            -- Did the budget allow this one through?
+            selected BOOLEAN DEFAULT FALSE,
+            tokens_estimated INTEGER,
+            -- For distillation-cache lookups
+            content_hash TEXT,
+            distilled BOOLEAN DEFAULT FALSE,
+            -- A small preview so operators can debug from the UI
+            preview TEXT
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS context_candidate_log_assembly_idx "
+        "ON context_candidate_log (assembly_id)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS context_candidate_log_source_idx "
+        "ON context_candidate_log (source_id, selected)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS context_outcome_log (
+            id BIGSERIAL PRIMARY KEY,
+            assembly_id BIGINT REFERENCES context_assembly_log(id) ON DELETE CASCADE,
+            llm_call_log_id BIGINT,
+            chat_message_id BIGINT,
+            action_type TEXT,
+            -- All optional / fill in async over time as user reacts
+            user_followed_up BOOLEAN,
+            user_regenerated BOOLEAN,
+            user_edited BOOLEAN,
+            user_dismissed BOOLEAN,
+            -- Composite signal in [0, 1]; the learner reads this
+            quality_signal NUMERIC(5, 4),
+            measured_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS context_outcome_log_assembly_idx "
+        "ON context_outcome_log (assembly_id)"
+    ))
+
+    # Global learned weights (per intent × source). Per-user comes later.
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS learned_context_weights (
+            id BIGSERIAL PRIMARY KEY,
+            intent TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            weight NUMERIC(8, 5) NOT NULL DEFAULT 1.0,
+            sample_count INTEGER NOT NULL DEFAULT 0,
+            last_outcome_quality NUMERIC(5, 4),
+            last_updated TIMESTAMP DEFAULT NOW(),
+            UNIQUE (intent, source_id)
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS learned_context_weights_intent_idx "
+        "ON learned_context_weights (intent)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS context_distillation_cache (
+            id BIGSERIAL PRIMARY KEY,
+            content_hash TEXT NOT NULL UNIQUE,
+            original_tokens INTEGER,
+            distilled_tokens INTEGER,
+            distilled_text TEXT NOT NULL,
+            distiller_model TEXT,
+            distiller_cost_usd NUMERIC(10, 6),
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            last_used_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.commit()
+
+
+def _migration_174_llm_gateway_decomposition_tables(conn) -> None:
+    """Phase F.10 — Universal LLM Gateway + Tree-of-Context decomposition.
+
+    Architecture (validated 2026-04-26 with operator):
+
+        gateway_chat(query, purpose=...) is the SOLE entry point for every
+        LLM call in CHILI. The gateway looks up the purpose's policy and
+        routes one of three ways:
+
+          * ``passthrough``  — straight to openai_client.chat() (legacy
+                               behavior; for trading-brain JSON callers
+                               where wrapping would break formatting)
+          * ``augmented``    — assemble Context Brain prompt then call
+                               (no decomposition, single LLM call)
+          * ``tree``         — full pipeline:
+                                  decompose query → N parallel Ollama calls
+                                  for each chunk → optional cross-examination
+                                  → compile chunks → synthesize via gpt-5.5
+
+    The "tree" path keeps 95%+ of LLM cost on local (free) Ollama. Only
+    the final synthesis call goes to gpt-5.5. As the learning cycle mines
+    successful patterns, we mechanically graduate them from "tree" to
+    "passthrough+template" — at which point even the synthesis call goes
+    away.
+
+    Tables:
+
+      * ``llm_gateway_log``        — every gateway call (one row per turn).
+                                      Source of truth for cost, latency,
+                                      routing strategy, success rate.
+      * ``decomposition_tree``     — for tree-routed calls: the parent
+                                      tree record linking back to the gateway
+                                      log row.
+      * ``decomposition_chunk``    — per-chunk record inside a tree. Holds
+                                      primary + secondary model responses,
+                                      similarity score, selected response.
+      * ``llm_purpose_policy``     — per-purpose routing config. Operators
+                                      flip strategies here without code.
+                                      Seeded with sensible defaults.
+      * ``context_brain_outcome``  — links a gateway call to user reaction
+                                      (followed-up, regenerated, edited)
+                                      so the learning cycle can score it.
+    """
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS llm_gateway_log (
+            id BIGSERIAL PRIMARY KEY,
+            purpose TEXT NOT NULL,
+            user_id INTEGER,
+            chat_message_id BIGINT,
+            -- The chosen routing for this call
+            routing_strategy TEXT NOT NULL,   -- passthrough | augmented | tree
+            -- Tree-path stats (NULL when passthrough/augmented)
+            decomposed BOOLEAN DEFAULT FALSE,
+            chunk_count INTEGER DEFAULT 0,
+            cross_examined BOOLEAN DEFAULT FALSE,
+            -- Models used in the various tiers
+            primary_local_model TEXT,
+            secondary_local_model TEXT,
+            synthesizer_model TEXT,
+            -- Cost / latency breakdown
+            ollama_calls_count INTEGER DEFAULT 0,
+            premium_calls_count INTEGER DEFAULT 0,
+            ollama_total_tokens INTEGER DEFAULT 0,
+            premium_total_tokens INTEGER DEFAULT 0,
+            premium_cost_usd NUMERIC(10, 6) DEFAULT 0,
+            total_latency_ms INTEGER,
+            decompose_latency_ms INTEGER,
+            chunk_latency_ms INTEGER,
+            compile_latency_ms INTEGER,
+            synthesize_latency_ms INTEGER,
+            -- Outcome
+            success BOOLEAN,
+            error_kind TEXT,
+            error_message TEXT,
+            -- Timestamps
+            started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMP
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS llm_gateway_log_purpose_idx "
+        "ON llm_gateway_log (purpose, started_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS llm_gateway_log_user_idx "
+        "ON llm_gateway_log (user_id, started_at DESC)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS decomposition_tree (
+            id BIGSERIAL PRIMARY KEY,
+            gateway_log_id BIGINT REFERENCES llm_gateway_log(id) ON DELETE CASCADE,
+            parent_query TEXT NOT NULL,
+            chunk_count INTEGER DEFAULT 0,
+            chunks_resolved INTEGER DEFAULT 0,
+            chunks_failed INTEGER DEFAULT 0,
+            decomposition_strategy TEXT,    -- 'heuristic_passthrough' | 'llm_decompose' | 'cached'
+            decomposer_model TEXT,
+            compiled_context_tokens INTEGER,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS decomposition_tree_gateway_idx "
+        "ON decomposition_tree (gateway_log_id)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS decomposition_chunk (
+            id BIGSERIAL PRIMARY KEY,
+            tree_id BIGINT NOT NULL REFERENCES decomposition_tree(id) ON DELETE CASCADE,
+            chunk_index INTEGER NOT NULL,
+            chunk_query TEXT NOT NULL,
+            chunk_kind TEXT,                  -- 'fact' | 'reasoning' | 'code' | 'general'
+            -- Primary local model response
+            primary_model TEXT,
+            primary_response TEXT,
+            primary_tokens_out INTEGER,
+            primary_latency_ms INTEGER,
+            -- Optional secondary local model (cross-exam)
+            secondary_model TEXT,
+            secondary_response TEXT,
+            secondary_tokens_out INTEGER,
+            secondary_latency_ms INTEGER,
+            similarity_score NUMERIC(5, 4),  -- character-level similarity 0..1
+            -- After disagreement resolution: which response went forward
+            selected_response TEXT,
+            selection_reason TEXT,            -- 'agreement' | 'primary_only' | 'referee'
+            is_high_stakes BOOLEAN DEFAULT FALSE,
+            success BOOLEAN,
+            error_message TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS decomposition_chunk_tree_idx "
+        "ON decomposition_chunk (tree_id, chunk_index)"
+    ))
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS llm_purpose_policy (
+            id SERIAL PRIMARY KEY,
+            purpose TEXT NOT NULL UNIQUE,
+            description TEXT,
+            -- Routing decision
+            routing_strategy TEXT NOT NULL DEFAULT 'augmented',
+            -- Tree-path knobs
+            decompose BOOLEAN DEFAULT FALSE,
+            cross_examine BOOLEAN DEFAULT FALSE,
+            use_premium_synthesis BOOLEAN DEFAULT TRUE,
+            high_stakes BOOLEAN DEFAULT FALSE,
+            -- Model overrides (NULL = use runtime_state defaults)
+            primary_local_model TEXT,
+            secondary_local_model TEXT,
+            synthesizer_model TEXT,
+            -- Tuning
+            max_chunks INTEGER DEFAULT 8,
+            chunk_timeout_sec INTEGER DEFAULT 30,
+            -- Toggle without code change
+            enabled BOOLEAN DEFAULT TRUE,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+
+    # Seed sensible default policies. Each call site in CHILI should map
+    # its purpose to one of these. ON CONFLICT DO NOTHING so re-running is
+    # safe and operator edits aren't clobbered.
+    seeds = [
+        # User-facing chat. Full tree pipeline. High-quality synthesis.
+        ("chat_user", "User chat in the chat UI", "tree",
+         True, True, True, False),
+        # Code dispatch — high stakes (will commit + push). Decomposition
+        # gives sharper plans; cross-exam catches hallucinated diffs.
+        ("code_dispatch_plan", "Dispatch loop plan step", "tree",
+         True, True, True, True),
+        ("code_dispatch_edit", "Dispatch loop per-file edit step", "augmented",
+         False, True, True, True),
+        ("code_dispatch_create", "Dispatch loop create-new-file step", "augmented",
+         False, True, True, True),
+        # Trading brain — strict JSON output, latency-sensitive. Wrapping
+        # would break things. Stays passthrough.
+        ("trading_pattern_adjust", "Trading brain pattern adjuster (JSON)", "passthrough",
+         False, False, False, True),
+        ("trading_reasoning", "Trading brain reasoning calls", "passthrough",
+         False, False, False, False),
+        # Vision passthrough — image content not amenable to chunked text retrieval
+        ("vision_describe", "Vision/image description", "passthrough",
+         False, False, False, False),
+        # Catch-all
+        ("llm_default", "Catch-all for unspecified call sites", "augmented",
+         False, False, True, False),
+    ]
+    for purpose, desc, strategy, decompose, cross, prem_synth, hs in seeds:
+        conn.execute(text(
+            "INSERT INTO llm_purpose_policy "
+            "(purpose, description, routing_strategy, decompose, "
+            " cross_examine, use_premium_synthesis, high_stakes) "
+            "VALUES (:p, :d, :s, :de, :ce, :ps, :hs) "
+            "ON CONFLICT (purpose) DO NOTHING"
+        ), {
+            "p": purpose, "d": desc, "s": strategy,
+            "de": decompose, "ce": cross, "ps": prem_synth, "hs": hs,
+        })
+
+    conn.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS context_brain_outcome (
+            id BIGSERIAL PRIMARY KEY,
+            gateway_log_id BIGINT REFERENCES llm_gateway_log(id) ON DELETE CASCADE,
+            tree_id BIGINT REFERENCES decomposition_tree(id) ON DELETE SET NULL,
+            chat_message_id BIGINT,
+            user_followed_up BOOLEAN,
+            user_regenerated BOOLEAN,
+            user_edited BOOLEAN,
+            user_dismissed BOOLEAN,
+            quality_signal NUMERIC(5, 4),    -- composite 0..1
+            measured_at TIMESTAMP DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS context_brain_outcome_gateway_idx "
+        "ON context_brain_outcome (gateway_log_id)"
+    ))
+    conn.commit()
+
+
+def _migration_175_gateway_learning_loop(conn) -> None:
+    """Phase F.4-F.6: distiller patterns, policy proposals, outcome enrichment.
+
+    Adds the schema needed for the gateway learning loop:
+
+      * Extends ``context_brain_outcome`` with explicit signals (thumbs,
+        outcome_source, raw_signal_json) so we can track multiple kinds of
+        feedback (chat followup heuristic, explicit thumbs, code dispatch
+        success, trade close PnL).
+      * Adds ``gateway_pattern`` — distilled correlations between gateway
+        input/strategy and downstream outcomes (the F.4 distiller's output).
+      * Adds ``policy_change_proposal`` — proposed adjustments to
+        ``llm_purpose_policy`` from the F.6 evolver. Low-stakes changes
+        (max_chunks ±1, chunk_timeout ±5s) auto-apply; routing strategy or
+        high_stakes flips wait for explicit human approval.
+      * Adds ``gateway_learning_run`` — one row per distiller/evolver pass so
+        operators can see when the loop last ran and what it touched.
+    """
+    from sqlalchemy import text
+
+    # 1. Enrich context_brain_outcome.
+    conn.execute(text("""
+        ALTER TABLE context_brain_outcome
+            ADD COLUMN IF NOT EXISTS thumbs_vote SMALLINT,
+            ADD COLUMN IF NOT EXISTS outcome_source TEXT,
+            ADD COLUMN IF NOT EXISTS raw_signal_json TEXT,
+            ADD COLUMN IF NOT EXISTS purpose TEXT,
+            ADD COLUMN IF NOT EXISTS user_id INTEGER
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS context_brain_outcome_purpose_idx "
+        "ON context_brain_outcome (purpose, measured_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS context_brain_outcome_source_idx "
+        "ON context_brain_outcome (outcome_source, measured_at DESC)"
+    ))
+
+    # 2. gateway_pattern — distilled correlations.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS gateway_pattern (
+            id BIGSERIAL PRIMARY KEY,
+            purpose TEXT NOT NULL,
+            pattern_kind TEXT NOT NULL,            -- 'strategy_vs_outcome', 'chunks_vs_outcome', etc.
+            pattern_key TEXT NOT NULL,             -- e.g. 'tree|chunks=4'
+            sample_count INTEGER NOT NULL DEFAULT 0,
+            avg_quality NUMERIC(5, 4),             -- 0..1
+            success_rate NUMERIC(5, 4),            -- 0..1
+            avg_latency_ms NUMERIC(10, 2),
+            confidence NUMERIC(5, 4) NOT NULL DEFAULT 0,  -- f(samples, variance)
+            description TEXT,
+            first_seen_at TIMESTAMP DEFAULT NOW(),
+            last_seen_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (purpose, pattern_kind, pattern_key)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS gateway_pattern_purpose_idx "
+        "ON gateway_pattern (purpose, confidence DESC)"
+    ))
+
+    # 3. policy_change_proposal — what the evolver wants to tweak.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS policy_change_proposal (
+            id BIGSERIAL PRIMARY KEY,
+            purpose TEXT NOT NULL,
+            field_name TEXT NOT NULL,           -- 'routing_strategy', 'max_chunks', etc.
+            current_value TEXT,
+            proposed_value TEXT NOT NULL,
+            justification TEXT,                 -- distiller pattern reference
+            pattern_id BIGINT REFERENCES gateway_pattern(id) ON DELETE SET NULL,
+            severity TEXT NOT NULL DEFAULT 'low',  -- 'low' (auto-apply) | 'high' (gate)
+            status TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected | auto_applied
+            decided_by TEXT,
+            decided_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS policy_change_proposal_status_idx "
+        "ON policy_change_proposal (status, created_at DESC)"
+    ))
+
+    # 4. gateway_learning_run — operator visibility into the loop itself.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS gateway_learning_run (
+            id BIGSERIAL PRIMARY KEY,
+            phase TEXT NOT NULL,                -- 'distiller' | 'evolver'
+            started_at TIMESTAMP DEFAULT NOW(),
+            ended_at TIMESTAMP,
+            success BOOLEAN,
+            patterns_touched INTEGER DEFAULT 0,
+            proposals_created INTEGER DEFAULT 0,
+            proposals_auto_applied INTEGER DEFAULT 0,
+            error_message TEXT
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS gateway_learning_run_phase_idx "
+        "ON gateway_learning_run (phase, started_at DESC)"
+    ))
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -10461,6 +11298,11 @@ MIGRATIONS = [
         "170_restore_pattern_1047_n_paths_threshold_second",
         _migration_170_restore_pattern_1047_n_paths_threshold_second,
     ),
+    ("171_chili_dispatch_tables", _migration_171_chili_dispatch_tables),
+    ("172_code_brain_neural_tables", _migration_172_code_brain_neural_tables),
+    ("173_context_brain_tables", _migration_173_context_brain_tables),
+    ("174_llm_gateway_decomposition_tables", _migration_174_llm_gateway_decomposition_tables),
+    ("175_gateway_learning_loop", _migration_175_gateway_learning_loop),
 ]
 
 

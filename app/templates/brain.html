@@ -160,6 +160,66 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       </div>
     </div>
 
+    <!-- Context Domain (Phase F) — TurboQuant-style adaptive context -->
+    <div id="domain-context" style="display:{% if _bd == 'context' %}block{% else %}none{% endif %}; overflow-y:auto;">
+      <div class="b-main-header">
+        <h2>Context Brain</h2>
+        <span id="context-status-info" style="font-size:var(--brain-font-sm);color:var(--text-muted)"></span>
+      </div>
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F9E9;</span> Runtime</div>
+        <div id="context-runtime-grid" class="reasoning-goals-grid" style="font-size:var(--brain-font-md)">
+          <div><div style="font-weight:600;margin-bottom:4px">Mode</div><div id="ctx-mode" style="color:var(--text-muted)">--</div></div>
+          <div><div style="font-weight:600;margin-bottom:4px">Token budget</div><div id="ctx-budget" style="color:var(--text-muted)">--</div></div>
+          <div><div style="font-weight:600;margin-bottom:4px">Distillation cap</div><div id="ctx-cap" style="color:var(--text-muted)">--</div></div>
+          <div><div style="font-weight:600;margin-bottom:4px">Strategy version</div><div id="ctx-version" style="color:var(--text-muted)">--</div></div>
+          <div><div style="font-weight:600;margin-bottom:4px">Learning</div><div id="ctx-learning" style="color:var(--text-muted)">--</div></div>
+          <div><div style="font-weight:600;margin-bottom:4px">Last cycle</div><div id="ctx-last-cycle" style="color:var(--text-muted)">never</div></div>
+        </div>
+      </div>
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Intents (last 24h)</div>
+        <div id="ctx-intents" style="font-size:var(--brain-font-md);color:var(--text-muted)">Loading...</div>
+      </div>
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Source contribution (last 24h)</div>
+        <div id="ctx-sources" style="font-size:var(--brain-font-md);color:var(--text-muted)">Loading...</div>
+      </div>
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4DC;</span> Recent assemblies</div>
+        <div id="ctx-assemblies" style="font-size:var(--brain-font-md);color:var(--text-muted)">Loading...</div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title">
+          <span class="bs-icon">&#x1F9EC;</span> Gateway Learning Loop
+          <button id="ctx-learn-run-btn" style="margin-left:12px;font-size:var(--brain-font-sm);padding:2px 8px;cursor:pointer">Run pass now</button>
+          <span id="ctx-learn-run-status" style="font-size:var(--brain-font-sm);color:var(--text-muted);margin-left:8px"></span>
+        </div>
+        <div style="font-size:var(--brain-font-md);color:var(--text-muted);margin-bottom:8px">
+          The distiller mines patterns from gateway calls + outcomes; the evolver proposes policy changes (low-stakes auto-applied, high-stakes pending operator approval).
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div>
+            <div style="font-weight:600;margin-bottom:4px">Top patterns (by confidence)</div>
+            <div id="ctx-patterns" style="font-size:var(--brain-font-sm);color:var(--text-muted)">Loading...</div>
+          </div>
+          <div>
+            <div style="font-weight:600;margin-bottom:4px">Pending proposals</div>
+            <div id="ctx-proposals" style="font-size:var(--brain-font-sm);color:var(--text-muted)">Loading...</div>
+          </div>
+        </div>
+        <div style="margin-top:12px">
+          <div style="font-weight:600;margin-bottom:4px">Recent outcomes</div>
+          <div id="ctx-outcomes" style="font-size:var(--brain-font-sm);color:var(--text-muted)">Loading...</div>
+        </div>
+        <div style="margin-top:12px">
+          <div style="font-weight:600;margin-bottom:4px">Learning runs</div>
+          <div id="ctx-learn-runs" style="font-size:var(--brain-font-sm);color:var(--text-muted)">Loading...</div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 

@@ -56,10 +56,7 @@ def _combine_diffs(diffs: list[str]) -> bytes:
     return "\n".join(parts).encode("utf-8", errors="replace")
 
 
-def _run_git_apply(cwd: Path, patch: bytes, *, check_only: bool) -> tuple[int, str]:
-    cmd = ["git", "apply", "--whitespace=nowarn"]
-    if check_only:
-        cmd.append("--check")
+def _run_git_apply_inner(cmd: list[str], cwd: Path, patch: bytes) -> tuple[int, str]:
     try:
         p = subprocess.run(
             cmd,
@@ -77,6 +74,69 @@ def _run_git_apply(cwd: Path, patch: bytes, *, check_only: bool) -> tuple[int, s
     err = (p.stderr or b"").decode("utf-8", errors="replace").strip()
     msg = err or out or f"exit {p.returncode}"
     return p.returncode, msg
+
+
+def _run_git_apply(cwd: Path, patch: bytes, *, check_only: bool) -> tuple[int, str]:
+    """Apply (or check) a patch. Tries strict first, then tolerant fallback.
+
+    LLM-generated diffs frequently have wrong ``@@ -a,b +c,d @@`` line counts
+    and slightly drifted context-line whitespace. Strict ``git apply`` rejects
+    these as "corrupt patch" / "patch fragment without header". The tolerant
+    fallback uses:
+      ``--recount``       — recompute @@ ranges from the actual hunk body
+      ``--whitespace=fix``— fix trailing whitespace differences
+      ``--ignore-space-change`` — be lenient about internal whitespace
+    These three together rescue the vast majority of LLM diffs without
+    accepting truly garbage patches (header / file-path errors still fail).
+    """
+    # Pass 1 — strict.
+    strict_cmd = ["git", "apply", "--whitespace=nowarn"]
+    if check_only:
+        strict_cmd.append("--check")
+    rc, msg = _run_git_apply_inner(strict_cmd, cwd, patch)
+    if rc == 0:
+        return rc, msg
+
+    # Pass 2 — tolerant: relax counting + whitespace.
+    tolerant_cmd = [
+        "git", "apply",
+        "--recount",
+        "--whitespace=fix",
+        "--ignore-space-change",
+    ]
+    if check_only:
+        tolerant_cmd.append("--check")
+    rc2, msg2 = _run_git_apply_inner(tolerant_cmd, cwd, patch)
+    if rc2 == 0:
+        return rc2, f"applied with --recount --whitespace=fix --ignore-space-change (strict had: {msg})"
+
+    # Pass 3 — 3-way merge. When context lines drift, git falls back to using
+    # the source blob from the object database to compute the right hunk
+    # placement. Requires the file in the diff to be tracked (in the index),
+    # which is the case for any real-repo apply via /workspace/.git. This is
+    # the strongest rescue for fuzzy LLM diffs short of full diff repair.
+    threeway_cmd = [
+        "git", "apply",
+        "--3way",
+        "--whitespace=fix",
+        "--ignore-space-change",
+    ]
+    if check_only:
+        threeway_cmd.append("--check")
+    rc3, msg3 = _run_git_apply_inner(threeway_cmd, cwd, patch)
+    if rc3 == 0:
+        return rc3, (
+            f"applied with --3way (strict: {msg[:200]} | "
+            f"tolerant: {msg2[:200]})"
+        )
+
+    # All three passes failed — surface trimmed errors so audit row shows what we tried.
+    combined = (
+        f"strict: {msg[:300]} | "
+        f"tolerant: {msg2[:300]} | "
+        f"3way: {msg3[:300]}"
+    )
+    return rc, combined[:1800]
 
 
 def _bound_audit_message(s: str) -> str:

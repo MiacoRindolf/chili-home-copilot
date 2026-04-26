@@ -1054,14 +1054,58 @@ def analyze_closed_trade(db: Session, trade: Trade) -> str | None:
         )
         try:
             system_prompt = load_prompt("trading_analyst")
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": user_msg}],
-                system_prompt=system_prompt,
-                trace_id=trace_id,
-                user_message=user_msg,
-                max_tokens=2048,
-            )
+            try:
+                from ..context_brain.llm_gateway import gateway_chat
+                result = gateway_chat(
+                    messages=[{"role": "user", "content": user_msg}],
+                    purpose='trading_pattern_mine',
+                    system_prompt=system_prompt,
+                    trace_id=trace_id,
+                    user_message=user_msg,
+                    max_tokens=2048,
+                    user_id=trade.user_id,
+                    db=db,
+                )
+            except Exception as _ge:
+                log_info(trace_id, f"[trading] gateway pattern-mine fallback: {_ge}")
+                result = openai_client.chat(
+                    messages=[{"role": "user", "content": user_msg}],
+                    system_prompt=system_prompt,
+                    trace_id=trace_id,
+                    user_message=user_msg,
+                    max_tokens=2048,
+                )
             llm_reply = (result.get("reply") or "").strip()
+            # F.5 — record trade outcome against the pattern_mine call so the
+            # distiller can learn which mining strategies correlate with wins.
+            try:
+                _gw_id = result.get("gateway_log_id") if isinstance(result, dict) else None
+                if _gw_id:
+                    from ..context_brain.outcome_tracker import record_trade_outcome
+                    # Convert raw PnL to a fractional return for the bucketer.
+                    pnl_frac = 0.0
+                    try:
+                        if trade.entry_price and float(trade.entry_price) > 0 and trade.pnl is not None:
+                            pnl_frac = float(trade.pnl) / max(
+                                1.0, float(trade.entry_price) * float(trade.qty or 1)
+                            )
+                    except Exception:
+                        pnl_frac = 0.0
+                    record_trade_outcome(
+                        db,
+                        gateway_log_id=int(_gw_id),
+                        pnl=pnl_frac,
+                        purpose="trading_pattern_mine",
+                        detail={
+                            "trade_id": trade.id,
+                            "ticker": trade.ticker,
+                            "won": bool(trade_won),
+                            "pnl_usd": float(trade.pnl or 0),
+                            "move_pct": float(move_pct),
+                        },
+                    )
+            except Exception as _oe:
+                log_info(trace_id, f"[trading] trade outcome record failed: {_oe}")
         except Exception as e:
             log_info(trace_id, f"[trading] post-trade LLM enrichment error: {e}")
 
@@ -5903,18 +5947,29 @@ Keep it conversational and honest. Use actual numbers from the patterns above.""
 
     try:
         from ...prompts import load_prompt
-        from ... import openai_client
         from ...logger import new_trace_id
 
         system_prompt = load_prompt("trading_analyst")
         trace_id = new_trace_id()
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": reflection_prompt}],
-            system_prompt=system_prompt,
-            trace_id=trace_id,
-            user_message=reflection_prompt,
-            max_tokens=3000,
-        )
+        try:
+            from ..context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=[{"role": "user", "content": reflection_prompt}],
+                purpose='trading_reflect',
+                system_prompt=system_prompt,
+                trace_id=trace_id,
+                user_message=reflection_prompt,
+                max_tokens=3000,
+            )
+        except Exception as _ge:
+            from ... import openai_client
+            result = openai_client.chat(
+                messages=[{"role": "user", "content": reflection_prompt}],
+                system_prompt=system_prompt,
+                trace_id=trace_id,
+                user_message=reflection_prompt,
+                max_tokens=3000,
+            )
         reflection = result.get("reply", "Could not generate reflection.")
     except Exception as e:
         reflection = f"Reflection unavailable: {e}"

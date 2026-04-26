@@ -285,6 +285,18 @@ def _token_param(base_url: str, max_tokens: int) -> dict:
     return {"max_tokens": max_tokens}
 
 
+def _temperature_param(model: str) -> dict:
+    """Return ``{"temperature": 0.7}`` only for models that support custom
+    temperature. The reasoning-tuned families (gpt-5*, o1*, o3*) reject
+    anything other than their default (1.0) with HTTP 400
+    ``unsupported_value``. Omitting the param uses the default and works.
+    """
+    m = (model or "").lower()
+    if m.startswith("gpt-5") or m.startswith("o1") or m.startswith("o3"):
+        return {}
+    return {"temperature": 0.7}
+
+
 def _call_provider(api_key: str, base_url: str, model: str, messages: list[dict],
                    system_prompt: str, trace_id: str,
                    max_tokens: int = 1024, timeout_override: float | None = None) -> dict:
@@ -305,7 +317,7 @@ def _call_provider(api_key: str, base_url: str, model: str, messages: list[dict]
             response = client.chat.completions.create(
                 model=model,
                 messages=api_messages,
-                temperature=0.7,
+                **_temperature_param(model),
                 **_token_param(base_url, max_tokens),
             )
             raw = response.choices[0].message.content
@@ -346,7 +358,7 @@ def _stream_provider(api_key: str, base_url: str, model: str, messages: list[dic
             stream = client.chat.completions.create(
                 model=model,
                 messages=api_messages,
-                temperature=0.7,
+                **_temperature_param(model),
                 **_token_param(base_url, max_tokens),
                 stream=True,
             )
@@ -486,6 +498,70 @@ def _chat_gemini(prompt, messages, user_message, trace_id, max_tokens, strict_es
     return None
 
 
+# ── DO NOT REMOVE — CHILI Dispatch (Phase D.0): llm_call_log writer ──
+# Every chat() invocation produces one row per tier attempt, so distillation
+# training data accumulates whether or not the cascade ultimately succeeded.
+# Wrapped in try/except so a logging failure never breaks the LLM path.
+def _safe_log_llm_call(
+    *,
+    trace_id: str,
+    provider: str,
+    tier: int,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    completion: str | None,
+    tokens_in: int | None,
+    tokens_out: int | None,
+    latency_ms: int,
+    success: bool,
+    weak_response: bool,
+    failure_kind: str | None,
+) -> None:
+    try:
+        from sqlalchemy import text as _text
+        from .db import SessionLocal as _SL
+
+        # Bound prompt/completion sizes so a runaway log doesn't blow up the row.
+        _MAX_PROMPT = 32_000
+        _MAX_COMPLETION = 32_000
+        sp = (system_prompt or "")[:_MAX_PROMPT]
+        up = (user_prompt or "")[:_MAX_PROMPT]
+        co = (completion or "")[:_MAX_COMPLETION] if completion is not None else None
+
+        with _SL() as _s:
+            _s.execute(
+                _text(
+                    "INSERT INTO llm_call_log "
+                    "(trace_id, provider, model, tier, purpose, system_prompt, "
+                    " user_prompt, completion, tokens_in, tokens_out, latency_ms, "
+                    " success, weak_response, failure_kind, distillable) "
+                    "VALUES (:trace_id, :provider, :model, :tier, :purpose, :sp, "
+                    " :up, :co, :ti, :to, :lm, :ok, :weak, :fk, :dist)"
+                ),
+                {
+                    "trace_id": trace_id,
+                    "provider": provider,
+                    "model": model,
+                    "tier": tier,
+                    "purpose": (trace_id.split("-")[0] if trace_id else "llm"),
+                    "sp": sp,
+                    "up": up,
+                    "co": co,
+                    "ti": tokens_in,
+                    "to": tokens_out,
+                    "lm": latency_ms,
+                    "ok": success,
+                    "weak": weak_response,
+                    "fk": failure_kind,
+                    "dist": bool(success and not weak_response and co),
+                },
+            )
+            _s.commit()
+    except Exception as _e:  # logging must never break the LLM path
+        log_info(trace_id, f"llm_call_log_write_failed={_e}")
+
+
 def chat(
     messages: list[dict],
     system_prompt: str | None = None,
@@ -508,14 +584,39 @@ def chat(
     _log_cascade_order_once(trace_id)
 
     if _free_tier_first_enabled():
-        order = (_chat_groq, _chat_openai, _chat_gemini)
+        order = ((_chat_groq, "groq", 2), (_chat_openai, "openai", 1), (_chat_gemini, "gemini", 3))
     else:
-        order = (_chat_openai, _chat_groq, _chat_gemini)
+        order = ((_chat_openai, "openai", 1), (_chat_groq, "groq", 2), (_chat_gemini, "gemini", 3))
 
-    for step in order:
+    # Concatenated user content for log fidelity (system prompt logged separately).
+    _user_prompt = "\n".join(
+        (m.get("content") or "") for m in messages if isinstance(m, dict) and m.get("role") != "system"
+    )
+
+    for step, provider_name, tier_num in order:
+        _t0 = time.monotonic()
         result = step(prompt, messages, user_message, trace_id, max_tokens, strict_escalation)
+        _latency_ms = int((time.monotonic() - _t0) * 1000)
         if result and result.get("reply"):
+            _safe_log_llm_call(
+                trace_id=trace_id, provider=provider_name, tier=tier_num,
+                model=str(result.get("model", "unknown")),
+                system_prompt=prompt, user_prompt=_user_prompt,
+                completion=str(result.get("reply", "")),
+                tokens_in=None, tokens_out=result.get("tokens_used"),
+                latency_ms=_latency_ms, success=True,
+                weak_response=False, failure_kind=None,
+            )
             return result
+        # Tier did not return a usable reply — log as a failure row so we have
+        # debugging evidence and so distillation can learn what NOT to keep.
+        _safe_log_llm_call(
+            trace_id=trace_id, provider=provider_name, tier=tier_num,
+            model="unknown", system_prompt=prompt, user_prompt=_user_prompt,
+            completion=None, tokens_in=None, tokens_out=None,
+            latency_ms=_latency_ms, success=False,
+            weak_response=False, failure_kind="empty_or_weak_or_skipped",
+        )
 
     return {"reply": "", "tokens_used": 0, "model": "error"}
 

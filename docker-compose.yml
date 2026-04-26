@@ -409,12 +409,29 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - CHILI_SCHEDULER_ROLE=all
       - CHILI_SCHEDULER_EMIT_HEARTBEAT=1
+      # DO NOT REMOVE — required for CHILI Dispatch (Phase D.1+)
+      - CHILI_DISPATCH_ENABLED=1
+      - CHILI_DISPATCH_MODE=sandboxed
+      - CHILI_DISPATCH_TASK_STATUSES=ready_for_dispatch
+      # Phase E.1 — autonomous commit + push (default OFF; flip the
+      # CHILI_DISPATCH_GIT_PUSH_ENABLED value in .env to 1 when you're
+      # ready to actually publish dispatch branches to GitHub).
+      - CHILI_DISPATCH_GIT_PUSH_ENABLED=${CHILI_DISPATCH_GIT_PUSH_ENABLED:-0}
+      - CHILI_DISPATCH_GITHUB_TOKEN=${CHILI_DISPATCH_GITHUB_TOKEN:-}
+      - CHILI_DISPATCH_GIT_REMOTE_USER=${CHILI_DISPATCH_GIT_REMOTE_USER:-}
+      - CHILI_DISPATCH_GIT_BASE_BRANCH=${CHILI_DISPATCH_GIT_BASE_BRANCH:-main}
       - CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1
       - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1
       - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=1
       - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=1
-      - DATABASE_POOL_SIZE=15
-      - DATABASE_MAX_OVERFLOW=25
+      # Bumped from 15/25 → 25/50 because trading scheduler bursts (auto trader
+      # tick, paper runner, neural mesh, bracket reconciliation, market data
+      # integrity) intermittently exhausted the pool, blocking dispatch's LLM
+      # logger writes and code_agent_runs updates. Postgres default is 100
+      # max_connections so 75 from this service still leaves headroom for the
+      # web service + ad-hoc psql access. (Phase D.2.7+ ops note 2026-04-26.)
+      - DATABASE_POOL_SIZE=25
+      - DATABASE_MAX_OVERFLOW=50
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
@@ -427,6 +444,23 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # DO NOT REMOVE — required for CHILI Dispatch (Phase D.2+)
+      # Read-write project root: dispatch loop calls `git worktree add` here.
+      # Read-only would block git's index/worktree metadata writes (.git/worktrees/...).
+      # Worktrees themselves are created under CHILI_DISPATCH_WORKTREE_DIR (defaults
+      # to /tmp/chili-dispatch) which lives inside the container, NOT in this mount.
+      - .:/workspace
+      # Phase E.2 — multi-repo support. Wide mount so the brain can address any
+      # local project under C:\dev\... by host path (resolver maps it to
+      # /host_dev/<project>). Without this, adding a new local project would
+      # require a docker-compose edit + recreate; with it, the resolver just
+      # detects the host path, computes /host_dev/<project>, and registers a
+      # code_repos row. No restart needed for new projects.
+      - C:/dev:/host_dev
+      # Named volume for repos that the brain CLONES on demand (e.g. when you
+      # give it a github.com URL it doesn't have locally). Lives inside
+      # Docker's volume manager so it survives container recreate.
+      - chili_dispatch_clones:/workspace_managed
     depends_on:
       postgres:
         condition: service_healthy
@@ -440,3 +474,11 @@ services:
         reservations:
           cpus: "1.0"
           memory: 1G
+
+# ── Named volumes ───────────────────────────────────────────────────
+# Phase E.2: chili_dispatch_clones holds repos the brain clones on demand
+# (i.e. you point it at a github.com URL that isn't already on disk). The
+# volume persists across container recreate so we don't re-clone every
+# time scheduler-worker is rebuilt.
+volumes:
+  chili_dispatch_clones:
