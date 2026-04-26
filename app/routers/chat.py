@@ -346,6 +346,20 @@ async def chat_api(
         planner_current = {"id": planner_project_id, "name": planner_project_name.strip()}
     on_planner_page = from_planner_page in ("1", "true", "yes") or planner_current is not None
 
+    # F.5 — heuristic outcome capture for the *previous* gateway call. Best
+    # effort; never raises into the chat path.
+    try:
+        if recent and any(m.role == "assistant" for m in recent[-3:]):
+            from ..services.context_brain.outcome_tracker import record_chat_followup
+            record_chat_followup(
+                db,
+                user_id=identity.get("user_id"),
+                user_message=message,
+                purpose="chat_user",
+            )
+    except Exception:
+        pass
+
     if openai_client.is_configured():
         log_info(trace_id, "direct_llm_path skipping Ollama planner")
         ctx = gather_context_only(db, message, identity, trace_id, project_id=_project_id)
@@ -394,6 +408,7 @@ async def chat_api(
         "conversation_id": conversation_id,
         "rag_sources": rag_sources,
         "personality_used": personality_used,
+        "gateway_log_id": result.get("gateway_log_id"),
     }
 
 

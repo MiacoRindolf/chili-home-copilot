@@ -667,14 +667,28 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
     messages.append({"role": "user", "content": user_msg})
 
     try:
-        from .. import openai_client
-        result = openai_client.chat(
-            messages=messages,
-            system_prompt=f"{_get_trading_prompt()}\n\n---\n\n{ai_context}",
-            trace_id=trace_id,
-            user_message=user_msg,
-            max_tokens=2048,
-        )
+        try:
+            from ..services.context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=messages,
+                purpose='trading_analyze',
+                system_prompt=f"{_get_trading_prompt()}\n\n---\n\n{ai_context}",
+                trace_id=trace_id,
+                user_message=user_msg,
+                max_tokens=2048,
+                user_id=ctx.get("user_id"),
+                db=db,
+            )
+        except Exception as _ge:
+            log_info(trace_id, f"[trading] gateway_chat failed, falling back: {_ge}")
+            from .. import openai_client
+            result = openai_client.chat(
+                messages=messages,
+                system_prompt=f"{_get_trading_prompt()}\n\n---\n\n{ai_context}",
+                trace_id=trace_id,
+                user_message=user_msg,
+                max_tokens=2048,
+            )
         reply = result.get("reply", "Could not generate analysis.")
     except Exception as e:
         log_info(trace_id, f"[trading] AI analysis error: {e}")

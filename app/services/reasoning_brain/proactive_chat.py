@@ -87,11 +87,20 @@ def generate_opening_message(db: Session, user_id: int, goal: ReasoningLearningG
         "Return ONLY the message text, no JSON, no quotes."
     )
 
-    result = openai_client.chat(
-        messages=[{"role": "user", "content": prompt}],
-        system_prompt="You are Chili's conversational brain. Return only the chat message.",
-        trace_id="reasoning_insight_opening",
-    )
+    try:
+        from ..context_brain.llm_gateway import gateway_chat
+        result = gateway_chat(
+            messages=[{"role": "user", "content": prompt}],
+            purpose='reasoning_proactive',
+            system_prompt="You are Chili's conversational brain. Return only the chat message.",
+            trace_id="reasoning_insight_opening",
+        )
+    except Exception:
+        result = openai_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are Chili's conversational brain. Return only the chat message.",
+            trace_id="reasoning_insight_opening",
+        )
     msg = (result.get("reply") or "").strip()
     if not msg:
         return None

@@ -25,7 +25,11 @@ def get_convo_key(identity: dict, device_token: str | None, client_ip: str) -> s
 def get_identity_ctx(request: Request, db: Session = Depends(get_db)):
     """Resolve the current user's identity from cookies/IP. Returns a dict with all identity info."""
     client_ip = request.client.host
-    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        device_token = auth.split(" ", 1)[1].strip() or None
+    else:
+        device_token = request.cookies.get(DEVICE_COOKIE_NAME)
     identity = get_identity_record(db, device_token)
     convo_key = get_convo_key(identity, device_token, client_ip)
     user_name = identity["user_name"]

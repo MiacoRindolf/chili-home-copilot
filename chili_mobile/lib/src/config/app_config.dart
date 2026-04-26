@@ -8,6 +8,10 @@ class AppConfig {
   AppConfig._();
   static final AppConfig instance = AppConfig._();
 
+  static const _keyBaseUrl = 'chili_base_url';
+  static const String defaultApiBaseUrl = 'https://localhost:8000';
+  String _apiBaseUrl = defaultApiBaseUrl;
+
   static const _keyWakeWord = 'chili_wake_word';
   static const _keyAlwaysListening = 'chili_always_listening';
   static const _keyOnboardingDone = 'chili_onboarding_done';
@@ -50,8 +54,31 @@ class AppConfig {
 
   bool get isLoaded => _prefs != null;
 
+  /// Public HTTP(S) root of the CHILI API (no trailing slash). Read by [ChiliApiClient].
+  String get apiBaseUrl => _apiBaseUrl;
+
+  static String normalizeApiBaseUrl(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) s = defaultApiBaseUrl;
+    while (s.length > 1 && s.endsWith('/')) {
+      s = s.substring(0, s.length - 1);
+    }
+    if (!s.startsWith('http://') && !s.startsWith('https://')) {
+      s = 'https://$s';
+    }
+    return s;
+  }
+
+  Future<void> setBaseUrl(String raw) async {
+    _apiBaseUrl = normalizeApiBaseUrl(raw);
+    await _prefs?.setString(_keyBaseUrl, _apiBaseUrl);
+  }
+
   Future<void> load() async {
     _prefs = await SharedPreferences.getInstance();
+    _apiBaseUrl = normalizeApiBaseUrl(
+      _prefs!.getString(_keyBaseUrl) ?? defaultApiBaseUrl,
+    );
     _wakeWord = _prefs!.getString(_keyWakeWord) ?? _defaultWakeWord;
     _alwaysListening = _prefs!.getBool(_keyAlwaysListening) ?? _defaultAlwaysListening;
     _reduceMotion = _prefs!.getBool(_keyReduceMotion) ?? false;

@@ -62,14 +62,24 @@ def generate_tasks_for_project(
         'Reasoning: Quality applications take 1-2 hrs each (research, tailoring).", "estimated_days": 1.5}]'
     )
     try:
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt=(
-                "You are a project planning assistant. Return only a valid JSON array. "
-                "Every task must have title, description, and estimated_days (number)."
-            ),
-            trace_id=trace_id,
+        _system = (
+            "You are a project planning assistant. Return only a valid JSON array. "
+            "Every task must have title, description, and estimated_days (number)."
         )
+        try:
+            from ...services.context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=[{"role": "user", "content": prompt}],
+                purpose='planner_intent',
+                system_prompt=_system,
+                trace_id=trace_id,
+            )
+        except Exception:
+            result = openai_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt=_system,
+                trace_id=trace_id,
+            )
         text = (result.get("reply") or "").strip()
     except Exception as e:  # pragma: no cover - defensive logging
         log_info(trace_id, f"generate_tasks_for_project_error={e}")

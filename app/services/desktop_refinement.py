@@ -41,12 +41,22 @@ def refine_desktop_transcription(message: str, trace_id: str = "desktop_refine")
     )
     user_content = f"User said: {message.strip()}"
     try:
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": user_content}],
-            system_prompt=system,
-            trace_id=trace_id,
-            user_message=message,
-        )
+        try:
+            from .context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=[{"role": "user", "content": user_content}],
+                purpose='desktop_refine_speech',
+                system_prompt=system,
+                trace_id=trace_id,
+                user_message=message,
+            )
+        except Exception:
+            result = openai_client.chat(
+                messages=[{"role": "user", "content": user_content}],
+                system_prompt=system,
+                trace_id=trace_id,
+                user_message=message,
+            )
         reply = (result.get("reply") or "").strip()
         if reply:
             log_info(trace_id, f"desktop_refine original={message!r} refined={reply!r}")
@@ -76,12 +86,22 @@ def normalize_app_name(app_name: str, trace_id: str = "desktop_norm") -> str:
     )
     user_content = f"User said: {app_name.strip()}\nCanonical apps: {canonical_list}"
     try:
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": user_content}],
-            system_prompt=system,
-            trace_id=trace_id,
-            user_message=app_name,
-        )
+        try:
+            from .context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=[{"role": "user", "content": user_content}],
+                purpose='desktop_normalize_app',
+                system_prompt=system,
+                trace_id=trace_id,
+                user_message=app_name,
+            )
+        except Exception:
+            result = openai_client.chat(
+                messages=[{"role": "user", "content": user_content}],
+                system_prompt=system,
+                trace_id=trace_id,
+                user_message=app_name,
+            )
         reply = (result.get("reply") or "").strip()
         if reply:
             log_info(trace_id, f"desktop_norm original={app_name!r} canonical={reply!r}")

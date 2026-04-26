@@ -105,11 +105,20 @@ def generate_hypotheses(db: Session, user_id: int) -> List[ReasoningHypothesis]:
         '[{"claim": "...", "domain": "trading|code|general|life|other"}]\n'
     )
 
-    result = openai_client.chat(
-        messages=[{"role": "user", "content": prompt}],
-        system_prompt="You are a disciplined hypothesis generator. Return only JSON.",
-        trace_id="reasoning_hypotheses",
-    )
+    try:
+        from ..context_brain.llm_gateway import gateway_chat
+        result = gateway_chat(
+            messages=[{"role": "user", "content": prompt}],
+            purpose='reasoning_evolve',
+            system_prompt="You are a disciplined hypothesis generator. Return only JSON.",
+            trace_id="reasoning_hypotheses",
+        )
+    except Exception:
+        result = openai_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are a disciplined hypothesis generator. Return only JSON.",
+            trace_id="reasoning_hypotheses",
+        )
     if not result.get("reply"):
         return []
 

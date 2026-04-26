@@ -8,6 +8,10 @@ import 'package:http/io_client.dart';
 import 'package:http_parser/http_parser.dart' show MediaType;
 import 'package:path/path.dart' as p;
 
+import '../brain/device_auth_store.dart';
+import '../config/app_config.dart';
+import 'network_error_message.dart' show userMessageForHttpStatus;
+
 /// Structured response from the chat endpoint.
 class ChatResponse {
   ChatResponse({required this.reply, this.clientAction, this.wasCancelled = false});
@@ -33,7 +37,8 @@ class CancelToken {
 /// Uses an [IOClient] that trusts all certificates so self-signed
 /// local dev certs (localhost.pem) work without extra setup.
 class ChiliApiClient {
-  static const String baseUrl = 'https://localhost:8000';
+  /// Current server root; applied immediately when changed in Settings (see [AppConfig.setBaseUrl]).
+  static String get baseUrl => AppConfig.instance.apiBaseUrl;
 
   String? _token;
 
@@ -43,8 +48,13 @@ class ChiliApiClient {
 
   static http.Client _buildClient() {
     final context = SecurityContext.defaultContext;
+    // Use a block for the cert callback so cascades (..) are not parsed as
+    // `=> true..connectionTimeout` (cascade on [bool]).
     final httpClient = HttpClient(context: context)
-      ..badCertificateCallback = (cert, host, port) => true;
+      ..badCertificateCallback = (cert, host, port) {
+        return true;
+      }
+      ..connectionTimeout = const Duration(seconds: 30);
     return IOClient(httpClient);
   }
 
@@ -55,6 +65,67 @@ class ChiliApiClient {
       h['Authorization'] = 'Bearer $_token';
     }
     return h;
+  }
+
+  static const Map<String, String> _pairingJsonHeaders = {
+    'Content-Type': 'application/json',
+  };
+
+  /// POST /api/pair/request — same as the Chat web UI; unauthenticated; no Bearer.
+  Future<Map<String, dynamic>> pairRequest({required String email}) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/pair/request'),
+      headers: _pairingJsonHeaders,
+      body: jsonEncode({'email': email.trim()}),
+    );
+    return _coercePairingResponse(res);
+  }
+
+  /// POST /api/pair/verify — same as the Chat web UI; returns JSON [token] for native.
+  Future<Map<String, dynamic>> pairVerify({
+    required String code,
+    String label = 'CHILI Desktop Companion',
+  }) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/pair/verify'),
+      headers: _pairingJsonHeaders,
+      body: jsonEncode({
+        'code': code.trim(),
+        'label': label.trim().isEmpty ? 'Unknown Device' : label.trim(),
+      }),
+    );
+    return _coercePairingResponse(res);
+  }
+
+  /// Pairing routes return JSON for both success and most errors; 502/504 often return HTML from a proxy.
+  static Map<String, dynamic> _coercePairingResponse(http.Response res) {
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      try {
+        final m = jsonDecode(res.body) as Map<String, dynamic>?;
+        if (m != null) return m;
+      } catch (_) {}
+      return {'ok': false, 'error': 'Invalid response from server.'};
+    }
+    try {
+      final m = jsonDecode(res.body) as Map<String, dynamic>?;
+      if (m != null) {
+        if (m['ok'] == false) {
+          return m;
+        }
+        final err = m['error'];
+        if (err is String && err.isNotEmpty) {
+          return {'ok': false, 'error': err};
+        }
+        final detail = m['detail'];
+        if (detail is String && detail.isNotEmpty) {
+          return {'ok': false, 'error': detail};
+        }
+        if (detail is List && detail.isNotEmpty) {
+          return {'ok': false, 'error': detail.first.toString()};
+        }
+      }
+    } catch (_) {}
+    return {'ok': false, 'error': userMessageForHttpStatus(res.statusCode)};
   }
 
   // ── Chat ──
@@ -391,5 +462,169 @@ class ChiliApiClient {
       reply: 'You said: $text\n\n${resp.reply}',
       clientAction: resp.clientAction,
     );
+  }
+
+  // ── Dispatch / Brain (Bearer via [initFromStore]) ──
+
+  Future<void> loadTokenFromStore() async {
+    _token = await DeviceAuthStore.getToken();
+  }
+
+  Future<void> initFromStore() async {
+    await loadTokenFromStore();
+  }
+
+  Future<Map<String, dynamic>> getDispatchStatus() async {
+    final res = await _client.get(
+      Uri.parse('$baseUrl/api/brain/dispatch/status'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ?? decoded?['detail'] ?? res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return decoded ?? {};
+  }
+
+  // ── Phase F — Context Brain endpoints ───────────────────────────────
+  Future<Map<String, dynamic>> getContextBrainStatus() async {
+    final res = await _client.get(
+      Uri.parse('$baseUrl/api/brain/context/status'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ?? decoded?['detail'] ?? res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return decoded ?? {};
+  }
+
+  Future<List<Map<String, dynamic>>> getContextBrainAssemblies({int limit = 50}) async {
+    final res = await _client.get(
+      Uri.parse('$baseUrl/api/brain/context/assemblies?limit=$limit'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) return [];
+    final items = (decoded?['items'] as List?) ?? [];
+    return items.cast<Map<String, dynamic>>();
+  }
+
+  Future<List<Map<String, dynamic>>> getContextBrainSources() async {
+    final res = await _client.get(
+      Uri.parse('$baseUrl/api/brain/context/sources'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) return [];
+    final items = (decoded?['items'] as List?) ?? [];
+    return items.cast<Map<String, dynamic>>();
+  }
+
+  Future<List<Map<String, dynamic>>> getDispatchRuns({
+    int limit = 20,
+    int? taskId,
+  }) async {
+    final q = <String, String>{'limit': '$limit'};
+    if (taskId != null) {
+      q['task_id'] = '$taskId';
+    }
+    final uri =
+        Uri.parse('$baseUrl/api/brain/dispatch/runs').replace(queryParameters: q);
+    final res = await _client.get(uri, headers: _headers(json: false));
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ?? decoded?['detail'] ?? res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    final raw = (decoded?['runs'] ?? []) as List<dynamic>;
+    return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
+
+  Future<Map<String, dynamic>> queueDispatchTask({
+    required String title,
+    required String description,
+    required int projectId,
+    List<String>? intendedFiles,
+    int? forceTier,
+    String? sourceInput,
+  }) async {
+    final body = <String, dynamic>{
+      'title': title,
+      'description': description,
+      'project_id': projectId,
+      'intended_files': intendedFiles ?? [],
+      if (forceTier != null) 'force_tier': forceTier,
+      if (sourceInput != null && sourceInput.trim().isNotEmpty)
+        'source_input': sourceInput.trim(),
+    };
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/brain/dispatch/queue'),
+      headers: _headers(),
+      body: jsonEncode(body),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ?? decoded?['detail'] ?? res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return decoded ?? {};
+  }
+
+  Future<Map<String, dynamic>> toggleKillSwitch({
+    required bool active,
+    String? reason,
+  }) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/brain/dispatch/kill-switch'),
+      headers: _headers(),
+      body: jsonEncode({'active': active, 'reason': reason}),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ?? decoded?['detail'] ?? res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return decoded ?? {};
+  }
+
+  Future<List<Map<String, dynamic>>> listProjects() async {
+    final res = await _client.get(
+      Uri.parse('$baseUrl/api/brain/dispatch/projects'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ?? decoded?['detail'] ?? res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    final raw = (decoded?['projects'] ?? []) as List<dynamic>;
+    return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
   }
 }

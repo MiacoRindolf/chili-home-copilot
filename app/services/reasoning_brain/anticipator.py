@@ -80,11 +80,20 @@ def generate_anticipations(db: Session, user_id: int, trace_id: str = "reasoning
     if not openai_client.is_configured():
         return []
 
-    result = openai_client.chat(
-        messages=[{"role": "user", "content": prompt}],
-        system_prompt="You are a disciplined anticipatory assistant. Return only valid JSON array.",
-        trace_id=trace_id,
-    )
+    try:
+        from ..context_brain.llm_gateway import gateway_chat
+        result = gateway_chat(
+            messages=[{"role": "user", "content": prompt}],
+            purpose='reasoning_anticipate',
+            system_prompt="You are a disciplined anticipatory assistant. Return only valid JSON array.",
+            trace_id=trace_id,
+        )
+    except Exception:
+        result = openai_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are a disciplined anticipatory assistant. Return only valid JSON array.",
+            trace_id=trace_id,
+        )
     if not result.get("reply"):
         return []
 

@@ -8,7 +8,7 @@
 # Local conda (WR8):
 #     conda run -n chili-env bash scripts/verify-migration-ids.sh
 #
-# Belt-and-brangles with run_migrations (see app/migrations.py::_assert_migration_ids_unique).
+# Belt-and-braces with run_migrations (see app/migrations.py::_assert_migration_ids_unique).
 
 set -euo pipefail
 

@@ -116,6 +116,8 @@ def resolve_response(
                 code_ctx = ""
                 reasoning_ctx = ""
                 pb_ctx = ""
+            # Phase F — brain_prompt overrides legacy concatenation when present.
+            brain_prompt_pass = (ctx or {}).get("brain_prompt") if ctx else None
             openai_system = build_openai_prompt(
                 user_name,
                 None,
@@ -125,15 +127,34 @@ def resolve_response(
                 code_context=code_ctx or None,
                 reasoning_context=reasoning_ctx or None,
                 project_brain_context=pb_ctx or None,
+                brain_prompt=brain_prompt_pass,
             )
-            result = openai_client.chat(
-                messages=openai_messages,
-                system_prompt=openai_system,
-                trace_id=trace_id,
-                user_message=message,
-            )
+            # Phase F.10 — route through Universal LLM Gateway with
+            # purpose='chat_user'. By default the policy says 'tree' →
+            # Ollama-first decompose/chunk/compile + gpt-5.5 synth.
+            # Falls back gracefully if Ollama is down.
+            try:
+                from .context_brain.llm_gateway import gateway_chat
+                result = gateway_chat(
+                    messages=openai_messages,
+                    purpose="chat_user",
+                    system_prompt=openai_system,
+                    trace_id=trace_id,
+                    user_message=message,
+                    user_id=(identity.get("user_id") if isinstance(identity, dict) else None),
+                    user_name=user_name,
+                    db=db,
+                )
+            except Exception as _e:
+                log_info(trace_id, f"gateway_chat failed, falling back: {_e}")
+                result = openai_client.chat(
+                    messages=openai_messages,
+                    system_prompt=openai_system,
+                    trace_id=trace_id,
+                    user_message=message,
+                )
             if result.get("reply"):
-                return {"reply": result["reply"], "action_type": "general_chat", "executed": True, "model_used": result["model"], "rag_sources": [], "personality_used": False, "client_action": None}
+                return {"reply": result["reply"], "action_type": "general_chat", "executed": True, "model_used": result["model"], "rag_sources": [], "personality_used": False, "client_action": None, "gateway_log_id": result.get("gateway_log_id")}
 
         return {"reply": "CHILI's brain is offline. Start Ollama to use chat: ollama serve", "action_type": "llm_offline", "executed": False, "model_used": "offline", "rag_sources": [], "personality_used": False, "client_action": None}
 
@@ -145,6 +166,7 @@ def resolve_response(
     action_type = planned.get("type", "unknown")
     action_data = planned.get("data", {})
     llm_reply = planned.get("reply") or ""
+    gateway_log_id = None  # captured from gateway_chat() if any branch invokes it
 
     if action_type == "unknown" and web_search_module.detect_search_intent(message):
         search_query = web_search_module.extract_search_query(message)
@@ -211,10 +233,15 @@ def resolve_response(
         )
         if stream:
             return {"continue_stream": True, "messages": openai_messages, "system_prompt": search_system, "action_type": "web_search", "model_used": model_used, "rag_sources": rag_sources, "personality_used": personality_used, "fallback_reply": llm_reply, "client_action": client_action}
-        result = openai_client.chat(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message)
+        try:
+            from .context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(messages=openai_messages, purpose='chat_search', system_prompt=search_system, trace_id=trace_id, user_message=message, db=db, user_id=user_id)
+        except Exception:
+            result = openai_client.chat(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message)
         if result.get("reply"):
             llm_reply = result["reply"]
             model_used = result["model"]
+            gateway_log_id = result.get("gateway_log_id") or gateway_log_id
             log_info(trace_id, f"web_search_synthesized model={model_used}")
 
     elif action_type == "unknown" and openai_client.is_configured():
@@ -231,6 +258,8 @@ def resolve_response(
             code_ctx = ""
             reasoning_ctx = ""
             pb_ctx = ""
+        # Phase F — pass brain_prompt through; build_openai_prompt
+        # uses it instead of legacy concat when present.
         openai_system = build_openai_prompt(
             user_name,
             ctx["personality_context"],
@@ -240,17 +269,34 @@ def resolve_response(
             code_context=code_ctx or None,
             reasoning_context=reasoning_ctx or None,
             project_brain_context=pb_ctx or None,
+            brain_prompt=ctx.get("brain_prompt"),
         )
         if llm_reply and llm_reply.strip():
             openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
         if stream:
             return {"continue_stream": True, "messages": openai_messages, "system_prompt": openai_system, "action_type": "general_chat", "model_used": "openai", "rag_sources": rag_sources, "personality_used": personality_used, "fallback_reply": "I'm not sure what to do with that.", "client_action": client_action}
-        result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
+        # Phase F.10 — gateway-routed chat call
+        try:
+            from .context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=openai_messages,
+                purpose="chat_user",
+                system_prompt=openai_system,
+                trace_id=trace_id,
+                user_message=message,
+                user_id=(identity.get("user_id") if isinstance(identity, dict) else None),
+                user_name=user_name,
+                db=db,
+            )
+        except Exception as _e:
+            log_info(trace_id, f"gateway_chat failed, falling back: {_e}")
+            result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
         if result.get("reply"):
             llm_reply = result["reply"]
             action_type = "general_chat"
             model_used = result["model"]
             executed = True
+            gateway_log_id = result.get("gateway_log_id")
             log_info(trace_id, f"llm_fallback tokens={result['tokens_used']} model={model_used}")
 
     if not llm_reply:
@@ -265,6 +311,7 @@ def resolve_response(
         "rag_sources": rag_sources,
         "personality_used": personality_used,
         "client_action": client_action,
+        "gateway_log_id": gateway_log_id,
     }
 
 
@@ -442,8 +489,42 @@ def gather_context_only(
     trace_id: str,
     project_id: int | None = None,
 ):
-    """Gather RAG, personality, memory, and project context without calling Ollama.
-    Used when Groq is configured to skip the slow local planner and go straight to one LLM call."""
+    """Gather context for a single-shot LLM call (Groq/OpenAI fast path).
+
+    Phase F: delegates to the Context Brain when available. The brain
+    pulls from all 9 retrievers (RAG, code_brain, reasoning, project_brain,
+    personality, memory, planner, project_files, chat_history), scores them
+    with learned weights, enforces a token budget, and returns a structured
+    XML-tagged prompt — replaces the old "concatenate everything" approach.
+
+    Falls back to the legacy ``_gather_context_parallel`` path if the brain
+    raises for any reason — chat must never break because the brain hiccups.
+    """
+    brain_prompt: str | None = None
+    brain_assembly_id: int | None = None
+    brain_intent: str | None = None
+    try:
+        from .context_brain.assembly import assemble_context  # type: ignore
+
+        user_id = identity.get("user_id") if isinstance(identity, dict) else None
+        is_guest = bool(identity.get("is_guest", True)) if isinstance(identity, dict) else True
+        if user_id is not None and not is_guest:
+            assembled = assemble_context(
+                message,
+                db=db,
+                user_id=int(user_id),
+                project_id=project_id,
+                trace_id=trace_id,
+            )
+            brain_prompt = assembled.prompt_text
+            brain_assembly_id = assembled.assembly_id
+            brain_intent = assembled.intent.intent
+    except Exception as e:
+        log_info(trace_id, f"context_brain assemble failed (falling back): {e}")
+        brain_prompt = None
+
+    # Legacy retrieval still runs so callers that don't pass brain_prompt
+    # to build_openai_prompt continue to work.
     rag_context, rag_hits, personality_context, _ = _gather_context_parallel(
         message, identity, trace_id, project_id
     )
@@ -452,6 +533,9 @@ def gather_context_only(
         "rag_context": rag_context,
         "rag_hits": rag_hits if rag_context else [],
         "personality_context": personality_context,
+        "brain_prompt": brain_prompt,
+        "brain_assembly_id": brain_assembly_id,
+        "brain_intent": brain_intent,
     }
 
 
@@ -481,6 +565,31 @@ def plan_and_enrich(
         )
         log_info(trace_id, f"planner_current_project_injected name={planner_current_project.get('name')}")
 
+    # Phase F: try Context Brain first (parallel with planner; the brain
+    # output augments downstream OpenAI calls, the planner still runs to
+    # decide action_type via Ollama).
+    brain_prompt: str | None = None
+    brain_assembly_id: int | None = None
+    brain_intent: str | None = None
+    try:
+        from .context_brain.assembly import assemble_context  # type: ignore
+
+        user_id = identity.get("user_id") if isinstance(identity, dict) else None
+        is_guest = bool(identity.get("is_guest", True)) if isinstance(identity, dict) else True
+        if user_id is not None and not is_guest:
+            assembled = assemble_context(
+                message,
+                db=db,
+                user_id=int(user_id),
+                project_id=project_id,
+                trace_id=trace_id,
+            )
+            brain_prompt = assembled.prompt_text
+            brain_assembly_id = assembled.assembly_id
+            brain_intent = assembled.intent.intent
+    except Exception as e:
+        log_info(trace_id, f"context_brain assemble failed in plan_and_enrich: {e}")
+
     rag_context, rag_hits, personality_context, project_context = _gather_context_parallel(
         message, identity, trace_id, project_id
     )
@@ -497,6 +606,9 @@ def plan_and_enrich(
         "rag_context": rag_context,
         "rag_hits": rag_hits if rag_context else [],
         "personality_context": personality_context,
+        "brain_prompt": brain_prompt,
+        "brain_assembly_id": brain_assembly_id,
+        "brain_intent": brain_intent,
     }
 
 
@@ -514,16 +626,36 @@ def build_openai_prompt(
     code_context: str | None = None,
     reasoning_context: str | None = None,
     project_brain_context: str | None = None,
+    brain_prompt: str | None = None,
 ) -> str:
-    """Build the OpenAI system prompt with personality, RAG, planner, code, reasoning, and project brain context."""
+    """Build the OpenAI system prompt.
+
+    When ``brain_prompt`` is provided (Context Brain Phase F), it has
+    already gathered, scored, budgeted, and structured ALL relevant
+    context — RAG, code_brain, reasoning, project_brain, memory,
+    personality. We use it directly instead of concatenating the legacy
+    individual contexts. The base system prompt + user_name + planner
+    page hint still wrap it so the LLM sees standard CHILI framing.
+
+    Legacy path (when ``brain_prompt`` is None) is preserved unchanged
+    so any caller that hasn't been migrated still works.
+    """
     openai_system = base_system_prompt
     openai_system += f"\n\nYou are talking to: {user_name}."
+    if planner_context:
+        openai_system += "\n\n" + _get_planner_page_context()
+
+    if brain_prompt:
+        # Context Brain owns the structured retrieval+scoring+budgeting.
+        # Keep its XML-tagged sections intact — gpt-5.x parses them well.
+        openai_system += "\n\n" + brain_prompt
+        return openai_system
+
+    # ── Legacy fallback path (pre-Phase F) ─────────────────────────────
     if personality_context:
         openai_system += f"\n\n{personality_context}"
     if rag_context:
         openai_system += f"\n\nHousehold document context (use ONLY if the user asks about these topics -- do NOT volunteer this info unprompted):\n{rag_context}"
-    if planner_context:
-        openai_system += "\n\n" + _get_planner_page_context()
     if code_context:
         openai_system += (
             "\n\nProject codebase context (use this when the user asks coding, refactoring, or debugging questions; "

@@ -53,14 +53,14 @@ def test_mobile_pair_flow_issues_token(client, db):
 
     with patch("app.email_service.is_configured", return_value=False):
         resp_req = client.post(
-            "/api/mobile/pair/request",
+            "/api/pair/request",
             json={"email": "pair@example.com"},
         )
     assert resp_req.status_code == 200
     code = resp_req.json()["dev_code"]
 
     resp_verify = client.post(
-        "/api/mobile/pair/verify",
+        "/api/pair/verify",
         json={"code": code, "label": "My Phone"},
     )
     assert resp_verify.status_code == 200

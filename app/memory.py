@@ -74,11 +74,20 @@ def extract_facts(
     prompt = EXTRACTION_PROMPT + exchange
 
     try:
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
-            trace_id=trace_id,
-        )
+        try:
+            from .services.context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=[{"role": "user", "content": prompt}],
+                purpose='memory_extract',
+                system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
+                trace_id=trace_id,
+            )
+        except Exception:
+            result = openai_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
+                trace_id=trace_id,
+            )
     except Exception as e:
         log_info(trace_id, f"memory_extraction_error={e}")
         return []

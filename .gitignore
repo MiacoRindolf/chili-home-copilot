@@ -67,3 +67,28 @@ regime_models/
 tests-summary.txt
 tests-output.log
 tests-output.err.log
+
+# Claude bridge daemon artifacts (queue, output, history) — local-only, never commit
+scripts/_claude_pending.txt
+scripts/_claude_output.txt
+scripts/_claude_history/
+scripts/_claude_test_writehost.ps1
+scripts/_claude_daemon.ps1
+
+# Diagnostic/dispatch script outputs (per-run scratch dumps)
+scripts/dispatch-debug-loaded-output.txt
+scripts/dispatch-diagnose-output.txt
+scripts/dispatch-mount-multirepo-output.txt
+scripts/codebrain-tick-output.txt
+scripts/pat-check-output.txt
+scripts/pat-write-check-output.txt
+
+# pytest scratch dumps captured to repo root during interactive runs
+_pytest_*.txt
+_pytest_*.log
+pytest_*.txt
+baseline_*.txt
+after_*.txt
+parse_out.txt
+_tmp_audit.md
+host-debug-logs/

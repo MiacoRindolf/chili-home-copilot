@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../companion/shared_chat_history.dart';
 import '../config/app_config.dart';
-import '../network/chili_api_client.dart';
 import '../voice/calibration_dialog.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -28,7 +27,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
-    _urlController = TextEditingController(text: ChiliApiClient.baseUrl);
+    _urlController = TextEditingController(text: AppConfig.instance.apiBaseUrl);
     _wakeWordController = TextEditingController(text: 'chili');
     _loadConfig();
   }
@@ -37,11 +36,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await AppConfig.instance.load();
     if (mounted) {
       setState(() {
+        _urlController.text = AppConfig.instance.apiBaseUrl;
         _wakeWordController.text = AppConfig.instance.wakeWord;
         _alwaysListening = AppConfig.instance.alwaysListening;
         _soundEffects = AppConfig.instance.soundEffects;
       });
     }
+  }
+
+  Future<void> _saveBaseUrl() async {
+    final raw = _urlController.text;
+    final uri = Uri.tryParse(AppConfig.normalizeApiBaseUrl(raw));
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter a valid URL (e.g. https://getchili.app)')),
+      );
+      return;
+    }
+    await AppConfig.instance.setBaseUrl(raw);
+    if (!mounted) return;
+    setState(() => _urlController.text = AppConfig.instance.apiBaseUrl);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Server URL saved and applied')),
+    );
   }
 
   @override
@@ -108,13 +126,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 12),
                   ElevatedButton.icon(
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content:
-                                Text('Server URL saved (restart to apply)')),
-                      );
-                    },
+                    onPressed: _saveBaseUrl,
                     icon: const Icon(Icons.save),
                     label: const Text('Save'),
                   ),

@@ -90,11 +90,20 @@ def extract_profile(user_id: int, db: Session, trace_id: str = "personality") ->
             "Messages:\n" + conversation_text
         )
 
-    result = openai_client.chat(
-        messages=[{"role": "user", "content": prompt}],
-        system_prompt="You are a personality analysis assistant. Return only valid JSON.",
-        trace_id=trace_id,
-    )
+    try:
+        from .services.context_brain.llm_gateway import gateway_chat
+        result = gateway_chat(
+            messages=[{"role": "user", "content": prompt}],
+            purpose='personality_apply',
+            system_prompt="You are a personality analysis assistant. Return only valid JSON.",
+            trace_id=trace_id,
+        )
+    except Exception:
+        result = openai_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are a personality analysis assistant. Return only valid JSON.",
+            trace_id=trace_id,
+        )
 
     if not result.get("reply"):
         return None

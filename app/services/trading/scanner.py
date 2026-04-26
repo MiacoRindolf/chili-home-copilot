@@ -5089,18 +5089,27 @@ End with portfolio allocation advice and any general market context warnings.
 """
 
     try:
-        from ... import openai_client
         from ...logger import new_trace_id
-
         trace_id = new_trace_id()
-
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": user_msg}],
-            system_prompt=f"{system_prompt}\n{smart_pick_addendum}\n\n---\n\n{full_context}",
-            trace_id=trace_id,
-            user_message=user_msg,
-            max_tokens=4096,
-        )
+        try:
+            from ..context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=[{"role": "user", "content": user_msg}],
+                purpose='trading_smart_pick',
+                system_prompt=f"{system_prompt}\n{smart_pick_addendum}\n\n---\n\n{full_context}",
+                trace_id=trace_id,
+                user_message=user_msg,
+                max_tokens=4096,
+            )
+        except Exception:
+            from ... import openai_client
+            result = openai_client.chat(
+                messages=[{"role": "user", "content": user_msg}],
+                system_prompt=f"{system_prompt}\n{smart_pick_addendum}\n\n---\n\n{full_context}",
+                trace_id=trace_id,
+                user_message=user_msg,
+                max_tokens=4096,
+            )
         reply = result.get("reply", "Could not generate recommendation.")
     except Exception as e:
         reply = f"Analysis unavailable: {e}"

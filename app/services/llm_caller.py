@@ -135,19 +135,29 @@ def call_llm(
     trace_id: str = "llm-caller",
     cacheable: bool = False,
     system_prompt: str | None = None,
-) -> str:
+    purpose: str | None = None,
+    user_id: int | None = None,
+    return_meta: bool = False,
+) -> "str | dict[str, Any]":
     """Call the configured LLM and return the reply text (or empty string on failure).
 
     ``cacheable=True`` opts this call into the in-process LRU+TTL cache
     keyed by ``(model, max_tokens, system_prompt, messages)``. Use only
     for deterministic prompts — never for user chat, personality,
     wellness, or brain-assistant paths.
+
+    Phase F.14 — when ``purpose`` is provided, the call routes through the
+    Universal LLM Gateway (so it's observable + the routing policy applies)
+    instead of going straight to ``openai_client.chat``. Set
+    ``return_meta=True`` to get a dict ``{"reply", "gateway_log_id"}``
+    instead of just the reply text — used by call sites that want to
+    record outcomes.
     """
     from ..openai_client import chat as llm_chat, is_configured
 
     if not is_configured():
         logger.debug("[llm_caller] LLM not configured")
-        return ""
+        return {"reply": "", "gateway_log_id": None} if return_meta else ""
 
     cache_key = None
     if cacheable:
@@ -156,29 +166,75 @@ def call_llm(
             cached = _cache_get(cache_key)
             if cached is not None:
                 logger.debug("[llm_caller] cache_hit trace=%s key=%s", trace_id, cache_key[:12])
-                return cached
+                return {"reply": cached, "gateway_log_id": None} if return_meta else cached
         except Exception as e:
             logger.debug("[llm_caller] cache read failed: %s", e)
             cache_key = None
 
+    # Phase F.14 — auto-detect purpose for project_brain agents so the
+    # learning loop sees per-agent traffic without editing every agent file.
+    if not purpose:
+        try:
+            import inspect, os
+            for frame in inspect.stack()[1:6]:
+                fpath = (frame.filename or "").replace("\\", "/")
+                if "/project_brain/agents/" in fpath:
+                    base = os.path.splitext(os.path.basename(fpath))[0]
+                    purpose = f"project_{base}"
+                    break
+                if "/project_brain/playwright_runner.py" in fpath:
+                    purpose = "project_playwright"
+                    break
+                if "/project_brain/web_research.py" in fpath:
+                    purpose = "project_web_research"
+                    break
+        except Exception:
+            purpose = None
+
     try:
-        chat_kwargs: dict[str, Any] = {
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "trace_id": trace_id,
-            "strict_escalation": False,
-        }
-        if system_prompt is not None:
-            chat_kwargs["system_prompt"] = system_prompt
-        result = llm_chat(**chat_kwargs)
+        # Phase F.14 — gateway path when purpose is given.
+        if purpose:
+            try:
+                from .context_brain.llm_gateway import gateway_chat
+                gw_kwargs: dict[str, Any] = {
+                    "messages": messages,
+                    "purpose": purpose,
+                    "max_tokens": max_tokens,
+                    "trace_id": trace_id,
+                    "strict_escalation": False,
+                    "user_id": user_id,
+                }
+                if system_prompt is not None:
+                    gw_kwargs["system_prompt"] = system_prompt
+                result = gateway_chat(**gw_kwargs)
+            except Exception as _ge:
+                logger.debug("[llm_caller] gateway_chat failed (%s); falling back", _ge)
+                result = None
+        else:
+            result = None
+
+        if result is None:
+            chat_kwargs: dict[str, Any] = {
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "trace_id": trace_id,
+                "strict_escalation": False,
+            }
+            if system_prompt is not None:
+                chat_kwargs["system_prompt"] = system_prompt
+            result = llm_chat(**chat_kwargs)
+
         reply = result.get("reply", "")
         text = reply if isinstance(reply, str) else str(reply)
+        gw_log_id = result.get("gateway_log_id") if isinstance(result, dict) else None
         if cacheable and cache_key is not None and text:
             try:
                 _cache_put(cache_key, text)
             except Exception as e:
                 logger.debug("[llm_caller] cache write failed: %s", e)
+        if return_meta:
+            return {"reply": text, "gateway_log_id": gw_log_id}
         return text
     except Exception as e:
         logger.warning("[llm_caller] LLM call failed: %s", e)
-        return ""
+        return {"reply": "", "gateway_log_id": None} if return_meta else ""

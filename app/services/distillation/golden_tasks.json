@@ -1,0 +1,35 @@
+[
+  {
+    "id": "g-001",
+    "title": "Add docstring to a pure function",
+    "prompt": "Add a numpy-style docstring to the function below explaining args, returns, and one example. Do not change behavior.",
+    "context_file": "tests/fixtures/distillation/pure_add.py",
+    "oracle": {
+      "command": "pytest tests/fixtures/distillation/test_pure_add_docstring.py -q",
+      "expect_exit": 0
+    },
+    "tier_floor": 1
+  },
+  {
+    "id": "g-002",
+    "title": "Rename a local variable safely",
+    "prompt": "Rename the local variable `tmp` to `aggregate` everywhere within the function, leaving callers untouched.",
+    "context_file": "tests/fixtures/distillation/rename_tmp.py",
+    "oracle": {
+      "command": "pytest tests/fixtures/distillation/test_rename_tmp.py -q",
+      "expect_exit": 0
+    },
+    "tier_floor": 1
+  },
+  {
+    "id": "g-003",
+    "title": "Replace deprecated datetime.utcnow with timezone-aware now",
+    "prompt": "Replace any call to `datetime.utcnow()` with `datetime.now(timezone.utc)` and add the import. Do not change other behavior.",
+    "context_file": "tests/fixtures/distillation/datetime_legacy.py",
+    "oracle": {
+      "command": "pytest tests/fixtures/distillation/test_datetime_legacy.py -q",
+      "expect_exit": 0
+    },
+    "tier_floor": 1
+  }
+]

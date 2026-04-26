@@ -1,0 +1,8 @@
+# Dart sources must be UTF-8. UTF-16 saves break the Flutter/Dart front-end
+# (GB001B595: control character U+0000).
+root = true
+
+[*.dart]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
