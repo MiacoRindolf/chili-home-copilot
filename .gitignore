@@ -92,3 +92,7 @@ after_*.txt
 parse_out.txt
 _tmp_audit.md
 host-debug-logs/
+
+# Per-task smoke test scripts (kept locally for re-runs but never committed)
+scripts/_smoke_*.py
+.pr_body.md

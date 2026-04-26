@@ -11117,6 +11117,388 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_180_options_lane_scaffold(conn) -> None:
+    """Q2.T1 — options lane scaffold.
+
+    Foundation tables for options trading:
+
+      * ``options_chains`` — full option chain snapshots per (underlying, as_of).
+        Contains every contract present in the chain at the snapshot time.
+      * ``options_quotes`` — quote-level data per contract (bid/ask/last/IV/greeks).
+        Rows are append-only; one per snapshot.
+      * ``options_flow`` — unusual-options-activity feed (volume vs OI, sweeps,
+        block trades) typically sourced from a third-party API.
+      * ``options_strategy_proposal`` — recommended multi-leg constructs the
+        brain considers (covered_call / cash_secured_put / vertical_spread /
+        iron_condor).
+      * ``options_position`` — open option positions (managed separately from
+        ``trading_trades``; closed when assigned, expired, or closed manually).
+      * ``options_greeks_budget`` — portfolio-level greeks limits per user
+        (max_abs_delta, max_abs_gamma, max_vega_per_tenor). Hard rules
+        consulted before any new option trade.
+
+    Default flag: ``CHILI_OPTIONS_LANE_ENABLED=False``. When OFF, no options
+    code paths execute and these tables sit empty. When ON, paper-only by
+    default (``CHILI_OPTIONS_LANE_LIVE=False``).
+    """
+    from sqlalchemy import text
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS options_chains (
+            id BIGSERIAL PRIMARY KEY,
+            underlying TEXT NOT NULL,
+            as_of TIMESTAMP NOT NULL DEFAULT NOW(),
+            venue TEXT NOT NULL DEFAULT 'tradier',
+            expirations_json JSONB,             -- list of expiration dates
+            n_contracts INTEGER,
+            spot_price NUMERIC(14, 4),
+            UNIQUE (underlying, as_of, venue)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_options_chains_underlying_asof "
+        "ON options_chains (underlying, as_of DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS options_quotes (
+            id BIGSERIAL PRIMARY KEY,
+            chain_id BIGINT REFERENCES options_chains(id) ON DELETE CASCADE,
+            occ_symbol TEXT NOT NULL,           -- standardized OCC symbol
+            underlying TEXT NOT NULL,
+            expiration DATE NOT NULL,
+            strike NUMERIC(14, 4) NOT NULL,
+            opt_type TEXT NOT NULL CHECK (opt_type IN ('call', 'put')),
+            bid NUMERIC(14, 4),
+            ask NUMERIC(14, 4),
+            last NUMERIC(14, 4),
+            volume INTEGER,
+            open_interest INTEGER,
+            implied_vol NUMERIC(8, 6),
+            delta NUMERIC(8, 6),
+            gamma NUMERIC(10, 8),
+            theta NUMERIC(10, 6),
+            vega NUMERIC(10, 6),
+            rho NUMERIC(10, 6),
+            recorded_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_options_quotes_chain "
+        "ON options_quotes (chain_id, expiration, strike, opt_type)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_options_quotes_occ "
+        "ON options_quotes (occ_symbol, recorded_at DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS options_flow (
+            id BIGSERIAL PRIMARY KEY,
+            underlying TEXT NOT NULL,
+            occ_symbol TEXT,
+            flow_kind TEXT,                     -- 'sweep' | 'block' | 'volume_spike' | etc.
+            premium_usd NUMERIC(14, 2),
+            sentiment TEXT,                     -- 'bullish' | 'bearish' | 'neutral'
+            details JSONB,
+            source TEXT,                        -- 'unusual_whales' | 'cboe' | etc.
+            recorded_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_options_flow_underlying "
+        "ON options_flow (underlying, recorded_at DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS options_strategy_proposal (
+            id BIGSERIAL PRIMARY KEY,
+            user_id INTEGER,
+            underlying TEXT NOT NULL,
+            strategy_family TEXT NOT NULL,      -- 'covered_call' | 'cash_secured_put'
+                                                -- | 'vertical_spread' | 'iron_condor'
+            legs_json JSONB NOT NULL,           -- list of {occ_symbol, qty, side}
+            net_debit NUMERIC(14, 4),
+            net_credit NUMERIC(14, 4),
+            max_loss NUMERIC(14, 4),
+            max_profit NUMERIC(14, 4),
+            breakevens NUMERIC(14, 4)[],
+            net_delta NUMERIC(8, 6),
+            net_gamma NUMERIC(10, 8),
+            net_theta NUMERIC(10, 6),
+            net_vega NUMERIC(10, 6),
+            confidence NUMERIC(5, 4),
+            rationale TEXT,
+            status TEXT NOT NULL DEFAULT 'proposed',  -- proposed|accepted|rejected|placed
+            decided_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_options_strategy_proposal_user "
+        "ON options_strategy_proposal (user_id, created_at DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS options_position (
+            id BIGSERIAL PRIMARY KEY,
+            user_id INTEGER,
+            underlying TEXT NOT NULL,
+            strategy_family TEXT,
+            proposal_id BIGINT REFERENCES options_strategy_proposal(id) ON DELETE SET NULL,
+            legs_json JSONB NOT NULL,
+            net_debit NUMERIC(14, 4),
+            net_credit NUMERIC(14, 4),
+            opened_at TIMESTAMP DEFAULT NOW(),
+            closed_at TIMESTAMP,
+            close_reason TEXT,                  -- 'expired'|'assigned'|'manual'|'stop'
+            realized_pnl_usd NUMERIC(14, 2),
+            is_paper BOOLEAN NOT NULL DEFAULT TRUE,
+            venue TEXT NOT NULL DEFAULT 'tradier'
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_options_position_user_open "
+        "ON options_position (user_id, closed_at) "
+        "WHERE closed_at IS NULL"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS options_greeks_budget (
+            id BIGSERIAL PRIMARY KEY,
+            user_id INTEGER UNIQUE,
+            max_abs_delta NUMERIC(10, 4) NOT NULL DEFAULT 0.50,
+            max_abs_gamma NUMERIC(10, 6) NOT NULL DEFAULT 0.05,
+            max_vega_per_tenor JSONB,           -- {'30d': 100, '60d': 80, '90d': 60}
+            max_total_vega NUMERIC(10, 4) NOT NULL DEFAULT 200.0,
+            max_theta_burn_per_day NUMERIC(10, 4),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """))
+
+    conn.commit()
+
+
+def _migration_179_portfolio_sizing_log(conn) -> None:
+    """Q1.T5 — HRP portfolio sizing log.
+
+    Adds ``portfolio_sizing_log`` for tracking every sizing decision the
+    HRP allocator makes. Each row records the symbol, the per-trade-2%
+    naive sizing result, the HRP-allocated sizing result, the active
+    position covariance summary, and the chosen sizing (which may be
+    naive when flag is off and HRP when on).
+
+    Operator can compare the two columns over time to assess whether
+    HRP is producing meaningfully different sizing than naive — and
+    whether that difference correlates with realized PnL improvement.
+    """
+    from sqlalchemy import text
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS portfolio_sizing_log (
+            id BIGSERIAL PRIMARY KEY,
+            user_id INTEGER,
+            symbol TEXT NOT NULL,
+            decision_at TIMESTAMP DEFAULT NOW(),
+            account_equity_usd NUMERIC(14, 2),
+            naive_size_usd NUMERIC(14, 2),
+            hrp_size_usd NUMERIC(14, 2),
+            hrp_weight NUMERIC(8, 6),
+            chosen_sizing TEXT NOT NULL,        -- 'naive' | 'hrp'
+            n_active_positions INTEGER,
+            cov_condition_number NUMERIC(14, 4),
+            hrp_cluster_label TEXT,
+            meta JSONB
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_portfolio_sizing_log_symbol "
+        "ON portfolio_sizing_log (symbol, decision_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_portfolio_sizing_log_chosen "
+        "ON portfolio_sizing_log (chosen_sizing, decision_at DESC)"
+    ))
+    conn.commit()
+
+
+def _migration_178_strategy_parameter_adaptive(conn) -> None:
+    """Q1.T4 — adaptive strategy parameter learning.
+
+    Adds:
+
+      * ``strategy_parameter`` — registry of every parameter the brain
+        adapts. One row per (strategy_family, parameter_key, scope).
+        ``current_value`` is what live code reads. ``min_value`` and
+        ``max_value`` define the search space. ``learning_state`` is a
+        JSON blob holding the Bayesian posterior (mean, variance, n,
+        last_updated). ``locked`` blocks any update — used to freeze a
+        parameter that's been mis-trained.
+
+      * ``strategy_parameter_outcome`` — every observation fed into the
+        learner. ``parameter_id`` references the parameter; ``trade_id``
+        and ``pattern_id`` are optional links back to the originating
+        decision; ``outcome_score`` is normalized to [0, 1] (1 =
+        successful, 0 = failed); ``meta`` is JSON for any other context.
+
+      * ``strategy_parameter_proposal`` — the learner's proposed updates
+        to ``current_value``. Mirrors the ``policy_change_proposal``
+        pattern: low-confidence proposals are auto-applied, high-stakes
+        ones wait for operator approval.
+
+    Flag-gated: ``CHILI_STRATEGY_PARAMETER_LEARNING_ENABLED`` (default
+    OFF). When OFF, code may still READ from the table for parameter
+    values, but the learner does not write proposals or update values.
+    """
+    from sqlalchemy import text
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS strategy_parameter (
+            id BIGSERIAL PRIMARY KEY,
+            strategy_family TEXT NOT NULL,
+            parameter_key TEXT NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'global',  -- 'global' | 'per_symbol' | 'per_regime'
+            scope_value TEXT,                      -- e.g. ticker symbol or regime label
+            current_value DOUBLE PRECISION NOT NULL,
+            initial_value DOUBLE PRECISION NOT NULL,
+            min_value DOUBLE PRECISION,
+            max_value DOUBLE PRECISION,
+            param_type TEXT NOT NULL DEFAULT 'float',  -- 'float' | 'int' | 'bool'
+            learning_state JSONB,
+            locked BOOLEAN NOT NULL DEFAULT FALSE,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (strategy_family, parameter_key, scope, scope_value)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_strategy_parameter_family_key "
+        "ON strategy_parameter (strategy_family, parameter_key)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS strategy_parameter_outcome (
+            id BIGSERIAL PRIMARY KEY,
+            parameter_id BIGINT NOT NULL REFERENCES strategy_parameter(id) ON DELETE CASCADE,
+            value_used DOUBLE PRECISION NOT NULL,
+            outcome_score NUMERIC(5, 4) NOT NULL,  -- 0..1
+            trade_id BIGINT,
+            pattern_id BIGINT,
+            meta JSONB,
+            recorded_at TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_strategy_parameter_outcome_param "
+        "ON strategy_parameter_outcome (parameter_id, recorded_at DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS strategy_parameter_proposal (
+            id BIGSERIAL PRIMARY KEY,
+            parameter_id BIGINT NOT NULL REFERENCES strategy_parameter(id) ON DELETE CASCADE,
+            current_value DOUBLE PRECISION NOT NULL,
+            proposed_value DOUBLE PRECISION NOT NULL,
+            confidence NUMERIC(5, 4) NOT NULL,
+            sample_count INTEGER NOT NULL,
+            justification TEXT,
+            severity TEXT NOT NULL DEFAULT 'low',  -- 'low' (auto) | 'high' (gated)
+            status TEXT NOT NULL DEFAULT 'pending',
+            decided_by TEXT,
+            decided_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_strategy_parameter_proposal_status "
+        "ON strategy_parameter_proposal (status, created_at DESC)"
+    ))
+
+    conn.commit()
+
+
+def _migration_177_unified_signal_consumer_parity_log(conn) -> None:
+    """Q1.T3 phase 2 — shadow consumer parity log.
+
+    Adds ``unified_signal_consumer_parity_log`` for tracking discrepancies
+    between bespoke ``BreakoutAlert``-driven decisions and what the
+    autotrader would have decided from the matching ``unified_signals``
+    row. Operator reads this table to assess consumer-readiness before
+    flipping ``CHILI_UNIFIED_SIGNAL_CONSUMER_AUTHORITATIVE`` (phase 3, future).
+    """
+    from sqlalchemy import text
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS unified_signal_consumer_parity_log (
+            id BIGSERIAL PRIMARY KEY,
+            alert_id BIGINT NOT NULL,
+            unified_signal_id BIGINT,
+            decision TEXT,
+            decision_reason TEXT,
+            discrepancies JSONB,
+            recorded_at TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_unified_signal_consumer_parity_log_alert "
+        "ON unified_signal_consumer_parity_log (alert_id, recorded_at DESC)"
+    ))
+    conn.commit()
+
+
+def _migration_176_macro_yield_curve_real(conn) -> None:
+    """A4 — replace yield_curve_slope_proxy with real DGS10-DGS2 from FRED.
+
+    Adds two columns to ``trading_macro_regime_snapshots``:
+
+      * ``dgs10_real`` (REAL) — 10-year Treasury constant-maturity yield from FRED.
+      * ``dgs2_real`` (REAL) — 2-year Treasury constant-maturity yield from FRED.
+
+    The slope = ``dgs10_real - dgs2_real`` is computed at read time and used
+    by the regime classifier feature pipeline in preference to
+    ``yield_curve_slope_proxy`` when both real values are present.
+
+    Plus a new ``macro_fred_fetch_log`` table for ingestion observability:
+    operator can see when the last successful FRED pull happened, which
+    series, and any error.
+
+    Both are nullable — if FRED ingestion is unavailable (network, missing
+    free key, etc.) the existing proxy continues to be used.
+    """
+    from sqlalchemy import text
+
+    conn.execute(text("""
+        ALTER TABLE trading_macro_regime_snapshots
+            ADD COLUMN IF NOT EXISTS dgs10_real REAL,
+            ADD COLUMN IF NOT EXISTS dgs2_real REAL,
+            ADD COLUMN IF NOT EXISTS yield_slope_source TEXT
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_trading_macro_regime_snapshots_yield_slope_source "
+        "ON trading_macro_regime_snapshots (yield_slope_source, as_of_date DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS macro_fred_fetch_log (
+            id BIGSERIAL PRIMARY KEY,
+            series_id TEXT NOT NULL,            -- e.g. 'DGS10', 'DGS2'
+            as_of_date DATE NOT NULL,
+            value REAL,                         -- NULL on fetch failure
+            success BOOLEAN NOT NULL,
+            error_message TEXT,
+            fetched_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (series_id, as_of_date)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_macro_fred_fetch_log_series "
+        "ON macro_fred_fetch_log (series_id, as_of_date DESC)"
+    ))
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -11303,6 +11685,11 @@ MIGRATIONS = [
     ("173_context_brain_tables", _migration_173_context_brain_tables),
     ("174_llm_gateway_decomposition_tables", _migration_174_llm_gateway_decomposition_tables),
     ("175_gateway_learning_loop", _migration_175_gateway_learning_loop),
+    ("176_macro_yield_curve_real", _migration_176_macro_yield_curve_real),
+    ("177_unified_signal_consumer_parity_log", _migration_177_unified_signal_consumer_parity_log),
+    ("178_strategy_parameter_adaptive", _migration_178_strategy_parameter_adaptive),
+    ("179_portfolio_sizing_log", _migration_179_portfolio_sizing_log),
+    ("180_options_lane_scaffold", _migration_180_options_lane_scaffold),
 ]
 
 

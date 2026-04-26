@@ -815,6 +815,34 @@ def _run_macro_regime_daily_job():
     run_scheduler_job_guarded("macro_regime_daily", _work)
 
 
+def _run_fred_yield_curve_daily_job():
+    """A4 — daily FRED DGS10/DGS2 ingestion.
+
+    Fetches DGS10 and DGS2 from FRED's public CSV endpoint, computes the
+    real yield curve slope, and updates today's macro_regime_snapshot row
+    with `dgs10_real`/`dgs2_real`. The regime classifier feature pipeline
+    prefers this over `yield_curve_slope_proxy` when both are present.
+
+    Best-effort: silently no-ops on network/parse failure (proxy continues
+    being used). One row per series per day in `macro_fred_fetch_log`.
+    """
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.fred_yield_curve import run_weekly_fred_yield_ingestion
+
+        db = SessionLocal()
+        try:
+            res = run_weekly_fred_yield_ingestion(db)
+            logger.info("[scheduler] fred_yield_curve_daily: %s", res)
+        except Exception:
+            logger.exception("[scheduler] fred_yield_curve_daily failed")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("fred_yield_curve_daily", _work)
+
+
 def _run_breadth_relstr_daily_job():
     """Phase L.18 - daily breadth + RS snapshot sweep (shadow mode only).
 
@@ -3391,6 +3419,20 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                 )
+                # A4 — FRED DGS10/DGS2 ingestion 5 minutes after macro snapshot
+                # so we can attach the real yield curve slope to the same row.
+                _fred_minute = (_mr_minute + 5) % 60
+                _fred_hour = _mr_hour + (1 if _mr_minute + 5 >= 60 else 0)
+                _scheduler.add_job(
+                    _run_fred_yield_curve_daily_job,
+                    trigger=CronTrigger(hour=_fred_hour, minute=_fred_minute),
+                    id="fred_yield_curve_daily",
+                    name=(
+                        f"FRED DGS10/DGS2 daily ({_fred_hour:02d}:{_fred_minute:02d})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
         except Exception:
             logger.exception(
                 "[scheduler] failed to register macro_regime_daily job"
@@ -3735,6 +3777,42 @@ def start_scheduler():
         except Exception:
             logger.exception(
                 "[scheduler] failed to register gateway learning jobs"
+            )
+
+        # Q1.T4 — Strategy parameter learning pass (every 6 hours).
+        try:
+            if role in ("all", "web"):
+                def _run_strategy_param_learning_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.trading.strategy_parameter import (
+                            run_parameter_learning_pass,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_parameter_learning_pass(_db)
+                            logger.info(
+                                "[strategy-param] learning pass: %s", res
+                            )
+                        finally:
+                            _db.close()
+                    except Exception:
+                        logger.exception(
+                            "[strategy-param] learning pass failed"
+                        )
+
+                _scheduler.add_job(
+                    _run_strategy_param_learning_job,
+                    trigger=IntervalTrigger(hours=6),
+                    id="strategy_parameter_learning",
+                    name="Strategy parameter learning pass (every 6h)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(minutes=20),
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register strategy parameter learning job"
             )
 
         _scheduler.start()

@@ -1,12 +1,94 @@
-feat(brain): thorough learning cycle overhaul + 11 Cursor rules
+Q1 close-out + Q2.T1 options lane scaffold
 
-Complete trading brain refactor: structured mining with rules_json DSL,
-lifecycle state machine, backtest/live parity via indicator_core.py,
-ensemble promotion gates, alpha decay monitoring, paper trading,
-risk management (Kelly/drawdown breaker), governance (kill switch/approval),
-regime detection, multi-timeframe consensus, intraday signals, daily playbook,
-ML model registry, execution quality tracking, and brain.html UI enhancements.
+Closes the original 12-month roadmap's Q1 by shipping the four remaining
+items plus the Q2.T1 options foundation. Migrations 176-180 added; all
+flag-gated, defaults preserve pre-change behavior.
 
-Added 14 new service modules, 4 new DB tables (migrations 066-069),
-1 parity test suite, and 17 Cursor rule files covering agent behavior
-and trading brain domain knowledge.
+A1  brain_miner_scanpattern_bridge_enabled — Category 4 -> Category 1
+    Investigation: bridge enqueues a single prescreen-tier ScanPattern
+    after intraday compression discovery; downstream OOS gates still
+    apply. No safety bypass. Default flipped True. FEATURE_FLAG_AUDIT.md
+    updated.
+
+A2  CPCV flag-flip readiness endpoint
+    GET /api/brain/cpcv/readiness reports whether the criteria for
+    flipping CHILI_CPCV_PROMOTION_GATE_ENABLED are met (>=5 evaluated
+    patterns, no procedural-count failures, scanner distribution
+    healthy). Read-only.
+
+A3  T2.5 design note (docs/TECH_DEBT.md)
+    Pattern-promotion vs CPCV-evidence asymmetry. Three options
+    documented (auto-demote / freeze-as-grandfathered / forced-eval
+    pass with relaxed thresholds). Recommendation: option C, then
+    deprecation timeline toward A. Trigger condition: act when
+    CHILI_CPCV_PROMOTION_GATE_ENABLED is being prepared for flip.
+
+A4  FRED yield slope upgrade (DGS10-DGS2)
+    Migration 176: dgs10_real, dgs2_real, yield_slope_source columns on
+    trading_macro_regime_snapshots; macro_fred_fetch_log table.
+    fred_yield_curve.py: best-effort fetcher (no API key needed —
+    public FRED CSV endpoint), persists to log + snapshot. Regime
+    classifier feature pipeline prefers real value when available,
+    falls back to proxy when not. Daily scheduler job 5min after macro
+    snapshot.
+
+B   Q1.T3 phase 2 — unified_signals shadow consumer
+    Migration 177: unified_signal_consumer_parity_log table.
+    signal_consumer.py with cross_check_alert_vs_unified() — when
+    CHILI_UNIFIED_SIGNAL_CONSUMER_ENABLED=true (default OFF), every
+    autotrader decision compares the bespoke BreakoutAlert path vs the
+    matching unified_signals row, logs discrepancies. No behavior
+    change; produces parity evidence for phase 3 cutover.
+
+C   Q1.T4 StrategyParameter adaptive learning
+    Migration 178: strategy_parameter, strategy_parameter_outcome,
+    strategy_parameter_proposal tables. strategy_parameter.py with
+    register/get/record_outcome + Bayesian learning pass (success-
+    weighted posterior mean, 5%-per-pass nudge cap, auto-apply when
+    confidence >=0.85). Weekly scheduler job (every 6h). Two new
+    /api/brain/ endpoints. Flag default OFF — read path always works,
+    learner only writes when ON.
+
+D   Q1.T5 HRP portfolio sizing
+    Migration 179: portfolio_sizing_log. hrp_sizing.py implements
+    Lopez de Prado HRP (single-linkage clustering, quasi-diagonal
+    ordering, recursive bisection) on 60-day returns from
+    trading_snapshots. Always logged for shadow comparison; flag
+    decides whether HRP overrides naive 2%-per-trade sizing in
+    autotrader. /api/brain/portfolio_sizing endpoint exposes
+    recent decisions + 7-day naive-vs-HRP ratio.
+
+E   Q2.T1 options lane scaffold
+    Migration 180: options_chains, options_quotes, options_flow,
+    options_strategy_proposal, options_position, options_greeks_budget.
+    options/greeks.py: Black-Scholes greeks + Newton-Raphson IV solver
+    (no scipy dependency in core path — uses math.erfc).
+    options/strategies.py: covered_call, cash_secured_put,
+    vertical_spread, iron_condor builders with full P&L + greeks.
+    options/venue_tradier.py: REST adapter (sandbox/live based on env)
+    for chain fetch + multi-leg order placement.
+    options/portfolio_budget.py: HARD greeks-budget enforcement at
+    proposal-acceptance time. Bypass only via
+    CHILI_OPTIONS_BUDGET_BYPASS=true env (operator-supervised testing).
+    Flag CHILI_OPTIONS_LANE_ENABLED default OFF; paper-only by default
+    even when ON (CHILI_OPTIONS_LANE_LIVE separate).
+
+Smoke-tested locally:
+- T4: parameter register+read+learning_pass-skipped-when-flag-off
+- T5: 35 active positions detected, naive=$200 chosen (flag off)
+- T6: BS greeks (ATM call price $3.61, delta 0.534) + IV inversion
+      converges to 0.3000 + all 4 strategy builders + budget rejection
+      (covered_call delta 0.93 > 0.50 limit) firing correctly.
+
+HR-compliance:
+- HR1 kill switch: untouched
+- HR2 drawdown breaker: untouched
+- HR3 data-first: all changes via migrations 176-180 (sequential, idempotent)
+- HR4 _test DB: smoke tests run in dev env, no fixture truncation
+- HR5 prediction-mirror authority: untouched
+- HR6 sequential migrations: 176-180, all in MIGRATIONS list
+
+WR-compliance:
+- All flags default OFF (preserve pre-change behavior)
+- One logical change per task; readonly endpoints separate from writers
+- Reversible migrations (DROP COLUMN / DROP TABLE rollback documented)

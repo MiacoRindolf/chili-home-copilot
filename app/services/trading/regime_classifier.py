@@ -78,26 +78,81 @@ def _normalize_utc(dt: datetime) -> datetime:
 def _load_macro_yield_vix_map(
     db: Session, start_d: date, end_d: date
 ) -> dict[date, tuple[float | None, float | None]]:
+    """Return per-date (yield_slope, vix). Prefers real FRED DGS10-DGS2
+    when both columns are populated (migration 176); falls back to
+    ``yield_curve_slope_proxy`` otherwise. Logs once per call which
+    source dominated."""
     from ...models.trading import MacroRegimeSnapshot
+    from sqlalchemy import text as _text
 
-    rows = (
-        db.query(
-            MacroRegimeSnapshot.as_of_date,
-            MacroRegimeSnapshot.yield_curve_slope_proxy,
-            MacroRegimeSnapshot.vix,
+    # Use raw SQL for the conditional COALESCE since the new columns may
+    # not yet be on the ORM in older deployments. Migration 176 adds
+    # dgs10_real and dgs2_real columns; fall back gracefully.
+    try:
+        result = db.execute(
+            _text(
+                """
+                SELECT
+                  as_of_date,
+                  CASE
+                    WHEN dgs10_real IS NOT NULL AND dgs2_real IS NOT NULL
+                      THEN (dgs10_real - dgs2_real)
+                    ELSE yield_curve_slope_proxy
+                  END                                                           AS yield_slope,
+                  CASE
+                    WHEN dgs10_real IS NOT NULL AND dgs2_real IS NOT NULL
+                      THEN 'fred_dgs10_dgs2'
+                    WHEN yield_curve_slope_proxy IS NOT NULL
+                      THEN 'proxy'
+                    ELSE NULL
+                  END                                                           AS yield_source,
+                  vix
+                FROM trading_macro_regime_snapshots
+                WHERE as_of_date >= :s AND as_of_date <= :e
+                """
+            ),
+            {"s": start_d, "e": end_d},
+        ).fetchall()
+    except Exception as e:
+        # Migration 176 not applied yet; fall back to ORM columns.
+        logger.debug("[regime_classifier] FRED-aware query failed (%s); using proxy only", e)
+        rows = (
+            db.query(
+                MacroRegimeSnapshot.as_of_date,
+                MacroRegimeSnapshot.yield_curve_slope_proxy,
+                MacroRegimeSnapshot.vix,
+            )
+            .filter(
+                MacroRegimeSnapshot.as_of_date >= start_d,
+                MacroRegimeSnapshot.as_of_date <= end_d,
+            )
+            .all()
         )
-        .filter(
-            MacroRegimeSnapshot.as_of_date >= start_d,
-            MacroRegimeSnapshot.as_of_date <= end_d,
-        )
-        .all()
-    )
+        out: dict[date, tuple[float | None, float | None]] = {}
+        for ad, yld, vx in rows:
+            if ad is None:
+                continue
+            d = ad if isinstance(ad, date) else ad.date()
+            out[d] = (yld, vx)
+        return out
+
     out: dict[date, tuple[float | None, float | None]] = {}
-    for ad, yld, vx in rows:
+    src_counts = {"fred_dgs10_dgs2": 0, "proxy": 0, "none": 0}
+    for ad, yld, source, vx in result or []:
         if ad is None:
             continue
         d = ad if isinstance(ad, date) else ad.date()
-        out[d] = (yld, vx)
+        out[d] = (float(yld) if yld is not None else None,
+                  float(vx) if vx is not None else None)
+        src_counts[source if source in src_counts else "none"] += 1
+    if out:
+        logger.debug(
+            "[regime_classifier] yield-slope sources over %s..%s: fred=%d proxy=%d none=%d",
+            start_d, end_d,
+            src_counts["fred_dgs10_dgs2"],
+            src_counts["proxy"],
+            src_counts["none"],
+        )
     return out
 
 
