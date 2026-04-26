@@ -812,6 +812,30 @@ class Settings(BaseSettings):
     chili_cpcv_weekly_backfill_enabled: bool = True
     # Q1.T3 phase 1: INSERT into ``unified_signals`` alongside existing payloads (default OFF).
     chili_unified_signal_enabled: bool = True
+    # Q1.T3 phase 2: shadow-consume unified_signals from autotrader and log
+    # parity discrepancies into unified_signal_consumer_parity_log. Decision is
+    # still driven by BreakoutAlert; this is observation only. Flip ON after
+    # phase 1 has accumulated unified_signals data for ~7 days. Default OFF.
+    chili_unified_signal_consumer_enabled: bool = False
+    # Q1.T4: adaptive strategy parameter learning. When ON, the background
+    # learning pass updates strategy_parameter rows from realized outcomes.
+    # Read path always works (code that calls get_parameter() always sees a
+    # coherent value). Default OFF — enables shadow-mode reads first, then
+    # operator flips ON when comfortable that the right outcomes are being
+    # recorded against parameter use.
+    chili_strategy_parameter_learning_enabled: bool = False
+    # Q1.T5: Hierarchical Risk Parity portfolio sizing. When ON, replaces the
+    # naive 2%-per-trade sizing with HRP-allocated sizing across the active
+    # position covariance. When OFF (default), naive sizing is preserved and
+    # HRP is computed in shadow for comparison via portfolio_sizing_log.
+    chili_hrp_sizing_enabled: bool = False
+    # Q2.T1: options lane scaffold. When OFF (default), all options code paths
+    # are inert. When ON, paper-only by default (set chili_options_lane_live
+    # to True for live broker submission via Tradier). Hard greeks-budget
+    # enforcement is always active when this is ON; bypass only via
+    # CHILI_OPTIONS_BUDGET_BYPASS=true (operator-supervised testing).
+    chili_options_lane_enabled: bool = False
+    chili_options_lane_live: bool = False
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
     chili_regime_classifier_enabled: bool = True
     # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).
@@ -1979,8 +2003,13 @@ class Settings(BaseSettings):
 
     # Secondary miners: high-vol regime hypothesis (crypto 15m) â€” additive to compression intraday miner.
     brain_high_vol_miner_enabled: bool = True
-    # Future: spawn ScanPattern from miner stats; must still pass normal backtest/OOS (default off).
-    brain_miner_scanpattern_bridge_enabled: bool = False
+    # Spawn ScanPattern from miner stats; must still pass normal backtest/OOS gates.
+    # Q1.T8 follow-up: investigated and reclassified Category 4 -> Category 1
+    # (diagnostic-safe-to-flip). The bridge enqueues at most one candidate pattern
+    # per cycle ("Brain miner: BB squeeze prescreen (15m)") which then has to earn
+    # promotion through the same OOS gates as any other candidate. See
+    # docs/FEATURE_FLAG_AUDIT.md > "Resolved: brain_miner_scanpattern_bridge_enabled".
+    brain_miner_scanpattern_bridge_enabled: bool = True
 
     # Benchmark walk-forward (SPY/QQQ-style) after hypothesis test; optional extra promotion gate.
     brain_bench_walk_forward_enabled: bool = True

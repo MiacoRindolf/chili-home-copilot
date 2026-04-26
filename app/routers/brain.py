@@ -338,6 +338,249 @@ def api_brain_cpcv_shadow_funnel(db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, "rows": rows, "view_available": True})
 
 
+@router.get("/api/brain/portfolio_sizing")
+def api_brain_portfolio_sizing(
+    db: Session = Depends(get_db),
+    limit: int = 50,
+):
+    """Q1.T5 — recent portfolio sizing decisions, naive vs HRP.
+
+    Operator compares the two columns to assess whether HRP is producing
+    meaningfully different sizing than the naive 2%-per-trade default.
+    """
+    try:
+        result = db.execute(
+            text(
+                """
+                SELECT id, symbol, decision_at, account_equity_usd,
+                       naive_size_usd, hrp_size_usd, hrp_weight,
+                       chosen_sizing, n_active_positions,
+                       cov_condition_number, meta
+                FROM portfolio_sizing_log
+                ORDER BY decision_at DESC
+                LIMIT :lim
+                """
+            ),
+            {"lim": int(limit)},
+        )
+        rows = [dict(r._mapping) for r in result]
+        agg = db.execute(
+            text(
+                """
+                SELECT
+                  COUNT(*) AS n_total,
+                  COUNT(*) FILTER (WHERE chosen_sizing = 'hrp')   AS n_hrp,
+                  COUNT(*) FILTER (WHERE chosen_sizing = 'naive') AS n_naive,
+                  ROUND(AVG(hrp_size_usd / NULLIF(naive_size_usd, 0))::numeric, 4) AS avg_hrp_naive_ratio
+                FROM portfolio_sizing_log
+                WHERE decision_at >= NOW() - INTERVAL '7 days'
+                """
+            )
+        ).fetchone()
+        agg_dict = dict(agg._mapping) if agg else {}
+        return JSONResponse({
+            "ok": True,
+            "rows": rows,
+            "count": len(rows),
+            "last_7d": agg_dict,
+        })
+    except Exception as exc:
+        logger.debug("[brain] portfolio_sizing unavailable: %s", exc)
+        return JSONResponse({"ok": False, "rows": [], "error": str(exc)[:200]})
+
+
+@router.get("/api/brain/strategy_parameters")
+def api_brain_strategy_parameters(
+    db: Session = Depends(get_db),
+    family: str = "",
+):
+    """Q1.T4 — list strategy parameters with current values + recent posterior."""
+    try:
+        clauses = ["1=1"]
+        params: dict[str, Any] = {}
+        if family:
+            clauses.append("strategy_family = :f")
+            params["f"] = family
+        result = db.execute(
+            text(
+                "SELECT id, strategy_family, parameter_key, scope, scope_value, "
+                "current_value, initial_value, min_value, max_value, "
+                "param_type, locked, learning_state, description, updated_at "
+                "FROM strategy_parameter WHERE " + " AND ".join(clauses) +
+                " ORDER BY strategy_family, parameter_key"
+            ),
+            params,
+        )
+        rows = [dict(r._mapping) for r in result]
+        return JSONResponse({"ok": True, "rows": rows, "count": len(rows)})
+    except Exception as exc:
+        logger.debug("[brain] strategy_parameters unavailable: %s", exc)
+        return JSONResponse({"ok": False, "rows": [], "error": str(exc)[:200]})
+
+
+@router.get("/api/brain/strategy_parameter_proposals")
+def api_brain_strategy_parameter_proposals(
+    db: Session = Depends(get_db),
+    status: str = "pending",
+):
+    """Q1.T4 — list pending (or by status) parameter proposals."""
+    try:
+        result = db.execute(
+            text(
+                """
+                SELECT pp.id, pp.parameter_id, p.strategy_family, p.parameter_key,
+                       pp.current_value, pp.proposed_value, pp.confidence,
+                       pp.sample_count, pp.justification, pp.severity,
+                       pp.status, pp.decided_by, pp.decided_at, pp.created_at
+                FROM strategy_parameter_proposal pp
+                JOIN strategy_parameter p ON p.id = pp.parameter_id
+                WHERE pp.status = :s
+                ORDER BY pp.created_at DESC
+                LIMIT 100
+                """
+            ),
+            {"s": status},
+        )
+        rows = [dict(r._mapping) for r in result]
+        return JSONResponse({"ok": True, "rows": rows, "count": len(rows)})
+    except Exception as exc:
+        logger.debug("[brain] strategy_parameter_proposals unavailable: %s", exc)
+        return JSONResponse({"ok": False, "rows": [], "error": str(exc)[:200]})
+
+
+@router.get("/api/brain/cpcv/readiness")
+def api_brain_cpcv_readiness(db: Session = Depends(get_db)):
+    """Q1.T1 flag-flip readiness check.
+
+    Reports whether the operator-review criteria for flipping
+    ``CHILI_CPCV_PROMOTION_GATE_ENABLED`` to ``True`` are met. Criteria
+    (per ``docs/CPCV_PROMOTION_GATE_RUNBOOK.md``):
+
+      1. ≥5 patterns evaluated under realized-PnL CPCV (``cpcv_n_paths IS NOT NULL``).
+      2. Zero patterns demoted on a single procedural-count threshold
+         (covers e.g. ``cpcv_n_paths_below_provisional_min`` regressions).
+      3. Per-scanner demote distribution healthy (no scanner accounts for
+         > 60 % of demotes among evaluated patterns).
+
+    The endpoint is read-only. Operator decides whether to flip; this just
+    reports whether criteria are met.
+    """
+    payload: dict[str, Any] = {
+        "ok": True,
+        "flag_currently": bool(
+            getattr(settings, "chili_cpcv_promotion_gate_enabled", False)
+        ),
+        "min_evaluated_required": 5,
+        "criteria": {},
+        "ready": False,
+        "blockers": [],
+    }
+    try:
+        agg = db.execute(
+            text(
+                """
+                SELECT
+                  COUNT(*) FILTER (WHERE cpcv_n_paths IS NOT NULL)            AS evaluated,
+                  COUNT(*) FILTER (WHERE promotion_gate_passed IS TRUE)       AS gate_passed,
+                  COUNT(*) FILTER (WHERE promotion_gate_passed IS FALSE
+                                   AND cpcv_n_paths IS NOT NULL)              AS gate_failed,
+                  COUNT(*) FILTER (
+                    WHERE promotion_gate_passed IS FALSE
+                      AND cpcv_n_paths IS NOT NULL
+                      AND (promotion_gate_reasons::text LIKE '%n_paths_below%'
+                        OR promotion_gate_reasons::text LIKE '%cv_infeasible_for_sample%'
+                        OR promotion_gate_reasons::text LIKE '%n_trades_below%')
+                  )                                                            AS procedural_failures,
+                  COUNT(*)                                                     AS total_promoted_or_live
+                FROM scan_patterns
+                WHERE lifecycle_stage IN ('promoted', 'live', 'challenged')
+                """
+            )
+        ).fetchone()
+        if agg:
+            evaluated = int(agg[0] or 0)
+            gate_passed = int(agg[1] or 0)
+            gate_failed = int(agg[2] or 0)
+            procedural = int(agg[3] or 0)
+            total = int(agg[4] or 0)
+
+            payload["criteria"]["evaluated"] = evaluated
+            payload["criteria"]["gate_passed"] = gate_passed
+            payload["criteria"]["gate_failed"] = gate_failed
+            payload["criteria"]["procedural_failures"] = procedural
+            payload["criteria"]["total_in_lifecycle"] = total
+
+            # Criterion 1: ≥5 evaluated
+            if evaluated < 5:
+                payload["blockers"].append(
+                    f"insufficient_evaluated_patterns ({evaluated} < 5) — "
+                    "weekly CPCV backfill accumulates evidence as trade history grows"
+                )
+            # Criterion 2: zero procedural-count failures
+            if procedural > 0:
+                payload["blockers"].append(
+                    f"procedural_count_failures ({procedural}) — "
+                    "indicates a sample-size threshold miscalibration, not a real-edge failure"
+                )
+            # Criterion 3: per-scanner skew (only check when evaluated >= 5)
+            if evaluated >= 5 and gate_failed > 0:
+                rows = db.execute(
+                    text(
+                        """
+                        SELECT scanner_bucket, COUNT(*) AS n
+                        FROM (
+                          SELECT
+                            CASE
+                              WHEN name ILIKE '%momentum%'           THEN 'momentum'
+                              WHEN name ILIKE '%breakout%'           THEN 'breakout'
+                              WHEN name ILIKE '%day%'
+                                OR timeframe IN ('1m','5m','15m')    THEN 'day'
+                              WHEN name ILIKE '%swing%'
+                                OR timeframe IN ('1h','4h','1d')     THEN 'swing'
+                              ELSE                                        'patterns'
+                            END AS scanner_bucket
+                          FROM scan_patterns
+                          WHERE promotion_gate_passed IS FALSE
+                            AND cpcv_n_paths IS NOT NULL
+                        ) sub
+                        GROUP BY scanner_bucket
+                        ORDER BY n DESC
+                        """
+                    )
+                ).fetchall()
+                by_scanner = [
+                    {"scanner": r[0], "n_failed": int(r[1])} for r in rows or []
+                ]
+                payload["criteria"]["failures_by_scanner"] = by_scanner
+                if by_scanner:
+                    top = by_scanner[0]
+                    if top["n_failed"] / max(gate_failed, 1) > 0.60:
+                        payload["blockers"].append(
+                            f"scanner_demote_skew ({top['scanner']} = "
+                            f"{top['n_failed']}/{gate_failed} failures > 60%) — "
+                            "investigate per-scanner calibration before flipping"
+                        )
+
+            payload["ready"] = len(payload["blockers"]) == 0 and evaluated >= 5
+
+        if payload["ready"]:
+            payload["recommendation"] = (
+                "Criteria met. Operator may flip CHILI_CPCV_PROMOTION_GATE_ENABLED=true "
+                "in a maintenance window. Begin the 14-day shadow-to-momentum-only-enforce "
+                "calendar from CPCV_PROMOTION_GATE_RUNBOOK.md."
+            )
+        else:
+            payload["recommendation"] = (
+                "Criteria not yet met. Keep flag OFF; weekly CPCV backfill is "
+                "accumulating evidence. Re-check when blockers clear."
+            )
+    except Exception as exc:
+        logger.debug("[brain] cpcv readiness query failed: %s", exc)
+        payload["ok"] = False
+        payload["error"] = str(exc)[:200]
+    return JSONResponse(payload)
+
+
 @router.get("/api/brain/regime_sharpe_heatmap")
 def api_brain_regime_sharpe_heatmap(db: Session = Depends(get_db)):
     """30d Sharpe by HMM regime × scanner (closed trades); needs migration 165 + flag optional."""

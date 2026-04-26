@@ -149,6 +149,28 @@ def _audit(
     db.add(row)
     db.commit()
 
+    # Q1.T3 phase 2 — shadow-consume unified_signals.
+    # No-op when chili_unified_signal_consumer_enabled is False (default).
+    # When True, looks up the matching unified_signals row and logs any
+    # parity discrepancies. Does NOT change the decision in any way.
+    try:
+        from .contracts.signal_consumer import maybe_shadow_consume
+        _entry_price = None
+        try:
+            _entry_price = float(alert.entry_price) if alert.entry_price is not None else None
+        except (TypeError, ValueError, AttributeError):
+            _entry_price = None
+        maybe_shadow_consume(
+            db,
+            alert_id=int(alert.id),
+            alert_ticker=(alert.ticker or "").upper(),
+            alert_entry_price=_entry_price,
+            decision=decision,
+            decision_reason=reason,
+        )
+    except Exception:  # pragma: no cover - never raise from audit hook
+        logger.debug("[autotrader] shadow_consume failed; ignored", exc_info=True)
+
 
 def _pattern_name(db: Session, scan_pattern_id: Optional[int]) -> str | None:
     if not scan_pattern_id:
@@ -910,6 +932,35 @@ def _execute_new_entry(
         notional = _TEMP_MIN_NOTIONAL_USD
     snap["notional_effective"] = round(notional, 2)
     # ─────────────────────────────────────────────────────────────────────
+
+    # Q1.T5 — HRP shadow sizing (and live override when flag ON).
+    # Always logged for shadow comparison; the chosen_sizing field of the
+    # decision tells us which to honor. Naive fallback when HRP is
+    # unavailable (insufficient history etc.) so flag-flip is safe.
+    try:
+        from .hrp_sizing import decide_position_size as _hrp_decide
+        _hrp_decision = _hrp_decide(
+            db,
+            symbol=(alert.ticker or "").upper(),
+            account_equity_usd=float(equity if equity > 0 else env_notional / 0.02),
+            user_id=uid,
+        )
+        snap["hrp_naive_size_usd"] = _hrp_decision.naive_size_usd
+        snap["hrp_size_usd"] = _hrp_decision.hrp_size_usd
+        snap["hrp_weight"] = _hrp_decision.hrp_weight
+        snap["hrp_chosen_sizing"] = _hrp_decision.chosen_sizing
+        snap["hrp_n_active_positions"] = _hrp_decision.n_active_positions
+        if _hrp_decision.chosen_sizing == "hrp" and _hrp_decision.hrp_size_usd:
+            # Flag is ON and HRP succeeded — override notional with HRP value
+            # (still subject to floor + per-share-cap below).
+            snap["notional_before_hrp"] = round(notional, 2)
+            notional = float(_hrp_decision.hrp_size_usd)
+            if notional < _TEMP_MIN_NOTIONAL_USD:
+                notional = _TEMP_MIN_NOTIONAL_USD
+            snap["notional_effective"] = round(notional, 2)
+            snap["notional_source"] = "hrp_allocated"
+    except Exception as _hrp_e:
+        snap["hrp_error"] = str(_hrp_e)[:200]
 
     # HARDCODED (TEMP 2026-04-21): floor to whole shares rather than
     # fractional. Most mid/large-cap RH tickers (ACN, WGS, GH, BA…)
