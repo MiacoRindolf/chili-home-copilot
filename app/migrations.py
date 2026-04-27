@@ -11117,6 +11117,56 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_189_seed_dydx_v4_perp_contracts(conn) -> None:
+    """Q2 follow-up — seed perp_contracts with dYdX v4 perpetuals.
+
+    Bybit is geo-blocked from US (CloudFront 403, same pattern as
+    Binance fapi). dYdX v4 is decentralized + US-accessible via the
+    public indexer (``indexer.dydx.trade/v4``), so it's the natural
+    third venue alongside Hyperliquid for cross-venue funding/OI
+    signals.
+
+    Like Hyperliquid, dYdX v4 is hourly-funding so funding_interval_hours=1.
+    Symbol convention: ``BTC-USD`` (matches the spot-pair format), not
+    bare ``BTC`` like Hyperliquid. The ingestion adapter normalizes
+    output rows so the basis / quote / OI consumers don't care.
+
+    Tier-1 majors only — dYdX v4 has 295 active markets but most are
+    long-tail. Cross-venue signal is most valuable on the high-volume
+    pairs where we already have Hyperliquid + Binance entries.
+
+    Idempotent on the existing UNIQUE (symbol, venue) constraint.
+    """
+    from sqlalchemy import text as _text
+
+    seeds = [
+        ("BTC-USD",   "BTC",   "USD"),
+        ("ETH-USD",   "ETH",   "USD"),
+        ("SOL-USD",   "SOL",   "USD"),
+        ("LINK-USD",  "LINK",  "USD"),
+        ("AVAX-USD",  "AVAX",  "USD"),
+        ("MATIC-USD", "MATIC", "USD"),
+        ("DOGE-USD",  "DOGE",  "USD"),
+        ("LTC-USD",   "LTC",   "USD"),
+        ("ATOM-USD",  "ATOM",  "USD"),
+        ("ADA-USD",   "ADA",   "USD"),
+        ("ARB-USD",   "ARB",   "USD"),
+        ("OP-USD",    "OP",    "USD"),
+    ]
+    for sym, base, quote in seeds:
+        conn.execute(_text(
+            """
+            INSERT INTO perp_contracts
+                (symbol, venue, base_ccy, quote_ccy,
+                 contract_multiplier, funding_interval_hours,
+                 max_leverage, tradable)
+            VALUES (:s, 'dydx_v4', :b, :q,
+                    1.0, 1, 10.0, TRUE)
+            ON CONFLICT (symbol, venue) DO NOTHING
+            """
+        ), {"s": sym, "b": base, "q": quote})
+
+
 def _migration_188_pattern_survival_promote_review_queue(conn) -> None:
     """K Phase 3 Step S.7 — promote-gate review queue table.
 
@@ -12422,6 +12472,7 @@ MIGRATIONS = [
     ("186_demote_lifecycle_active_drift", _migration_186_demote_lifecycle_active_drift),
     ("187_pattern_survival_decision_log", _migration_187_pattern_survival_decision_log),
     ("188_pattern_survival_promote_review_queue", _migration_188_pattern_survival_promote_review_queue),
+    ("189_seed_dydx_v4_perp_contracts", _migration_189_seed_dydx_v4_perp_contracts),
 ]
 
 
