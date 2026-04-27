@@ -2036,11 +2036,17 @@ def get_crypto_quote(ticker: str) -> dict[str, Any] | None:
 # Approval is operator-side; we surface broker rejections cleanly via the
 # existing audit row plumbing, same as KK did for crypto-not-supported.
 #
-# robin_stocks options API used here:
-#   rh.options.order_buy_option_limit(...)    — single-leg long buy
-#   rh.options.order_sell_option_limit(...)   — single-leg long sell
+# robin_stocks options API used here. NOTE: order placement lives in
+# rh.orders (same as equity + crypto orders), while discovery and quotes
+# live in rh.options. Don't confuse them — discovered the hard way during
+# Phase 1 paper smoke when the first attempt looked for order placement
+# in rh.options and got AttributeError.
+#   rh.orders.order_buy_option_limit(...)    — single-leg long buy
+#   rh.orders.order_sell_option_limit(...)   — single-leg long sell
+#   rh.orders.cancel_option_order(order_id)  — kill an open option order
 #   rh.options.find_options_by_expiration_and_strike(...) — locate contract
 #   rh.options.get_option_market_data_by_id(option_id) — quote + IV + greeks
+#   rh.options.get_open_option_positions(...) — held legs
 #
 # Multi-leg strategies (verticals, iron condors) need separate orchestration
 # at the strategy layer — submit each leg sequentially with combined coid
@@ -2177,7 +2183,7 @@ def place_option_buy_order(
         import robin_stocks.robinhood as rh
 
         def _do_buy():
-            return rh.options.order_buy_option_limit(
+            return rh.orders.order_buy_option_limit(
                 positionEffect="open",
                 creditOrDebit="debit",  # buying-to-open is always a debit
                 price=round(float(limit_price), 2),
@@ -2277,7 +2283,7 @@ def place_option_sell_order(
         cod = "credit"
 
         def _do_sell():
-            return rh.options.order_sell_option_limit(
+            return rh.orders.order_sell_option_limit(
                 positionEffect=pe,
                 creditOrDebit=cod,
                 price=round(float(limit_price), 2),
@@ -2348,7 +2354,7 @@ def cancel_option_order(order_id: str) -> dict[str, Any]:
         return {"ok": False, "error": "empty order_id"}
     try:
         import robin_stocks.robinhood as rh
-        result = rh.options.cancel_option_order(order_id)
+        result = rh.orders.cancel_option_order(order_id)
         return {"ok": True, "raw": result or {}}
     except Exception as e:
         logger.warning("[broker] cancel_option_order(%s) failed: %s", order_id, e)
