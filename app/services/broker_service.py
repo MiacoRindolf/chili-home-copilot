@@ -2328,6 +2328,111 @@ def place_option_sell_order(
         return {"ok": False, "error": str(e)}
 
 
+def place_option_spread(
+    legs: list[dict[str, Any]],
+    underlying: str,
+    quantity: int,
+    limit_price: float,
+    *,
+    direction: str = "debit",
+    time_in_force: str = "gtc",
+) -> dict[str, Any]:
+    """Place a multi-leg option spread via Robinhood (Phase 4).
+
+    Wraps ``rh.orders.order_option_debit_spread`` / ``order_option_credit_spread``
+    so the autotrader can submit verticals, iron condors, etc. as a
+    single atomic order rather than orchestrating individual legs.
+
+    Each ``legs`` entry is a dict with keys:
+      expiration:   ISO YYYY-MM-DD
+      strike:       float
+      option_type:  'call' or 'put'
+      action:       'buy' or 'sell'
+      effect:       'open' or 'close'  (defaults to 'open' if missing)
+
+    ``direction`` is 'debit' (you pay net) or 'credit' (you receive net).
+    The autotrader's strategies map vertical bull-call / iron-condor /
+    etc. into the right combination of legs + direction at the strategy
+    layer; the adapter just submits whatever the caller assembled.
+
+    Returns the same envelope shape as ``place_option_buy_order``.
+    """
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+
+    sym = (underlying or "").strip().upper()
+    if not sym or quantity <= 0 or limit_price <= 0 or not legs:
+        return {"ok": False, "error": f"bad inputs sym={underlying!r} qty={quantity} px={limit_price} legs={len(legs or [])}"}
+    direction_l = (direction or "debit").strip().lower()
+    if direction_l not in ("debit", "credit"):
+        return {"ok": False, "error": f"bad direction: {direction!r}"}
+
+    # Translate legs into RH's spread payload format.
+    spread: list[dict[str, Any]] = []
+    for leg in legs:
+        try:
+            spread.append({
+                "expirationDate": str(leg["expiration"]),
+                "strike": float(leg["strike"]),
+                "optionType": str(leg["option_type"]).lower(),
+                "effect": str(leg.get("effect", "open")).lower(),
+                "ratio_quantity": int(leg.get("ratio_quantity", 1)),
+                "side": "buy" if str(leg["action"]).lower() == "buy" else "sell",
+            })
+        except (KeyError, ValueError, TypeError) as e:
+            return {"ok": False, "error": f"bad leg {e}: {leg!r}"}
+
+    try:
+        import robin_stocks.robinhood as rh
+
+        def _do_spread():
+            if direction_l == "debit":
+                return rh.orders.order_option_debit_spread(
+                    price=round(float(limit_price), 2),
+                    symbol=sym,
+                    quantity=int(quantity),
+                    spread=spread,
+                    timeInForce=time_in_force,
+                    jsonify=True,
+                )
+            return rh.orders.order_option_credit_spread(
+                price=round(float(limit_price), 2),
+                symbol=sym,
+                quantity=int(quantity),
+                spread=spread,
+                timeInForce=time_in_force,
+                jsonify=True,
+            )
+
+        label = f"{direction_l.upper()}-SPREAD {sym} legs={len(spread)}"
+        result = _retry_api_call(_do_spread, label=label)
+
+        if result and isinstance(result, dict):
+            order_id = result.get("id") or ""
+            state = result.get("state", "unknown")
+            if not order_id:
+                error_msg = (
+                    result.get("detail")
+                    or result.get("error")
+                    or result.get("message")
+                    or "Robinhood spread endpoint returned no order_id"
+                )
+                logger.error("[broker] %s rejected (no order_id): response=%s", label, result)
+                return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            logger.info("[broker] %s placed: qty=%d limit=%.2f -> %s", label, quantity, limit_price, state)
+            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+
+        error_msg = str(result) if result else "Empty response from Robinhood spread"
+        logger.error("[broker] %s failed: %s", label, error_msg)
+        return {"ok": False, "error": error_msg}
+
+    except Exception as e:
+        logger.error("[broker] place_option_spread exception for %s: %s", sym, e, exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
 def get_open_option_positions() -> list[dict[str, Any]]:
     """Current open option legs (long + short). Each entry carries
     quantity, average_price (premium paid/received), trade_value,

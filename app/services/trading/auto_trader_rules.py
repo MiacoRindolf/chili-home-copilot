@@ -621,10 +621,25 @@ def passes_rule_gate(
     if options_path:
         snap_meta = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
         opt_meta = snap_meta.get("option_meta") or {}
-        required = ("strike", "expiration", "option_type")
-        missing = [k for k in required if not opt_meta.get(k)]
-        if missing:
-            return False, f"options_meta_missing:{','.join(missing)}", snap
+        # Phase 4 — accept either single-leg metadata or a multi-leg
+        # ``legs`` list. Single-leg requires (strike, expiration,
+        # option_type); multi-leg requires `legs` to be a non-empty
+        # list of dicts each with (strike, expiration, option_type,
+        # action). The autotrader's _execute_broker_buy will branch
+        # on the presence of `legs` to call place_spread vs
+        # place_option_buy.
+        legs = opt_meta.get("legs")
+        if isinstance(legs, list) and len(legs) >= 2:
+            for i, leg in enumerate(legs):
+                miss = [k for k in ("strike", "expiration", "option_type", "action")
+                        if not (isinstance(leg, dict) and leg.get(k))]
+                if miss:
+                    return False, f"options_meta_leg_{i}_missing:{','.join(miss)}", snap
+        else:
+            required = ("strike", "expiration", "option_type")
+            missing = [k for k in required if not opt_meta.get(k)]
+            if missing:
+                return False, f"options_meta_missing:{','.join(missing)}", snap
         snap["option_meta"] = opt_meta
 
     # Phase 3: pull learned per-pattern signal quality from the M.1 ledger.

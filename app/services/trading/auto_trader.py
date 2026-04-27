@@ -852,18 +852,33 @@ def _execute_broker_buy(
             out["skipped"] += 1
             _autotrader_tick_note(out, kind="blocked", reason="rh_options_adapter_off", alert=alert)
             return None
-        # qty here represents number of CONTRACTS (each = 100 underlying
-        # shares). The rule gate's notional sizing already converted
-        # cash → contract count using opt_meta['limit_price'].
+        # Phase 4 — multi-leg branch. When option_meta carries `legs`
+        # (a list of >1 leg dicts), submit as a spread atomically via
+        # the spread adapter method instead of single-leg place_option_buy.
+        # The strategy layer (Q2.T1 vertical_spread / iron_condor /
+        # etc.) emits the legs + direction; the autotrader just routes.
+        legs = opt_meta.get("legs")
         try:
-            res = opt_ad.place_option_buy(
-                underlying=str(alert.ticker),
-                expiration=str(opt_meta["expiration"]),
-                strike=float(opt_meta["strike"]),
-                option_type=str(opt_meta["option_type"]),
-                quantity=int(qty),
-                limit_price=float(opt_meta.get("limit_price") or alert.entry_price or 0),
-            )
+            if isinstance(legs, list) and len(legs) > 1:
+                res = opt_ad.place_spread(
+                    underlying=str(alert.ticker),
+                    legs=legs,
+                    quantity=int(qty),
+                    limit_price=float(opt_meta.get("limit_price") or alert.entry_price or 0),
+                    direction=str(opt_meta.get("direction", "debit")),
+                )
+            else:
+                # qty here represents number of CONTRACTS (each = 100
+                # underlying shares). The rule gate's notional sizing
+                # already converted cash → contract count.
+                res = opt_ad.place_option_buy(
+                    underlying=str(alert.ticker),
+                    expiration=str(opt_meta["expiration"]),
+                    strike=float(opt_meta["strike"]),
+                    option_type=str(opt_meta["option_type"]),
+                    quantity=int(qty),
+                    limit_price=float(opt_meta.get("limit_price") or alert.entry_price or 0),
+                )
         except Exception as exc:
             res = {"ok": False, "error": f"options_adapter_exception:{exc}"}
         if not res.get("ok"):
