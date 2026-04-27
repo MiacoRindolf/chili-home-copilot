@@ -599,13 +599,8 @@ def submit_robinhood_trade_exit(
     # owns option exits via place_option_sell against the contract
     # symbol; we hand off to it by returning a benign "skipped" result.
     try:
-        snap = trade.indicator_snapshot if isinstance(trade.indicator_snapshot, dict) else {}
-        ba = snap.get("breakout_alert") if isinstance(snap.get("breakout_alert"), dict) else {}
-        is_option_trade = (
-            (ba.get("asset_type") or "").lower() == "options"
-            or bool(snap.get("option_meta"))
-            or bool(ba.get("option_meta"))
-        )
+        from .autopilot_scope import is_option_trade as _is_option_trade
+        is_option_trade = _is_option_trade(trade)
     except Exception:
         is_option_trade = False
     if is_option_trade:

@@ -66,6 +66,20 @@ def _phase_a_economic_ledger_live_shadow(
     except Exception:
         return
 
+    # LLL -- skip option trades. The economic ledger assumes share-based
+    # positions where cash_delta = price * qty. For an option, the row
+    # uses trade.entry_price (premium, e.g. $4) but trade.exit_price may
+    # be the underlying spot price (e.g. $715), yielding a phantom +$711
+    # P&L. Option exits should be tracked via the options-specific cash
+    # math (premium * 100 multiplier * qty), not this hook. Until the
+    # ledger gains options-aware shape, do not emit option events.
+    try:
+        from ..autopilot_scope import is_option_trade
+        if is_option_trade(trade):
+            return
+    except Exception:
+        pass
+
     try:
         ticker = (trade.ticker or "").strip().upper()
         if not ticker:

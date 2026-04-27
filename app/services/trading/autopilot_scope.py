@@ -51,28 +51,36 @@ def live_autopilot_trade_filter():
 def is_option_trade(trade: Trade) -> bool:
     """True if this Trade is an options position (vs equity / crypto).
 
-    DDD architectural fix: the equity exit monitor should not touch
-    option trades -- the Phase 5 options exit monitor (run_options_exit_pass)
-    handles them via place_option_sell on the contract symbol. Trying
-    to sell shares of the underlying against an option position trips
-    Robinhood's "Not enough shares to sell." rejection.
+    String-tolerant: trade.indicator_snapshot may be returned as a JSON
+    string instead of a dict (legacy / mixed-storage rows). We json.loads
+    it before inspecting.
     """
+    import json as _json
     try:
-        snap = trade.indicator_snapshot if isinstance(trade.indicator_snapshot, dict) else {}
+        snap = trade.indicator_snapshot
     except Exception:
         return False
+    if isinstance(snap, str):
+        try:
+            snap = _json.loads(snap)
+        except Exception:
+            return False
     if not isinstance(snap, dict):
         return False
     if snap.get("option_meta"):
         return True
     ba = snap.get("breakout_alert")
+    if isinstance(ba, str):
+        try:
+            ba = _json.loads(ba)
+        except Exception:
+            ba = None
     if isinstance(ba, dict):
         if (ba.get("asset_type") or "").lower() == "options":
             return True
         if ba.get("option_meta"):
             return True
     return False
-
 
 def classify_live_autopilot_trade_scope(trade: Trade) -> str:
     """Return the operator-facing scope label for a live trade."""
@@ -279,9 +287,4 @@ def check_autopilot_entry_gate(
     if owner == candidate_n:
         return {"allowed": True, "reason": "owner_self", **base}
 
-    # No owner. In strict-primary mode, only the configured primary may open
-    # a fresh entry; otherwise either autopilot may.
-    if strict and primary and candidate_n != primary:
-        return {"allowed": False, "reason": "not_primary", **base}
-
-    return {"allowed": True, "reason": "ok", **base}
+    # No owner. In stric
