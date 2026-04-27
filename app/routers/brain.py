@@ -448,6 +448,244 @@ def api_brain_strategy_parameter_proposals(
         return JSONResponse({"ok": False, "rows": [], "error": str(exc)[:200]})
 
 
+@router.get("/api/brain/health/kpi")
+def api_brain_health_kpi(db: Session = Depends(get_db)):
+    """Q1.T6 + I — single-glance brain health rollup.
+
+    Six categories, computed in one shot from existing tables:
+      1. Profitability  — recent realized PnL, hit-rate, drawdown
+      2. Learning       — patterns mined / promoted / demoted, cpcv coverage
+      3. Execution      — broker auth health, recent 401 rate
+      4. Diversity      — active strategy_family count + PnL concentration
+      5. Regime         — current HMM regime, time-since-change
+      6. Safety         — kill switch, drawdown breaker, days since breach
+
+    Read-only. Operator hits this once a day to confirm "is the brain
+    healthier this week than last?" without trawling individual tables.
+    """
+    out: dict[str, Any] = {
+        "ok": True,
+        "as_of": datetime.utcnow().isoformat(),
+        "profitability": {},
+        "learning": {},
+        "execution": {},
+        "diversity": {},
+        "regime": {},
+        "safety": {},
+    }
+
+    # 1. Profitability — last 30d closed trades
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT
+                  COUNT(*) FILTER (WHERE exit_date >= NOW() - INTERVAL '30 days')        AS n_30d,
+                  COUNT(*) FILTER (WHERE exit_date >= NOW() - INTERVAL '7 days')         AS n_7d,
+                  COUNT(*) FILTER (WHERE pnl > 0 AND exit_date >= NOW() - INTERVAL '30 days')  AS wins_30d,
+                  ROUND(SUM(pnl) FILTER (WHERE exit_date >= NOW() - INTERVAL '30 days')::numeric, 2) AS pnl_30d,
+                  ROUND(SUM(pnl) FILTER (WHERE exit_date >= NOW() - INTERVAL '7 days')::numeric, 2)  AS pnl_7d,
+                  ROUND(MIN(pnl) FILTER (WHERE exit_date >= NOW() - INTERVAL '30 days')::numeric, 2) AS worst_30d
+                FROM trading_trades
+                WHERE pnl IS NOT NULL
+                """
+            )
+        ).fetchone()
+        if row:
+            n30 = int(row[0] or 0)
+            wins30 = int(row[2] or 0)
+            out["profitability"] = {
+                "trades_30d": n30,
+                "trades_7d": int(row[1] or 0),
+                "hit_rate_30d": round(wins30 / n30, 4) if n30 > 0 else None,
+                "pnl_30d_usd": float(row[3] or 0),
+                "pnl_7d_usd": float(row[4] or 0),
+                "worst_trade_30d_usd": float(row[5] or 0),
+            }
+    except Exception as e:
+        out["profitability"]["error"] = str(e)[:200]
+
+    # 2. Learning — pattern lifecycle + CPCV coverage
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT
+                  COUNT(*) FILTER (WHERE lifecycle_stage = 'promoted')                  AS promoted,
+                  COUNT(*) FILTER (WHERE lifecycle_stage = 'live')                      AS live,
+                  COUNT(*) FILTER (WHERE lifecycle_stage = 'challenged')                AS challenged,
+                  COUNT(*) FILTER (WHERE lifecycle_stage = 'candidate')                 AS candidate,
+                  COUNT(*) FILTER (WHERE cpcv_n_paths IS NOT NULL)                      AS cpcv_evaluated,
+                  COUNT(*) FILTER (WHERE updated_at >= NOW() - INTERVAL '7 days'
+                                   AND lifecycle_stage IN ('promoted','live'))         AS promoted_recent,
+                  COUNT(*) FILTER (WHERE updated_at >= NOW() - INTERVAL '7 days'
+                                   AND lifecycle_stage = 'challenged')                 AS demoted_recent
+                FROM scan_patterns
+                """
+            )
+        ).fetchone()
+        if row:
+            promoted = int(row[0] or 0)
+            live = int(row[1] or 0)
+            evaluated = int(row[4] or 0)
+            total_active = promoted + live
+            out["learning"] = {
+                "promoted": promoted,
+                "live": live,
+                "challenged": int(row[2] or 0),
+                "candidate": int(row[3] or 0),
+                "cpcv_evaluated": evaluated,
+                "cpcv_coverage_pct": round(
+                    100 * evaluated / total_active, 1
+                ) if total_active > 0 else 0.0,
+                "promoted_last_7d": int(row[5] or 0),
+                "demoted_last_7d": int(row[6] or 0),
+            }
+    except Exception as e:
+        out["learning"]["error"] = str(e)[:200]
+
+    # 3. Execution — broker session age + recent 401 hint
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT broker, username, updated_at,
+                       EXTRACT(EPOCH FROM (NOW() - updated_at)) / 3600.0 AS age_hours
+                FROM broker_sessions
+                ORDER BY updated_at DESC
+                """
+            )
+        ).fetchall()
+        sessions = []
+        for r in row or []:
+            sessions.append({
+                "broker": r[0],
+                "username": r[1],
+                "updated_at": r[2].isoformat() if r[2] else None,
+                "age_hours": round(float(r[3] or 0), 1),
+                "stale": bool((r[3] or 0) > 24),
+            })
+        out["execution"]["broker_sessions"] = sessions
+        out["execution"]["robinhood_stale"] = any(
+            s["broker"] == "robinhood" and s["stale"] for s in sessions
+        )
+    except Exception as e:
+        out["execution"]["error"] = str(e)[:200]
+
+    # 4. Diversity — active strategy_family + PnL concentration (Herfindahl)
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT COALESCE(p.hypothesis_family, 'unknown') AS family,
+                       COALESCE(SUM(t.pnl), 0)::numeric AS pnl_30d
+                FROM trading_trades t
+                LEFT JOIN scan_patterns p ON p.id = t.scan_pattern_id
+                WHERE t.exit_date >= NOW() - INTERVAL '30 days'
+                  AND t.pnl IS NOT NULL
+                GROUP BY p.hypothesis_family
+                """
+            )
+        ).fetchall()
+        families = [{"family": r[0], "pnl_30d": float(r[1] or 0)} for r in rows or []]
+        total_abs = sum(abs(f["pnl_30d"]) for f in families) or 1.0
+        # Herfindahl on the absolute-PnL share. >0.5 = one family dominates.
+        hhi = sum((abs(f["pnl_30d"]) / total_abs) ** 2 for f in families)
+        out["diversity"] = {
+            "active_families": len(families),
+            "by_family_30d": sorted(families, key=lambda x: -abs(x["pnl_30d"])),
+            "pnl_herfindahl": round(hhi, 4),
+            "concentration_warning": hhi > 0.5 and len(families) >= 2,
+        }
+    except Exception as e:
+        out["diversity"]["error"] = str(e)[:200]
+
+    # 5. Regime — most recent HMM tag + age
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT regime, posterior, model_version,
+                       as_of, EXTRACT(EPOCH FROM (NOW() - as_of)) / 3600.0 AS age_hours
+                FROM regime_snapshot
+                ORDER BY as_of DESC
+                LIMIT 1
+                """
+            )
+        ).fetchone()
+        if row:
+            out["regime"] = {
+                "current": row[0],
+                "posterior": row[1],
+                "model_version": row[2],
+                "as_of": row[3].isoformat() if row[3] else None,
+                "age_hours": round(float(row[4] or 0), 1),
+                "stale": bool((row[4] or 0) > 168),  # >1 week = stale
+            }
+        else:
+            out["regime"] = {"current": None, "note": "regime_classifier never ran"}
+    except Exception as e:
+        out["regime"]["error"] = str(e)[:200]
+
+    # 6. Safety — kill switch + drawdown breaker + autotrader status
+    try:
+        from app.services.trading.governance import (
+            is_kill_switch_active,
+            get_kill_switch_status,
+        )
+        ks = get_kill_switch_status() or {}
+        out["safety"]["kill_switch_active"] = bool(is_kill_switch_active())
+        out["safety"]["kill_switch_reason"] = ks.get("reason")
+        out["safety"]["kill_switch_set_at"] = ks.get("set_at")
+    except Exception as e:
+        out["safety"]["kill_switch_error"] = str(e)[:200]
+
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT
+                  COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours'
+                                   AND decision = 'placed')                            AS placed_24h,
+                  COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours'
+                                   AND decision LIKE 'monitor_exit%')                  AS exits_24h,
+                  COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours'
+                                   AND decision = 'error')                             AS errors_24h
+                FROM trading_autotrader_runs
+                """
+            )
+        ).fetchone()
+        if row:
+            out["safety"]["autotrader_24h"] = {
+                "placed": int(row[0] or 0),
+                "exits": int(row[1] or 0),
+                "errors": int(row[2] or 0),
+            }
+    except Exception as e:
+        out["safety"]["autotrader_error"] = str(e)[:200]
+
+    out["safety"]["flags"] = {
+        "autotrader_enabled": getattr(settings, "chili_autotrader_enabled", False),
+        "cpcv_promotion_gate_enabled": getattr(
+            settings, "chili_cpcv_promotion_gate_enabled", False
+        ),
+        "regime_classifier_enabled": getattr(
+            settings, "chili_regime_classifier_enabled", False
+        ),
+        "strategy_parameter_learning_enabled": getattr(
+            settings, "chili_strategy_parameter_learning_enabled", False
+        ),
+        "hrp_sizing_enabled": getattr(settings, "chili_hrp_sizing_enabled", False),
+        "options_lane_enabled": getattr(
+            settings, "chili_options_lane_enabled", False
+        ),
+        "forex_lane_enabled": getattr(settings, "chili_forex_lane_enabled", False),
+        "perps_lane_enabled": getattr(settings, "chili_perps_lane_enabled", False),
+    }
+
+    return JSONResponse(out)
+
+
 @router.get("/api/brain/cpcv/readiness")
 def api_brain_cpcv_readiness(db: Session = Depends(get_db)):
     """Q1.T1 flag-flip readiness check.
