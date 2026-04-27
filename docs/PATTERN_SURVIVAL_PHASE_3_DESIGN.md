@@ -168,9 +168,57 @@ Roughly 8 small PRs, totaling ~450 LOC. Each ships independently; failure of any
 - **Hard Rule 5 (prediction mirror authority frozen)** — Phase 3 writes to NEW tables. The prediction mirror is untouched.
 - **Hard Rule 6 (migrations sequential + idempotent)** — 187 + 188 follow the pattern. Both are ID-checked before merge.
 
-## Open questions to resolve before S.1
+## Open questions — resolved (Task T)
 
-1. **Pattern lifecycle enum** — does PG have a CHECK constraint on `lifecycle_stage`? If yes, S.7 must extend it; if no (free-form string), S.7 is a no-op. Need to grep the migration history.
-2. **Drift monitor interaction** — there's an existing `drift_monitor` that demotes patterns on PSI drift. How do we sequence Phase 3's demote against drift_monitor's? Suggestion: drift_monitor wins (it's the older and more conservative authority); Phase 3 demote is additive (only demotes patterns that drift_monitor didn't already catch).
-3. **Multiplier floor** — is 0.25 the right number? Need to see the realized PnL distribution of low-survival patterns post-A activation. Tune via `chili_pattern_survival_sizing_floor` env var.
-4. **`consecutive 3 days` storage** — query `last 3 predictions for pattern X, all p < 0.20` is a few-row fetch but happens per-pattern per-day. Cheap. But: do we want to store the streak counter on `scan_patterns` for visibility? Probably yes, as a `survival_at_risk_streak_days` column. Tracked under S.5.
+### Q1 — lifecycle CHECK constraint  ✅ RESOLVED
+
+**Found:** `chk_sp_lifecycle` exists. Allowed values:
+
+```
+candidate, backtested, validated, challenged, promoted, live, decayed, retired
+```
+
+**Decision:** Phase 3 uses the existing vocabulary. NO new state.
+
+- Consumer B (demote) goes `live → challenged → decayed` (`decayed` is the existing post-demote terminal). No CHECK constraint update needed.
+- Consumer C (promote gate) does NOT use a new `lifecycle='review'` state. Instead, the candidate stays `lifecycle='candidate'` and a flag in a separate review-queue table holds it. Migration 188 (originally proposed for the lifecycle CHECK update) becomes:
+  - `pattern_survival_promote_review_queue (scan_pattern_id PK, queued_at, predicted_p, cpcv_passed_at, review_decision NULL/approve/reject, review_decided_at, decided_by)`
+
+This is a significantly cleaner design: no state-machine surgery, no risk of breaking lifecycle-stage consumers in other code paths. **Migration 188 LOC drops from ~20 to ~30 (one new table, no CHECK update).**
+
+### Q2 — drift_monitor sequencing  ✅ RESOLVED
+
+**Found:** `drift_monitor_service.py` and `drift_escalation_watchdog.py` produce drift severity (yellow/red) and write to `trading_pattern_drift_log`. They do NOT modify `scan_patterns.lifecycle_stage` directly (verified — no UPDATE statements touching that column anywhere in the drift-monitor module).
+
+**Decision:** Phase 3.B can run **additively**, not sequenced. Both write to their own log tables. Operator reconciles by joining `pattern_survival_decision_log` against `trading_pattern_drift_log`. No risk of double-demotion since drift_monitor doesn't demote.
+
+If a future operator decides drift_monitor SHOULD demote (separate PR), Phase 3.B's "consecutive 3 days" guard still smooths anything weird.
+
+Drift_monitor flag (`brain_drift_monitor_mode`) is independent of `chili_pattern_survival_demote_enabled`. Both can be ON at the same time; their effects compose without interfering.
+
+### Q3 — multiplier floor (0.25)  ⏸️ DEFERRED
+
+Not actionable without ~30 days of live K Phase 1 features post-flag-flip. Ship with `chili_pattern_survival_sizing_floor=0.25` env default; tune in a follow-up after observing realized-PnL distribution.
+
+### Q4 — streak storage  ✅ RESOLVED
+
+**Found:** No existing `streak`/`risk` columns on `scan_patterns`.
+
+**Decision:** Add `survival_at_risk_streak_days INTEGER NOT NULL DEFAULT 0` column to `scan_patterns` in migration 187 (alongside the decision log table). Updated by the daily demote pass: increment when today's prediction is below threshold, reset to 0 otherwise. Persisted streak is clearer for operator queries than recomputing from prediction history every check.
+
+## Updated implementation sequencing (post-Task-T)
+
+| step | what | gates | LOC est. |
+| --- | --- | --- | --- |
+| S.1 | Migration 187 — `pattern_survival_decision_log` table + `scan_patterns.survival_at_risk_streak_days` column | none | ~60 |
+| S.2 | Add `chili_pattern_survival_*_enabled` flags to config.py | none | ~10 |
+| S.3 | `pattern_survival/decisions.py` — single `compute_decision(db, scan_pattern_id, consumer)` returning the action + recording the log row | requires S.1, S.2 | ~150 |
+| S.4 | Wire consumer A (sizing) into `auto_trader.py`. Multiplier applied AFTER HRP. | requires S.3 | ~50 |
+| S.5 | Daily demote-pass scheduler hook + `consumer B` logic. Uses `survival_at_risk_streak_days` for the consecutive-day guard. Demotes `live → challenged` and `challenged → decayed`. | requires S.3, S.1 | ~100 |
+| S.6 | KPI endpoint adds `learning.survival_at_risk_count` (patterns where p < 0.30) and `learning.in_promote_review_queue` count | requires S.4 or S.5 done | ~20 |
+| S.7 | Migration 188 — `pattern_survival_promote_review_queue` table | none | ~30 |
+| S.8 | Wire consumer C (promote_gate) into the CPCV-promotion path. Holds candidates in the review queue when CPCV passes but predicted survival < 0.40. | requires S.7 | ~80 |
+
+Total ~500 LOC across 8 PRs (was ~450; the streak column adds a bit, the simplified S.7 saves a bit, net wash).
+
+**Bigger win: no CHECK-constraint surgery.** The original S.7 was the riskiest step in the original plan — extending an enum CHECK on a heavily-referenced column. The new S.7 is a fresh table; nothing to break.
