@@ -333,6 +333,18 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         summary["delegated_to_options_exit_monitor"] = sorted(option_trade_ids)
     open_rows = [t for t in open_rows if int(t.id) not in option_trade_ids]
 
+    # HHH -- partition out crypto trades. Equity monitor skips RH -USD
+    # tickers; doing it here matches DDD design and lets
+    # run_crypto_exit_pass own crypto exits via place_crypto_sell_order.
+    crypto_trade_ids = {
+        int(t.id) for t in open_rows
+        if (t.ticker or "").upper().endswith("-USD")
+        or (t.broker_source or "").strip().lower() == "coinbase"
+    }
+    if crypto_trade_ids:
+        summary["delegated_to_crypto_exit_monitor"] = sorted(crypto_trade_ids)
+    open_rows = [t for t in open_rows if int(t.id) not in crypto_trade_ids]
+
     for t in open_rows:
         summary["checked"] += 1
         if t.id in paused_ids:
