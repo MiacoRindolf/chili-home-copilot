@@ -1994,6 +1994,24 @@ class Settings(BaseSettings):
             "bypassing market-hours and PDT gates. Equity behavior unchanged."
         ),
     )
+    # Task MM Phase 2 — when true, the autotrader rule gate accepts
+    # alerts with asset_type='options' and routes them through the
+    # RobinhoodOptionsAdapter. The alert must carry option metadata
+    # (strike, expiration, option_type) in indicator_snapshot.option_meta;
+    # most equity-shaped gates (price cap, slippage, projected profit)
+    # are bypassed because the operator-driven entry encodes its own
+    # limit price + sizing. Kill-switch / drawdown / concurrent-limit
+    # still apply. Default OFF until paper round-trips validate.
+    chili_autotrader_options_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_ENABLED"),
+        description=(
+            "When true, the autotrader will execute pattern_imminent alerts "
+            "with asset_type='options' via the Robinhood options adapter. "
+            "Requires CHILI_OPTIONS_VENUE_ROBINHOOD_ENABLED=true at the "
+            "venue layer."
+        ),
+    )
     chili_autotrader_assumed_capital_usd: float = Field(
         default=25_000.0,
         ge=100.0,
