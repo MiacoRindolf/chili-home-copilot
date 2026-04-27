@@ -20,7 +20,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, validates
 
 from ..db import Base
 
@@ -104,6 +104,86 @@ class Trade(Base):
     # Phase 2C: neural mesh correlation id for the entry signal. Plasticity uses
     # this to look up the activation path on close.
     mesh_entry_correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
+    # Explicit asset class. Auto-derived by before_insert hook below from
+    # ticker shape + indicator_snapshot. See migration 192 for the backfill rules.
+    asset_kind: Optional[str] = Column(String(20), nullable=True, index=True)
+
+    # Anomaly guards (incident 2026-04-19: Massive provider outage caused 66 crypto rows
+    # to land with entry_price=0 because quote-fetch failed silently and writes proceeded).
+    # These reject obviously-broken writes at the model layer so every code path is covered.
+    # See project memory project_massive_blocked.md for the full incident.
+    @validates("entry_price")
+    def _validate_entry_price(self, key, value):
+        if value is None or value <= 0:
+            raise ValueError(
+                f"trade_anomaly: entry_price must be > 0, got {value!r} "
+                f"(ticker={getattr(self, 'ticker', '?')}, broker_source={getattr(self, 'broker_source', '?')}); "
+                "likely upstream quote failure - caller should fall back to alt provider before writing"
+            )
+        return value
+
+    @validates("exit_price")
+    def _validate_exit_price(self, key, value):
+        # exit_price is Optional - None is fine (open trade), but an explicit 0 or negative is not.
+        if value is not None and value <= 0:
+            raise ValueError(
+                f"trade_anomaly: exit_price must be > 0 when set, got {value!r} "
+                f"(ticker={getattr(self, 'ticker', '?')}, trade_id={getattr(self, 'id', 'new')})"
+            )
+        return value
+
+    @validates("quantity")
+    def _validate_quantity(self, key, value):
+        if value is None or value <= 0:
+            raise ValueError(
+                f"trade_anomaly: quantity must be > 0, got {value!r} "
+                f"(ticker={getattr(self, 'ticker', '?')})"
+            )
+        return value
+
+
+
+# Auto-derive Trade.asset_kind on insert (incident 2026-04: trade 392 was an
+# option premium written with ticker=SPY entry_price=4.01 and managed as if
+# it were the SPY underlying because the writer didn't tag asset class).
+from sqlalchemy import event as _sa_event
+
+
+@_sa_event.listens_for(Trade, "before_insert")
+def _trade_derive_asset_kind(_mapper, _conn, target: Trade) -> None:
+    if target.asset_kind:
+        return  # caller set it explicitly - respect that
+    snap = target.indicator_snapshot or {}
+    # Some legacy callers stringify the JSON.
+    if isinstance(snap, str):
+        try:
+            import json as _json
+            snap = _json.loads(snap)
+        except Exception:
+            snap = {}
+    ba = snap.get("breakout_alert") if isinstance(snap, dict) else None
+    if isinstance(ba, str):
+        try:
+            import json as _json
+            ba = _json.loads(ba)
+        except Exception:
+            ba = None
+    is_option = False
+    if isinstance(snap, dict) and snap.get("option_meta"):
+        is_option = True
+    elif isinstance(ba, dict):
+        if (ba.get("asset_type") or "").lower() == "options":
+            is_option = True
+        elif ba.get("option_meta"):
+            is_option = True
+    if is_option:
+        target.asset_kind = "option"
+        return
+    t = (target.ticker or "").upper()
+    if t.endswith("-USD") or (len(t) > 3 and t.endswith("USD") and "-" not in t and t[:-3].isalnum()):
+        target.asset_kind = "crypto"
+        return
+    target.asset_kind = "equity"
 
 
 class AutoTraderRun(Base):

@@ -2545,6 +2545,47 @@ def _run_intraday_signal_sweep_job():
         db.close()
 
 
+
+def _run_brain_batch_reconciler_job() -> None:
+    """Periodic sweep of stale brain_batch_jobs (orphaned 'running' rows).
+
+    See ``app/services/trading/brain_batch_reconciler.py``. Runs every 5 min in
+    the scheduler-worker container. Idempotent and cheap (single UPDATE per
+    case, indexed on the predicate columns).
+    """
+    try:
+        from ..db import SessionLocal
+        from .trading.brain_batch_reconciler import reconcile_stale_batch_jobs
+        sess = SessionLocal()
+        try:
+            reconcile_stale_batch_jobs(sess)
+        finally:
+            sess.close()
+    except Exception as e:
+        logger.warning("[scheduler_job] brain_batch_reconciler failed: %s", e)
+
+
+def _run_promotion_evidence_audit_job() -> None:
+    """Daily promotion-evidence audit (logs summary; auto-demote is opt-in).
+
+    See ``app/services/trading/promotion_evidence_audit.py``. Pure-read by
+    default. Set ``CHILI_PATTERN_EVIDENCE_AUTO_DEMOTE=true`` to actually
+    demote evidence-incomplete promoted patterns; ``CHILI_PATTERN_EVIDENCE_AUTO_DEMOTE_DRY_RUN=true``
+    logs what would be demoted without applying.
+    """
+    if not bool(getattr(settings, "chili_pattern_evidence_audit_enabled", True)):
+        return
+    try:
+        from ..db import SessionLocal
+        from .trading.promotion_evidence_audit import run_promotion_evidence_audit
+        sess = SessionLocal()
+        try:
+            run_promotion_evidence_audit(sess)
+        finally:
+            sess.close()
+    except Exception as e:
+        logger.warning("[scheduler_job] promotion_evidence_audit failed: %s", e)
+
 def _run_monitor_decision_review_job():
     """Hourly: fill price_after_1h/4h and was_beneficial on pattern monitor decisions."""
     from ..db import SessionLocal
@@ -3039,6 +3080,25 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=55),
+            )
+
+            _scheduler.add_job(
+                _run_brain_batch_reconciler_job,
+                trigger=IntervalTrigger(minutes=5),
+                id="brain_batch_reconciler",
+                name="Stale brain_batch_jobs reconciler (every 5min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=20),
+            )
+
+            _scheduler.add_job(
+                _run_promotion_evidence_audit_job,
+                trigger=CronTrigger(hour=2, minute=15, timezone="America/Los_Angeles"),
+                id="promotion_evidence_audit",
+                name="Promotion-evidence audit (daily, 02:15 PT)",
+                replace_existing=True,
+                max_instances=1,
             )
 
         if include_heavy:

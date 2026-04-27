@@ -178,9 +178,127 @@ def _base() -> str:
     return settings.massive_base_url.rstrip("/")
 
 
+# ---------------------------------------------------------------------------
+# Circuit breaker (incident 2026-04-19: residential IP added to Massive's
+# edge denylist after a volume spike; CHILI's continued retries kept the
+# abuse-trigger pattern hot, so any support-side unblock got re-tripped
+# within hours).
+#
+# Closed   : normal operation, count consecutive connection-class failures.
+# Open     : skip all Massive calls for `cooldown_sec`, return None.
+# Half-open: cooldown elapsed; allow probes through. First success closes
+#            the breaker; first failure re-opens it and resets cooldown.
+#
+# Only "connection-class" failures count (TCP refused, DNS, timeout).
+# HTTP 4xx/5xx mean the upstream IS reachable; those don't trip the breaker.
+# ---------------------------------------------------------------------------
+_breaker_lock = threading.Lock()
+_breaker_state = "closed"  # one of: closed, open, half_open
+_breaker_consecutive_failures = 0
+_breaker_opened_at = 0.0
+_breaker_log_throttle_until = 0.0
+
+
+def _breaker_threshold() -> int:
+    return max(1, int(getattr(settings, "massive_breaker_failure_threshold", 5)))
+
+
+def _breaker_cooldown_sec() -> int:
+    return max(30, int(getattr(settings, "massive_breaker_cooldown_sec", 900)))
+
+
+def _breaker_allow_request() -> bool:
+    """Return True if the call should proceed, False if breaker is open."""
+    global _breaker_state, _breaker_log_throttle_until
+    with _breaker_lock:
+        if _breaker_state in ("closed", "half_open"):
+            return True
+        # state == "open"
+        now = time.time()
+        cooldown = _breaker_cooldown_sec()
+        elapsed = now - _breaker_opened_at
+        if elapsed >= cooldown:
+            _breaker_state = "half_open"
+            logger.info(
+                "[massive] circuit breaker entering half_open after %ds cooldown - probing",
+                int(elapsed),
+            )
+            return True
+        # Still cooling down. Throttle the "skipping" log to once/minute.
+        if now >= _breaker_log_throttle_until:
+            logger.warning(
+                "[massive] circuit breaker OPEN - skipping request (%ds remaining)",
+                int(cooldown - elapsed),
+            )
+            _breaker_log_throttle_until = now + 60
+        return False
+
+
+def _breaker_record_success() -> None:
+    """Reachability succeeded (200 or 404). Closes the breaker."""
+    global _breaker_state, _breaker_consecutive_failures
+    with _breaker_lock:
+        if _breaker_state in ("open", "half_open"):
+            logger.info(
+                "[massive] circuit breaker CLOSED - probe succeeded after %d failures, resuming traffic",
+                _breaker_consecutive_failures,
+            )
+        _breaker_state = "closed"
+        _breaker_consecutive_failures = 0
+
+
+def _breaker_record_failure() -> None:
+    """Connection-class failure. May trip or re-open the breaker."""
+    global _breaker_state, _breaker_consecutive_failures, _breaker_opened_at
+    with _breaker_lock:
+        _breaker_consecutive_failures += 1
+        if _breaker_state == "half_open":
+            _breaker_state = "open"
+            _breaker_opened_at = time.time()
+            logger.warning(
+                "[massive] circuit breaker re-OPEN - probe failed, cooldown %ds",
+                _breaker_cooldown_sec(),
+            )
+            return
+        if (
+            _breaker_state == "closed"
+            and _breaker_consecutive_failures >= _breaker_threshold()
+        ):
+            _breaker_state = "open"
+            _breaker_opened_at = time.time()
+            logger.error(
+                "[massive] circuit breaker OPEN - %d consecutive connection failures, "
+                "skipping calls for %ds (prevents abuse-trigger re-block)",
+                _breaker_consecutive_failures,
+                _breaker_cooldown_sec(),
+            )
+
+
+def get_breaker_status() -> dict[str, Any]:
+    """Observability hook for status endpoints."""
+    with _breaker_lock:
+        now = time.time()
+        cooldown = _breaker_cooldown_sec()
+        return {
+            "state": _breaker_state,
+            "consecutive_failures": _breaker_consecutive_failures,
+            "opened_at": _breaker_opened_at,
+            "cooldown_remaining_sec": (
+                max(0, int(cooldown - (now - _breaker_opened_at)))
+                if _breaker_state == "open"
+                else 0
+            ),
+            "threshold": _breaker_threshold(),
+            "cooldown_sec": cooldown,
+        }
+
+
+
 def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """GET with retries, backoff, and rate-limit awareness."""
     if not _api_key():
+        return None
+    if not _breaker_allow_request():
         return None
     if params is None:
         params = {}
@@ -192,6 +310,7 @@ def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | Non
             _bump("requests")
             resp = _session.get(url, params=params, timeout=15)
             if resp.status_code == 200:
+                _breaker_record_success()
                 return resp.json()
             if resp.status_code == 429:
                 _bump("rate_limits")
@@ -208,6 +327,7 @@ def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | Non
             _bump("errors")
             if resp.status_code == 404:
                 logger.debug(f"[massive] 404 for {url}")
+                _breaker_record_success()
                 return _NOT_FOUND
             logger.warning(f"[massive] {resp.status_code} for {url}: {resp.text[:200]}")
             return None
@@ -217,6 +337,7 @@ def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | Non
                 time.sleep(_BACKOFF_BASE)
                 continue
             logger.warning(f"[massive] request failed after {_MAX_RETRIES + 1} attempts: {e}")
+            _breaker_record_failure()
             return None
     return None
 

@@ -12323,6 +12323,106 @@ def _migration_176_macro_yield_curve_real(conn) -> None:
 
 
 # (version_id, callable that receives conn and runs migration)
+
+def _migration_191_brain_batch_jobs_lifecycle(conn) -> None:
+    """Add lifecycle columns + 'orphaned' status for periodic reconciler.
+
+    Background: ``brain_batch_jobs`` only had a 4h startup-time sweep; long
+    uptimes accumulated stale 'running' rows (40 of them on 2026-04-27, all
+    from morning, never transitioned). The new periodic reconciler in
+    ``app/services/trading/brain_batch_reconciler.py`` needs:
+
+      - ``heartbeat_at`` so workers can prove liveness during long jobs
+      - ``worker_instance_id`` to correlate orphans with the dead worker
+      - ``final_state_reason`` to distinguish stale_heartbeat vs no_heartbeat
+        vs explicit timeout vs error
+      - ``orphaned_at`` separate from ``ended_at`` to keep audit clarity
+      - ``'orphaned'`` value in chk_bbj_status (drop & recreate the constraint)
+
+    Idempotent: only adds columns/constraints if missing.
+    """
+    if "brain_batch_jobs" not in _tables(conn):
+        return
+    cols = _columns(conn, "brain_batch_jobs")
+    if "heartbeat_at" not in cols:
+        conn.execute(text("ALTER TABLE brain_batch_jobs ADD COLUMN heartbeat_at TIMESTAMP"))
+    if "worker_instance_id" not in cols:
+        conn.execute(text("ALTER TABLE brain_batch_jobs ADD COLUMN worker_instance_id VARCHAR(80)"))
+    if "final_state_reason" not in cols:
+        conn.execute(text("ALTER TABLE brain_batch_jobs ADD COLUMN final_state_reason VARCHAR(120)"))
+    if "orphaned_at" not in cols:
+        conn.execute(text("ALTER TABLE brain_batch_jobs ADD COLUMN orphaned_at TIMESTAMP"))
+    # Index for the reconciler query (status + heartbeat_at + started_at).
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_bbj_running_heartbeat "
+        "ON brain_batch_jobs (status, heartbeat_at, started_at) "
+        "WHERE status = 'running'"
+    ))
+    # Update the status check constraint to allow 'orphaned'.
+    conn.execute(text("ALTER TABLE brain_batch_jobs DROP CONSTRAINT IF EXISTS chk_bbj_status"))
+    conn.execute(text(
+        "ALTER TABLE brain_batch_jobs ADD CONSTRAINT chk_bbj_status "
+        "CHECK (status IN ('queued','running','ok','error','timeout','orphaned'))"
+    ))
+    conn.commit()
+
+
+
+
+def _migration_192_trade_asset_kind(conn) -> None:
+    """Add explicit asset_kind to trading_trades + backfill from existing signals.
+
+    Background: trade 392 wrote ticker=SPY entry_price=4.01 — an option premium
+    being managed as if it's the SPY underlying. The existing ``is_option_trade``
+    helper detects options from ``indicator_snapshot.option_meta`` etc., but it's
+    only consulted at READ time. With no explicit column, query-side filters
+    (e.g., "show me all option trades") have to scan JSONB.
+
+    Backfill rules (most-specific first):
+      * indicator_snapshot.option_meta or breakout_alert.asset_type='options' -> 'option'
+      * ticker LIKE '%-USD' (crypto convention) -> 'crypto'
+      * default -> 'equity'
+
+    CHECK constraint allows the known set; future asset classes (perp/forex)
+    can be added in a follow-up migration.
+
+    Idempotent: only ALTERs if column missing.
+    """
+    if "trading_trades" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_trades")
+    if "asset_kind" not in cols:
+        conn.execute(text("ALTER TABLE trading_trades ADD COLUMN asset_kind VARCHAR(20)"))
+        # Backfill: option detection from indicator_snapshot, crypto from ticker, default equity.
+        conn.execute(text(
+            """
+            UPDATE trading_trades SET asset_kind = 'option'
+            WHERE asset_kind IS NULL
+              AND (
+                indicator_snapshot ? 'option_meta'
+                OR (indicator_snapshot -> 'breakout_alert' ->> 'asset_type') = 'options'
+                OR indicator_snapshot -> 'breakout_alert' ? 'option_meta'
+              )
+            """
+        ))
+        conn.execute(text(
+            "UPDATE trading_trades SET asset_kind = 'crypto' "
+            "WHERE asset_kind IS NULL AND ticker LIKE '%-USD'"
+        ))
+        conn.execute(text(
+            "UPDATE trading_trades SET asset_kind = 'equity' WHERE asset_kind IS NULL"
+        ))
+        conn.execute(text(
+            "ALTER TABLE trading_trades ADD CONSTRAINT chk_trade_asset_kind "
+            "CHECK (asset_kind IN ('equity','option','crypto','forex','perp'))"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_trades_asset_kind ON trading_trades(asset_kind)"
+        ))
+    conn.commit()
+
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -12523,6 +12623,8 @@ MIGRATIONS = [
     ("188_pattern_survival_promote_review_queue", _migration_188_pattern_survival_promote_review_queue),
     ("189_seed_dydx_v4_perp_contracts", _migration_189_seed_dydx_v4_perp_contracts),
     ("190_seed_kraken_futures_perp_contracts", _migration_190_seed_kraken_futures_perp_contracts),
+    ("191_brain_batch_jobs_lifecycle", _migration_191_brain_batch_jobs_lifecycle),
+    ("192_trade_asset_kind", _migration_192_trade_asset_kind),
 ]
 
 

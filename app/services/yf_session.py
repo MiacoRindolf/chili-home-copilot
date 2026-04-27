@@ -99,6 +99,28 @@ _MAX_CACHE_SIZE = 10_000   # 64 GB RAM — keep much more in memory
 _dead_tickers: dict[str, float] = {}
 _dead_lock = threading.Lock()
 
+# Consecutive-empty counter: only mark a ticker dead after N empty results in a
+# row from yfinance, never on the first empty. Reason: when an upstream provider
+# (e.g., Massive/Polygon) is blocked and the priority chain falls back to yf,
+# yf gets hammered and returns empty for many tickers due to throttling. The
+# old "any empty -> mark dead" logic mass-mis-classified live tickers as
+# delisted (incident 2026-04-19, see project_massive_blocked.md). Reset on any
+# non-empty result so a single recovery clears the streak.
+_EMPTY_THRESHOLD = 3
+_empty_counts: dict[str, int] = {}
+_empty_lock = threading.Lock()
+
+
+def _bump_empty(symbol: str) -> int:
+    with _empty_lock:
+        _empty_counts[symbol] = _empty_counts.get(symbol, 0) + 1
+        return _empty_counts[symbol]
+
+
+def _reset_empty(symbol: str) -> None:
+    with _empty_lock:
+        _empty_counts.pop(symbol, None)
+
 
 def _is_crypto(symbol: str) -> bool:
     """Check if a symbol is a crypto ticker."""

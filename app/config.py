@@ -168,6 +168,13 @@ class Settings(BaseSettings):
     # threads (batch OHLCV + snapshot batches + backtests) or logs "Connection pool is full".
     massive_http_pool_connections: int = 128
     massive_http_pool_maxsize: int = 512
+    # Circuit breaker: after N consecutive Massive connection-class failures (e.g.
+    # TCP refused from edge denylist), open breaker and skip calls for cooldown
+    # period. Without this, a residential-IP block triggers ~180 retries/hr that
+    # re-trigger Massive's abuse system and undo any support-side unblock.
+    # See project memory project_massive_blocked.md for the 2026-04 incident.
+    massive_breaker_failure_threshold: int = 5
+    massive_breaker_cooldown_sec: int = 900
 
     # Polygon.io market data (secondary fallback â€” replaces yfinance for speed)
     polygon_api_key: str = ""
@@ -1947,6 +1954,37 @@ class Settings(BaseSettings):
         ge=500.0,
         le=3_600_000.0,
         validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_ERROR_P95_MS"),
+    )
+    # Upper bound on a single sample's lag before we treat it as orphan/bad-data
+    # rather than legitimate lag. Without this, a single broker event with a
+    # stale event_at (clock skew, late delivery, broken upstream) dominates
+    # p95 and pages the operator on phantom 80h lags. Samples above this are
+    # excluded from the percentile and counted in `dropped_outlier_count`.
+    chili_execution_event_lag_max_sample_ms: float = Field(
+        default=600_000.0,  # 10 minutes - real lag should never come close
+        ge=10_000.0,
+        le=86_400_000.0,
+        validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_MAX_SAMPLE_MS"),
+    )
+
+    # Promotion-evidence audit: scan promoted patterns for missing OOS / CPCV /
+    # deflated_sharpe / promotion_gate_passed. Default audit-only (logs the
+    # incomplete set, no mutation). Set chili_pattern_evidence_auto_demote=true
+    # to actually demote them to 'challenged' on the next run. Reading the
+    # report first is strongly recommended — Codex's 2026-04-27 audit found
+    # near-total absence of evidence on the legacy promoted-status set, so
+    # naive auto-demote would stop a lot of live trading at once.
+    chili_pattern_evidence_audit_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_PATTERN_EVIDENCE_AUDIT_ENABLED"),
+    )
+    chili_pattern_evidence_auto_demote: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PATTERN_EVIDENCE_AUTO_DEMOTE"),
+    )
+    chili_pattern_evidence_auto_demote_dry_run: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PATTERN_EVIDENCE_AUTO_DEMOTE_DRY_RUN"),
     )
 
     # P0.8 — drift escalation watchdog. Alerts when the same bracket

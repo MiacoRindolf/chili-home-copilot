@@ -61,6 +61,10 @@ def _error_p95_ms() -> float:
     return float(getattr(settings, "chili_execution_event_lag_error_p95_ms", 60_000.0))
 
 
+def _max_sample_ms() -> float:
+    return float(getattr(settings, "chili_execution_event_lag_max_sample_ms", 600_000.0))
+
+
 @dataclass(frozen=True)
 class EventLagSummary:
     """Frozen-shape gauge output.
@@ -80,6 +84,11 @@ class EventLagSummary:
     error_threshold_ms: float
     breach: str = "ok"
     per_venue: dict[str, dict[str, float | int | None]] = field(default_factory=dict)
+    # Number of rows excluded as orphans (lag > max_sample_ms). Surfaces in
+    # to_dict() so the operator can see if a high count is masking a real
+    # event-pairing bug upstream.
+    dropped_outlier_count: int = 0
+    max_sample_ms: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +103,8 @@ class EventLagSummary:
             "error_threshold_ms": self.error_threshold_ms,
             "breach": self.breach,
             "per_venue": self.per_venue,
+            "dropped_outlier_count": self.dropped_outlier_count,
+            "max_sample_ms": self.max_sample_ms,
         }
 
 
@@ -134,14 +145,21 @@ def measure_execution_event_lag(
         )
         rows = []
 
+    max_sample = _max_sample_ms()
     all_lags: list[float] = []
     per_venue_lags: dict[str, list[float]] = {}
+    dropped_outliers = 0
     for venue, lag_ms in rows:
         try:
             v = float(lag_ms)
         except (TypeError, ValueError):
             continue
         if v <= 0:
+            continue
+        if v > max_sample:
+            # Orphan / bad event_at — exclude from percentile so it cannot
+            # dominate the gauge. Count it for observability.
+            dropped_outliers += 1
             continue
         all_lags.append(v)
         key = venue or "unknown"
@@ -180,6 +198,8 @@ def measure_execution_event_lag(
         error_threshold_ms=error_ms,
         breach=breach,
         per_venue=per_venue,
+        dropped_outlier_count=dropped_outliers,
+        max_sample_ms=max_sample,
     )
 
 
@@ -198,9 +218,10 @@ def run_execution_event_lag_tick(db: Session) -> dict[str, Any]:
     if summary.breach == "error":
         logger.error(
             f"{EXECUTION_EVENT_LAG} lag breach=ERROR p95=%.0fms threshold=%.0fms "
-            "samples=%s lookback=%ss max=%s",
+            "samples=%s lookback=%ss max=%s dropped_outliers=%d",
             summary.p95_ms or 0.0, summary.error_threshold_ms,
             summary.sample_size, summary.lookback_seconds, summary.max_ms,
+            summary.dropped_outlier_count,
         )
     elif summary.breach == "warn":
         logger.warning(
