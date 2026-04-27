@@ -572,30 +572,73 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
     except Exception as e:
         out["execution"]["error"] = str(e)[:200]
 
-    # 4. Diversity — active strategy_family + PnL concentration (Herfindahl)
+    # 4. Diversity — active strategy_family + PnL concentration (Herfindahl).
+    #
+    # Trades that came from broker-sync (tags='robinhood-sync') don't have a
+    # scan_pattern_id because they're operator manual-trades being mirrored,
+    # not signals CHILI emitted. Including them in the family rollup makes
+    # the "unattributed" bucket dominate and fires a false concentration
+    # warning. Split: ``external_unattributed_pnl_30d`` is reported
+    # separately so the operator still sees the manual book; the Herfindahl
+    # is computed ONLY over CHILI-attributed PnL (scan_pattern_id IS NOT
+    # NULL), which is the actual signal-diversity question.
     try:
-        rows = db.execute(
+        # CHILI-attributed PnL: trades that have a scan_pattern_id AND
+        # the matched pattern has a non-NULL hypothesis_family. These
+        # are the rows the brain emitted; the diversity question is
+        # about how concentrated THESE are.
+        chili_rows = db.execute(
             text(
                 """
-                SELECT COALESCE(p.hypothesis_family, 'unknown') AS family,
+                SELECT COALESCE(p.hypothesis_family, 'unclassified') AS family,
                        COALESCE(SUM(t.pnl), 0)::numeric AS pnl_30d
                 FROM trading_trades t
-                LEFT JOIN scan_patterns p ON p.id = t.scan_pattern_id
+                JOIN scan_patterns p ON p.id = t.scan_pattern_id
                 WHERE t.exit_date >= NOW() - INTERVAL '30 days'
                   AND t.pnl IS NOT NULL
                 GROUP BY p.hypothesis_family
                 """
             )
         ).fetchall()
-        families = [{"family": r[0], "pnl_30d": float(r[1] or 0)} for r in rows or []]
-        total_abs = sum(abs(f["pnl_30d"]) for f in families) or 1.0
-        # Herfindahl on the absolute-PnL share. >0.5 = one family dominates.
-        hhi = sum((abs(f["pnl_30d"]) / total_abs) ** 2 for f in families)
+        chili_families = [
+            {"family": r[0], "pnl_30d": float(r[1] or 0)}
+            for r in chili_rows or []
+        ]
+        # External (manual / broker-sync) PnL: trades with no
+        # scan_pattern_id. These are operator manual-trades mirrored
+        # from the broker, not CHILI signals; tracked separately so the
+        # operator still sees the manual book without it skewing
+        # diversity.
+        ext_row = db.execute(
+            text(
+                """
+                SELECT COALESCE(SUM(t.pnl), 0)::numeric,
+                       COUNT(*)::int
+                FROM trading_trades t
+                WHERE t.exit_date >= NOW() - INTERVAL '30 days'
+                  AND t.pnl IS NOT NULL
+                  AND t.scan_pattern_id IS NULL
+                """
+            )
+        ).fetchone()
+        external_pnl = float(ext_row[0] or 0) if ext_row else 0.0
+        external_trades = int(ext_row[1] or 0) if ext_row else 0
+        total_abs = sum(abs(f["pnl_30d"]) for f in chili_families) or 1.0
+        # Herfindahl on absolute-PnL share. >0.5 = one family dominates
+        # within the brain-attributed book.
+        hhi = sum(
+            (abs(f["pnl_30d"]) / total_abs) ** 2
+            for f in chili_families
+        )
         out["diversity"] = {
-            "active_families": len(families),
-            "by_family_30d": sorted(families, key=lambda x: -abs(x["pnl_30d"])),
+            "active_families": len(chili_families),
+            "by_family_30d": sorted(
+                chili_families, key=lambda x: -abs(x["pnl_30d"])
+            ),
+            "external_unattributed_pnl_30d": round(external_pnl, 2),
+            "external_unattributed_trades_30d": external_trades,
             "pnl_herfindahl": round(hhi, 4),
-            "concentration_warning": hhi > 0.5 and len(families) >= 2,
+            "concentration_warning": hhi > 0.5 and len(chili_families) >= 2,
         }
     except Exception as e:
         out["diversity"]["error"] = str(e)[:200]
