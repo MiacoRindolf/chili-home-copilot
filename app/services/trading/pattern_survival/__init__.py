@@ -28,8 +28,18 @@ from .features import (
     snapshot_pattern_features,
     run_pattern_survival_snapshot_job,
 )
+from .training import (
+    backfill_survival_labels,
+    train_survival_classifier,
+    score_pending_features,
+    run_pattern_survival_training_pass,
+)
 
 __all__ = [
     "snapshot_pattern_features",
     "run_pattern_survival_snapshot_job",
+    "backfill_survival_labels",
+    "train_survival_classifier",
+    "score_pending_features",
+    "run_pattern_survival_training_pass",
 ]

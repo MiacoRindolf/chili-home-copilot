@@ -3857,6 +3857,52 @@ def start_scheduler():
                 "[scheduler] failed to register pattern_survival snapshot job"
             )
 
+        # Q2 Task R — pattern-survival training pass (weekly Sun 04:30 PT).
+        # Runs after the regime classifier weekly retrain (Sun 04:15) and
+        # the daily snapshot job. Order matters: the snapshot must have
+        # populated features for the day before the training pass tries
+        # to score them, and the regime retrain must have run before
+        # snapshot so regime_at_snapshot is filled.
+        try:
+            if role in ("all", "web"):
+                def _run_pattern_survival_training_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.trading.pattern_survival import (
+                            run_pattern_survival_training_pass,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_pattern_survival_training_pass(_db)
+                            logger.info(
+                                "[pattern-survival] training pass: %s", res
+                            )
+                        finally:
+                            _db.close()
+                    except Exception:
+                        logger.exception(
+                            "[pattern-survival] training pass failed"
+                        )
+
+                _scheduler.add_job(
+                    _run_pattern_survival_training_job,
+                    trigger=CronTrigger(
+                        day_of_week="sun", hour=4, minute=30,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_survival_training",
+                    name=(
+                        "Pattern-survival weekly training "
+                        "(label backfill + train + score, Sun 04:30 PT)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_survival training job"
+            )
+
         # Q2 Task L — perps ingestion (every hour).
         # Flag-gated by chili_perps_lane_enabled. Iterates over the seeded
         # perp_contracts and writes premium/funding/OI rows to perp_quotes,
