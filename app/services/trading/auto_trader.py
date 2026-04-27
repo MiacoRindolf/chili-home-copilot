@@ -424,6 +424,60 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     return {"ok": True, **out}
 
 
+def _maybe_substitute_with_options(alert: BreakoutAlert, spot: float) -> None:
+    """Phase 3 — when the substitute flag is on, translate a bullish
+    equity alert into a long-call entry by writing option_meta into
+    ``alert.indicator_snapshot`` and flipping ``alert.asset_type`` to
+    'options'. Mutates the in-memory alert; doesn't touch the DB row.
+
+    Skips silently (leaves the alert as equity) when:
+      - Flag is OFF
+      - Alert isn't a bullish stock alert
+      - Option chain is illiquid or no tradable contract exists
+      - Synthesis raises (broker hiccup, etc.)
+    """
+    try:
+        if not bool(getattr(settings, "chili_autotrader_options_substitute_enabled", False)):
+            return
+        if (alert.asset_type or "").lower() != "stock":
+            return
+        # Bullish-only check: target above entry
+        ent = float(alert.entry_price or 0)
+        tgt = float(alert.target_price or 0)
+        if not (ent > 0 and tgt > ent):
+            return
+
+        from .options.synthesis import synthesize_option_meta
+        notional = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 300.0))
+        target_dte = int(getattr(settings, "chili_autotrader_options_substitute_dte", 30))
+        opt_meta = synthesize_option_meta(
+            underlying=str(alert.ticker),
+            spot=float(spot),
+            notional_usd=notional,
+            target_dte=target_dte,
+        )
+        if not opt_meta:
+            return
+
+        snap = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+        snap = dict(snap)  # copy so we don't mutate ORM state inadvertently
+        snap["option_meta"] = opt_meta
+        snap["original_asset_type"] = alert.asset_type
+        alert.indicator_snapshot = snap
+        alert.asset_type = "options"
+        # Override entry_price to the option premium so downstream code
+        # using alert.entry_price as "limit" stays consistent.
+        alert.entry_price = float(opt_meta.get("limit_price") or alert.entry_price)
+        logger.info(
+            "[autotrader_options_substitute] %s -> %s %s %s%s qty=%d limit=%.2f",
+            alert.ticker, alert.ticker,
+            opt_meta["expiration"], opt_meta["strike"], opt_meta["option_type"],
+            opt_meta["quantity"], opt_meta["limit_price"],
+        )
+    except Exception:
+        logger.debug("[autotrader_options_substitute] failed; falling back to equity", exc_info=True)
+
+
 def _process_one_alert(
     db: Session,
     uid: int,
@@ -437,6 +491,12 @@ def _process_one_alert(
         out["skipped"] += 1
         _autotrader_tick_note(out, kind="skipped", reason="no_quote", alert=alert)
         return
+
+    # Phase 3: when the substitute flag is on, mutate this in-memory
+    # equity alert into an options alert. The rule gate's options_path
+    # branch then picks it up just like an explicitly-queued option
+    # alert. No-op when flag is off (leaves the alert as equity).
+    _maybe_substitute_with_options(alert, px)
 
     live = bool(runtime.get("live_orders_effective"))
     open_n = count_autotrader_v1_open(db, uid, paper_mode=not live)
