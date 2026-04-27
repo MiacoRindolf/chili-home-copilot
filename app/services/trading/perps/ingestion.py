@@ -33,7 +33,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from . import venue_binance, venue_dydx_v4, venue_hyperliquid
+from . import (
+    venue_binance,
+    venue_dydx_v4,
+    venue_hyperliquid,
+    venue_kraken_futures,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,7 @@ _VENUE_ADAPTERS = {
     "binance": venue_binance,
     "dydx_v4": venue_dydx_v4,
     "hyperliquid": venue_hyperliquid,
+    "kraken_futures": venue_kraken_futures,
 }
 
 

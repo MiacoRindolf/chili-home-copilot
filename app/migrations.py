@@ -11117,6 +11117,55 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_190_seed_kraken_futures_perp_contracts(conn) -> None:
+    """Q2 follow-up — seed perp_contracts with Kraken Futures perpetuals.
+
+    Kraken Futures is the first centralized US-regulated venue in the
+    perps lane (Hyperliquid + dYdX v4 are both DEXs). Useful for
+    cross-venue funding-rate divergence — when DEX funding diverges
+    from a regulated venue, that's signal beyond what either DEX alone
+    can show.
+
+    Funding cadence: hourly (matches Hyperliquid + dYdX), so
+    funding_interval_hours=1.
+
+    Symbol convention: Kraken uses 'PF_<base>USD' format, with 'XBT'
+    instead of 'BTC' for Bitcoin per Kraken's historical convention.
+    The seed rows use the literal Kraken symbol so the adapter doesn't
+    need to renormalize.
+
+    Idempotent on the existing UNIQUE (symbol, venue) constraint.
+    """
+    from sqlalchemy import text as _text
+
+    seeds = [
+        ("PF_XBTUSD",   "BTC",   "USD"),
+        ("PF_ETHUSD",   "ETH",   "USD"),
+        ("PF_SOLUSD",   "SOL",   "USD"),
+        ("PF_LINKUSD",  "LINK",  "USD"),
+        ("PF_AVAXUSD",  "AVAX",  "USD"),
+        ("PF_MATICUSD", "MATIC", "USD"),
+        ("PF_DOGEUSD",  "DOGE",  "USD"),
+        ("PF_LTCUSD",   "LTC",   "USD"),
+        ("PF_ATOMUSD",  "ATOM",  "USD"),
+        ("PF_ADAUSD",   "ADA",   "USD"),
+        ("PF_ARBUSD",   "ARB",   "USD"),
+        ("PF_OPUSD",    "OP",    "USD"),
+    ]
+    for sym, base, quote in seeds:
+        conn.execute(_text(
+            """
+            INSERT INTO perp_contracts
+                (symbol, venue, base_ccy, quote_ccy,
+                 contract_multiplier, funding_interval_hours,
+                 max_leverage, tradable)
+            VALUES (:s, 'kraken_futures', :b, :q,
+                    1.0, 1, 10.0, TRUE)
+            ON CONFLICT (symbol, venue) DO NOTHING
+            """
+        ), {"s": sym, "b": base, "q": quote})
+
+
 def _migration_189_seed_dydx_v4_perp_contracts(conn) -> None:
     """Q2 follow-up — seed perp_contracts with dYdX v4 perpetuals.
 
@@ -12473,6 +12522,7 @@ MIGRATIONS = [
     ("187_pattern_survival_decision_log", _migration_187_pattern_survival_decision_log),
     ("188_pattern_survival_promote_review_queue", _migration_188_pattern_survival_promote_review_queue),
     ("189_seed_dydx_v4_perp_contracts", _migration_189_seed_dydx_v4_perp_contracts),
+    ("190_seed_kraken_futures_perp_contracts", _migration_190_seed_kraken_futures_perp_contracts),
 ]
 
 
