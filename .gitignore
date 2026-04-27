@@ -93,6 +93,7 @@ parse_out.txt
 _tmp_audit.md
 host-debug-logs/
 
-# Per-task smoke test scripts (kept locally for re-runs but never committed)
+# Per-task smoke test + diagnostic scripts (kept locally, never committed)
 scripts/_smoke_*.py
+scripts/_diag_*.py
 .pr_body.md
