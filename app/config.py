@@ -836,6 +836,19 @@ class Settings(BaseSettings):
     # CHILI_OPTIONS_BUDGET_BYPASS=true (operator-supervised testing).
     chili_options_lane_enabled: bool = False
     chili_options_lane_live: bool = False
+    # Q2.T2: forex lane scaffold (OANDA-first). When OFF (default), all FX
+    # code paths are inert. When ON, paper-only by default (set
+    # chili_forex_lane_live to True for live broker submission). Hard 10:1
+    # effective-leverage cap is always enforced when ON; bypass via
+    # CHILI_FOREX_LEVERAGE_BYPASS=true (testing only).
+    chili_forex_lane_enabled: bool = False
+    chili_forex_lane_live: bool = False
+    # Q2.T3: crypto perps lane scaffold (Binance-first, Bybit slot).
+    # When OFF (default), all perp code paths are inert. When ON, paper
+    # only by default. Funding-rate ingestion runs on schedule when ON
+    # so perp_funding accumulates regardless of trading.
+    chili_perps_lane_enabled: bool = False
+    chili_perps_lane_live: bool = False
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
     chili_regime_classifier_enabled: bool = True
     # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).

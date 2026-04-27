@@ -11117,6 +11117,314 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_182_perps_lane_scaffold(conn) -> None:
+    """Q2.T3 — crypto perps + funding lane scaffold.
+
+    Foundation tables for perpetual futures trading on crypto exchanges:
+
+      * ``perp_contracts`` — registry of tradable perp symbols across
+        venues (Binance, Bybit). Tracks tick size, contract multiplier,
+        funding interval, mark-vs-index spread cap.
+      * ``perp_quotes`` — bid/ask snapshots per contract.
+      * ``perp_funding`` — 8-hour funding rate snapshots (positive =
+        longs pay shorts, negative = shorts pay longs).
+      * ``perp_oi`` — open interest snapshots (USD notional).
+      * ``perp_basis`` — perp price minus underlying spot, in bps.
+        Spot drives via existing trading_snapshots; this records the
+        spread.
+      * ``perp_position`` — open positions, similar shape to fx_position
+        but with funding accruals.
+
+    Flag: ``CHILI_PERPS_LANE_ENABLED=False`` (default).
+    Live: ``CHILI_PERPS_LANE_LIVE=False`` (default).
+    """
+    from sqlalchemy import text
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS perp_contracts (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,              -- e.g. 'BTCUSDT', 'ETHUSDT'
+            venue TEXT NOT NULL,               -- 'binance' | 'bybit'
+            base_ccy TEXT NOT NULL,
+            quote_ccy TEXT NOT NULL,
+            contract_multiplier NUMERIC(14, 6) NOT NULL DEFAULT 1.0,
+            tick_size NUMERIC(14, 8),
+            funding_interval_hours INTEGER NOT NULL DEFAULT 8,
+            max_leverage NUMERIC(8, 2) NOT NULL DEFAULT 10.0,
+            tradable BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (symbol, venue)
+        )
+    """))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS perp_quotes (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            ts TIMESTAMP NOT NULL DEFAULT NOW(),
+            mark_price NUMERIC(20, 8),
+            index_price NUMERIC(20, 8),
+            bid NUMERIC(20, 8),
+            ask NUMERIC(20, 8),
+            spread_bps NUMERIC(10, 4)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_perp_quotes_sym_ts "
+        "ON perp_quotes (symbol, venue, ts DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS perp_funding (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            funding_time TIMESTAMP NOT NULL,
+            funding_rate NUMERIC(14, 8) NOT NULL,  -- e.g. 0.0001 = 0.01% per 8h
+            mark_at_funding NUMERIC(20, 8),
+            ingested_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (symbol, venue, funding_time)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_perp_funding_time "
+        "ON perp_funding (symbol, venue, funding_time DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS perp_oi (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            ts TIMESTAMP NOT NULL DEFAULT NOW(),
+            open_interest NUMERIC(24, 4),       -- in contracts
+            open_interest_usd NUMERIC(24, 2),
+            UNIQUE (symbol, venue, ts)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_perp_oi_sym_ts "
+        "ON perp_oi (symbol, venue, ts DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS perp_basis (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            ts TIMESTAMP NOT NULL DEFAULT NOW(),
+            perp_price NUMERIC(20, 8),
+            spot_price NUMERIC(20, 8),
+            basis_bps NUMERIC(10, 4),           -- (perp - spot) / spot * 10000
+            UNIQUE (symbol, venue, ts)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_perp_basis_sym_ts "
+        "ON perp_basis (symbol, venue, ts DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS perp_position (
+            id BIGSERIAL PRIMARY KEY,
+            user_id INTEGER,
+            symbol TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('long', 'short')),
+            contracts NUMERIC(20, 8) NOT NULL,
+            entry_price NUMERIC(20, 8) NOT NULL,
+            mark_at_entry NUMERIC(20, 8),
+            stop_price NUMERIC(20, 8),
+            take_profit_price NUMERIC(20, 8),
+            opened_at TIMESTAMP DEFAULT NOW(),
+            closed_at TIMESTAMP,
+            close_price NUMERIC(20, 8),
+            close_reason TEXT,
+            realized_pnl_usd NUMERIC(20, 2),
+            funding_accrued_usd NUMERIC(20, 4) DEFAULT 0,
+            strategy_family TEXT,
+            is_paper BOOLEAN NOT NULL DEFAULT TRUE
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_perp_position_user_open "
+        "ON perp_position (user_id, closed_at) "
+        "WHERE closed_at IS NULL"
+    ))
+
+    # Seed the major perpetual contracts on Binance.
+    conn.execute(text("""
+        INSERT INTO perp_contracts (symbol, venue, base_ccy, quote_ccy)
+        VALUES
+            ('BTCUSDT',   'binance', 'BTC',   'USDT'),
+            ('ETHUSDT',   'binance', 'ETH',   'USDT'),
+            ('SOLUSDT',   'binance', 'SOL',   'USDT'),
+            ('BNBUSDT',   'binance', 'BNB',   'USDT'),
+            ('XRPUSDT',   'binance', 'XRP',   'USDT'),
+            ('AVAXUSDT',  'binance', 'AVAX',  'USDT'),
+            ('LINKUSDT',  'binance', 'LINK',  'USDT'),
+            ('MATICUSDT', 'binance', 'MATIC', 'USDT'),
+            ('DOGEUSDT',  'binance', 'DOGE',  'USDT')
+        ON CONFLICT (symbol, venue) DO NOTHING
+    """))
+
+    conn.commit()
+
+
+def _migration_181_forex_lane_scaffold(conn) -> None:
+    """Q2.T2 — forex lane scaffold (OANDA-first).
+
+    Foundation tables for FX trading:
+
+      * ``fx_pairs`` — registry of tradable currency pairs with pip
+        size, swap rates (long/short), session-active flag, leverage
+        cap.
+      * ``fx_quotes`` — tick-level bid/ask plus session tag at the
+        time of quote (Sydney / Tokyo / London / NY / overlap).
+      * ``fx_economic_calendar`` — upcoming + recent macro events
+        ingested from Trading Economics or ForexFactory; used for
+        news-blackout windows and news-fade entries.
+      * ``fx_cot`` — weekly CFTC Commitments of Traders for
+        non-commercial positioning z-scores.
+      * ``fx_position`` — open FX positions (managed separately from
+        ``trading_trades`` because of pip math + swap accruals).
+
+    Default flag: ``CHILI_FOREX_LANE_ENABLED=False``. When ON, paper-
+    only by default (``CHILI_FOREX_LANE_LIVE=False``). Hard 10:1
+    effective-leverage cap regardless of broker allowance.
+    """
+    from sqlalchemy import text
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fx_pairs (
+            id BIGSERIAL PRIMARY KEY,
+            pair TEXT NOT NULL UNIQUE,         -- e.g. 'EUR_USD', 'USD_JPY'
+            base_ccy TEXT NOT NULL,
+            quote_ccy TEXT NOT NULL,
+            pip_size NUMERIC(12, 8) NOT NULL DEFAULT 0.0001,
+            pip_decimals SMALLINT NOT NULL DEFAULT 4,
+            min_trade_units INTEGER NOT NULL DEFAULT 1,
+            max_leverage NUMERIC(8, 2) NOT NULL DEFAULT 10.0,
+            swap_long_pips NUMERIC(10, 4),     -- triple on Wednesday
+            swap_short_pips NUMERIC(10, 4),
+            sessions_active TEXT[] DEFAULT
+              ARRAY['sydney','tokyo','london','ny']::TEXT[],
+            tradable BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_fx_pairs_tradable "
+        "ON fx_pairs (tradable, pair)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fx_quotes (
+            id BIGSERIAL PRIMARY KEY,
+            pair TEXT NOT NULL,
+            ts TIMESTAMP NOT NULL DEFAULT NOW(),
+            session_tag TEXT,                  -- sydney|tokyo|london|ny|tokyo_london|london_ny
+            bid NUMERIC(14, 6) NOT NULL,
+            ask NUMERIC(14, 6) NOT NULL,
+            spread_pips NUMERIC(8, 2),
+            venue TEXT NOT NULL DEFAULT 'oanda'
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_fx_quotes_pair_ts "
+        "ON fx_quotes (pair, ts DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fx_economic_calendar (
+            id BIGSERIAL PRIMARY KEY,
+            event_id TEXT,                     -- vendor-specific id
+            ccy TEXT NOT NULL,                 -- e.g. 'USD', 'EUR'
+            event_name TEXT NOT NULL,
+            scheduled_at TIMESTAMP NOT NULL,
+            importance SMALLINT,               -- 1-3 (3 = high impact)
+            actual NUMERIC(20, 6),
+            forecast NUMERIC(20, 6),
+            previous NUMERIC(20, 6),
+            source TEXT,                       -- 'trading_economics' | 'forex_factory'
+            ingested_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (event_id, source)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_fx_economic_calendar_scheduled "
+        "ON fx_economic_calendar (scheduled_at, importance DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fx_cot (
+            id BIGSERIAL PRIMARY KEY,
+            ccy TEXT NOT NULL,                 -- 'EUR', 'JPY', 'GBP', etc.
+            report_date DATE NOT NULL,
+            non_commercial_long INTEGER,
+            non_commercial_short INTEGER,
+            non_commercial_net INTEGER,
+            non_commercial_z_score NUMERIC(10, 4),  -- vs 1y window
+            commercial_long INTEGER,
+            commercial_short INTEGER,
+            ingested_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE (ccy, report_date)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_fx_cot_ccy_date "
+        "ON fx_cot (ccy, report_date DESC)"
+    ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fx_position (
+            id BIGSERIAL PRIMARY KEY,
+            user_id INTEGER,
+            pair TEXT NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('long', 'short')),
+            units INTEGER NOT NULL,
+            entry_price NUMERIC(14, 6) NOT NULL,
+            entry_session TEXT,
+            stop_price NUMERIC(14, 6),
+            take_profit_price NUMERIC(14, 6),
+            opened_at TIMESTAMP DEFAULT NOW(),
+            closed_at TIMESTAMP,
+            close_price NUMERIC(14, 6),
+            close_reason TEXT,                 -- stop|target|manual|news_blackout|swap_purge
+            realized_pnl_usd NUMERIC(14, 2),
+            swap_accrued_usd NUMERIC(14, 4),
+            strategy_family TEXT,
+            is_paper BOOLEAN NOT NULL DEFAULT TRUE,
+            venue TEXT NOT NULL DEFAULT 'oanda'
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_fx_position_user_open "
+        "ON fx_position (user_id, closed_at) "
+        "WHERE closed_at IS NULL"
+    ))
+
+    # Seed the major + minor FX pair list so OANDA adapter has somewhere to point.
+    conn.execute(text("""
+        INSERT INTO fx_pairs (pair, base_ccy, quote_ccy, pip_size, pip_decimals)
+        VALUES
+            ('EUR_USD', 'EUR', 'USD', 0.0001, 4),
+            ('GBP_USD', 'GBP', 'USD', 0.0001, 4),
+            ('USD_JPY', 'USD', 'JPY', 0.01,   2),
+            ('USD_CHF', 'USD', 'CHF', 0.0001, 4),
+            ('AUD_USD', 'AUD', 'USD', 0.0001, 4),
+            ('USD_CAD', 'USD', 'CAD', 0.0001, 4),
+            ('NZD_USD', 'NZD', 'USD', 0.0001, 4),
+            ('EUR_GBP', 'EUR', 'GBP', 0.0001, 4),
+            ('EUR_JPY', 'EUR', 'JPY', 0.01,   2),
+            ('GBP_JPY', 'GBP', 'JPY', 0.01,   2)
+        ON CONFLICT (pair) DO NOTHING
+    """))
+
+    conn.commit()
+
+
 def _migration_180_options_lane_scaffold(conn) -> None:
     """Q2.T1 — options lane scaffold.
 
@@ -11690,6 +11998,8 @@ MIGRATIONS = [
     ("178_strategy_parameter_adaptive", _migration_178_strategy_parameter_adaptive),
     ("179_portfolio_sizing_log", _migration_179_portfolio_sizing_log),
     ("180_options_lane_scaffold", _migration_180_options_lane_scaffold),
+    ("181_forex_lane_scaffold", _migration_181_forex_lane_scaffold),
+    ("182_perps_lane_scaffold", _migration_182_perps_lane_scaffold),
 ]
 
 
