@@ -1970,6 +1970,21 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LLM_REVALIDATION_ENABLED"),
     )
+    # Task KK — gate the autotrader's crypto path. Robinhood crypto trades
+    # 24/7 with no PDT regulation, so when this flag is ON the rule gate
+    # accepts asset_type='crypto' alerts, skips the RTH/extended-hours
+    # session check for them, and the venue adapter routes to RH's crypto
+    # order endpoints. Default OFF so behavior is identical to pre-KK
+    # until the operator has done a paper round-trip.
+    chili_autotrader_crypto_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_CRYPTO_ENABLED"),
+        description=(
+            "When true, the autotrader will execute imminent-pattern entries "
+            "for crypto-USD tickers via Robinhood's crypto endpoints, "
+            "bypassing market-hours and PDT gates. Equity behavior unchanged."
+        ),
+    )
     chili_autotrader_assumed_capital_usd: float = Field(
         default=25_000.0,
         ge=100.0,

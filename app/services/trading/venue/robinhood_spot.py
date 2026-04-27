@@ -66,6 +66,22 @@ def _to_ticker(product_id: str) -> str:
     return s
 
 
+def _is_crypto_product(product_id: str) -> bool:
+    """True when ``product_id`` looks like a crypto-USD pair ('BTC-USD').
+
+    The convention CHILI carries through alerts/trades is ``BASE-USD`` for
+    crypto. Equity tickers don't contain a dash. Numeric-prefixed tickers
+    (like the 4-digit Asian ADRs that surface as e.g. ``9988-USD`` on
+    some feeds) are excluded — that pattern is data noise, not a real
+    crypto pair.
+    """
+    s = (product_id or "").strip().upper()
+    if not s.endswith("-USD"):
+        return False
+    base = s[:-4]
+    return bool(base) and not base.isdigit()
+
+
 def _now_freshness(max_age: float = 15.0) -> FreshnessMeta:
     return FreshnessMeta(
         retrieved_at_utc=datetime.now(timezone.utc),
@@ -205,6 +221,44 @@ class RobinhoodSpotAdapter(VenueAdapter):
     def get_best_bid_ask(self, product_id: str) -> tuple[Optional[NormalizedTicker], FreshnessMeta]:
         ticker = _to_ticker(product_id)
         fresh = _now_freshness()
+
+        # Task KK — crypto bases (BTC, ETH, …) aren't in the equity
+        # universe; rh.stocks.get_quotes returns garbage for them. Route
+        # through the crypto endpoint so the monitor's live price tracks
+        # the venue we'd actually fill on.
+        if _is_crypto_product(product_id):
+            try:
+                from ...broker_service import get_crypto_quote
+                q = get_crypto_quote(ticker) or {}
+                bid = _sf(q.get("bid_price"))
+                ask = _sf(q.get("ask_price"))
+                last = _sf(q.get("mark_price")) or _sf(q.get("high_price"))
+                if bid and ask and bid > 0 and ask > 0:
+                    mid = (bid + ask) / 2.0
+                    spread_abs = ask - bid
+                    spread_bps = (spread_abs / mid) * 10_000 if mid > 0 else None
+                elif last and last > 0:
+                    mid = last
+                    bid = bid or last
+                    ask = ask or last
+                    spread_abs = (ask or last) - (bid or last)
+                    spread_bps = (spread_abs / mid) * 10_000 if mid > 0 and spread_abs else 0.0
+                else:
+                    return None, fresh
+                return NormalizedTicker(
+                    product_id=ticker,
+                    bid=bid, ask=ask, mid=mid,
+                    spread_abs=spread_abs, spread_bps=spread_bps,
+                    last_price=last,
+                    last_size=None, bid_size=None, ask_size=None,
+                    base_volume_24h=_sf(q.get("volume")),
+                    quote_volume_24h=None,
+                    freshness=fresh,
+                ), fresh
+            except Exception as e:
+                logger.warning("[rh_adapter] get_best_bid_ask crypto(%s) failed: %s", ticker, e)
+                return None, fresh
+
         try:
             import robin_stocks.robinhood as rh
 
@@ -277,11 +331,26 @@ class RobinhoodSpotAdapter(VenueAdapter):
         price; missing / halted symbols are omitted. Falls back to per-symbol
         ``get_quote_price`` on any library exception.
         """
-        tickers = sorted({(_to_ticker(p) or "").upper() for p in product_ids if p})
+        # Task KK — split crypto product_ids out and route per-symbol via
+        # the crypto-aware path. Equity tickers stay batched. The output
+        # is keyed on the bare base (BTC), not the original BTC-USD pair —
+        # callers normalize with _to_ticker on either side so this stays
+        # consistent with the equity behavior.
+        crypto_inputs = [p for p in product_ids if p and _is_crypto_product(p)]
+        equity_inputs = [p for p in product_ids if p and not _is_crypto_product(p)]
+        out: dict[str, float] = {}
+        for cp in crypto_inputs:
+            base = _to_ticker(cp)
+            px = self.get_quote_price(cp)
+            if px is not None:
+                out[base] = float(px)
+        if not equity_inputs:
+            return out
+
+        tickers = sorted({(_to_ticker(p) or "").upper() for p in equity_inputs if p})
         tickers = [t for t in tickers if t]
         if not tickers:
-            return {}
-        out: dict[str, float] = {}
+            return out
         try:
             import robin_stocks.robinhood as rh
 
@@ -383,6 +452,11 @@ class RobinhoodSpotAdapter(VenueAdapter):
         market_hours_override: Optional[str] = None,
         extended_hours_override: Optional[bool] = None,
     ) -> dict[str, Any]:
+        # Task KK — branch on -USD suffix. Equity orders strip the suffix
+        # (`BTC-USD` would never get here) and call rh.orders.order().
+        # Crypto orders pass the bare base ('BTC') to the rh crypto
+        # endpoints, which trade 24/7 and skip the market-hours plumbing.
+        is_crypto = _is_crypto_product(product_id)
         ticker = _to_ticker(product_id)
         qty = float(base_size)
 
@@ -410,32 +484,52 @@ class RobinhoodSpotAdapter(VenueAdapter):
                 venue=_VENUE,
                 source="rh_place_market",
                 client_order_id=client_order_id,
-                raw_payload={"ticker": ticker, "side": side.lower(), "qty": qty},
+                raw_payload={
+                    "ticker": ticker, "side": side.lower(), "qty": qty,
+                    "is_crypto": is_crypto,
+                },
             )
         except Exception:
             pass
 
-        from ...broker_service import place_buy_order, place_sell_order
-
         side_l = side.lower()
-        if side_l == "buy":
-            result = place_buy_order(
-                ticker,
-                qty,
-                order_type="market",
-                market_hours_override=market_hours_override,
-                extended_hours_override=extended_hours_override,
+
+        if is_crypto:
+            from ...broker_service import (
+                place_crypto_buy_order, place_crypto_sell_order,
             )
-        elif side_l == "sell":
-            result = place_sell_order(
-                ticker,
-                qty,
-                order_type="market",
-                market_hours_override=market_hours_override,
-                extended_hours_override=extended_hours_override,
-            )
+
+            if side_l == "buy":
+                result = place_crypto_buy_order(
+                    ticker, qty, order_type="market",
+                )
+            elif side_l == "sell":
+                result = place_crypto_sell_order(
+                    ticker, qty, order_type="market",
+                )
+            else:
+                return {"ok": False, "error": f"unknown side: {side}"}
         else:
-            return {"ok": False, "error": f"unknown side: {side}"}
+            from ...broker_service import place_buy_order, place_sell_order
+
+            if side_l == "buy":
+                result = place_buy_order(
+                    ticker,
+                    qty,
+                    order_type="market",
+                    market_hours_override=market_hours_override,
+                    extended_hours_override=extended_hours_override,
+                )
+            elif side_l == "sell":
+                result = place_sell_order(
+                    ticker,
+                    qty,
+                    order_type="market",
+                    market_hours_override=market_hours_override,
+                    extended_hours_override=extended_hours_override,
+                )
+            else:
+                return {"ok": False, "error": f"unknown side: {side}"}
 
         if result.get("ok") and client_order_id:
             idempotency_store.remember(
