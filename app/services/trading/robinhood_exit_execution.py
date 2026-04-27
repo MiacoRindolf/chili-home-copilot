@@ -756,6 +756,70 @@ def submit_robinhood_trade_exit(
 
     if not res.get("ok"):
         broker_error = str(res.get("error") or "sell_failed")
+
+        # Restart-recovery for duplicate_client_order_id. Caused by:
+        # the previous attempt successfully submitted to the broker, the
+        # idempotency store committed (its own DB session, auto-commits),
+        # but the trade-row write that follows in this function never
+        # reached commit — typically because the container restarted in
+        # between. Without recovery we'd loop forever every monitor tick
+        # because the deterministic client_order_id (atv1-<id>-exit-<reason>)
+        # never changes. Look up the broker_order_id we already have and
+        # back-fill the trade row so the bracket reconciler can take over.
+        if broker_error == "duplicate_client_order_id":
+            try:
+                from .venue import idempotency_store
+                recovered_oid = idempotency_store.resolve_broker_id(client_order_id)
+            except Exception:
+                logger.exception(
+                    "[rh_exit] resolve_broker_id failed during dup recovery trade=%s",
+                    trade.id,
+                )
+                recovered_oid = None
+            if recovered_oid:
+                _mark_pending_exit_order(
+                    db,
+                    trade,
+                    order_id=str(recovered_oid),
+                    status="submitted",
+                    exit_reason=exit_reason,
+                    requested_at=now,
+                    limit_price=limit_price,
+                )
+                _record_autotrader_run(
+                    db,
+                    trade,
+                    decision=f"{audit_decision_prefix}_recovered",
+                    reason=f"recovered_from_dup_coid:{recovered_oid[:16]}",
+                    snapshot=_audit_snapshot(
+                        trade,
+                        exit_reason=exit_reason,
+                        monitor_exit_meta=monitor_exit_meta,
+                        extra={
+                            "client_order_id": client_order_id,
+                            "broker_order_id": str(recovered_oid),
+                            "recovery_path": "duplicate_coid_idempotency_lookup",
+                        },
+                    ),
+                )
+                logger.info(
+                    "[rh_exit] dup-coid recovery: trade=%s coid=%s -> broker_oid=%s "
+                    "(reconciler will sync state)",
+                    trade.id, client_order_id, recovered_oid,
+                )
+                return {
+                    "ok": True,
+                    "state": "working",
+                    "broker_state": "submitted",
+                    "order_id": str(recovered_oid),
+                    "recovered": True,
+                }
+            # Memory-cache-only duplicate (DB write of the prior submission
+            # failed). No broker_order_id to recover; honest fall-through to
+            # the real error path so the operator sees the failure and
+            # something can be done. The next tick will retry naturally
+            # because the in-memory key TTL is 300s.
+
         # Always emit an audit row so monitor rejections show up in
         # ``trading_autotrader_runs`` instead of only in broker logs —
         # otherwise repeated silent rejections look like a stopped job.
