@@ -11117,6 +11117,64 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_188_pattern_survival_promote_review_queue(conn) -> None:
+    """K Phase 3 Step S.7 — promote-gate review queue table.
+
+    Phase 3.C (the promote-gate consumer) holds candidates that passed
+    CPCV but have a low predicted survival probability. Per the
+    resolved Q1 from the Phase 3 design doc (Task T), the held
+    candidates stay at ``lifecycle_stage='candidate'`` and are tracked
+    via this dedicated queue rather than introducing a new
+    ``lifecycle='review'`` state. Avoids surgery on the
+    ``chk_sp_lifecycle`` CHECK constraint that's referenced across the
+    trading brain.
+
+    Lifecycle of a row:
+      INSERT when CPCV-passes a candidate AND predicted survival
+        is below promote_gate_threshold (queued_at = NOW(),
+        review_decision = NULL).
+      UPDATE when the operator clears the queue: review_decision in
+        ('approve' | 'reject'), review_decided_at = NOW(),
+        decided_by = '<operator>'.
+
+    The CPCV-promotion path (S.8 wiring) checks this table BEFORE
+    promoting: if a row exists with review_decision IS NULL or 'reject',
+    the candidate stays at lifecycle='candidate'. Only when a row has
+    review_decision='approve' (or no row exists at all) does promotion
+    proceed.
+
+    Idempotent — IF NOT EXISTS guard.
+    """
+    from sqlalchemy import text as _text
+
+    conn.execute(_text(
+        """
+        CREATE TABLE IF NOT EXISTS pattern_survival_promote_review_queue (
+            id BIGSERIAL PRIMARY KEY,
+            scan_pattern_id INTEGER NOT NULL,
+            queued_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            predicted_p DOUBLE PRECISION,
+            cpcv_passed_at TIMESTAMP,
+            review_decision TEXT,
+            review_decided_at TIMESTAMP,
+            decided_by TEXT,
+            notes TEXT
+        )
+        """
+    ))
+    conn.execute(_text(
+        "CREATE INDEX IF NOT EXISTS pattern_survival_promote_review_pattern_idx "
+        "ON pattern_survival_promote_review_queue (scan_pattern_id, queued_at DESC)"
+    ))
+    # Pending-only partial index keeps the operator's "what's waiting?"
+    # query cheap regardless of historical queue size.
+    conn.execute(_text(
+        "CREATE INDEX IF NOT EXISTS pattern_survival_promote_review_pending_idx "
+        "ON pattern_survival_promote_review_queue (queued_at DESC) "
+        "WHERE review_decision IS NULL"
+    ))
+
+
 def _migration_187_pattern_survival_decision_log(conn) -> None:
     """K Phase 3 Step S.1 — decision log table + at-risk streak column.
 
@@ -12363,6 +12421,7 @@ MIGRATIONS = [
     ("185_backfill_pattern_families", _migration_185_backfill_pattern_families),
     ("186_demote_lifecycle_active_drift", _migration_186_demote_lifecycle_active_drift),
     ("187_pattern_survival_decision_log", _migration_187_pattern_survival_decision_log),
+    ("188_pattern_survival_promote_review_queue", _migration_188_pattern_survival_promote_review_queue),
 ]
 
 

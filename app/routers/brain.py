@@ -554,6 +554,46 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
     except Exception as e:
         out["learning"]["error"] = str(e)[:200]
 
+    # K Phase 3 S.6 — survival-classifier visibility on the morning strip.
+    #
+    # ``survival_at_risk_count`` — patterns whose latest prediction is
+    #   below the demote threshold. Always populated when the
+    #   classifier is producing predictions; doesn't depend on the
+    #   demote consumer being flagged on. Lets the operator see
+    #   "what would the gate be acting on?" in shadow mode.
+    #
+    # ``in_promote_review_queue`` — count of pending rows in
+    #   pattern_survival_promote_review_queue (review_decision IS NULL).
+    #   Always populated; non-zero means the operator has candidates
+    #   waiting on manual review.
+    try:
+        threshold = float(getattr(
+            settings, "chili_pattern_survival_demote_threshold", 0.30
+        ))
+        # Latest prediction per pattern, then count below threshold.
+        row = db.execute(text(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (scan_pattern_id)
+                       scan_pattern_id, survival_probability
+                FROM pattern_survival_predictions
+                ORDER BY scan_pattern_id, snapshot_date DESC, id DESC
+            ) latest
+            WHERE survival_probability < :t
+            """
+        ), {"t": threshold}).fetchone()
+        out["learning"]["survival_at_risk_count"] = int(row[0] or 0) if row else 0
+
+        row = db.execute(text(
+            "SELECT COUNT(*) FROM pattern_survival_promote_review_queue "
+            "WHERE review_decision IS NULL"
+        )).fetchone()
+        out["learning"]["in_promote_review_queue"] = (
+            int(row[0] or 0) if row else 0
+        )
+    except Exception as e:
+        out["learning"]["survival_metrics_error"] = str(e)[:200]
+
     # 3. Execution — broker session age + recent 401 hint
     try:
         row = db.execute(
