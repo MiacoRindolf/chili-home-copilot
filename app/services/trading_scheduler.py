@@ -1704,6 +1704,20 @@ def _run_auto_trader_monitor_job():
     db = SessionLocal()
     try:
         tick_auto_trader_monitor(db)
+        # Task PP Phase 5 — option-aware exit pass. Runs at the same
+        # cadence as the equity exit monitor; flag-gated internally so
+        # this is a no-op when chili_autotrader_options_exit_monitor_enabled
+        # is OFF. Independent of the equity monitor — option Trade rows
+        # carry option_meta in indicator_snapshot and need different
+        # exit logic (DTE / premium-based, not stop_loss / take_profit
+        # on the underlying).
+        try:
+            from .trading.options.exit_monitor import run_options_exit_pass
+            opt_summary = run_options_exit_pass(db)
+            if opt_summary.get("triggered", 0) > 0 or opt_summary.get("errors", 0) > 0:
+                logger.info("[scheduler] options_exit_pass: %s", opt_summary)
+        except Exception:
+            logger.exception("[scheduler] options_exit_pass failed (non-fatal)")
     except Exception:
         logger.exception("[scheduler] auto_trader monitor failed")
     finally:
