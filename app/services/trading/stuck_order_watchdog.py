@@ -175,6 +175,19 @@ def _try_cancel(adapter: Any, t: Trade) -> dict[str, Any]:
 
 def _process_one(db: Session, t: Trade, now: datetime) -> str:
     """Process one stuck-order candidate. Returns a short outcome string."""
+    # KKK -- skip option trades. The robinhood spot adapter cannot query
+    # option order IDs (those go through rh.options.*, not rh.orders.*),
+    # so adapter.get_order(broker_order_id) returns None for an option
+    # order even when the broker filled it. The watchdog then stamps
+    # the trade rejected/unknown. Phase 5 options exit monitor and
+    # broker_sync (GGG revive + MMM stale-skip) reconcile option
+    # positions correctly; this watchdog should leave them alone.
+    try:
+        from .autopilot_scope import is_option_trade
+        if is_option_trade(t):
+            return "skipped_option_trade"
+    except Exception:
+        pass
     submit_time = _effective_submit_time(t)
     if submit_time is None:
         return "no_submit_time"
@@ -207,18 +220,37 @@ def _process_one(db: Session, t: Trade, now: datetime) -> str:
         return "get_order_error"
 
     if order_normalized is None:
-        # Broker doesn't know about this order id any more. Treat as rejected
-        # so the rule gate releases the open-position slot.
-        logger.critical(
-            "[stuck_order_watchdog] trade=%s broker_order=%s unknown at venue; "
-            "marking rejected after %ss",
-            t.id, t.broker_order_id, int(elapsed.total_seconds()),
-        )
-        t.status = "rejected"
-        t.broker_status = "unknown"
-        t.last_broker_sync = datetime.utcnow()
-        db.commit()
-        return "unknown_at_venue_rejected"
+        # KKK -- broker get_order returned None. This is NOT a confirmed
+        # rejection -- it can mean (1) transient broker lookup glitch,
+        # (2) wrong-typed adapter (options/crypto via spot adapter), or
+        # (3) the order really vanished. Only stamp "rejected" when
+        # elapsed > 10x the normal timeout AND the trade has been retried.
+        # Otherwise leave broker_status="unknown" so broker_sync (with
+        # GGG revive) can reconcile if the broker actually filled.
+        long_elapsed = elapsed > timeout * 10
+        if long_elapsed:
+            logger.critical(
+                "[stuck_order_watchdog] trade=%s broker_order=%s unknown at venue "
+                "for >10x timeout (%ss); marking rejected (KKK guard)",
+                t.id, t.broker_order_id, int(elapsed.total_seconds()),
+            )
+            t.status = "rejected"
+            t.broker_status = "unknown"
+            t.last_broker_sync = datetime.utcnow()
+            db.commit()
+            return "unknown_at_venue_rejected"
+        else:
+            # Just record the lookup-uncertainty; trade stays open. broker_sync
+            # GGG revive will reconcile if the position is actually held.
+            logger.warning(
+                "[stuck_order_watchdog] trade=%s broker_order=%s unknown at venue "
+                "after %ss; deferring rejection (KKK guard) -- broker_sync will reconcile",
+                t.id, t.broker_order_id, int(elapsed.total_seconds()),
+            )
+            t.broker_status = "unknown"
+            t.last_broker_sync = datetime.utcnow()
+            db.commit()
+            return "unknown_at_venue_deferred"
 
     broker_status = (order_normalized.status or "").lower()
     # Step 2: if the broker already has a terminal state, just mirror it.
