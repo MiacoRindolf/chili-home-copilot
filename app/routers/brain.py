@@ -519,7 +519,9 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
                   COUNT(*) FILTER (WHERE updated_at >= NOW() - INTERVAL '7 days'
                                    AND lifecycle_stage IN ('promoted','live'))         AS promoted_recent,
                   COUNT(*) FILTER (WHERE updated_at >= NOW() - INTERVAL '7 days'
-                                   AND lifecycle_stage = 'challenged')                 AS demoted_recent
+                                   AND lifecycle_stage = 'challenged')                 AS demoted_recent,
+                  COUNT(*) FILTER (WHERE lifecycle_stage = 'live'
+                                   AND active = FALSE)                                 AS live_but_inactive
                 FROM scan_patterns
                 """
             )
@@ -529,6 +531,7 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
             live = int(row[1] or 0)
             evaluated = int(row[4] or 0)
             total_active = promoted + live
+            live_inactive = int(row[7] or 0)
             out["learning"] = {
                 "promoted": promoted,
                 "live": live,
@@ -540,6 +543,13 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
                 ) if total_active > 0 else 0.0,
                 "promoted_last_7d": int(row[5] or 0),
                 "demoted_last_7d": int(row[6] or 0),
+                # Q2 Task Q: lifecycle vs active drift detector. Should
+                # always be 0 in steady state — non-zero means a pattern
+                # is "live" per the lifecycle but inactive per the
+                # scanner. Migration 186 cleans up the existing drift;
+                # this metric catches any new drift early.
+                "live_but_inactive": live_inactive,
+                "lifecycle_active_drift_warning": live_inactive > 0,
             }
     except Exception as e:
         out["learning"]["error"] = str(e)[:200]

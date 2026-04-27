@@ -11117,6 +11117,50 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_186_demote_lifecycle_active_drift(conn) -> None:
+    """Q2 Task Q — repair lifecycle vs active drift on never-validated patterns.
+
+    Diagnosis: 17 of 18 patterns with lifecycle_stage='live' had
+    active=False, plus last_backtest_at IS NULL, plus trade_count=0,
+    plus confidence <= 0.2. They were promoted via the seed path
+    (origin='web_discovered') but never validated through the backtest
+    pipeline. The scanner only evaluates active=True patterns, so they
+    sat silent — taking up a live slot in operator visibility while
+    contributing nothing.
+
+    The underlying code-path bug (promotion writes lifecycle_stage but
+    not active=True consistently, OR a later demotion path writes
+    active=False without dropping lifecycle_stage) is tracked
+    separately as tech debt. This migration repairs the existing
+    drifted rows so KPI counts are honest going forward.
+
+    Conservative criteria: only repair patterns that meet ALL of:
+      * lifecycle_stage='live' AND active=False  (the contradiction)
+      * trade_count = 0                          (never produced a trade)
+      * last_backtest_at IS NULL                 (never validated)
+    Demoted to lifecycle_stage='candidate' so the existing backtest
+    queue picks them up. If they pass backtest, the normal promotion
+    path will move them back to live with active=True.
+
+    Idempotent. Patterns that have ANY trade history or backtest
+    record are left untouched — repairing those requires per-pattern
+    operator review, not a bulk migration.
+    """
+    from sqlalchemy import text as _text
+
+    conn.execute(_text(
+        """
+        UPDATE scan_patterns
+        SET lifecycle_stage = 'candidate',
+            lifecycle_changed_at = NOW()
+        WHERE lifecycle_stage = 'live'
+          AND active = FALSE
+          AND COALESCE(trade_count, 0) = 0
+          AND last_backtest_at IS NULL
+        """
+    ))
+
+
 def _migration_185_backfill_pattern_families(conn) -> None:
     """Q2 Task P — backfill scan_patterns.hypothesis_family by name keyword.
 
@@ -12253,6 +12297,7 @@ MIGRATIONS = [
     ("183_pattern_survival_meta_classifier", _migration_183_pattern_survival_meta_classifier),
     ("184_seed_hyperliquid_perp_contracts", _migration_184_seed_hyperliquid_perp_contracts),
     ("185_backfill_pattern_families", _migration_185_backfill_pattern_families),
+    ("186_demote_lifecycle_active_drift", _migration_186_demote_lifecycle_active_drift),
 ]
 
 
