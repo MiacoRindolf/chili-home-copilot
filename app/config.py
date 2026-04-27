@@ -849,6 +849,14 @@ class Settings(BaseSettings):
     # so perp_funding accumulates regardless of trading.
     chili_perps_lane_enabled: bool = False
     chili_perps_lane_live: bool = False
+    # Q2 Task K: pattern-survival meta-classifier. When OFF (default), all
+    # meta-classifier code paths are inert — feature collection, prediction
+    # writes, and downstream consumers all skip. When ON, the daily snapshot
+    # job populates pattern_survival_features. Live wiring into demotion /
+    # sizing decisions is gated separately by
+    # chili_pattern_survival_decisions_enabled (Phase 3, default OFF).
+    chili_pattern_survival_classifier_enabled: bool = False
+    chili_pattern_survival_decisions_enabled: bool = False
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
     chili_regime_classifier_enabled: bool = True
     # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).

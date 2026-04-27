@@ -11117,6 +11117,115 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_183_pattern_survival_meta_classifier(conn) -> None:
+    """Q2 Task K — meta-classifier scaffold for pattern survival prediction.
+
+    This migration scaffolds the data plane for an offline supervised model
+    that predicts whether a candidate / promoted ScanPattern will survive
+    the next 30 days of live exposure (continue trading + maintain positive
+    expectancy + not get demoted by drift). Today the lifecycle treats every
+    pattern symmetrically — promoted → live → maybe demoted later. The
+    meta-classifier gives us a *forward-looking* probability so the brain
+    can de-risk pre-emptively instead of waiting for the realized loss.
+
+    Two tables:
+
+      * ``pattern_survival_features`` — point-in-time feature snapshots,
+        keyed (scan_pattern_id, snapshot_date). Features include the
+        pattern's recent hit_rate, expectancy, age_days, regime affinity,
+        CPCV promotion confidence, recent live PnL slope, and family
+        diversity context. One row per (pattern, day) — small table.
+
+      * ``pattern_survival_predictions`` — per-snapshot probability output
+        from the trained classifier, plus the ground-truth label backfilled
+        30 days later. ``label_resolved_at`` IS NULL until the 30d window
+        closes; the trainer joins live to features to update labels.
+
+    Both tables are flag-gated by chili_pattern_survival_classifier_enabled
+    (default OFF). Reads always work; writes only happen when the flag is
+    on. Phase 1 ships as feature collection only — no model training, no
+    decisions wired anywhere. Phase 2 (separate task) trains LightGBM,
+    Phase 3 wires the score into the demotion / sizing decision.
+    """
+    from sqlalchemy import text as _text
+
+    conn.execute(_text(
+        """
+        CREATE TABLE IF NOT EXISTS pattern_survival_features (
+            id BIGSERIAL PRIMARY KEY,
+            scan_pattern_id INTEGER NOT NULL,
+            snapshot_date DATE NOT NULL,
+            -- Pattern lifecycle context
+            pattern_lifecycle TEXT,            -- candidate | live | challenged | demoted
+            age_days INTEGER,
+            promoted_at TIMESTAMP,
+            -- Recent realized performance (rolling 30d)
+            trades_30d INTEGER,
+            hit_rate_30d DOUBLE PRECISION,
+            expectancy_30d_pct DOUBLE PRECISION,
+            sharpe_30d DOUBLE PRECISION,
+            max_drawdown_30d_pct DOUBLE PRECISION,
+            pnl_slope_14d DOUBLE PRECISION,    -- linear regression slope of cum PnL over last 14d
+            -- CPCV evidence
+            cpcv_dsr DOUBLE PRECISION,
+            cpcv_pbo DOUBLE PRECISION,
+            cpcv_n_paths INTEGER,
+            cpcv_promotion_confident BOOLEAN,
+            -- Regime / diversity
+            regime_at_snapshot TEXT,
+            family_concentration_herfindahl DOUBLE PRECISION,
+            family_active_count INTEGER,
+            -- Drift signals
+            feature_psi_max DOUBLE PRECISION,  -- max PSI across input features
+            recert_overdue BOOLEAN,
+            -- Free-form additional features
+            features_json JSONB,
+            CONSTRAINT pattern_survival_features_unique
+                UNIQUE (scan_pattern_id, snapshot_date)
+        );
+        CREATE INDEX IF NOT EXISTS pattern_survival_features_pattern_idx
+            ON pattern_survival_features (scan_pattern_id, snapshot_date DESC);
+        CREATE INDEX IF NOT EXISTS pattern_survival_features_date_idx
+            ON pattern_survival_features (snapshot_date DESC);
+        """
+    ))
+
+    conn.execute(_text(
+        """
+        CREATE TABLE IF NOT EXISTS pattern_survival_predictions (
+            id BIGSERIAL PRIMARY KEY,
+            feature_id BIGINT NOT NULL REFERENCES pattern_survival_features(id)
+                ON DELETE CASCADE,
+            scan_pattern_id INTEGER NOT NULL,
+            snapshot_date DATE NOT NULL,
+            -- Model identity
+            model_name TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            trained_at TIMESTAMP,
+            -- Prediction (0..1: probability the pattern survives the next 30d)
+            survival_probability DOUBLE PRECISION NOT NULL,
+            decision_threshold DOUBLE PRECISION,
+            predicted_label BOOLEAN,
+            -- Backfilled outcome (NULL until horizon closes)
+            label_horizon_days INTEGER NOT NULL DEFAULT 30,
+            label_resolved_at TIMESTAMP,
+            actual_survived BOOLEAN,
+            actual_demote_reason TEXT,
+            -- Diagnostics
+            shap_top_features JSONB,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS pattern_survival_predictions_pattern_idx
+            ON pattern_survival_predictions (scan_pattern_id, snapshot_date DESC);
+        CREATE INDEX IF NOT EXISTS pattern_survival_predictions_unresolved_idx
+            ON pattern_survival_predictions (label_resolved_at)
+            WHERE label_resolved_at IS NULL;
+        CREATE INDEX IF NOT EXISTS pattern_survival_predictions_model_idx
+            ON pattern_survival_predictions (model_name, model_version);
+        """
+    ))
+
+
 def _migration_182_perps_lane_scaffold(conn) -> None:
     """Q2.T3 — crypto perps + funding lane scaffold.
 
@@ -12000,6 +12109,7 @@ MIGRATIONS = [
     ("180_options_lane_scaffold", _migration_180_options_lane_scaffold),
     ("181_forex_lane_scaffold", _migration_181_forex_lane_scaffold),
     ("182_perps_lane_scaffold", _migration_182_perps_lane_scaffold),
+    ("183_pattern_survival_meta_classifier", _migration_183_pattern_survival_meta_classifier),
 ]
 
 

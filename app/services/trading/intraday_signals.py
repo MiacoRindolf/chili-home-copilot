@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
@@ -120,8 +120,52 @@ def scan_opening_range_breakout(
     return signals[:10]
 
 
+def _resolve_momentum_rvol_min(db: Optional[Session]) -> float:
+    """Q2 Task J — adaptive rvol_min for momentum_continuation gate.
+
+    Default 0.8 (current behavior). Bounds [0.3, 5.0] keep the learner
+    from pushing the gate into nonsense territory: below 0.3 we're
+    accepting setups with no relative-volume confirmation; above 5.0 we
+    need a five-bagger volume spike to trade, which would silence the
+    scanner entirely.
+    """
+    default = 0.8
+    if db is None:
+        return default
+    try:
+        from .strategy_parameter import (
+            ParameterSpec, get_parameter, register_parameter,
+        )
+        register_parameter(
+            db,
+            ParameterSpec(
+                strategy_family="momentum_continuation",
+                parameter_key="rvol_min",
+                initial_value=default,
+                min_value=0.3,
+                max_value=5.0,
+                description=(
+                    "Minimum relative volume to allow a momentum_continuation "
+                    "signal. Pull-back-to-EMA setups without a volume "
+                    "confirmation tend to fade; the learner adapts this "
+                    "from realized 15m signal outcomes."
+                ),
+            ),
+        )
+        v = get_parameter(
+            db, "momentum_continuation", "rvol_min", default=default,
+        )
+        if v is None:
+            return default
+        return float(max(0.3, min(5.0, v)))
+    except Exception:
+        return default
+
+
 def scan_momentum_continuation(
     tickers: list[str] | None = None,
+    *,
+    db: Optional[Session] = None,
 ) -> list[dict[str, Any]]:
     """Find stocks/crypto in strong intraday momentum pulling back to EMA support.
 
@@ -132,6 +176,8 @@ def scan_momentum_continuation(
 
     if tickers is None:
         tickers = list(DEFAULT_SCAN_TICKERS)[:30] + list(DEFAULT_CRYPTO_TICKERS)[:10]
+
+    rvol_min = _resolve_momentum_rvol_min(db)
 
     signals = []
     for ticker in tickers:
@@ -161,7 +207,7 @@ def scan_momentum_continuation(
                     prior_vol = float(volume.iloc[-40:-10].mean()) if len(volume) >= 40 else recent_vol
                     rvol = round(recent_vol / prior_vol, 2) if prior_vol > 0 else 1.0
 
-                    if mom_pct > 1.0 and rvol >= 0.8:
+                    if mom_pct > 1.0 and rvol >= rvol_min:
                         signals.append({
                             "ticker": ticker,
                             "price": round(last_close, 4 if ticker.endswith("-USD") else 2),
@@ -170,6 +216,7 @@ def scan_momentum_continuation(
                             "pullback_pct": round(pullback_to_ema9, 2),
                             "momentum_pct": round(mom_pct, 2),
                             "rvol": rvol,
+                            "rvol_min_gate": rvol_min,
                             "direction": "long",
                             "signal_type": "momentum_continuation",
                             "timeframe": "15m",
@@ -207,7 +254,7 @@ def run_intraday_signal_sweep(
         results["orb_signals"] = []
 
     try:
-        momentum = scan_momentum_continuation()
+        momentum = scan_momentum_continuation(db=db)
         results["momentum_signals"] = momentum
     except Exception as e:
         logger.warning("[intraday] Momentum scan failed: %s", e)

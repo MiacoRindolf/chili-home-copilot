@@ -18,9 +18,18 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-SNAPSHOT_LOOKBACK = 10
+SNAPSHOT_LOOKBACK = 10  # marker-q2j
 STALE_SECONDS_DEFAULT = 7200
 MIN_SNAPS_FOR_TRAJECTORY = 3
+
+# Default RSI overbought threshold; can be overridden via the
+# StrategyParameter registry (family="setup_vitals", key="rsi_overbought").
+# Q2 Task J — adaptive threshold. Reads through get_parameter so the
+# learner can nudge it when realized outcomes show 70 is too tight or
+# too loose for the current regime. The 95.0 ceiling and 50.0 floor
+# guard against the learner pushing RSI into nonsense territory.
+_DEFAULT_RSI_OVERBOUGHT = 70.0
+_RSI_OVERBOUGHT_BOUNDS = (50.0, 95.0)
 
 
 @dataclass
@@ -94,17 +103,62 @@ def _normalized_slope(values: list[float | None]) -> float:
     return float(np.clip(slope * len(arr) / (scale * max(len(arr), 1)), -1.0, 1.0))
 
 
-def _rsi_zone(rsi: float | None) -> str:
+def _resolve_rsi_overbought(db: Optional[Session]) -> float:
+    """Resolve adaptive RSI overbought threshold via StrategyParameter, default 70.
+
+    Best-effort; on any failure returns the static default so the vitals
+    pipeline never breaks because of a config-table read miss.
+    """
+    if db is None:
+        return _DEFAULT_RSI_OVERBOUGHT
+    try:
+        from .strategy_parameter import (
+            ParameterSpec, get_parameter, register_parameter,
+        )
+        register_parameter(
+            db,
+            ParameterSpec(
+                strategy_family="setup_vitals",
+                parameter_key="rsi_overbought",
+                initial_value=_DEFAULT_RSI_OVERBOUGHT,
+                min_value=_RSI_OVERBOUGHT_BOUNDS[0],
+                max_value=_RSI_OVERBOUGHT_BOUNDS[1],
+                description=(
+                    "RSI(14) threshold above which a setup is flagged as "
+                    "overbought / overextension-prone. Adapts when realized "
+                    "outcomes show 70 is mis-tuned for the current regime."
+                ),
+            ),
+        )
+        v = get_parameter(
+            db, "setup_vitals", "rsi_overbought",
+            default=_DEFAULT_RSI_OVERBOUGHT,
+        )
+        if v is None:
+            return _DEFAULT_RSI_OVERBOUGHT
+        # Defensive clamp — never trust the DB to obey its own bounds.
+        return float(max(_RSI_OVERBOUGHT_BOUNDS[0],
+                         min(_RSI_OVERBOUGHT_BOUNDS[1], v)))
+    except Exception:
+        return _DEFAULT_RSI_OVERBOUGHT
+
+
+def _rsi_zone(rsi: float | None, overbought: float = _DEFAULT_RSI_OVERBOUGHT) -> str:
     if rsi is None:
         return "unknown"
-    if rsi >= 70:
+    if rsi >= overbought:
         return "overbought"
     if rsi <= 30:
         return "oversold"
     return "neutral"
 
 
-def _compute_vitals_from_flats(flats: list[dict[str, Any]], *, source: str) -> SetupVitals:
+def _compute_vitals_from_flats(
+    flats: list[dict[str, Any]],
+    *,
+    source: str,
+    db: Optional[Session] = None,
+) -> SetupVitals:
     """Derive scores from ordered list of flat indicator dicts (oldest -> newest)."""
     if not flats:
         return SetupVitals(source=source)
@@ -167,11 +221,13 @@ def _compute_vitals_from_flats(flats: list[dict[str, Any]], *, source: str) -> S
             elif ps[-1] < ps[0] and rs[-1] > rs[0] + 2:
                 divergences.append({"type": "bullish", "pair": "price_rsi", "note": "price down, RSI stronger"})
 
+    rsi_overbought_threshold = _resolve_rsi_overbought(db)
     trajectory_details: dict[str, Any] = {
         "rsi_14": {
             "slope": rsi_slope,
-            "zone": _rsi_zone(rsi_last),
+            "zone": _rsi_zone(rsi_last, overbought=rsi_overbought_threshold),
             "direction": "falling" if rsi_slope < -0.15 else "rising" if rsi_slope > 0.15 else "flat",
+            "overbought_threshold": rsi_overbought_threshold,
         },
         "macd_hist": {
             "slope": macd_slope,
@@ -188,7 +244,7 @@ def _compute_vitals_from_flats(flats: list[dict[str, Any]], *, source: str) -> S
     }
 
     degradation_signals: list[str] = []
-    if rsi_last and rsi_last > 70 and rsi_slope < -0.1:
+    if rsi_last and rsi_last > rsi_overbought_threshold and rsi_slope < -0.1:
         degradation_signals.append("rsi_falling_from_overbought")
     if macd_slope < -0.2 and momentum_score < 0:
         degradation_signals.append("macd_hist_weakening")
@@ -247,7 +303,12 @@ def load_snapshot_flats_chronological(
     return out
 
 
-def compute_vitals_from_ohlcv(ticker: str, bar_interval: str) -> SetupVitals:
+def compute_vitals_from_ohlcv(
+    ticker: str,
+    bar_interval: str,
+    *,
+    db: Optional[Session] = None,
+) -> SetupVitals:
     """Fallback: full OHLCV + indicator_core arrays."""
     from .market_data import fetch_ohlcv_df
     from .indicator_core import compute_all_from_df
@@ -287,15 +348,15 @@ def compute_vitals_from_ohlcv(ticker: str, bar_interval: str) -> SetupVitals:
             "bb_pct_b": bbp,
         }
         flats.append(flat)
-    return _compute_vitals_from_flats(flats, source="ohlcv")
+    return _compute_vitals_from_flats(flats, source="ohlcv", db=db)
 
 
 def compute_setup_vitals(db: Session, ticker: str, bar_interval: str) -> SetupVitals:
     """Compute vitals: prefer snapshot history; fallback to OHLCV."""
     flats = load_snapshot_flats_chronological(db, ticker, bar_interval, limit=SNAPSHOT_LOOKBACK)
     if len(flats) >= MIN_SNAPS_FOR_TRAJECTORY:
-        return _compute_vitals_from_flats(flats, source="snapshots")
-    return compute_vitals_from_ohlcv(ticker, bar_interval)
+        return _compute_vitals_from_flats(flats, source="snapshots", db=db)
+    return compute_vitals_from_ohlcv(ticker, bar_interval, db=db)
 
 
 def merge_direction_into_flat(flat: dict[str, Any], vitals: SetupVitals) -> dict[str, Any]:
