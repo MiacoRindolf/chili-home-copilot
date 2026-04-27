@@ -4,20 +4,25 @@ Phase 3 of the options integration. Lets the autotrader translate a
 bullish equity pattern_imminent alert into a long-call option entry
 without operator pre-filling option metadata.
 
+The tunable parameters (DTE target, max spread, etc.) are NOT
+hardcoded — they're registered in the StrategyParameter ledger
+(family='autotrader_options') so the brain's learning loop can adapt
+them from realized outcomes the same way it adapts confidence_floor
+in Q2.T4. Env values (``chili_autotrader_options_*``) are first-run
+bootstraps; once the parameter exists in the DB, the DB value wins.
+
 Design choices for the minimum viable version:
 
 * **Direction**: always bullish (long call). The autotrader doesn't
   fire bearish equity entries today (no short selling), so the only
-  direction available is bullish. Phase 4 / future work can add put
-  synthesis for bearish patterns once the autotrader supports them.
+  direction available is bullish.
 * **Strike**: ATM (closest available strike at-or-above the current
   spot). ATM has the most reliable liquidity + Greeks behave
-  predictably. Future work: skew toward OTM for higher leverage.
-* **Expiration**: nearest tradable expiration ~30 DTE out. Far enough
-  that theta isn't catastrophic, near enough that gamma matters.
+  predictably.
+* **Expiration**: nearest tradable expiration to the brain-tuned DTE
+  target.
 * **Quantity**: notional / (premium × 100), minimum 1 contract.
-* **Liquidity check**: reject if ask is None / 0, or if spread > 15%
-  of mid. Bad liquidity = bad fill = avoid.
+* **Liquidity check**: reject if spread > brain-tuned max spread.
 """
 from __future__ import annotations
 
@@ -25,7 +30,64 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from sqlalchemy.orm import Session
+
 logger = logging.getLogger(__name__)
+
+# StrategyParameter family used for all option synthesis + exit knobs.
+# Keep this stable — the learning loop's per-family aggregations key on
+# it, and renaming would orphan the historical adaptation curve.
+STRATEGY_FAMILY = "autotrader_options"
+
+
+def _register_synthesis_parameters(db: Session) -> None:
+    """Idempotent registration of the synthesis params. Bootstraps with
+    env values on first call; subsequent calls no-op when the rows
+    already exist (the DB value is authoritative thereafter).
+    """
+    try:
+        from ....config import settings
+        from ..strategy_parameter import ParameterSpec, register_parameter
+
+        register_parameter(db, ParameterSpec(
+            strategy_family=STRATEGY_FAMILY,
+            parameter_key="synthesis_target_dte",
+            initial_value=float(getattr(settings, "chili_autotrader_options_substitute_dte", 30)),
+            min_value=7.0, max_value=90.0,
+            description=(
+                "Target days-to-expiration for substituted long calls. "
+                "Lower = less theta but more gamma exposure. The brain "
+                "adapts within [7, 90] from realized PnL of substituted "
+                "entries vs the equity alternative they replaced."
+            ),
+        ))
+        register_parameter(db, ParameterSpec(
+            strategy_family=STRATEGY_FAMILY,
+            parameter_key="synthesis_max_spread_pct",
+            initial_value=15.0,
+            min_value=3.0, max_value=30.0,
+            description=(
+                "Maximum bid-ask spread (% of mid) below which a "
+                "synthesized contract is considered tradable. Tighter "
+                "= cleaner fills, fewer eligible alerts. Brain adapts "
+                "from realized fill quality (entry slippage) vs the "
+                "rejected-eligible-pool size."
+            ),
+        ))
+        register_parameter(db, ParameterSpec(
+            strategy_family=STRATEGY_FAMILY,
+            parameter_key="synthesis_strike_increment",
+            initial_value=5.0,
+            min_value=1.0, max_value=10.0,
+            description=(
+                "Strike rounding increment when picking ATM. SPY/QQQ "
+                "have $5 strikes far from spot; small caps have $1. "
+                "Brain adapts per-ticker (scope=ticker) from "
+                "find_contract retry count."
+            ),
+        ))
+    except Exception as e:
+        logger.debug("[options_synth] _register_synthesis_parameters failed: %s", e)
 
 
 def _pick_expiration(adapter, underlying: str, target_dte: int = 30) -> Optional[str]:
@@ -72,14 +134,18 @@ def _pick_strike(spot: float, increment: float = 5.0) -> float:
 
 def synthesize_option_meta(
     *,
+    db: Session,
     underlying: str,
     spot: float,
     notional_usd: float,
-    target_dte: int = 30,
-    max_spread_pct: float = 15.0,
 ) -> Optional[dict[str, Any]]:
     """Build an ``option_meta`` dict from an equity context, or None to
     skip (illiquid, no chain, etc.).
+
+    Tunables (DTE target, max spread, strike increment) come from the
+    StrategyParameter ledger (family='autotrader_options'). The first
+    call seeds them from env; subsequent calls trust the DB value the
+    brain's learning loop has adapted from realized outcomes.
 
     Returned dict carries the fields the rule gate validates +
     `_execute_broker_buy` reads:
@@ -91,13 +157,35 @@ def synthesize_option_meta(
       synthesis_source = 'equity_substitute'
       synthesis_target_dte
       synthesis_spread_pct
+      synthesis_spot_at_pick
     """
     sym = (underlying or "").strip().upper()
     if not sym or spot <= 0 or notional_usd <= 0:
         return None
 
-    # Lazy import — robin_stocks may not be ready in test contexts.
+    # Lazy imports — robin_stocks may not be ready in test contexts.
     from ..venue.robinhood_options import RobinhoodOptionsAdapter
+    from ....config import settings
+    from ..strategy_parameter import get_parameter
+
+    _register_synthesis_parameters(db)
+
+    target_dte = int(get_parameter(
+        db, STRATEGY_FAMILY, "synthesis_target_dte",
+        default=float(getattr(settings, "chili_autotrader_options_substitute_dte", 30)),
+    ) or 30)
+    max_spread_pct = float(get_parameter(
+        db, STRATEGY_FAMILY, "synthesis_max_spread_pct",
+        default=15.0,
+    ) or 15.0)
+    strike_increment = float(get_parameter(
+        db, STRATEGY_FAMILY, "synthesis_strike_increment",
+        scope="ticker", scope_value=sym,
+        default=float(get_parameter(
+            db, STRATEGY_FAMILY, "synthesis_strike_increment",
+            default=5.0,
+        ) or 5.0),
+    ) or 5.0)
 
     adapter = RobinhoodOptionsAdapter()
     expiration = _pick_expiration(adapter, sym, target_dte=target_dte)
@@ -105,7 +193,7 @@ def synthesize_option_meta(
         logger.info("[options_synth] %s: no expiration ~%dDTE; skipping", sym, target_dte)
         return None
 
-    target_strike = _pick_strike(spot, increment=5.0)
+    target_strike = _pick_strike(spot, increment=strike_increment)
     contract = adapter.find_contract(sym, expiration, target_strike, "call")
     if not contract:
         # Try $1 increments around target as fallback for low-priced names.
@@ -142,8 +230,7 @@ def synthesize_option_meta(
         )
         return None
 
-    # Limit price = ask (cross the spread to fill cleanly). For smoke
-    # safety the operator-set limit_price overrides via opt_meta.
+    # Limit price = ask (cross the spread to fill cleanly).
     limit_price = ask
     cost_per_contract_usd = limit_price * 100.0
     contracts = max(1, int(notional_usd // cost_per_contract_usd))
@@ -157,6 +244,7 @@ def synthesize_option_meta(
         "quantity": int(contracts),
         "synthesis_source": "equity_substitute",
         "synthesis_target_dte": target_dte,
+        "synthesis_max_spread_pct": max_spread_pct,
         "synthesis_spread_pct": round(spread_pct, 3),
         "synthesis_spot_at_pick": round(spot, 4),
     }

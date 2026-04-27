@@ -478,12 +478,19 @@ services:
         condition: service_healthy
     deploy:
       resources:
+        # 2026-04-27 — bumped 4G → 10G + 4 → 6 CPU. scheduler-worker
+        # was at 95% RAM (3.65/4G) before adding options work
+        # (synthesis chain queries hit RH chains every tick + exit
+        # monitor adds another sweep over open option positions).
+        # Match brain-worker's 8G envelope, slightly higher to give
+        # the option chain queries headroom. Same shape as KK's
+        # postgres/brain-worker bump pattern.
         limits:
-          cpus: "4.0"
-          memory: 4G
+          cpus: "6.0"
+          memory: 10G
         reservations:
-          cpus: "1.0"
-          memory: 1G
+          cpus: "1.5"
+          memory: 2G
 
 # ── Named volumes ───────────────────────────────────────────────────
 # Phase E.2: chili_dispatch_clones holds repos the brain clones on demand

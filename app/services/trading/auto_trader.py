@@ -424,11 +424,15 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     return {"ok": True, **out}
 
 
-def _maybe_substitute_with_options(alert: BreakoutAlert, spot: float) -> None:
+def _maybe_substitute_with_options(db: Session, alert: BreakoutAlert, spot: float) -> None:
     """Phase 3 — when the substitute flag is on, translate a bullish
     equity alert into a long-call entry by writing option_meta into
     ``alert.indicator_snapshot`` and flipping ``alert.asset_type`` to
     'options'. Mutates the in-memory alert; doesn't touch the DB row.
+
+    Synthesis tunables (DTE target, max spread, etc.) come from the
+    StrategyParameter ledger so the brain's learning loop adapts them
+    from realized outcomes — no hardcoded values.
 
     Skips silently (leaves the alert as equity) when:
       - Flag is OFF
@@ -449,12 +453,11 @@ def _maybe_substitute_with_options(alert: BreakoutAlert, spot: float) -> None:
 
         from .options.synthesis import synthesize_option_meta
         notional = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 300.0))
-        target_dte = int(getattr(settings, "chili_autotrader_options_substitute_dte", 30))
         opt_meta = synthesize_option_meta(
+            db=db,
             underlying=str(alert.ticker),
             spot=float(spot),
             notional_usd=notional,
-            target_dte=target_dte,
         )
         if not opt_meta:
             return
@@ -496,7 +499,7 @@ def _process_one_alert(
     # equity alert into an options alert. The rule gate's options_path
     # branch then picks it up just like an explicitly-queued option
     # alert. No-op when flag is off (leaves the alert as equity).
-    _maybe_substitute_with_options(alert, px)
+    _maybe_substitute_with_options(db, alert, px)
 
     live = bool(runtime.get("live_orders_effective"))
     open_n = count_autotrader_v1_open(db, uid, paper_mode=not live)
