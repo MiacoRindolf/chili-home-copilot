@@ -1214,8 +1214,32 @@ def _execute_new_entry(
     # a tick. Whole-share sizing sacrifices some precision but succeeds
     # universally. REMOVE with the rest of the TEMP block when the
     # brain-driven fractional-eligibility check ships.
-    qty_raw = notional / px
-    qty = int(qty_raw)  # whole shares only for now
+    # CCC -- options sizing bypass. Operator-driven option entry already
+    # encoded qty in option_meta.quantity (default 1 contract). Equity
+    # math (qty = notional / px where px = UNDERLYING price) gives
+    # qty=0 for SPY at $714 / $300 notional and trips the per-share
+    # cap as "symbol_too_expensive_for_notional", which is wrong by
+    # construction. For options, set qty from option_meta and use
+    # premium*100*qty as the effective notional (skipping the per-share
+    # ceiling check below since qty>=1 is now guaranteed).
+    if snap.get("options_path") and snap.get("option_meta"):
+        _opt_meta = snap["option_meta"]
+        try:
+            qty = int(_opt_meta.get("quantity") or 1)
+            if qty < 1:
+                qty = 1
+        except Exception:
+            qty = 1
+        try:
+            _premium = float(_opt_meta.get("limit_price") or alert.entry_price or 0)
+        except Exception:
+            _premium = 0.0
+        qty_raw = float(qty)  # populate for snapshot logging
+        snap["qty_source"] = "options_meta"
+        snap["notional_effective"] = round(_premium * 100.0 * qty, 2)
+    else:
+        qty_raw = notional / px
+        qty = int(qty_raw)  # whole shares only for now
 
     if qty < 1 and px > 0:
         if px <= _TEMP_MAX_PER_SHARE_USD:
