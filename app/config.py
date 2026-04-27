@@ -2035,6 +2035,38 @@ class Settings(BaseSettings):
         le=365,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_SUBSTITUTE_DTE"),
     )
+    # Task PP Phase 5 — option-aware exit monitor. When ON, the scheduler
+    # ticks the options_exit_pass which closes open option Trade rows
+    # on three triggers: DTE threshold (default 7d), premium stop-loss
+    # (default 50% drop), premium take-profit (default 100% gain).
+    # Decoupled from chili_autotrader_options_enabled so the operator
+    # can flip the entry path on without flipping the exit monitor on
+    # (manual close mode), and vice versa.
+    chili_autotrader_options_exit_monitor_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_EXIT_MONITOR_ENABLED"),
+    )
+    chili_autotrader_options_exit_dte: int = Field(
+        default=7,
+        ge=0,
+        le=180,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_EXIT_DTE"),
+        description="DTE threshold below which open options auto-close.",
+    )
+    chili_autotrader_options_exit_stop_pct: float = Field(
+        default=50.0,
+        ge=1.0,
+        le=99.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_EXIT_STOP_PCT"),
+        description="Premium drop %% below entry that triggers stop-loss exit.",
+    )
+    chili_autotrader_options_exit_tp_pct: float = Field(
+        default=100.0,
+        ge=1.0,
+        le=10000.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_EXIT_TP_PCT"),
+        description="Premium gain %% above entry that triggers take-profit exit.",
+    )
     chili_autotrader_assumed_capital_usd: float = Field(
         default=25_000.0,
         ge=100.0,
