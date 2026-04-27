@@ -693,6 +693,79 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
     except Exception as e:
         out["diversity"]["error"] = str(e)[:200]
 
+    # 4b. Manual book health — operator's robinhood-sync trades that don't
+    # match any CHILI alert (verified: 0/20 unattributed trades had a
+    # matching alert in ±4h, so heuristic pattern-attribution is a
+    # non-starter; these are genuinely operator-manual decisions).
+    # Surface them as a separate health bucket so the operator can audit
+    # their manual book without polluting the CHILI signal-diversity
+    # rollup. Aggregate metrics only — no per-trade attribution attempt.
+    try:
+        agg = db.execute(text(
+            """
+            SELECT
+                COUNT(*)::int                                       AS n_trades,
+                COALESCE(SUM(pnl), 0)::numeric                      AS pnl,
+                AVG(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END)::numeric AS hit_rate,
+                AVG(EXTRACT(EPOCH FROM (exit_date - entry_date)) / 3600.0)::numeric AS avg_hold_hours
+            FROM trading_trades
+            WHERE exit_date >= NOW() - INTERVAL '30 days'
+              AND pnl IS NOT NULL
+              AND scan_pattern_id IS NULL
+            """
+        )).fetchone()
+
+        top_winners = db.execute(text(
+            """
+            SELECT ticker, COUNT(*)::int AS n, SUM(pnl)::numeric AS pnl
+            FROM trading_trades
+            WHERE exit_date >= NOW() - INTERVAL '30 days'
+              AND pnl IS NOT NULL
+              AND scan_pattern_id IS NULL
+            GROUP BY ticker
+            HAVING SUM(pnl) > 0
+            ORDER BY pnl DESC
+            LIMIT 5
+            """
+        )).fetchall()
+
+        top_losers = db.execute(text(
+            """
+            SELECT ticker, COUNT(*)::int AS n, SUM(pnl)::numeric AS pnl
+            FROM trading_trades
+            WHERE exit_date >= NOW() - INTERVAL '30 days'
+              AND pnl IS NOT NULL
+              AND scan_pattern_id IS NULL
+            GROUP BY ticker
+            HAVING SUM(pnl) < 0
+            ORDER BY pnl ASC
+            LIMIT 5
+            """
+        )).fetchall()
+
+        out["manual_book"] = {
+            "trades_30d": int(agg[0] or 0) if agg else 0,
+            "pnl_30d_usd": round(float(agg[1] or 0), 2) if agg else 0.0,
+            "hit_rate_30d": (
+                round(float(agg[2] or 0), 4) if agg and agg[2] is not None else None
+            ),
+            "avg_hold_hours": (
+                round(float(agg[3] or 0), 1) if agg and agg[3] is not None else None
+            ),
+            "top_winners": [
+                {"ticker": r[0], "trades": int(r[1]),
+                 "pnl_usd": round(float(r[2] or 0), 2)}
+                for r in top_winners or []
+            ],
+            "top_losers": [
+                {"ticker": r[0], "trades": int(r[1]),
+                 "pnl_usd": round(float(r[2] or 0), 2)}
+                for r in top_losers or []
+            ],
+        }
+    except Exception as e:
+        out["manual_book"] = {"error": str(e)[:200]}
+
     # 5. Regime — most recent HMM tag + age
     try:
         row = db.execute(
