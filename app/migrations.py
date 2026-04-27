@@ -11117,6 +11117,70 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_187_pattern_survival_decision_log(conn) -> None:
+    """K Phase 3 Step S.1 — decision log table + at-risk streak column.
+
+    The data plane for Phase 3. No consumer reads or writes either yet
+    (the consumer wiring lands in S.4 / S.5 / S.8). Shipping the schema
+    first so the migration is reviewed independently of the policy
+    code.
+
+    Two changes:
+
+      1. ``pattern_survival_decision_log``: one row per decision the
+         classifier-driven gate makes (sizing multiplier, demote, or
+         promote_gate). Captures predicted_survival, threshold,
+         decision (apply / no_op / manual_override), model_version,
+         and a per-consumer JSONB blob with the consumer-specific
+         details. Indexed by (scan_pattern_id, decided_at) and
+         (consumer, decided_at) so the operator can pull "what did
+         the gate do for pattern X today" or "what's the gate done
+         all week" cheaply.
+
+      2. ``scan_patterns.survival_at_risk_streak_days``: integer
+         column counting consecutive days where the pattern's latest
+         prediction was below the demote threshold. Updated in S.5 by
+         the daily demote pass. NULL-default would force the consumer
+         to handle two cases on every read; default 0 keeps the read
+         path simple.
+
+    Idempotent — IF NOT EXISTS guards on both the table and the column.
+    """
+    from sqlalchemy import text as _text
+
+    conn.execute(_text(
+        """
+        CREATE TABLE IF NOT EXISTS pattern_survival_decision_log (
+            id BIGSERIAL PRIMARY KEY,
+            scan_pattern_id INTEGER NOT NULL,
+            consumer TEXT NOT NULL,
+            predicted_survival DOUBLE PRECISION,
+            threshold_used DOUBLE PRECISION,
+            decision TEXT NOT NULL,
+            details JSONB,
+            model_version TEXT,
+            decided_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """
+    ))
+    conn.execute(_text(
+        "CREATE INDEX IF NOT EXISTS pattern_survival_decision_log_pattern_idx "
+        "ON pattern_survival_decision_log (scan_pattern_id, decided_at DESC)"
+    ))
+    conn.execute(_text(
+        "CREATE INDEX IF NOT EXISTS pattern_survival_decision_log_consumer_idx "
+        "ON pattern_survival_decision_log (consumer, decided_at DESC)"
+    ))
+
+    # Add the streak column on scan_patterns. ALTER ADD COLUMN IF NOT
+    # EXISTS is supported on PG 9.6+ which the chili stack uses.
+    conn.execute(_text(
+        "ALTER TABLE scan_patterns "
+        "ADD COLUMN IF NOT EXISTS survival_at_risk_streak_days "
+        "INTEGER NOT NULL DEFAULT 0"
+    ))
+
+
 def _migration_186_demote_lifecycle_active_drift(conn) -> None:
     """Q2 Task Q — repair lifecycle vs active drift on never-validated patterns.
 
@@ -12298,6 +12362,7 @@ MIGRATIONS = [
     ("184_seed_hyperliquid_perp_contracts", _migration_184_seed_hyperliquid_perp_contracts),
     ("185_backfill_pattern_families", _migration_185_backfill_pattern_families),
     ("186_demote_lifecycle_active_drift", _migration_186_demote_lifecycle_active_drift),
+    ("187_pattern_survival_decision_log", _migration_187_pattern_survival_decision_log),
 ]
 
 
