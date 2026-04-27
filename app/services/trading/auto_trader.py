@@ -18,6 +18,7 @@ from .auto_trader_rules import (
     autotrader_realized_pnl_today_et,
     breakout_alert_already_processed,
     count_autotrader_v1_open,
+    count_autotrader_v1_open_by_lane,
     passes_rule_gate,
 )
 from .autotrader_desk import effective_autotrader_runtime
@@ -503,6 +504,7 @@ def _process_one_alert(
 
     live = bool(runtime.get("live_orders_effective"))
     open_n = count_autotrader_v1_open(db, uid, paper_mode=not live)
+    open_by_lane = count_autotrader_v1_open_by_lane(db, uid, paper_mode=not live)
     loss_today = (
         autotrader_paper_realized_pnl_today_et(db, uid)
         if not live
@@ -512,6 +514,7 @@ def _process_one_alert(
         current_price=px,
         autotrader_open_count=open_n,
         realized_loss_today_usd=loss_today,
+        autotrader_open_count_by_lane=open_by_lane,
     )
 
     existing_trade = None

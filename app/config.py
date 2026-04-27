@@ -1821,11 +1821,42 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_DAILY_LOSS_CAP_USD"),
     )
+    # VV — legacy global concurrency cap. Kept as the outer-safety
+    # ceiling on the SUM of all open autotrader-v1 positions across all
+    # lanes (equity + crypto + options). Per-lane caps live in the three
+    # ``chili_autotrader_max_concurrent_<lane>`` fields below and are
+    # registered in the ``strategy_parameter`` ledger so the brain can
+    # adapt them. Default 60 = 3 lanes × 20 (each lane's bootstrap).
     chili_autotrader_max_concurrent: int = Field(
-        default=3,
+        default=60,
         ge=1,
-        le=50,
+        le=500,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_CONCURRENT"),
+    )
+    # VV — per-lane caps. These are bootstrap values; on first
+    # ``passes_rule_gate`` call the rule gate registers each as a
+    # ``strategy_parameter`` row (family='autotrader_concurrency',
+    # key='max_concurrent_<lane>') and reads the learned current_value
+    # back. Operator can hand-edit current_value via a SQL update or
+    # via the Brain UI; brain learner adapts it from realized outcomes
+    # when CHILI_STRATEGY_PARAMETER_LEARNING_ENABLED is on.
+    chili_autotrader_max_concurrent_equity: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_CONCURRENT_EQUITY"),
+    )
+    chili_autotrader_max_concurrent_crypto: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_CONCURRENT_CRYPTO"),
+    )
+    chili_autotrader_max_concurrent_options: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_CONCURRENT_OPTIONS"),
     )
     chili_autotrader_confidence_floor: float = Field(
         default=0.7,

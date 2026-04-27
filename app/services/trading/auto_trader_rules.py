@@ -61,6 +61,12 @@ class RuleGateContext:
     current_price: float
     autotrader_open_count: int
     realized_loss_today_usd: float  # negative sum of closed autotrader PnL today (0 if none)
+    # VV — per-lane open counts. Optional for backward compat; when present
+    # the gate uses the lane-specific cap from StrategyParameter instead of
+    # the legacy global ``max_concurrent`` cap. Keys: 'equity' | 'crypto' |
+    # 'options'. Missing keys default to 0 — the gate also keeps the global
+    # cap as a final-safety ceiling.
+    autotrader_open_count_by_lane: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -111,7 +117,15 @@ class RuleGateSettings:
     daily_loss_cap_usd: float = 150.0
 
     # Concurrency
-    max_concurrent: int = 3
+    # VV — legacy global cap; kept as outer-safety ceiling. The gate now
+    # evaluates per-lane caps (equity/crypto/options) read from the
+    # StrategyParameter ledger so the brain can adapt them. The global
+    # cap only fires if a lane runs the brain's bookkeeping off the
+    # rails. Default 60 = 3 lanes × 20 (lane bootstrap default).
+    max_concurrent: int = 60
+    max_concurrent_equity: int = 20
+    max_concurrent_crypto: int = 20
+    max_concurrent_options: int = 20
 
     # Broker-equity TTL cache (Phase B)
     broker_equity_cache_enabled: bool = False
@@ -144,6 +158,15 @@ class RuleGateSettings:
             daily_loss_cap_pct=float(g("chili_autotrader_daily_loss_cap_pct", cls.daily_loss_cap_pct)),
             daily_loss_cap_usd=float(g("chili_autotrader_daily_loss_cap_usd", cls.daily_loss_cap_usd)),
             max_concurrent=int(g("chili_autotrader_max_concurrent", cls.max_concurrent)),
+            max_concurrent_equity=int(
+                g("chili_autotrader_max_concurrent_equity", cls.max_concurrent_equity)
+            ),
+            max_concurrent_crypto=int(
+                g("chili_autotrader_max_concurrent_crypto", cls.max_concurrent_crypto)
+            ),
+            max_concurrent_options=int(
+                g("chili_autotrader_max_concurrent_options", cls.max_concurrent_options)
+            ),
             broker_equity_cache_enabled=bool(
                 g("chili_autotrader_broker_equity_cache_enabled", cls.broker_equity_cache_enabled)
             ),
@@ -800,15 +823,84 @@ def passes_rule_gate(
         return False, "daily_loss_cap_already_hit", snap
 
     if for_new_entry:
-        base_max_c = gs.max_concurrent
-        # Dial-scaled concurrency. Floor at 1 so a deeply defensive dial still
-        # allows one probe position instead of fully muting the autotrader.
-        max_c = max(1, int(round(base_max_c * dial)))
-        snap["max_concurrent_effective"] = max_c
-        snap["max_concurrent_base"] = base_max_c
+        # VV — per-lane concurrency caps. Each lane (equity / crypto / options)
+        # has its own cap registered in the StrategyParameter ledger so the
+        # brain can adapt them from realized outcomes. The legacy global
+        # cap (gs.max_concurrent) acts as an outer-safety ceiling on the
+        # *sum* of all lanes.
+        if crypto_path:
+            lane = "crypto"
+            base_lane_cap = gs.max_concurrent_crypto
+        elif options_path:
+            lane = "options"
+            base_lane_cap = gs.max_concurrent_options
+        else:
+            lane = "equity"
+            base_lane_cap = gs.max_concurrent_equity
+
+        # Resolve the lane cap from StrategyParameter (registers idempotently
+        # on first call). Falls back to the env-bootstrapped value above if
+        # the ledger is unavailable.
+        try:
+            from .strategy_parameter import (
+                ParameterSpec, get_parameter, register_parameter,
+            )
+            register_parameter(
+                db,
+                ParameterSpec(
+                    strategy_family="autotrader_concurrency",
+                    parameter_key=f"max_concurrent_{lane}",
+                    initial_value=float(base_lane_cap),
+                    min_value=1.0,
+                    max_value=200.0,
+                    param_type="int",
+                    description=(
+                        f"Max simultaneous autotrader-v1 open positions in the "
+                        f"{lane} lane. Adapts from realized outcomes when the "
+                        f"learner is enabled."
+                    ),
+                ),
+            )
+            learned = get_parameter(
+                db,
+                strategy_family="autotrader_concurrency",
+                parameter_key=f"max_concurrent_{lane}",
+                default=float(base_lane_cap),
+            )
+            base_lane_cap_eff = int(round(float(learned))) if learned is not None else base_lane_cap
+        except Exception:
+            base_lane_cap_eff = base_lane_cap
+
+        # Dial-scaled cap. Floor at 1 so a deeply defensive dial still
+        # allows one probe position per lane instead of fully muting it.
+        lane_cap = max(1, int(round(base_lane_cap_eff * dial)))
+
+        # Per-lane open count. Falls back to the legacy single counter when
+        # the caller didn't supply a per-lane breakdown (e.g. older test
+        # paths) — preserves equality with the prior single-cap behavior.
+        if ctx.autotrader_open_count_by_lane is not None:
+            lane_open = int(ctx.autotrader_open_count_by_lane.get(lane, 0))
+        else:
+            lane_open = int(ctx.autotrader_open_count)
+
+        snap["concurrency_lane"] = lane
+        snap["max_concurrent_lane"] = lane_cap
+        snap["max_concurrent_lane_base"] = base_lane_cap_eff
+        snap["max_concurrent_lane_env"] = base_lane_cap
+        snap["autotrader_open_count_lane"] = lane_open
         snap["autotrader_open_count"] = ctx.autotrader_open_count
-        if ctx.autotrader_open_count >= max_c:
-            return False, "max_concurrent_autotrader", snap
+        if lane_open >= lane_cap:
+            return False, f"max_concurrent_{lane}", snap
+
+        # Outer-safety ceiling — the sum across all lanes. Default 60 from
+        # 3 × 20; bumped via env if the operator wants a different ceiling.
+        # This only fires if a lane miscount or a flood of unattributed
+        # trades pushes the global total past the outer cap.
+        global_cap_base = gs.max_concurrent
+        global_cap = max(1, int(round(global_cap_base * dial)))
+        snap["max_concurrent_global"] = global_cap
+        if ctx.autotrader_open_count >= global_cap:
+            return False, "max_concurrent_global", snap
 
         uid = alert.user_id if alert.user_id is not None else fallback_user_id
         if uid is None:
@@ -845,6 +937,72 @@ def count_autotrader_v1_open(db: Session, user_id: Optional[int], *, paper_mode:
     if user_id is not None:
         q = q.filter(Trade.user_id == user_id)
     return int(q.count())
+
+
+# VV — per-lane open counts. JOINs trading_trades ↔ trading_breakout_alerts
+# via related_alert_id and buckets by alert.asset_type. Trades whose
+# linked alert is missing or has a NULL/empty asset_type fall into the
+# 'equity' bucket (matches autotrader history pre-asset_type rollout).
+def count_autotrader_v1_open_by_lane(
+    db: Session,
+    user_id: Optional[int],
+    *,
+    paper_mode: bool = False,
+) -> dict:
+    """Return ``{'equity': int, 'crypto': int, 'options': int}``.
+
+    Counts open AutoTrader-v1 trades per asset-class lane. Used by the rule
+    gate to enforce per-lane concurrency caps. Best-effort: any failure
+    returns zeros (the gate's outer global cap still protects the system).
+    """
+    out = {"equity": 0, "crypto": 0, "options": 0}
+    try:
+        if paper_mode:
+            q = db.query(PaperTrade).filter(PaperTrade.status == "open")
+            if user_id is not None:
+                q = q.filter(PaperTrade.user_id == user_id)
+            for row in q.all():
+                sj = row.signal_json or {}
+                if not sj.get("auto_trader_v1"):
+                    continue
+                # PaperTrade may not link an alert; rely on signal_json
+                # markers when present. Falls through to 'equity'.
+                lane = "equity"
+                if sj.get("options_path") or sj.get("asset_type") == "options":
+                    lane = "options"
+                elif sj.get("crypto_path") or sj.get("asset_type") == "crypto":
+                    lane = "crypto"
+                out[lane] = out.get(lane, 0) + 1
+            return out
+
+        # Live trades — JOIN to BreakoutAlert via related_alert_id.
+        from sqlalchemy import text as _text
+        params = {}
+        sql = (
+            "SELECT COALESCE(LOWER(NULLIF(a.asset_type, '')), 'stock') AS at, "
+            "       COUNT(*) AS n "
+            "FROM trading_trades t "
+            "LEFT JOIN trading_breakout_alerts a ON a.id = t.related_alert_id "
+            "WHERE t.auto_trader_version = 'v1' "
+            "  AND t.status = 'open' "
+        )
+        if user_id is not None:
+            sql += " AND t.user_id = :uid"
+            params["uid"] = user_id
+        sql += " GROUP BY at"
+        rows = db.execute(_text(sql), params).fetchall()
+        for at, n in rows or []:
+            at_l = (at or "stock").lower()
+            if at_l == "crypto":
+                out["crypto"] += int(n)
+            elif at_l == "options":
+                out["options"] += int(n)
+            else:
+                # 'stock', NULL/empty, forex, anything unrecognized → equity bucket
+                out["equity"] += int(n)
+    except Exception as e:
+        logger.debug("[autotrader] count_open_by_lane failed (returning zeros): %s", e)
+    return out
 
 
 def autotrader_paper_realized_pnl_today_et(db: Session, user_id: Optional[int]) -> float:
