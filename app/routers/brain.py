@@ -793,6 +793,77 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
     except Exception as e:
         out["regime"]["error"] = str(e)[:200]
 
+    # 5b. Cross-venue funding divergence — for symbols traded on multiple
+    # perp venues, surface the spread between the highest and lowest
+    # current funding APY. Big divergence is a funding-arbitrage signal:
+    # short the high-funding venue, long the low-funding (or spot) one,
+    # collect the spread. Joins via perp_contracts.base_ccy so the
+    # different symbol conventions (BTC vs BTC-USD vs PF_XBTUSD)
+    # normalize correctly.
+    try:
+        rows = db.execute(text(
+            """
+            WITH latest_per_venue AS (
+                SELECT DISTINCT ON (pf.symbol, pf.venue)
+                       pf.symbol, pf.venue, pf.funding_rate, pf.funding_time
+                FROM perp_funding pf
+                ORDER BY pf.symbol, pf.venue, pf.funding_time DESC
+            ),
+            apy_per_venue AS (
+                SELECT pc.base_ccy, lpv.venue,
+                       (lpv.funding_rate * (24.0 / pc.funding_interval_hours)
+                            * 365.0 * 100.0)::numeric AS apy_pct
+                FROM latest_per_venue lpv
+                JOIN perp_contracts pc
+                  ON pc.symbol = lpv.symbol AND pc.venue = lpv.venue
+                WHERE lpv.funding_time >= NOW() - INTERVAL '8 hours'
+            )
+            SELECT base_ccy,
+                   COUNT(*)::int        AS venues,
+                   MAX(apy_pct)::numeric AS max_apy,
+                   MIN(apy_pct)::numeric AS min_apy,
+                   (MAX(apy_pct) - MIN(apy_pct))::numeric AS spread_pct,
+                   array_agg(venue || ':' || ROUND(apy_pct, 3)::text
+                             ORDER BY apy_pct DESC) AS detail
+            FROM apy_per_venue
+            GROUP BY base_ccy
+            HAVING COUNT(*) >= 2
+            ORDER BY spread_pct DESC
+            """
+        )).fetchall()
+
+        top_divergent = []
+        for r in rows[:5]:
+            details = []
+            for entry in r[5] or []:
+                if ":" in entry:
+                    venue_name, apy_str = entry.split(":", 1)
+                    try:
+                        details.append({
+                            "venue": venue_name,
+                            "apy_pct": round(float(apy_str), 3),
+                        })
+                    except ValueError:
+                        continue
+            top_divergent.append({
+                "base_ccy": r[0],
+                "venues": int(r[1]),
+                "max_apy_pct": round(float(r[2] or 0), 3),
+                "min_apy_pct": round(float(r[3] or 0), 3),
+                "spread_pct": round(float(r[4] or 0), 3),
+                "by_venue": details,
+            })
+
+        out["perps_funding"] = {
+            "symbols_compared": len(rows),
+            "max_spread_pct": (
+                round(float(rows[0][4] or 0), 3) if rows else 0.0
+            ),
+            "top_divergent": top_divergent,
+        }
+    except Exception as e:
+        out["perps_funding"] = {"error": str(e)[:200]}
+
     # 6. Safety — kill switch + drawdown breaker + autotrader status
     try:
         from app.services.trading.governance import (
