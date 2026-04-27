@@ -12,5 +12,5 @@ Live: ``CHILI_PERPS_LANE_LIVE=False`` (default — paper-only when ON).
 
 __all__ = [
     "features", "ingestion", "strategies",
-    "venue_binance", "venue_hyperliquid",
+    "venue_binance", "venue_dydx_v4", "venue_hyperliquid",
 ]
