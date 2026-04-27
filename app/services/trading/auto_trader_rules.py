@@ -231,15 +231,66 @@ def _broker_equity_cache_put(key: str, equity: float, source: str) -> None:
         _broker_equity_cache[key] = (equity, source, time.monotonic())
 
 
+# XX - bound every broker call from the autotrader hot path with a hard
+# wall-clock timeout. Hung-tick incident on 2026-04-27 had
+# broker_service.get_portfolio() stuck for ~12 min which blocked every
+# subsequent tick due to APScheduler max_instances=1.
+# Combined with broker_equity_cache_enabled=true and max_instances>1
+# this prevents one slow broker call from cascading into a stalled scheduler.
+
+_BROKER_EQUITY_HARD_TIMEOUT_S = 10.0
+
+
+def _call_with_timeout(fn, timeout_s, *args, **kwargs):
+    """Run fn with hard wall-clock timeout. Returns (ok, result).
+
+    On timeout/exception returns (False, None). ThreadPoolExecutor-based
+    so it works on Windows / in threads / in async loops. Timed-out work
+    continues in background until its socket times out.
+    """
+    import concurrent.futures
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(fn, *args, **kwargs)
+            try:
+                return True, future.result(timeout=timeout_s)
+            except concurrent.futures.TimeoutError:
+                return False, None
+    except Exception as e:
+        logger.debug("[autotrader] _call_with_timeout exception: %s", e)
+        return False, None
+
+
 def _fetch_broker_equity_once(
     fallback: float,
 ) -> tuple[float, str]:
-    """Single uncached broker-equity lookup. Returns (equity, source)."""
+    """Single uncached broker-equity lookup. Returns (equity, source).
+
+    XX - every broker call wrapped in _call_with_timeout so a flapping
+    broker can't stall the autotrader tick.
+    """
     try:
         from .. import broker_service
-        if not broker_service.is_connected():
+        ok, connected = _call_with_timeout(
+            broker_service.is_connected, _BROKER_EQUITY_HARD_TIMEOUT_S
+        )
+        if not ok:
+            logger.warning(
+                "[autotrader] is_connected timed out after %.1fs",
+                _BROKER_EQUITY_HARD_TIMEOUT_S,
+            )
+            return fallback, "fallback:is_connected_timeout"
+        if not connected:
             return fallback, "fallback:broker_disconnected"
-        portfolio = broker_service.get_portfolio()
+        ok, portfolio = _call_with_timeout(
+            broker_service.get_portfolio, _BROKER_EQUITY_HARD_TIMEOUT_S
+        )
+        if not ok:
+            logger.warning(
+                "[autotrader] get_portfolio timed out after %.1fs",
+                _BROKER_EQUITY_HARD_TIMEOUT_S,
+            )
+            return fallback, "fallback:get_portfolio_timeout"
         if not isinstance(portfolio, dict):
             return fallback, "fallback:portfolio_unavailable"
         equity = portfolio.get("equity")

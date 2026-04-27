@@ -319,6 +319,20 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
     if paused_ids:
         summary["live_monitor_paused_ids"] = sorted(paused_ids)
 
+    # DDD -- partition out option trades. The equity monitor manages
+    # share-based positions via submit_robinhood_trade_exit (which
+    # calls the spot adapter against the underlying ticker). For an
+    # option trade the position is a CONTRACT, not shares -- Robinhood
+    # rejects every sell with "Not enough shares to sell." Phase 5
+    # run_options_exit_pass (already wired into trading_scheduler at
+    # the same cadence) handles option exits via place_option_sell
+    # on the contract symbol; we just skip them here.
+    from .autopilot_scope import is_option_trade
+    option_trade_ids = {int(t.id) for t in open_rows if is_option_trade(t)}
+    if option_trade_ids:
+        summary["delegated_to_options_exit_monitor"] = sorted(option_trade_ids)
+    open_rows = [t for t in open_rows if int(t.id) not in option_trade_ids]
+
     for t in open_rows:
         summary["checked"] += 1
         if t.id in paused_ids:

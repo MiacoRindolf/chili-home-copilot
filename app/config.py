@@ -2110,6 +2110,58 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_INTERVAL_SECONDS"),
     )
 
+    # XX — concurrency safety. ``max_instances`` lets a slow tick coexist
+    # with subsequent fast ticks (per-alert advisory locks prevent races on
+    # the same alert; audit-row check is the second line of defense).
+    # ``tick_max_seconds`` is the hard wall-clock budget enforced by the
+    # outer wrapper in ``_run_auto_trader_tick_job`` — a tick exceeding it
+    # is abandoned (its worker continues until its socket times out, but
+    # the scheduler slot is freed). ``misfire_grace_s`` lets a missed
+    # schedule still fire if it's only a few seconds late instead of
+    # being dropped entirely.
+    chili_autotrader_tick_max_instances: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_MAX_INSTANCES"),
+    )
+    chili_autotrader_tick_max_seconds: int = Field(
+        default=45,
+        ge=5,
+        le=300,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_MAX_SECONDS"),
+    )
+    chili_autotrader_tick_misfire_grace_s: int = Field(
+        default=30,
+        ge=0,
+        le=300,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_MISFIRE_GRACE_S"),
+    )
+
+    # AAA -- janitor threshold for terminating leaked autotrader
+    # advisory-lock holders. When XX outer wall-clock budget abandons a
+    # hung worker thread, the thread DB session stays alive holding the
+    # lock; the janitor (runs at the start of every tick) terminates
+    # sessions stuck "idle in transaction" older than this threshold.
+    # Default 120s -- well past 45s tick budget so legitimate slow ticks
+    # are never killed.
+    chili_autotrader_leak_cleanup_threshold_s: int = Field(
+        default=120,
+        ge=60,
+        le=900,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_LEAK_CLEANUP_THRESHOLD_S"),
+    )
+
+    # YY — drawdown breaker scope. When True (default), the breaker only
+    # measures P&L from CHILI-placed trades (auto_trader_version IS NOT
+    # NULL or management_scope='auto_trader_v1'). Pre-CHILI manual
+    # positions are invisible to the breaker. Set False to revert to the
+    # legacy "all trades count" behavior.
+    chili_breaker_scope_autotrader_only: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_BREAKER_SCOPE_AUTOTRADER_ONLY"),
+    )
+
     # Phase B (tech-debt): TTL cache on broker-equity lookups so a flapping
     # broker does not amplify into a per-tick retry storm. When enabled, the
     # first call per ``chili_autotrader_broker_equity_cache_ttl_seconds`` window

@@ -590,6 +590,40 @@ def submit_robinhood_trade_exit(
 ) -> dict[str, Any]:
     from .venue.robinhood_spot import RobinhoodSpotAdapter
 
+    # DDD -- options exit short-circuit. The equity exit path (this
+    # function) submits a sell order to the spot adapter against the
+    # underlying ticker's shares. For an option trade the position is a
+    # CONTRACT, not shares -- Robinhood returns "Not enough shares to
+    # sell." and the engine treats it as a real rejection. The Phase 5
+    # options exit monitor (run_options_exit_pass in trading_scheduler)
+    # owns option exits via place_option_sell against the contract
+    # symbol; we hand off to it by returning a benign "skipped" result.
+    try:
+        snap = trade.indicator_snapshot if isinstance(trade.indicator_snapshot, dict) else {}
+        ba = snap.get("breakout_alert") if isinstance(snap.get("breakout_alert"), dict) else {}
+        is_option_trade = (
+            (ba.get("asset_type") or "").lower() == "options"
+            or bool(snap.get("option_meta"))
+            or bool(ba.get("option_meta"))
+        )
+    except Exception:
+        is_option_trade = False
+    if is_option_trade:
+        try:
+            logger = __import__("logging").getLogger(__name__)
+            logger.info(
+                "[autotrader] DDD: skipping equity exit path for option trade#%s "
+                "(reason=%s); options_exit_monitor handles this",
+                trade.id, exit_reason,
+            )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "state": "skipped_options_exit_handled_separately",
+            "reason": "ddd_options_exit_short_circuit",
+        }
+
     now = _coerce_utc()
     adapter = adapter or RobinhoodSpotAdapter()
     qty = float(trade.quantity or 0.0)
