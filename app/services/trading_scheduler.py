@@ -3857,6 +3857,56 @@ def start_scheduler():
                 "[scheduler] failed to register pattern_survival snapshot job"
             )
 
+        # K Phase 3 S.5 — pattern-survival daily demote pass (04:00 PT).
+        # Runs after the daily snapshot (03:30) so today's predictions
+        # are present, and before the weekly training pass (Sun 04:30)
+        # so a fresh-trained model isn't immediately demoting on its
+        # first day's predictions. The job updates the at-risk streak
+        # counter every day regardless of flag state (continuity across
+        # flag flips); only applies lifecycle changes when
+        # chili_pattern_survival_demote_enabled is True. Gated on
+        # classifier_enabled at the parent level — without features
+        # there are no predictions to consult.
+        try:
+            if role in ("all", "web"):
+                def _run_pattern_survival_demote_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.trading.pattern_survival import (
+                            run_pattern_survival_demote_pass,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_pattern_survival_demote_pass(_db)
+                            logger.info(
+                                "[pattern-survival] demote pass: %s", res
+                            )
+                        finally:
+                            _db.close()
+                    except Exception:
+                        logger.exception(
+                            "[pattern-survival] demote pass failed"
+                        )
+
+                _scheduler.add_job(
+                    _run_pattern_survival_demote_job,
+                    trigger=CronTrigger(
+                        hour=4, minute=0,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_survival_demote",
+                    name=(
+                        "Pattern-survival daily demote pass "
+                        "(streak update + apply, 04:00 PT)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_survival demote job"
+            )
+
         # Q2 Task R — pattern-survival training pass (weekly Sun 04:30 PT).
         # Runs after the regime classifier weekly retrain (Sun 04:15) and
         # the daily snapshot job. Order matters: the snapshot must have

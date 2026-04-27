@@ -214,6 +214,57 @@ def _decide_sizing(
     }
 
 
+def demote_policy(
+    *,
+    p: float,
+    current_lifecycle: Optional[str],
+    current_streak: int,
+    threshold: float,
+    streak_required: int,
+) -> dict[str, Any]:
+    """Pure-function policy: given inputs, return proposed lifecycle +
+    new streak.
+
+    Extracted so the daily demote-pass scheduler hook can share the
+    exact same logic as ``compute_decision(consumer='demote')`` without
+    duplicating thresholds/state-machine rules.
+
+    Returns::
+
+        {
+          "current_lifecycle": str | None,
+          "proposed_lifecycle": str | None,
+          "streak_days_before": int,
+          "streak_days_after": int,
+          "streak_required": int,
+          "would_apply": bool,
+        }
+
+    The pass uses ``streak_days_after`` to update
+    ``scan_patterns.survival_at_risk_streak_days`` and uses
+    ``proposed_lifecycle`` (only when ``would_apply``) to update
+    ``lifecycle_stage``.
+    """
+    proposed = current_lifecycle
+    new_streak: int
+    if p < threshold:
+        new_streak = current_streak + 1
+        if current_lifecycle == "live":
+            proposed = "challenged"
+        elif current_lifecycle == "challenged" and new_streak >= streak_required:
+            proposed = "decayed"
+    else:
+        new_streak = 0
+    return {
+        "current_lifecycle": current_lifecycle,
+        "proposed_lifecycle": proposed,
+        "streak_days_before": int(current_streak),
+        "streak_days_after": int(new_streak),
+        "streak_required": int(streak_required),
+        "would_apply": proposed != current_lifecycle,
+    }
+
+
 def _decide_demote(
     db: Session,
     settings,
@@ -247,20 +298,29 @@ def _decide_demote(
                 streak = int(row[1])
         except Exception as e:
             logger.debug("[ps_decisions] lifecycle lookup failed: %s", e)
-
-    proposed = cur
-    if p < threshold:
-        # Tick the streak; subsequent state changes use the bumped streak.
-        new_streak = streak + 1
-        if cur == "live":
-            # First-stage warning fires immediately on a single bad day.
-            proposed = "challenged"
-        elif cur == "challenged" and new_streak >= streak_required:
-            proposed = "decayed"
     else:
-        new_streak = 0  # reset
+        # Caller passed current_lifecycle but we still need streak from DB.
+        try:
+            row = db.execute(
+                text(
+                    "SELECT COALESCE(survival_at_risk_streak_days, 0) "
+                    "FROM scan_patterns WHERE id = :p"
+                ),
+                {"p": scan_pattern_id},
+            ).fetchone()
+            if row:
+                streak = int(row[0])
+        except Exception:
+            streak = 0
 
-    decision = "apply" if proposed != cur else "no_op"
+    pol = demote_policy(
+        p=p,
+        current_lifecycle=cur,
+        current_streak=streak,
+        threshold=threshold,
+        streak_required=streak_required,
+    )
+    decision = "apply" if pol["would_apply"] else "no_op"
     return {
         "consumer": "demote",
         "decision": decision,
@@ -268,11 +328,11 @@ def _decide_demote(
         "model_version": pred["model_version"],
         "threshold_used": threshold,
         "details": {
-            "current_lifecycle": cur,
-            "proposed_lifecycle": proposed,
-            "streak_days_before": streak,
-            "streak_days_after": new_streak,
-            "streak_required": streak_required,
+            "current_lifecycle": pol["current_lifecycle"],
+            "proposed_lifecycle": pol["proposed_lifecycle"],
+            "streak_days_before": pol["streak_days_before"],
+            "streak_days_after": pol["streak_days_after"],
+            "streak_required": pol["streak_required"],
         },
     }
 
@@ -353,3 +413,167 @@ def _record_decision(
             "[ps_decisions] log row insert failed: pattern=%s consumer=%s: %s",
             scan_pattern_id, result.get("consumer"), e,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# S.5 — daily demote scheduler pass
+# ─────────────────────────────────────────────────────────────────────
+
+def run_pattern_survival_demote_pass(db: Session) -> dict[str, Any]:
+    """Daily pass: walk lifecycle in (live, challenged), update streak,
+    apply demote if the demote flag is on.
+
+    Three-flag interaction:
+
+      * ``chili_pattern_survival_classifier_enabled`` OFF (the parent
+        feature-collection flag): pass returns {'skipped':
+        'classifier_flag_off'} and does nothing. Without features
+        there are no predictions, so the demote pass is moot.
+
+      * ``chili_pattern_survival_decisions_enabled`` parent OFF:
+        compute_decision logs no_op rows but the pass still runs the
+        policy locally to update ``survival_at_risk_streak_days``.
+        Streak continuity is preserved across flag flips.
+
+      * ``chili_pattern_survival_demote_enabled`` OFF:
+        same as above — streak is updated, log rows are written,
+        but lifecycle changes are NOT applied. This is the shadow
+        mode the operator runs for ~2 weeks before flipping demote
+        on per the activation runbook.
+
+      * Both flags ON + policy says apply:
+        lifecycle_stage and lifecycle_changed_at are updated.
+        survival_at_risk_streak_days is also updated.
+
+    Returns counts for the scheduler log line.
+    """
+    from ....config import settings as _settings
+
+    if not getattr(
+        _settings, "chili_pattern_survival_classifier_enabled", False
+    ):
+        return {"skipped": "classifier_flag_off"}
+
+    threshold = float(getattr(
+        _settings, "chili_pattern_survival_demote_threshold", 0.30
+    ))
+    streak_required = int(getattr(
+        _settings, "chili_pattern_survival_demote_streak_required", 3
+    ))
+    demote_enabled = bool(getattr(
+        _settings, "chili_pattern_survival_demote_enabled", False
+    ))
+
+    try:
+        rows = db.execute(text(
+            """
+            SELECT id, lifecycle_stage,
+                   COALESCE(survival_at_risk_streak_days, 0)
+            FROM scan_patterns
+            WHERE lifecycle_stage IN ('live', 'challenged')
+            ORDER BY id
+            """
+        )).fetchall()
+    except Exception as e:
+        logger.warning("[ps_demote_pass] enumerate failed: %s", e)
+        return {"error": str(e)[:200]}
+
+    inspected = 0
+    streak_updated = 0
+    demoted = 0
+    skipped_no_pred = 0
+    errors = 0
+
+    for r in rows or []:
+        pid = int(r[0])
+        cur_lifecycle = r[1]
+        cur_streak = int(r[2])
+        inspected += 1
+
+        # Always log via compute_decision so the audit row lands on
+        # every pass (parent-flag-OFF case included).
+        try:
+            log_result = compute_decision(
+                db,
+                scan_pattern_id=pid,
+                consumer="demote",
+                input_context={"current_lifecycle": cur_lifecycle},
+            )
+        except Exception as e:
+            logger.warning(
+                "[ps_demote_pass] compute_decision failed pid=%s: %s", pid, e
+            )
+            errors += 1
+            continue
+
+        # Pull the latest prediction directly so we can run the policy
+        # even when consumer flag is OFF (compute_decision short-circuits
+        # before computing in that case).
+        pred = _latest_prediction(db, pid)
+        if pred is None:
+            skipped_no_pred += 1
+            continue
+
+        pol = demote_policy(
+            p=pred["survival_probability"],
+            current_lifecycle=cur_lifecycle,
+            current_streak=cur_streak,
+            threshold=threshold,
+            streak_required=streak_required,
+        )
+
+        # Always write streak update (continuity across flag flips).
+        try:
+            db.execute(text(
+                "UPDATE scan_patterns "
+                "SET survival_at_risk_streak_days = :s "
+                "WHERE id = :p"
+            ), {"s": pol["streak_days_after"], "p": pid})
+            if pol["streak_days_after"] != cur_streak:
+                streak_updated += 1
+        except Exception as e:
+            logger.warning(
+                "[ps_demote_pass] streak update pid=%s failed: %s", pid, e
+            )
+            errors += 1
+
+        # Apply lifecycle change ONLY if demote flag is on AND policy
+        # would-apply.
+        if demote_enabled and pol["would_apply"]:
+            try:
+                db.execute(text(
+                    "UPDATE scan_patterns "
+                    "SET lifecycle_stage = :ls, "
+                    "    lifecycle_changed_at = NOW() "
+                    "WHERE id = :p AND lifecycle_stage = :cur"
+                ), {
+                    "ls": pol["proposed_lifecycle"],
+                    "p": pid,
+                    "cur": cur_lifecycle,
+                })
+                demoted += 1
+                logger.warning(
+                    "[ps_demote_pass] demoted pattern %s: %s -> %s "
+                    "(p=%.3f, streak=%d)",
+                    pid, cur_lifecycle, pol["proposed_lifecycle"],
+                    pred["survival_probability"], pol["streak_days_after"],
+                )
+            except Exception as e:
+                logger.warning(
+                    "[ps_demote_pass] lifecycle update pid=%s failed: %s",
+                    pid, e,
+                )
+                errors += 1
+
+    db.commit()
+
+    summary = {
+        "inspected": inspected,
+        "streak_updated": streak_updated,
+        "demoted": demoted,
+        "skipped_no_prediction": skipped_no_pred,
+        "errors": errors,
+        "demote_flag_enabled": demote_enabled,
+    }
+    logger.info("[ps_demote_pass] complete: %s", summary)
+    return summary
