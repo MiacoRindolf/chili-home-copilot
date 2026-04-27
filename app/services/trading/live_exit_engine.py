@@ -58,7 +58,16 @@ def compute_live_exit_levels(
     result["exit_config"] = exit_cfg
 
     if atr and exit_cfg.get("trailing_enabled", True):
-        trail_mult = exit_cfg.get("trailing_atr_mult", 1.5)
+        # Pattern-specific trailing_atr_mult overrides the global one. When
+        # the pattern config doesn't pin the value (most don't), Q2 Task J
+        # routes through the StrategyParameter registry so the learner can
+        # adapt the trailing-stop tightness from realized exit outcomes.
+        cfg_trail = exit_cfg.get("trailing_atr_mult")
+        if cfg_trail is None:
+            trail_mult = _resolve_trailing_atr_mult(db)
+        else:
+            trail_mult = float(cfg_trail)
+        result["trailing_atr_mult_used"] = trail_mult
         if is_long:
             trail_stop = current_price - (atr * trail_mult)
             result["trailing_stop"] = round(trail_stop, 4)
@@ -125,13 +134,64 @@ def compute_live_exit_levels(
     return result
 
 
+_DEFAULT_TRAILING_ATR_MULT = 1.5
+_TRAILING_ATR_MULT_BOUNDS = (0.5, 5.0)
+
+
+def _resolve_trailing_atr_mult(db: Session | None) -> float:
+    """Q2 Task J — adaptive trailing-stop ATR multiple.
+
+    Default 1.5 ATR (current behavior). Bounds [0.5, 5.0] keep the
+    learner from setting a trailing stop tighter than half an ATR (gets
+    stopped out by noise) or looser than five ATR (gives back too much
+    open profit).
+    """
+    if db is None:
+        return _DEFAULT_TRAILING_ATR_MULT
+    try:
+        from .strategy_parameter import (
+            ParameterSpec, get_parameter, register_parameter,
+        )
+        register_parameter(
+            db,
+            ParameterSpec(
+                strategy_family="exit_engine",
+                parameter_key="trailing_atr_mult",
+                initial_value=_DEFAULT_TRAILING_ATR_MULT,
+                min_value=_TRAILING_ATR_MULT_BOUNDS[0],
+                max_value=_TRAILING_ATR_MULT_BOUNDS[1],
+                description=(
+                    "ATR multiple for live trailing stops on positions "
+                    "that don't pin a pattern-specific trailing_atr_mult. "
+                    "The learner adapts this from realized exit outcomes "
+                    "(stopped-by-noise vs gave-back-profit)."
+                ),
+            ),
+        )
+        v = get_parameter(
+            db, "exit_engine", "trailing_atr_mult",
+            default=_DEFAULT_TRAILING_ATR_MULT,
+        )
+        if v is None:
+            return _DEFAULT_TRAILING_ATR_MULT
+        return float(max(_TRAILING_ATR_MULT_BOUNDS[0],
+                         min(_TRAILING_ATR_MULT_BOUNDS[1], v)))
+    except Exception:
+        return _DEFAULT_TRAILING_ATR_MULT
+
+
 def _load_exit_config(db: Session, scan_pattern_id: int | None) -> dict:
-    """Load exit config from the ScanPattern, with sensible defaults."""
+    """Load exit config from the ScanPattern, with sensible defaults.
+
+    Note: ``trailing_atr_mult`` defaults to ``None`` so the engine's
+    StrategyParameter resolver kicks in when the pattern doesn't pin the
+    value. Setting a numeric default here would shadow the registry.
+    """
     defaults = {
         "atr_stop_mult": 2.0,
         "atr_target_mult": 3.0,
         "trailing_enabled": True,
-        "trailing_atr_mult": 1.5,
+        "trailing_atr_mult": None,
         "max_bars": 20,
         "use_bos": True,
         "bos_buffer_pct": 0.5,
