@@ -1818,6 +1818,27 @@ def _to_crypto_base(ticker: str) -> str:
     return s
 
 
+def _is_crypto_supported_on_robinhood(base: str) -> bool:
+    """Pre-flight check: does Robinhood actually list this crypto base?
+
+    The brain's pattern scanner looks at a much wider crypto universe (e.g.
+    Coinbase / CoinGecko) than Robinhood lists. When the autotrader tries
+    to submit a crypto order for a symbol RH doesn't trade — say a low-cap
+    altcoin like SPX-USD — robin_stocks crashes deep in its order builder
+    with a cryptic ``TypeError: float() argument must be a string or a
+    real number, not 'NoneType'``. That's because RH's crypto-pair lookup
+    returns None and the library doesn't guard. This pre-flight catches it
+    cleanly so callers see ``crypto_not_supported_on_robinhood`` instead.
+    """
+    q = get_crypto_quote(base)
+    if not q:
+        return False
+    # A real RH crypto quote always carries a numeric mark/bid/ask. An
+    # empty/synthetic response should also fail closed.
+    px = _safe_float(q.get("mark_price")) or _safe_float(q.get("bid_price")) or _safe_float(q.get("ask_price"))
+    return bool(px and px > 0)
+
+
 def place_crypto_buy_order(
     ticker: str,
     quantity: float,
@@ -1840,6 +1861,15 @@ def place_crypto_buy_order(
     base = _to_crypto_base(ticker)
     if not base:
         return {"ok": False, "error": f"empty crypto base from {ticker!r}"}
+
+    # Pre-flight: confirm the symbol is tradeable on Robinhood. Saves a
+    # noisy stack trace inside robin_stocks for low-cap altcoins the brain
+    # scans but RH doesn't list (SPX-USD, DAI-USD, etc.).
+    if not _is_crypto_supported_on_robinhood(base):
+        return {
+            "ok": False,
+            "error": f"crypto_not_supported_on_robinhood:{base}",
+        }
 
     try:
         import robin_stocks.robinhood as rh
@@ -1912,6 +1942,12 @@ def place_crypto_sell_order(
     base = _to_crypto_base(ticker)
     if not base:
         return {"ok": False, "error": f"empty crypto base from {ticker!r}"}
+
+    if not _is_crypto_supported_on_robinhood(base):
+        return {
+            "ok": False,
+            "error": f"crypto_not_supported_on_robinhood:{base}",
+        }
 
     try:
         import robin_stocks.robinhood as rh
