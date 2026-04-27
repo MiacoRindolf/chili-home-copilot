@@ -1796,6 +1796,201 @@ def place_sell_order(
         return {"ok": False, "error": str(e)}
 
 
+# ── Crypto order placement (Task KK) ───────────────────────────────────
+#
+# Robinhood crypto trades 24/7 with no PDT constraint. The `rh.orders`
+# crypto endpoints are separate from equity (different URL family;
+# stock `instrument` URL vs crypto `currency_pair_id`). Symbol convention:
+# bare base currency ('BTC', 'ETH', 'SOL') — NOT 'BTC-USD'.
+#
+# Strategy mirrors place_buy_order/place_sell_order but skips the
+# market-hours / extended-hours plumbing because crypto sessions are
+# always open. We still enforce the duplicate-id idempotency guard at
+# the adapter level (RobinhoodSpotAdapter.place_market_order); this
+# layer is a thin shim over the robin_stocks call.
+
+
+def _to_crypto_base(ticker: str) -> str:
+    """Normalize 'BTC-USD' → 'BTC'. Idempotent for already-bare bases."""
+    s = (ticker or "").strip().upper()
+    if s.endswith("-USD"):
+        s = s[:-4]
+    return s
+
+
+def place_crypto_buy_order(
+    ticker: str,
+    quantity: float,
+    order_type: str = "market",
+    limit_price: float | None = None,
+) -> dict[str, Any]:
+    """Place a crypto buy via Robinhood. Returns the same envelope shape as
+    place_buy_order so call sites can dispatch on ``_is_crypto(ticker)``
+    without branching the response handling.
+
+    ``ticker`` accepts either ``BTC-USD`` (autotrader convention) or
+    bare ``BTC``; both normalize to the bare symbol the RH crypto API
+    expects.
+    """
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+
+    base = _to_crypto_base(ticker)
+    if not base:
+        return {"ok": False, "error": f"empty crypto base from {ticker!r}"}
+
+    try:
+        import robin_stocks.robinhood as rh
+
+        def _do_buy():
+            if order_type == "limit":
+                if not limit_price or limit_price <= 0:
+                    raise ValueError("limit_price required for crypto limit order")
+                return rh.orders.order_buy_crypto_limit(
+                    symbol=base,
+                    quantity=quantity,
+                    limitPrice=round(float(limit_price), 2),
+                    timeInForce="gtc",
+                    jsonify=True,
+                )
+            return rh.orders.order_buy_crypto_by_quantity(
+                symbol=base,
+                quantity=quantity,
+                jsonify=True,
+            )
+
+        result = _retry_api_call(_do_buy, label=f"BUY-CRYPTO {base}")
+
+        if result and isinstance(result, dict):
+            order_id = result.get("id") or ""
+            state = result.get("state", "unknown")
+            if not order_id:
+                error_msg = (
+                    result.get("detail")
+                    or result.get("error")
+                    or result.get("message")
+                    or "Robinhood crypto endpoint returned no order_id"
+                )
+                logger.error(
+                    "[broker] BUY-CRYPTO rejected (no order_id): %s x%s response=%s",
+                    base, quantity, result,
+                )
+                return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            logger.info(
+                "[broker] BUY-CRYPTO order placed: %s x%s (%s) -> %s",
+                base, quantity, order_type, state,
+            )
+            _cache.pop("crypto_positions", None)
+            _cache.pop("portfolio", None)
+            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+
+        error_msg = str(result) if result else "Empty response from Robinhood crypto"
+        logger.error("[broker] BUY-CRYPTO order failed for %s: %s", base, error_msg)
+        return {"ok": False, "error": error_msg}
+
+    except Exception as e:
+        logger.error(
+            "[broker] BUY-CRYPTO order exception for %s: %s", base, e, exc_info=True,
+        )
+        return {"ok": False, "error": str(e)}
+
+
+def place_crypto_sell_order(
+    ticker: str,
+    quantity: float,
+    order_type: str = "market",
+    limit_price: float | None = None,
+) -> dict[str, Any]:
+    """Mirror of :func:`place_crypto_buy_order` for the sell side."""
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+
+    base = _to_crypto_base(ticker)
+    if not base:
+        return {"ok": False, "error": f"empty crypto base from {ticker!r}"}
+
+    try:
+        import robin_stocks.robinhood as rh
+
+        def _do_sell():
+            if order_type == "limit":
+                if not limit_price or limit_price <= 0:
+                    raise ValueError("limit_price required for crypto limit order")
+                return rh.orders.order_sell_crypto_limit(
+                    symbol=base,
+                    quantity=quantity,
+                    limitPrice=round(float(limit_price), 2),
+                    timeInForce="gtc",
+                    jsonify=True,
+                )
+            return rh.orders.order_sell_crypto_by_quantity(
+                symbol=base,
+                quantity=quantity,
+                jsonify=True,
+            )
+
+        result = _retry_api_call(_do_sell, label=f"SELL-CRYPTO {base}")
+
+        if result and isinstance(result, dict):
+            order_id = result.get("id") or ""
+            state = result.get("state", "unknown")
+            if not order_id:
+                error_msg = (
+                    result.get("detail")
+                    or result.get("error")
+                    or result.get("message")
+                    or "Robinhood crypto endpoint returned no order_id"
+                )
+                logger.error(
+                    "[broker] SELL-CRYPTO rejected (no order_id): %s x%s response=%s",
+                    base, quantity, result,
+                )
+                return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            logger.info(
+                "[broker] SELL-CRYPTO order placed: %s x%s (%s) -> %s",
+                base, quantity, order_type, state,
+            )
+            _cache.pop("crypto_positions", None)
+            _cache.pop("portfolio", None)
+            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+
+        error_msg = str(result) if result else "Empty response from Robinhood crypto"
+        logger.error("[broker] SELL-CRYPTO order failed for %s: %s", base, error_msg)
+        return {"ok": False, "error": error_msg}
+
+    except Exception as e:
+        logger.error(
+            "[broker] SELL-CRYPTO order exception for %s: %s", base, e, exc_info=True,
+        )
+        return {"ok": False, "error": str(e)}
+
+
+def get_crypto_quote(ticker: str) -> dict[str, Any] | None:
+    """Return the raw crypto quote dict from Robinhood, or ``None`` on failure.
+
+    Used by the venue adapter when callers ask for a crypto price — the
+    equity ``rh.stocks.get_quotes`` path returns garbage for crypto bases.
+    """
+    if not _rh_available or not is_connected():
+        return None
+    base = _to_crypto_base(ticker)
+    if not base:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        q = rh.crypto.get_crypto_quote(base)
+        if isinstance(q, dict) and q:
+            return q
+        return None
+    except Exception as e:
+        logger.warning("[broker] get_crypto_quote(%s) failed: %s", base, e)
+        return None
+
+
 def _poll_order_until_terminal(order_id: str, *, label: str = "") -> str:
     """Poll a Robinhood order until it reaches a terminal state or times out.
 

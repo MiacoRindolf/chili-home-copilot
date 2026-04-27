@@ -88,6 +88,11 @@ class RuleGateSettings:
     rth_only: bool = True
     allow_extended_hours: bool = False
 
+    # Task KK — crypto path. When True, asset_type='crypto' alerts pass
+    # the gate, the RTH check is skipped for them, and max_symbol_price
+    # is not applied (crypto bases routinely exceed the equity $50 cap).
+    crypto_enabled: bool = False
+
     # Thresholds
     confidence_floor: float = 0.7
     min_projected_profit_pct: float = 12.0
@@ -119,6 +124,7 @@ class RuleGateSettings:
             assumed_capital_usd=float(g("chili_autotrader_assumed_capital_usd", cls.assumed_capital_usd)),
             rth_only=bool(g("chili_autotrader_rth_only", cls.rth_only)),
             allow_extended_hours=bool(g("chili_autotrader_allow_extended_hours", cls.allow_extended_hours)),
+            crypto_enabled=bool(g("chili_autotrader_crypto_enabled", cls.crypto_enabled)),
             confidence_floor=float(g("chili_autotrader_confidence_floor", cls.confidence_floor)),
             min_projected_profit_pct=float(
                 g("chili_autotrader_min_projected_profit_pct", cls.min_projected_profit_pct)
@@ -559,7 +565,17 @@ def passes_rule_gate(
         "for_new_entry": for_new_entry,
     }
 
-    if gs.rth_only:
+    # Task KK — crypto trades 24/7 with no PDT. When the operator has
+    # opted into the crypto path, alerts with asset_type='crypto' bypass
+    # the US-equity session gate entirely. Equity alerts still go through
+    # the existing RTH / extended-hours check unchanged.
+    asset_type_l = (alert.asset_type or "").lower()
+    is_crypto_alert = asset_type_l == "crypto"
+    crypto_path = bool(gs.crypto_enabled) and is_crypto_alert
+    snap["asset_type"] = asset_type_l
+    snap["crypto_path"] = crypto_path
+
+    if gs.rth_only and not crypto_path:
         from .pattern_imminent_alerts import (
             us_stock_extended_session_open,
             us_stock_session_open,
@@ -574,7 +590,13 @@ def passes_rule_gate(
                 "outside_extended_hours" if allow_ext else "outside_rth"
             ), snap
 
-    if (alert.asset_type or "").lower() != "stock":
+    if asset_type_l != "stock" and not crypto_path:
+        # Either this is a crypto alert and the operator hasn't opted into
+        # the crypto path yet (flag OFF), or it's some asset class we
+        # don't support (forex, options). Surface the same reason for
+        # historical KPI continuity but include the asset_type in the
+        # snapshot so the operator can see whether flipping the flag
+        # would unblock these.
         return False, "not_stock", snap
 
     # Phase 3: pull learned per-pattern signal quality from the M.1 ledger.
@@ -682,7 +704,12 @@ def passes_rule_gate(
     px = float(ctx.current_price)
     snap["current_price"] = px
     max_px = gs.max_symbol_price_usd
-    if px > max_px:
+    # Task KK — the equity max-symbol-price cap (default $50) was meant to
+    # avoid sub-1-share fractional rounding traps on stocks like NVDA. It
+    # makes no sense for crypto: BTC is routinely > $50k, and Robinhood
+    # supports fractional crypto natively, so a literal price cap would
+    # block every crypto alert by construction.
+    if not crypto_path and px > max_px:
         return False, "symbol_price_above_cap", snap
 
     uid_for_slip = alert.user_id if alert.user_id is not None else fallback_user_id
