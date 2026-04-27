@@ -437,6 +437,23 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
                 summary["deferred"] += 1
                 continue
 
+            # Cooldown: when can_submit_now is True but the previous tick's
+            # submit failed downstream (wide_spread, whole_shares_required,
+            # offhours_quote_rejected), the deferred re-attempt fires every
+            # 30s and audit-spams. Only retry deferreds every 5 minutes so
+            # the audit log stays signal-rich. The trade still goes live the
+            # moment the market opens — the regular session_open transition
+            # gives can_submit_now a different value, hence different code
+            # path. (LL.9)
+            from datetime import datetime, timedelta, timezone
+            requested_at = t.pending_exit_requested_at
+            if requested_at is not None:
+                # pending_exit_requested_at is naive UTC (see _mark_deferred_exit)
+                req_aware = requested_at.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - req_aware < timedelta(minutes=5):
+                    summary["deferred"] += 1
+                    continue
+
         client_oid = f"atv1-{t.id}-exit-{reason}"
         res = submit_robinhood_trade_exit(
             db,
