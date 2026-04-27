@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from ...models.trading import (
     LearningEvent,
@@ -7456,12 +7456,70 @@ def test_pattern_hypothesis(
     else:
         patch["lifecycle_stage"] = lifecycle_stage_from_promotion_status(_promo_for_lifecycle)
 
+    # K Phase 3 S.8 — promote-gate consult.
+    # When CPCV passes (patch.lifecycle_stage would land at 'promoted'
+    # or 'live'), consult the survival classifier. If predicted survival
+    # is below the promote threshold, queue the pattern for operator
+    # review and KEEP it at 'candidate'. Always logs to
+    # pattern_survival_decision_log via compute_decision so the audit
+    # row lands even when the gate is OFF.
+    _ps_promo_held = False
+    try:
+        from .pattern_survival.decisions import compute_decision as _ps_decide
+        _ls_target = patch.get("lifecycle_stage")
+        _would_promote = _ls_target in ("promoted", "live")
+        _ps_promo_result = _ps_decide(
+            db,
+            scan_pattern_id=int(pattern.id),
+            consumer="promote_gate",
+            input_context={"cpcv_passed": _would_promote},
+        )
+        # When the gate fires apply (=hold), force the patch back to
+        # 'candidate' lifecycle and queue for operator review.
+        if (
+            _would_promote
+            and _ps_promo_result["decision"] == "apply"
+            and _ps_promo_result["details"].get("hold")
+        ):
+            _ps_promo_held = True
+            patch["lifecycle_stage"] = "candidate"
+            try:
+                db.execute(text(
+                    """
+                    INSERT INTO pattern_survival_promote_review_queue
+                        (scan_pattern_id, predicted_p, cpcv_passed_at)
+                    VALUES (:p, :pp, NOW())
+                    """
+                ), {
+                    "p": int(pattern.id),
+                    "pp": float(_ps_promo_result["predicted_survival"] or 0),
+                })
+                db.commit()
+                logger.warning(
+                    "[ps_promote_gate] held pattern %s at candidate "
+                    "(p=%.3f, threshold=%.3f) — queued for operator review",
+                    pattern.id,
+                    _ps_promo_result["predicted_survival"],
+                    _ps_promo_result["threshold_used"],
+                )
+            except Exception as e:
+                logger.warning(
+                    "[ps_promote_gate] queue insert pid=%s failed: %s",
+                    pattern.id, e,
+                )
+    except Exception as e:
+        logger.debug("[ps_promote_gate] consult failed pid=%s: %s",
+                     pattern.id, e)
+
     update_pattern(db, pattern.id, patch)
 
-    # Lifecycle FSM transitions based on promotion outcome
+    # Lifecycle FSM transitions based on promotion outcome.
+    # When the promote-gate held the pattern at candidate, suppress the
+    # transition_on_promotion call — the FSM will fire normally if and
+    # when the operator clears the review queue.
     _final_status = str(patch.get("promotion_status", prom_stat))
     try:
-        if _final_status == "promoted":
+        if _final_status == "promoted" and not _ps_promo_held:
             transition_on_promotion(db, pattern)
         elif _final_status in ("pending_oos", "backtested"):
             transition_on_backtest(db, pattern, oos_pass=True)
