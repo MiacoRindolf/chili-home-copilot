@@ -47,6 +47,43 @@ _session_connected_at: float | None = None  # exposed to runtime_status
 _last_sync_ts: float | None = None          # exposed to runtime_status
 _LOGIN_TTL = int(getattr(settings, "broker_login_ttl_seconds", 3600))
 
+
+def _reset_rh_session() -> None:
+    """Wipe robin_stocks' module-level SESSION cookies + Authorization header.
+
+    The robin_stocks library keeps a long-lived ``requests.Session()`` at
+    ``robin_stocks.robinhood.helper.SESSION``. Every login attempt within a
+    single uvicorn process accumulates cookies on that session. After 2-3
+    failed Step1 attempts, Robinhood starts silently dropping further
+    requests from that cookie jar — robin_stocks' ``request_post`` then
+    returns ``None`` instead of the expected verification_workflow body.
+
+    Symptom: ``Step1 response keys: None`` in logs, even with valid
+    credentials. A fresh subprocess (e.g. a diagnostic script) hits the
+    same endpoint and gets a normal response, proving the issue is local
+    session state, not server-side block.
+
+    Call this at the top of every interactive login flow so each click
+    starts from a clean slate.
+    """
+    if not _rh_available:
+        return
+    try:
+        from robin_stocks.robinhood import helper as _rh_helper
+
+        _rh_helper.SESSION.cookies.clear()
+        # Drop any leftover Authorization header from a prior attempt.
+        for h in ("Authorization", "X-Hyper-Ex"):
+            _rh_helper.SESSION.headers.pop(h, None)
+        try:
+            _rh_helper.set_login_state(False)
+        except Exception:
+            pass
+        logger.debug("[broker] robin_stocks SESSION cookies/headers reset for fresh login")
+    except Exception as e:
+        logger.debug("[broker] could not reset robin_stocks SESSION: %s", e)
+
+
 # SMS flow state preserved between step 1 and step 2
 _sms_state: dict[str, Any] = {}
 
@@ -228,9 +265,51 @@ def try_restore_session() -> bool:
         return False
 
 
+def _refresh_oauth_token(refresh_token: str, scope: str | None = None) -> dict | None:
+    """POST /oauth2/token/ with grant_type=refresh_token.
+
+    Returns the new token dict on success (containing access_token,
+    refresh_token, expires_in, etc.), or None if Robinhood rejected the
+    refresh (typical after ~5 days of idle — refresh tokens age out).
+    """
+    import requests
+    REFRESH_URL = "https://api.robinhood.com/oauth2/token/"
+    payload = {
+        "client_id": "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS",
+        "expires_in": 86400,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": scope or "internal",
+        "token_request_path": "/login",
+    }
+    try:
+        r = requests.post(REFRESH_URL, data=payload, timeout=10)
+        if not r.ok:
+            try:
+                err = r.json()
+            except Exception:
+                err = r.text[:200]
+            logger.info(
+                "[broker] refresh_token rejected by Robinhood (status=%s body=%s)",
+                r.status_code, err,
+            )
+            return None
+        body = r.json()
+        if not isinstance(body, dict) or not body.get("access_token"):
+            logger.info("[broker] refresh response missing access_token: %s", body)
+            return None
+        return body
+    except Exception as e:
+        logger.info("[broker] refresh_token request failed: %s", e)
+        return None
+
+
 def _try_load_db_session() -> bool:
     """Load a stored session from PostgreSQL and validate with a lightweight
-    API call.  Sets module login state on success."""
+    API call. If the access_token has expired (401), use the refresh_token
+    to mint a new one without re-MFA, then save the new token blob and retry.
+    Sets module login state on success.
+    """
     global _logged_in, _last_login, _session_connected_at
     try:
         from robin_stocks.robinhood.helper import (
@@ -254,21 +333,89 @@ def _try_load_db_session() -> bool:
             logger.debug("[broker] DB session row exists but has no token")
             return False
 
-        if auth_header:
-            update_session("Authorization", auth_header)
-        else:
-            update_session("Authorization", f"{token_type} {access_token}")
-        set_login_state(True)
+        def _apply_token_to_session(td: dict) -> None:
+            ah = td.get("Authorization")
+            if ah:
+                update_session("Authorization", ah)
+            else:
+                update_session(
+                    "Authorization",
+                    f"{td.get('token_type', 'Bearer')} {td['access_token']}",
+                )
+            set_login_state(True)
 
-        res = request_get(
-            positions_url(), "pagination", {"nonzero": "true"}, jsonify_data=False
-        )
-        res.raise_for_status()
+        _apply_token_to_session(data)
+
+        # First validation attempt with the stored access_token.
+        try:
+            res = request_get(
+                positions_url(), "pagination",
+                {"nonzero": "true"}, jsonify_data=False,
+            )
+            res.raise_for_status()
+            _logged_in = True
+            _last_login = time.time()
+            _session_connected_at = _last_login
+            logger.info("[broker] Robinhood session restored from DB (no re-auth)")
+            return True
+        except Exception as first_err:
+            # Most common: HTTP 401 from expired access_token. Try the refresh
+            # flow before giving up — that's why Robinhood gave us a refresh
+            # token in the first place.
+            logger.debug(
+                "[broker] stored access_token failed validation (%s); trying refresh",
+                first_err,
+            )
+
+        refresh_tok = data.get("refresh_token")
+        if not refresh_tok:
+            logger.info("[broker] no refresh_token in saved session; manual login required")
+            return False
+
+        new_blob = _refresh_oauth_token(refresh_tok, scope=data.get("scope"))
+        if not new_blob:
+            # Refresh token has aged out / been revoked. Operator must MFA once.
+            return False
+
+        # Merge: keep old fields like user_uuid, replace token-y fields.
+        merged = dict(data)
+        merged.update(new_blob)
+        # The Authorization JWT in the original blob is separate from the
+        # refresh-issued access_token. Drop it so _apply_token_to_session
+        # falls back to the new "Bearer <access_token>" path.
+        merged.pop("Authorization", None)
+
+        _apply_token_to_session(merged)
+
+        # Re-validate.
+        try:
+            res = request_get(
+                positions_url(), "pagination",
+                {"nonzero": "true"}, jsonify_data=False,
+            )
+            res.raise_for_status()
+        except Exception as e2:
+            logger.warning(
+                "[broker] refresh succeeded but validation still failed: %s", e2,
+            )
+            return False
+
+        # Persist the freshly-refreshed token blob so subsequent restarts
+        # use it directly.
+        try:
+            _save_session_to_db(
+                broker="robinhood",
+                username=username,
+                token_data=merged,
+                device_token=merged.get("device_token") or data.get("device_token"),
+            )
+        except Exception as e3:
+            logger.warning("[broker] failed to persist refreshed token: %s", e3)
 
         _logged_in = True
         _last_login = time.time()
         _session_connected_at = _last_login
-        logger.info("[broker] Robinhood session restored from DB (no re-auth)")
+        logger.info("[broker] Robinhood session restored via refresh_token (no MFA)")
         return True
 
     except Exception as e:
@@ -292,6 +439,7 @@ def login_with_credentials(username: str, password: str, totp_secret: str | None
 
     if totp_secret:
         with _login_lock:
+            _reset_rh_session()
             try:
                 import pyotp
                 import robin_stocks.robinhood as rh
@@ -315,6 +463,7 @@ def login_with_credentials(username: str, password: str, totp_secret: str | None
                 return {"status": "error", "message": f"TOTP login failed: {e}"}
 
     with _login_lock:
+        _reset_rh_session()
         try:
             from robin_stocks.robinhood.authentication import (
                 generate_device_token, login_url,
@@ -373,7 +522,28 @@ def login_with_credentials(username: str, password: str, totp_secret: str | None
 
                 return {"status": "error", "message": "Could not determine verification method. Try again."}
 
-            return {"status": "error", "message": "Unexpected response from Robinhood. Check credentials."}
+            # Same diagnostic discrimination as login_step1_sms (see below).
+            if not data:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Robinhood did not respond (transport failure or rate "
+                        "limit). Wait 30 seconds and try again."
+                    ),
+                }
+            if isinstance(data, dict) and "detail" in data:
+                return {
+                    "status": "error",
+                    "message": f"Robinhood rejected the login: {data.get('detail')}",
+                }
+            return {
+                "status": "error",
+                "message": (
+                    "Robinhood returned an unexpected response (no access_token, "
+                    "no verification_workflow). Keys: "
+                    + (", ".join(data.keys()) if isinstance(data, dict) else type(data).__name__)
+                ),
+            }
         except Exception as e:
             logger.error(f"[broker] Login failed (user creds): {e}", exc_info=True)
             return {"status": "error", "message": f"Login failed: {e}"}
@@ -402,6 +572,11 @@ def login_step1_sms() -> dict[str, Any]:
         return {"status": "error", "message": "TOTP login failed"}
 
     with _login_lock:
+        # Q1.T8 fix — clear cookies/state from any prior failed attempt so
+        # Robinhood treats this as a fresh login. Without this, repeated
+        # clicks of "Connect" from the same uvicorn process produce silent
+        # None responses after the first 1-2 attempts.
+        _reset_rh_session()
         try:
             from robin_stocks.robinhood.authentication import (
                 generate_device_token, login_url,
@@ -425,10 +600,44 @@ def login_step1_sms() -> dict[str, Any]:
             data = request_post(login_url(), payload)
             logger.info(f"[broker] Step1 response keys: {list(data.keys()) if data else 'None'}")
 
+            # Distinguish "Robinhood didn't respond" from "Robinhood said no".
+            # request_post returns None on transport / 4xx-with-non-JSON / rate
+            # limit. The previous catch-all "Check credentials" message was
+            # misleading because it fires whether or not credentials are wrong.
+            if not data:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Robinhood did not respond (transport failure or rate "
+                        "limit). Wait 30 seconds and try again. If this keeps "
+                        "happening, check internet connectivity or whether your "
+                        "account is locked."
+                    ),
+                }
+
             # No MFA needed — already logged in
             if data and "access_token" in data:
                 _complete_login(data)
                 return {"status": "connected", "message": "Connected (no MFA required)"}
+
+            # Robinhood-side error (wrong password, account locked, etc.)
+            if isinstance(data, dict) and "detail" in data:
+                detail = str(data.get("detail") or "").strip()
+                # Map known Robinhood detail strings to actionable messages.
+                _DETAIL_HINTS = {
+                    "Unable to log in with provided credentials.":
+                        "Robinhood says: invalid username or password. Verify the "
+                        "values in your .env are correct.",
+                    "Account temporarily locked.":
+                        "Robinhood has temporarily locked the account (likely "
+                        "from too many failed login attempts). Wait 15 minutes "
+                        "and try again, or unlock via the Robinhood app.",
+                }
+                hint = _DETAIL_HINTS.get(detail, detail or "credentials issue")
+                return {
+                    "status": "error",
+                    "message": f"Robinhood rejected the login: {hint}",
+                }
 
             # Verification workflow triggered
             if data and "verification_workflow" in data:
