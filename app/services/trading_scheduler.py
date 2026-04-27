@@ -3815,6 +3815,91 @@ def start_scheduler():
                 "[scheduler] failed to register strategy parameter learning job"
             )
 
+        # Q2 Task K (Phase 1) — daily pattern-survival feature snapshot.
+        # Runs once a day at 03:30 America/Los_Angeles (after the macro
+        # regime daily at 02:00 has settled). Flag-gated; the job itself
+        # also re-checks the flag and skips when off, so flipping the flag
+        # at runtime takes effect on the next tick without a restart.
+        try:
+            if role in ("all", "web"):
+                def _run_pattern_survival_snapshot_job() -> None:
+                    try:
+                        from app.db import SessionLocal
+                        from app.services.trading.pattern_survival import (
+                            run_pattern_survival_snapshot_job,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_pattern_survival_snapshot_job(_db)
+                            logger.info(
+                                "[pattern-survival] daily snapshot: %s", res
+                            )
+                        finally:
+                            _db.close()
+                    except Exception:
+                        logger.exception(
+                            "[pattern-survival] daily snapshot failed"
+                        )
+
+                _scheduler.add_job(
+                    _run_pattern_survival_snapshot_job,
+                    trigger=CronTrigger(
+                        hour=3, minute=30,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_survival_snapshot",
+                    name="Pattern-survival daily feature snapshot (03:30 PT)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_survival snapshot job"
+            )
+
+        # Q2 Task L — perps ingestion (every hour).
+        # Flag-gated by chili_perps_lane_enabled. Iterates over the seeded
+        # perp_contracts and writes premium/funding/OI rows to perp_quotes,
+        # perp_funding, perp_oi, perp_basis. Continues to no-op if the flag
+        # is off — useful so seed contract data accumulates silently before
+        # any strategy ever consumes it (warm cache for funding_carry /
+        # oi_divergence backtests).
+        try:
+            if role in ("all", "web"):
+                def _run_perps_ingestion_job() -> None:
+                    try:
+                        from app.config import settings
+                        if not getattr(
+                            settings, "chili_perps_lane_enabled", False
+                        ):
+                            return
+                        from app.db import SessionLocal
+                        from app.services.trading.perps.ingestion import (
+                            run_perps_ingestion_pass,
+                        )
+                        _db = SessionLocal()
+                        try:
+                            res = run_perps_ingestion_pass(_db)
+                            logger.info("[perps] ingestion: %s", res)
+                        finally:
+                            _db.close()
+                    except Exception:
+                        logger.exception("[perps] ingestion failed")
+
+                _scheduler.add_job(
+                    _run_perps_ingestion_job,
+                    trigger=IntervalTrigger(hours=1),
+                    id="perps_ingestion",
+                    name="Perps premium/funding/OI ingestion (hourly)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(minutes=2),
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register perps ingestion job"
+            )
+
         _scheduler.start()
         _ps_note = (
             "daily prescreen 2AM America/Los_Angeles; "

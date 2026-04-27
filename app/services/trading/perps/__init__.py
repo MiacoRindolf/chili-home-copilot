@@ -10,4 +10,4 @@ Flag: ``CHILI_PERPS_LANE_ENABLED=False`` (default).
 Live: ``CHILI_PERPS_LANE_LIVE=False`` (default — paper-only when ON).
 """
 
-__all__ = ["features", "strategies", "venue_binance"]
+__all__ = ["features", "ingestion", "strategies", "venue_binance"]
