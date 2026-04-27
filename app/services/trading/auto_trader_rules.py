@@ -781,14 +781,28 @@ def passes_rule_gate(
     if not crypto_path and not options_path and px > max_px:
         return False, "symbol_price_above_cap", snap
 
+    # WW — for options, ``ref`` is the option PREMIUM (e.g. $4.01) but
+    # ``px = ctx.current_price`` is the UNDERLYING price (e.g. SPY at
+    # $714). Computing ``abs(px - ref) / ref`` here gives nonsensical
+    # ~17,000% "slippage" that blocks every option entry. The Phase 2
+    # comment at the options_path validation block above explicitly
+    # called for short-circuiting the equity-shape gates; this is the
+    # missing implementation. Operator-driven option entries already
+    # encode their own limit price + sizing — the broker's limit order
+    # will simply not fill if the market moves past it, so there's
+    # nothing for this gate to add.
     uid_for_slip = alert.user_id if alert.user_id is not None else fallback_user_id
     slip_pct, slip_source = resolve_effective_slippage_pct(db, user_id=uid_for_slip, settings=settings)
     snap["slippage_tolerance_pct"] = round(slip_pct, 4)
     snap["slippage_source"] = slip_source
-    slip = abs(px - ref) / ref * 100.0
-    snap["entry_slippage_pct"] = round(slip, 4)
-    if slip > slip_pct:
-        return False, "missed_entry_slippage", snap
+    if not options_path:
+        slip = abs(px - ref) / ref * 100.0
+        snap["entry_slippage_pct"] = round(slip, 4)
+        if slip > slip_pct:
+            return False, "missed_entry_slippage", snap
+    else:
+        snap["entry_slippage_pct"] = None
+        snap["slippage_skipped_reason"] = "options_path"
 
     # Long viability: stop below entry, target above entry
     if alert.stop_loss is not None:
