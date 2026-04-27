@@ -34,6 +34,7 @@ from .training import (
     score_pending_features,
     run_pattern_survival_training_pass,
 )
+from .decisions import compute_decision
 
 __all__ = [
     "snapshot_pattern_features",
@@ -42,4 +43,5 @@ __all__ = [
     "train_survival_classifier",
     "score_pending_features",
     "run_pattern_survival_training_pass",
+    "compute_decision",
 ]
