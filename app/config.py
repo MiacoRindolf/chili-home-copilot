@@ -857,6 +857,28 @@ class Settings(BaseSettings):
     # chili_pattern_survival_decisions_enabled (Phase 3, default OFF).
     chili_pattern_survival_classifier_enabled: bool = False
     chili_pattern_survival_decisions_enabled: bool = False
+    # K Phase 3 sub-flags (S.2). Each consumer of survival_probability is
+    # gated independently so the operator can flip them on one at a time
+    # following the staged rollout in
+    # docs/PATTERN_SURVIVAL_PHASE_3_DESIGN.md (sizing first, demote
+    # second, promote_gate last). All require chili_pattern_survival_-
+    # decisions_enabled=True as the parent kill-switch — flipping the
+    # parent OFF disables every sub-consumer regardless of its own flag.
+    chili_pattern_survival_sizing_enabled: bool = False
+    chili_pattern_survival_demote_enabled: bool = False
+    chili_pattern_survival_promote_gate_enabled: bool = False
+    # Sizing-multiplier floor: a low-survival pattern's notional is
+    # multiplied by clamp(SIZING_FLOOR + (1-SIZING_FLOOR) * p, FLOOR, 1.0).
+    # Default 0.25 means even patterns with p=0.0 keep 25% of their
+    # HRP-allocated size. Tunable so the operator can sharpen the
+    # gradient (lower floor = more aggressive risk-off) without code
+    # changes.
+    chili_pattern_survival_sizing_floor: float = 0.25
+    # Demote / promote thresholds. Sourced as floats so per-environment
+    # tuning is .env-only.
+    chili_pattern_survival_demote_threshold: float = 0.30
+    chili_pattern_survival_demote_streak_required: int = 3
+    chili_pattern_survival_promote_gate_threshold: float = 0.40
     # Q1.T2: 3-state Gaussian HMM regime tags on snapshots (default OFF = byte parity with pre-T2).
     chili_regime_classifier_enabled: bool = True
     # When True, weekly retrain and backfill skip loading `regime_models/` for warm-start (cold EM fit).
