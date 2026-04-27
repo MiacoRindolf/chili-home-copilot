@@ -118,6 +118,81 @@ def _release_alert_claim(db: Session, alert_id: int) -> None:
         )
 
 
+# AAA -- janitor: kill leaked autotrader advisory-lock holders.
+#
+# When XX's outer wall-clock budget abandons a hung worker thread, the
+# thread's DB session stays alive (Python can't safely kill a thread).
+# That orphan session keeps any pg_advisory_lock it acquired -- which
+# means every subsequent tick fails to claim the same alert with
+# advisory_lock_busy. Diagnosed via pg_stat_activity + pg_locks:
+# sessions stuck "idle in transaction" with state_change_age > N seconds,
+# holding a lock in our 0x4154 namespace, are leaked.
+#
+# This janitor runs at the START of every autotrader tick, before any
+# work. It's cheap (one indexed query) and idempotent -- pg_terminate_backend
+# is a no-op on a session that has already finished. Threshold is
+# generous (default 120s) so we don't fight legitimate slow ticks; the
+# tick budget is 45s so anything older is definitely orphaned.
+
+def _cleanup_leaked_advisory_locks(db: Session) -> int:
+    """Terminate orphan sessions holding autotrader advisory locks.
+
+    Returns count of sessions terminated. Best-effort: any failure logs
+    and returns 0 -- never raises into the tick.
+    """
+    try:
+        dialect = db.bind.dialect.name if db.bind else ""
+    except Exception:
+        dialect = ""
+    if dialect != "postgresql":
+        return 0
+    try:
+        threshold_s = max(60, int(getattr(settings, "chili_autotrader_leak_cleanup_threshold_s", 120)))
+    except Exception:
+        threshold_s = 120
+    try:
+        rows = db.execute(
+            text(
+                "SELECT pa.pid, "
+                "       EXTRACT(EPOCH FROM (NOW() - pa.state_change))::int AS age_s, "
+                "       pa.state "
+                "FROM pg_stat_activity pa "
+                "JOIN pg_locks l ON l.pid = pa.pid "
+                "WHERE l.locktype = 'advisory' "
+                "  AND l.classid::int = :ns "
+                "  AND pa.state IN ('idle in transaction', 'idle in transaction (aborted)') "
+                "  AND EXTRACT(EPOCH FROM (NOW() - pa.state_change)) > :thr "
+            ),
+            {"ns": _ALERT_CLAIM_LOCK_NAMESPACE, "thr": threshold_s},
+        ).fetchall()
+        killed = 0
+        for r in rows or []:
+            pid, age_s, state = int(r[0]), int(r[1] or 0), r[2]
+            try:
+                db.execute(
+                    text("SELECT pg_terminate_backend(:p)"),
+                    {"p": pid},
+                )
+                killed += 1
+                logger.warning(
+                    "[autotrader] AAA janitor: terminated leaked session "
+                    "pid=%s state=%s age=%ss (orphan lock from prior abandoned tick)",
+                    pid, state, age_s,
+                )
+            except Exception as e:
+                logger.debug("[autotrader] AAA janitor terminate pid=%s failed: %s", pid, e)
+        if killed:
+            db.commit()
+        return killed
+    except Exception as e:
+        logger.debug("[autotrader] AAA janitor pass failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
+
+
 def _resolve_user_id() -> Optional[int]:
     return getattr(settings, "chili_autotrader_user_id", None) or getattr(
         settings, "brain_default_user_id", None
@@ -330,6 +405,12 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     rt = effective_autotrader_runtime(db)
     if not rt.get("tick_allowed"):
         return {"ok": True, "skipped": True, "reason": "paused_or_disabled", "runtime": rt}
+
+    # AAA -- janitor pass: kill any leaked autotrader advisory-lock holders
+    # from previous abandoned ticks. Cheap, idempotent. Default threshold
+    # 120s -- well past the 45s tick budget so legitimate slow ticks never
+    # get killed by us.
+    _cleanup_leaked_advisory_locks(db)
 
     uid = _resolve_user_id()
     if uid is None:

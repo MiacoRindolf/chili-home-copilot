@@ -2138,6 +2138,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_MISFIRE_GRACE_S"),
     )
 
+    # AAA -- janitor threshold for terminating leaked autotrader
+    # advisory-lock holders. When XX outer wall-clock budget abandons a
+    # hung worker thread, the thread DB session stays alive holding the
+    # lock; the janitor (runs at the start of every tick) terminates
+    # sessions stuck "idle in transaction" older than this threshold.
+    # Default 120s -- well past 45s tick budget so legitimate slow ticks
+    # are never killed.
+    chili_autotrader_leak_cleanup_threshold_s: int = Field(
+        default=120,
+        ge=60,
+        le=900,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_LEAK_CLEANUP_THRESHOLD_S"),
+    )
+
     # YY — drawdown breaker scope. When True (default), the breaker only
     # measures P&L from CHILI-placed trades (auto_trader_version IS NOT
     # NULL or management_scope='auto_trader_v1'). Pre-CHILI manual
