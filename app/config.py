@@ -2012,6 +2012,29 @@ class Settings(BaseSettings):
             "venue layer."
         ),
     )
+    # Task NN Phase 3 — substitute equity entries with options. When
+    # ON, bullish equity pattern_imminent alerts get synthesized into
+    # ATM call entries (~30 DTE) before the rule gate. Skip the
+    # substitution if the option chain is illiquid (spread > 15%) or
+    # no tradable contract exists near ATM. Requires both
+    # chili_autotrader_options_enabled AND chili_options_venue_robinhood_enabled.
+    chili_autotrader_options_substitute_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_SUBSTITUTE_ENABLED"),
+        description=(
+            "When true, bullish equity entries are translated to long "
+            "ATM calls instead of stock buys. Substitution is skipped "
+            "(falls back to equity) when the chain is illiquid."
+        ),
+    )
+    # DTE target for substitution (calendar days). Default 30 for the
+    # theta-vs-gamma sweet spot.
+    chili_autotrader_options_substitute_dte: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_SUBSTITUTE_DTE"),
+    )
     chili_autotrader_assumed_capital_usd: float = Field(
         default=25_000.0,
         ge=100.0,
