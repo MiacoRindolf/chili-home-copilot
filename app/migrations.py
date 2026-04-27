@@ -11117,6 +11117,95 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_185_backfill_pattern_families(conn) -> None:
+    """Q2 Task P — backfill scan_patterns.hypothesis_family by name keyword.
+
+    Diagnosis: KPI's diversity rollup showed pnl_herfindahl=0.92 with
+    'unknown' family contributing -$1721 of -$1641 total realized PnL.
+    Splitting that bucket showed two distinct sources of "unknown":
+
+      1. 4 active NULL-family patterns whose names clearly indicated
+         the strategy family (Bear flag breakdown, Descending triangle
+         breakdown, rsi_bullish_divergence variants) but were never
+         tagged. Driven by web_discovered seed patterns + variant
+         creation paths that didn't propagate family from parent when
+         the parent itself was NULL.
+
+      2. 75 broker-sync trades (tags='robinhood-sync') with no
+         scan_pattern_id at all. These are operator manual-trades
+         mirrored from Robinhood; not a CHILI signal source. The
+         brain.py KPI endpoint splits these into a separate
+         external_unattributed bucket so they don't pollute the
+         signal-diversity Herfindahl.
+
+    This migration handles bucket 1 — name-keyword backfill across all
+    NULL/unknown hypothesis_family rows. Idempotent on subsequent runs
+    (only rewrites NULL/unknown values; preserves explicit tags).
+
+    The priority order matches app/services/trading/pattern_family_backfill.py:
+    specific oscillator / continuation signals before generic breakout/
+    reversal so RSI divergence reversals don't get tagged as breakouts.
+    """
+    from sqlalchemy import text as _text
+
+    conn.execute(_text(
+        """
+        UPDATE scan_patterns
+        SET hypothesis_family = (
+            CASE
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       LIKE '%divergence%'
+                THEN 'mean_reversion'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'rsi_oversold|rsi_overbought|vwap_revert|vwap_reclaim|oversold|overbought'
+                THEN 'mean_reversion'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'squeeze|compression|triangle|flag|pennant|wedge'
+                THEN 'compression_expansion'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'liquidity_sweep|breakdown'
+                THEN 'liquidity_sweep'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'opening_range|orb_'
+                THEN 'opening_range'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'gap_fill|gap_and_go|gap_continuation|ema_stack|ema_cross|breakout'
+                THEN 'momentum_continuation'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       LIKE '%reversal%'
+                THEN 'mean_reversion'
+                ELSE NULL
+            END
+        )
+        WHERE (hypothesis_family IS NULL OR hypothesis_family = 'unknown')
+          AND (CASE
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       LIKE '%divergence%'
+                THEN 'mean_reversion'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'rsi_oversold|rsi_overbought|vwap_revert|vwap_reclaim|oversold|overbought'
+                THEN 'mean_reversion'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'squeeze|compression|triangle|flag|pennant|wedge'
+                THEN 'compression_expansion'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'liquidity_sweep|breakdown'
+                THEN 'liquidity_sweep'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'opening_range|orb_'
+                THEN 'opening_range'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       ~ 'gap_fill|gap_and_go|gap_continuation|ema_stack|ema_cross|breakout'
+                THEN 'momentum_continuation'
+                WHEN LOWER(name || ' ' || COALESCE(description, ''))
+                       LIKE '%reversal%'
+                THEN 'mean_reversion'
+                ELSE NULL
+              END) IS NOT NULL
+        """
+    ))
+
+
 def _migration_184_seed_hyperliquid_perp_contracts(conn) -> None:
     """Q2 Task M — seed perp_contracts with Hyperliquid rows.
 
@@ -12163,6 +12252,7 @@ MIGRATIONS = [
     ("182_perps_lane_scaffold", _migration_182_perps_lane_scaffold),
     ("183_pattern_survival_meta_classifier", _migration_183_pattern_survival_meta_classifier),
     ("184_seed_hyperliquid_perp_contracts", _migration_184_seed_hyperliquid_perp_contracts),
+    ("185_backfill_pattern_families", _migration_185_backfill_pattern_families),
 ]
 
 
