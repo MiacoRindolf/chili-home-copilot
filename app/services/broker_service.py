@@ -2027,6 +2027,334 @@ def get_crypto_quote(ticker: str) -> dict[str, Any] | None:
         return None
 
 
+# ── Options order placement (Task MM) ──────────────────────────────────
+#
+# Robinhood options live at api.robinhood.com/options/ — same equity-scope
+# OAuth token as stocks (NOT a separate scope like crypto's nummus). If the
+# RH session is connected for stocks, options endpoints work too, modulo
+# account-level options approval (Level 2 buy / Level 3 spreads / etc).
+# Approval is operator-side; we surface broker rejections cleanly via the
+# existing audit row plumbing, same as KK did for crypto-not-supported.
+#
+# robin_stocks options API used here:
+#   rh.options.order_buy_option_limit(...)    — single-leg long buy
+#   rh.options.order_sell_option_limit(...)   — single-leg long sell
+#   rh.options.find_options_by_expiration_and_strike(...) — locate contract
+#   rh.options.get_option_market_data_by_id(option_id) — quote + IV + greeks
+#
+# Multi-leg strategies (verticals, iron condors) need separate orchestration
+# at the strategy layer — submit each leg sequentially with combined coid
+# prefix. Out of scope for Phase 1.
+
+
+def find_option_contract(
+    underlying: str,
+    expiration: str,
+    strike: float,
+    option_type: str,
+) -> dict[str, Any] | None:
+    """Look up a specific option contract by (underlying, expiration, strike, type).
+
+    Args:
+        underlying: equity ticker, e.g. 'AAPL'
+        expiration: ISO date 'YYYY-MM-DD' (e.g. '2026-05-16')
+        strike: strike price as float
+        option_type: 'call' or 'put'
+
+    Returns the raw RH instrument dict (with id/url/state/tradability) or
+    ``None`` if no match. None signals the contract doesn't exist or RH
+    auth lacks options scope; the venue adapter should clean-error rather
+    than crash on this.
+    """
+    if not _rh_available or not is_connected():
+        return None
+    side = (option_type or "").strip().lower()
+    if side not in ("call", "put"):
+        return None
+    sym = (underlying or "").strip().upper()
+    if not sym:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        results = rh.options.find_options_by_expiration_and_strike(
+            sym, expiration, strike, side,
+        )
+        if not results:
+            return None
+        # The library returns a list; take the first matching tradable contract.
+        for c in results:
+            if isinstance(c, dict) and c.get("tradability") in ("tradable", None):
+                return c
+        # Fall back to first if none flagged tradable.
+        first = results[0]
+        return first if isinstance(first, dict) else None
+    except Exception as e:
+        logger.warning(
+            "[broker] find_option_contract(%s %s %s %s) failed: %s",
+            sym, expiration, strike, side, e,
+        )
+        return None
+
+
+def get_option_quote(option_id: str) -> dict[str, Any] | None:
+    """Return market data for a specific option contract by RH id, or None.
+
+    The dict carries bid_price, ask_price, mark_price, implied_volatility,
+    delta/gamma/theta/vega/rho, open_interest, volume — the operator-visible
+    fields the autotrader uses for sizing + slippage gates.
+    """
+    if not _rh_available or not is_connected():
+        return None
+    if not option_id:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        # robin_stocks returns a list (one entry per requested id). Normalize
+        # to a single dict.
+        data = rh.options.get_option_market_data_by_id(option_id)
+        if isinstance(data, list) and data:
+            first = data[0]
+            return first if isinstance(first, dict) else None
+        if isinstance(data, dict):
+            return data
+        return None
+    except Exception as e:
+        logger.warning("[broker] get_option_quote(%s) failed: %s", option_id, e)
+        return None
+
+
+def place_option_buy_order(
+    underlying: str,
+    expiration: str,
+    strike: float,
+    option_type: str,
+    quantity: int,
+    limit_price: float,
+    *,
+    time_in_force: str = "gtc",
+) -> dict[str, Any]:
+    """Place a single-leg long-call or long-put BUY via Robinhood.
+
+    Args mirror the contract-identification triple plus order details:
+
+      underlying:  'AAPL'
+      expiration:  '2026-05-16' (ISO YYYY-MM-DD; same format RH uses)
+      strike:      150.0 (the strike price in dollars)
+      option_type: 'call' or 'put'
+      quantity:    integer number of contracts (each = 100 shares of underlying)
+      limit_price: per-contract premium in dollars (NOT × 100)
+      time_in_force: 'gtc' or 'gfd' (default gtc for limit orders)
+
+    Returns the same envelope as place_buy_order for stocks/crypto so the
+    autotrader doesn't need a third response shape. The pre-flight verifies
+    the contract exists at the broker before submitting; if RH options
+    approval is missing on the account the order will be rejected by RH
+    and surfaced as ``error`` in the response.
+    """
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+
+    sym = (underlying or "").strip().upper()
+    side = (option_type or "").strip().lower()
+    if not sym or side not in ("call", "put"):
+        return {"ok": False, "error": f"bad inputs: underlying={underlying!r} type={option_type!r}"}
+    if quantity <= 0 or limit_price <= 0:
+        return {"ok": False, "error": f"bad qty/price: qty={quantity} price={limit_price}"}
+
+    # Pre-flight: confirm the contract exists. Catches typos in
+    # expiration / strike before the broker does, gives a clean error
+    # message instead of an opaque RH 400.
+    contract = find_option_contract(sym, expiration, strike, side)
+    if not contract:
+        return {
+            "ok": False,
+            "error": f"option_contract_not_found:{sym}_{expiration}_{strike}_{side}",
+        }
+
+    try:
+        import robin_stocks.robinhood as rh
+
+        def _do_buy():
+            return rh.options.order_buy_option_limit(
+                positionEffect="open",
+                creditOrDebit="debit",  # buying-to-open is always a debit
+                price=round(float(limit_price), 2),
+                symbol=sym,
+                quantity=int(quantity),
+                expirationDate=expiration,
+                strike=float(strike),
+                optionType=side,
+                timeInForce=time_in_force,
+                jsonify=True,
+            )
+
+        result = _retry_api_call(_do_buy, label=f"BUY-OPT {sym} {expiration} {strike}{side}")
+
+        if result and isinstance(result, dict):
+            order_id = result.get("id") or ""
+            state = result.get("state", "unknown")
+            if not order_id:
+                error_msg = (
+                    result.get("detail")
+                    or result.get("error")
+                    or result.get("message")
+                    or "Robinhood options endpoint returned no order_id"
+                )
+                logger.error(
+                    "[broker] BUY-OPT rejected (no order_id): %s %s %s%s qty=%d response=%s",
+                    sym, expiration, strike, side, quantity, result,
+                )
+                return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            logger.info(
+                "[broker] BUY-OPT order placed: %s %s %s%s qty=%d limit=%.2f -> %s",
+                sym, expiration, strike, side, quantity, limit_price, state,
+            )
+            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+
+        error_msg = str(result) if result else "Empty response from Robinhood options"
+        logger.error("[broker] BUY-OPT order failed for %s: %s", sym, error_msg)
+        return {"ok": False, "error": error_msg}
+
+    except Exception as e:
+        logger.error("[broker] BUY-OPT exception for %s: %s", sym, e, exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
+def place_option_sell_order(
+    underlying: str,
+    expiration: str,
+    strike: float,
+    option_type: str,
+    quantity: int,
+    limit_price: float,
+    *,
+    position_effect: str = "close",
+    time_in_force: str = "gtc",
+) -> dict[str, Any]:
+    """Place a single-leg SELL via Robinhood. Mirrors place_option_buy_order.
+
+    ``position_effect``:
+      - 'close' (default) — closing a long call/put we already own
+      - 'open' — opening a short call/put (covered call, naked put, etc.).
+        Requires Level 3+ approval and far higher margin/cash than longs.
+
+    For Phase 1 we default to 'close' so the autotrader can exit a long
+    position without operator-supervised gating. Opening shorts is opt-in
+    by passing ``position_effect='open'`` explicitly.
+    """
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+
+    sym = (underlying or "").strip().upper()
+    side = (option_type or "").strip().lower()
+    if not sym or side not in ("call", "put"):
+        return {"ok": False, "error": f"bad inputs: underlying={underlying!r} type={option_type!r}"}
+    if quantity <= 0 or limit_price <= 0:
+        return {"ok": False, "error": f"bad qty/price: qty={quantity} price={limit_price}"}
+    pe = (position_effect or "close").strip().lower()
+    if pe not in ("open", "close"):
+        return {"ok": False, "error": f"bad position_effect: {position_effect!r}"}
+
+    # Closing: contract must exist (we should already own it).
+    # Opening short: contract must exist + RH approval level handles the
+    # margin check. Either way the existence check is correct.
+    contract = find_option_contract(sym, expiration, strike, side)
+    if not contract:
+        return {
+            "ok": False,
+            "error": f"option_contract_not_found:{sym}_{expiration}_{strike}_{side}",
+        }
+
+    try:
+        import robin_stocks.robinhood as rh
+
+        # close-of-long is a credit (we receive premium); open-of-short
+        # is also a credit. Both sells go through as credit transactions.
+        cod = "credit"
+
+        def _do_sell():
+            return rh.options.order_sell_option_limit(
+                positionEffect=pe,
+                creditOrDebit=cod,
+                price=round(float(limit_price), 2),
+                symbol=sym,
+                quantity=int(quantity),
+                expirationDate=expiration,
+                strike=float(strike),
+                optionType=side,
+                timeInForce=time_in_force,
+                jsonify=True,
+            )
+
+        result = _retry_api_call(_do_sell, label=f"SELL-OPT {sym} {expiration} {strike}{side}")
+
+        if result and isinstance(result, dict):
+            order_id = result.get("id") or ""
+            state = result.get("state", "unknown")
+            if not order_id:
+                error_msg = (
+                    result.get("detail")
+                    or result.get("error")
+                    or result.get("message")
+                    or "Robinhood options endpoint returned no order_id"
+                )
+                logger.error(
+                    "[broker] SELL-OPT rejected (no order_id): %s %s %s%s qty=%d response=%s",
+                    sym, expiration, strike, side, quantity, result,
+                )
+                return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            logger.info(
+                "[broker] SELL-OPT order placed: %s %s %s%s qty=%d limit=%.2f effect=%s -> %s",
+                sym, expiration, strike, side, quantity, limit_price, pe, state,
+            )
+            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+
+        error_msg = str(result) if result else "Empty response from Robinhood options"
+        logger.error("[broker] SELL-OPT order failed for %s: %s", sym, error_msg)
+        return {"ok": False, "error": error_msg}
+
+    except Exception as e:
+        logger.error("[broker] SELL-OPT exception for %s: %s", sym, e, exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
+def get_open_option_positions() -> list[dict[str, Any]]:
+    """Current open option legs (long + short). Each entry carries
+    quantity, average_price (premium paid/received), trade_value,
+    and chain_id — enough to reconcile against trade rows.
+    """
+    if not _rh_available or not is_connected():
+        return []
+    try:
+        import robin_stocks.robinhood as rh
+        positions = rh.options.get_open_option_positions() or []
+        return [p for p in positions if isinstance(p, dict)]
+    except Exception as e:
+        logger.warning("[broker] get_open_option_positions failed: %s", e)
+        return []
+
+
+def cancel_option_order(order_id: str) -> dict[str, Any]:
+    """Cancel an open option order by id. Returns ok/error envelope."""
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+    if not order_id:
+        return {"ok": False, "error": "empty order_id"}
+    try:
+        import robin_stocks.robinhood as rh
+        result = rh.options.cancel_option_order(order_id)
+        return {"ok": True, "raw": result or {}}
+    except Exception as e:
+        logger.warning("[broker] cancel_option_order(%s) failed: %s", order_id, e)
+        return {"ok": False, "error": str(e)}
+
+
 def _poll_order_until_terminal(order_id: str, *, label: str = "") -> str:
     """Poll a Robinhood order until it reaches a terminal state or times out.
 

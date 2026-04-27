@@ -836,6 +836,15 @@ class Settings(BaseSettings):
     # CHILI_OPTIONS_BUDGET_BYPASS=true (operator-supervised testing).
     chili_options_lane_enabled: bool = False
     chili_options_lane_live: bool = False
+    # Task MM Phase 1: Robinhood options venue. The options lane scaffold
+    # (Q2.T1) routes through Tradier by default; flip this to ON to use
+    # the Robinhood options API instead. Same equity-scope OAuth token
+    # the spot adapter uses, so no separate auth dance like crypto's
+    # nummus. Operator-side prerequisite: RH options must be approved
+    # at the appropriate level on the account (Level 2 buy / Level 3
+    # spreads). Default OFF; flipping requires chili_options_lane_enabled
+    # to also be ON.
+    chili_options_venue_robinhood_enabled: bool = False
     # Q2.T2: forex lane scaffold (OANDA-first). When OFF (default), all FX
     # code paths are inert. When ON, paper-only by default (set
     # chili_forex_lane_live to True for live broker submission). Hard 10:1
