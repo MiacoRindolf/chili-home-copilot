@@ -1760,6 +1760,18 @@ def _run_auto_trader_monitor_job():
                 logger.info("[scheduler] options_exit_pass: %s", opt_summary)
         except Exception:
             logger.exception("[scheduler] options_exit_pass failed (non-fatal)")
+        # HHH -- crypto-aware exit monitor, parallel to options. Equity
+        # monitor skips robinhood -USD tickers; without this pass the
+        # stop/target on crypto Trade rows never fires. Flag-gated
+        # internally; no-op when chili_autotrader_crypto_exit_monitor_enabled
+        # is False.
+        try:
+            from .trading.crypto.exit_monitor import run_crypto_exit_pass
+            crypto_summary = run_crypto_exit_pass(db)
+            if crypto_summary.get("closed", 0) > 0 or len(crypto_summary.get("errors", []) or []) > 0:
+                logger.info("[scheduler] crypto_exit_pass: %s", crypto_summary)
+        except Exception:
+            logger.exception("[scheduler] crypto_exit_pass failed (non-fatal)")
     except Exception:
         logger.exception("[scheduler] auto_trader monitor failed")
     finally:

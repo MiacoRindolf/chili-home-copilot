@@ -1215,6 +1215,55 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 existing.indicator_snapshot = _compute_trade_snapshot(ticker, avg_price)
             updated += 1
         else:
+            # GGG -- broker_sync crypto dedup. Before creating a brand-new
+            # broker_sync row, look for a recent (last 24h) trade on the
+            # SAME ticker+broker that may have been stamped "rejected"
+            # incorrectly while the broker actually holds the position.
+            # The RAY-USD failure mode: trade#384 placed by autotrader_v1
+            # at 10:18 -- broker filled (cost basis $301.13 / 420 RAY)
+            # but post-place verification timed out and stamped the row
+            # rejected. Without this revive, broker_sync then created
+            # phantom "open" rows on every cycle.
+            from datetime import timedelta as _td
+            _revive_cutoff = datetime.utcnow() - _td(hours=24)
+            revive = (
+                db.query(Trade)
+                .filter(
+                    Trade.user_id == user_id,
+                    Trade.ticker == ticker,
+                    Trade.broker_source == "robinhood",
+                    Trade.status.in_(("rejected", "cancelled", "failed", "unknown")),
+                    Trade.entry_date >= _revive_cutoff,
+                )
+                .order_by(Trade.id.desc())
+                .first()
+            )
+            if revive is not None:
+                # Compare avg price within 5%% to be safe.
+                _rev_entry = float(revive.entry_price or 0)
+                _broker_avg = float(avg_price or 0)
+                price_match = (
+                    _broker_avg > 0 and _rev_entry > 0
+                    and abs(_rev_entry - _broker_avg) / _broker_avg < 0.05
+                )
+                qty_match = abs(float(revive.quantity or 0) - float(qty or 0)) < 1e-6
+                if price_match and qty_match:
+                    revive.status = "open"
+                    revive.broker_status = "filled"
+                    revive.filled_quantity = qty
+                    revive.last_broker_sync = datetime.utcnow()
+                    revive.notes = (
+                        (revive.notes or "")
+                        + f"\n[GGG broker_sync revive] {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} "
+                        f"-- broker confirms position; was wrongly stamped '{revive.status}'"
+                    )
+                    logger.warning(
+                        "[broker_sync] GGG revived trade#%s ticker=%s qty=%s price=%s "
+                        "(was stamped rejected/cancelled but broker holds the position)",
+                        revive.id, ticker, qty, avg_price,
+                    )
+                    updated += 1
+                    continue  # skip the new-row creation below
             snapshot = _compute_trade_snapshot(ticker, avg_price)
             is_crypto = ticker.upper().endswith("-USD")
             trade = Trade(

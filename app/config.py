@@ -2152,6 +2152,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LEAK_CLEANUP_THRESHOLD_S"),
     )
 
+    # HHH -- crypto-aware exit monitor flag. Equity monitor skips RH
+    # crypto tickers; this pass plugs that gap by checking stop_loss /
+    # take_profit on open crypto Trade rows and submitting market sell
+    # orders via place_crypto_sell_order. Default ON because the entry
+    # path (KK) is already live and exits should be the matching default.
+    chili_autotrader_crypto_exit_monitor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_CRYPTO_EXIT_MONITOR_ENABLED"),
+    )
+
     # YY — drawdown breaker scope. When True (default), the breaker only
     # measures P&L from CHILI-placed trades (auto_trader_version IS NOT
     # NULL or management_scope='auto_trader_v1'). Pre-CHILI manual
