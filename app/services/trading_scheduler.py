@@ -1677,6 +1677,22 @@ def _run_pattern_imminent_job():
 
 
 def _run_auto_trader_tick_job():
+    """XX — outer-safety wrapper for the autotrader tick.
+
+    The inner ``run_auto_trader_tick`` already wraps its broker calls in
+    ``_call_with_timeout`` (see ``auto_trader_rules._fetch_broker_equity_once``).
+    This outer wrapper adds a wall-clock deadline so even if a future
+    callsite gets added without a timeout, a hung tick can't hold the
+    scheduler instance slot indefinitely.
+
+    Implementation: ``ThreadPoolExecutor`` runs the tick in a worker
+    thread; main thread blocks up to ``chili_autotrader_tick_max_seconds``
+    (default 45s) waiting for it. If the thread exceeds the budget, we
+    log a warning and return — the abandoned worker continues until
+    its socket times out, and the next scheduler tick fires
+    independently. With ``max_instances=3`` the queue keeps moving.
+    """
+    import concurrent.futures
     from ..config import settings as _settings
     from ..db import SessionLocal
     from .trading.auto_trader import run_auto_trader_tick
@@ -1684,13 +1700,39 @@ def _run_auto_trader_tick_job():
     if not getattr(_settings, "chili_autotrader_enabled", False):
         return
 
-    db = SessionLocal()
+    budget_s = max(5, int(getattr(_settings, "chili_autotrader_tick_max_seconds", 45)))
+
+    def _do_tick():
+        db = SessionLocal()
+        try:
+            run_auto_trader_tick(db)
+        finally:
+            db.close()
+
+    started = time.monotonic()
     try:
-        run_auto_trader_tick(db)
-    except Exception:
-        logger.exception("[scheduler] auto_trader tick failed")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_do_tick)
+            try:
+                future.result(timeout=budget_s)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "[scheduler] auto_trader tick exceeded %ss budget — "
+                    "abandoning the worker; next tick will fire normally",
+                    budget_s,
+                )
+                # Don't wait for shutdown — let the abandoned thread complete in background
+                ex._threads.clear()  # detach from the pool's join() on __exit__
+                concurrent.futures.thread._threads_queues.clear()
+            except Exception:
+                logger.exception("[scheduler] auto_trader tick failed")
     finally:
-        db.close()
+        dur = time.monotonic() - started
+        if dur > 20.0:
+            logger.warning(
+                "[scheduler] auto_trader tick slow: took %.1fs (budget=%ss)",
+                dur, budget_s,
+            )
 
 
 def _run_auto_trader_monitor_job():
@@ -3052,13 +3094,25 @@ def start_scheduler():
         if include_heavy or include_web_light:
             _at_tick_s = max(5, int(getattr(settings, "chili_autotrader_tick_interval_seconds", 10)))
             _at_mon_s = max(5, int(getattr(settings, "chili_autotrader_monitor_interval_seconds", 30)))
+            # XX — autotrader tick / monitor allow concurrent instances so a
+            # slow tick (e.g. a flapping broker call before the timeout
+            # wrapper kicks in) doesn't suppress the queue. Per-alert
+            # advisory locks (``_try_claim_alert``) prevent two concurrent
+            # ticks from racing on the same alert; the audit-row check
+            # (``breakout_alert_already_processed``) is the second line of
+            # defense. ``misfire_grace_time`` lets a missed schedule still
+            # fire if it's only a few seconds late.
+            _at_max_inst = max(1, int(getattr(settings, "chili_autotrader_tick_max_instances", 3)))
+            _at_misfire = max(0, int(getattr(settings, "chili_autotrader_tick_misfire_grace_s", 30)))
             _scheduler.add_job(
                 _run_auto_trader_tick_job,
                 trigger=IntervalTrigger(seconds=_at_tick_s),
                 id="auto_trader_tick",
                 name=f"AutoTrader v1 tick (every {_at_tick_s}s)",
                 replace_existing=True,
-                max_instances=1,
+                max_instances=_at_max_inst,
+                misfire_grace_time=_at_misfire,
+                coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=25),
             )
             _scheduler.add_job(
@@ -3067,7 +3121,9 @@ def start_scheduler():
                 id="auto_trader_monitor",
                 name=f"AutoTrader v1 monitor (every {_at_mon_s}s)",
                 replace_existing=True,
-                max_instances=1,
+                max_instances=_at_max_inst,
+                misfire_grace_time=_at_misfire,
+                coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=30),
             )
 

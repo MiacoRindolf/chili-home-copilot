@@ -829,12 +829,59 @@ def get_drawdown_limits(
     )
 
 
+# YY — drawdown breaker scope. The breaker should be measuring CHILI's
+# OWN P&L, not the user's pre-existing manual positions. The user opened
+# this scope distinction after the breaker tripped at -9.8% on a pool of
+# realized losses that included manual pre-CHILI trades — unfair to
+# CHILI, blocked all autotrader entries, and was a false positive.
+#
+# When ``chili_breaker_scope_autotrader_only`` is True (default), every
+# query in ``check_drawdown_breaker`` filters to rows that CHILI placed
+# (``auto_trader_version IS NOT NULL`` OR ``management_scope`` matches
+# the autotrader scope). Manual positions are invisible to the breaker.
+#
+# Set to False to preserve the legacy "everything counts" behavior.
+
+def _breaker_trade_filter(query):
+    """Apply the autotrader-only filter to a Trade query when the flag is on.
+
+    Idempotent — when the flag is off, returns the query untouched. The
+    canonical "this row was placed by the autotrader" signal is
+    ``auto_trader_version IS NOT NULL``; ``management_scope`` is the
+    secondary signal carried on a few legacy rows. We OR them so the
+    filter matches both populations.
+    """
+    try:
+        from ...config import settings
+        scope_only = bool(getattr(settings, "chili_breaker_scope_autotrader_only", True))
+    except Exception:
+        scope_only = True
+    if not scope_only:
+        return query
+    from sqlalchemy import or_
+    from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
+    return query.filter(
+        or_(
+            Trade.auto_trader_version.isnot(None),
+            Trade.management_scope == MANAGEMENT_SCOPE_AUTO_TRADER_V1,
+        )
+    )
+
+
 def _compute_unrealized_pnl(db: Session, user_id: int | None) -> float:
-    """Compute mark-to-market unrealized P&L across open trades."""
-    open_trades = db.query(Trade).filter(
+    """Compute mark-to-market unrealized P&L across open trades.
+
+    YY — only counts CHILI-placed trades when
+    ``chili_breaker_scope_autotrader_only`` is True (default). Manual
+    positions are excluded because the breaker should measure CHILI's
+    risk, not the user's overall portfolio.
+    """
+    q = db.query(Trade).filter(
         Trade.user_id == user_id,
         Trade.status == "open",
-    ).all()
+    )
+    q = _breaker_trade_filter(q)
+    open_trades = q.all()
     if not open_trades:
         return 0.0
 
@@ -902,13 +949,14 @@ def check_drawdown_breaker(
         logger.warning("[circuit_breaker] TRIPPED (MTM): %s", _breaker_reason)
         return True, _breaker_reason
 
-    # 5-day rolling P&L (realized + unrealized)
+    # 5-day rolling P&L (realized + unrealized) — YY: CHILI-placed only
     five_days_ago = now - timedelta(days=5)
-    recent_5d = db.query(Trade).filter(
+    q5 = db.query(Trade).filter(
         Trade.user_id == user_id,
         Trade.status == "closed",
         Trade.exit_date >= five_days_ago,
-    ).all()
+    )
+    recent_5d = _breaker_trade_filter(q5).all()
     pnl_5d_realized = sum(t.pnl or 0 for t in recent_5d)
     pnl_5d_total = pnl_5d_realized + unrealized_pnl
     pnl_5d_pct = (pnl_5d_total / capital * 100) if capital > 0 else 0
@@ -923,13 +971,14 @@ def check_drawdown_breaker(
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
-    # 30-day rolling P&L (realized + unrealized)
+    # 30-day rolling P&L (realized + unrealized) — YY: CHILI-placed only
     thirty_days_ago = now - timedelta(days=30)
-    recent_30d = db.query(Trade).filter(
+    q30 = db.query(Trade).filter(
         Trade.user_id == user_id,
         Trade.status == "closed",
         Trade.exit_date >= thirty_days_ago,
-    ).all()
+    )
+    recent_30d = _breaker_trade_filter(q30).all()
     pnl_30d_realized = sum(t.pnl or 0 for t in recent_30d)
     pnl_30d_total = pnl_30d_realized + unrealized_pnl
     pnl_30d_pct = (pnl_30d_total / capital * 100) if capital > 0 else 0
@@ -944,11 +993,13 @@ def check_drawdown_breaker(
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
-    # Consecutive losses
-    last_n = db.query(Trade).filter(
+    # Consecutive losses — YY: CHILI-placed only
+    qcons = db.query(Trade).filter(
         Trade.user_id == user_id,
         Trade.status == "closed",
-    ).order_by(Trade.exit_date.desc()).limit(limits.max_consecutive_losses).all()
+    )
+    qcons = _breaker_trade_filter(qcons)
+    last_n = qcons.order_by(Trade.exit_date.desc()).limit(limits.max_consecutive_losses).all()
     if len(last_n) >= limits.max_consecutive_losses:
         if all((t.pnl or 0) < 0 for t in last_n):
             _breaker_tripped = True
