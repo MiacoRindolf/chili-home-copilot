@@ -93,6 +93,13 @@ class RuleGateSettings:
     # is not applied (crypto bases routinely exceed the equity $50 cap).
     crypto_enabled: bool = False
 
+    # Task MM Phase 2 — options path. When True, asset_type='options'
+    # alerts pass the gate. Most equity-specific checks are bypassed
+    # (price cap, slippage tolerance, projected_profit_pct) because the
+    # operator-driven option entry encodes its own limit price + sizing.
+    # Kill-switch, drawdown breaker, concurrent-limit still apply.
+    options_enabled: bool = False
+
     # Thresholds
     confidence_floor: float = 0.7
     min_projected_profit_pct: float = 12.0
@@ -125,6 +132,7 @@ class RuleGateSettings:
             rth_only=bool(g("chili_autotrader_rth_only", cls.rth_only)),
             allow_extended_hours=bool(g("chili_autotrader_allow_extended_hours", cls.allow_extended_hours)),
             crypto_enabled=bool(g("chili_autotrader_crypto_enabled", cls.crypto_enabled)),
+            options_enabled=bool(g("chili_autotrader_options_enabled", cls.options_enabled)),
             confidence_floor=float(g("chili_autotrader_confidence_floor", cls.confidence_floor)),
             min_projected_profit_pct=float(
                 g("chili_autotrader_min_projected_profit_pct", cls.min_projected_profit_pct)
@@ -572,10 +580,16 @@ def passes_rule_gate(
     asset_type_l = (alert.asset_type or "").lower()
     is_crypto_alert = asset_type_l == "crypto"
     crypto_path = bool(gs.crypto_enabled) and is_crypto_alert
+    # Task MM Phase 2 — options path. Operator-driven via the manual
+    # entry endpoint that creates the alert; the option metadata
+    # (strike/expiration/type) lives in alert.indicator_snapshot.option_meta.
+    is_options_alert = asset_type_l == "options"
+    options_path = bool(gs.options_enabled) and is_options_alert
     snap["asset_type"] = asset_type_l
     snap["crypto_path"] = crypto_path
+    snap["options_path"] = options_path
 
-    if gs.rth_only and not crypto_path:
+    if gs.rth_only and not crypto_path and not options_path:
         from .pattern_imminent_alerts import (
             us_stock_extended_session_open,
             us_stock_session_open,
@@ -590,14 +604,28 @@ def passes_rule_gate(
                 "outside_extended_hours" if allow_ext else "outside_rth"
             ), snap
 
-    if asset_type_l != "stock" and not crypto_path:
-        # Either this is a crypto alert and the operator hasn't opted into
-        # the crypto path yet (flag OFF), or it's some asset class we
-        # don't support (forex, options). Surface the same reason for
-        # historical KPI continuity but include the asset_type in the
-        # snapshot so the operator can see whether flipping the flag
-        # would unblock these.
+    if asset_type_l != "stock" and not crypto_path and not options_path:
+        # Crypto alert without flag, options alert without flag, or some
+        # asset class we don't support (forex). Same audit reason for
+        # historical continuity; the snapshot's asset_type and *_path
+        # fields tell the operator which flag would unblock.
         return False, "not_stock", snap
+
+    # For options, the operator-driven entry has already chosen a strike,
+    # expiration, qty, and limit price. The equity-shaped gates below
+    # (confidence floor, projected profit %, slippage on equity-spread,
+    # symbol price cap) don't apply cleanly. Validate that the alert
+    # carries the required option metadata, then short-circuit through
+    # the kill-switch / drawdown / concurrent-limit checks the same way
+    # crypto does, and return ok.
+    if options_path:
+        snap_meta = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+        opt_meta = snap_meta.get("option_meta") or {}
+        required = ("strike", "expiration", "option_type")
+        missing = [k for k in required if not opt_meta.get(k)]
+        if missing:
+            return False, f"options_meta_missing:{','.join(missing)}", snap
+        snap["option_meta"] = opt_meta
 
     # Phase 3: pull learned per-pattern signal quality from the M.1 ledger.
     # When the pattern has confident cells we can derive confidence_floor and
@@ -709,7 +737,10 @@ def passes_rule_gate(
     # makes no sense for crypto: BTC is routinely > $50k, and Robinhood
     # supports fractional crypto natively, so a literal price cap would
     # block every crypto alert by construction.
-    if not crypto_path and px > max_px:
+    # Task MM — same reasoning for options. The "symbol price" the gate
+    # sees here is the underlying's price, not the option premium. A
+    # call on AAPL at $180 spot is fine even though 180 > 50.
+    if not crypto_path and not options_path and px > max_px:
         return False, "symbol_price_above_cap", snap
 
     uid_for_slip = alert.user_id if alert.user_id is not None else fallback_user_id

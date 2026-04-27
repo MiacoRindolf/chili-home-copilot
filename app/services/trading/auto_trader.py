@@ -774,6 +774,51 @@ def _execute_broker_buy(
         )
         return None
 
+    # Task MM Phase 2 — when this is an options alert, branch to the
+    # options venue adapter instead of the spot adapter. The rule gate
+    # has already validated the option metadata exists, so we just
+    # extract it and call place_option_buy. snap['option_meta'] is set
+    # by the gate when options_path=True.
+    if snap.get("options_path") and snap.get("option_meta"):
+        opt_meta = snap["option_meta"]
+        from .venue.robinhood_options import RobinhoodOptionsAdapter
+        opt_ad = RobinhoodOptionsAdapter()
+        if not opt_ad.is_enabled():
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="blocked", reason="rh_options_adapter_off",
+                rule_snapshot=snap, llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(out, kind="blocked", reason="rh_options_adapter_off", alert=alert)
+            return None
+        # qty here represents number of CONTRACTS (each = 100 underlying
+        # shares). The rule gate's notional sizing already converted
+        # cash → contract count using opt_meta['limit_price'].
+        try:
+            res = opt_ad.place_option_buy(
+                underlying=str(alert.ticker),
+                expiration=str(opt_meta["expiration"]),
+                strike=float(opt_meta["strike"]),
+                option_type=str(opt_meta["option_type"]),
+                quantity=int(qty),
+                limit_price=float(opt_meta.get("limit_price") or alert.entry_price or 0),
+            )
+        except Exception as exc:
+            res = {"ok": False, "error": f"options_adapter_exception:{exc}"}
+        if not res.get("ok"):
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="blocked", reason=f"broker:{res.get('error')}",
+                rule_snapshot=snap, llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="blocked", reason=f"broker:{res.get('error')}", alert=alert,
+            )
+            return None
+        return res
+
     ad = get_adapter("robinhood")
     if ad is None or not ad.is_enabled():
         _audit(
