@@ -2,32 +2,29 @@
 
 Closes open option Trade rows when any of three exit triggers fire:
 
-  1. **DTE threshold** — when days-to-expiration drops below
-     ``chili_autotrader_options_exit_dte`` (default 7), close the
-     position. This avoids the gamma blowup that hits long options
-     in the final week.
-  2. **Premium stop-loss** — when current bid drops more than
-     ``chili_autotrader_options_exit_stop_pct`` below entry premium
-     (default 50% loss). Cuts losers before zero.
-  3. **Premium take-profit** — when current bid rises more than
-     ``chili_autotrader_options_exit_tp_pct`` above entry premium
-     (default 100% gain). Locks in winners before reversal.
+  1. **DTE threshold** — close before final-week gamma blowup.
+  2. **Premium stop-loss** — cut losers before zero.
+  3. **Premium take-profit** — lock winners before reversal.
+
+The thresholds for each trigger are read from the StrategyParameter
+ledger (family='autotrader_options'), bootstrapped from env values on
+first run. The brain's learning loop adapts them from realized
+outcomes the same way it adapts confidence_floor — no hardcoded
+numbers in this module.
 
 Triggers are checked in order; the first match wins. The exit fires
 ``sell-to-close`` via :class:`RobinhoodOptionsAdapter`, which uses
 the same idempotency / audit plumbing the equity monitor uses.
 
 Out of scope (deferred):
-  - Multi-leg spread exits. The current version exits each leg
-    separately. A real spread-close would use the same multi-leg
-    spread endpoint with action=sell on each leg; that's a follow-up.
-  - Trailing stops on premium. Phase 5 keeps the rules linear.
-  - Rolling (close + reopen at next expiration). Operator-driven only.
+  - Multi-leg spread exits — currently exits each leg separately;
+    closing-the-spread (single multi-leg sell-to-close) is a
+    follow-up.
+  - Trailing stops on premium.
+  - Rolling (close + reopen at next expiration).
 
 Flag-gated by ``chili_autotrader_options_exit_monitor_enabled`` (default
-OFF). When OFF, no option Trade rows are touched by this pass — the
-existing equity exit monitor doesn't recognize option metadata, so
-closing them stays the operator's job.
+OFF). When OFF, no option Trade rows are touched by this pass.
 """
 from __future__ import annotations
 
@@ -42,6 +39,60 @@ from ....config import settings
 from ....models.trading import Trade
 
 logger = logging.getLogger(__name__)
+
+# Same StrategyParameter family as the synthesis path so the brain's
+# learning loop sees options-related knobs as one unit.
+STRATEGY_FAMILY = "autotrader_options"
+
+
+def _register_exit_parameters(db: Session) -> None:
+    """Idempotent registration of the exit-monitor knobs. Bootstraps
+    with env values on first call (so the operator's CHILI_AUTOTRADER_*
+    overrides act as initial values), then the DB is authoritative
+    and the brain's learning loop is free to adapt within bounds.
+    """
+    try:
+        from ..strategy_parameter import ParameterSpec, register_parameter
+
+        register_parameter(db, ParameterSpec(
+            strategy_family=STRATEGY_FAMILY,
+            parameter_key="exit_dte",
+            initial_value=float(getattr(settings, "chili_autotrader_options_exit_dte", 7)),
+            min_value=0.0, max_value=30.0,
+            description=(
+                "Days-to-expiration threshold below which open option "
+                "positions auto-close. Lower exposes the position to "
+                "final-week gamma risk; higher gives up theta-bleed "
+                "premium too early. Brain adapts within [0, 30] from "
+                "realized PnL near-expiry vs early-close cohorts."
+            ),
+        ))
+        register_parameter(db, ParameterSpec(
+            strategy_family=STRATEGY_FAMILY,
+            parameter_key="exit_stop_pct",
+            initial_value=float(getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0)),
+            min_value=10.0, max_value=80.0,
+            description=(
+                "Premium drop %% below entry that triggers stop-loss "
+                "exit. Tighter = exit losers earlier, more frequent "
+                "false stops. Brain adapts within [10, 80] from "
+                "realized survival curves of option entries."
+            ),
+        ))
+        register_parameter(db, ParameterSpec(
+            strategy_family=STRATEGY_FAMILY,
+            parameter_key="exit_tp_pct",
+            initial_value=float(getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0)),
+            min_value=20.0, max_value=500.0,
+            description=(
+                "Premium gain %% above entry that triggers "
+                "take-profit exit. Lower = lock smaller wins more "
+                "often, miss home runs. Brain adapts within "
+                "[20, 500] from option-trade outcome distributions."
+            ),
+        ))
+    except Exception as e:
+        logger.debug("[options_exit_monitor] _register_exit_parameters failed: %s", e)
 
 
 def _is_option_trade(t: Trade) -> bool:
@@ -114,9 +165,24 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
     if not bool(getattr(settings, "chili_autotrader_options_exit_monitor_enabled", False)):
         return summary
 
-    dte_threshold = int(getattr(settings, "chili_autotrader_options_exit_dte", 7))
-    stop_pct = float(getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0))
-    tp_pct = float(getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0))
+    # Bootstrap StrategyParameter rows on first call (idempotent),
+    # then read brain-adapted values. Env values seed the rows; the
+    # DB is authoritative thereafter.
+    _register_exit_parameters(db)
+    from ..strategy_parameter import get_parameter
+
+    dte_threshold = int(get_parameter(
+        db, STRATEGY_FAMILY, "exit_dte",
+        default=float(getattr(settings, "chili_autotrader_options_exit_dte", 7)),
+    ) or 7)
+    stop_pct = float(get_parameter(
+        db, STRATEGY_FAMILY, "exit_stop_pct",
+        default=float(getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0)),
+    ) or 50.0)
+    tp_pct = float(get_parameter(
+        db, STRATEGY_FAMILY, "exit_tp_pct",
+        default=float(getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0)),
+    ) or 100.0)
 
     # Lazy import to avoid a hard module-load dependency on the
     # adapter (broker_service ultimately imports robin_stocks).
