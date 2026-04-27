@@ -11117,6 +11117,58 @@ def _migration_175_gateway_learning_loop(conn) -> None:
     conn.commit()
 
 
+def _migration_184_seed_hyperliquid_perp_contracts(conn) -> None:
+    """Q2 Task M — seed perp_contracts with Hyperliquid rows.
+
+    Hyperliquid is geo-unrestricted (Binance fapi 451's from US, see
+    project memory ``project_binance_geoblock``). Adding it as a
+    second venue lets the perps lane actually accumulate funding /
+    OI / basis data without operator manual proxy work.
+
+    Hyperliquid has 230+ tradable coins; we seed the major liquid
+    set so the ingestion pass doesn't hammer with no payoff. New rows
+    use ``funding_interval_hours = 1`` because Hyperliquid funds
+    hourly, not 8-hourly like Binance — the features.py annualizer
+    multiplies by ``intervals_per_day = 24 / funding_interval_hours``
+    so the right APY falls out automatically.
+
+    Idempotent — INSERT ... ON CONFLICT DO NOTHING on the existing
+    UNIQUE (symbol, venue) constraint.
+    """
+    from sqlalchemy import text as _text
+
+    # Tier-1 majors first; can expand later via a follow-up migration.
+    seeds = [
+        ("BTC",   "BTC",   "USD"),
+        ("ETH",   "ETH",   "USD"),
+        ("SOL",   "SOL",   "USD"),
+        ("BNB",   "BNB",   "USD"),
+        ("XRP",   "XRP",   "USD"),
+        ("AVAX",  "AVAX",  "USD"),
+        ("LINK",  "LINK",  "USD"),
+        ("DOGE",  "DOGE",  "USD"),
+        ("MATIC", "MATIC", "USD"),
+        ("ARB",   "ARB",   "USD"),
+        ("OP",    "OP",    "USD"),
+        ("LTC",   "LTC",   "USD"),
+        ("ATOM",  "ATOM",  "USD"),
+        ("APT",   "APT",   "USD"),
+        ("INJ",   "INJ",   "USD"),
+    ]
+    for sym, base, quote in seeds:
+        conn.execute(_text(
+            """
+            INSERT INTO perp_contracts
+                (symbol, venue, base_ccy, quote_ccy,
+                 contract_multiplier, funding_interval_hours,
+                 max_leverage, tradable)
+            VALUES (:s, 'hyperliquid', :b, :q,
+                    1.0, 1, 10.0, TRUE)
+            ON CONFLICT (symbol, venue) DO NOTHING
+            """
+        ), {"s": sym, "b": base, "q": quote})
+
+
 def _migration_183_pattern_survival_meta_classifier(conn) -> None:
     """Q2 Task K — meta-classifier scaffold for pattern survival prediction.
 
@@ -12110,6 +12162,7 @@ MIGRATIONS = [
     ("181_forex_lane_scaffold", _migration_181_forex_lane_scaffold),
     ("182_perps_lane_scaffold", _migration_182_perps_lane_scaffold),
     ("183_pattern_survival_meta_classifier", _migration_183_pattern_survival_meta_classifier),
+    ("184_seed_hyperliquid_perp_contracts", _migration_184_seed_hyperliquid_perp_contracts),
 ]
 
 
