@@ -189,6 +189,41 @@ class RobinhoodOptionsAdapter:
         from ...broker_service import cancel_option_order
         return cancel_option_order(order_id)
 
+    # ── Multi-leg spreads (Phase 4) ────────────────────────────────────
+
+    def place_spread(
+        self,
+        *,
+        underlying: str,
+        legs: list[dict[str, Any]],
+        quantity: int,
+        limit_price: float,
+        direction: str = "debit",
+        time_in_force: str = "gtc",
+    ) -> dict[str, Any]:
+        """Submit a multi-leg spread (vertical, iron condor, etc.) as a
+        single atomic order. Each leg is a dict with the keys
+        ``expiration``, ``strike``, ``option_type`` (call|put),
+        ``action`` (buy|sell), and optionally ``effect`` (open|close,
+        default open).
+
+        Direction is 'debit' (net pay) or 'credit' (net receive). The
+        strategy layer (Q2.T1 vertical_spread, iron_condor, etc.)
+        decides which based on the leg combination; the adapter just
+        submits.
+
+        Returns the same envelope shape as ``place_option_buy``.
+        """
+        from ...broker_service import place_option_spread
+        return place_option_spread(
+            legs=legs,
+            underlying=underlying,
+            quantity=int(quantity),
+            limit_price=float(limit_price),
+            direction=direction,
+            time_in_force=time_in_force,
+        )
+
     # ── Position queries ───────────────────────────────────────────────
 
     def get_open_positions(self) -> list[dict[str, Any]]:
