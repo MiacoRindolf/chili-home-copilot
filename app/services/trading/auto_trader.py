@@ -962,6 +962,45 @@ def _execute_new_entry(
     except Exception as _hrp_e:
         snap["hrp_error"] = str(_hrp_e)[:200]
 
+    # K Phase 3 S.4 — survival-classifier sizing multiplier.
+    # Composes AFTER HRP (so HRP allocates risk-parity weight, then K
+    # nudges based on per-pattern survival probability). Always called,
+    # logs to pattern_survival_decision_log; returns no_op when any of
+    # the gates is OFF or no prediction exists. Failures are
+    # deliberately swallowed — sizing must never crash the entry path.
+    try:
+        from .pattern_survival.decisions import compute_decision as _ps_decide
+        _ps_result = _ps_decide(
+            db,
+            scan_pattern_id=int(alert.scan_pattern_id),
+            consumer="sizing",
+            input_context={"input_notional": float(notional)},
+        )
+        snap["ps_sizing_decision"] = _ps_result["decision"]
+        snap["ps_sizing_predicted"] = _ps_result.get("predicted_survival")
+        if _ps_result["decision"] == "apply":
+            mult = float(_ps_result["details"]["multiplier"])
+            snap["notional_before_ps_sizing"] = round(notional, 2)
+            snap["ps_sizing_multiplier"] = mult
+            notional = float(_ps_result["details"]["output_notional"])
+            if notional < _TEMP_MIN_NOTIONAL_USD:
+                notional = _TEMP_MIN_NOTIONAL_USD
+                snap["ps_sizing_floored_to_min"] = True
+            snap["notional_effective"] = round(notional, 2)
+            snap["notional_source"] = (
+                snap.get("notional_source", "unknown") + "+ps_sizing"
+            )
+        else:
+            # no_op — multiplier was 1.0 effectively. Still surface
+            # the skip_reason so the operator can confirm gating.
+            snap["ps_sizing_skip_reason"] = (
+                _ps_result.get("details") or {}
+            ).get("skip_reason")
+    except Exception as _ps_e:
+        # Hard rule: sizing must never crash entry. Fall back to the
+        # HRP-allocated notional unchanged.
+        snap["ps_sizing_error"] = str(_ps_e)[:200]
+
     # HARDCODED (TEMP 2026-04-21): floor to whole shares rather than
     # fractional. Most mid/large-cap RH tickers (ACN, WGS, GH, BA…)
     # don't support fractional orders, and server-side rejection wastes
