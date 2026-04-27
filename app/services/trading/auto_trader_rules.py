@@ -585,12 +585,53 @@ def passes_rule_gate(
 
     conf = alert_confidence_from_score(alert)
     snap["confidence"] = conf
+
+    # Q2 Task H — confidence_floor sourced through the StrategyParameter
+    # registry when available, falling back to the operator's env setting.
+    # Registers (idempotent) on first call with the env value as initial.
+    # When chili_strategy_parameter_learning_enabled is True, the learning
+    # pass adapts this value from realized outcomes; reads always work
+    # regardless of the flag state.
     env_floor = gs.confidence_floor
-    # Learned floor: 85% of historical hit_rate, clamped to [0.55, env_floor].
-    # Clamping to env_floor as an upper bound means the brain can LOWER the
-    # floor below env (when a pattern is genuinely strong) but never raise it
-    # above what the operator configured — keeps the operator in charge of
-    # the outer envelope.
+    try:
+        from .strategy_parameter import (
+            ParameterSpec, get_parameter, register_parameter,
+        )
+        register_parameter(
+            db,
+            ParameterSpec(
+                strategy_family="autotrader",
+                parameter_key="confidence_floor",
+                initial_value=float(env_floor),
+                min_value=0.40,
+                max_value=0.95,
+                description=(
+                    "Minimum signal confidence to allow a new entry. Adapts "
+                    "from realized hit-rate outcomes when the learning flag "
+                    "is on."
+                ),
+            ),
+        )
+        adaptive_floor = get_parameter(
+            db,
+            "autotrader",
+            "confidence_floor",
+            default=float(env_floor),
+        )
+        if adaptive_floor is not None and adaptive_floor != env_floor:
+            snap["confidence_floor_adaptive"] = round(float(adaptive_floor), 4)
+            snap["confidence_floor_env"] = round(float(env_floor), 4)
+            env_floor = float(adaptive_floor)
+    except Exception:
+        # Read path is best-effort; never raise into the gate decision.
+        pass
+
+    # Learned floor (per-pattern, from M.1 ledger): 85% of historical
+    # hit_rate, clamped to [0.55, env_floor]. Clamping to env_floor as
+    # an upper bound means the brain can LOWER the floor below env (when a
+    # pattern is genuinely strong) but never raise it above what the
+    # operator configured — keeps the operator in charge of the outer
+    # envelope.
     if pat_ctx.get("hit_rate") is not None:
         learned_floor = max(
             CONFIDENCE_ABSOLUTE_FLOOR,
@@ -600,7 +641,11 @@ def passes_rule_gate(
         snap["confidence_floor_source"] = "pattern_hit_rate"
     else:
         floor = env_floor
-        snap["confidence_floor_source"] = "env_default"
+        snap["confidence_floor_source"] = (
+            "strategy_parameter_adaptive"
+            if "confidence_floor_adaptive" in snap
+            else "env_default"
+        )
     snap["confidence_floor_effective"] = round(floor, 4)
     if conf < floor:
         return False, "confidence_below_floor", snap
