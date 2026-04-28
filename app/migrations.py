@@ -12912,7 +12912,8 @@ def _migration_198_seed_short_swing_patterns(conn) -> None:
                 name, description, rules_json, exit_config,
                 origin, asset_class, timeframe,
                 confidence, win_rate, avg_return_pct,
-                evidence_count, trade_count,
+                evidence_count, backtest_count, trade_count,
+                score_boost, min_base_score, generation,
                 lifecycle_stage, promotion_status,
                 ticker_scope, backtest_priority,
                 active, created_at, updated_at
@@ -12920,7 +12921,8 @@ def _migration_198_seed_short_swing_patterns(conn) -> None:
                 :name, :description, CAST(:rules AS jsonb), CAST(:exit_cfg AS jsonb),
                 'short_swing_seed_198', :asset_class, '1d',
                 0.55, NULL, NULL,
-                0, 0,
+                0, 0, 0,
+                0.0, 0.0, 0,
                 'backtested', 'pending_oos',
                 'universal', 200,
                 true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
