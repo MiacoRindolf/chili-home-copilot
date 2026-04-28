@@ -833,7 +833,10 @@ class Settings(BaseSettings):
     # current ticker regime. Default mode is shadow (logs would-be-blocks
     # without enforcing) so the operator can audit before flipping live.
     chili_regime_gate_enabled: bool = True
-    chili_regime_gate_mode: str = "shadow"
+    # 2026-04-28: flipped shadow -> live per operator. Gate is conservative
+    # (only blocks confidently-negative-EV in regime, n>=5). Strictly safer
+    # than allowing every entry through.
+    chili_regime_gate_mode: str = "live"
     chili_regime_gate_min_trades: int = 5
     chili_regime_gate_max_age_days: int = 7
     # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM

@@ -51,6 +51,111 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
+# Each dimension is a (regime_dimension_name, sql_for_(pid, regime_label, pnl,
+# ret_pct, hold_days)) pair. Ticker-level uses LATERAL by ticker; broad-market
+# levels join by exit_date::date only.
+REGIME_DIMENSIONS: dict[str, str] = {
+    "ticker_regime": (
+        """
+        SELECT t.scan_pattern_id AS pid,
+               COALESCE(r.ticker_regime_label, 'unknown') AS regime_label,
+               t.pnl AS pnl,
+               CASE
+                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
+                      AND t.exit_price IS NOT NULL
+                 THEN ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
+                 ELSE 0.0
+               END AS ret_pct,
+               EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
+        FROM trading_trades t
+        LEFT JOIN LATERAL (
+            SELECT ticker_regime_label
+            FROM trading_ticker_regime_snapshots r
+            WHERE r.ticker = t.ticker
+              AND r.as_of_date <= COALESCE(t.exit_date::date, CURRENT_DATE)
+            ORDER BY r.as_of_date DESC
+            LIMIT 1
+        ) r ON TRUE
+        WHERE t.status = 'closed' AND t.scan_pattern_id IS NOT NULL
+          AND t.exit_date IS NOT NULL
+          AND t.exit_date > NOW() - make_interval(days => :wd)
+        """
+    ),
+    "breadth_regime": (
+        """
+        SELECT t.scan_pattern_id AS pid,
+               COALESCE(b.breadth_label, 'unknown') AS regime_label,
+               t.pnl AS pnl,
+               CASE
+                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
+                      AND t.exit_price IS NOT NULL
+                 THEN ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
+                 ELSE 0.0
+               END AS ret_pct,
+               EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
+        FROM trading_trades t
+        LEFT JOIN LATERAL (
+            SELECT breadth_label
+            FROM trading_breadth_relstr_snapshots b
+            WHERE b.as_of_date <= COALESCE(t.exit_date::date, CURRENT_DATE)
+            ORDER BY b.as_of_date DESC LIMIT 1
+        ) b ON TRUE
+        WHERE t.status = 'closed' AND t.scan_pattern_id IS NOT NULL
+          AND t.exit_date IS NOT NULL
+          AND t.exit_date > NOW() - make_interval(days => :wd)
+        """
+    ),
+    "cross_asset_regime": (
+        """
+        SELECT t.scan_pattern_id AS pid,
+               COALESCE(c.cross_asset_label, 'unknown') AS regime_label,
+               t.pnl AS pnl,
+               CASE
+                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
+                      AND t.exit_price IS NOT NULL
+                 THEN ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
+                 ELSE 0.0
+               END AS ret_pct,
+               EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
+        FROM trading_trades t
+        LEFT JOIN LATERAL (
+            SELECT cross_asset_label
+            FROM trading_cross_asset_snapshots c
+            WHERE c.as_of_date <= COALESCE(t.exit_date::date, CURRENT_DATE)
+            ORDER BY c.as_of_date DESC LIMIT 1
+        ) c ON TRUE
+        WHERE t.status = 'closed' AND t.scan_pattern_id IS NOT NULL
+          AND t.exit_date IS NOT NULL
+          AND t.exit_date > NOW() - make_interval(days => :wd)
+        """
+    ),
+    "vol_regime": (
+        """
+        SELECT t.scan_pattern_id AS pid,
+               COALESCE(v.vol_regime_label, 'unknown') AS regime_label,
+               t.pnl AS pnl,
+               CASE
+                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
+                      AND t.exit_price IS NOT NULL
+                 THEN ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
+                 ELSE 0.0
+               END AS ret_pct,
+               EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
+        FROM trading_trades t
+        LEFT JOIN LATERAL (
+            SELECT vol_regime_label
+            FROM trading_vol_dispersion_snapshots v
+            WHERE v.as_of_date <= COALESCE(t.exit_date::date, CURRENT_DATE)
+            ORDER BY v.as_of_date DESC LIMIT 1
+        ) v ON TRUE
+        WHERE t.status = 'closed' AND t.scan_pattern_id IS NOT NULL
+          AND t.exit_date IS NOT NULL
+          AND t.exit_date > NOW() - make_interval(days => :wd)
+        """
+    ),
+}
+
+# Backwards compat name still used by older code paths.
 REGIME_DIMENSION = "ticker_regime"
 
 
@@ -145,69 +250,47 @@ def build_ledger(
     run_id = uuid.uuid4().hex[:32]
     mode = str(_settings_get("brain_breadth_relstr_mode", "shadow") or "shadow").lower()
 
-    # Pull (trade, regime_label) for each closed trade in the window.
-    # Use a LATERAL join so each trade pulls its OWN regime row by
-    # (ticker, as_of_date <= trade exit date) — newest such row per trade.
-    rows = sess.execute(text("""
-        SELECT t.scan_pattern_id AS pid,
-               COALESCE(r.ticker_regime_label, 'unknown') AS regime_label,
-               t.pnl AS pnl,
-               CASE
-                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
-                      AND t.exit_price IS NOT NULL
-                 THEN ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
-                 ELSE 0.0
-               END AS ret_pct,
-               EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
-        FROM trading_trades t
-        LEFT JOIN LATERAL (
-            SELECT ticker_regime_label
-            FROM trading_ticker_regime_snapshots r
-            WHERE r.ticker = t.ticker
-              AND r.as_of_date <= COALESCE(t.exit_date::date, CURRENT_DATE)
-            ORDER BY r.as_of_date DESC
-            LIMIT 1
-        ) r ON TRUE
-        WHERE t.status = 'closed'
-          AND t.scan_pattern_id IS NOT NULL
-          AND t.exit_date IS NOT NULL
-          AND t.exit_date > NOW() - make_interval(days => :wd)
-    """), {"wd": int(window_days)}).fetchall()
-
-    groups: dict[tuple[int, str], _GroupAcc] = {}
-    for r in rows:
-        key = (int(r.pid), str(r.regime_label))
-        g = groups.get(key)
-        if g is None:
-            g = _GroupAcc(pattern_id=int(r.pid), regime_label=str(r.regime_label))
-            groups[key] = g
-        try:
-            ret = float(r.ret_pct) if r.ret_pct is not None else 0.0
-        except Exception:
-            ret = 0.0
-        if math.isfinite(ret):
-            g.rets_pct.append(ret)
-        try:
-            pnl = float(r.pnl) if r.pnl is not None else 0.0
-        except Exception:
-            pnl = 0.0
-        if math.isfinite(pnl):
-            g.pnls.append(pnl)
-        if r.hold_days is not None:
+    # For each regime_dimension, pull (trade, regime_label) and group.
+    # Each dimension uses its own LATERAL join by ticker/date.
+    groups: dict[tuple[str, int, str], _GroupAcc] = {}  # (dim, pid, label)
+    trades_seen = 0
+    for dim_name, dim_sql in REGIME_DIMENSIONS.items():
+        rows = sess.execute(text(dim_sql), {"wd": int(window_days)}).fetchall()
+        if dim_name == "ticker_regime":
+            trades_seen = len(rows)  # all dims hit the same trade set
+        for r in rows:
+            key = (dim_name, int(r.pid), str(r.regime_label))
+            g = groups.get(key)
+            if g is None:
+                g = _GroupAcc(pattern_id=int(r.pid), regime_label=str(r.regime_label))
+                groups[key] = g
             try:
-                hd = float(r.hold_days)
-                if math.isfinite(hd) and hd >= 0:
-                    g.holds_days.append(hd)
+                ret = float(r.ret_pct) if r.ret_pct is not None else 0.0
             except Exception:
-                pass
+                ret = 0.0
+            if math.isfinite(ret):
+                g.rets_pct.append(ret)
+            try:
+                pnl = float(r.pnl) if r.pnl is not None else 0.0
+            except Exception:
+                pnl = 0.0
+            if math.isfinite(pnl):
+                g.pnls.append(pnl)
+            if r.hold_days is not None:
+                try:
+                    hd = float(r.hold_days)
+                    if math.isfinite(hd) and hd >= 0:
+                        g.holds_days.append(hd)
+                except Exception:
+                    pass
 
     written = 0
-    for (pid, regime_label), grp in groups.items():
+    for (dim_name, pid, regime_label), grp in groups.items():
         s = _stats_for_group(grp)
         payload = {
             "asset_classes": [],
             "trade_ids_count": s["n_trades"],
-            "regime_label_source": REGIME_DIMENSION,
+            "regime_label_source": dim_name,
         }
         if dry_run:
             written += 1
@@ -236,7 +319,7 @@ def build_ledger(
             "as_of": as_of,
             "wd": int(window_days),
             "pid": pid,
-            "dim": REGIME_DIMENSION,
+            "dim": dim_name,
             "label": regime_label,
             "n": s["n_trades"],
             "nw": s["n_wins"],
@@ -264,6 +347,7 @@ def build_ledger(
         "window_days": window_days,
         "groups": len(groups),
         "rows_written": written,
-        "trades_used": len(rows),
+        "trades_used": trades_seen,
+        "dimensions": list(REGIME_DIMENSIONS.keys()),
         "dry_run": dry_run,
     }
