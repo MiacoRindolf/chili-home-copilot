@@ -153,6 +153,11 @@ def close_trade(
     trade.exit_date = exit_date or datetime.utcnow()
     trade.status = "closed"
     trade.pnl = _calc_pnl(trade)
+    if not trade.exit_reason:
+        # Caller did not set an explicit exit_reason; tag with notes-derived
+        # marker so the row is not silently null. Most callers should be
+        # passing exit_reason explicitly via robinhood_exit_execution etc.
+        trade.exit_reason = (notes[:50] if notes else None) or "portfolio_close_unspecified"
     if notes:
         trade.notes = (trade.notes or "") + f"\n{notes}"
 

@@ -675,6 +675,8 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     for trade in stale:
         trade.status = "closed"
         trade.exit_date = datetime.utcnow()
+        if not trade.exit_reason:
+            trade.exit_reason = "coinbase_position_sync_gone"
         trade.notes = (
             (trade.notes or "")
             + f"\nAuto-closed: position no longer on Coinbase ({datetime.utcnow().strftime('%Y-%m-%d %H:%M')})"

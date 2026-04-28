@@ -155,9 +155,13 @@ def _apply_terminal_state(t: Trade, broker_status: str, raw: dict[str, Any] | No
         return
     if bs in _TERMINAL_CANCELLED:
         t.status = "cancelled"
+        if not t.exit_reason:
+            t.exit_reason = f"stuck_order_terminal_cancelled:{bs}"[:50]
         return
     if bs in _TERMINAL_REJECTED:
         t.status = "rejected"
+        if not t.exit_reason:
+            t.exit_reason = f"stuck_order_terminal_rejected:{bs}"[:50]
         return
 
 
@@ -271,6 +275,8 @@ def _process_one(db: Session, t: Trade, now: datetime) -> str:
     if cancel_result.get("ok"):
         t.status = "cancelled"
         t.broker_status = "cancelled"
+        if not t.exit_reason:
+            t.exit_reason = "stuck_order_watchdog_timeout"
         t.last_broker_sync = datetime.utcnow()
         db.commit()
         return "cancelled"

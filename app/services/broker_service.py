@@ -1371,6 +1371,8 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
         trade.status = "closed"
         trade.exit_date = datetime.utcnow()
+        if not trade.exit_reason:
+            trade.exit_reason = "broker_reconcile_position_gone"
         entry = trade.entry_price or 0.0
         qty = trade.quantity or 0.0
         exit_price = _get_exit_price(trade.ticker, entry)
@@ -1465,6 +1467,8 @@ def cleanup_manual_trades(
         if trade.ticker not in live_tickers:
             trade.status = "closed"
             trade.exit_date = datetime.utcnow()
+            if not trade.exit_reason:
+                trade.exit_reason = "broker_reconcile_manual_not_live"
             entry = trade.entry_price or 0.0
             qty = trade.quantity or 0.0
             exit_price = _get_exit_price(trade.ticker, entry)
@@ -2746,6 +2750,8 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     filled += 1
                 else:
                     trade.status = "cancelled"
+                    if not trade.exit_reason:
+                        trade.exit_reason = f"broker_order_cancelled:{rh_state}"[:50]
                     cancelled += 1
                     logger.info(
                         f"[broker] Order {trade.broker_order_id} for {trade.ticker} {rh_state}"
