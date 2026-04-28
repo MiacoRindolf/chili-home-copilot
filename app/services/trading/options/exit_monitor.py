@@ -99,12 +99,20 @@ def _is_option_trade(t: Trade) -> bool:
     """True when the trade row carries option metadata. Used to filter
     the equity-monitor universe out of the options-monitor pass.
 
-    Heuristic priority:
-      1. indicator_snapshot.option_meta is a non-empty dict
-      2. tags contain 'options' (case-insensitive)
+    Delegates to :func:`autopilot_scope.is_option_trade`, the canonical
+    helper that handles BOTH locations option_meta can live in:
+      1. indicator_snapshot.option_meta (top-level)
+      2. indicator_snapshot.breakout_alert.option_meta (nested - 2026-04
+         autotrader_v1 writer puts it here)
+    Falls back to a tags-based check ("options" in trade.tags) when the
+    canonical helper returns False, preserving the legacy behavior.
+
+    The original local implementation only checked location (1), causing
+    the options exit pass to silently skip option Trade rows whose
+    option_meta lived in (2) — see trade 392 for the canonical example.
     """
-    snap = t.indicator_snapshot if isinstance(t.indicator_snapshot, dict) else {}
-    if isinstance(snap.get("option_meta"), dict) and snap["option_meta"]:
+    from ..autopilot_scope import is_option_trade as _canonical
+    if _canonical(t):
         return True
     tags = (t.tags or "").lower()
     return "options" in tags
