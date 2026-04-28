@@ -822,6 +822,12 @@ class Settings(BaseSettings):
     chili_realized_sync_enabled: bool = True
     chili_realized_sync_lookback_days: int = 365
     chili_realized_sync_min_n: int = 1
+    # 2026-04-28: pattern x regime ledger — turns shadow-mode regime
+    # snapshots into actionable per-pattern evidence.
+    chili_pattern_regime_ledger_enabled: bool = True
+    chili_pattern_regime_ledger_window_days: int = 90
+    chili_pattern_regime_ledger_min_trades: int = 3
+    chili_pattern_regime_ledger_dry_run: bool = False
     # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM
     # (memory safety for patterns with huge trading_pattern_trades). 0 = no cap.
     chili_cpcv_max_labeled_rows: int = 0

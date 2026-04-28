@@ -450,6 +450,23 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     return {"completed": completed, "errors": errors}
 
 
+def _run_subtask_pattern_regime_ledger(status: "BrainWorkerStatus") -> dict:
+    """Build trading_pattern_regime_performance_daily — the per-pattern x
+    regime evidence ledger. Joins closed trades with ticker_regime snapshots
+    and aggregates per (pattern_id, regime_label).
+    """
+    status.set_step("PatternRegimeLedger", "Joining closed trades with regime snapshots...")
+    from app.services.trading.pattern_regime_ledger import build_ledger
+    db = SessionLocal()
+    try:
+        return build_ledger(db)
+    except Exception as e:
+        logger.warning("[brain:subtask] pattern_regime_ledger failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
 def _run_subtask_realized_sync(status: "BrainWorkerStatus") -> dict:
     """Sync ScanPattern realized stats (trade_count, win_rate, avg_return_pct)
     from trading_trades. Source-of-truth maintenance for the EV gate +
@@ -497,6 +514,7 @@ _SUBTASKS = [
     ("retention", _run_subtask_retention, 12),
     ("realized_sync", _run_subtask_realized_sync, 1),
     ("ticker_autotune", _run_subtask_ticker_autotune, 6),
+    ("pattern_regime_ledger", _run_subtask_pattern_regime_ledger, 12),
 ]
 _subtask_counters: dict[str, int] = {name: 0 for name, _, _ in _SUBTASKS}
 
