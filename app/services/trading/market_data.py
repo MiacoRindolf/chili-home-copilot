@@ -471,6 +471,21 @@ def fetch_ohlcv_df(
             df = _yf_history(ticker, start=_start_str, end=_end_str, interval=interval)
         else:
             df = _yf_history(ticker, start=_start_str, interval=interval)
+        # 2026-04-28: yfinance has a quirk with ^-prefixed index tickers
+        # (^VIX, ^GSPC) where start-based queries return empty. Fall back to
+        # period-mode and slice locally if we got nothing for an index.
+        if (df is None or df.empty) and ticker.startswith("^"):
+            _yf_period = _clamp_period(interval, "1y")
+            df_full = _yf_history(ticker, period=_yf_period, interval=interval)
+            if df_full is not None and not df_full.empty:
+                try:
+                    import pandas as _pd
+                    _start_ts = _pd.Timestamp(_start_str)
+                    if df_full.index.tz is not None:
+                        _start_ts = _start_ts.tz_localize("UTC")
+                    df = df_full[df_full.index >= _start_ts]
+                except Exception:
+                    df = df_full
     else:
         period = _clamp_period(interval, period)
         df = _yf_history(ticker, period=period, interval=interval)
