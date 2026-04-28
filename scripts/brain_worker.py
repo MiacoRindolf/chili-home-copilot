@@ -450,6 +450,23 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     return {"completed": completed, "errors": errors}
 
 
+def _run_subtask_realized_sync(status: "BrainWorkerStatus") -> dict:
+    """Sync ScanPattern realized stats (trade_count, win_rate, avg_return_pct)
+    from trading_trades. Source-of-truth maintenance for the EV gate +
+    autotune — closes the sync gap audit-found 2026-04-28.
+    """
+    status.set_step("RealizedSync", "Syncing realized stats from trading_trades...")
+    from app.services.trading.realized_stats_sync import sync_realized_stats
+    db = SessionLocal()
+    try:
+        return sync_realized_stats(db)
+    except Exception as e:
+        logger.warning("[brain:subtask] realized_sync failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
 def _run_subtask_ticker_autotune(status: "BrainWorkerStatus") -> dict:
     """Auto-narrow ScanPattern.scope_tickers from realized per-ticker PnL.
 
@@ -478,6 +495,7 @@ _SUBTASKS = [
     ("signal_refresh", _run_subtask_signal_refresh, 1),
     ("fast_backtest", _run_subtask_fast_backtest, 1),
     ("retention", _run_subtask_retention, 12),
+    ("realized_sync", _run_subtask_realized_sync, 1),
     ("ticker_autotune", _run_subtask_ticker_autotune, 6),
 ]
 _subtask_counters: dict[str, int] = {name: 0 for name, _, _ in _SUBTASKS}

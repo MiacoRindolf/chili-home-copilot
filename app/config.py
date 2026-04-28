@@ -816,6 +816,12 @@ class Settings(BaseSettings):
     chili_ticker_autotune_min_trades_per_ticker: int = 2
     chili_ticker_autotune_lookback_days: int = 90
     chili_ticker_autotune_dry_run: bool = False
+    # 2026-04-28: realized stats sync. Recomputes ScanPattern columns from
+    # trading_trades. Closes the gap exposed by the audit (8 patterns had
+    # actual trades but stored trade_count=0).
+    chili_realized_sync_enabled: bool = True
+    chili_realized_sync_lookback_days: int = 365
+    chili_realized_sync_min_n: int = 1
     # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM
     # (memory safety for patterns with huge trading_pattern_trades). 0 = no cap.
     chili_cpcv_max_labeled_rows: int = 0
