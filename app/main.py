@@ -56,6 +56,15 @@ _under_pytest = (os.environ.get("CHILI_PYTEST") or "").strip().lower() in ("1", 
 if not _under_pytest:
     Base.metadata.create_all(bind=engine)
     run_migrations(engine)
+    # 2026-04-28: idle-in-tx watchdog. Backstop for the FractionalBacktest
+    # leak that held a session open for 17h and blocked migration 193.
+    try:
+        from .services.db_watchdog import start_watchdog as _start_db_watchdog
+        _start_db_watchdog()
+    except Exception:
+        # Never let the watchdog wiring fail the app startup.
+        import logging as _logging
+        _logging.getLogger(__name__).warning("[db_watchdog] failed to start", exc_info=True)
 
 # Builtin pattern seeding queries scan_patterns; can block if another process holds locks.
 # Tests truncate app tables per case; callers that need ScanPattern rows insert them.

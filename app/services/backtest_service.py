@@ -487,12 +487,28 @@ def run_backtest(
                 param_ranges[param] = list(np.arange(lo, hi + step, step))
             else:
                 param_ranges[param] = range(lo, hi + 1, step)
+        # Wall-clock budget (2026-04-28): hard-cap each run so a single
+        # mis-specified pattern can't hold the worker for hours.
+        from .trading.backtest_watchdog import (
+            run_with_walltime_budget as _bt_run_budget,
+            BacktestBudgetExceeded as _BTBudgetExceeded,
+        )
         try:
-            stats = bt.optimize(**param_ranges, maximize="Return [%]")
-        except Exception:
-            stats = bt.run(**coerced)
+            try:
+                stats = bt.optimize(**param_ranges, maximize="Return [%]")
+            except Exception:
+                stats = _bt_run_budget(bt, label=f"optimize_fallback:{ticker}", **coerced)
+        except _BTBudgetExceeded:
+            return {"ok": False, "error": f"backtest_budget_exceeded:{ticker}"}
     else:
-        stats = bt.run(**coerced)
+        from .trading.backtest_watchdog import (
+            run_with_walltime_budget as _bt_run_budget,
+            BacktestBudgetExceeded as _BTBudgetExceeded,
+        )
+        try:
+            stats = _bt_run_budget(bt, label=f"named:{ticker}:{strategy_id}", **coerced)
+        except _BTBudgetExceeded:
+            return {"ok": False, "error": f"backtest_budget_exceeded:{ticker}"}
 
     equity = stats.get("_equity_curve")
     equity_data = []
@@ -1776,7 +1792,22 @@ def _run_dynamic_pattern_slice(
         exclusive_orders=True,
         finalize_trades=True,
     )
-    stats = bt.run()
+    # Wall-clock budget (2026-04-28): the brain-worker logs showed a single
+    # FractionalBacktest at 70% with ETA 55h, accumulating idle-in-tx locks.
+    # If a pattern can't backtest within the budget, abort and let the
+    # caller mark/skip it instead of dragging the entire lane.
+    from .trading.backtest_watchdog import (
+        run_with_walltime_budget as _bt_run_budget,
+        BacktestBudgetExceeded as _BTBudgetExceeded,
+    )
+    try:
+        stats = _bt_run_budget(bt, label=f"dynpat:{ticker}")
+    except _BTBudgetExceeded as _e:
+        logger.warning(
+            "[backtest_service] dynpat backtest aborted on budget for ticker=%s: %s",
+            ticker, _e,
+        )
+        return {"ok": False, "error": f"backtest_budget_exceeded:{ticker}"}
 
     equity_data: list[dict[str, Any]] = []
     if include_charts:
