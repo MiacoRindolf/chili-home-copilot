@@ -351,3 +351,182 @@ def build_ledger(
         "dimensions": list(REGIME_DIMENSIONS.keys()),
         "dry_run": dry_run,
     }
+
+
+# Backtest-history sourced regime queries. Joins trading_pattern_trades (which
+# has years of backtested per-trade outcomes with regime context) instead of
+# trading_trades (live only). Each row uses as_of_ts as the time anchor and
+# outcome_return_pct directly as ret_pct.
+BACKTEST_REGIME_DIMENSIONS: dict[str, str] = {
+    "ticker_regime": (
+        """
+        SELECT pt.scan_pattern_id AS pid,
+               COALESCE(r.ticker_regime_label, 'unknown') AS regime_label,
+               COALESCE(pt.outcome_return_pct, 0.0) AS pnl,
+               COALESCE(pt.outcome_return_pct, 0.0) AS ret_pct,
+               COALESCE(pt.hold_bars, 0)::float AS hold_days
+        FROM trading_pattern_trades pt
+        LEFT JOIN LATERAL (
+            SELECT ticker_regime_label
+            FROM trading_ticker_regime_snapshots r
+            WHERE r.ticker = pt.ticker
+              AND r.as_of_date <= pt.as_of_ts::date
+            ORDER BY r.as_of_date DESC LIMIT 1
+        ) r ON TRUE
+        WHERE pt.scan_pattern_id IS NOT NULL
+          AND pt.outcome_return_pct IS NOT NULL
+          AND pt.as_of_ts > NOW() - make_interval(days => :wd)
+        """
+    ),
+    "breadth_regime": (
+        """
+        SELECT pt.scan_pattern_id AS pid,
+               COALESCE(b.breadth_label, 'unknown') AS regime_label,
+               COALESCE(pt.outcome_return_pct, 0.0) AS pnl,
+               COALESCE(pt.outcome_return_pct, 0.0) AS ret_pct,
+               COALESCE(pt.hold_bars, 0)::float AS hold_days
+        FROM trading_pattern_trades pt
+        LEFT JOIN LATERAL (
+            SELECT breadth_label
+            FROM trading_breadth_relstr_snapshots b
+            WHERE b.as_of_date <= pt.as_of_ts::date
+            ORDER BY b.as_of_date DESC LIMIT 1
+        ) b ON TRUE
+        WHERE pt.scan_pattern_id IS NOT NULL
+          AND pt.outcome_return_pct IS NOT NULL
+          AND pt.as_of_ts > NOW() - make_interval(days => :wd)
+        """
+    ),
+    "cross_asset_regime": (
+        """
+        SELECT pt.scan_pattern_id AS pid,
+               COALESCE(c.cross_asset_label, 'unknown') AS regime_label,
+               COALESCE(pt.outcome_return_pct, 0.0) AS pnl,
+               COALESCE(pt.outcome_return_pct, 0.0) AS ret_pct,
+               COALESCE(pt.hold_bars, 0)::float AS hold_days
+        FROM trading_pattern_trades pt
+        LEFT JOIN LATERAL (
+            SELECT cross_asset_label
+            FROM trading_cross_asset_snapshots c
+            WHERE c.as_of_date <= pt.as_of_ts::date
+            ORDER BY c.as_of_date DESC LIMIT 1
+        ) c ON TRUE
+        WHERE pt.scan_pattern_id IS NOT NULL
+          AND pt.outcome_return_pct IS NOT NULL
+          AND pt.as_of_ts > NOW() - make_interval(days => :wd)
+        """
+    ),
+    "vol_regime": (
+        """
+        SELECT pt.scan_pattern_id AS pid,
+               COALESCE(v.vol_regime_label, 'unknown') AS regime_label,
+               COALESCE(pt.outcome_return_pct, 0.0) AS pnl,
+               COALESCE(pt.outcome_return_pct, 0.0) AS ret_pct,
+               COALESCE(pt.hold_bars, 0)::float AS hold_days
+        FROM trading_pattern_trades pt
+        LEFT JOIN LATERAL (
+            SELECT vol_regime_label
+            FROM trading_vol_dispersion_snapshots v
+            WHERE v.as_of_date <= pt.as_of_ts::date
+            ORDER BY v.as_of_date DESC LIMIT 1
+        ) v ON TRUE
+        WHERE pt.scan_pattern_id IS NOT NULL
+          AND pt.outcome_return_pct IS NOT NULL
+          AND pt.as_of_ts > NOW() - make_interval(days => :wd)
+        """
+    ),
+}
+
+
+def build_ledger_from_backtests(
+    sess: Session,
+    *,
+    as_of: date | None = None,
+    window_days: int = 365,  # backtest pull goes deeper than live
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Build pattern x regime ledger rows from BACKTEST history.
+
+    Returns rows tagged with mode='backtest' (vs live's 'live') so the
+    regime gate / autotrader can decide which evidence kind to consult.
+    Uses ``trading_pattern_trades`` which has years of backtest outcomes
+    instead of just the live-trade window.
+    """
+    as_of = as_of or date.today()
+    run_id = uuid.uuid4().hex[:32]
+
+    groups: dict[tuple[str, int, str], _GroupAcc] = {}
+    trades_seen = 0
+    for dim_name, dim_sql in BACKTEST_REGIME_DIMENSIONS.items():
+        rows = sess.execute(text(dim_sql), {"wd": int(window_days)}).fetchall()
+        if dim_name == "ticker_regime":
+            trades_seen = len(rows)
+        for r in rows:
+            key = (dim_name, int(r.pid), str(r.regime_label))
+            g = groups.get(key)
+            if g is None:
+                g = _GroupAcc(pattern_id=int(r.pid), regime_label=str(r.regime_label))
+                groups[key] = g
+            try:
+                ret = float(r.ret_pct) if r.ret_pct is not None else 0.0
+            except Exception:
+                ret = 0.0
+            if math.isfinite(ret):
+                g.rets_pct.append(ret)
+            try:
+                pnl = float(r.pnl) if r.pnl is not None else 0.0
+            except Exception:
+                pnl = 0.0
+            if math.isfinite(pnl):
+                g.pnls.append(pnl)
+
+    written = 0
+    for (dim_name, pid, regime_label), grp in groups.items():
+        s = _stats_for_group(grp)
+        payload = {
+            "trade_ids_count": s["n_trades"],
+            "regime_label_source": dim_name,
+            "evidence_kind": "backtest",
+        }
+        if dry_run:
+            written += 1
+            continue
+        sess.execute(text("""
+            INSERT INTO trading_pattern_regime_performance_daily (
+                ledger_run_id, as_of_date, window_days, pattern_id,
+                regime_dimension, regime_label,
+                n_trades, n_wins, hit_rate,
+                mean_pnl_pct, median_pnl_pct, sum_pnl, expectancy,
+                mean_win_pct, mean_loss_pct, profit_factor, sharpe_proxy,
+                avg_hold_days, has_confidence,
+                payload_json, mode, computed_at
+            )
+            VALUES (
+                :run_id, :as_of, :wd, :pid, :dim, :label,
+                :n, :nw, :hr, :mp, :medp, :sp, :exp,
+                :mw, :ml, :pf, :sh, :ah, :hc,
+                CAST(:pj AS jsonb), :mode, CURRENT_TIMESTAMP
+            )
+        """), {
+            "run_id": run_id, "as_of": as_of, "wd": int(window_days),
+            "pid": pid, "dim": dim_name, "label": regime_label,
+            "n": s["n_trades"], "nw": s["n_wins"], "hr": s["hit_rate"],
+            "mp": s["mean_pnl_pct"], "medp": s["median_pnl_pct"],
+            "sp": s["sum_pnl"], "exp": s["expectancy"],
+            "mw": s["mean_win_pct"], "ml": s["mean_loss_pct"],
+            "pf": s["profit_factor"], "sh": s["sharpe_proxy"],
+            "ah": s["avg_hold_days"], "hc": s["has_confidence"],
+            "pj": json.dumps(payload),
+            "mode": "backtest",
+        })
+        written += 1
+    if not dry_run:
+        sess.commit()
+
+    return {
+        "run_id": run_id, "as_of": str(as_of), "window_days": window_days,
+        "groups": len(groups), "rows_written": written, "trades_used": trades_seen,
+        "evidence_kind": "backtest",
+        "dimensions": list(BACKTEST_REGIME_DIMENSIONS.keys()),
+        "dry_run": dry_run,
+    }
