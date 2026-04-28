@@ -807,6 +807,15 @@ class Settings(BaseSettings):
     chili_realized_ev_min_trades: int = 5
     chili_realized_ev_min_avg_return_pct: float = 0.0
     chili_realized_ev_min_win_rate: float = 0.0
+    # 2026-04-28: ticker-scope autotune. Reads per-ticker realized PnL and
+    # narrows ``ticker_scope`` from 'universal' to 'explicit_list' when
+    # a pattern has both edge AND bleed tickers. The brain LEARNS its
+    # ticker dependency rather than us banning tickers manually.
+    chili_ticker_autotune_enabled: bool = True
+    chili_ticker_autotune_min_total_trades: int = 5
+    chili_ticker_autotune_min_trades_per_ticker: int = 2
+    chili_ticker_autotune_lookback_days: int = 90
+    chili_ticker_autotune_dry_run: bool = False
     # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM
     # (memory safety for patterns with huge trading_pattern_trades). 0 = no cap.
     chili_cpcv_max_labeled_rows: int = 0

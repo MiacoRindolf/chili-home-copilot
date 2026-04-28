@@ -450,12 +450,35 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     return {"completed": completed, "errors": errors}
 
 
+def _run_subtask_ticker_autotune(status: "BrainWorkerStatus") -> dict:
+    """Auto-narrow ScanPattern.scope_tickers from realized per-ticker PnL.
+
+    Added 2026-04-28 — the brain learns ticker dependency rather than us
+    banning tickers manually. Run every 6 cycles since per-ticker stats
+    don't change quickly and this touches the primary operator truth column
+    ``ticker_scope`` which auto-trader reads on every alert.
+    """
+    status.set_step("TickerAutotune", "Auto-tuning scope_tickers from realized PnL...")
+    from app.services.trading.ticker_scope_autotune import run_autotune
+    db = SessionLocal()
+    try:
+        actions = run_autotune(db)
+        narrowed = sum(1 for a in actions if a.decision == "narrow_to_explicit")
+        return {"actions": len(actions), "narrowed": narrowed}
+    except Exception as e:
+        logger.warning("[brain:subtask] ticker_autotune failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
 # Subtask registry: (name, function, run_every_n_cycles) — maintenance / edge refresh, not primary operator truth
 _SUBTASKS = [
     ("alpha_decay", _run_subtask_alpha_decay, 3),
     ("signal_refresh", _run_subtask_signal_refresh, 1),
     ("fast_backtest", _run_subtask_fast_backtest, 1),
     ("retention", _run_subtask_retention, 12),
+    ("ticker_autotune", _run_subtask_ticker_autotune, 6),
 ]
 _subtask_counters: dict[str, int] = {name: 0 for name, _, _ in _SUBTASKS}
 
