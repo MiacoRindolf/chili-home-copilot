@@ -12399,9 +12399,9 @@ def _migration_192_trade_asset_kind(conn) -> None:
             UPDATE trading_trades SET asset_kind = 'option'
             WHERE asset_kind IS NULL
               AND (
-                indicator_snapshot ? 'option_meta'
-                OR (indicator_snapshot -> 'breakout_alert' ->> 'asset_type') = 'options'
-                OR indicator_snapshot -> 'breakout_alert' ? 'option_meta'
+                (indicator_snapshot::jsonb) ? 'option_meta'
+                OR (indicator_snapshot::jsonb -> 'breakout_alert' ->> 'asset_type') = 'options'
+                OR (indicator_snapshot::jsonb -> 'breakout_alert') ? 'option_meta'
               )
             """
         ))
