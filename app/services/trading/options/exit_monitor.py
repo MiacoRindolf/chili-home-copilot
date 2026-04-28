@@ -119,8 +119,34 @@ def _is_option_trade(t: Trade) -> bool:
 
 
 def _opt_meta(t: Trade) -> dict[str, Any]:
-    snap = t.indicator_snapshot if isinstance(t.indicator_snapshot, dict) else {}
-    return snap.get("option_meta") or {}
+    """Resolve option_meta from BOTH top-level AND nested breakout_alert.option_meta.
+
+    Earlier writers (autotrader_v1) put option_meta NESTED under breakout_alert -
+    the same nested-location bug that _is_option_trade had until commit 9ae90f8.
+    Without this fix, run_options_exit_pass counts the trade as 'checked' but
+    immediately 'continue's because expiration/strike/option_type come back empty,
+    so the stop/TP/DTE triggers never evaluate even when conditions are met.
+    Concrete example: 2026-04-28 trade 392 (SPY 729C). Bid 2.42 was below stop
+    threshold 2.807, but the engine never fired because _opt_meta returned {}.
+    """
+    import json as _json
+    snap = t.indicator_snapshot
+    if isinstance(snap, str):
+        try: snap = _json.loads(snap)
+        except Exception: snap = {}
+    if not isinstance(snap, dict):
+        return {}
+    if isinstance(snap.get("option_meta"), dict) and snap["option_meta"]:
+        return snap["option_meta"]
+    ba = snap.get("breakout_alert")
+    if isinstance(ba, str):
+        try: ba = _json.loads(ba)
+        except Exception: ba = None
+    if isinstance(ba, dict):
+        bom = ba.get("option_meta")
+        if isinstance(bom, dict) and bom:
+            return bom
+    return {}
 
 
 def _dte(expiration: str) -> Optional[int]:
