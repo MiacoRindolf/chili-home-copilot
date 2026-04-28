@@ -239,7 +239,19 @@ def get_history(symbol: str, **kwargs) -> Any:
     # - The coin might be new or use a different format
     # - Massive or CoinGecko may still have the data
     if df.empty and not _is_crypto(symbol):
-        _mark_dead(symbol)
+        # 2026-04-28 leak fix: respect the consecutive-empty threshold defined
+        # at lines 102-109. The previous code ALWAYS marked dead on the first
+        # empty response — which is exactly what the comment block warns
+        # against. ^VIX was the canonical victim: a transient yfinance empty
+        # would land it in the dead cache and short-circuit every subsequent
+        # call until TTL expired.
+        _streak = _bump_empty(symbol)
+        if _streak >= _EMPTY_THRESHOLD:
+            _mark_dead(symbol)
+            _reset_empty(symbol)
+    elif not df.empty:
+        # Reset the streak so a single recovery clears prior empties.
+        _reset_empty(symbol)
 
     _cache_set(cache_key, df)
 
