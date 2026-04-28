@@ -155,13 +155,29 @@ def mark_pattern_tested(
     
     Resets the boost priority after processing.
     """
+    import math as _math
+
     pattern.last_backtest_at = datetime.utcnow()
     pattern.backtest_priority = 0  # Reset boost after processing
-    
-    if win_rate is not None:
+
+    # NaN/range guard (2026-04-28 audit found 11 NaN + 11 out-of-range rows
+    # written by callers that didn't sanitize). Migration 193 adds a CHECK
+    # constraint at the DB level — this guard avoids exception-on-commit
+    # and gives us a clean log line instead.
+    if win_rate is not None and _math.isfinite(win_rate) and 0.0 <= win_rate <= 1.0:
         pattern.win_rate = round(win_rate, 4)
-    if avg_return is not None:
+    elif win_rate is not None:
+        logger.warning(
+            "[backtest_queue] mark_pattern_tested rejected invalid win_rate=%r for pattern id=%s",
+            win_rate, getattr(pattern, "id", None),
+        )
+    if avg_return is not None and _math.isfinite(avg_return):
         pattern.avg_return_pct = round(avg_return, 2)
+    elif avg_return is not None:
+        logger.warning(
+            "[backtest_queue] mark_pattern_tested rejected invalid avg_return=%r for pattern id=%s",
+            avg_return, getattr(pattern, "id", None),
+        )
 
     db.commit()
     invalidate_queue_status_cache()

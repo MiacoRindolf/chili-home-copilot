@@ -12422,6 +12422,100 @@ def _migration_192_trade_asset_kind(conn) -> None:
     conn.commit()
 
 
+def _migration_193_cleanup_corrupt_win_rates(conn) -> None:
+    """Clean corrupt scan_patterns.win_rate values + add CHECK guard.
+
+    Audit on 2026-04-28 found two distinct corruptions, all on n=0 patterns:
+
+    * 11 rows with ``win_rate = 'NaN'::float`` (divide-by-zero on the
+      ``wins/total`` formula in :mod:`learning.py` when ``total = 0``).
+    * 11 rows with ``win_rate > 1`` (max ``60.0``) where an LLM-spawn
+      write site stored a percent value (``60.0`` = "60%") into a
+      column the rest of the system reads as a fraction (``0.60``).
+
+    Cleanup rules (idempotent):
+
+    * NaN     -> NULL    (no real evidence to keep)
+    * > 1     -> /100    (interpret stored value as percent, scale back)
+    * NULL/in-range -> untouched.
+
+    Also adds a CHECK constraint so future writes that violate the
+    fraction contract fail at the DB level rather than silently
+    corrupting the table again. The constraint is added with
+    ``NOT VALID`` first so existing data isn't re-scanned, then we
+    explicitly ``VALIDATE`` after cleanup.
+
+    Rollback (manual)::
+
+        ALTER TABLE scan_patterns DROP CONSTRAINT IF EXISTS chk_scan_patterns_win_rate_range;
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    # Step 1: NaN -> NULL (use ::text comparison since NaN<>NaN in float8 but we
+    # want to be explicit and avoid surprises with SET clauses on float).
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET win_rate = NULL
+        WHERE win_rate IS NOT NULL AND win_rate::text = 'NaN'
+        """
+    ))
+    conn.commit()
+
+    # Step 2: > 1 -> /100 (percent stored where fraction expected).
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET win_rate = win_rate / 100.0
+        WHERE win_rate IS NOT NULL
+          AND win_rate::text <> 'NaN'
+          AND win_rate > 1.0
+        """
+    ))
+    conn.commit()
+
+    # Step 3: avg_return_pct NaN -> NULL (defense in depth — same divide-by-zero
+    # source could land here). Range left unconstrained since avg_return_pct is
+    # in PCT and can legitimately be e.g. -50.0.
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET avg_return_pct = NULL
+        WHERE avg_return_pct IS NOT NULL AND avg_return_pct::text = 'NaN'
+        """
+    ))
+    conn.commit()
+
+    # Step 4: add CHECK constraint (idempotent — only adds if missing).
+    row = conn.execute(text(
+        """
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        WHERE t.relname = 'scan_patterns'
+          AND c.conname = 'chk_scan_patterns_win_rate_range'
+        """
+    )).fetchone()
+    if not row:
+        conn.execute(text(
+            """
+            ALTER TABLE scan_patterns
+            ADD CONSTRAINT chk_scan_patterns_win_rate_range
+            CHECK (
+                win_rate IS NULL
+                OR (win_rate >= 0.0 AND win_rate <= 1.0)
+            ) NOT VALID
+            """
+        ))
+        conn.commit()
+        # Now safe to validate — corruptions cleaned above.
+        conn.execute(text(
+            "ALTER TABLE scan_patterns VALIDATE CONSTRAINT "
+            "chk_scan_patterns_win_rate_range"
+        ))
+    conn.commit()
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -12625,6 +12719,7 @@ MIGRATIONS = [
     ("190_seed_kraken_futures_perp_contracts", _migration_190_seed_kraken_futures_perp_contracts),
     ("191_brain_batch_jobs_lifecycle", _migration_191_brain_batch_jobs_lifecycle),
     ("192_trade_asset_kind", _migration_192_trade_asset_kind),
+    ("193_cleanup_corrupt_win_rates", _migration_193_cleanup_corrupt_win_rates),
 ]
 
 

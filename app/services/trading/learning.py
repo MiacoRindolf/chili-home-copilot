@@ -1961,6 +1961,31 @@ def ensure_mined_scan_pattern(
 
     tf = (timeframe or "1d").strip() or "1d"
     rules = json.dumps({"conditions": conditions})
+
+    # Sanitize win_rate to fraction in [0, 1]. The 2026-04-28 audit caught 11
+    # rows where a caller wrote a percent value (e.g. 60.0) into a column the
+    # rest of the system reads as fraction (0.6). Migration 193 adds a CHECK
+    # constraint, but we'd rather fix-on-write than crash-on-commit.
+    safe_win_rate: float | None
+    if win_rate is None or not math.isfinite(win_rate):
+        safe_win_rate = None
+    elif 0.0 <= win_rate <= 1.0:
+        safe_win_rate = win_rate
+    elif 1.0 < win_rate <= 100.0:
+        safe_win_rate = win_rate / 100.0
+        logger.warning(
+            "[learning] ensure_mined_scan_pattern coerced percent win_rate=%.2f to fraction=%.4f for '%s'",
+            win_rate, safe_win_rate, name,
+        )
+    else:
+        logger.warning(
+            "[learning] ensure_mined_scan_pattern rejected nonsense win_rate=%r for '%s'",
+            win_rate, name,
+        )
+        safe_win_rate = None
+
+    safe_avg_return_pct = avg_return_pct if (avg_return_pct is None or math.isfinite(avg_return_pct)) else None
+
     existing = db.query(ScanPattern).filter(
         ScanPattern.name == name,
         ScanPattern.origin == "mined",
@@ -1969,8 +1994,8 @@ def ensure_mined_scan_pattern(
     ).first()
     if existing:
         existing.confidence = confidence
-        existing.win_rate = win_rate
-        existing.avg_return_pct = avg_return_pct
+        existing.win_rate = safe_win_rate
+        existing.avg_return_pct = safe_avg_return_pct
         existing.evidence_count = evidence_count
         existing.rules_json = rules
         existing.timeframe = tf
@@ -1985,8 +2010,8 @@ def ensure_mined_scan_pattern(
         asset_class=asset_class,
         timeframe=tf,
         confidence=confidence,
-        win_rate=win_rate,
-        avg_return_pct=avg_return_pct,
+        win_rate=safe_win_rate,
+        avg_return_pct=safe_avg_return_pct,
         evidence_count=evidence_count,
         lifecycle_stage="candidate",
     )
@@ -4564,33 +4589,42 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
 
         winners = sum(1 for o in outcomes if o["outcome"] == "winner")
         total = len(outcomes)
+        if total <= 0:
+            # Defensive: outer filter already enforces len(outcomes) >= 3, but
+            # never emit a divide-by-zero NaN into pattern.win_rate (the
+            # 2026-04-28 NaN sweep showed 11 rows corrupted by exactly this).
+            continue
         new_win_rate = winners / total
-        
         avg_gain = sum(o["gain_pct"] for o in outcomes) / total
-        
-        # Exponential moving average to blend new data with existing
-        old_wr = pattern.win_rate or 0.5
-        old_ret = pattern.avg_return_pct or 0.0
-        
-        # Blend factor based on sample size (more data = more trust in new stats)
-        blend = min(0.8, total / 50)  # up to 80% weight for new data
-        
-        pattern.win_rate = round(old_wr * (1 - blend) + new_win_rate * blend, 4)
-        pattern.avg_return_pct = round(old_ret * (1 - blend) + avg_gain * blend, 2)
+
+        # Old values for log only. Avoid `or` falsy default — a real stored
+        # 0.0 would silently fall through and contaminate the new write.
+        old_wr = pattern.win_rate if pattern.win_rate is not None else float("nan")
+        old_ret = pattern.avg_return_pct if pattern.avg_return_pct is not None else float("nan")
+
+        # Raw realized — no EWMA smoothing. Operator preference (2026-04-28):
+        # simpler & honest over smooth & misleading. Patterns with small n
+        # will be noisy, but stored win_rate matches `wins/total` directly.
+        if math.isfinite(new_win_rate) and 0.0 <= new_win_rate <= 1.0:
+            pattern.win_rate = round(new_win_rate, 4)
+        if math.isfinite(avg_gain):
+            pattern.avg_return_pct = round(avg_gain, 2)
         actual_trade_count = db.query(func.count(Trade.id)).filter(
             Trade.scan_pattern_id == pattern.id
         ).scalar() or 0
         pattern.trade_count = actual_trade_count
         pattern.updated_at = datetime.utcnow()
-        
+
         patterns_updated += 1
-        
+
         logger.info(
             "[learning] Updated ScanPattern '%s' (id=%d) from real trades: "
-            "win_rate=%.1f%% (was %.1f%%), avg_return=%.2f%% (was %.2f%%), n=%d",
+            "win_rate=%.1f%% (was %s), avg_return=%.2f%% (was %s), n=%d",
             pattern.name, pattern.id,
-            pattern.win_rate * 100, old_wr * 100,
-            pattern.avg_return_pct, old_ret,
+            (pattern.win_rate or 0.0) * 100,
+            f"{old_wr * 100:.1f}%" if math.isfinite(old_wr) else "n/a",
+            (pattern.avg_return_pct or 0.0),
+            f"{old_ret:.2f}" if math.isfinite(old_ret) else "n/a",
             actual_trade_count,
         )
 
@@ -4717,15 +4751,20 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
 
         wins = sum(1 for t in trades if t["win"])
         n = len(trades)
+        if n <= 0:
+            continue
         new_wr = wins / n
         new_ret = sum(t["return_pct"] for t in trades) / n
 
-        blend = min(0.8, n / 30)
-        old_wr = pattern.win_rate or 0.5
-        old_ret = pattern.avg_return_pct or 0.0
+        # Old values for log only — explicit None check (no `or` falsy default).
+        old_wr = pattern.win_rate if pattern.win_rate is not None else float("nan")
+        old_ret = pattern.avg_return_pct if pattern.avg_return_pct is not None else float("nan")
 
-        pattern.win_rate = round(old_wr * (1 - blend) + new_wr * blend, 4)
-        pattern.avg_return_pct = round(old_ret * (1 - blend) + new_ret * blend, 2)
+        # Raw realized — no EWMA blend (operator preference 2026-04-28).
+        if math.isfinite(new_wr) and 0.0 <= new_wr <= 1.0:
+            pattern.win_rate = round(new_wr, 4)
+        if math.isfinite(new_ret):
+            pattern.avg_return_pct = round(new_ret, 2)
         actual_trade_count = db.query(func.count(Trade.id)).filter(
             Trade.scan_pattern_id == pattern.id
         ).scalar() or 0
@@ -4735,10 +4774,12 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
 
         logger.info(
             "[learning] Trade feedback → ScanPattern '%s' (id=%d): "
-            "wr=%.1f%% (was %.1f%%), avg_ret=%.2f%% (was %.2f%%), n=%d",
+            "wr=%.1f%% (was %s), avg_ret=%.2f%% (was %s), n=%d",
             pattern.name, pattern.id,
-            pattern.win_rate * 100, old_wr * 100,
-            pattern.avg_return_pct, old_ret,
+            (pattern.win_rate or 0.0) * 100,
+            f"{old_wr * 100:.1f}%" if math.isfinite(old_wr) else "n/a",
+            (pattern.avg_return_pct or 0.0),
+            f"{old_ret:.2f}" if math.isfinite(old_ret) else "n/a",
             actual_trade_count,
         )
 
