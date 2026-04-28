@@ -142,6 +142,18 @@ def main() -> int:
             "``cpcv_n_paths IS NULL`` (resume / skip already backfilled)."
         ),
     )
+    ap.add_argument(
+        "--include-challenged",
+        action="store_true",
+        help=(
+            "Also process rows where lifecycle_stage='challenged' AND "
+            "promotion_status='demoted_evidence_gap'. Patterns that PASS the "
+            "promotion_gate after CPCV evaluation are auto-restored to "
+            "lifecycle_stage='promoted' and promotion_status='promoted'. "
+            "Use this after a bulk evidence-gap demotion to recover patterns "
+            "that genuinely have the data to support promotion."
+        ),
+    )
     args = ap.parse_args()
 
     if args.commit and args.dry_run:
@@ -154,9 +166,18 @@ def main() -> int:
 
     db = SessionLocal()
     try:
-        base_pf = db.query(ScanPattern).filter(
-            ScanPattern.lifecycle_stage.in_(("promoted", "live"))
-        )
+        if args.include_challenged:
+            base_pf = db.query(ScanPattern).filter(
+                (ScanPattern.lifecycle_stage.in_(("promoted", "live")))
+                | (
+                    (ScanPattern.lifecycle_stage == "challenged")
+                    & (ScanPattern.promotion_status == "demoted_evidence_gap")
+                )
+            )
+        else:
+            base_pf = db.query(ScanPattern).filter(
+                ScanPattern.lifecycle_stage.in_(("promoted", "live"))
+            )
         n_promoted_live_db = base_pf.count()
         q = base_pf
         if not args.all:
@@ -233,12 +254,29 @@ def main() -> int:
             elif do_commit and patch:
                 action = "patch_cpcv_columns"
 
+            # Track whether this row was a challenged-gap pattern PRE-update,
+            # so we can decide whether passing the gate triggers a restore.
+            was_challenged_gap = (
+                (pat.lifecycle_stage or "").strip() == "challenged"
+                and (pat.promotion_status or "").strip() == "demoted_evidence_gap"
+            )
             if do_commit:
                 for k, v in patch.items():
                     setattr(pat, k, v)
                 if would_demote:
                     pat.lifecycle_stage = "challenged"
                     pat.lifecycle_changed_at = datetime.utcnow()
+                elif was_challenged_gap and ok:
+                    # Pattern was demoted for evidence gap; the CPCV evaluation
+                    # just filled in the missing metrics and it passes the gate.
+                    # Restore to promoted and clear the demotion marker.
+                    pat.lifecycle_stage = "promoted"
+                    pat.promotion_status = "promoted"
+                    pat.lifecycle_changed_at = datetime.utcnow()
+                    logger.info(
+                        "id=%s RESTORED challenged -> promoted (CPCV gate passed after backfill)",
+                        pat.id,
+                    )
                 try:
                     db.commit()
                 except Exception:
