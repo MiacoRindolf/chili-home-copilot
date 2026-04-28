@@ -1985,6 +1985,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_ELIGIBLE_LIFECYCLE_STAGES"),
     )
 
+    # Variant-spawn gate: refuse to fork entry/exit/tf/combo variants from
+    # parent patterns with WR < 35% on >=50 trades, or that are in demoted
+    # lifecycle stages. Default ON. Set false to restore the legacy variant
+    # treadmill (81% of the 612-pattern audit population came from forks of
+    # mostly low-edge parents).
+    chili_variant_spawn_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_VARIANT_SPAWN_GATE_ENABLED"),
+    )
+
     chili_pattern_evidence_audit_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_PATTERN_EVIDENCE_AUDIT_ENABLED"),

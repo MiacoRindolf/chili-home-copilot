@@ -7967,6 +7967,40 @@ _EXIT_VARIANTS: list[dict[str, Any]] = [
 _MAX_ACTIVE_VARIANTS = 8
 
 
+# 2026-04-28: variant-spawn gate. The 612-pattern audit showed 81% of
+# patterns are exit/entry/tf/combo variants of existing parents - a treadmill
+# that mostly produces children with no edge because the parent had no edge.
+# This guard refuses to spawn from parents with WR < 35% on >=50 trades, or
+# from patterns the lifecycle FSM has demoted/retired. Override via
+# CHILI_VARIANT_SPAWN_GATE_ENABLED=false to allow legacy behavior.
+_VARIANT_GATE_MIN_TRADES = 50
+_VARIANT_GATE_MIN_WR = 0.35
+_VARIANT_GATE_BLOCKED_STAGES = frozenset({"challenged", "retired", "decayed"})
+
+
+def _parent_eligible_for_variant_spawn(parent: "ScanPattern") -> tuple[bool, str]:
+    """Returns (eligible, reason). reason is empty when eligible=True.
+
+    Disqualifications (any one fails the gate):
+      - lifecycle_stage in {challenged, retired, decayed}
+      - backtest_count >= MIN_TRADES AND win_rate < MIN_WR
+      - parent itself was already demoted via promotion_status='demoted_evidence_gap'
+    """
+    from ...config import settings as _s
+    if not bool(getattr(_s, "chili_variant_spawn_gate_enabled", True)):
+        return True, ""
+    stage = (getattr(parent, "lifecycle_stage", "") or "").strip().lower()
+    if stage in _VARIANT_GATE_BLOCKED_STAGES:
+        return False, f"parent_lifecycle_blocked:{stage}"
+    if (getattr(parent, "promotion_status", "") or "").strip().lower() == "demoted_evidence_gap":
+        return False, "parent_evidence_demoted"
+    bt = int(getattr(parent, "backtest_count", 0) or 0)
+    wr = getattr(parent, "win_rate", None)
+    if bt >= _VARIANT_GATE_MIN_TRADES and wr is not None and float(wr) < _VARIANT_GATE_MIN_WR:
+        return False, f"parent_low_wr:{float(wr):.3f}_on_{bt}_trades"
+    return True, ""
+
+
 def _create_variant_child(
     db: "Session",
     parent: "ScanPattern",
@@ -7978,8 +8012,20 @@ def _create_variant_child(
     timeframe: str | None = None,
     ticker_scope: str | None = None,
     scope_tickers_json: str | None = None,
-) -> "ScanPattern":
-    """Low-level helper: create a child ScanPattern + linked TradingInsight."""
+) -> "ScanPattern | None":
+    """Low-level helper: create a child ScanPattern + linked TradingInsight.
+
+    Returns None when the variant-spawn gate refuses (parent has no edge or
+    is in a demoted lifecycle stage). Caller code should handle None as
+    "skip this fork".
+    """
+    eligible, reason = _parent_eligible_for_variant_spawn(parent)
+    if not eligible:
+        logger.info(
+            "[variant_spawn_gate] refused parent_id=%s name=%s origin=%s reason=%s",
+            getattr(parent, "id", "?"), getattr(parent, "name", "?"), origin, reason,
+        )
+        return None
     from ...models.trading import ScanPattern, TradingInsight
 
     child_name = f"{parent.name} [{variant_label}]"
