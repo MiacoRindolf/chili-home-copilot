@@ -12750,6 +12750,68 @@ def _migration_196_pattern_signature_with_timeframe(conn) -> None:
     conn.commit()
 
 
+def _migration_197_promote_top_backtest_evidence(conn) -> None:
+    """Re-promote patterns with strong backtest-evidence in the new ledger.
+
+    Migration 194 retroactively demoted every promoted pattern. The brain
+    is now in a state where 0 patterns can fire (lifecycle gate blocks all).
+    The 2026-04-28 backtest-history backfill of
+    `trading_pattern_regime_performance_daily` surfaced 1,355 confident
+    (n>=5) backtest cells. Use that evidence to re-promote the strongest
+    universal winners.
+
+    Selection criteria (strict):
+      * mode = 'backtest' AND has_confidence
+      * max(n_trades) >= 30
+      * avg(mean_pnl_pct) > 0.5
+      * avg(hit_rate) >= 0.45
+
+    Patterns re-promoted here pass through the FULL gate stack at
+    runtime: ticker autotune, EV gate, regime gate, lifecycle gate,
+    drawdown breaker.
+
+    Rollback (manual)::
+
+        UPDATE scan_patterns SET lifecycle_stage = 'challenged',
+                                 promotion_status = 'rolled_back_197'
+        WHERE promotion_status = 'promoted_via_bt_ev_197';
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    if "trading_pattern_regime_performance_daily" not in _tables(conn):
+        conn.commit()
+        return
+
+    rows = conn.execute(text("""
+        SELECT pattern_id,
+               max(n_trades) AS n,
+               avg(hit_rate) AS hr,
+               avg(mean_pnl_pct) AS mp
+        FROM trading_pattern_regime_performance_daily
+        WHERE mode = 'backtest'
+          AND has_confidence
+          AND n_trades >= 30
+        GROUP BY pattern_id
+        HAVING avg(mean_pnl_pct) > 0.5
+           AND avg(hit_rate) >= 0.45
+        ORDER BY avg(mean_pnl_pct) DESC
+        LIMIT 25
+    """)).fetchall()
+
+    for r in rows:
+        pid = int(r.pattern_id)
+        conn.execute(text("""
+            UPDATE scan_patterns
+            SET lifecycle_stage = 'promoted',
+                promotion_status = 'promoted_via_bt_ev_197',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = :pid
+              AND lifecycle_stage NOT IN ('promoted', 'live')
+        """), {"pid": pid})
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -12956,6 +13018,7 @@ MIGRATIONS = [
     ("194_realized_ev_gate_retroactive_demote", _migration_194_realized_ev_gate_retroactive_demote),
     ("195_pattern_condition_signature", _migration_195_pattern_condition_signature),
     ("196_pattern_signature_with_timeframe", _migration_196_pattern_signature_with_timeframe),
+    ("197_promote_top_backtest_evidence", _migration_197_promote_top_backtest_evidence),
 ]
 
 
