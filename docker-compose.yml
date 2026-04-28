@@ -114,7 +114,7 @@ services:
       # For plain HTTP in Docker, use: docker compose run -e CHILI_TLS=0 … or a compose override.
       - CHILI_TLS=1
       # Scanner/prescreener batch OHLCV: Massive-only (no Polygon/yfinance log spam).
-      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       # No APScheduler in Uvicorn: all cron jobs run in ``scheduler-worker`` (see CHILI_SCHEDULER_ROLE there).
       # Also disables Massive WebSocket in this process (continuous quote stream); trading UI uses REST polling.
       - CHILI_SCHEDULER_ROLE=none
@@ -240,7 +240,7 @@ services:
       - BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
       - DATABASE_POOL_SIZE=8
       - DATABASE_MAX_OVERFLOW=12
-      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
       - CHILI_RUNNING_IN_DOCKER=1
@@ -293,7 +293,7 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - DATABASE_POOL_SIZE=4
       - DATABASE_MAX_OVERFLOW=6
-      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=3
     volumes:
@@ -335,7 +335,7 @@ services:
       - DATABASE_MAX_OVERFLOW=10
       - BRAIN_QUEUE_BACKTEST_EXECUTOR=${BRAIN_QUEUE_BACKTEST_EXECUTOR:-process}
       - BRAIN_QUEUE_PROCESS_CAP=${BRAIN_QUEUE_PROCESS_CAP:-8}
-      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=5
     volumes:
@@ -375,7 +375,7 @@ services:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - DATABASE_POOL_SIZE=4
       - DATABASE_MAX_OVERFLOW=4
-      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=2
     volumes:
@@ -442,7 +442,7 @@ services:
       # web service + ad-hoc psql access. (Phase D.2.7+ ops note 2026-04-26.)
       - DATABASE_POOL_SIZE=25
       - DATABASE_MAX_OVERFLOW=50
-      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
       - CHILI_RUNNING_IN_DOCKER=1

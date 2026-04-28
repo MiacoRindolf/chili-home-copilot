@@ -298,7 +298,7 @@ def fetch_ohlcv(
         return []
 
     if _start_str:
-        df = _yf_history(ticker, start=_start_str, period="15d", interval=interval)
+        df = (_yf_history(ticker, start=_start_str, end=_end_str, interval=interval) if _end_str else _yf_history(ticker, start=_start_str, interval=interval))
     else:
         period = _clamp_period(interval, period)
         df = _yf_history(ticker, period=period, interval=interval)
@@ -465,7 +465,12 @@ def fetch_ohlcv_df(
         return pd.DataFrame()
 
     if _start_str:
-        df = _yf_history(ticker, start=_start_str, period="15d", interval=interval)
+        # 2026-04-28 leak fix: yfinance truncates to ~10 rows when given
+        # both start AND period together. Pass start (and end if set) only.
+        if _end_str:
+            df = _yf_history(ticker, start=_start_str, end=_end_str, interval=interval)
+        else:
+            df = _yf_history(ticker, start=_start_str, interval=interval)
     else:
         period = _clamp_period(interval, period)
         df = _yf_history(ticker, period=period, interval=interval)

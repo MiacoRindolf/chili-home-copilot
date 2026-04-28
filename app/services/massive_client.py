@@ -373,8 +373,15 @@ def _massive_url_ticker_ok(m_ticker: str) -> bool:
 def to_massive_ticker(ticker: str) -> str:
     """Convert app-internal ticker to Massive/Polygon-compatible symbol format.
 
-    Polygon crypto format uses ``X:BTCUSD`` (no hyphen), while the app uses
-    ``BTC-USD`` (yfinance style). Bare ``ZKUSD`` is also accepted. Stocks pass through unchanged.
+    Polygon/Massive crypto format uses ``X:BTCUSD`` (no hyphen), while the
+    app uses ``BTC-USD`` (yfinance style). Indices use the ``I:`` prefix on
+    Massive (``I:VIX``, ``I:SPX``, ``I:DJI``); the app stores them in
+    yfinance form (``^VIX``). Bare ``ZKUSD`` is also accepted. Stocks pass
+    through unchanged.
+
+    2026-04-28 leak fix: previously ``^VIX`` was passed straight to
+    Massive's stocks endpoint, which silently returned 0 rows and broke
+    the HMM regime classifier downstream.
     """
     t = ticker.upper().strip()
     if is_crypto(t):
@@ -383,6 +390,9 @@ def to_massive_ticker(ticker: str) -> str:
         return f"X:{t}"
     if t.startswith("X:") and "-" in t:
         return t.replace("-", "")
+    # Indices: yfinance ``^VIX`` -> Massive ``I:VIX``.
+    if t.startswith("^") and len(t) > 1:
+        return "I:" + t[1:]
     return t
 
 
