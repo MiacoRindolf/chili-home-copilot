@@ -12615,7 +12615,7 @@ def _migration_194_realized_ev_gate_retroactive_demote(conn) -> None:
         conn.execute(text("""
             UPDATE scan_patterns
             SET lifecycle_stage = 'challenged',
-                promotion_status = 'ev_gate_retroactive_demote_1047_supersede_168_170',
+                promotion_status = 'ev_demote_1047_supersede',
                 demoted_at = COALESCE(demoted_at, CURRENT_TIMESTAMP),
                 promotion_demote_reason =
                   'pattern 1047 explicit retire: supersedes migrations 168 + 170. '
