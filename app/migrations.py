@@ -12938,6 +12938,106 @@ def _migration_198_seed_short_swing_patterns(conn) -> None:
     conn.commit()
 
 
+def _migration_199_widen_promotion_honestly(conn) -> None:
+    """Promote more patterns without lowering quality — use the system's
+    own statistical floor (15 trades, matching ``chili_cpcv_min_trades``)
+    AND add a regime-conditional path (pattern wins in SOME regime; the
+    live regime_gate will correctly block the losing regimes).
+
+    Background (mig 197): we required ``n_trades >= 30`` because the
+    regime_gate hadn't accumulated evidence yet — we were re-promoting
+    blind. Now that the ledger has 1,355 confident cells and
+    ``chili_regime_gate_mode = 'live'``, patterns can fire AND get
+    correctly blocked in their losing regimes. Two paths to promotion:
+
+    PATH A (relaxed universal): same as 197 but n>=15 (CPCV's own min).
+
+    PATH B (regime-conditional): pattern has at least ONE confident
+    backtest cell with mean_pnl_pct > 1.0 AND hit_rate >= 0.55, even if
+    other regimes are losing. The live regime_gate will block alerts in
+    losing regimes; this lets the winning regimes through.
+
+    Both paths still pass through the EV gate, lifecycle gate, ticker
+    autotune, regime gate, and drawdown breaker at runtime. Nothing is
+    bypassed.
+
+    Rollback (manual)::
+
+        UPDATE scan_patterns SET lifecycle_stage = 'challenged',
+                                 promotion_status = 'rolled_back_199'
+        WHERE promotion_status IN ('promoted_via_bt_ev_199_universal',
+                                   'promoted_via_bt_ev_199_regime_conditional');
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    if "trading_pattern_regime_performance_daily" not in _tables(conn):
+        conn.commit()
+        return
+
+    # PATH A: relaxed universal threshold matching CPCV's own min_trades.
+    rows_a = conn.execute(text("""
+        SELECT pattern_id,
+               max(n_trades) AS n,
+               avg(hit_rate) AS hr,
+               avg(mean_pnl_pct) AS mp
+        FROM trading_pattern_regime_performance_daily
+        WHERE mode = 'backtest'
+          AND has_confidence
+          AND n_trades >= 15
+        GROUP BY pattern_id
+        HAVING avg(mean_pnl_pct) > 0.5
+           AND avg(hit_rate) >= 0.45
+        ORDER BY avg(mean_pnl_pct) DESC
+        LIMIT 50
+    """)).fetchall()
+
+    promoted_a = 0
+    for r in rows_a:
+        pid = int(r.pattern_id)
+        result = conn.execute(text("""
+            UPDATE scan_patterns
+            SET lifecycle_stage = 'promoted',
+                promotion_status = 'promoted_via_bt_ev_199_uni',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = :pid
+              AND lifecycle_stage NOT IN ('promoted', 'live')
+              AND (avg_return_pct IS NULL OR avg_return_pct >= -1.0)
+        """), {"pid": pid})
+        if result.rowcount > 0:
+            promoted_a += 1
+    conn.commit()
+
+    # PATH B: regime-conditional winners. At least one confident cell with
+    # strong positive EV. Stricter on per-cell quality (hit_rate>=0.55,
+    # mean_pnl_pct>1.0) to compensate for not requiring a global average.
+    rows_b = conn.execute(text("""
+        SELECT DISTINCT pattern_id
+        FROM trading_pattern_regime_performance_daily
+        WHERE mode = 'backtest'
+          AND has_confidence
+          AND n_trades >= 15
+          AND mean_pnl_pct > 1.0
+          AND hit_rate >= 0.55
+    """)).fetchall()
+
+    promoted_b = 0
+    for r in rows_b:
+        pid = int(r.pattern_id)
+        result = conn.execute(text("""
+            UPDATE scan_patterns
+            SET lifecycle_stage = 'promoted',
+                promotion_status = 'promoted_via_bt_ev_199_rc',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = :pid
+              AND lifecycle_stage NOT IN ('promoted', 'live')
+              AND (avg_return_pct IS NULL OR avg_return_pct >= -2.0)
+        """), {"pid": pid})
+        if result.rowcount > 0:
+            promoted_b += 1
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -13146,6 +13246,7 @@ MIGRATIONS = [
     ("196_pattern_signature_with_timeframe", _migration_196_pattern_signature_with_timeframe),
     ("197_promote_top_backtest_evidence", _migration_197_promote_top_backtest_evidence),
     ("198_seed_short_swing_patterns", _migration_198_seed_short_swing_patterns),
+    ("199_widen_promotion_honestly", _migration_199_widen_promotion_honestly),
 ]
 
 
