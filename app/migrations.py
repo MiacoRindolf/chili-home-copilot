@@ -12812,6 +12812,130 @@ def _migration_197_promote_top_backtest_evidence(conn) -> None:
     conn.commit()
 
 
+def _migration_198_seed_short_swing_patterns(conn) -> None:
+    """Seed 6 short-swing (1-2 day hold) patterns + boost their backtest queue.
+
+    Operator request 2026-04-28: existing promoted patterns have multi-day to
+    multi-week holds. The user wants faster capital turnover, ~1-2 day swing
+    trades. The current ``_EXIT_PARAMS_BY_TIMEFRAME['1d']`` defaults set
+    max_bars to 50/15/25 (way too long for short swings); these patterns
+    pin ``exit_config.max_bars`` to 1-2 explicitly so the backtest engine
+    and live exit_monitor honor the short hold.
+
+    Each pattern has a distinct ``rules_json`` + ``timeframe='1d'`` +
+    ``exit_config`` JSON. Inserted as ``lifecycle_stage='backtested'`` with
+    ``backtest_priority=200`` so the brain-worker queue picks them up first.
+    Once enough backtest history accumulates and they pass the EV gate,
+    the existing promotion path graduates them to live trading.
+
+    Rollback (manual)::
+
+        DELETE FROM scan_patterns WHERE origin = 'short_swing_seed_198';
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    seeds = [
+        # (name, description, rules_json, exit_config_json, asset_class)
+        (
+            "Daily IBS<0.2 + Bull Engulf — 1-2d Mean Reversion",
+            "Internal Bar Strength below 0.2 (close near low) + previous-day bull engulf signals "
+            "exhaustion. Enter at close, exit within 1-2 days on mean-reversion bounce.",
+            '{"conditions": [{"indicator": "ibs", "op": "<", "value": 0.2}, '
+            '{"indicator": "bullish_engulfing", "op": "==", "value": true}]}',
+            '{"max_bars": 2, "atr_mult": 1.0, "use_bos": false}',
+            "stocks",
+        ),
+        (
+            "Gap-Down Fade — 1d Close Fill",
+            "Gap-down >2 percent with elevated volume + RSI<40. Enters at open, fades the "
+            "gap as price reverts to prior close. Exit by next session.",
+            '{"conditions": [{"indicator": "gap_pct", "op": "<", "value": -0.02}, '
+            '{"indicator": "volume_ratio", "op": ">", "value": 1.2}, '
+            '{"indicator": "rsi_14", "op": "<", "value": 40}]}',
+            '{"max_bars": 1, "atr_mult": 1.5, "use_bos": false}',
+            "stocks",
+        ),
+        (
+            "Inside Day Breakout — 1-2d Continuation",
+            "NR7 (narrow range 7) + volume confirmation + neutral RSI. Enters on breakout, "
+            "rides 1-2 day continuation with BOS confirmation.",
+            '{"conditions": [{"indicator": "nr7", "op": "==", "value": true}, '
+            '{"indicator": "volume_ratio", "op": ">", "value": 1.0}, '
+            '{"indicator": "rsi_14", "op": "between", "value": [40, 60]}]}',
+            '{"max_bars": 2, "atr_mult": 1.3, "use_bos": true, "bos_buffer_pct": 0.001}',
+            "stocks",
+        ),
+        (
+            "Daily RSI<30 + Above SMA50 — 1-2d Bounce",
+            "Oversold (RSI<30) while price still above the 50-day moving average (uptrend "
+            "intact). Counter-trend bounce trade with 1-2 day hold.",
+            '{"conditions": [{"indicator": "rsi_14", "op": "<", "value": 30}, '
+            '{"indicator": "above_sma50", "op": "==", "value": true}, '
+            '{"indicator": "volume_ratio", "op": ">", "value": 0.8}]}',
+            '{"max_bars": 2, "atr_mult": 1.0, "use_bos": false}',
+            "stocks",
+        ),
+        (
+            "Bull Hammer + High Volume — 1d Confirmation",
+            "Hammer reversal candle with elevated volume in oversold zone. Next-day "
+            "continuation trade; exit by close of day after entry.",
+            '{"conditions": [{"indicator": "hammer", "op": "==", "value": true}, '
+            '{"indicator": "volume_ratio", "op": ">", "value": 1.5}, '
+            '{"indicator": "rsi_14", "op": "<", "value": 50}]}',
+            '{"max_bars": 1, "atr_mult": 1.5, "use_bos": false}',
+            "stocks",
+        ),
+        (
+            "EMA20 Pullback in Strong Trend — 1-2d Resumption",
+            "Price pulled back to within 0.5 percent of 20-EMA in a confirmed trend "
+            "(ADX>20, RSI>40). Trend continuation entry; exit on 1-2 day resumption.",
+            '{"conditions": [{"indicator": "ema20_dist_pct", "op": "<", "value": 0.005}, '
+            '{"indicator": "rsi_14", "op": ">", "value": 40}, '
+            '{"indicator": "adx", "op": ">", "value": 20}]}',
+            '{"max_bars": 2, "atr_mult": 1.2, "use_bos": false}',
+            "stocks",
+        ),
+    ]
+
+    inserted = 0
+    for name, description, rules, exit_cfg, asset_class in seeds:
+        # Idempotent: skip if a pattern with this exact name already exists.
+        row = conn.execute(text(
+            "SELECT id FROM scan_patterns WHERE name = :n LIMIT 1"
+        ), {"n": name}).fetchone()
+        if row:
+            continue
+        conn.execute(text("""
+            INSERT INTO scan_patterns (
+                name, description, rules_json, exit_config,
+                origin, asset_class, timeframe,
+                confidence, win_rate, avg_return_pct,
+                evidence_count, trade_count,
+                lifecycle_stage, promotion_status,
+                ticker_scope, backtest_priority,
+                active, created_at, updated_at
+            ) VALUES (
+                :name, :description, CAST(:rules AS jsonb), CAST(:exit_cfg AS jsonb),
+                'short_swing_seed_198', :asset_class, '1d',
+                0.55, NULL, NULL,
+                0, 0,
+                'backtested', 'pending_oos',
+                'universal', 200,
+                true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+        """), {
+            "name": name,
+            "description": description,
+            "rules": rules,
+            "exit_cfg": exit_cfg,
+            "asset_class": asset_class,
+        })
+        inserted += 1
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -13019,6 +13143,7 @@ MIGRATIONS = [
     ("195_pattern_condition_signature", _migration_195_pattern_condition_signature),
     ("196_pattern_signature_with_timeframe", _migration_196_pattern_signature_with_timeframe),
     ("197_promote_top_backtest_evidence", _migration_197_promote_top_backtest_evidence),
+    ("198_seed_short_swing_patterns", _migration_198_seed_short_swing_patterns),
 ]
 
 
