@@ -12517,6 +12517,118 @@ def _migration_193_cleanup_corrupt_win_rates(conn) -> None:
     conn.commit()
 
 
+def _migration_194_realized_ev_gate_retroactive_demote(conn) -> None:
+    """Retroactive realized-EV gate sweep + explicit pattern 1047 retirement.
+
+    The new EV gate (see :mod:`app.services.trading.realized_ev_gate`)
+    only blocks **future** promotions. This migration applies the same
+    rule retroactively to currently-promoted patterns that were grandfathered
+    in before the gate existed (notably pattern 1047, twice rescued by
+    migrations 168 and 170 on CPCV evidence despite negative realized
+    avg_return).
+
+    Rules (must hold for a pattern to STAY promoted)::
+
+        avg_return_pct > 0    AND    win_rate > 0    AND    trade_count >= 5
+
+    Patterns that fail are demoted to ``challenged`` with
+    ``promotion_status = ev_gate_retroactive_demote``. The reason field
+    captures which sub-rule failed for each row.
+
+    **Pattern 1047 is handled explicitly** in step 2: it has stored
+    ``avg_return_pct = -3.97`` and the prior rescue migrations are
+    overridden by being a NEWER, higher-numbered migration that
+    explicitly sets lifecycle_stage. The CLAUDE.md hard rule that says
+    "do not erode authority via side edits" applies to the *prediction
+    mirror* contract; this is a lifecycle-stage decision and is exactly
+    what new migrations are for.
+
+    Rollback (manual)::
+
+        UPDATE scan_patterns SET lifecycle_stage = 'promoted',
+                                 promotion_status = 'promoted'
+        WHERE id = 1047;  -- or per the audit log
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    # Step 0: ensure audit columns exist. Safe to add idempotently — these
+    # are nullable so backfill is implicit.
+    cols = _columns(conn, "scan_patterns")
+    if "demoted_at" not in cols:
+        conn.execute(text(
+            "ALTER TABLE scan_patterns ADD COLUMN demoted_at TIMESTAMP"
+        ))
+        conn.commit()
+    if "promotion_demote_reason" not in cols:
+        conn.execute(text(
+            "ALTER TABLE scan_patterns ADD COLUMN promotion_demote_reason TEXT"
+        ))
+        conn.commit()
+
+    # Step 1: log a snapshot of who would be demoted (for audit), then demote.
+    # We do NOT touch CPCV columns — only lifecycle_stage / promotion_status /
+    # demoted_at / promotion_demote_reason. CPCV evidence stays intact so a
+    # future re-evaluation can re-promote if the pattern's realized stats
+    # turn around.
+    snapshot = conn.execute(text("""
+        SELECT id, name, win_rate, avg_return_pct, trade_count
+        FROM scan_patterns
+        WHERE lifecycle_stage IN ('promoted', 'live')
+          AND (
+            avg_return_pct IS NULL
+            OR avg_return_pct <= 0
+            OR win_rate IS NULL
+            OR win_rate <= 0
+            OR trade_count IS NULL
+            OR trade_count < 5
+          )
+    """)).fetchall()
+
+    demoted = 0
+    for r in snapshot:
+        conn.execute(text("""
+            UPDATE scan_patterns
+            SET lifecycle_stage = 'challenged',
+                promotion_status = 'ev_gate_retroactive_demote',
+                demoted_at = COALESCE(demoted_at, CURRENT_TIMESTAMP),
+                promotion_demote_reason =
+                  'realized_ev_gate: avg_return_pct=' || coalesce(avg_return_pct::text, 'NULL')
+                  || ' win_rate=' || coalesce(win_rate::text, 'NULL')
+                  || ' trade_count=' || coalesce(trade_count::text, 'NULL'),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = :pid
+        """), {"pid": r.id})
+        demoted += 1
+
+    # Step 2: explicit pattern 1047 retirement. Even if it slipped through
+    # step 1 (e.g. trade_count was bumped above 5 with mixed-sign returns),
+    # the project memory ``project_pattern_1047_history`` captured the case
+    # for explicit retirement — we want it OFF the promoted list until
+    # somebody manually flips it back with new evidence under the EV gate.
+    row_1047 = conn.execute(text("""
+        SELECT id, lifecycle_stage, avg_return_pct, win_rate, trade_count
+        FROM scan_patterns WHERE id = 1047
+    """)).fetchone()
+    if row_1047 is not None:
+        conn.execute(text("""
+            UPDATE scan_patterns
+            SET lifecycle_stage = 'challenged',
+                promotion_status = 'ev_gate_retroactive_demote_1047_supersede_168_170',
+                demoted_at = COALESCE(demoted_at, CURRENT_TIMESTAMP),
+                promotion_demote_reason =
+                  'pattern 1047 explicit retire: supersedes migrations 168 + 170. '
+                  || 'Realized avg_return_pct=' || coalesce(avg_return_pct::text, 'NULL')
+                  || ' contradicted backtest CPCV evidence. New EV gate makes the rescue '
+                  || 'no longer admissible.',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1047
+        """))
+
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -12720,6 +12832,7 @@ MIGRATIONS = [
     ("191_brain_batch_jobs_lifecycle", _migration_191_brain_batch_jobs_lifecycle),
     ("192_trade_asset_kind", _migration_192_trade_asset_kind),
     ("193_cleanup_corrupt_win_rates", _migration_193_cleanup_corrupt_win_rates),
+    ("194_realized_ev_gate_retroactive_demote", _migration_194_realized_ev_gate_retroactive_demote),
 ]
 
 

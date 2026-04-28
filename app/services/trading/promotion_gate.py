@@ -1010,6 +1010,32 @@ def finalize_promotion_with_cpcv(
         detail["blocked"] = "cpcv_promotion_gate_failed"
         detail["cpcv_gate_reasons"] = reasons
 
+    # 2026-04-28: Realized-EV gate. Independent of CPCV. Pattern 1047 was
+    # the smoking gun: passed CPCV (rescued via migrations 168+170) yet had
+    # avg_return_pct=-3.97 realized. CPCV checks risk-adjusted OOS metrics;
+    # this gate checks "did this pattern actually make money?".
+    try:
+        from .realized_ev_gate import check_realized_ev_blocking
+        ev_blocked, ev_reasons, ev_snapshot = check_realized_ev_blocking(scan_pattern)
+        detail["realized_ev_gate"] = {
+            "blocked": ev_blocked,
+            "reasons": ev_reasons,
+            "snapshot": ev_snapshot,
+        }
+        if ev_blocked:
+            # Don't overwrite a pre-existing CPCV block reason — both can be
+            # true at once. Append EV reasons to the list so both root
+            # causes appear in the audit trail.
+            existing = detail.get("blocked")
+            existing_reasons = detail.get("cpcv_gate_reasons") or []
+            if existing:
+                detail["blocked"] = f"{existing}+realized_ev_gate_failed"
+            else:
+                detail["blocked"] = "realized_ev_gate_failed"
+            detail["cpcv_gate_reasons"] = list(existing_reasons) + [f"ev:{r}" for r in ev_reasons]
+    except Exception as _ev_exc:
+        logger.warning("[realized_ev_gate] evaluation failed (continuing on CPCV alone): %s", _ev_exc)
+
     return detail
 
 

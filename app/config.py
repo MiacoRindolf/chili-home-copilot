@@ -799,6 +799,14 @@ class Settings(BaseSettings):
     # When True, CPCV + DSR + PBO gate blocks promotion after ensemble/DSR/holdout (HR1 path).
     # Default OFF: metrics computed at promotion-attempt time only; shadow / logging only.
     chili_cpcv_promotion_gate_enabled: bool = False
+    # 2026-04-28: realized-EV gate. Sits alongside CPCV. Pattern must have
+    # positive avg_return_pct (mean of trade returns = EV) and at least
+    # ``chili_realized_ev_min_trades`` realized trades. CPCV alone wasn't
+    # enough — 1047 passed it twice while losing money live.
+    chili_realized_ev_gate_enabled: bool = True
+    chili_realized_ev_min_trades: int = 5
+    chili_realized_ev_min_avg_return_pct: float = 0.0
+    chili_realized_ev_min_win_rate: float = 0.0
     # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM
     # (memory safety for patterns with huge trading_pattern_trades). 0 = no cap.
     chili_cpcv_max_labeled_rows: int = 0
