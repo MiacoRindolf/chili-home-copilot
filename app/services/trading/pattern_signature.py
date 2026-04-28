@@ -93,8 +93,19 @@ def _canonicalize_condition(cond: dict[str, Any]) -> tuple[str, str, str]:
     return (indicator, op, value)
 
 
-def compute_signature(conditions: Iterable[dict[str, Any]] | None) -> str:
-    """Return a 40-hex-char stable signature for a list of conditions.
+def compute_signature(
+    conditions: Iterable[dict[str, Any]] | None,
+    *,
+    timeframe: str | None = None,
+) -> str:
+    """Return a 40-hex-char stable signature for (conditions, timeframe).
+
+    Timeframe is part of the signature because an "RSI < 30" rule on
+    1-minute bars is a fundamentally different strategy than the same
+    rule on daily bars — different signal density, different exit
+    horizon, different evidence stream. The 2026-04-28 audit caught
+    this when 31 patterns with identical conditions but different bar
+    intervals collapsed under the conditions-only signature.
 
     ``conditions = None`` or empty -> :data:`EMPTY_SIGNATURE`.
     """
@@ -105,12 +116,17 @@ def compute_signature(conditions: Iterable[dict[str, Any]] | None) -> str:
     if not canon:
         return EMPTY_SIGNATURE
     canon.sort()
-    flat = "|".join(f"{i}:{o}:{v}" for (i, o, v) in canon)
+    tf = (str(timeframe).strip().lower() if timeframe else "") or "_notf"
+    flat = "tf=" + tf + "||" + "|".join(f"{i}:{o}:{v}" for (i, o, v) in canon)
     return hashlib.sha1(flat.encode("utf-8")).hexdigest()
 
 
-def signature_for_rules_json(rules_json: str | dict | None) -> str:
-    """Convenience: parse rules_json and compute the signature."""
+def signature_for_rules_json(
+    rules_json: str | dict | None,
+    *,
+    timeframe: str | None = None,
+) -> str:
+    """Convenience: parse rules_json and compute signature for (conditions, timeframe)."""
     if rules_json is None:
         return EMPTY_SIGNATURE
     obj: Any
@@ -124,12 +140,15 @@ def signature_for_rules_json(rules_json: str | dict | None) -> str:
             return EMPTY_SIGNATURE
     if not isinstance(obj, dict):
         return EMPTY_SIGNATURE
-    return compute_signature(obj.get("conditions") or [])
+    return compute_signature(obj.get("conditions") or [], timeframe=timeframe)
 
 
 def signature_for_pattern(pattern: Any) -> str:
-    """Compute signature from a ScanPattern ORM instance."""
-    return signature_for_rules_json(getattr(pattern, "rules_json", None))
+    """Compute signature from a ScanPattern ORM instance (uses pattern.timeframe)."""
+    return signature_for_rules_json(
+        getattr(pattern, "rules_json", None),
+        timeframe=getattr(pattern, "timeframe", None),
+    )
 
 
 def find_existing_by_signature(sess: Any, signature: str) -> Any:

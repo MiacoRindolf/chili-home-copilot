@@ -1996,7 +1996,7 @@ def ensure_mined_scan_pattern(
             compute_signature as _sig_compute,
             EMPTY_SIGNATURE as _SIG_EMPTY,
         )
-        _sig = _sig_compute(conditions)
+        _sig = _sig_compute(conditions, timeframe=tf)
     except Exception:
         _sig = None
     if _sig and _sig != _SIG_EMPTY:

@@ -12700,6 +12700,56 @@ def _migration_195_pattern_condition_signature(conn) -> None:
     conn.commit()
 
 
+def _migration_196_pattern_signature_with_timeframe(conn) -> None:
+    """Re-backfill ``condition_signature`` to include the pattern's timeframe.
+
+    The signature added by migration 195 hashed only ``rules_json.conditions``,
+    which collapsed patterns with identical entry rules but different bar
+    intervals onto the same hash. The 2026-04-28 audit found 31 rows
+    sharing one signature where the actual ``timeframe`` column ranged
+    over {1m, 5m, 15m, 1h, 4h, 1d}.
+
+    Operator correction: those suffixes ARE timeframe variants. They are
+    NOT duplicates — a strategy on 1-minute bars and the same rule on
+    daily bars are fundamentally different signal streams. This migration
+    recomputes the signature using the helper's new timeframe-aware form.
+
+    Idempotent: ``signature_for_pattern`` is pure, recomputing always
+    produces the same value for the same row.
+
+    Rollback (manual)::
+
+        UPDATE scan_patterns SET condition_signature = NULL;
+        # then re-run migrations 195 + 196 in order.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    # Pull every row's rules_json + timeframe and recompute. The helper
+    # falls back to a stable EMPTY marker if either is unparseable.
+    try:
+        from app.services.trading.pattern_signature import signature_for_rules_json
+    except Exception:
+        # If the helper module isn't importable yet (mid-deploy), no-op
+        # this migration so it doesn't fail boot. It will run on a future
+        # restart once the module lands.
+        conn.commit()
+        return
+
+    rows = conn.execute(text(
+        "SELECT id, rules_json, timeframe FROM scan_patterns"
+    )).fetchall()
+    updated = 0
+    for r in rows:
+        sig = signature_for_rules_json(r.rules_json, timeframe=r.timeframe)
+        conn.execute(text(
+            "UPDATE scan_patterns SET condition_signature = :sig WHERE id = :pid"
+        ), {"sig": sig, "pid": r.id})
+        updated += 1
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -12905,6 +12955,7 @@ MIGRATIONS = [
     ("193_cleanup_corrupt_win_rates", _migration_193_cleanup_corrupt_win_rates),
     ("194_realized_ev_gate_retroactive_demote", _migration_194_realized_ev_gate_retroactive_demote),
     ("195_pattern_condition_signature", _migration_195_pattern_condition_signature),
+    ("196_pattern_signature_with_timeframe", _migration_196_pattern_signature_with_timeframe),
 ]
 
 
