@@ -592,6 +592,30 @@ def _process_one_alert(
                 out["skipped"] += 1
                 _autotrader_tick_note(out, kind="skipped", reason=_reason, alert=alert)
                 return
+
+    # 2026-04-28 regime gate. Reads pattern x regime ledger; blocks entries
+    # for (pattern, ticker_regime) pairs with confident negative expectancy.
+    # Default mode is "shadow" — logs would-be-blocks without enforcing,
+    # so we accumulate audit history before flipping to "live".
+    try:
+        from .regime_gate import regime_gate_blocks_entry
+        _rg_block, _rg_reason = regime_gate_blocks_entry(
+            db,
+            pattern_id=alert.scan_pattern_id,
+            ticker=alert.ticker,
+        )
+        if _rg_block:
+            _audit(db, user_id=uid, alert=alert, decision="skipped",
+                   reason=f"regime_gate:{_rg_reason}")
+            out["skipped"] += 1
+            _autotrader_tick_note(out, kind="skipped",
+                                  reason=f"regime_gate:{_rg_reason}", alert=alert)
+            return
+    except Exception as _rg_exc:
+        # Defense-in-depth: never let the regime gate's wiring error block
+        # an alert. The gate is an additive safety, not a critical path.
+        logger.debug("[regime_gate] eval skipped due to error: %s", _rg_exc)
+
     px = _current_price(alert.ticker)
     if px is None:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason="no_quote")

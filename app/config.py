@@ -828,6 +828,14 @@ class Settings(BaseSettings):
     chili_pattern_regime_ledger_window_days: int = 90
     chili_pattern_regime_ledger_min_trades: int = 3
     chili_pattern_regime_ledger_dry_run: bool = False
+    # 2026-04-28: regime gate at the auto-trader entry funnel. Reads the
+    # ledger to block patterns with confidently-negative expectancy in the
+    # current ticker regime. Default mode is shadow (logs would-be-blocks
+    # without enforcing) so the operator can audit before flipping live.
+    chili_regime_gate_enabled: bool = True
+    chili_regime_gate_mode: str = "shadow"
+    chili_regime_gate_min_trades: int = 5
+    chili_regime_gate_max_age_days: int = 7
     # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM
     # (memory safety for patterns with huge trading_pattern_trades). 0 = no cap.
     chili_cpcv_max_labeled_rows: int = 0
