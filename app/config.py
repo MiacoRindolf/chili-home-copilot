@@ -1974,6 +1974,17 @@ class Settings(BaseSettings):
     # report first is strongly recommended — Codex's 2026-04-27 audit found
     # near-total absence of evidence on the legacy promoted-status set, so
     # naive auto-demote would stop a lot of live trading at once.
+    # AutoTrader entry gate: only trade alerts whose scan_pattern is in this
+    # set of lifecycle stages. 2026-04-28 incident: 32 of 34 entries in 7 days
+    # were on `challenged` patterns the evidence audit had just demoted - the
+    # operational gate had been ignoring lifecycle_stage. Default
+    # ('promoted','live') matches CLAUDE.md hard-rule. Override via env to
+    # widen during recovery: CHILI_AUTOTRADER_ELIGIBLE_LIFECYCLE_STAGES=promoted,live,validated
+    chili_autotrader_eligible_lifecycle_stages: str = Field(
+        default="promoted,live",
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_ELIGIBLE_LIFECYCLE_STAGES"),
+    )
+
     chili_pattern_evidence_audit_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_PATTERN_EVIDENCE_AUDIT_ENABLED"),

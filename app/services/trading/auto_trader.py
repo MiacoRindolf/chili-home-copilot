@@ -563,6 +563,12 @@ def _maybe_substitute_with_options(db: Session, alert: BreakoutAlert, spot: floa
         logger.debug("[autotrader_options_substitute] failed; falling back to equity", exc_info=True)
 
 
+def _eligible_lifecycle_stages() -> set[str]:
+    """The lifecycle_stage values that are allowed to enter new live trades."""
+    raw = (getattr(settings, "chili_autotrader_eligible_lifecycle_stages", "promoted,live") or "")
+    return {s.strip().lower() for s in raw.split(",") if s.strip()}
+
+
 def _process_one_alert(
     db: Session,
     uid: int,
@@ -570,6 +576,22 @@ def _process_one_alert(
     out: dict[str, Any],
     runtime: dict[str, Any],
 ) -> None:
+    # 2026-04-28 lifecycle gate. Evidence audit demotes patterns to 'challenged'
+    # but the entry funnel had been ignoring lifecycle_stage, so 32 of 34 entries
+    # last week landed on demoted patterns (driving most of the bleed). Enforce
+    # the audit's intent at trade-placement. Override via
+    # CHILI_AUTOTRADER_ELIGIBLE_LIFECYCLE_STAGES env var to widen the set.
+    if alert.scan_pattern_id:
+        _pat = db.query(ScanPattern).filter(ScanPattern.id == int(alert.scan_pattern_id)).first()
+        if _pat is not None:
+            _stage = (_pat.lifecycle_stage or "").strip().lower()
+            _allowed = _eligible_lifecycle_stages()
+            if _stage not in _allowed:
+                _reason = f"pattern_lifecycle_not_eligible:{_stage or 'none'}"
+                _audit(db, user_id=uid, alert=alert, decision="skipped", reason=_reason)
+                out["skipped"] += 1
+                _autotrader_tick_note(out, kind="skipped", reason=_reason, alert=alert)
+                return
     px = _current_price(alert.ticker)
     if px is None:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason="no_quote")
