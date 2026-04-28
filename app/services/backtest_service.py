@@ -705,6 +705,24 @@ def save_backtest(
         for _k in ("ohlc_bars", "chart_time_from", "chart_time_to", "period", "interval"):
             if params_obj.get(_k) is None and _dp.get(_k) is not None:
                 params_obj[_k] = _dp[_k]
+
+    # 2026-04-28: persist the interval audit trail even when the caller forgot.
+    # The 30d audit found 99% of backtests had NULL params.interval, making
+    # it impossible to verify whether patterns were backtested at the right
+    # timeframe. Fall back to the linked ScanPattern.timeframe so every row
+    # records what bar size it was supposed to run on.
+    if not params_obj.get("interval") and resolved_sp_id is not None:
+        try:
+            from sqlalchemy import text as _sa_text
+            _sp_tf = db.execute(
+                _sa_text("SELECT timeframe FROM scan_patterns WHERE id = :pid"),
+                {"pid": int(resolved_sp_id)},
+            ).scalar()
+            if _sp_tf:
+                params_obj["interval"] = _sp_tf
+                params_obj.setdefault("interval_source", "scan_pattern_timeframe_fallback")
+        except Exception:
+            pass
     strategy, params_obj, _prov_status, _prov_issues, _sp = normalize_backtest_storage_metadata(
         db,
         resolved_scan_pattern_id=int(resolved_sp_id) if resolved_sp_id is not None else None,
