@@ -593,7 +593,10 @@ class Settings(BaseSettings):
     brain_intraday_session_ops_log_enabled: bool = True
     # 22:00 local scheduler slot (post US cash close and after L.17-L.21
     # jobs at 06:30-07:30).
-    brain_intraday_session_cron_hour: int = 22
+    # 2026-04-28: was a single int (22). Changed to str so we can take a
+    # comma-separated cron expression and refresh the snapshot multiple
+    # times intraday instead of once per day.
+    brain_intraday_session_cron_hour: str = "11,13,15,16,22"
     brain_intraday_session_cron_minute: int = 0
     # Source symbol + OHLCV fetch parameters.
     brain_intraday_session_source_symbol: str = "SPY"

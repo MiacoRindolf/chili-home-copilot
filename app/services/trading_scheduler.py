@@ -3703,11 +3703,15 @@ def start_scheduler():
                 or "off"
             ).lower()
             if include_web_light and _is_mode not in ("off", "authoritative"):
-                _is_hour = int(
-                    getattr(
-                        settings, "brain_intraday_session_cron_hour", 22,
-                    )
-                    or 22
+                # 2026-04-28: was a single 22:00 ET cron — produced 1 snapshot
+                # per day, useless for live intraday gating. Now uses a multi-hour
+                # spec so the snapshot refreshes every 2h during market hours and
+                # captures the day's evolving intraday character.
+                _is_hours = (
+                    str(getattr(
+                        settings, "brain_intraday_session_cron_hour", "11,13,15,16,22",
+                    ))
+                    or "11,13,15,16,22"
                 )
                 _is_minute = int(
                     getattr(
@@ -3717,11 +3721,11 @@ def start_scheduler():
                 )
                 _scheduler.add_job(
                     _run_intraday_session_daily_job,
-                    trigger=CronTrigger(hour=_is_hour, minute=_is_minute),
+                    trigger=CronTrigger(hour=_is_hours, minute=_is_minute),
                     id="intraday_session_daily",
                     name=(
-                        f"Intraday session daily ({_is_hour:02d}:"
-                        f"{_is_minute:02d}; mode={_is_mode})"
+                        f"Intraday session sweep (hours={_is_hours}; "
+                        f"min={_is_minute:02d}; mode={_is_mode})"
                     ),
                     replace_existing=True,
                     max_instances=1,
