@@ -1986,6 +1986,39 @@ def ensure_mined_scan_pattern(
 
     safe_avg_return_pct = avg_return_pct if (avg_return_pct is None or math.isfinite(avg_return_pct)) else None
 
+    # Dedupe-by-signature (2026-04-28). If a row with the same canonical
+    # condition signature already exists, increment its evidence rather than
+    # spawn a near-duplicate. This closes the variant-treadmill loophole that
+    # let mining/hypothesis/web/builtin/variant paths each generate their own
+    # copy of effectively-identical rule sets.
+    try:
+        from .pattern_signature import (
+            compute_signature as _sig_compute,
+            EMPTY_SIGNATURE as _SIG_EMPTY,
+        )
+        _sig = _sig_compute(conditions)
+    except Exception:
+        _sig = None
+    if _sig and _sig != _SIG_EMPTY:
+        from sqlalchemy import text as _sa_text
+        _dup_row = db.execute(_sa_text(
+            "SELECT id FROM scan_patterns WHERE condition_signature = :sig "
+            "AND (active IS NULL OR active = true) "
+            "ORDER BY created_at ASC, id ASC LIMIT 1"
+        ), {"sig": _sig}).fetchone()
+        if _dup_row is not None:
+            _dup = db.query(ScanPattern).get(int(_dup_row.id))
+            if _dup is not None:
+                _prev = int(_dup.evidence_count or 0)
+                _dup.evidence_count = _prev + max(0, int(evidence_count or 0))
+                db.flush()
+                logger.info(
+                    "[learning] ensure_mined_scan_pattern dedupe: existing id=%s sig=%s "
+                    "evidence_count %s -> %s (would-be name=%r)",
+                    _dup.id, _sig, _prev, _dup.evidence_count, name,
+                )
+                return _dup.id
+
     existing = db.query(ScanPattern).filter(
         ScanPattern.name == name,
         ScanPattern.origin == "mined",

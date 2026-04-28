@@ -12629,6 +12629,77 @@ def _migration_194_realized_ev_gate_retroactive_demote(conn) -> None:
     conn.commit()
 
 
+def _migration_195_pattern_condition_signature(conn) -> None:
+    """Add ``scan_patterns.condition_signature`` + backfill from ``rules_json``.
+
+    Closes the variant-treadmill loophole identified 2026-04-28: many of
+    the 614 patterns are functionally identical near-duplicates spawned
+    by different paths. The signature column lets future write paths
+    short-circuit on duplicate conditions (look up by hash, increment
+    evidence on the existing row instead of spawning new).
+
+    Steps:
+      1. ALTER TABLE ADD COLUMN IF NOT EXISTS condition_signature CHAR(40).
+      2. Compute and write the signature for every existing row using the
+         pure :mod:`pattern_signature` helpers (no app.db / settings
+         needed — plain JSON parse + hash).
+      3. CREATE INDEX (non-unique — we WANT to find duplicates) on the
+         column for fast lookup.
+
+    Idempotent. Safe to re-run.
+
+    Rollback (manual)::
+
+        ALTER TABLE scan_patterns DROP COLUMN IF EXISTS condition_signature;
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    cols = _columns(conn, "scan_patterns")
+    if "condition_signature" not in cols:
+        conn.execute(text(
+            "ALTER TABLE scan_patterns ADD COLUMN condition_signature CHAR(40)"
+        ))
+        conn.commit()
+
+    # Backfill: pull rules_json for every row, compute signature, write back.
+    # We do it in Python because SQL string normalization for JSON is fragile;
+    # the canonical helpers in :mod:`pattern_signature` are the source of truth.
+    rows = conn.execute(text(
+        "SELECT id, rules_json FROM scan_patterns "
+        "WHERE condition_signature IS NULL OR condition_signature = ''"
+    )).fetchall()
+    if rows:
+        # Local import — the migration shouldn't hard-fail if the helper
+        # module can't load (e.g. mid-deploy mismatch). Fall back to a
+        # do-nothing stamp so we don't spin re-running this migration.
+        try:
+            from app.services.trading.pattern_signature import (
+                signature_for_rules_json,
+                EMPTY_SIGNATURE,
+            )
+        except Exception:
+            signature_for_rules_json = lambda _x: "ERR_NO_HELPER"
+            EMPTY_SIGNATURE = "EMPTY"
+
+        updated = 0
+        for r in rows:
+            sig = signature_for_rules_json(r.rules_json)
+            conn.execute(text(
+                "UPDATE scan_patterns SET condition_signature = :sig WHERE id = :pid"
+            ), {"sig": sig, "pid": r.id})
+            updated += 1
+        conn.commit()
+
+    # Non-unique index. We WANT duplicates to surface, not constrain them.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_scan_patterns_condition_signature "
+        "ON scan_patterns (condition_signature)"
+    ))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -12833,6 +12904,7 @@ MIGRATIONS = [
     ("192_trade_asset_kind", _migration_192_trade_asset_kind),
     ("193_cleanup_corrupt_win_rates", _migration_193_cleanup_corrupt_win_rates),
     ("194_realized_ev_gate_retroactive_demote", _migration_194_realized_ev_gate_retroactive_demote),
+    ("195_pattern_condition_signature", _migration_195_pattern_condition_signature),
 ]
 
 
