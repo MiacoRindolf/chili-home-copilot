@@ -1062,6 +1062,18 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                             score += m["score_boost"]
                             signals.append(f"Pattern: {m['name']} (+{m['score_boost']:.1f})")
             finally:
+                # FIX 46 (2026-04-29): explicit rollback to end the implicit
+                # read-only transaction. SQLAlchemy's session.close() returns
+                # the connection to the pool but doesn't ROLLBACK by default —
+                # leaving it as 'idle in transaction' in pg_stat_activity.
+                # Found via FIX 45b's per-app DB tagging: 62 of 69 sessions
+                # on chili-scheduler-cron were stuck on SELECT scan_patterns.*.
+                # rollback() ends the txn cleanly so the connection state is
+                # 'idle' (clean) when returned to the pool.
+                try:
+                    _pe_db.rollback()
+                except Exception:
+                    pass
                 _pe_db.close()
         except Exception:
             logger.debug("[scanner] _score_ticker_impl: pattern engine scoring failed (non-fatal)", exc_info=True)
@@ -2388,6 +2400,13 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                             score += m["score_boost"]
                             signals.append(f"Pattern match: {m['name']} (+{m['score_boost']:.1f})")
             finally:
+                # FIX 46 (2026-04-29): see _score_ticker_impl. Explicit rollback
+                # ends the implicit read-only transaction so the connection
+                # returns to the pool 'idle' instead of 'idle in transaction'.
+                try:
+                    _pe_db.rollback()
+                except Exception:
+                    pass
                 _pe_db.close()
         except Exception:
             logger.debug("[scanner] _score_crypto_breakout: optional signal component failed", exc_info=True)
@@ -3128,6 +3147,13 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                             score += m["score_boost"]
                             signals.append(f"Pattern match: {m['name']} (+{m['score_boost']:.1f})")
             finally:
+                # FIX 46 (2026-04-29): see _score_ticker_impl. Explicit rollback
+                # ends the implicit read-only transaction so the connection
+                # returns to the pool 'idle' instead of 'idle in transaction'.
+                try:
+                    _pe_db.rollback()
+                except Exception:
+                    pass
                 _pe_db.close()
         except Exception:
             logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
