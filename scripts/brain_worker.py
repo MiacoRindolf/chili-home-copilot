@@ -427,10 +427,22 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     """Process backtest queue items.
 
     FIX B (2026-04-28): batch size raised 5 → 30 per cycle to drain the
-    141-deep backlog of untested candidates. Audit found candidates
-    sitting indefinitely, blocking the EV gate from getting realized
-    evidence on potential promoted patterns. Override via
-    ``CHILI_BRAIN_FAST_BACKTEST_BATCH`` env var.
+    141-deep backlog of untested candidates.
+
+    FIX 43 (2026-04-29): EARLY-EXIT when data providers are dead. The
+    Massive circuit breaker opens after 5 consecutive TCP failures and
+    cools down for 900s. Without this guard the FIX 34 timer would still
+    fire every 60s, and each tick spawned a fresh ``execute_queue_backtest_for_pattern``
+    worker that wedged on the data-fetch retry loop (observed: brain-worker
+    at 115% CPU, ~10 simultaneous FractionalBacktest tqdm bars at 0%/0 bar/s,
+    each holding memory + threads).
+
+    Now: when the Massive breaker is OPEN, skip the entire tick so brain-worker
+    stays idle until the cooldown expires and the breaker probes again. The
+    Coinbase fallback (FIX 42) is also network-blocked from the host right
+    now, so there's no useful work to do during an outage.
+
+    Override via ``CHILI_BRAIN_FAST_BACKTEST_BATCH`` env var.
 
     Each item still runs in its own session (open + close per item) so a
     failed pattern can't poison the rest of the batch.
@@ -438,6 +450,31 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     status.set_step("FastBacktest", "Processing backtest queue...")
     from app.services.trading.backtest_queue import get_pending_patterns
     from app.config import settings as _s
+
+    # FIX 43: skip the whole tick if the primary data provider is down.
+    # When Coinbase fallback (FIX 42) is also unreachable (current host
+    # network state), there's nothing to backtest with — running the path
+    # just spawns wedged FractionalBacktest workers.
+    if getattr(_s, "brain_fast_backtest_skip_when_provider_down", True):
+        try:
+            from app.services.massive_client import get_breaker_status as _massive_breaker
+
+            br = _massive_breaker()
+            if isinstance(br, dict) and br.get("state") == "open":
+                cooldown_remaining = int(br.get("cooldown_remaining_sec") or 0)
+                logger.info(
+                    "[brain:subtask] fast_backtest skipped — Massive breaker OPEN "
+                    "(cooldown %ds). Re-probes when network egress recovers.",
+                    cooldown_remaining,
+                )
+                return {
+                    "completed": 0,
+                    "errors": 0,
+                    "skipped": True,
+                    "skip_reason": f"massive_breaker_open_cooldown={cooldown_remaining}s",
+                }
+        except Exception as e:
+            logger.debug("[brain:subtask] fast_backtest breaker probe failed: %s", e)
 
     uid = getattr(_s, "brain_default_user_id", None)
     batch_size = int(os.environ.get("CHILI_BRAIN_FAST_BACKTEST_BATCH", "30"))

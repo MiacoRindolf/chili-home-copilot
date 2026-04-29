@@ -452,6 +452,12 @@ class Settings(BaseSettings):
     # IDs as the live-trading venue, geo-clean from US, no auth needed.
     brain_market_data_coinbase_fallback: bool = True
 
+    # FIX 43 (2026-04-29): skip fast_backtest tick when Massive breaker is
+    # OPEN. Prevents brain-worker from spawning doomed FractionalBacktest
+    # workers that wedge waiting for unreachable data — observed at 115%
+    # CPU sustained with ~10 simultaneous tqdm bars stuck at 0/N.
+    brain_fast_backtest_skip_when_provider_down: bool = True
+
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"
