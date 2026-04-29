@@ -451,6 +451,19 @@ services:
       # Autopilot real-time streaming: price bus + Coinbase WS in scheduler for event-driven runner.
       - CHILI_AUTOPILOT_PRICE_BUS_ENABLED=1
       - CHILI_COINBASE_WS_ENABLED=1
+      # FIX 33 (deep audit 2026-04-28): autotrader_v1 tick uses
+      # ThreadPoolExecutor with timeout that ABANDONS the worker thread
+      # on timeout (trading_scheduler.py:1714-1726). Each abandoned
+      # thread keeps its db = SessionLocal() open until eventual
+      # completion, leading to idle-in-tx pile-up (saw 63 sessions
+      # held 30-100s each). Lowering tick budget 45s -> 15s makes
+      # abandoned threads die faster, cutting accumulation rate by 3x.
+      # Combined with FIX 32's 600s watchdog kill for non-brain-worker
+      # apps, this keeps total sessions well under the 80-session pool
+      # ceiling. max_instances=1 also helps — we never benefit from
+      # parallel autotrader ticks (same broker, same alert queue).
+      - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
+      - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
