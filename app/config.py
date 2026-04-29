@@ -446,6 +446,12 @@ class Settings(BaseSettings):
     # per 60s). Both subscribe to live/paper/broker_fill close events.
     brain_work_trade_close_batch_size: int = 16
 
+    # FIX 42 (2026-04-29): Coinbase OHLCV fallback for crypto. Triggered
+    # when Massive is exhausted (circuit breaker OPEN, all variants dead).
+    # Uses Coinbase's public /products/{pid}/candles endpoint — same product
+    # IDs as the live-trading venue, geo-clean from US, no auth needed.
+    brain_market_data_coinbase_fallback: bool = True
+
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"

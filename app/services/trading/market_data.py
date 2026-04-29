@@ -252,6 +252,34 @@ def fetch_ohlcv(
             )
 
     if _massive_dead and _massive.is_crypto(ticker):
+        # FIX 42 (2026-04-29): instead of returning empty when Massive is
+        # exhausted for crypto, try Coinbase's public candles endpoint.
+        # Coinbase is the live-trading venue; same product IDs (BTC-USD,
+        # ETH-USD, AAVE-USD, etc.). Public endpoint, no auth, geo-clean
+        # from US. Off by default; enable via brain_market_data_coinbase_fallback.
+        if getattr(settings, "brain_market_data_coinbase_fallback", True):
+            try:
+                from .coinbase_ohlcv import get_ohlcv as _cb_get_ohlcv
+
+                bars = _cb_get_ohlcv(
+                    ticker, interval=interval, period=period,
+                    start=_start_str, end=_end_str,
+                )
+                if bars:
+                    _log_ohlcv_outcome(
+                        ticker, interval, provider="coinbase",
+                        reason="ok_massive_exhausted", row_count=len(bars),
+                    )
+                    return bars
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="coinbase",
+                    reason="empty_after_massive_dead", row_count=0,
+                )
+            except Exception as e:
+                logger.warning("[market_data] Coinbase fallback failed for %s: %s", ticker, e)
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="coinbase", reason="error", row_count=0,
+                )
         # Phase F fix: only crypto tickers legitimately exhaust all Massive
         # variants (X:BASEUSD / X:BASEUSDT / X:BASEUSDC). For equities the
         # single candidate is the ticker itself and Polygon/yfinance are
@@ -292,6 +320,25 @@ def fetch_ohlcv(
     # --- yfinance fallback (skip crypto: symbols rarely match Massive/Polygon) ---
     _is_crypto = ticker.upper().endswith("-USD")
     if _is_crypto:
+        # FIX 42 (2026-04-29): try Coinbase public candles before giving up
+        # on crypto. yfinance crypto symbols rarely match, but Coinbase's
+        # product IDs are exactly the BASE-USD shape we use.
+        if getattr(settings, "brain_market_data_coinbase_fallback", True):
+            try:
+                from .coinbase_ohlcv import get_ohlcv as _cb_get_ohlcv
+
+                bars = _cb_get_ohlcv(
+                    ticker, interval=interval, period=period,
+                    start=_start_str, end=_end_str,
+                )
+                if bars:
+                    _log_ohlcv_outcome(
+                        ticker, interval, provider="coinbase",
+                        reason="ok_after_polygon_empty", row_count=len(bars),
+                    )
+                    return bars
+            except Exception as e:
+                logger.warning("[market_data] Coinbase fallback failed for %s: %s", ticker, e)
         _log_ohlcv_outcome(
             ticker, interval, provider="yfinance", reason="skipped_crypto_list_path", row_count=0,
         )
@@ -421,6 +468,39 @@ def fetch_ohlcv_df(
             )
 
     if _massive_dead and _massive.is_crypto(ticker):
+        # FIX 42 (2026-04-29): Coinbase fallback for DataFrame path too.
+        if getattr(settings, "brain_market_data_coinbase_fallback", True):
+            try:
+                from .coinbase_ohlcv import get_ohlcv as _cb_get_ohlcv
+
+                bars = _cb_get_ohlcv(
+                    ticker, interval=interval, period=period,
+                    start=_start_str, end=_end_str,
+                )
+                if bars:
+                    _df = pd.DataFrame([
+                        {
+                            "Open": r["open"], "High": r["high"], "Low": r["low"],
+                            "Close": r["close"], "Volume": r["volume"],
+                        }
+                        for r in bars
+                    ], index=pd.to_datetime([r["time"] for r in bars], unit="s", utc=True))
+                    _log_ohlcv_outcome(
+                        ticker, interval, provider="coinbase",
+                        reason="ok_massive_exhausted_df", row_count=len(_df),
+                    )
+                    return _store_and_return(
+                        _finalize_ohlcv_df(_df, ticker=ticker, interval=interval, provider="coinbase")
+                    )
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="coinbase",
+                    reason="empty_after_massive_dead_df", row_count=0,
+                )
+            except Exception as e:
+                logger.warning("[market_data] Coinbase DF fallback failed for %s: %s", ticker, e)
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="coinbase", reason="error_df", row_count=0,
+                )
         # Phase F fix: see fetch_ohlcv. Equities fall through to Polygon/yfinance.
         _log_ohlcv_outcome(
             ticker, interval, provider="massive", reason="all_variants_dead", row_count=0,
@@ -459,6 +539,32 @@ def fetch_ohlcv_df(
     # --- yfinance fallback (skip crypto: symbols rarely match Massive/Polygon) ---
     _is_crypto = ticker.upper().endswith("-USD")
     if _is_crypto:
+        # FIX 42 (2026-04-29): Coinbase fallback for crypto in DataFrame path.
+        if getattr(settings, "brain_market_data_coinbase_fallback", True):
+            try:
+                from .coinbase_ohlcv import get_ohlcv as _cb_get_ohlcv
+
+                bars = _cb_get_ohlcv(
+                    ticker, interval=interval, period=period,
+                    start=_start_str, end=_end_str,
+                )
+                if bars:
+                    _df = pd.DataFrame([
+                        {
+                            "Open": r["open"], "High": r["high"], "Low": r["low"],
+                            "Close": r["close"], "Volume": r["volume"],
+                        }
+                        for r in bars
+                    ], index=pd.to_datetime([r["time"] for r in bars], unit="s", utc=True))
+                    _log_ohlcv_outcome(
+                        ticker, interval, provider="coinbase",
+                        reason="ok_after_polygon_empty_df", row_count=len(_df),
+                    )
+                    return _store_and_return(
+                        _finalize_ohlcv_df(_df, ticker=ticker, interval=interval, provider="coinbase")
+                    )
+            except Exception as e:
+                logger.warning("[market_data] Coinbase DF fallback failed for %s: %s", ticker, e)
         _log_ohlcv_outcome(
             ticker, interval, provider="yfinance", reason="skipped_crypto_df_path", row_count=0,
         )
