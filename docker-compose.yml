@@ -422,7 +422,14 @@ services:
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - OLLAMA_HOST=http://ollama:11434
-      - CHILI_SCHEDULER_ROLE=all
+      # FIX 45a (2026-04-29): split autotrader into its own container. This
+      # service drops to ``cron_only`` so it stops registering autotrader tick
+      # (every 10s) + monitor (every 30s). Autotrader now runs in
+      # ``autotrader-worker`` below — its broker-call hot loop is isolated
+      # and can't pollute scanners' network state or share fate with leak-
+      # prone cron jobs. Original role: ``all``. Revert to ``all`` if you
+      # want the legacy single-container behavior back.
+      - CHILI_SCHEDULER_ROLE=cron_only
       - CHILI_SCHEDULER_EMIT_HEARTBEAT=1
       # DO NOT REMOVE — required for CHILI Dispatch (Phase D.1+)
       - CHILI_DISPATCH_ENABLED=1
@@ -517,6 +524,72 @@ services:
         reservations:
           cpus: "1.5"
           memory: 2G
+
+  # FIX 45a (2026-04-29): dedicated autotrader hot loop. Isolates the autotrader
+  # tick (every 10s) + monitor (every 30s) from the slow cron jobs in
+  # scheduler-worker. Rationale:
+  #   * The autotrader's broker calls (Robinhood + Coinbase) run 6× per minute.
+  #     If the host firewall rate-limits the source IP because of failed retry
+  #     storms, only THIS container is affected — scanners + snapshots in
+  #     scheduler-worker keep their network egress intact.
+  #   * Memory leaks in the tick code path are visible immediately (small
+  #     container, single workload) instead of buried under 30 other jobs.
+  #   * A restart of autotrader-worker doesn't disturb scanners, momentum
+  #     runner, or bracket reconciliation.
+  #   * Tighter resource limits (3G mem, 2 CPU) force the leak surface; if it
+  #     OOMs, only autotrader is affected and Compose auto-restarts.
+  autotrader-worker:
+    image: chili-app:local
+    restart: unless-stopped
+    labels:
+      com.chili.service: autotrader-worker
+      com.chili.entrypoint: scheduler_worker
+    command: ["python", "scripts/scheduler_worker.py"]
+    env_file:
+      - path: .env
+        required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - OLLAMA_HOST=http://ollama:11434
+      - CHILI_SCHEDULER_ROLE=autotrader_only
+      - CHILI_SCHEDULER_EMIT_HEARTBEAT=0
+      - DATABASE_POOL_SIZE=10
+      - DATABASE_MAX_OVERFLOW=15
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
+      - CHILI_RUNNING_IN_DOCKER=1
+      - CHILI_CONTAINER_CPU_LIMIT=2
+      - PYTHONUNBUFFERED=1
+      # Autopilot real-time streaming: same env as scheduler-worker had.
+      - CHILI_AUTOPILOT_PRICE_BUS_ENABLED=1
+      - CHILI_COINBASE_WS_ENABLED=1
+      # FIX 33 carry-over: tight tick budget keeps any abandoned thread
+      # from pinning a session for too long.
+      - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
+      - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
+      - BRAIN_RISK_MAX_AVG_CORRELATION=0.85
+    volumes:
+      - D:/CHILI-Docker/chili-data:/app/data
+      - ./app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    deploy:
+      resources:
+        # Tight envelope to surface leaks early. Autotrader tick is small —
+        # if it hits 3G, something is wrong.
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
 
 # ── Named volumes ───────────────────────────────────────────────────
 # Phase E.2: chili_dispatch_clones holds repos the brain clones on demand

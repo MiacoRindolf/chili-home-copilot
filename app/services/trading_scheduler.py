@@ -2918,15 +2918,26 @@ def start_scheduler():
                 role,
             )
             return
-        if role not in ("all", "web", "worker"):
+        # FIX 45a (2026-04-29): added 'autotrader_only' and 'cron_only' for the
+        # container-isolation refactor. Goal: autotrader's broker-call hot loop
+        # (every 10s) lives in its own container so its connection storms can't
+        # pollute the scanners' network state or share fate with leak-prone
+        # cron jobs. ``autotrader_only`` registers ONLY autotrader tick +
+        # monitor; ``cron_only`` registers everything EXCEPT those.
+        if role not in ("all", "web", "worker", "autotrader_only", "cron_only"):
             logger.warning(
                 "[scheduler] invalid CHILI_SCHEDULER_ROLE=%r; using 'all' "
                 "(if you meant API-only web, set none and rebuild image — see docker-compose.yml)",
                 role,
             )
             role = "all"
-        include_heavy = role in ("all", "worker")
-        include_web_light = role in ("all", "web")
+        # cron_only = legacy 'worker' role minus autotrader (so the existing
+        # scheduler-worker container drops autotrader without losing scanners).
+        include_heavy = role in ("all", "worker", "cron_only")
+        include_web_light = role in ("all", "web", "cron_only")
+        # autotrader_only registers ONLY autotrader jobs. 'all'/'worker' still
+        # include them (legacy behavior preserved). 'cron_only' excludes them.
+        include_autotrader = role in ("all", "worker", "autotrader_only")
         _hb_env = os.environ.get("CHILI_SCHEDULER_EMIT_HEARTBEAT", "").strip().lower()
         emit_worker_heartbeat = role == "worker" or (
             role == "all" and _hb_env in ("1", "true", "yes", "on")
@@ -3157,7 +3168,10 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=20),
             )
 
-        if include_heavy or include_web_light:
+        # FIX 45a (2026-04-29): autotrader tick + monitor carved out under
+        # their own flag so the autotrader-worker container can register them
+        # in isolation while scheduler-worker (cron_only role) skips them.
+        if include_autotrader:
             _at_tick_s = max(5, int(getattr(settings, "chili_autotrader_tick_interval_seconds", 10)))
             _at_mon_s = max(5, int(getattr(settings, "chili_autotrader_monitor_interval_seconds", 30)))
             # XX — autotrader tick / monitor allow concurrent instances so a
@@ -3193,6 +3207,11 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=30),
             )
 
+        # FIX 45a: stuck-order / execution-event-lag / drift-escalation are
+        # broker-adjacent watchdogs but NOT the autotrader hot loop itself.
+        # They stay with cron_only for now; phase 45b will pull broker-sync
+        # related jobs (these + broker_sync sweep) into their own container.
+        if include_heavy or include_web_light:
             _stuck_s = max(
                 15,
                 int(getattr(settings, "chili_stuck_order_watchdog_interval_seconds", 60)),
