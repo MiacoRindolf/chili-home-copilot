@@ -634,32 +634,66 @@ def priority_tickers_from_stored_backtests_for_refresh(
 def _rules_tuple_from_scan_pattern(
     pattern,
 ) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None, int] | None:
-    """Parse ``ScanPattern`` into (conditions, name, exit_config, pattern.id) or None."""
+    """Parse ``ScanPattern`` into (conditions, name, exit_config, pattern.id) or None.
+
+    FIX 40 (Bug #46, 2026-04-29): ``rules_json`` is a JSONB column on
+    ScanPattern, so SQLAlchemy returns it as a dict (not a string). Prior to
+    this fix the function rejected dict-typed values via the
+    ``isinstance(raw, str)`` check, which sent every JSONB-stored pattern
+    through the lossy NL hydration path. Mig 203's crypto seeds with names
+    like "Crypto VWAP Reclaim + Volume" or "Crypto Liquidity Sweep + Reversal"
+    failed NL parsing → 0 conditions → backtest path returned None →
+    ``execute_queue_backtest_for_pattern`` produced 0 trading_backtests rows
+    even with priority=100.
+
+    Now accepts both str (legacy text-typed rows or hydrated rows) and
+    dict (the JSONB normal case).
+
+    ``exit_config`` is also defensively dict-or-str (same JSONB column).
+    """
     import json as _json
 
-    raw = getattr(pattern, "rules_json", None) if pattern else None
-    if not pattern or not (isinstance(raw, str) and raw.strip()):
+    if not pattern:
         return None
-    exit_cfg = None
-    if pattern.exit_config:
+
+    raw = getattr(pattern, "rules_json", None)
+    rules: dict[str, Any] | None = None
+    if isinstance(raw, dict):
+        rules = raw
+    elif isinstance(raw, str) and raw.strip():
         try:
-            exit_cfg = _json.loads(pattern.exit_config)
+            parsed = _json.loads(raw)
+            if isinstance(parsed, dict):
+                rules = parsed
         except (_json.JSONDecodeError, TypeError):
-            pass
-    try:
-        rules = _json.loads(raw)
-        if not isinstance(rules, dict):
             return None
-        conditions = rules.get("conditions", [])
-        if isinstance(conditions, dict):
-            conditions = [conditions]
-        if not isinstance(conditions, list):
-            return None
-        conditions = [c for c in conditions if isinstance(c, dict) and c]
-        if conditions:
-            return conditions, pattern.name, exit_cfg, int(pattern.id)
-    except (_json.JSONDecodeError, TypeError):
-        pass
+    else:
+        return None
+
+    if rules is None:
+        return None
+
+    # exit_config — accept both dict (JSONB) and str (legacy/hydrated).
+    exit_cfg: dict[str, Any] | None = None
+    raw_ec = getattr(pattern, "exit_config", None)
+    if isinstance(raw_ec, dict):
+        exit_cfg = raw_ec
+    elif isinstance(raw_ec, str) and raw_ec.strip():
+        try:
+            parsed_ec = _json.loads(raw_ec)
+            if isinstance(parsed_ec, dict):
+                exit_cfg = parsed_ec
+        except (_json.JSONDecodeError, TypeError):
+            exit_cfg = None
+
+    conditions = rules.get("conditions", [])
+    if isinstance(conditions, dict):
+        conditions = [conditions]
+    if not isinstance(conditions, list):
+        return None
+    conditions = [c for c in conditions if isinstance(c, dict) and c]
+    if conditions:
+        return conditions, pattern.name, exit_cfg, int(pattern.id)
     return None
 
 
@@ -733,7 +767,13 @@ def hydrate_scan_pattern_rules_json(
         if not conds:
             continue
         try:
-            pattern.rules_json = _json.dumps({"conditions": conds})
+            # FIX 40 (Bug #46, 2026-04-29): rules_json is a JSONB column;
+            # SQLAlchemy serializes a dict directly. Storing as JSON string
+            # via ``_json.dumps`` previously double-encoded the value (the
+            # string itself becomes a JSON-string-of-JSON in the DB), which
+            # round-tripped fine via the legacy str-only path but is wrong
+            # for JSONB. Native dict matches column type cleanly.
+            pattern.rules_json = {"conditions": conds}
             db.add(pattern)
             db.commit()
             db.refresh(pattern)
