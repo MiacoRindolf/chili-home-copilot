@@ -765,6 +765,99 @@ def _maybe_run_brain_work_batch() -> None:
         db.close()
 
 
+# FIX 31 (deep audit 2026-04-28): conditional gate for the legacy reconcile
+# pass. The cycle was running every iteration regardless of work, holding a
+# single PG session for ~13–34 minutes and getting killed by `server closed
+# the connection unexpectedly` mid-flight. The endgame is to migrate every
+# step into brain_work_event handlers; this gate is the bridge.
+
+# Floor: never let more than this many seconds pass between cycles, even
+# without explicit signals — guards against slow drift in tables that
+# haven't yet emitted events on every change.
+_RECONCILE_PASS_MAX_INTERVAL_S = int(os.environ.get(
+    "CHILI_BRAIN_RECONCILE_MAX_INTERVAL_S", str(4 * 3600)
+))
+
+# In-memory watermark of the last completed reconcile pass. Survives only
+# within the brain-worker process lifetime; on restart we run once and
+# then start gating again — that's deliberate, restarts are rare.
+_LAST_RECONCILE_PASS_AT: float | None = None
+
+
+def _record_reconcile_pass_completed() -> None:
+    global _LAST_RECONCILE_PASS_AT
+    _LAST_RECONCILE_PASS_AT = time.time()
+
+
+def _should_skip_reconcile_pass(status: "BrainWorkerStatus") -> tuple[bool, str]:
+    """Return (skip, reason). Skip when nothing has happened that the
+    cycle could possibly need to reconcile.
+
+    Triggers that REQUIRE a cycle (skip=False):
+      * Never run before in this process lifetime (cold start)
+      * MAX_INTERVAL_S elapsed since last cycle (safety floor)
+      * Any brain_work_events with status='done' since last cycle
+        (a backtest completed, a promotion fired, etc.)
+      * Recent scan_pattern lifecycle/promotion changes since last cycle
+
+    Otherwise: skip and let the event-driven path do the work.
+    """
+    global _LAST_RECONCILE_PASS_AT
+    now = time.time()
+
+    if _LAST_RECONCILE_PASS_AT is None:
+        return False, "cold_start_first_cycle"
+
+    elapsed = now - _LAST_RECONCILE_PASS_AT
+    if elapsed >= _RECONCILE_PASS_MAX_INTERVAL_S:
+        return False, f"safety_floor_elapsed_s={int(elapsed)}"
+
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text
+
+        # Convert wall-time watermark to a SQL-friendly NOW() - INTERVAL
+        # since we don't store the watermark in DB (in-memory only).
+        # Look at events / pattern changes since last cycle.
+        secs = int(elapsed)
+        result = db.execute(text(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM brain_work_events
+                 WHERE status = 'done'
+                   AND updated_at > NOW() - make_interval(secs => :s)) AS work_done,
+                (SELECT COUNT(*) FROM scan_patterns
+                 WHERE lifecycle_changed_at IS NOT NULL
+                   AND lifecycle_changed_at > NOW() - make_interval(secs => :s)) AS lc_changed,
+                (SELECT COUNT(*) FROM scan_patterns
+                 WHERE updated_at > NOW() - make_interval(secs => :s)) AS pat_updated
+            """
+        ), {"s": secs}).fetchone()
+
+        work_done = int(result.work_done or 0) if result else 0
+        lc_changed = int(result.lc_changed or 0) if result else 0
+        pat_updated = int(result.pat_updated or 0) if result else 0
+
+        if work_done > 0:
+            return False, f"work_events_done={work_done}"
+        if lc_changed > 0:
+            return False, f"lifecycle_changes={lc_changed}"
+        if pat_updated > 50:  # threshold to avoid trivial bumps
+            return False, f"pattern_updates={pat_updated}"
+
+        return True, f"no_signal_elapsed_s={secs}_floor={_RECONCILE_PASS_MAX_INTERVAL_S}"
+    except Exception as e:
+        # Defensive: any DB error -> run the cycle (fail-open). Better to
+        # spend compute than silently drop work.
+        logger.warning("[brain] reconcile-skip probe failed; running cycle: %s", e)
+        return False, f"probe_error:{type(e).__name__}"
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
 def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
     """Default: dispatch round → full reconcile pass → maintenance subtasks + idle sleep."""
     while True:
@@ -782,77 +875,119 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
         except Exception as _we:
             logger.warning("[brain] work ledger batch before cycle skipped: %s", _we)
 
-        logger.info("[brain] Starting reconcile pass (after work-ledger dispatch)")
-        cycle_start = time.time()
-
+        # FIX 31 (architecture, deep audit 2026-04-28): the legacy reconcile
+        # pass was running every iteration regardless of whether anything
+        # changed — typically holding a single PG session for ~13–34 minutes
+        # and getting killed by `server closed the connection unexpectedly`
+        # mid-flight. Recent cycles produced "Mined: 0, Tested: 0, Evolved: 0,
+        # Pruned: 0" — pure waste of compute and connection budget.
+        #
+        # Gate the cycle on actual signal:
+        #   * If brain_work_events processed any *_completed events this
+        #     iteration, OR
+        #   * If patterns were promoted/demoted/discovered since last cycle, OR
+        #   * If we exceed the safety floor (max time between cycles)
+        # then run. Otherwise skip and sleep.
+        #
+        # The endgame (issue #31) is to migrate every step of the reconcile
+        # pass into a brain_work_event handler under app/services/trading/
+        # brain_work/ — at which point this gate becomes "always skip" and
+        # this whole block goes away. This is the bridge.
+        skip_cycle, skip_reason = _should_skip_reconcile_pass(status)
         cycle_stats: dict = {}
-        max_retries = 2
-        for attempt in range(max_retries + 1):
+
+        if skip_cycle:
+            logger.info("[brain] Reconcile pass SKIPPED (%s); event-driven only this iteration",
+                        skip_reason)
+            cycle_stats = {"skipped": True, "skip_reason": skip_reason, "duration_seconds": 0.0}
+            status.last_cycle = cycle_stats
+            # Still run the post-cycle subtasks + neural batch — those are
+            # the event-driven parts that should always run, regardless of
+            # whether the legacy reconcile pass fired.
             try:
-                cycle_stats = run_learning_cycle(status)
-
-                status.totals["cycles_completed"] += 1
-                for key in [
-                    "tickers_scanned",
-                    "snapshots_taken",
-                    "patterns_mined",
-                    "patterns_tested",
-                    "queue_patterns_processed",
-                    "hypotheses_validated",
-                    "hypotheses_challenged",
-                    "patterns_spawned",
-                    "patterns_evolved",
-                    "patterns_variant_promoted",
-                    "patterns_pruned",
-                    "insights_decayed",
-                ]:
-                    status.totals[key] += cycle_stats.get(key, 0)
-
-                cycle_duration = time.time() - cycle_start
-                cycle_stats["duration_seconds"] = round(cycle_duration, 1)
-                status.last_cycle = cycle_stats
-
-                logger.info(
-                    f"[brain] Reconcile pass finished in {cycle_duration:.1f}s | "
-                    f"Scanned: {cycle_stats.get('tickers_scanned', 0)}, "
-                    f"Mined: {cycle_stats['patterns_mined']}, Tested: {cycle_stats['patterns_tested']}, "
-                    f"Evolved: {cycle_stats.get('patterns_evolved', 0)}, Pruned: {cycle_stats.get('patterns_pruned', 0)}"
-                )
-
+                sub_results = run_subtasks(status)
+                if sub_results:
+                    cycle_stats["subtasks"] = sub_results
+            except Exception as sub_e:
+                logger.warning("[brain] Subtask sweep failed (post-skip): %s", sub_e)
+            try:
+                _maybe_run_neural_activation_batch()
+            except Exception as _ne:
+                logger.warning("[brain] neural batch (post-skip) skipped: %s", _ne)
+        else:
+            logger.info("[brain] Starting reconcile pass (after work-ledger dispatch)")
+            cycle_start = time.time()
+            max_retries = 2
+            for attempt in range(max_retries + 1):
                 try:
-                    sub_results = run_subtasks(status)
-                    if sub_results:
-                        cycle_stats["subtasks"] = sub_results
-                except Exception as sub_e:
-                    logger.warning("[brain] Subtask sweep failed: %s", sub_e)
+                    cycle_stats = run_learning_cycle(status)
 
-                try:
-                    _maybe_run_neural_activation_batch()
-                except Exception as _ne:
-                    logger.warning("[brain] neural batch after cycle skipped: %s", _ne)
+                    status.totals["cycles_completed"] += 1
+                    for key in [
+                        "tickers_scanned",
+                        "snapshots_taken",
+                        "patterns_mined",
+                        "patterns_tested",
+                        "queue_patterns_processed",
+                        "hypotheses_validated",
+                        "hypotheses_challenged",
+                        "patterns_spawned",
+                        "patterns_evolved",
+                        "patterns_variant_promoted",
+                        "patterns_pruned",
+                        "insights_decayed",
+                    ]:
+                        status.totals[key] += cycle_stats.get(key, 0)
 
-                break
+                    cycle_duration = time.time() - cycle_start
+                    cycle_stats["duration_seconds"] = round(cycle_duration, 1)
+                    status.last_cycle = cycle_stats
 
-            except Exception as e:
-                error_str = str(e).lower()
-                is_db_locked = "database is locked" in error_str or "locked" in error_str
-
-                if is_db_locked and attempt < max_retries:
-                    wait_time = 30 * (attempt + 1)
-                    logger.warning(
-                        f"[brain] Database locked, waiting {wait_time}s before retry {attempt + 1}/{max_retries}"
+                    logger.info(
+                        f"[brain] Reconcile pass finished in {cycle_duration:.1f}s | "
+                        f"Scanned: {cycle_stats.get('tickers_scanned', 0)}, "
+                        f"Mined: {cycle_stats['patterns_mined']}, Tested: {cycle_stats['patterns_tested']}, "
+                        f"Evolved: {cycle_stats.get('patterns_evolved', 0)}, Pruned: {cycle_stats.get('patterns_pruned', 0)}"
                     )
-                    status.set_step("Waiting", f"Database locked, retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
 
-                logger.error(f"[brain] Cycle failed (attempt {attempt + 1}): {e}")
-                import traceback
+                    # Record skip-floor watermark so future iterations can
+                    # decide whether enough has happened to warrant another.
+                    _record_reconcile_pass_completed()
 
-                traceback.print_exc()
-                status.set_step("Error", f"Cycle failed: {str(e)[:50]}...")
-                cycle_stats = {}
-                break
+                    try:
+                        sub_results = run_subtasks(status)
+                        if sub_results:
+                            cycle_stats["subtasks"] = sub_results
+                    except Exception as sub_e:
+                        logger.warning("[brain] Subtask sweep failed: %s", sub_e)
+
+                    try:
+                        _maybe_run_neural_activation_batch()
+                    except Exception as _ne:
+                        logger.warning("[brain] neural batch after cycle skipped: %s", _ne)
+
+                    break
+
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_db_locked = "database is locked" in error_str or "locked" in error_str
+
+                    if is_db_locked and attempt < max_retries:
+                        wait_time = 30 * (attempt + 1)
+                        logger.warning(
+                            f"[brain] Database locked, waiting {wait_time}s before retry {attempt + 1}/{max_retries}"
+                        )
+                        status.set_step("Waiting", f"Database locked, retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+
+                    logger.error(f"[brain] Cycle failed (attempt {attempt + 1}): {e}")
+                    import traceback
+
+                    traceback.print_exc()
+                    status.set_step("Error", f"Cycle failed: {str(e)[:50]}...")
+                    cycle_stats = {}
+                    break
 
         if args.once:
             logger.info("[brain] Single cycle mode, exiting")
