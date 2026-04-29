@@ -131,6 +131,11 @@ services:
       # Autopilot real-time streaming: price bus + Coinbase WS for crypto quotes.
       - CHILI_AUTOPILOT_PRICE_BUS_ENABLED=1
       - CHILI_COINBASE_WS_ENABLED=1
+      # 2026-04-28: raised from default 0.75 → 0.85 per operator. Same
+      # value also set in scheduler-worker (where the autotrader runs);
+      # mirrored here for any chili-side consumer of portfolio_risk.
+      # See scheduler-worker block for full rationale.
+      - BRAIN_RISK_MAX_AVG_CORRELATION=0.85
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./docs:/app/docs
@@ -464,6 +469,14 @@ services:
       # parallel autotrader ticks (same broker, same alert queue).
       - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
       - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
+      # 2026-04-28: raised from default 0.75 → 0.85 per operator. With
+      # 2 open crypto positions (AAVE-USD, RAY-USD) the avg correlation
+      # of any new crypto candidate (1INCH/ADA/SAND etc) was 0.76 —
+      # JUST over the 0.75 limit, blocking 5+ entries in last 4h. 0.85
+      # gives ~10% headroom over observed values while still catching
+      # extreme concentration cases (>0.90). Source:
+      # app/services/trading/portfolio_risk.py:46.
+      - BRAIN_RISK_MAX_AVG_CORRELATION=0.85
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
