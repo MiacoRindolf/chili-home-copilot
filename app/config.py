@@ -399,6 +399,13 @@ class Settings(BaseSettings):
     brain_risk_max_heat_pct: float = 6.0
     brain_risk_max_risk_per_trade_pct: float = 1.0
     brain_risk_max_same_ticker: int = 2
+    # 2026-04-28: declared so BRAIN_RISK_MAX_AVG_CORRELATION env override
+    # actually takes effect. Default stays 0.75 (matches portfolio_risk.py
+    # RiskLimits.max_avg_correlation default); operator can raise via env
+    # to e.g. 0.85 when the crypto pipeline needs more headroom.
+    brain_risk_max_avg_correlation: float = 0.75
+    # Also declare max_sector_pct for the same reason (was getattr-only).
+    brain_risk_max_sector_pct: float = 40.0
 
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
