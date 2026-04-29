@@ -539,11 +539,15 @@ def _run_subtask_ticker_autotune(status: "BrainWorkerStatus") -> dict:
         db.close()
 
 
-# Subtask registry: (name, function, run_every_n_cycles) — maintenance / edge refresh, not primary operator truth
+# Subtask registry: (name, function, run_every_n_cycles) — maintenance / edge refresh, not primary operator truth.
+# FIX 34 (2026-04-29): fast_backtest is intentionally NOT in this list — it now
+# runs on its own independent timer (see _run_fast_backtest_independent_loop)
+# so the queue drains regardless of whether run_learning_cycle is stuck on a
+# stalled provider chain. If the independent loop is disabled via settings,
+# fast_backtest is re-injected at startup (see main()).
 _SUBTASKS = [
     ("alpha_decay", _run_subtask_alpha_decay, 3),
     ("signal_refresh", _run_subtask_signal_refresh, 1),
-    ("fast_backtest", _run_subtask_fast_backtest, 1),
     ("retention", _run_subtask_retention, 12),
     ("realized_sync", _run_subtask_realized_sync, 1),
     ("ticker_autotune", _run_subtask_ticker_autotune, 6),
@@ -551,6 +555,86 @@ _SUBTASKS = [
     ("pattern_regime_ledger", _run_subtask_pattern_regime_ledger, 12),
 ]
 _subtask_counters: dict[str, int] = {name: 0 for name, _, _ in _SUBTASKS}
+
+
+# FIX 34 (2026-04-29): Independent fast_backtest loop.
+# Module-scope lock prevents concurrent invocation if cycle's after-cycle
+# sweep (in degenerate config where independent loop is disabled but the
+# subtask is also re-injected) tries to fire fast_backtest at the same time
+# as the timer thread.
+_FAST_BACKTEST_LOCK = threading.Lock()
+
+
+def _run_fast_backtest_independent_loop(stop_event: "threading.Event", status: "BrainWorkerStatus") -> None:
+    """Independent fast_backtest timer thread.
+
+    FIX 34 (2026-04-29): Previously fast_backtest ran only after
+    ``run_learning_cycle`` completed. With Massive/yfinance frequently down,
+    Step 1 (mine) stalls for tens of minutes on data-fetch retries, blocking
+    the queue drain. The 354-pattern queue (incl. priority=100 crypto seeds)
+    rotted at ``candidate``.
+
+    This loop ticks every ``brain_fast_backtest_interval_s`` (default 60s)
+    independent of the cycle. The cycle still runs (FIX 31 gates it), but
+    backtest queue drain no longer waits on it. Bridge to FIX 31 event-driven
+    endgame.
+    """
+    from app.config import settings as _settings
+
+    interval_s = int(os.environ.get(
+        "CHILI_BRAIN_FAST_BACKTEST_INTERVAL_S",
+        str(getattr(_settings, "brain_fast_backtest_interval_s", 60)),
+    ))
+    logger.info("[brain:fast_backtest_loop] starting (interval=%ds, batch_size=%s)",
+                interval_s, os.environ.get("CHILI_BRAIN_FAST_BACKTEST_BATCH", "30"))
+    while not stop_event.is_set():
+        try:
+            # Lock prevents concurrent fast_backtest with the after-cycle sweep
+            # if the operator re-injects the subtask via degenerate config.
+            acquired = _FAST_BACKTEST_LOCK.acquire(blocking=False)
+            if not acquired:
+                logger.debug("[brain:fast_backtest_loop] tick skipped (lock held)")
+            else:
+                try:
+                    t0 = time.time()
+                    r = _run_subtask_fast_backtest(status)
+                    elapsed = round(time.time() - t0, 1)
+                    completed = int((r or {}).get("completed", 0) or 0)
+                    errors = int((r or {}).get("errors", 0) or 0)
+                    if completed > 0 or errors > 0:
+                        logger.info(
+                            "[brain:fast_backtest_loop] tick completed=%d errors=%d elapsed=%.1fs",
+                            completed, errors, elapsed
+                        )
+                finally:
+                    _FAST_BACKTEST_LOCK.release()
+        except Exception as e:
+            logger.warning("[brain:fast_backtest_loop] tick failed: %s", e)
+            try:
+                _FAST_BACKTEST_LOCK.release()
+            except (RuntimeError, threading.ThreadError):
+                pass
+
+        # Sleep in 5s chunks for fast stop response
+        remaining = interval_s
+        while remaining > 0 and not stop_event.is_set():
+            chunk = min(5, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
+    logger.info("[brain:fast_backtest_loop] stopped")
+
+
+def _start_fast_backtest_thread(status: "BrainWorkerStatus") -> "threading.Event":
+    """Start the independent fast_backtest timer thread. Returns its stop event."""
+    stop_event = threading.Event()
+    t = threading.Thread(
+        target=_run_fast_backtest_independent_loop,
+        args=(stop_event, status),
+        daemon=True,
+        name="brain-fast-backtest",
+    )
+    t.start()
+    return stop_event
 
 
 def run_subtasks(status: "BrainWorkerStatus") -> dict:
@@ -1377,7 +1461,29 @@ def main():
             pass
     finally:
         db_boot.close()
-    
+
+    # FIX 34 (2026-04-29): Start the independent fast_backtest timer thread
+    # if enabled (default). Decoupled from the cycle so the queue drains
+    # regardless of whether run_learning_cycle is stuck on a stalled provider.
+    # If the operator disables it, re-inject the subtask into _SUBTASKS so
+    # the queue still drains via the after-cycle sweep.
+    fast_backtest_stop_event = None
+    try:
+        from app.config import settings as _cfg
+        independent_loop = bool(getattr(_cfg, "brain_fast_backtest_independent_loop", True))
+    except Exception:
+        independent_loop = True
+    if independent_loop and args.mode == "lean-cycle":
+        fast_backtest_stop_event = _start_fast_backtest_thread(status)
+        logger.info("[brain] FIX 34: independent fast_backtest timer thread started")
+    elif args.mode == "lean-cycle":
+        # Degenerate config: operator disabled the timer; re-inject subtask
+        # so the queue still drains after each cycle.
+        if not any(name == "fast_backtest" for name, _, _ in _SUBTASKS):
+            _SUBTASKS.insert(2, ("fast_backtest", _run_subtask_fast_backtest, 1))
+            _subtask_counters["fast_backtest"] = 0
+            logger.info("[brain] FIX 34 disabled — fast_backtest re-injected into after-cycle sweep")
+
     try:
         if args.mode == "lean-cycle":
             _run_lean_cycle_loop(args, status)
@@ -1392,6 +1498,8 @@ def main():
         else:
             logger.error("[brain] Unknown mode %r", args.mode)
     finally:
+        if fast_backtest_stop_event is not None:
+            fast_backtest_stop_event.set()
         status.clear()
         logger.info("[brain] Brain Worker stopped")
 

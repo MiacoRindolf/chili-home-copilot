@@ -415,6 +415,13 @@ class Settings(BaseSettings):
     brain_crypto_miner_min_winners_per_signature: int = 3
     brain_crypto_miner_max_variants_per_run: int = 10
 
+    # FIX 34 (2026-04-29): Independent fast_backtest timer. Pulls the
+    # backtest-queue drain out of the after-cycle subtask sweep so it
+    # runs every N seconds regardless of whether run_learning_cycle is
+    # stuck on a stalled provider chain. Bridge to FIX 31 endgame.
+    brain_fast_backtest_independent_loop: bool = True
+    brain_fast_backtest_interval_s: int = 60
+
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"
