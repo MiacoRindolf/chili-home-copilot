@@ -150,12 +150,25 @@ def mark_pattern_tested(
     pattern: ScanPattern,
     win_rate: float | None = None,
     avg_return: float | None = None,
+    backtests_run: int | None = None,
 ) -> None:
     """Mark a pattern as tested and update its stats.
-    
+
     Resets the boost priority after processing.
+
+    FIX 35 (Bug #47, 2026-04-29): now also recomputes ``backtest_count`` from
+    the canonical trading_backtests table. Previously this column was only
+    updated by the slow-cycle ``run_learning_cycle`` path (via
+    ``actual_bt_count = COUNT(*) FROM trading_backtests``) — the per-pattern
+    queue-drain hot path skipped it entirely. With FIX 34's independent
+    timer drain, that meant patterns could accumulate 25+ backtest rows
+    while ``backtest_count`` stayed at 0, blocking the promotion gate
+    (which checks ``backtest_count >= min_trades``). This regression
+    persisted from the moment the queue path diverged from the cycle path.
     """
     import math as _math
+    from sqlalchemy import func as _func
+    from ...models.trading import BacktestResult as _TB
 
     pattern.last_backtest_at = datetime.utcnow()
     pattern.backtest_priority = 0  # Reset boost after processing
@@ -177,6 +190,23 @@ def mark_pattern_tested(
         logger.warning(
             "[backtest_queue] mark_pattern_tested rejected invalid avg_return=%r for pattern id=%s",
             avg_return, getattr(pattern, "id", None),
+        )
+
+    # FIX 35: recompute backtest_count from canonical source. Cheap query
+    # (single COUNT, indexed on scan_pattern_id) and matches what the cycle
+    # path computes at learning.py:7230. Avoids drift between the two paths.
+    try:
+        actual_bt_count = (
+            db.query(_func.count(_TB.id))
+            .filter(_TB.scan_pattern_id == pattern.id)
+            .scalar()
+            or 0
+        )
+        pattern.backtest_count = int(actual_bt_count)
+    except Exception as e:
+        logger.warning(
+            "[backtest_queue] backtest_count recount failed for pattern id=%s: %s",
+            getattr(pattern, "id", None), e,
         )
 
     db.commit()
