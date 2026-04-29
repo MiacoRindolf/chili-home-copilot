@@ -248,7 +248,17 @@ def build_ledger(
 
     as_of = as_of or date.today()
     run_id = uuid.uuid4().hex[:32]
-    mode = str(_settings_get("brain_breadth_relstr_mode", "shadow") or "shadow").lower()
+    # FIX 9 (deep audit 2026-04-28): the live-trade writer was reading
+    # ``brain_breadth_relstr_mode`` (wrong settings key — that one belongs
+    # to the breadth snapshots writer). The result: 38 rows tagged
+    # ``mode='shadow'`` instead of ``mode='live'``, and the live ledger
+    # had 0 rows even though the writer was running.
+    #
+    # Now uses the dedicated key. Default 'live' is intentional: the
+    # backtest path tags 'backtest' explicitly, the live trade-driven
+    # writer should tag 'live' (this code path). 'shadow' is reserved
+    # for the explicit dry-run case via chili_pattern_regime_ledger_dry_run.
+    mode = str(_settings_get("brain_pattern_regime_perf_mode", "live") or "live").lower()
 
     # For each regime_dimension, pull (trade, regime_label) and group.
     # Each dimension uses its own LATERAL join by ticker/date.
