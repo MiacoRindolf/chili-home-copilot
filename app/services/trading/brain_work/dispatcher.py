@@ -177,8 +177,9 @@ def _dispatch_limits(
     max_backtest: int | None = None,
     max_exec_feedback: int | None = None,
     max_mine: int | None = None,
+    max_cpcv_gate: int | None = None,
 ) -> list[tuple[str, int]]:
-    """Order: execution feedback first (short), then mine, then backtests."""
+    """Order: execution feedback first (short), then mine, then backtests, then cpcv_gate."""
     bt = int(max_backtest if max_backtest is not None else getattr(settings, "brain_work_dispatch_batch_size", 8))
     ex = int(
         max_exec_feedback
@@ -193,10 +194,19 @@ def _dispatch_limits(
         if max_mine is not None
         else getattr(settings, "brain_work_mine_batch_size", 1)
     )
+    # FIX 37 (Phase 2 #2, 2026-04-29): cpcv_gate is fast (DB query + numeric
+    # eval); cap higher to drain the pipe quickly when many backtests complete
+    # in a burst.
+    cg = int(
+        max_cpcv_gate
+        if max_cpcv_gate is not None
+        else getattr(settings, "brain_work_cpcv_gate_batch_size", 8)
+    )
     return [
         ("execution_feedback_digest", max(0, ex)),
         ("market_snapshots_batch", max(0, mn)),
         ("backtest_requested", max(0, bt)),
+        ("backtest_completed", max(0, cg)),
     ]
 
 
@@ -244,6 +254,11 @@ def run_brain_work_dispatch_round(
                     # Replaces Step 1 of run_learning_cycle.
                     from .handlers.mine import handle_market_snapshots_batch
                     handle_market_snapshots_batch(db, ev, user_id)
+                elif event_type == "backtest_completed":
+                    # FIX 37 (Phase 2 #2, 2026-04-29): event-driven CPCV gate.
+                    # Replaces the OOS validation step of run_learning_cycle.
+                    from .handlers.cpcv_gate import handle_backtest_completed
+                    handle_backtest_completed(db, ev, user_id)
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
                 mark_work_done(db, int(ev.id))

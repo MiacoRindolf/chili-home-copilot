@@ -428,6 +428,12 @@ class Settings(BaseSettings):
     brain_work_mine_batch_size: int = 1
     brain_mine_handler_min_snapshots: int = 10
 
+    # FIX 37 (Phase 2 #2, 2026-04-29): event-driven CPCV gate handler.
+    # Reacts to backtest_completed events; runs CPCV promotion gate;
+    # sets lifecycle_stage to backtested/challenged based on result.
+    # Promotion (lifecycle_stage='promoted') is gated to handler #3.
+    brain_work_cpcv_gate_batch_size: int = 8
+
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"
