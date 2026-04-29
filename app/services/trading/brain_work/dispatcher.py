@@ -179,8 +179,9 @@ def _dispatch_limits(
     max_mine: int | None = None,
     max_cpcv_gate: int | None = None,
     max_promote: int | None = None,
+    max_trade_close: int | None = None,
 ) -> list[tuple[str, int]]:
-    """Order: execution feedback first (short), then mine, then backtests, then cpcv_gate, then promote."""
+    """Order: execution feedback, mine, backtests, cpcv_gate, promote, trade-close fanout."""
     bt = int(max_backtest if max_backtest is not None else getattr(settings, "brain_work_dispatch_batch_size", 8))
     ex = int(
         max_exec_feedback
@@ -211,12 +212,25 @@ def _dispatch_limits(
         if max_promote is not None
         else getattr(settings, "brain_work_promote_batch_size", 4)
     )
+    # FIX 39 (Phase 2 #4+#5, 2026-04-29): trade-close fanout. Both demote
+    # and regime_ledger handlers subscribe to the same three close events
+    # (live_trade_closed, paper_trade_closed, broker_fill_closed). Each
+    # event is dispatched to BOTH handlers in sequence (see handler chain
+    # below). Cap higher since trade closes can burst during regime shifts.
+    tc = int(
+        max_trade_close
+        if max_trade_close is not None
+        else getattr(settings, "brain_work_trade_close_batch_size", 16)
+    )
     return [
         ("execution_feedback_digest", max(0, ex)),
         ("market_snapshots_batch", max(0, mn)),
         ("backtest_requested", max(0, bt)),
         ("backtest_completed", max(0, cg)),
         ("pattern_eligible_promotion", max(0, pm)),
+        ("live_trade_closed", max(0, tc)),
+        ("paper_trade_closed", max(0, tc)),
+        ("broker_fill_closed", max(0, tc)),
     ]
 
 
@@ -274,6 +288,35 @@ def run_brain_work_dispatch_round(
                     # Sole authority for flipping lifecycle to 'promoted'.
                     from .handlers.promote import handle_pattern_eligible_promotion
                     handle_pattern_eligible_promotion(db, ev, user_id)
+                elif event_type in ("live_trade_closed", "paper_trade_closed", "broker_fill_closed"):
+                    # FIX 39 (Phase 2 #4+#5, 2026-04-29): trade-close fanout.
+                    # Each event is dispatched to BOTH demote + regime_ledger
+                    # handlers. If demote raises, we still try regime_ledger
+                    # so a broken handler doesn't poison the other.
+                    demote_err: Exception | None = None
+                    try:
+                        from .handlers.demote import handle_trade_closed
+                        handle_trade_closed(db, ev, user_id)
+                    except Exception as _de:
+                        demote_err = _de
+                        logger.warning(
+                            "%s demote handler failed ev_id=%s: %s — proceeding to regime_ledger",
+                            LOG_PREFIX, ev.id, _de,
+                        )
+                    try:
+                        from .handlers.regime_ledger import handle_trade_closed_for_ledger
+                        handle_trade_closed_for_ledger(db, ev, user_id)
+                    except Exception as _re:
+                        if demote_err is None:
+                            raise
+                        # Both failed — re-raise the earlier one for retry.
+                        logger.warning(
+                            "%s regime_ledger handler also failed ev_id=%s: %s",
+                            LOG_PREFIX, ev.id, _re,
+                        )
+                        raise demote_err
+                    if demote_err is not None:
+                        raise demote_err
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
                 mark_work_done(db, int(ev.id))

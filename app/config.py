@@ -440,6 +440,12 @@ class Settings(BaseSettings):
     # want each one logged cleanly.
     brain_work_promote_batch_size: int = 4
 
+    # FIX 39 (Phase 2 #4+#5, 2026-04-29): trade-close fanout. Demote handler
+    # re-checks realized EV gate and demotes if it now blocks. Regime ledger
+    # handler rebuilds pattern_regime_ledger (throttled internally to once
+    # per 60s). Both subscribe to live/paper/broker_fill close events.
+    brain_work_trade_close_batch_size: int = 16
+
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"
