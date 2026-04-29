@@ -407,6 +407,14 @@ class Settings(BaseSettings):
     # Also declare max_sector_pct for the same reason (was getattr-only).
     brain_risk_max_sector_pct: float = 40.0
 
+    # Crypto-native pattern miner (2026-04-29). Spawns candidate
+    # patterns from indicator signatures of profitable crypto trades.
+    # See app/services/trading/crypto/pattern_miner.py.
+    brain_crypto_miner_enabled: bool = True
+    brain_crypto_miner_lookback_days: int = 30
+    brain_crypto_miner_min_winners_per_signature: int = 3
+    brain_crypto_miner_max_variants_per_run: int = 10
+
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"

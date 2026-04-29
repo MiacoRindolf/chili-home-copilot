@@ -495,6 +495,28 @@ def _run_subtask_realized_sync(status: "BrainWorkerStatus") -> dict:
         db.close()
 
 
+def _run_subtask_crypto_pattern_miner(status: "BrainWorkerStatus") -> dict:
+    """Run crypto-native pattern miner — extracts indicator signatures
+    from recent profitable crypto trades and spawns variant candidates.
+
+    Added 2026-04-29 to address the operator goal of 10 profitable crypto
+    trades/day. The general web_pattern_researcher is biased toward
+    1d swing setups for stocks; this complements it with crypto-specific
+    candidates mined from real winners. Runs every 6 cycles since
+    realized winners don't accumulate quickly.
+    """
+    status.set_step("CryptoMiner", "Mining crypto patterns from realized winners...")
+    from app.services.trading.crypto.pattern_miner import run_crypto_pattern_miner
+    db = SessionLocal()
+    try:
+        return run_crypto_pattern_miner(db)
+    except Exception as e:
+        logger.warning("[brain:subtask] crypto_pattern_miner failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
 def _run_subtask_ticker_autotune(status: "BrainWorkerStatus") -> dict:
     """Auto-narrow ScanPattern.scope_tickers from realized per-ticker PnL.
 
@@ -525,6 +547,7 @@ _SUBTASKS = [
     ("retention", _run_subtask_retention, 12),
     ("realized_sync", _run_subtask_realized_sync, 1),
     ("ticker_autotune", _run_subtask_ticker_autotune, 6),
+    ("crypto_pattern_miner", _run_subtask_crypto_pattern_miner, 6),
     ("pattern_regime_ledger", _run_subtask_pattern_regime_ledger, 12),
 ]
 _subtask_counters: dict[str, int] = {name: 0 for name, _, _ in _SUBTASKS}
