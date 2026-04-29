@@ -3,9 +3,9 @@
 Polls ``pg_stat_activity`` periodically and:
 
 * logs WARN when a connection is held ``idle in transaction`` longer than
-  :data:`IDLE_TX_WARN_SEC` (default 5 min);
+  :data:`IDLE_TX_WARN_SEC` (default 2 min);
 * calls ``pg_terminate_backend()`` for any connection held longer than
-  :data:`IDLE_TX_KILL_SEC` (default 30 min).
+  :data:`IDLE_TX_KILL_SEC` (default 10 min).
 
 This guards against the 2026-04-28 incident where a brain-worker
 FractionalBacktest opened a transaction, hung for 17 hours, accumulated
@@ -17,12 +17,20 @@ The watchdog runs as a daemon thread started from :mod:`app.main` on
 process startup. It uses a short-lived ``SessionLocal()`` per poll and
 never holds its own transaction open; logs are best-effort.
 
+FIX 5 (deep audit 2026-04-28): defaults lowered from 5min/30min to
+2min/10min. The audit found 25-minute idle-in-transaction sessions
+that the previous 30-min kill threshold ignored. ``idle in transaction``
+is a leaked transaction by definition — the connection began a tx but
+isn't currently executing — so a 10-minute ceiling is generous. Long-
+running brain-worker cycles execute queries and would show ``active``,
+not ``idle in transaction``; they're not affected by this change.
+
 Tuning::
 
     CHILI_DB_WATCHDOG_ENABLED       = '1'   (default '1')
     CHILI_DB_WATCHDOG_POLL_SEC      = 60     (default 60)
-    CHILI_DB_WATCHDOG_WARN_SEC      = 300    (default 300 = 5min)
-    CHILI_DB_WATCHDOG_KILL_SEC      = 1800   (default 1800 = 30min)
+    CHILI_DB_WATCHDOG_WARN_SEC      = 120    (default 120 = 2min)
+    CHILI_DB_WATCHDOG_KILL_SEC      = 600    (default 600 = 10min)
 """
 from __future__ import annotations
 
@@ -62,8 +70,8 @@ def _poll_once() -> tuple[int, int]:
     """
     from ..db import SessionLocal
 
-    warn_sec = _env_int("CHILI_DB_WATCHDOG_WARN_SEC", 300)
-    kill_sec = _env_int("CHILI_DB_WATCHDOG_KILL_SEC", 1800)
+    warn_sec = _env_int("CHILI_DB_WATCHDOG_WARN_SEC", 120)
+    kill_sec = _env_int("CHILI_DB_WATCHDOG_KILL_SEC", 600)
 
     warned = 0
     killed = 0
@@ -117,8 +125,8 @@ def _loop() -> None:
     poll_sec = max(15, _env_int("CHILI_DB_WATCHDOG_POLL_SEC", 60))
     logger.info("[db_watchdog] started: poll=%ds  warn>=%ds  kill>=%ds",
                 poll_sec,
-                _env_int("CHILI_DB_WATCHDOG_WARN_SEC", 300),
-                _env_int("CHILI_DB_WATCHDOG_KILL_SEC", 1800))
+                _env_int("CHILI_DB_WATCHDOG_WARN_SEC", 120),
+                _env_int("CHILI_DB_WATCHDOG_KILL_SEC", 600))
     while not _stop_event.is_set():
         try:
             _poll_once()

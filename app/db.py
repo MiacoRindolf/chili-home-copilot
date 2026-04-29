@@ -28,8 +28,28 @@ engine = create_engine(
     DATABASE_URL,
     pool_size=_pool_size,
     max_overflow=_max_overflow,
-    pool_pre_ping=True,  # detect stale connections
-    pool_recycle=3600,  # avoid stale server-side disconnects on long-lived CHILI + worker
+    pool_pre_ping=True,  # detect stale connections at checkout
+    pool_recycle=3600,  # recycle at checkout if older than 1h
+    # FIX 13+14 (deep audit 2026-04-28): keep-alives at the TCP level so a
+    # long-running brain-worker learning cycle (~34min hold) can't have its
+    # connection silently closed by the server. The brain-worker grabs a
+    # session, runs through 20+ steps, and the snapshot SELECT (LIMIT 5000)
+    # is the long pole — without keepalives, postgres closes the idle TCP
+    # socket and the next query fails with 'server closed the connection
+    # unexpectedly'. The cycle then rolls back, the predictions cache fails
+    # to emit ('Promoted prediction cache at cycle end failed'), and the
+    # next consumer reads cached_result_count=0.
+    #
+    # 30s keepalive_idle is well below typical net.ipv4.tcp_keepalive_time
+    # (default 7200s on Linux) so we don't depend on OS defaults; 5s
+    # keepalives_interval gives 6 keepalives before tcp_keepalives_count
+    # gives up — the connection stays alive even when fully idle.
+    connect_args={
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 5,
+        "keepalives_count": 5,
+    },
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
