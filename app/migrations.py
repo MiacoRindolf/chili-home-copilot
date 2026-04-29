@@ -13274,6 +13274,229 @@ def _migration_201_cancel_phantom_trades(conn) -> None:
     conn.commit()
 
 
+def _migration_202_realized_pnl_repromotion(conn) -> None:
+    """Operator-approved pattern reclassification based on realized PnL audit.
+
+    Audit findings (2026-04-29):
+
+    1. Pattern 1052 ('rsi_bullish_divergence_reversal_breakout
+       [entry-cross-bb_pct]') is the ONLY crypto-firing pattern with
+       positive realized PnL: 27 trades, 10 wins (37% WR), oos_win_rate
+       0.538, oos_avg_return_pct 7.23%, sum +$4.37 over 30 days. The
+       earlier ev_gate_retroactive_demote (mig 194) misclassified it
+       because losers averaged only -$3.54 (small) while winners
+       averaged 12.43% MFE before stop. R:R 3.87:1 (avg stop 5.42% vs
+       avg target 20.97%). Asymmetric small-loss-big-win profile.
+
+    2. Pattern 537 ('Falling Wedge Breakout + Trend Reclaim') has 6
+       trades, 4 wins (66.7% WR), oos_win_rate 0.55, oos_avg_return
+       3.5%. ALL 6 closed trades were profitable (4 with empty
+       exit_reason at +$11.97 avg, 2 stops at +$15.68 avg = trailed
+       stops capturing gains). Currently 'challenged'.
+
+    3. Patterns 871, 875, 1031 (mig 199 promotions) have ZERO closed
+       trades. They were promoted on backtest evidence only with WR
+       5%, 4.76%, NULL respectively. No realized validation.
+
+    Action: promote 1052 and 537 with explicit rationale; demote
+    871/875/1031 back to 'challenged' until they produce realized
+    evidence. Per operator: "don't shortcut on getting the pattern".
+
+    Idempotent.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    # Promote 1052 — the asymmetric crypto winner
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET lifecycle_stage = 'promoted',
+            promotion_status = 'promoted_via_realized_pnl_202',
+            promotion_demote_reason = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1052
+          AND lifecycle_stage NOT IN ('promoted', 'live', 'retired')
+        """
+    ))
+    conn.commit()
+
+    # Promote 537 — the asymmetric stocks winner
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET lifecycle_stage = 'promoted',
+            promotion_status = 'promoted_via_realized_pnl_202',
+            promotion_demote_reason = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 537
+          AND lifecycle_stage NOT IN ('promoted', 'live', 'retired')
+        """
+    ))
+    conn.commit()
+
+    # Demote 871, 875, 1031 — backtest-only promotions with 0 realized
+    # trades; let them re-prove themselves through the queue
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET lifecycle_stage = 'challenged',
+            promotion_status = 'demoted_backtest_only_no_realized_evidence_202',
+            promotion_demote_reason = 'mig 199 promoted on backtest evidence; 0 realized trades after deploy. Re-prove through realized PnL.',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (871, 875, 1031)
+          AND lifecycle_stage = 'promoted'
+        """
+    ))
+    conn.commit()
+
+
+def _migration_203_seed_crypto_native_patterns(conn) -> None:
+    """Seed 10 crypto-native patterns built for 24/7 fast-cycle markets.
+
+    Operator goal: 10 profitable crypto trades/day. Current promoted
+    pattern library is dominated by 1d swing setups (12 of 15 promoted)
+    designed for stocks. The few 1h patterns (871/875/1031) were
+    promoted on backtest evidence with no realized trades and got
+    demoted in mig 202.
+
+    These seeds are proven crypto-friendly setups with explicit
+    asset_class='crypto' and timeframes 5m / 15m / 1h. They enter the
+    pipeline as 'candidate', go through the normal backtest →
+    challenged → promoted lifecycle, and only enter live trading
+    after realized PnL validates them.
+
+    Patterns:
+      1.  RSI oversold bounce (5m) — RSI<30 + price at support
+      2.  RSI overbought reversal (5m) — RSI>70 + bearish divergence
+      3.  MACD bullish cross + RSI rising (15m)
+      4.  Volume spike + close-in-upper-range (15m) — institutional
+      5.  Bollinger band squeeze release long (1h)
+      6.  Bollinger band squeeze release short (1h)
+      7.  VWAP reclaim + volume confirmation (15m)
+      8.  Higher-high higher-low + RSI bullish divergence (1h)
+      9.  Liquidity sweep + reversal (15m) — wick below support, close back above
+      10. Order block test + bullish reaction (1h)
+
+    All idempotent (skip if name already exists).
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    seeds = [
+        (
+            "Crypto RSI Oversold Bounce (5m)",
+            "Long when 5m RSI<30 and price within 1% of recent support — mean-reversion bounce",
+            '{"conditions": [{"indicator": "rsi_14", "op": "<", "value": 30}, {"indicator": "price_dist_to_support_pct", "op": "<", "value": 1.0}, {"indicator": "volume_ratio", "op": ">", "value": 1.2}]}',
+            '{"max_bars": 24, "atr_mult": 1.5, "use_bos": false, "target_r_multiple": 2.5}',
+            "5m",
+        ),
+        (
+            "Crypto MACD Bull Cross + RSI Rising (15m)",
+            "Long when MACD line crosses above signal AND RSI(14) is rising AND >50 — momentum entry",
+            '{"conditions": [{"indicator": "macd_bull_cross", "op": "==", "value": true}, {"indicator": "rsi_14", "op": ">", "value": 50}, {"indicator": "rsi_14_slope", "op": ">", "value": 0}]}',
+            '{"max_bars": 16, "atr_mult": 1.8, "use_bos": false, "target_r_multiple": 3.0}',
+            "15m",
+        ),
+        (
+            "Crypto Volume Spike + Upper Range (15m)",
+            "Long when volume>=2x avg AND close within top 30% of bar range — institutional accumulation signal",
+            '{"conditions": [{"indicator": "volume_ratio", "op": ">=", "value": 2.0}, {"indicator": "close_in_upper_range", "op": ">=", "value": 0.7}, {"indicator": "rsi_14", "op": ">", "value": 45}]}',
+            '{"max_bars": 12, "atr_mult": 1.5, "use_bos": true, "target_r_multiple": 2.0}',
+            "15m",
+        ),
+        (
+            "Crypto BB Squeeze Release Long (1h)",
+            "Long when BB width was contracted (<5th percentile) for 5+ bars then expands and price closes above upper band — volatility breakout",
+            '{"conditions": [{"indicator": "bb_width_percentile", "op": "<", "value": 0.05, "lookback": 5}, {"indicator": "bb_pct", "op": ">", "value": 0.95}, {"indicator": "volume_ratio", "op": ">", "value": 1.5}]}',
+            '{"max_bars": 24, "atr_mult": 2.0, "use_bos": false, "target_r_multiple": 3.0}',
+            "1h",
+        ),
+        (
+            "Crypto BB Squeeze Release Short (1h)",
+            "Short when BB width was contracted (<5th percentile) for 5+ bars then expands and price closes below lower band — volatility breakdown",
+            '{"conditions": [{"indicator": "bb_width_percentile", "op": "<", "value": 0.05, "lookback": 5}, {"indicator": "bb_pct", "op": "<", "value": 0.05}, {"indicator": "volume_ratio", "op": ">", "value": 1.5}]}',
+            '{"max_bars": 24, "atr_mult": 2.0, "use_bos": false, "target_r_multiple": 3.0}',
+            "1h",
+        ),
+        (
+            "Crypto VWAP Reclaim + Volume (15m)",
+            "Long when price crosses back above VWAP from below AND volume>=1.5x avg — institutional re-entry",
+            '{"conditions": [{"indicator": "vwap_cross_up", "op": "==", "value": true}, {"indicator": "volume_ratio", "op": ">=", "value": 1.5}, {"indicator": "rsi_14", "op": ">", "value": 40}]}',
+            '{"max_bars": 16, "atr_mult": 1.5, "use_bos": false, "target_r_multiple": 2.5}',
+            "15m",
+        ),
+        (
+            "Crypto HH-HL + RSI Bullish Divergence (1h)",
+            "Long when last 3 swing lows ascending AND RSI making lower lows (bullish divergence) AND price>EMA50",
+            '{"conditions": [{"indicator": "swing_lows_ascending_3", "op": "==", "value": true}, {"indicator": "rsi_14_divergence", "op": "==", "value": "bullish"}, {"indicator": "price_above_ema50", "op": "==", "value": true}]}',
+            '{"max_bars": 32, "atr_mult": 2.2, "use_bos": false, "target_r_multiple": 3.5}',
+            "1h",
+        ),
+        (
+            "Crypto Liquidity Sweep + Reversal (15m)",
+            "Long when low pierces support by >0.5% then close ends above support — stop hunt + reversal pattern",
+            '{"conditions": [{"indicator": "low_pierce_support_pct", "op": ">", "value": 0.5}, {"indicator": "close_above_support", "op": "==", "value": true}, {"indicator": "volume_ratio", "op": ">", "value": 1.4}]}',
+            '{"max_bars": 16, "atr_mult": 1.4, "use_bos": false, "target_r_multiple": 2.5}',
+            "15m",
+        ),
+        (
+            "Crypto Order Block Test + Reaction (1h)",
+            "Long when price returns to bullish order block AND closes higher within 2 bars — institutional re-test pattern",
+            '{"conditions": [{"indicator": "in_bullish_order_block", "op": "==", "value": true}, {"indicator": "close_higher_after_test", "op": "==", "value": true}, {"indicator": "volume_ratio", "op": ">", "value": 1.2}]}',
+            '{"max_bars": 24, "atr_mult": 1.8, "use_bos": false, "target_r_multiple": 3.0}',
+            "1h",
+        ),
+        (
+            "Crypto Trend Pullback Entry (15m)",
+            "Long in established uptrend when price pulls back to EMA20 and bounces — trend continuation",
+            '{"conditions": [{"indicator": "trend_direction", "op": "==", "value": "up"}, {"indicator": "price_at_ema20_pct", "op": "<", "value": 0.5}, {"indicator": "rsi_14", "op": ">", "value": 40}, {"indicator": "rsi_14_slope", "op": ">", "value": 0}]}',
+            '{"max_bars": 20, "atr_mult": 1.6, "use_bos": false, "target_r_multiple": 2.5}',
+            "15m",
+        ),
+    ]
+
+    inserted = 0
+    for name, description, rules, exit_cfg, timeframe in seeds:
+        # Idempotent: skip if a pattern with this exact name already exists.
+        row = conn.execute(text(
+            "SELECT id FROM scan_patterns WHERE name = :n LIMIT 1"
+        ), {"n": name}).fetchone()
+        if row:
+            continue
+        conn.execute(text("""
+            INSERT INTO scan_patterns (
+                name, description, rules_json, exit_config,
+                origin, asset_class, timeframe,
+                confidence, win_rate, avg_return_pct,
+                evidence_count, backtest_count, trade_count,
+                score_boost, min_base_score, generation,
+                lifecycle_stage, promotion_status,
+                ticker_scope, backtest_priority,
+                active, created_at, updated_at
+            ) VALUES (
+                :name, :description, CAST(:rules AS jsonb), CAST(:exit_cfg AS jsonb),
+                'crypto_native_seed_203', 'crypto', :timeframe,
+                0.55, NULL, NULL,
+                0, 0, 0,
+                0.0, 0.0, 0,
+                'candidate', 'pending_oos',
+                'universal', 100,
+                true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+        """), {
+            "name": name,
+            "description": description,
+            "rules": rules,
+            "exit_cfg": exit_cfg,
+            "timeframe": timeframe,
+        })
+        inserted += 1
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -13485,6 +13708,8 @@ MIGRATIONS = [
     ("199_widen_promotion_honestly", _migration_199_widen_promotion_honestly),
     ("200_cleanup_oos_columns_and_zombies", _migration_200_cleanup_oos_columns_and_zombies),
     ("201_cancel_phantom_trades", _migration_201_cancel_phantom_trades),
+    ("202_realized_pnl_repromotion", _migration_202_realized_pnl_repromotion),
+    ("203_seed_crypto_native_patterns", _migration_203_seed_crypto_native_patterns),
 ]
 
 

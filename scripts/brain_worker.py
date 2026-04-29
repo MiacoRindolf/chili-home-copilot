@@ -424,15 +424,26 @@ def _run_subtask_signal_refresh(status: "BrainWorkerStatus") -> dict:
 
 
 def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
-    """Process up to 5 backtest queue items without running a full cycle."""
+    """Process backtest queue items.
+
+    FIX B (2026-04-28): batch size raised 5 → 30 per cycle to drain the
+    141-deep backlog of untested candidates. Audit found candidates
+    sitting indefinitely, blocking the EV gate from getting realized
+    evidence on potential promoted patterns. Override via
+    ``CHILI_BRAIN_FAST_BACKTEST_BATCH`` env var.
+
+    Each item still runs in its own session (open + close per item) so a
+    failed pattern can't poison the rest of the batch.
+    """
     status.set_step("FastBacktest", "Processing backtest queue...")
     from app.services.trading.backtest_queue import get_pending_patterns
     from app.config import settings as _s
 
     uid = getattr(_s, "brain_default_user_id", None)
+    batch_size = int(os.environ.get("CHILI_BRAIN_FAST_BACKTEST_BATCH", "30"))
     completed = 0
     errors = 0
-    for _ in range(5):
+    for _ in range(batch_size):
         db = SessionLocal()
         try:
             patterns = get_pending_patterns(db, limit=1)
@@ -447,7 +458,7 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
             errors += 1
         finally:
             db.close()
-    return {"completed": completed, "errors": errors}
+    return {"completed": completed, "errors": errors, "batch_size": batch_size}
 
 
 def _run_subtask_pattern_regime_ledger(status: "BrainWorkerStatus") -> dict:
