@@ -65,6 +65,19 @@ def _max_sample_ms() -> float:
     return float(getattr(settings, "chili_execution_event_lag_max_sample_ms", 600_000.0))
 
 
+def _min_samples() -> int:
+    """Min sample count to compute a meaningful p95 breach.
+
+    FIX 48 (2026-04-29): with sample_size=1, p95 == that single sample,
+    so a single stale event can trip the ERROR threshold (observed
+    p95=79011ms vs threshold=60000ms with only 1 sample in 300s lookback).
+    Below this floor we report breach='ok' and surface the count via
+    sample_size so the operator knows the gauge is just sleeping, not
+    silently masking a real breach.
+    """
+    return max(1, int(getattr(settings, "chili_execution_event_lag_min_samples", 5)))
+
+
 @dataclass(frozen=True)
 class EventLagSummary:
     """Frozen-shape gauge output.
@@ -170,8 +183,14 @@ def measure_execution_event_lag(
     p99 = _percentile(all_lags, 0.99)
     mx = max(all_lags) if all_lags else None
 
+    # FIX 48 (2026-04-29): require a minimum sample count before declaring
+    # a breach. Single-sample p95 == that one sample, so a single stale
+    # event of 79s would have flipped breach='error' — that's noise, not
+    # signal. With min_samples=5 default, the gauge waits for enough events
+    # to make the percentile stable.
     breach = "ok"
-    if p95 is not None:
+    min_n = _min_samples()
+    if p95 is not None and len(all_lags) >= min_n:
         if p95 >= error_ms:
             breach = "error"
         elif p95 >= warn_ms:
