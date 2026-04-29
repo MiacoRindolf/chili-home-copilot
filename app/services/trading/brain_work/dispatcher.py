@@ -178,8 +178,9 @@ def _dispatch_limits(
     max_exec_feedback: int | None = None,
     max_mine: int | None = None,
     max_cpcv_gate: int | None = None,
+    max_promote: int | None = None,
 ) -> list[tuple[str, int]]:
-    """Order: execution feedback first (short), then mine, then backtests, then cpcv_gate."""
+    """Order: execution feedback first (short), then mine, then backtests, then cpcv_gate, then promote."""
     bt = int(max_backtest if max_backtest is not None else getattr(settings, "brain_work_dispatch_batch_size", 8))
     ex = int(
         max_exec_feedback
@@ -202,11 +203,20 @@ def _dispatch_limits(
         if max_cpcv_gate is not None
         else getattr(settings, "brain_work_cpcv_gate_batch_size", 8)
     )
+    # FIX 38 (Phase 2 #3, 2026-04-29): promote handler — flips lifecycle to
+    # 'promoted' after second-gate (realized EV) check. Cap at 4 per round
+    # since promotion is rare and we want to log each one cleanly.
+    pm = int(
+        max_promote
+        if max_promote is not None
+        else getattr(settings, "brain_work_promote_batch_size", 4)
+    )
     return [
         ("execution_feedback_digest", max(0, ex)),
         ("market_snapshots_batch", max(0, mn)),
         ("backtest_requested", max(0, bt)),
         ("backtest_completed", max(0, cg)),
+        ("pattern_eligible_promotion", max(0, pm)),
     ]
 
 
@@ -259,6 +269,11 @@ def run_brain_work_dispatch_round(
                     # Replaces the OOS validation step of run_learning_cycle.
                     from .handlers.cpcv_gate import handle_backtest_completed
                     handle_backtest_completed(db, ev, user_id)
+                elif event_type == "pattern_eligible_promotion":
+                    # FIX 38 (Phase 2 #3, 2026-04-29): promote handler.
+                    # Sole authority for flipping lifecycle to 'promoted'.
+                    from .handlers.promote import handle_pattern_eligible_promotion
+                    handle_pattern_eligible_promotion(db, ev, user_id)
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
                 mark_work_done(db, int(ev.id))

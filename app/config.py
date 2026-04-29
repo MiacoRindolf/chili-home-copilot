@@ -434,6 +434,12 @@ class Settings(BaseSettings):
     # Promotion (lifecycle_stage='promoted') is gated to handler #3.
     brain_work_cpcv_gate_batch_size: int = 8
 
+    # FIX 38 (Phase 2 #3, 2026-04-29): promote handler. Flips lifecycle to
+    # 'promoted' after passing both CPCV + realized-EV gates. Sole authority
+    # for promotion finalize step. Cap low since promotion is rare and we
+    # want each one logged cleanly.
+    brain_work_promote_batch_size: int = 4
+
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"
