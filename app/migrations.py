@@ -13201,6 +13201,79 @@ def _migration_200_cleanup_oos_columns_and_zombies(conn) -> None:
         conn.commit()
 
 
+def _migration_201_cancel_phantom_trades(conn) -> None:
+    """Codex audit 2026-04-28 deep audit, follow-up to mig 200.
+
+    Mig 200 was too conservative: it only swept zombies older than 7 days
+    (the 8 from 2026-04-20). After FIX 1 (autopilot_scope truncation +
+    crypto exit_monitor import) shipped on 2026-04-29, the deep audit
+    found 6 more zombies from 2026-04-27 still stuck open with
+    ``broker_order_id IS NULL``: CRDL, CCCC, GEO, ELTX, JOB, plus
+    ETH-USD trade 404 (entry_price=0, never reached broker).
+
+    These rows have no broker liaison (``broker_order_id IS NULL`` or
+    empty) and no fill (``broker_status IS NULL`` and
+    ``avg_fill_price IS NULL``), meaning the original buy attempt
+    silently failed and the autotrader created a Trade row anyway. The
+    DB-canonical fix is to mark them ``cancelled`` so the reconciler /
+    portfolio loops don't repeatedly try to match them, and so the
+    realized-pnl ledger doesn't carry phantom positions forward.
+
+    Operator-approved (deep audit Q4): "Mark cancelled in mig 201".
+
+    Idempotent: only touches rows still ``status='open'`` AND missing
+    a broker_order_id AND > 24h old. Mig 200's 7-day rule is too
+    permissive; this catches the gap.
+    """
+    if "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+
+    # Phantom trades: NULL/empty broker_order_id AND no broker fill AND > 24h
+    conn.execute(text(
+        """
+        UPDATE trading_trades
+        SET status = 'cancelled',
+            exit_reason = COALESCE(exit_reason, 'phantom_no_broker_id'),
+            exit_date = COALESCE(exit_date, CURRENT_TIMESTAMP),
+            exit_price = COALESCE(exit_price, entry_price),
+            notes = COALESCE(notes, '')
+                || E'\\n[mig201] cancelled: broker_order_id missing; '
+                || 'autotrader inserted Trade row but broker placement failed'
+        WHERE status = 'open'
+          AND (broker_order_id IS NULL OR broker_order_id = '')
+          AND (broker_status IS NULL OR broker_status = '')
+          AND (avg_fill_price IS NULL)
+          AND entry_date IS NOT NULL
+          AND entry_date < NOW() - INTERVAL '24 hours'
+          AND notes NOT LIKE '%[mig201]%'
+        """
+    ))
+    conn.commit()
+
+    # Trade 404 specifically: ETH-USD with entry_price=0 (mig200 only added
+    # a NOTE; user approved cancellation in deep audit).
+    conn.execute(text(
+        """
+        UPDATE trading_trades
+        SET status = 'cancelled',
+            exit_reason = COALESCE(exit_reason, 'phantom_zero_entry_price'),
+            exit_date = COALESCE(exit_date, CURRENT_TIMESTAMP),
+            exit_price = 0,
+            pnl = 0,
+            notes = COALESCE(notes, '')
+                || E'\\n[mig201] cancelled: entry_price=0 phantom; '
+                || 'broker fill never reached DB'
+        WHERE status = 'open'
+          AND ticker = 'ETH-USD'
+          AND (entry_price IS NULL OR entry_price <= 0)
+          AND (broker_order_id IS NULL OR broker_order_id = '')
+          AND notes NOT LIKE '%[mig201]%'
+        """
+    ))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -13411,6 +13484,7 @@ MIGRATIONS = [
     ("198_seed_short_swing_patterns", _migration_198_seed_short_swing_patterns),
     ("199_widen_promotion_honestly", _migration_199_widen_promotion_honestly),
     ("200_cleanup_oos_columns_and_zombies", _migration_200_cleanup_oos_columns_and_zombies),
+    ("201_cancel_phantom_trades", _migration_201_cancel_phantom_trades),
 ]
 
 

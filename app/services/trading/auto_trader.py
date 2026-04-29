@@ -1328,6 +1328,29 @@ def _execute_new_entry(
         )
         if res is None:
             return
+        # Phantom-trade guard (deep audit 2026-04-28 CRIT #3): refuse to
+        # insert a Trade row when the broker call returned ok=True but
+        # didn't surface an order_id. Mig 201 cleaned up 7 such rows
+        # (CRDL/CCCC/GEO/ELTX/JOB + ETH-USD trade 404). The original
+        # bug was: ``broker_order_id=str(res.get("order_id") or "")``
+        # silently coerces missing IDs to "" and creates a Trade that
+        # the reconciler can never match. Treat missing order_id as a
+        # broker failure even when ``ok=True``.
+        order_id_raw = res.get("order_id") or ""
+        if not str(order_id_raw).strip():
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="blocked",
+                reason="broker:place_no_order_id",
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="blocked",
+                reason="broker:place_no_order_id", alert=alert,
+            )
+            return
         raw = res.get("raw") or {}
         try:
             fill = float(raw.get("average_price") or raw.get("price") or px)
@@ -1348,7 +1371,7 @@ def _execute_new_entry(
             related_alert_id=alert.id,
             broker_source="robinhood",
             management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
-            broker_order_id=str(res.get("order_id") or ""),
+            broker_order_id=str(order_id_raw).strip(),
             indicator_snapshot={
                 "breakout_alert": alert.indicator_snapshot,
                 "signals": alert.signals_snapshot,
