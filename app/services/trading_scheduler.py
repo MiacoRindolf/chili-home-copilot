@@ -1677,22 +1677,32 @@ def _run_pattern_imminent_job():
 
 
 def _run_auto_trader_tick_job():
-    """XX — outer-safety wrapper for the autotrader tick.
+    """Run the autotrader tick. Inner broker calls are individually
+    wrapped in ``_call_with_timeout`` so they can't hang indefinitely.
 
-    The inner ``run_auto_trader_tick`` already wraps its broker calls in
-    ``_call_with_timeout`` (see ``auto_trader_rules._fetch_broker_equity_once``).
-    This outer wrapper adds a wall-clock deadline so even if a future
-    callsite gets added without a timeout, a hung tick can't hold the
-    scheduler instance slot indefinitely.
+    FIX 33b (deep audit 2026-04-28): the previous ``ThreadPoolExecutor``
+    + 45s outer timeout pattern abandoned worker threads on timeout
+    (``ex._threads.clear()`` + ``concurrent.futures.thread._threads_
+    queues.clear()``), and the abandoned threads kept their
+    ``db = SessionLocal()`` open until eventual completion. Result: 63
+    idle-in-tx scheduler sessions piled up at peak (verified post-FIX
+    32). The watchdog (FIX 32 + FIX 5) eventually killed them at 600s
+    but new ones spawned faster.
 
-    Implementation: ``ThreadPoolExecutor`` runs the tick in a worker
-    thread; main thread blocks up to ``chili_autotrader_tick_max_seconds``
-    (default 45s) waiting for it. If the thread exceeds the budget, we
-    log a warning and return — the abandoned worker continues until
-    its socket times out, and the next scheduler tick fires
-    independently. With ``max_instances=3`` the queue keeps moving.
+    The outer timeout is unnecessary defense-in-depth: every slow path
+    in the tick (broker quote, broker equity, broker order placement)
+    is already wrapped with ``_call_with_timeout`` at the call site.
+    APScheduler's ``max_instances=1`` (set in FIX 33's docker-compose
+    env) already prevents pile-up — if a tick legitimately runs long,
+    the next scheduled tick is skipped, not queued.
+
+    Removing the outer timeout means:
+      * No abandoned threads, no leaked sessions.
+      * If a future code path is added that hangs without a timeout,
+        the SLOT is held but no session leak. APScheduler's misfire
+        handling + ``max_instances`` still keep the system healthy.
+      * The session is guaranteed to close via ``finally``.
     """
-    import concurrent.futures
     from ..config import settings as _settings
     from ..db import SessionLocal
     from .trading.auto_trader import run_auto_trader_tick
@@ -1700,37 +1710,23 @@ def _run_auto_trader_tick_job():
     if not getattr(_settings, "chili_autotrader_enabled", False):
         return
 
-    budget_s = max(5, int(getattr(_settings, "chili_autotrader_tick_max_seconds", 45)))
-
-    def _do_tick():
-        db = SessionLocal()
-        try:
-            run_auto_trader_tick(db)
-        finally:
-            db.close()
-
     started = time.monotonic()
+    db = SessionLocal()
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(_do_tick)
-            try:
-                future.result(timeout=budget_s)
-            except concurrent.futures.TimeoutError:
-                logger.warning(
-                    "[scheduler] auto_trader tick exceeded %ss budget — "
-                    "abandoning the worker; next tick will fire normally",
-                    budget_s,
-                )
-                # Don't wait for shutdown — let the abandoned thread complete in background
-                ex._threads.clear()  # detach from the pool's join() on __exit__
-                concurrent.futures.thread._threads_queues.clear()
-            except Exception:
-                logger.exception("[scheduler] auto_trader tick failed")
+        run_auto_trader_tick(db)
+    except Exception:
+        logger.exception("[scheduler] auto_trader tick failed")
     finally:
+        db.close()
         dur = time.monotonic() - started
-        if dur > 20.0:
+        # Keep the slow-tick warning so operator still sees when a
+        # tick takes longer than expected; the budget setting is now
+        # purely advisory (no abandon).
+        budget_s = max(5, int(getattr(_settings, "chili_autotrader_tick_max_seconds", 45)))
+        if dur > budget_s:
             logger.warning(
-                "[scheduler] auto_trader tick slow: took %.1fs (budget=%ss)",
+                "[scheduler] auto_trader tick slow: took %.1fs (advisory budget=%ss); "
+                "next tick will run normally — session was closed cleanly",
                 dur, budget_s,
             )
 
