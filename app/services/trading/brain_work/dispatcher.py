@@ -176,16 +176,26 @@ def _dispatch_limits(
     *,
     max_backtest: int | None = None,
     max_exec_feedback: int | None = None,
+    max_mine: int | None = None,
 ) -> list[tuple[str, int]]:
-    """Order: execution feedback first (short), then backtests."""
+    """Order: execution feedback first (short), then mine, then backtests."""
     bt = int(max_backtest if max_backtest is not None else getattr(settings, "brain_work_dispatch_batch_size", 8))
     ex = int(
         max_exec_feedback
         if max_exec_feedback is not None
         else getattr(settings, "brain_work_exec_feedback_batch_size", 3)
     )
+    # FIX 36 (Phase 2, 2026-04-29): cap mine to 1 per dispatch round — mining
+    # is heavy and there's no value in running the same handler twice in a
+    # single batch, even if multiple market_snapshots_batch events arrived.
+    mn = int(
+        max_mine
+        if max_mine is not None
+        else getattr(settings, "brain_work_mine_batch_size", 1)
+    )
     return [
         ("execution_feedback_digest", max(0, ex)),
+        ("market_snapshots_batch", max(0, mn)),
         ("backtest_requested", max(0, bt)),
     ]
 
@@ -229,6 +239,11 @@ def run_brain_work_dispatch_round(
                     _handle_backtest_requested(db, ev, user_id)
                 elif event_type == "execution_feedback_digest":
                     _handle_execution_feedback_digest(db, ev, user_id)
+                elif event_type == "market_snapshots_batch":
+                    # FIX 36 (Phase 2, 2026-04-29): event-driven mine handler.
+                    # Replaces Step 1 of run_learning_cycle.
+                    from .handlers.mine import handle_market_snapshots_batch
+                    handle_market_snapshots_batch(db, ev, user_id)
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
                 mark_work_done(db, int(ev.id))

@@ -422,6 +422,12 @@ class Settings(BaseSettings):
     brain_fast_backtest_independent_loop: bool = True
     brain_fast_backtest_interval_s: int = 60
 
+    # FIX 36 (Phase 2 of FIX 31, 2026-04-29): event-driven mine handler.
+    # Replaces Step 1 of run_learning_cycle by reacting to
+    # market_snapshots_batch outcome events.
+    brain_work_mine_batch_size: int = 1
+    brain_mine_handler_min_snapshots: int = 10
+
     brain_capital_reweight_mode: str = "shadow"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"
