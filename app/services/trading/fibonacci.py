@@ -23,21 +23,57 @@ DEFAULT_FIB_LEVELS: tuple[float, ...] = (0.236, 0.382, 0.5, 0.618, 0.786)
 # ── Swing pivot detection ──────────────────────────────────────────────
 
 def find_swing_highs(high: pd.Series, lookback: int = 5) -> pd.Series:
-    """Fractal-style pivot-high detection.
+    """Causal fractal-style pivot-high detection.
 
-    A bar is a swing high when its *High* is the maximum in a centred window
-    of ``2 * lookback + 1`` bars.  Returns a boolean Series (True at pivots).
+    A pivot at bar ``i`` is only CONFIRMED ``lookback`` bars later — when we
+    can verify nothing in ``[i+1, i+lookback]`` exceeded ``high.iloc[i]``.
+    Therefore the returned boolean Series is True at bar ``i + lookback``
+    (the confirmation bar), NOT at bar ``i`` (the pivot bar).
+
+    FIX (deep audit 2026-04-28, research_integrity strict mode): the prior
+    implementation used ``rolling(window, center=True).max()`` which marks
+    the pivot AT the pivot bar but requires ``lookback`` future bars to do
+    so. That produced different results on truncated vs full dataframes
+    (the same bar ``i`` could be flagged a pivot when computed on the full
+    df but not when computed on ``df.iloc[:i+1]``), causing 5,230 lookahead
+    failures in the research_integrity check across the
+    "RSI + Fib 0.382 + FVG Pullback" pattern family (fingerprint
+    1d81b0d2605e1417).
+
+    The new implementation:
+        rolling_max_trailing = high.rolling(window).max()
+        was_pivot_lookback_bars_ago = (high.shift(lookback) == rolling_max_trailing)
+
+    Reads as: "lookback bars ago, the high was the max of the trailing
+    ``window``-bar window ending now". Equivalent to the old centred check
+    but with the result lagged so it's only emitted once causally observable.
+
+    Note: downstream callers (find_impulse_leg, compute_fib_retracement_series)
+    already slice ``df.iloc[:i+1]`` per bar, so the lag doesn't change leg
+    endpoints — it just makes the pivot-detection step itself causal.
     """
     window = 2 * lookback + 1
-    rolling_max = high.rolling(window, center=True).max()
-    return (high == rolling_max) & high.notna() & rolling_max.notna()
+    rolling_max_trailing = high.rolling(window).max()
+    high_lag = high.shift(lookback)
+    return (
+        (high_lag == rolling_max_trailing)
+        & high_lag.notna()
+        & rolling_max_trailing.notna()
+    )
 
 
 def find_swing_lows(low: pd.Series, lookback: int = 5) -> pd.Series:
-    """Fractal-style pivot-low detection (mirror of :func:`find_swing_highs`)."""
+    """Causal fractal-style pivot-low detection (mirror of
+    :func:`find_swing_highs`). Pivot at bar ``i`` is emitted at bar
+    ``i + lookback``. See :func:`find_swing_highs` for rationale."""
     window = 2 * lookback + 1
-    rolling_min = low.rolling(window, center=True).min()
-    return (low == rolling_min) & low.notna() & rolling_min.notna()
+    rolling_min_trailing = low.rolling(window).min()
+    low_lag = low.shift(lookback)
+    return (
+        (low_lag == rolling_min_trailing)
+        & low_lag.notna()
+        & rolling_min_trailing.notna()
+    )
 
 
 # ── Impulse leg identification ─────────────────────────────────────────
