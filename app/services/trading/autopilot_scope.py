@@ -287,4 +287,9 @@ def check_autopilot_entry_gate(
     if owner == candidate_n:
         return {"allowed": True, "reason": "owner_self", **base}
 
-    # No owner. In stric
+    # No owner. In strict-primary mode, only the configured primary may open
+    # a fresh entry; otherwise either autopilot may.
+    if strict and primary and candidate_n != primary:
+        return {"allowed": False, "reason": "not_primary", **base}
+
+    return {"allowed": True, "reason": "ok", **base}

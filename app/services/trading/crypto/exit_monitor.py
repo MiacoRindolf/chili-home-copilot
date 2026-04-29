@@ -57,7 +57,7 @@ def _current_crypto_price(ticker: str) -> Optional[float]:
         logger.debug("[crypto_exit] fetch_quote failed for %s: %s", ticker, e)
     # Fallback: try the broker's own quote endpoint
     try:
-        from .. import broker_service
+        from ... import broker_service
         if broker_service.is_connected():
             try:
                 import robin_stocks.robinhood as rh
@@ -173,7 +173,7 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
 
         # Place the sell.
         try:
-            from .. import broker_service
+            from ... import broker_service
             qty = float(t.quantity or 0.0)
             if qty <= 0:
                 out["errors"].append(f"bad_qty:{t.ticker}")
