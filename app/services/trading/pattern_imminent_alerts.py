@@ -318,7 +318,14 @@ def _tickers_for_pattern(
     scope = (getattr(pat, "ticker_scope", None) or "universal").strip().lower()
     ac = (getattr(pat, "asset_class", None) or "all").strip().lower()
 
-    if scope == "ticker_specific":
+    # 2026-04-28 audit fix: honor 'explicit_list' the same as 'ticker_specific'.
+    # The ticker_scope_autotuner (scripts/brain_worker.py:496) writes
+    # ticker_scope='explicit_list' when it narrows a pattern's scope to its
+    # edge tickers (see ticker_scope_autotune.py:172). Before this fix, the
+    # matcher silently fell into the 'else' branch and the autotuner's
+    # narrowing was a no-op — which is why pattern 1052 (scope_tickers
+    # ['ACMR','INFQ']) was firing alerts for ABNB/RAY-USD/DOGE-USD/ETH-USD.
+    if scope in ("ticker_specific", "explicit_list"):
         scoped = _parse_scope_tickers(pat)
         cap = max(1, int(settings.pattern_imminent_scope_tickers_cap))
         scoped = scoped[:cap]

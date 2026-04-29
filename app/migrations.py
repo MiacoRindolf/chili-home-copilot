@@ -13038,6 +13038,169 @@ def _migration_199_widen_promotion_honestly(conn) -> None:
     conn.commit()
 
 
+def _migration_200_cleanup_oos_columns_and_zombies(conn) -> None:
+    """Codex audit 2026-04-28 cleanup: oos_* corruption + zombie trades.
+
+    Three independent fixups, all idempotent:
+
+    A. ``scan_patterns.oos_win_rate`` — same percent-as-fraction +
+       NaN bug fixed for ``win_rate`` in mig 193, now repeated on the
+       OOS column. Code site (``web_pattern_researcher.py:603``) was
+       fixed alongside this migration to write fractions.
+
+       * NaN -> NULL    (no real evidence)
+       * > 1 -> /100    (percent stored where fraction expected)
+       * NULL/in-range -> untouched
+
+       Then add ``CHECK`` constraint matching mig 193's win_rate.
+
+    B. ``scan_patterns.oos_avg_return_pct`` NaN -> NULL. Same
+       divide-by-zero source as mig 193's ``avg_return_pct``. The
+       column is in PCT units so range is unconstrained (a -50.0
+       return is legitimate).
+
+    C. Zombie trade reconciliation: trades with ``status='open'``
+       but no ``broker_status`` and entry_date > 7 days old are
+       relics from the pre-asset-kind era (the 8 from 2026-04-20
+       in the audit). Closing them with a synthetic exit_reason
+       preserves the audit trail and unblocks the reconciler from
+       repeatedly trying to match them. Only zeroes out trades
+       with no recent activity (no exit_price, no exit_date)
+       to avoid clobbering any in-flight close.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    # --- A. oos_win_rate corruption sweep ---
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET oos_win_rate = NULL
+        WHERE oos_win_rate IS NOT NULL AND oos_win_rate::text = 'NaN'
+        """
+    ))
+    conn.commit()
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET oos_win_rate = oos_win_rate / 100.0
+        WHERE oos_win_rate IS NOT NULL
+          AND oos_win_rate::text <> 'NaN'
+          AND oos_win_rate > 1.0
+        """
+    ))
+    conn.commit()
+
+    # --- B. oos_avg_return_pct NaN sweep ---
+    conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET oos_avg_return_pct = NULL
+        WHERE oos_avg_return_pct IS NOT NULL AND oos_avg_return_pct::text = 'NaN'
+        """
+    ))
+    conn.commit()
+
+    # --- A2. CHECK constraint (idempotent) ---
+    row = conn.execute(text(
+        """
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        WHERE t.relname = 'scan_patterns'
+          AND c.conname = 'chk_scan_patterns_oos_win_rate_range'
+        """
+    )).fetchone()
+    if not row:
+        conn.execute(text(
+            """
+            ALTER TABLE scan_patterns
+            ADD CONSTRAINT chk_scan_patterns_oos_win_rate_range
+            CHECK (
+                oos_win_rate IS NULL
+                OR (oos_win_rate >= 0.0 AND oos_win_rate <= 1.0)
+            ) NOT VALID
+            """
+        ))
+        conn.commit()
+        # Now safe to validate — corruptions cleaned in steps A above.
+        conn.execute(text(
+            "ALTER TABLE scan_patterns VALIDATE CONSTRAINT "
+            "chk_scan_patterns_oos_win_rate_range"
+        ))
+        conn.commit()
+
+    # --- C. zombie trade reconciliation ---
+    if "trading_trades" in _tables(conn):
+        # C1: Broker-says-filled but DB-says-open (trade 386 in audit).
+        # The exit columns were populated by some upstream path (broker
+        # sync, dup_coid recovery, etc.) that didn't pair the writes with
+        # status='closed'. Force-close so reconciler / portfolio loops
+        # stop endlessly retrying. PnL is computed from existing entry
+        # and exit prices to be honest about the realized outcome.
+        conn.execute(text(
+            """
+            UPDATE trading_trades
+            SET status = 'closed',
+                pnl = COALESCE(pnl,
+                    CASE
+                        WHEN entry_price IS NOT NULL AND exit_price IS NOT NULL
+                          AND COALESCE(quantity, 0) > 0
+                        THEN ROUND(
+                            ((exit_price - entry_price) * quantity)::numeric,
+                            4
+                        )
+                        ELSE pnl
+                    END
+                )
+            WHERE status = 'open'
+              AND broker_status = 'filled'
+              AND exit_price IS NOT NULL
+              AND exit_reason IS NOT NULL
+            """
+        ))
+        conn.commit()
+
+        # C2: True zombies — open trades with no broker liaison and old
+        # entry_dates (the 8 from 2026-04-20). Synthetic close to clear
+        # the reconciler queue.
+        conn.execute(text(
+            """
+            UPDATE trading_trades
+            SET status = 'closed',
+                exit_reason = COALESCE(exit_reason, 'zombie_reconcile_orphan'),
+                exit_date = COALESCE(exit_date, CURRENT_TIMESTAMP),
+                exit_price = COALESCE(exit_price, entry_price)
+            WHERE status = 'open'
+              AND (broker_status IS NULL OR broker_status = '')
+              AND entry_date IS NOT NULL
+              AND entry_date < NOW() - INTERVAL '7 days'
+              AND exit_price IS NULL
+            """
+        ))
+        conn.commit()
+
+        # C3: Trade 404 ETH-USD (audit critical #4) — entry_price=0
+        # because broker fill never backfilled. Until broker_sync can
+        # repair it, mark the row so it can't compute infinite ROI on
+        # close. The reconciler should still try to repair via
+        # broker_account_repair, but this prevents poison data
+        # propagating to ledger / KPIs.
+        conn.execute(text(
+            """
+            UPDATE trading_trades
+            SET notes = COALESCE(notes, '')
+                || '\\n[mig200] entry_price=0 — broker fill missing; '
+                || 'requires broker_account_repair before close'
+            WHERE status = 'open'
+              AND ticker = 'ETH-USD'
+              AND (entry_price IS NULL OR entry_price <= 0)
+              AND notes NOT LIKE '%[mig200]%'
+            """
+        ))
+        conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -13247,6 +13410,7 @@ MIGRATIONS = [
     ("197_promote_top_backtest_evidence", _migration_197_promote_top_backtest_evidence),
     ("198_seed_short_swing_patterns", _migration_198_seed_short_swing_patterns),
     ("199_widen_promotion_honestly", _migration_199_widen_promotion_honestly),
+    ("200_cleanup_oos_columns_and_zombies", _migration_200_cleanup_oos_columns_and_zombies),
 ]
 
 

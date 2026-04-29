@@ -813,7 +813,13 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
             ov = dict(sp.oos_validation_json or {}) if isinstance(sp.oos_validation_json, dict) else {}
             dm = ov.get("decay_monitor") or {}
             n_live = int(dm.get("live_n_closed") or 0)
-            conf = float(getattr(sp, "confidence", 0.5) or 0.5)
+            # 2026-04-28 audit fix: don't collapse confidence=0.0 to 0.5.
+            # The previous `or 0.5` falsy-coerced legitimate zero-confidence
+            # patterns (which should retire at the < 0.15 threshold below)
+            # back to the default 0.5, leaving them undead. Same bug class
+            # as mig 193's percent-as-fraction at the WR sites.
+            _conf_raw = getattr(sp, "confidence", None)
+            conf = float(_conf_raw) if _conf_raw is not None else 0.5
             last_trade_str = dm.get("updated_at")
             last_active = None
             if last_trade_str:

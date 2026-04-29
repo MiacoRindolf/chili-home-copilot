@@ -12,10 +12,47 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 from datetime import datetime, timedelta
 from typing import Any
+
+
+def _safe_fraction_from_pct(pct_value: float | None) -> float | None:
+    """Convert a percent (0-100) value to fraction (0-1) with NaN/inf guard.
+
+    Source columns ``win_rate`` and ``oos_win_rate`` on ``scan_patterns`` are
+    fraction-typed and CHECK-constrained to [0, 1] (see migration 193). The
+    upstream backtest result dict reports win_rate in percent units (line 522
+    ``if wr > 50: wins += 1`` proves it). Without this conversion the patch
+    would either violate the CHECK or — for ``oos_win_rate`` which has no
+    constraint — silently store percent-as-fraction (the 2026-04-28 audit
+    finding). Also guards against NaN: ``round(float('nan'), 2)`` returns
+    ``nan`` which would otherwise leak into the column.
+    """
+    if pct_value is None:
+        return None
+    try:
+        v = float(pct_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v):
+        return None
+    return round(max(0.0, min(1.0, v / 100.0)), 4)
+
+
+def _safe_pct(pct_value: float | None) -> float | None:
+    """Round a percent value (e.g. avg_return_pct) with NaN/inf guard."""
+    if pct_value is None:
+        return None
+    try:
+        v = float(pct_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v):
+        return None
+    return round(v, 2)
 
 import requests
 from sqlalchemy.orm import Session
@@ -593,15 +630,23 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
             "walk_forward": wf_audit,
         }
 
+        # 2026-04-28 audit fix: win_rate / oos_win_rate columns are
+        # fraction-typed [0, 1] (CHECK constraint on win_rate from mig 193).
+        # Upstream `mean_is_wr` / `mean_oos_wr` are in PERCENT units (line 522
+        # `if wr > 50` proves it). Without _safe_fraction_from_pct this either
+        # violated the CHECK or — for oos_win_rate which has no constraint
+        # yet — silently stored ~65.3 where readers expected ~0.65 (the
+        # 30-pattern corruption noted in the 2026-04-28 audit).
+        # Also guards against NaN bleeding through (mig 193's bug type).
         patch: dict[str, Any] = {
             "confidence": round(confidence, 3),
-            "win_rate": round(mean_is_wr, 1),
-            "avg_return_pct": round(avg_return, 2),
+            "win_rate": _safe_fraction_from_pct(mean_is_wr),
+            "avg_return_pct": _safe_pct(avg_return),
             "backtest_count": total,
             "evidence_count": total,
             "promotion_status": prom_stat,
-            "oos_win_rate": round(mean_oos_wr, 1) if mean_oos_wr is not None else None,
-            "oos_avg_return_pct": round(mean_oos_ret, 2) if mean_oos_ret is not None else None,
+            "oos_win_rate": _safe_fraction_from_pct(mean_oos_wr),
+            "oos_avg_return_pct": _safe_pct(mean_oos_ret),
             "oos_trade_count": oos_trade_sum if oos_trade_sum else None,
             "backtest_spread_used": bt_kw.get("spread"),
             "backtest_commission_used": bt_kw.get("commission"),
