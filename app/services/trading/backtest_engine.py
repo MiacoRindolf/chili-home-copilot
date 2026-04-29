@@ -727,73 +727,45 @@ def hydrate_scan_pattern_rules_json(
     pattern,
     insight=None,
 ) -> bool:
-    """Persist ``rules_json.conditions`` by parsing NL from pattern/insight when missing.
+    """Return True iff the pattern has usable structured ``rules_json``.
 
-    Skips the shared legacy-unlinked sentinel (many insights reference one row).
-    Returns True if the pattern now has usable conditions (including already-valid JSON).
+    FIX 41 (architectural fix, 2026-04-29):
+
+    Previous versions of this function tried to "hydrate" missing rules by
+    parsing NL from the pattern's name/description (e.g. "Crypto VWAP
+    Reclaim" → guess at conditions). That was lossy and dangerous: the
+    parser couldn't recognize indicators it didn't have hand-coded vocabulary
+    for, so it would either return 0 conditions (silently breaking the
+    backtest) or return *wrong* conditions that didn't match the operator's
+    intent. Worse, when it succeeded it would *overwrite* good structured
+    JSONB data with stringified JSON, corrupting the column type.
+
+    Pattern conditions are now strictly structured data:
+
+      * Pattern producers (mig 203 seeds, web_pattern_researcher,
+        learning.py mining, crypto/pattern_miner.py) MUST emit ``rules_json``
+        as a dict with a ``conditions`` list of dicts — never as parsed text.
+      * Consumers read JSONB directly via ``_rules_tuple_from_scan_pattern``,
+        which now accepts both dict (correct) and str (legacy/repaired by
+        mig 204) shapes.
+      * If a pattern has no structured rules, this function returns False
+        and ``_find_linked_pattern`` returns None — the pattern is treated
+        as misconfigured and skipped, with a clear log line. We do NOT
+        silently invent conditions.
+
+    The ``insight`` parameter is kept for signature compatibility with
+    existing callers but is no longer consulted.
     """
-    import json as _json
-
-    from .pattern_resolution import is_legacy_unlinked_scan_pattern
-
     if not pattern:
         return False
     if _rules_tuple_from_scan_pattern(pattern):
         return True
-    if is_legacy_unlinked_scan_pattern(pattern):
-        return False
-
-    from ...models.trading import TradingInsight
-
-    texts = _text_sources_for_rule_hydration(pattern, insight)
-    seen_txt = set(texts)
-    for (_pd,) in (
-        db.query(TradingInsight.pattern_description)
-        .filter(TradingInsight.scan_pattern_id == int(pattern.id))
-        .order_by(
-            TradingInsight.evidence_count.desc().nullslast(),
-            TradingInsight.id.desc(),
-        )
-        .limit(5)
-        .all()
-    ):
-        s = (_pd or "").strip()
-        if len(s) >= 8 and s not in seen_txt:
-            seen_txt.add(s)
-            texts.append(s)
-
-    for txt in texts:
-        conds = _parse_conditions_from_description(txt)
-        if not conds:
-            continue
-        try:
-            # FIX 40 (Bug #46, 2026-04-29): rules_json is a JSONB column;
-            # SQLAlchemy serializes a dict directly. Storing as JSON string
-            # via ``_json.dumps`` previously double-encoded the value (the
-            # string itself becomes a JSON-string-of-JSON in the DB), which
-            # round-tripped fine via the legacy str-only path but is wrong
-            # for JSONB. Native dict matches column type cleanly.
-            pattern.rules_json = {"conditions": conds}
-            db.add(pattern)
-            db.commit()
-            db.refresh(pattern)
-            logger.info(
-                "[backtest_engine] Hydrated ScanPattern id=%s rules_json (%d conditions) from parsed text",
-                pattern.id,
-                len(conds),
-            )
-            return _rules_tuple_from_scan_pattern(pattern) is not None
-        except Exception as exc:
-            logger.warning(
-                "[backtest_engine] Failed to persist rules_json for ScanPattern id=%s: %s",
-                getattr(pattern, "id", None),
-                exc,
-            )
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            return False
+    logger.warning(
+        "[backtest_engine] ScanPattern id=%s (%r) has no structured rules_json — "
+        "skipping (FIX 41: NL hydration disabled). Producer must emit conditions.",
+        getattr(pattern, "id", None),
+        (getattr(pattern, "name", None) or "")[:80],
+    )
     return False
 
 

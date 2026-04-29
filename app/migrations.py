@@ -13499,6 +13499,81 @@ def _migration_203_seed_crypto_native_patterns(conn) -> None:
     conn.commit()
 
 
+def _migration_204_repair_rules_json_dict_types(conn) -> None:
+    """Repair scan_patterns.rules_json rows stored as JSON-string-of-JSON.
+
+    FIX 41 (architectural fix, 2026-04-29):
+
+    ``rules_json`` and ``exit_config`` are JSONB columns. Code paths that
+    assigned ``json.dumps(...)`` (a Python string) caused psycopg2 to store
+    the literal string AS A JSONB STRING — i.e. JSONB type ``string`` rather
+    than ``object``. This round-tripped fine via the legacy str-only parser
+    in ``backtest_engine._rules_tuple_from_scan_pattern``, but rejected
+    cleanly-typed JSONB objects (mig 203 seeds), and the NL hydration
+    fallback for those would *overwrite* good structured data with bad
+    string-typed data on first call.
+
+    Hot path that demonstrated the bug: 4 of 10 mig 203 seeds (1194, 1196,
+    1197, 1198) had their structured JSONB conditions clobbered to JSONB-
+    string by hydrate_scan_pattern_rules_json. The other 6 stayed as
+    objects but were skipped by the type check, so they never produced
+    backtests.
+
+    This migration:
+      1. Identifies all rules_json / exit_config rows where
+         ``jsonb_typeof = 'string'``.
+      2. Unwraps the JSON string and re-stores as JSONB object.
+      3. Logs a count for ops visibility.
+
+    Safe to re-run: the WHERE clause filters to string-typed rows only.
+    """
+    from sqlalchemy import text as _text
+
+    # rules_json
+    res = conn.execute(_text(
+        """
+        UPDATE scan_patterns
+        SET rules_json = (rules_json #>> '{}')::jsonb
+        WHERE jsonb_typeof(rules_json) = 'string'
+        RETURNING id
+        """
+    ))
+    rules_repaired = res.rowcount or 0
+
+    # exit_config (same JSONB-string corruption can happen here)
+    res2 = conn.execute(_text(
+        """
+        UPDATE scan_patterns
+        SET exit_config = (exit_config #>> '{}')::jsonb
+        WHERE exit_config IS NOT NULL
+          AND jsonb_typeof(exit_config) = 'string'
+        RETURNING id
+        """
+    ))
+    exit_cfg_repaired = res2.rowcount or 0
+
+    # Audit row in trading_learning_events (correct table name).
+    try:
+        conn.execute(_text(
+            """
+            INSERT INTO trading_learning_events
+                (user_id, event_type, description, related_insight_id, created_at)
+            VALUES
+                (NULL, 'migration_204', :msg, NULL, CURRENT_TIMESTAMP)
+            """
+        ), {
+            "msg": (
+                f"mig 204 repaired rules_json={rules_repaired} "
+                f"exit_config={exit_cfg_repaired} JSONB-string rows -> object"
+            )
+        })
+    except Exception:
+        # Audit insert is best-effort — don't fail the migration if the
+        # learning_events table shape ever differs.
+        pass
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -13712,6 +13787,7 @@ MIGRATIONS = [
     ("201_cancel_phantom_trades", _migration_201_cancel_phantom_trades),
     ("202_realized_pnl_repromotion", _migration_202_realized_pnl_repromotion),
     ("203_seed_crypto_native_patterns", _migration_203_seed_crypto_native_patterns),
+    ("204_repair_rules_json_dict_types", _migration_204_repair_rules_json_dict_types),
 ]
 
 

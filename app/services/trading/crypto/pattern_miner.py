@@ -300,6 +300,13 @@ def _spawn_variant_pattern(
     if not base_conditions:
         return None
 
+    # FIX 41 (architectural fix, 2026-04-29): we serialize to JSON-string
+    # here so the SQL ``CAST(:rules AS jsonb)`` below can parse it cleanly
+    # back into a JSONB *object* (not a JSONB string). This is the same
+    # pattern mig 203 uses. The corruption that mig 204 repaired came from
+    # an ORM-attribute assignment in ``hydrate_scan_pattern_rules_json`` —
+    # not this SQL path. Keep the explicit CAST so the storage type is
+    # always object regardless of how the bind layer adapts the value.
     rules_json = json.dumps({"conditions": base_conditions})
     description = (
         f"Auto-mined from {n_winners} profitable crypto trade(s) sharing "
