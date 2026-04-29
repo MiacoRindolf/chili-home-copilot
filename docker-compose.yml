@@ -525,6 +525,65 @@ services:
           cpus: "1.5"
           memory: 2G
 
+  # FIX 45b (2026-04-29): broker-sync hot lane. Owns ALL broker-call jobs:
+  # Robinhood order+position sync, bracket reconciliation, stuck-order
+  # watchdog, execution-event lag gauge, drift escalation watchdog,
+  # day-trade fast stop monitor, crypto stop-loss monitor. These all hit
+  # external broker APIs at high cadence; isolating them gives:
+  #   * Single network egress lane for broker traffic. If host firewall
+  #     rate-limits the source IP, ONLY this container is affected.
+  #   * Independent restart granularity. Broker reconciliation issue?
+  #     Restart broker-sync-worker without disturbing scanners or autotrader.
+  #   * Clean memory profile. If RSS grows steadily here, leak source is
+  #     in the broker-sync code path; isolated bisection.
+  broker-sync-worker:
+    image: chili-app:local
+    restart: unless-stopped
+    labels:
+      com.chili.service: broker-sync-worker
+      com.chili.entrypoint: scheduler_worker
+    command: ["python", "scripts/scheduler_worker.py"]
+    env_file:
+      - path: .env
+        required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - OLLAMA_HOST=http://ollama:11434
+      - CHILI_SCHEDULER_ROLE=broker_sync_only
+      - CHILI_SCHEDULER_EMIT_HEARTBEAT=0
+      - DATABASE_POOL_SIZE=12
+      - DATABASE_MAX_OVERFLOW=20
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
+      - CHILI_RUNNING_IN_DOCKER=1
+      - CHILI_CONTAINER_CPU_LIMIT=2
+      - PYTHONUNBUFFERED=1
+      # FIX 33 carry-over for broker-call timeouts.
+      - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
+      - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
+    volumes:
+      - D:/CHILI-Docker/chili-data:/app/data
+      - ./app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    deploy:
+      resources:
+        # Tight envelope to surface leaks. Broker sync is small workload —
+        # if it hits 4G, something is wrong.
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 768M
+
   # FIX 45a (2026-04-29): dedicated autotrader hot loop. Isolates the autotrader
   # tick (every 10s) + monitor (every 30s) from the slow cron jobs in
   # scheduler-worker. Rationale:

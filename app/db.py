@@ -30,7 +30,20 @@ if not _app_name:
     if "brain_worker" in argv0:
         _app_name = "chili-brain-worker"
     elif "scheduler" in argv0 or os.environ.get("CHILI_SCHEDULER_ROLE") not in (None, "", "none"):
-        _app_name = "chili-scheduler"
+        # FIX 45a follow-up (2026-04-29): derive app_name from scheduler role
+        # so per-container DB activity is distinguishable in pg_stat_activity.
+        # Without this, autotrader-worker + broker-sync-worker + scheduler-
+        # worker all show as "chili-scheduler" — defeats the whole point of
+        # the container split for diagnostic purposes.
+        _role = (os.environ.get("CHILI_SCHEDULER_ROLE") or "").strip().lower()
+        if _role == "autotrader_only":
+            _app_name = "chili-autotrader-worker"
+        elif _role == "broker_sync_only":
+            _app_name = "chili-broker-sync-worker"
+        elif _role == "cron_only":
+            _app_name = "chili-scheduler-cron"
+        else:
+            _app_name = "chili-scheduler"
     elif "pytest" in argv0:
         _app_name = "chili-pytest"
     else:

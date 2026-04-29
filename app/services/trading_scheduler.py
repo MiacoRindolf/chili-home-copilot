@@ -2918,26 +2918,37 @@ def start_scheduler():
                 role,
             )
             return
-        # FIX 45a (2026-04-29): added 'autotrader_only' and 'cron_only' for the
-        # container-isolation refactor. Goal: autotrader's broker-call hot loop
-        # (every 10s) lives in its own container so its connection storms can't
-        # pollute the scanners' network state or share fate with leak-prone
-        # cron jobs. ``autotrader_only`` registers ONLY autotrader tick +
-        # monitor; ``cron_only`` registers everything EXCEPT those.
-        if role not in ("all", "web", "worker", "autotrader_only", "cron_only"):
+        # FIX 45a/b (2026-04-29): added 'autotrader_only', 'cron_only', and
+        # 'broker_sync_only' for the container-isolation refactor. Goal: the
+        # scheduler's heterogeneous workload is split by domain so each
+        # container has its own crash domain, memory profile, and network
+        # egress accounting. The 8.9GB scheduler-worker memory bloat was
+        # driven by autotrader (10s broker calls), broker_sync (every 2min),
+        # bracket reconciliation, etc. all sharing one heap with 4-minute
+        # scanners + momentum runners.
+        if role not in (
+            "all", "web", "worker",
+            "autotrader_only", "cron_only", "broker_sync_only",
+        ):
             logger.warning(
                 "[scheduler] invalid CHILI_SCHEDULER_ROLE=%r; using 'all' "
                 "(if you meant API-only web, set none and rebuild image — see docker-compose.yml)",
                 role,
             )
             role = "all"
-        # cron_only = legacy 'worker' role minus autotrader (so the existing
-        # scheduler-worker container drops autotrader without losing scanners).
+        # cron_only = legacy 'worker' role minus autotrader minus broker_sync
+        # (so scheduler-worker container drops both hot-loop call paths).
         include_heavy = role in ("all", "worker", "cron_only")
         include_web_light = role in ("all", "web", "cron_only")
         # autotrader_only registers ONLY autotrader jobs. 'all'/'worker' still
         # include them (legacy behavior preserved). 'cron_only' excludes them.
         include_autotrader = role in ("all", "worker", "autotrader_only")
+        # FIX 45b (2026-04-29): broker-sync jobs (RH order sync, bracket
+        # reconciliation, stuck-order watchdog, exec lag gauge, drift escalation,
+        # daytrade fast monitor, crypto stop monitor) are network-heavy and
+        # share fate with autotrader. Pulled into their own container so a
+        # broker-call storm only affects this lane.
+        include_broker_sync = role in ("all", "web", "worker", "broker_sync_only")
         _hb_env = os.environ.get("CHILI_SCHEDULER_EMIT_HEARTBEAT", "").strip().lower()
         emit_worker_heartbeat = role == "worker" or (
             role == "all" and _hb_env in ("1", "true", "yes", "on")
@@ -3008,105 +3019,117 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=45),
             )
 
-        if include_web_light:
-            _scheduler.add_job(
-                _run_weekly_review_job,
-                trigger=CronTrigger(day_of_week="sun", hour=18, minute=0),
-                id="weekly_review",
-                name="Weekly performance review",
-                replace_existing=True,
-                max_instances=1,
-            )
+        # FIX 45b (2026-04-29): broker-related jobs (broker_sync, daytrade_fast,
+        # crypto_stop) are gated on include_broker_sync so they migrate to the
+        # broker-sync-worker container. Non-broker jobs (weekly_review,
+        # price_monitor) stay on include_web_light. The outer disjunction
+        # ensures broker_sync_only role still enters this block.
+        if include_web_light or include_broker_sync:
+            if include_web_light:
+                _scheduler.add_job(
+                    _run_weekly_review_job,
+                    trigger=CronTrigger(day_of_week="sun", hour=18, minute=0),
+                    id="weekly_review",
+                    name="Weekly performance review",
+                    replace_existing=True,
+                    max_instances=1,
+                )
 
-            _scheduler.add_job(
-                _run_broker_sync_job,
-                trigger=CronTrigger(
-                    day_of_week="mon-fri",
-                    hour="8-20",
-                    minute="*/2",
-                    timezone="US/Eastern",
-                ),
-                id="broker_sync",
-                name="Robinhood order+position sync (ET 8am-8pm every 2min)",
-                replace_existing=True,
-                max_instances=1,
-            )
+            if include_broker_sync:
+                _scheduler.add_job(
+                    _run_broker_sync_job,
+                    trigger=CronTrigger(
+                        day_of_week="mon-fri",
+                        hour="8-20",
+                        minute="*/2",
+                        timezone="US/Eastern",
+                    ),
+                    id="broker_sync",
+                    name="Robinhood order+position sync (ET 8am-8pm every 2min)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
 
-            _scheduler.add_job(
-                _run_price_monitor_job,
-                trigger=CronTrigger(
-                    day_of_week="mon-fri",
-                    hour="8-20",
-                    minute="*/5",
-                    timezone="US/Eastern",
-                ),
-                id="price_monitor",
-                name="Price monitor & alerts (ET 8am-8pm every 5min)",
-                replace_existing=True,
-                max_instances=1,
-            )
+            if include_web_light:
+                _scheduler.add_job(
+                    _run_price_monitor_job,
+                    trigger=CronTrigger(
+                        day_of_week="mon-fri",
+                        hour="8-20",
+                        minute="*/5",
+                        timezone="US/Eastern",
+                    ),
+                    id="price_monitor",
+                    name="Price monitor & alerts (ET 8am-8pm every 5min)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
 
-            _scheduler.add_job(
-                _run_daytrade_fast_monitor_job,
-                trigger=CronTrigger(
-                    day_of_week="mon-fri",
-                    hour="9-16",
-                    minute="*/1",
-                ),
-                id="daytrade_fast_monitor",
-                name="Day-trade fast stop/exit monitor (market hours every 1min)",
-                replace_existing=True,
-                max_instances=1,
-            )
+            if include_broker_sync:
+                _scheduler.add_job(
+                    _run_daytrade_fast_monitor_job,
+                    trigger=CronTrigger(
+                        day_of_week="mon-fri",
+                        hour="9-16",
+                        minute="*/1",
+                    ),
+                    id="daytrade_fast_monitor",
+                    name="Day-trade fast stop/exit monitor (market hours every 1min)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
 
-            _scheduler.add_job(
-                _run_crypto_stop_monitor_job,
-                trigger=IntervalTrigger(minutes=2),
-                id="crypto_stop_monitor",
-                name="Crypto stop-loss monitor (every 2min, 24/7)",
-                replace_existing=True,
-                max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=30),
-            )
+                _scheduler.add_job(
+                    _run_crypto_stop_monitor_job,
+                    trigger=IntervalTrigger(minutes=2),
+                    id="crypto_stop_monitor",
+                    name="Crypto stop-loss monitor (every 2min, 24/7)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=30),
+                )
 
-            _scheduler.add_job(
-                _run_pattern_position_monitor_job,
-                trigger=IntervalTrigger(minutes=30),
-                id="pattern_position_monitor",
-                name="Pattern position monitor heartbeat (every 30min, event-driven primary)",
-                replace_existing=True,
-                max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=45),
-            )
+            # FIX 45b: remaining non-broker jobs in this block stay gated on
+            # include_web_light so they don't fire for broker_sync_only role.
+            if include_web_light:
+                _scheduler.add_job(
+                    _run_pattern_position_monitor_job,
+                    trigger=IntervalTrigger(minutes=30),
+                    id="pattern_position_monitor",
+                    name="Pattern position monitor heartbeat (every 30min, event-driven primary)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=45),
+                )
 
-            _scheduler.add_job(
-                _run_intraday_signal_sweep_job,
-                trigger=IntervalTrigger(minutes=15),
-                id="intraday_signal_sweep",
-                name="Intraday signal sweep (every 15min)",
-                replace_existing=True,
-                max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=55),
-            )
+                _scheduler.add_job(
+                    _run_intraday_signal_sweep_job,
+                    trigger=IntervalTrigger(minutes=15),
+                    id="intraday_signal_sweep",
+                    name="Intraday signal sweep (every 15min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=55),
+                )
 
-            _scheduler.add_job(
-                _run_brain_batch_reconciler_job,
-                trigger=IntervalTrigger(minutes=5),
-                id="brain_batch_reconciler",
-                name="Stale brain_batch_jobs reconciler (every 5min)",
-                replace_existing=True,
-                max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=20),
-            )
+                _scheduler.add_job(
+                    _run_brain_batch_reconciler_job,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="brain_batch_reconciler",
+                    name="Stale brain_batch_jobs reconciler (every 5min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=20),
+                )
 
-            _scheduler.add_job(
-                _run_promotion_evidence_audit_job,
-                trigger=CronTrigger(hour=2, minute=15, timezone="America/Los_Angeles"),
-                id="promotion_evidence_audit",
-                name="Promotion-evidence audit (daily, 02:15 PT)",
-                replace_existing=True,
-                max_instances=1,
-            )
+                _scheduler.add_job(
+                    _run_promotion_evidence_audit_job,
+                    trigger=CronTrigger(hour=2, minute=15, timezone="America/Los_Angeles"),
+                    id="promotion_evidence_audit",
+                    name="Promotion-evidence audit (daily, 02:15 PT)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
 
         if include_heavy:
             _scheduler.add_job(
@@ -3207,11 +3230,13 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=30),
             )
 
-        # FIX 45a: stuck-order / execution-event-lag / drift-escalation are
-        # broker-adjacent watchdogs but NOT the autotrader hot loop itself.
-        # They stay with cron_only for now; phase 45b will pull broker-sync
-        # related jobs (these + broker_sync sweep) into their own container.
-        if include_heavy or include_web_light:
+        # FIX 45b (2026-04-29): stuck-order / execution-event-lag / drift-
+        # escalation are broker-adjacent watchdogs and now live in
+        # broker-sync-worker (role=broker_sync_only). They have their own
+        # connection pool to broker APIs and share fate with broker_sync +
+        # bracket reconciliation. Gated on include_broker_sync so cron_only
+        # role doesn't register them.
+        if include_broker_sync:
             _stuck_s = max(
                 15,
                 int(getattr(settings, "chili_stuck_order_watchdog_interval_seconds", 60)),
@@ -3422,7 +3447,10 @@ def start_scheduler():
         try:
             _brk_mode = (getattr(settings, "brain_live_brackets_mode", "off") or "off").lower()
             _brk_interval_s = int(getattr(settings, "brain_live_brackets_reconciliation_interval_s", 60) or 60)
-            if include_web_light and _brk_mode not in ("off", "authoritative"):
+            # FIX 45b (2026-04-29): bracket reconciliation belongs to broker-
+            # sync-worker — it sweeps broker order state and is part of the
+            # broker-call surface area we want isolated.
+            if include_broker_sync and _brk_mode not in ("off", "authoritative"):
                 _scheduler.add_job(
                     _run_bracket_reconciliation_job,
                     trigger=IntervalTrigger(seconds=_brk_interval_s),
