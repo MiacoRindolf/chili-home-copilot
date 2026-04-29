@@ -72,6 +72,18 @@ def _poll_once() -> tuple[int, int]:
 
     warn_sec = _env_int("CHILI_DB_WATCHDOG_WARN_SEC", 120)
     kill_sec = _env_int("CHILI_DB_WATCHDOG_KILL_SEC", 600)
+    # FIX 32 (deep audit 2026-04-28): exempt the brain-worker from the
+    # default 10-min kill. The reconcile pass legitimately holds a
+    # session for 13+ minutes (mining, backtesting, prediction emit).
+    # Without exemption, FIX 5 was killing the brain-worker mid-cycle
+    # and triggering the same 'server closed the connection
+    # unexpectedly' that FIX 13/14 was meant to prevent.
+    #
+    # The brain-worker gets its own threshold via CHILI_DB_WATCHDOG_
+    # BRAIN_WORKER_KILL_SEC (default 1800s = 30min). Backtest children
+    # (multiprocess workers) also get the longer threshold because
+    # their backtests can run for many minutes.
+    bw_kill_sec = _env_int("CHILI_DB_WATCHDOG_BRAIN_WORKER_KILL_SEC", 1800)
 
     warned = 0
     killed = 0
@@ -83,6 +95,7 @@ def _poll_once() -> tuple[int, int]:
             """
             SELECT pid,
                    EXTRACT(EPOCH FROM (now() - query_start))::bigint AS dur_s,
+                   coalesce(application_name, '') AS app,
                    left(query, 120) AS q
             FROM pg_stat_activity
             WHERE state = 'idle in transaction'
@@ -95,12 +108,20 @@ def _poll_once() -> tuple[int, int]:
 
         for r in rows:
             dur_s = int(r.dur_s or 0)
-            if dur_s >= kill_sec:
+            app = (r.app or "").strip()
+            # FIX 32: per-application_name kill thresholds. Brain-worker
+            # and backtest-children get a longer leash; everything else
+            # uses the standard kill_sec.
+            if app in ("chili-brain-worker", "chili-backtest-child"):
+                effective_kill = bw_kill_sec
+            else:
+                effective_kill = kill_sec
+            if dur_s >= effective_kill:
                 # Auto-terminate: log first so we have an audit trail even if
                 # something downstream eats the kill result.
                 logger.warning(
-                    "[db_watchdog] terminating idle-in-tx pid=%s held for %ds (>= %d kill threshold) query=%s",
-                    r.pid, dur_s, kill_sec, r.q,
+                    "[db_watchdog] terminating idle-in-tx pid=%s app=%s held for %ds (>= %d kill threshold) query=%s",
+                    r.pid, app or "<none>", dur_s, effective_kill, r.q,
                 )
                 try:
                     sess.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": r.pid})
@@ -111,8 +132,8 @@ def _poll_once() -> tuple[int, int]:
                     sess.rollback()
             else:
                 logger.warning(
-                    "[db_watchdog] idle-in-tx pid=%s held for %ds (warn threshold %d) query=%s",
-                    r.pid, dur_s, warn_sec, r.q,
+                    "[db_watchdog] idle-in-tx pid=%s app=%s held for %ds (warn threshold %d, kill at %d) query=%s",
+                    r.pid, app or "<none>", dur_s, warn_sec, effective_kill, r.q,
                 )
                 warned += 1
     finally:

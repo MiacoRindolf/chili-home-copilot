@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -11,8 +12,34 @@ DATA_DIR.mkdir(exist_ok=True)
 # PostgreSQL only — DATABASE_URL validated in config (see .env.example).
 DATABASE_URL = settings.database_url
 
+# FIX 32 (deep audit 2026-04-28): set ``application_name`` on every PG
+# connection so db_watchdog can identify which process owns the session
+# and apply per-app kill thresholds. Without this, all sessions show
+# blank application_name in pg_stat_activity and the watchdog can't
+# distinguish a leaking chili API request from a legitimately long
+# brain-worker reconcile pass — leading to FIX 5 killing the wrong
+# sessions and triggering 'server closed the connection unexpectedly'.
+#
+# The brain-worker is launched via scripts/brain_worker.py (sys.argv[0]
+# contains 'brain_worker'). Other invocations (FastAPI, scheduler,
+# pytest, ad-hoc scripts) get a generic 'chili'. Override via
+# CHILI_APP_NAME env var when needed.
+_app_name = os.environ.get("CHILI_APP_NAME", "").strip()
+if not _app_name:
+    argv0 = (sys.argv[0] if sys.argv else "") or ""
+    if "brain_worker" in argv0:
+        _app_name = "chili-brain-worker"
+    elif "scheduler" in argv0 or os.environ.get("CHILI_SCHEDULER_ROLE") not in (None, "", "none"):
+        _app_name = "chili-scheduler"
+    elif "pytest" in argv0:
+        _app_name = "chili-pytest"
+    else:
+        _app_name = "chili-app"
+
 # Process-pool queue workers set CHILI_MP_BACKTEST_CHILD before first db import (see backtest_queue_worker).
 _mp_child = os.environ.get("CHILI_MP_BACKTEST_CHILD", "").strip().lower() in ("1", "true", "yes")
+if _mp_child:
+    _app_name = "chili-backtest-child"
 _pool_size = (
     settings.brain_mp_child_database_pool_size
     if _mp_child
@@ -49,6 +76,9 @@ engine = create_engine(
         "keepalives_idle": 30,
         "keepalives_interval": 5,
         "keepalives_count": 5,
+        # FIX 32: tag every connection with our application_name so
+        # db_watchdog can apply per-app kill thresholds.
+        "application_name": _app_name,
     },
 )
 
