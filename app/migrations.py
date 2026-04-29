@@ -13337,12 +13337,14 @@ def _migration_202_realized_pnl_repromotion(conn) -> None:
     conn.commit()
 
     # Demote 871, 875, 1031 — backtest-only promotions with 0 realized
-    # trades; let them re-prove themselves through the queue
+    # trades; let them re-prove themselves through the queue.
+    # NOTE: promotion_status column is varchar(32). Long descriptive
+    # reason goes in promotion_demote_reason which is text-typed.
     conn.execute(text(
         """
         UPDATE scan_patterns
         SET lifecycle_stage = 'challenged',
-            promotion_status = 'demoted_backtest_only_no_realized_evidence_202',
+            promotion_status = 'demoted_no_realized_ev_202',
             promotion_demote_reason = 'mig 199 promoted on backtest evidence; 0 realized trades after deploy. Re-prove through realized PnL.',
             updated_at = CURRENT_TIMESTAMP
         WHERE id IN (871, 875, 1031)
