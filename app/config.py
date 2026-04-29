@@ -842,6 +842,13 @@ class Settings(BaseSettings):
     chili_regime_gate_mode: str = "live"
     chili_regime_gate_min_trades: int = 5
     chili_regime_gate_max_age_days: int = 7
+    # FIX 10 (2026-04-28 deep audit): multi-dim consensus threshold. The
+    # gate consults all four dimensions (ticker_regime, breadth_regime,
+    # cross_asset_regime, vol_regime) and BLOCKS only when at least this
+    # many dimensions show confident-negative EV. 2-of-4 was operator-
+    # selected: prevents single-dim noise from over-blocking while still
+    # catching cases where multiple dimensions agree on regime risk.
+    chili_regime_gate_min_negatives: int = 2
     # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM
     # (memory safety for patterns with huge trading_pattern_trades). 0 = no cap.
     chili_cpcv_max_labeled_rows: int = 0
