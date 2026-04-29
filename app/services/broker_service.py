@@ -1194,6 +1194,28 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         if not qty or qty <= 0:
             continue
 
+        # FIX 47 (2026-04-29): skip positions where the broker returned a
+        # zero/missing average price. Some legacy Robinhood crypto holdings
+        # (observed with ETH-USD) come back with qty > 0 but
+        # average_buy_price == 0 — likely because the position predates the
+        # API field or sits on a deprecated nummus shard. The Trade model's
+        # @validates("entry_price") raises ValueError for entry_price <= 0,
+        # which crashed the WHOLE broker_sync run mid-iteration. Skipping the
+        # single bad ticker (with a warning log) lets the rest of the sync
+        # complete for healthy positions.
+        try:
+            _ap = float(avg_price or 0)
+        except (TypeError, ValueError):
+            _ap = 0.0
+        if _ap <= 0:
+            logger.warning(
+                "[broker_sync] skipping %s: broker returned qty=%s but avg_price=%r "
+                "(likely legacy/incomplete position data); not writing Trade row.",
+                ticker, qty, avg_price,
+            )
+            continue
+        avg_price = _ap
+
         existing = (
             db.query(Trade)
             .filter(
