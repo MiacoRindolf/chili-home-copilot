@@ -1831,6 +1831,78 @@ def _run_drift_escalation_watchdog_job():
         db.close()
 
 
+# Tracks the previous heap snapshot so the watcher can log DELTAS — that's
+# what surfaces a leak (steady positive growth in some object type), not the
+# instantaneous count.
+_mem_watcher_prev_counts: dict[str, int] = {}
+
+
+def _run_memory_watcher_job():
+    """FIX 49 (2026-04-29) — log the scheduler-worker's heap fingerprint.
+
+    After FIX 45a/b split scheduler into 3 containers and FIX 46 fixed the
+    scanner session leak, scheduler-cron still drifts ~1.2 GB/hour in
+    anonymous heap (RssAnon). Probe from outside (docker exec python -c)
+    only sees a fresh child interpreter, not PID 1, so the leak source
+    isn't visible from the host. This job runs IN-PROCESS, logging the
+    top object types and their delta vs the previous snapshot. A type
+    whose count grows steadily across snapshots IS the leak.
+
+    Cheap (~50ms): single gc.get_objects() pass, dict tally, log.
+    """
+    import gc as _gc
+    import os as _os
+
+    global _mem_watcher_prev_counts
+    try:
+        _gc.collect()
+        # RSS for context
+        try:
+            with open("/proc/self/status") as f:
+                _status = f.read()
+            _vm_rss_kb = 0
+            _vm_size_kb = 0
+            _threads = 0
+            for line in _status.splitlines():
+                if line.startswith("VmRSS:"):
+                    _vm_rss_kb = int(line.split()[1])
+                elif line.startswith("VmSize:"):
+                    _vm_size_kb = int(line.split()[1])
+                elif line.startswith("Threads:"):
+                    _threads = int(line.split()[1])
+        except Exception:
+            _vm_rss_kb = _vm_size_kb = _threads = 0
+
+        counts: dict[str, int] = {}
+        for obj in _gc.get_objects():
+            t = type(obj).__name__
+            counts[t] = counts.get(t, 0) + 1
+        total = sum(counts.values())
+
+        # Top 12 by absolute count
+        top_abs = sorted(counts.items(), key=lambda x: -x[1])[:12]
+        # Top 5 by delta (growth since last snapshot — signals the leak)
+        deltas = []
+        for t, n in counts.items():
+            d = n - _mem_watcher_prev_counts.get(t, n)
+            if d > 0:
+                deltas.append((d, t, n))
+        deltas.sort(reverse=True)
+        top_delta = deltas[:5]
+
+        logger.info(
+            "[mem_watcher] vm_rss=%dMB vm_size=%dMB threads=%d py_objects=%d "
+            "top_abs=%s top_delta_since_last=%s",
+            _vm_rss_kb // 1024, _vm_size_kb // 1024, _threads, total,
+            [(t, n) for t, n in top_abs[:6]],
+            [(t, f"+{d}", f"now={n}") for d, t, n in top_delta],
+        )
+
+        _mem_watcher_prev_counts = counts
+    except Exception as e:
+        logger.warning("[scheduler] memory_watcher tick failed: %s", e)
+
+
 _crypto_alert_cooldown: dict[str, float] = {}
 _stock_alert_cooldown: dict[str, float] = {}
 
@@ -3440,6 +3512,24 @@ def start_scheduler():
                 )
         except Exception:
             logger.exception("[scheduler] failed to register neural_mesh_drain job")
+
+        # FIX 49 (2026-04-29): in-process memory watcher. Logs heap fingerprint
+        # + delta vs previous tick every 5 minutes. Registered for ALL roles
+        # so we can compare scheduler-cron vs autotrader-worker vs broker-sync-
+        # worker memory profiles independently. Cheap (~50ms per tick).
+        try:
+            _mw_interval_s = max(60, int(getattr(settings, "chili_memory_watcher_interval_s", 300)))
+            _scheduler.add_job(
+                _run_memory_watcher_job,
+                trigger=IntervalTrigger(seconds=_mw_interval_s),
+                id="memory_watcher",
+                name=f"Memory watcher (every {_mw_interval_s}s, in-process)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=120),
+            )
+        except Exception:
+            logger.exception("[scheduler] failed to register memory_watcher job")
 
         # Phase G: bracket reconciliation sweep (shadow mode only).
         # Gated by brain_live_brackets_mode != off; authoritative is blocked
