@@ -31,24 +31,84 @@ _VIABILITY_BRIDGE_MAX_TICKERS = 30
 
 
 def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
-    """Run a scheduler callback with structured logs; swallow exceptions after logging.
+    """Run a scheduler callback with structured logs + brain_batch_jobs row;
+    swallow exceptions after logging.
 
     APScheduler must not crash the process on job failure; failures are recorded
     with ``logger.exception`` and a duration field for ops triage.
+
+    FIX (round 10, 2026-04-30): every guarded job now writes a baseline
+    brain_batch_jobs row (job_type=job_id) with status=ok/failed and
+    duration. Audit found 31 of 39 scheduled jobs were running but had
+    no operator-visible audit row. This wrapper closes the gap for all
+    of them in one place. Jobs that ALSO call brain_batch_job_begin/finish
+    inside _work() will write a second, richer row -- harmless duplication.
+
+    The batch_job write is fenced so a DB error never blocks the job
+    itself. Per the no-hardcoded-fallback rule: failure to record the
+    audit row is logged but not surfaced as a job failure.
     """
     import gc
 
     t0 = time.monotonic()
     logger.info("[scheduler_job] job_id=%s phase=start", job_id)
+
+    # Open a baseline batch_job row for ops visibility. Best-effort.
+    _wrapper_jid = None
+    _wrapper_db = None
+    try:
+        from ..db import SessionLocal as _SL
+        from .trading.brain_batch_job_log import (
+            brain_batch_job_begin as _bbj_begin,
+            brain_batch_job_finish as _bbj_finish,
+        )
+        from ..config import settings as _s
+        _uid = getattr(_s, "brain_default_user_id", None)
+        _wrapper_db = _SL()
+        _wrapper_jid = _bbj_begin(_wrapper_db, job_id, user_id=_uid)
+        _wrapper_db.commit()
+    except Exception:
+        logger.debug(
+            "[scheduler_job] job_id=%s baseline batch_job_begin failed; "
+            "job will run without operator-visible audit row",
+            job_id,
+            exc_info=True,
+        )
+        if _wrapper_db is not None:
+            try:
+                _wrapper_db.close()
+            except Exception:
+                pass
+            _wrapper_db = None
+        _wrapper_jid = None
+
     try:
         fn()
-    except Exception:
+    except Exception as exc:
         dur_ms = int((time.monotonic() - t0) * 1000)
         logger.exception(
             "[scheduler_job] job_id=%s phase=fail duration_ms=%s",
             job_id,
             dur_ms,
         )
+        if _wrapper_jid is not None and _wrapper_db is not None:
+            try:
+                _bbj_finish(
+                    _wrapper_db, _wrapper_jid, ok=False,
+                    error=str(exc)[:500],
+                    meta={"duration_ms": dur_ms, "wrapper": "run_scheduler_job_guarded"},
+                )
+                _wrapper_db.commit()
+            except Exception:
+                logger.debug(
+                    "[scheduler_job] job_id=%s baseline batch_job_finish(failed) failed",
+                    job_id, exc_info=True,
+                )
+        if _wrapper_db is not None:
+            try:
+                _wrapper_db.close()
+            except Exception:
+                pass
         gc.collect()
         return
     dur_ms = int((time.monotonic() - t0) * 1000)
@@ -57,6 +117,23 @@ def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
         job_id,
         dur_ms,
     )
+    if _wrapper_jid is not None and _wrapper_db is not None:
+        try:
+            _bbj_finish(
+                _wrapper_db, _wrapper_jid, ok=True,
+                meta={"duration_ms": dur_ms, "wrapper": "run_scheduler_job_guarded"},
+            )
+            _wrapper_db.commit()
+        except Exception:
+            logger.debug(
+                "[scheduler_job] job_id=%s baseline batch_job_finish(ok) failed",
+                job_id, exc_info=True,
+            )
+    if _wrapper_db is not None:
+        try:
+            _wrapper_db.close()
+        except Exception:
+            pass
     gc.collect()
 
 

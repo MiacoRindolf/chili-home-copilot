@@ -1,0 +1,36 @@
+fix(scheduler): round-10 systemic batch_job visibility gap
+
+Round 10 deeper-pass found that of the 39 jobs registered via
+`run_scheduler_job_guarded`, only 8 ever wrote rows to brain_batch_jobs
+(the scanners and heartbeat). The other 31 ran cleanly but left no
+audit trail in the table operators look at:
+  bracket_reconciliation, breadth_relstr_daily, breaker_heartbeat,
+  broker_sync, capital_reweight_weekly, cross_asset_daily,
+  crypto_stop_monitor, data_retention, daytrade_fast_monitor,
+  divergence_sweep_daily, drift_monitor_daily, fred_yield_curve_daily,
+  intraday_session_daily, macro_regime_daily,
+  momentum_live_runner_batch, momentum_paper_runner_batch,
+  monitor_decision_review, neural_mesh_drain, paper_trade_check,
+  pattern_position_monitor, pattern_regime_autopilot_tick,
+  pattern_regime_autopilot_weekly, pattern_regime_killswitch_daily,
+  pattern_regime_perf_daily, price_monitor, realized_ev_demote_pass,
+  regime_classifier_weekly, ticker_regime_daily, vol_dispersion_daily,
+  weekly_cpcv_backfill, weekly_review.
+
+`run_scheduler_job_guarded` was a logging-only wrapper. This commit
+makes it ALSO open + close a brain_batch_jobs row. Every guarded job
+now produces an operator-visible audit row with status=ok/failed and
+duration. Jobs that already had inline brain_batch_job_begin/finish
+calls will write a SECOND, richer row -- harmless duplication; the
+inline rich-meta row is still the canonical one.
+
+The batch_job writes are fully fenced: a DB failure during the audit
+write logs and skips, never blocks job execution itself.
+
+This closes the gap originally noticed for breaker_heartbeat +
+realized_ev_demote_pass in round 9, plus the 29 other jobs that had
+the same shape.
+
+Operator-visibility win: now any of the 39 scheduled jobs that
+silently fails (PG hiccup, code bug, dependency import error) shows
+up in brain_batch_jobs with status='failed' and the exception text.
