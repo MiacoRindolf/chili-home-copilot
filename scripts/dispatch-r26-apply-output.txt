@@ -1,0 +1,63 @@
+﻿# r26 apply exit-defer-on-reject 04/30/2026 13:16:10
+
+===== apply edit via Python script (host git works) =====
+inserted helper
+inserted defer-on-reject
+ast OK
+wrote 1300 lines to C:\dev\chili-home-copilot\app\services\trading\robinhood_exit_execution.py
+
+
+
+===== py-compile =====
+OK
+
+
+===== git diff stat =====
+git : warning: in the working copy of 'app/services/trading/robinhood_exit_execution.py', LF will be replaced by CRLF 
+the next time Git touches it
+At C:\dev\chili-home-copilot\scripts\dispatch-r26-apply.ps1:15 char:5
++     git diff --stat app/services/trading/robinhood_exit_execution.py
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: in the... Git touches it:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ app/services/trading/robinhood_exit_execution.py | 61 +++++++++++++++++++++++-
+ 1 file changed, 60 insertions(+), 1 deletion(-)
+
+
+===== force-recreate autotrader-worker (where the exit submission runs) =====
+docker :  Container chili-home-copilot-postgres-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r26-apply.ps1:19 char:5
++     docker compose up -d --force-recreate autotrader-worker
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...gres-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-ollama-1 Running 
+ Container chili-home-copilot-autotrader-worker-1 Recreate 
+ Container chili-home-copilot-autotrader-worker-1 Recreated 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-autotrader-worker-1 Starting 
+ Container chili-home-copilot-autotrader-worker-1 Started 
+
+
+===== wait 10s =====
+ok
+
+
+===== autotrader-worker uptime =====
+chili-home-copilot-autotrader-worker-1 | Up 10 seconds
+
+
+===== autotrader-worker startup errors? =====
+
+
+===== exit-rejected count BEFORE further sweeps (last 5 min) =====
+ decision | reason | count 
+----------+--------+-------
+(0 rows)
+
+

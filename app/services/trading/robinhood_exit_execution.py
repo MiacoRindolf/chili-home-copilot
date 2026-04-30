@@ -303,6 +303,36 @@ def describe_robinhood_equity_execution_window(
     }
 
 
+def _is_retryable_broker_rejection(broker_error):
+    """Whether a broker-reject reason is the kind that may succeed later.
+
+    Used by R26 to engage the existing 5-min auto_trader_monitor cooldown
+    via ``_mark_deferred_exit``. Only patterns that are KNOWN to be
+    transient (PDT window clears, spread widens then narrows, market
+    closed will reopen, rate limit will reset). Truly fatal errors
+    (bad symbol, account-closed, no_position) fall through unmarked so
+    the next cycle treats them as fresh failures and the operator sees
+    the real signal.
+    """
+    if not broker_error:
+        return False
+    e = str(broker_error).lower()
+    return any(
+        token in e
+        for token in (
+            "pdt designation",
+            "wide_spread",
+            "wide spread",
+            "market closed",
+            "extended hours",
+            "rate_limited",
+            "rate limit",
+            "no_quote",
+            "not enough shares",
+        )
+    )
+
+
 def _mark_deferred_exit(
     db: Session,
     trade: Trade,
@@ -1015,7 +1045,7 @@ def submit_robinhood_trade_exit(
             # because the in-memory key TTL is 300s.
 
         # Always emit an audit row so monitor rejections show up in
-        # ``trading_autotrader_runs`` instead of only in broker logs —
+        # ``trading_autotrader_runs`` instead of only in broker logs --
         # otherwise repeated silent rejections look like a stopped job.
         try:
             _record_autotrader_run(
@@ -1037,6 +1067,35 @@ def submit_robinhood_trade_exit(
             )
         except Exception:
             logger.exception("[rh_exit] failed to record broker-reject audit trade=%s", trade.id)
+
+        # R26 (2026-04-30 audit HIGH 6.3): defer this exit so the next
+        # cycle does not immediately retry. Without this, the autotrader
+        # monitor re-fires every ~30s and the broker keeps rejecting --
+        # produced 1053 PDT + 227 wide_spread + 41 "Not enough shares"
+        # rejections in 24h, all on the same handful of trades on a tight
+        # loop. Marking the trade pending_exit_status='deferred' engages
+        # the existing 5-min cooldown in auto_trader_monitor (LL.9).
+        # Applied for KNOWN-retryable broker errors only -- truly fatal
+        # broker errors fall through so the operator sees the real signal.
+        try:
+            if _is_retryable_broker_rejection(broker_error):
+                _mark_deferred_exit(
+                    db,
+                    trade,
+                    exit_reason=exit_reason,
+                    execution_reason=f"broker_reject:{broker_error[:80]}",
+                    now_utc=now,
+                )
+                logger.info(
+                    "[rh_exit] R26: deferred trade=%s after broker rejection "
+                    "(reason=%s) -- 5min cooldown engaged",
+                    trade.id, broker_error[:80],
+                )
+        except Exception:
+            logger.exception(
+                "[rh_exit] R26 deferred-mark failed for trade=%s", trade.id
+            )
+
         return {"ok": False, "error": broker_error}
 
     raw = dict(res.get("raw") or {})
