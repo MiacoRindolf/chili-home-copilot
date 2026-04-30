@@ -1,0 +1,94 @@
+﻿# r23 temporary deactivate + diagnose duplicate-submission loop 04/30/2026 10:48:13
+
+===== set CHILI_BRACKET_SWEEP_WRITER_ENABLED=0 in .env (mode stays authoritative for now) =====
+BRAIN_LIVE_BRACKETS_MODE=authoritative
+CHILI_BRACKET_SWEEP_WRITER_ENABLED=0
+
+
+===== force-recreate broker-sync-worker (writer flag flips back to OFF; mode stays authoritative -> shadow fallback) =====
+docker :  Container chili-home-copilot-postgres-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-deactivate-and-diag.ps1:23 char:5
++     docker compose up -d --force-recreate broker-sync-worker
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...gres-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-ollama-1 Running 
+ Container chili-home-copilot-broker-sync-worker-1 Recreate 
+ Container chili-home-copilot-broker-sync-worker-1 Recreated 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-broker-sync-worker-1 Starting 
+ Container chili-home-copilot-broker-sync-worker-1 Started 
+
+
+===== wait 65s for one fresh sweep =====
+ok
+
+
+===== verify writer is OFF and falls back to shadow =====
+        observed_at         |  mode  |     kind     | count 
+----------------------------+--------+--------------+-------
+ 2026-04-30 17:48:49.464995 | shadow | missing_stop |     1
+(1 row)
+
+
+
+===== g2_ events should be quiet now =====
+ events_last_2m 
+----------------
+              1
+(1 row)
+
+
+
+===== the first stop's broker order details (69f3947a) =====
+{
+  "id": "69f3947a-61cf-4e11-99c4-1f45879749e0",
+  "cumulative_quantity": "0.00000000",
+  "state": "confirmed",
+  "type": "market",
+  "side": "sell",
+  "trigger": "stop",
+  "price": null,
+  "stop_price": "6.56000000",
+  "quantity": "42.00000000",
+  "created_at": "2026-04-30T17:42:18.901343Z",
+  "last_transaction_at": "2026-04-30T17:42:19.057000Z"
+}
+
+
+===== all open Robinhood orders for ADT =====
+Found Additional pages.
+Loading page 2 ...
+Loading page 3 ...
+ADT orders found: 0
+
+
+===== what does broker_manager_view_fn return for ADT? =====
+available=True stop_order_id=None stop_state=None stop_price=None target_id=None
+
+
+===== broker-sync-worker logs for the last minute (showing the loop pattern) =====
+
+broker-sync-worker-1  | 2026-04-30 17:48:56,137 [INFO] app.services.trading.bracket_reconciliation_service: 
+[bracket_reconciliation_ops] event=discrepancy mode=shadow sweep_id=19324587-db20-4aa1-861c-d05bcbf4e655 trade_id=1694 
+bracket_intent_id=206 ticker=ADT broker_source=robinhood kind=missing_stop severity=error
+broker-sync-worker-1  | 2026-04-30 17:48:56,168 [INFO] app.services.trading.bracket_reconciliation_service: 
+[bracket_reconciliation_ops] event=sweep_summary mode=shadow sweep_id=19324587-db20-4aa1-861c-d05bcbf4e655 
+trades_scanned=1 brackets_checked=1 agree_count=0 orphan_stop=0 missing_stop=1 qty_drift=0 state_drift=0 price_drift=0 
+broker_down=0 unreconciled=0 took_ms=6673.75
+
+
+
+
+===== audit row recording the temporary deactivation =====
+  id   
+-------
+ 10316
+(1 row)
+
+INSERT 0 1
+

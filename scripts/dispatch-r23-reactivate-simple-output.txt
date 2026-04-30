@@ -1,0 +1,97 @@
+﻿# r23 reactivate (simple, no heredocs) 04/30/2026 11:24:01
+
+===== ship view-fn fix: recreate broker-sync-worker =====
+docker :  Container chili-home-copilot-ollama-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-reactivate-simple.ps1:6 char:5
++     docker compose up -d --force-recreate broker-sync-worker
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...lama-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-postgres-1 Running 
+ Container chili-home-copilot-broker-sync-worker-1 Recreate 
+ Container chili-home-copilot-broker-sync-worker-1 Recreated 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-broker-sync-worker-1 Starting 
+ Container chili-home-copilot-broker-sync-worker-1 Started 
+
+
+===== wait 12s =====
+ok
+
+
+===== broker-sync-worker uptime =====
+chili-home-copilot-broker-sync-worker-1 | Up 12 seconds
+
+
+===== ANY startup errors in broker-sync-worker? =====
+
+
+===== set CHILI_BRACKET_SWEEP_WRITER_ENABLED=1 in .env =====
+BRAIN_LIVE_BRACKETS_MODE=authoritative
+CHILI_BRACKET_SWEEP_WRITER_ENABLED=1
+
+
+===== recreate broker-sync-worker (pick up flag) =====
+docker :  Container chili-home-copilot-postgres-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-reactivate-simple.ps1:33 char:5
++     docker compose up -d --force-recreate broker-sync-worker
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...gres-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-ollama-1 Running 
+ Container chili-home-copilot-broker-sync-worker-1 Recreate 
+ Container chili-home-copilot-broker-sync-worker-1 Recreated 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-broker-sync-worker-1 Starting 
+ Container chili-home-copilot-broker-sync-worker-1 Started 
+
+
+===== wait 80s for at least one bracket sweep =====
+ok
+
+
+===== fresh sweeps (last 90s) =====
+        observed_at         |     mode      | kind  | count 
+----------------------------+---------------+-------+-------
+ 2026-04-30 18:24:52.014153 | authoritative | agree |     1
+(1 row)
+
+
+
+===== g2_ events count last 2 min =====
+ recent_events | max 
+---------------+-----
+             0 | 
+(1 row)
+
+
+
+===== broker-sync-worker logs since restart (key lines) =====
+
+broker-sync-worker-1  | 2026-04-30 18:25:00,875 [INFO] app.services.trading.bracket_intent_writer: 
+[bracket_intent_ops] event=mark_reconciled mode=authoritative bracket_intent_id=206 reason=agree
+broker-sync-worker-1  | 2026-04-30 18:25:00,887 [INFO] app.services.trading.bracket_reconciliation_service: 
+[bracket_reconciliation_ops] event=sweep_summary mode=authoritative sweep_id=24deefe9-4d9c-4415-8b76-a5ddaae11be5 
+trades_scanned=1 brackets_checked=1 agree_count=1 orphan_stop=0 missing_stop=0 qty_drift=0 state_drift=0 price_drift=0 
+broker_down=0 unreconciled=0 took_ms=8980.3
+broker-sync-worker-1  | 2026-04-30 18:25:00,887 [INFO] app.services.trading_scheduler: [scheduler] 
+bracket_reconciliation sweep done: trades=1 brackets=1 agree=1 drift=0 took_ms=8980.3
+
+
+
+
+===== trade 1694 ADT status (should still be open) =====
+  id  | ticker | status | broker_status 
+------+--------+--------+---------------
+ 1694 | ADT    | open   | filled
+(1 row)
+
+

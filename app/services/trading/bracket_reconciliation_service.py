@@ -16,7 +16,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -113,16 +113,31 @@ def _noop_broker_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]:
     ]
 
 
-def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]:
-    """Phase G default broker provider: reads combined positions across
-    Robinhood + Coinbase via ``broker_manager.get_combined_positions``.
+def _is_working_stop_order_state(state: Optional[str]) -> bool:
+    if not state:
+        return False
+    s = str(state).lower()
+    return s in (
+        "confirmed", "queued", "open", "active", "working", "pending",
+        "submitted", "accepted", "partially_filled", "unconfirmed",
+    )
 
-    In Phase G the broker has no bracket / stop primitives wired (that's
-    Phase G.2), so ``stop_order_id`` / ``target_order_id`` are always
-    ``None``. A live trade with a local ``BracketIntent`` will therefore
-    classify as ``missing_stop`` (truthful: Phase G never places a
-    server-side stop). Positions we cannot reach are flagged
-    ``available=False`` so the reconciler emits ``broker_down``.
+
+def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]:
+    """Phase G.2 broker provider: positions + working stop orders.
+
+    Reads combined positions via ``broker_manager.get_combined_positions``
+    AND open broker orders to surface resting SELL stop orders. The
+    classifier needs ``stop_order_id`` populated for any open order whose
+    ``trigger`` is ``stop`` and whose state is still working — otherwise
+    every sweep classifies the trade as ``missing_stop`` and the writer
+    re-submits a duplicate (the duplicate-submission loop bit us on
+    2026-04-30 17:42-17:46 UTC: writer placed real stop 69f3947a, then
+    every minute re-classified as missing_stop because this fn returned
+    stop_order_id=None).
+
+    Positions we cannot reach are flagged ``available=False`` so the
+    reconciler emits ``broker_down``.
     """
     views: list[BrokerView] = []
     try:
@@ -142,6 +157,7 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
             for r in local_rows
         ]
 
+    # Index positions by (ticker, broker_source).
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for p in positions:
         tkr = (p.get("ticker") or p.get("symbol") or "").upper() or None
@@ -150,16 +166,94 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
             continue
         by_key[(tkr, src)] = p
 
+    # Phase G.2: pull working broker stop orders so the classifier can
+    # see the stops the writer (or anything else) has placed. Fail-soft:
+    # if the fetch raises, we treat as "no stops known" — that's the same
+    # state as Phase G, just less precise.
+    rh_stops_by_ticker: dict[str, dict[str, Any]] = {}
+    try:
+        # Only Robinhood has a working stop-order surface today; Coinbase
+        # support comes when bracket_writer_g2 adds Coinbase venue.
+        wanted_rh = any(
+            (r.get("broker_source") or "").lower() == "robinhood"
+            for r in local_rows
+        )
+        if wanted_rh:
+            import robin_stocks.robinhood as rh
+            raw_orders = rh.orders.get_all_open_stock_orders() or []
+            for od in raw_orders:
+                if not isinstance(od, dict):
+                    continue
+                if str(od.get("side", "")).lower() != "sell":
+                    continue
+                if str(od.get("trigger", "")).lower() != "stop":
+                    continue
+                if not _is_working_stop_order_state(od.get("state")):
+                    continue
+                # Resolve the ticker for this order. RH orders carry an
+                # instrument URL, not a symbol — try common shapes.
+                tkr = (
+                    od.get("symbol")
+                    or od.get("chain_symbol")
+                    or ""
+                ).upper() or None
+                if not tkr:
+                    inst_url = od.get("instrument") or od.get("instrument_url")
+                    if inst_url:
+                        try:
+                            inst = rh.stocks.get_instrument_by_url(inst_url)
+                            if isinstance(inst, dict):
+                                tkr = (inst.get("symbol") or "").upper() or None
+                        except Exception:
+                            tkr = None
+                if not tkr:
+                    continue
+                # If the same ticker has multiple working stops, prefer the
+                # most recently created — the latest is the writer's most
+                # recent intent.
+                prior = rh_stops_by_ticker.get(tkr)
+                if prior is None or (
+                    str(od.get("created_at") or "") > str(prior.get("created_at") or "")
+                ):
+                    rh_stops_by_ticker[tkr] = od
+    except Exception:
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} broker_manager_view_fn: stop-order "
+            "fetch failed (rh.orders.get_all_open_stock_orders); "
+            "stop_order_id will stay None for this sweep",
+            exc_info=True,
+        )
+        rh_stops_by_ticker = {}
+
+    def _stop_meta_for(tkr: Optional[str], src: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[float]]:
+        if not tkr:
+            return None, None, None
+        if (src or "").lower() != "robinhood":
+            return None, None, None
+        od = rh_stops_by_ticker.get(tkr.upper())
+        if not od:
+            return None, None, None
+        try:
+            sp = od.get("stop_price")
+            sp_f = float(sp) if sp is not None else None
+        except Exception:
+            sp_f = None
+        return od.get("id"), od.get("state"), sp_f
+
     for row in local_rows:
         tkr = (row.get("ticker") or "").upper() or None
         src = row.get("broker_source")
         p = by_key.get((tkr, src)) if tkr and src else None
+        stop_oid, stop_state, stop_price = _stop_meta_for(tkr, src)
         if p is None:
             views.append(BrokerView(
                 available=True,
                 ticker=tkr,
                 broker_source=src,
                 position_quantity=0.0,
+                stop_order_id=stop_oid,
+                stop_order_state=stop_state,
+                stop_order_price=stop_price,
             ))
             continue
         qty = p.get("quantity") or p.get("qty") or p.get("shares") or 0
@@ -172,6 +266,9 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
             ticker=tkr,
             broker_source=src,
             position_quantity=qty_f,
+            stop_order_id=stop_oid,
+            stop_order_state=stop_state,
+            stop_order_price=stop_price,
         ))
     return views
 
