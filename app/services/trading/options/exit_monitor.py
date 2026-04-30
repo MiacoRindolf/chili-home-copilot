@@ -168,11 +168,37 @@ def _evaluate_exit_triggers(
       ``options_dte_threshold``     — DTE <= dte_threshold
       ``options_premium_stop_loss``  — drop > stop_pct
       ``options_premium_take_profit`` — gain > tp_pct
+
+    Round-15 (2026-04-30): added implausible-quote guard parallel to
+    the stock + crypto exit decision paths. A corrupted upstream
+    options quote (e.g. bid returning 0.001 vs entry 0.50) would falsely
+    trigger ``options_premium_stop_loss``. Reject quotes where the
+    ratio (current/entry) > 10 or < 0.1 -- that's a 10x divergence,
+    far more than legitimate option moves between 5-min monitor passes.
+    Returns None so the next pass retries with a fresh quote rather
+    than acting on garbage data.
+
+    Note: options CAN legitimately drop near zero at expiration, but
+    the configured stop_pct (default 50%) fires LONG BEFORE the 0.1x
+    bound. Real legitimate exits happen at change_pct = -50% which is
+    ratio = 0.5 -- well within the (0.1, 10) plausibility envelope.
     """
     if dte is not None and dte <= dte_threshold:
         return "options_dte_threshold"
     if entry_premium > 0 and current_premium is not None and current_premium > 0:
-        change_pct = (current_premium - entry_premium) / entry_premium * 100.0
+        ratio = current_premium / entry_premium
+        if ratio > 10.0 or ratio < 0.1:
+            # Implausible move -- abstain. Per no-hardcoded-fallback rule,
+            # don't synthesize a "current value" -- return None and let the
+            # next pass retry with a fresh quote.
+            logger.warning(
+                "[options_exit_monitor] implausible quote ratio=%.4f "
+                "(current=%s, entry=%s); refusing to act on data error -- "
+                "next pass retries with fresh quote.",
+                ratio, current_premium, entry_premium,
+            )
+            return None
+        change_pct = (ratio - 1.0) * 100.0
         if change_pct <= -abs(stop_pct):
             return "options_premium_stop_loss"
         if change_pct >= abs(tp_pct):
@@ -257,7 +283,24 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             bid = float(quote.get("bid_price") or 0)
         except (TypeError, ValueError):
             bid = 0.0
-        current_premium = bid if bid > 0 else None
+        try:
+            mark = float(quote.get("mark_price") or 0)
+        except (TypeError, ValueError):
+            mark = 0.0
+        # Round-15 (2026-04-30): use MARK for change calculation rather
+        # than bid. Bid-vs-entry-ask is apples-to-oranges and biases
+        # toward false stops by the bid-ask spread amount immediately
+        # after entry (a position that hasn't moved still appears -2%
+        # to -10% if the spread is wide). Mark is the midpoint and is
+        # the standard reference for option PnL accounting. Fall back
+        # to bid only if mark is unavailable; if neither, current is
+        # unknown and we must NOT compare to entry.
+        if mark > 0:
+            current_premium = mark
+        elif bid > 0:
+            current_premium = bid
+        else:
+            current_premium = None
 
         entry_premium = 0.0
         try:
@@ -279,9 +322,29 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             continue
         summary["triggered"] += 1
 
-        # Submit sell-to-close. Limit price = bid (cross spread for
-        # clean fill) when available, else previous mark.
-        limit_price = current_premium or float(quote.get("mark_price") or 0) or entry_premium
+        # Round-15 (2026-04-30): refuse to submit sell-to-close when no
+        # real market data is available. The previous code had:
+        #     limit_price = current_premium or mark or entry_premium
+        # which fell back to ENTRY price when neither bid nor mark was
+        # known -- that submits an exit at the buy price, ignoring any
+        # actual move. Per the no-hardcoded-fallback rule: defer the
+        # exit to the next pass rather than send a sell at entry.
+        if bid > 0:
+            # Sell-to-close at the bid (cross spread for clean fill).
+            limit_price = bid
+        elif mark > 0:
+            # Use mark when bid is missing; less likely to fill quickly
+            # but at least it's market-aware.
+            limit_price = mark
+        else:
+            logger.warning(
+                "[options_exit_monitor] trade=%s reason=%s but no real "
+                "market data (bid=%s mark=%s); deferring exit -- will "
+                "retry next pass.",
+                t.id, reason, bid, mark,
+            )
+            summary["skipped_no_quote"] += 1
+            continue
         try:
             res = adapter.place_option_sell(
                 underlying=str(meta.get("underlying") or t.ticker),

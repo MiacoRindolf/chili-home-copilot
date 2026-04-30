@@ -1,0 +1,42 @@
+fix(options): round-15 hardening of options exit pricing
+
+User-directed: audit how the options engine handles option pricing.
+Three real bugs found in `options/exit_monitor.py`:
+
+1. **Bid-biased change calculation (false-stop generator).**
+   The exit-trigger logic compared current BID to entry premium. But
+   entry premium is typically the ASK (you bought at the ask) -- so
+   bid-vs-ask immediately shows a -spread% loss the moment after entry,
+   even if the underlying hasn't moved. Wide-spread options can
+   trigger ``options_premium_stop_loss`` purely from the spread.
+   Fix: prefer MARK price for the change calculation (mid-to-mid,
+   standard option PnL accounting). Fall back to bid only when mark
+   is unavailable. The submit limit price still uses bid (clean fill
+   crossing the spread) -- only the change calculation moves to mark.
+
+2. **No implausible-quote guard.**
+   Same vulnerability as the round-13 crypto and round-14 stock paths.
+   A corrupted upstream options quote (e.g. bid=0.001 vs entry=0.50)
+   would falsely trigger ``options_premium_stop_loss``. The legitimate
+   stop_pct (default 50%) fires at ratio=0.5; the new guard rejects
+   ratio > 10 or < 0.1 (a 10x divergence between monitor passes is
+   data error, not a real move). On reject, return None so the next
+   pass retries with a fresh quote. Adds a WARNING log line so ops
+   sees the data-error event.
+
+3. **No-market-data fallback to entry price.**
+   The submit path was:
+       limit_price = current_premium or mark_price or entry_premium
+   The fallback to ``entry_premium`` submits a sell-to-close at the
+   BUY price, completely ignoring any actual market move. Per the
+   no-hardcoded-fallback rule (operator feedback): if neither bid
+   nor mark is available, defer the exit and let the next pass try
+   with fresh data. WARN log + summary["skipped_no_quote"] += 1.
+
+The exit triggers themselves (DTE threshold, premium stop, premium
+take-profit) keep working; the change is in HOW current_premium is
+derived and what to do when market data is missing or implausible.
+
+Synthesis path (`options/synthesis.py`) was audited too: it returns
+None on missing ask, doesn't fall back to fake values, and uses the
+ask explicitly to pay the spread for clean entry. Clean.
