@@ -1,0 +1,28 @@
+fix(audit-2026-04-29): round-9 hygiene — settings + batch_job visibility
+
+Round 9 deeper-pass review caught two operational-quality gaps:
+
+1. Two settings I added in B-1 + G-1 weren't declared in app/config.py:
+     chili_realized_ev_demote_pass_enabled
+     chili_realized_ev_demote_settle_days
+   Probe via `getattr(settings, name, '<MISSING>')` showed `<MISSING>`,
+   meaning code was relying on the inline `_settings_get(name, default)`
+   fallbacks. Behavior was correct (defaults TRUE/14) but env-var
+   overrides via .env / docker-compose would be silently ignored.
+   Fix: add the two settings to the Settings class with the same
+   defaults so they round-trip through Pydantic correctly.
+
+2. _run_realized_ev_demote_pass_job and _run_breaker_heartbeat_job
+   were running cleanly (verified: ev_demote ran at 04:00 PT, evaluated
+   12 patterns, all within 14d settle window) but didn't write to
+   brain_batch_jobs. That meant operator could see them in the live
+   scheduler log but not in the audit table that other jobs use.
+   Fix: wrap both with brain_batch_job_begin/finish so they appear in
+   brain_batch_jobs with status, duration, and meta. Mirrors the F-3
+   fix pattern applied to _run_macro_regime_daily_job.
+
+Verified: realized_ev_demote_pass DID fire successfully at 04:00 PT
+(scheduler log: phase=ok duration_ms=51, 12 patterns evaluated, 0
+demoted because all are inside the 14d settle window). The B-1 fix
+is working as intended; this commit just makes it visible in the
+batch_job audit table.

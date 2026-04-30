@@ -1341,17 +1341,37 @@ def _run_realized_ev_demote_pass_job():
     to every ``lifecycle_stage='promoted'`` pattern; demotes any that fail
     outside the configured settle-in window. See
     :mod:`app.services.trading.realized_ev_demote_pass`.
+
+    FIX (round 9): wrap with brain_batch_job_begin/finish so the run
+    appears in brain_batch_jobs alongside other scheduler outputs --
+    operator-visibility parity with daily_market_scan, etc.
     """
 
     def _work() -> None:
         from ..db import SessionLocal
+        from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
         from .trading.realized_ev_demote_pass import run_realized_ev_demote_pass
 
+        from ..config import settings as _settings
+        _uid = getattr(_settings, "brain_default_user_id", None)
         logger.info("[scheduler] Realized-EV demote pass starting")
         db = SessionLocal()
+        jid = None
         try:
+            jid = brain_batch_job_begin(db, "realized_ev_demote_pass", user_id=_uid)
+            db.commit()
             summary = run_realized_ev_demote_pass(db)
             logger.info("[scheduler] Realized-EV demote pass done: %s", summary)
+            brain_batch_job_finish(db, jid, ok=True, meta=summary)
+            db.commit()
+        except Exception as exc:
+            logger.exception("[scheduler] realized_ev_demote_pass failed")
+            if jid is not None:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(exc)[:500])
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] realized_ev_demote_pass batch_job_finish failed")
         finally:
             db.close()
 
@@ -1366,15 +1386,34 @@ def _run_breaker_heartbeat_job():
     distinguish "breaker is alive and not tripped" from "breaker writer
     is dead". The breaker itself is event-driven (only persists on
     trip/reset); this is observability-only.
+
+    FIX (round 9): wrap with brain_batch_job_begin/finish for
+    operator-visibility parity with other scheduler outputs.
     """
 
     def _work() -> None:
         from ..db import SessionLocal
+        from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
         from .trading.portfolio_risk import write_daily_breaker_liveness_snapshot
 
+        from ..config import settings as _settings
+        _uid = getattr(_settings, "brain_default_user_id", None)
         db = SessionLocal()
+        jid = None
         try:
-            write_daily_breaker_liveness_snapshot(db)
+            jid = brain_batch_job_begin(db, "breaker_heartbeat", user_id=_uid)
+            db.commit()
+            snap = write_daily_breaker_liveness_snapshot(db)
+            brain_batch_job_finish(db, jid, ok=True, meta=snap)
+            db.commit()
+        except Exception as exc:
+            logger.exception("[scheduler] breaker_heartbeat failed")
+            if jid is not None:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(exc)[:500])
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] breaker_heartbeat batch_job_finish failed")
         finally:
             db.close()
 

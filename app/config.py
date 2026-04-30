@@ -883,6 +883,12 @@ class Settings(BaseSettings):
     chili_realized_sync_enabled: bool = True
     chili_realized_sync_lookback_days: int = 365
     chili_realized_sync_min_n: int = 1
+    # 2026-04-29 third-pass audit FIX B-1: daily realized-EV demote pass.
+    # Re-applies the realized-EV gate to every promoted pattern; demotes
+    # any that fail outside the configured settle window. Mig 206 is the
+    # one-time retroactive sweep; this is the going-forward enforcement.
+    chili_realized_ev_demote_pass_enabled: bool = True
+    chili_realized_ev_demote_settle_days: int = 14
     # 2026-04-28: pattern x regime ledger — turns shadow-mode regime
     # snapshots into actionable per-pattern evidence.
     chili_pattern_regime_ledger_enabled: bool = True
