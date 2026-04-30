@@ -1,0 +1,23 @@
+fix(audit-2026-04-29): K-1 daemon process-tree kill on timeout
+
+The Claude command-watcher daemon (scripts/_claude_daemon.ps1) hangs
+when a dispatched script launches descendant processes that outlive
+the parent on $proc.Kill(). The third-pass audit dispatch wedged
+the daemon for 1h+ on a DO $$ heredoc inside docker compose exec --
+the parent powershell.exe got killed by WaitForExit timeout, but
+docker.exe -> docker compose exec -> postgres heredoc kept running
+and held the redirected stdio handles, blocking the next iteration.
+
+Fix: replace $proc.Kill() with `taskkill /T /F /PID $proc.Id` which
+terminates the entire process tree. Falls back to .Kill() if taskkill
+is unavailable. Adds a 500ms sleep so the OS can reap descendants
+and release temp file handles before the daemon reads them.
+
+The currently-running daemon must be restarted for this fix to take
+effect; .ps1 file changes do not auto-reload.
+
+Bundled in this commit:
+- G-2 audit finding closed as not-a-bug. The autotune writes to the
+  existing `scan_patterns.scope_tickers` column, NOT a separate
+  `trading_pattern_ticker_scope` table. Memory misread in the original
+  audit.
