@@ -1,0 +1,156 @@
+﻿# Phase 0 verify + Phase 1 Flag 1 activation 04/30/2026 14:37:34
+
+===== P0: chili containers up? =====
+chili-home-copilot-autotrader-worker-1 | Up About an hour
+chili-home-copilot-scheduler-worker-1 | Up 2 hours
+chili-home-copilot-broker-sync-worker-1 | Up 3 hours
+chili-home-copilot-chili-1 | Up 5 hours (healthy)
+chili-home-copilot-brain-worker-1 | Up 5 hours (healthy)
+chili-home-copilot-postgres-1 | Up 5 hours (healthy)
+chili-home-copilot-ollama-1 | Up 5 hours (healthy)
+
+
+===== P0: R23 sweep mode + agree count last 30 min =====
+     mode      |     kind     | count 
+---------------+--------------+-------
+ authoritative | missing_stop |    30
+(1 row)
+
+
+
+===== P0: g2_ events count last 30 min (should be 0 in steady-state) =====
+ count 
+-------
+    60
+(1 row)
+
+
+
+===== P0: ADT stop still resting at broker? =====
+state= cancelled stop_price= 6.56000000 qty= 42.00000000
+
+
+===== P0: brain_batch_jobs running count =====
+  status  | count 
+----------+-------
+ ok       |  3919
+ orphaned |    26
+ error    |     6
+ timeout  |     1
+(4 rows)
+
+
+
+===== P0: monitor_exit decisions last hour (R26 cooldown still working?) =====
+ decision | count 
+----------+-------
+(0 rows)
+
+
+
+===== P1F1 pre-flight: migrations 183 + 184 applied? =====
+              version_id              
+--------------------------------------
+ 183_pattern_survival_meta_classifier
+ 184_seed_hyperliquid_perp_contracts
+(2 rows)
+
+
+
+===== P1F1 pre-flight: kill switch status (must be inactive) =====
+{'active': False, 'reason': None}
+
+
+===== P1F1 pre-flight: drawdown breaker status =====
+ id | user_id | snapshot_date | open_positions | total_heat_pct | breaker_tripped |       breaker_reason        | capital |     regime      |         created_at         
+----+---------+---------------+----------------+----------------+-----------------+-----------------------------+---------+-----------------+----------------------------
+ 18 |         | 2026-04-30    |              0 |              0 | t               | 5 consecutive losing trades |       0 | circuit_breaker | 2026-04-30 15:35:17.291883
+(1 row)
+
+
+
+===== P1F1 pre-flight: pattern_survival_features table exists? =====
+           column_name           
+---------------------------------
+ id
+ scan_pattern_id
+ snapshot_date
+ pattern_lifecycle
+ age_days
+ promoted_at
+ trades_30d
+ hit_rate_30d
+ expectancy_30d_pct
+ sharpe_30d
+ max_drawdown_30d_pct
+ pnl_slope_14d
+ cpcv_dsr
+ cpcv_pbo
+ cpcv_n_paths
+ cpcv_promotion_confident
+ regime_at_snapshot
+ family_concentration_herfindahl
+ family_active_count
+ feature_psi_max
+ recert_overdue
+ features_json
+(22 rows)
+
+
+
+===== P1F1 pre-flight: current promoted/live + challenged pattern count (target audience) =====
+ lifecycle_stage | count 
+-----------------+-------
+ challenged      |    36
+ promoted        |     8
+(2 rows)
+
+
+
+===== P1F1: append CHILI_PATTERN_SURVIVAL_CLASSIFIER_ENABLED=true to .env =====
+REPLACED existing flag value -> true
+BRAIN_LIVE_BRACKETS_MODE=authoritative
+CHILI_PATTERN_SURVIVAL_CLASSIFIER_ENABLED=true
+CHILI_PATTERN_SURVIVAL_CLASSIFIER_ENABLED=true
+CHILI_BRACKET_SWEEP_WRITER_ENABLED=1
+
+
+===== P1F1: restart chili (the daily job runs in chili web role per scheduler config) =====
+docker :  Container chili-home-copilot-chili-1 Restarting 
+At C:\dev\chili-home-copilot\scripts\dispatch-phase0-phase1-flag1-activate.ps1:76 char:5
++     docker compose restart chili
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...i-1 Restarting :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-chili-1 Started 
+
+
+===== P1F1: wait 15s for restart =====
+ok
+
+
+===== P1F1: chili health =====
+chili-home-copilot-chili-1 | Up 15 seconds (healthy)
+
+
+===== P1F1: verify flag loaded in container =====
+classifier_enabled: True
+
+
+===== P1F1: scheduler-worker has the pattern_survival_snapshot job registered? =====
+role= cron_only
+
+
+===== P1F1: try invoking the snapshot job manually (validates code path now, not 03:30 PT) =====
+ImportError - module path may differ: No module named 'app.services.trading.pattern_survival_features'
+also failed: cannot import name 'pattern_survival_classifier' from 'app.services.trading' (/app/app/services/trading/__init__.py)
+
+
+===== P1F1: row count after manual run =====
+ count |    max     
+-------+------------
+    67 | 2026-04-29
+(1 row)
+
+

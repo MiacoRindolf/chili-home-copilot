@@ -1,0 +1,298 @@
+﻿# R23 regression + drawdown breaker investigation 04/30/2026 14:41:07
+
+===== ADT trade current state =====
+  id  | ticker | status | broker_status |           broker_order_id            | entry  |  exit  |  pnl  | pending_exit_status | pending_exit_reason 
+------+--------+--------+---------------+--------------------------------------+--------+--------+-------+---------------------+---------------------
+ 1694 | ADT    | open   | filled        | 69f23c08-6066-4743-aa46-847628411212 | 7.1350 | 7.4100 | 11.55 |                     | 
+(1 row)
+
+
+
+===== ADT broker order 69f3947a state =====
+{
+  "id": "69f3947a-61cf-4e11-99c4-1f45879749e0",
+  "ref_id": "b17f9e2f-9867-45e4-a884-6bd2f17c669c",
+  "url": "https://api.robinhood.com/orders/69f3947a-61cf-4e11-99c4-1f45879749e0/",
+  "account": "https://api.robinhood.com/accounts/5UV17626/",
+  "user_uuid": "077f01bd-990b-49c1-8cfb-e1f06f2356d5",
+  "position": "https://api.robinhood.com/positions/5UV17626/f14f2b8b-3e68-4237-aeaf-f849ffbe69fb/",
+  "cancel": null,
+  "instrument": "https://api.robinhood.com/instruments/f14f2b8b-3e68-4237-aeaf-f849ffbe69fb/",
+  "instrument_id": "f14f2b8b-3e68-4237-aeaf-f849ffbe69fb",
+  "cumulative_quantity": "0.00000000",
+  "average_price": null,
+  "fees": "0",
+  "sec_fees": "0.00",
+  "taf_fees": "0.00",
+  "cat_fees": "0.00",
+  "sales_taxes": [],
+  "state": "cancelled",
+  "derived_state": "cancelled",
+  "pending_cancel_open_agent": null,
+  "type": "market",
+  "side": "sell",
+  "time_in_force": "gtc",
+  "trigger": "stop",
+  "price": null,
+  "stop_price": "6.56000000",
+  "quantity": "42.00000000",
+  "reject_reason": null,
+  "created_at": "2026-04-30T17:42:18.901343Z",
+  "updated_at": "2026-04-30T20:01:35.848315Z",
+  "last_transaction_at": "2026-04-30T20:00:16.747674Z",
+  "executions": [],
+  "extended_hours": false,
+  "market_hours": "regular_hours",
+  "override_dtbp_checks": false,
+  "override_day_trade_checks": false,
+  "response_category": null,
+  "stop_triggered_at": null,
+  "last_trail_price": null,
+  "last_trail_price_updated_at": null,
+  "last_trail_price_source": null,
+  "dollar_based_amount": null,
+  "total_notional": null,
+  "executed_notional": null,
+  "investment_schedule_id": null,
+  "is_ipo_access_order": false,
+  "ipo_access_cancellation_reason": "user",
+  "ipo_access_lower_collared_price": null,
+  "ipo_access_upper_collared_price": null,
+  "ipo_access_upper_price": null,
+  "ipo_access_lower_price": null,
+  "is_ipo_access_price_finalized": false,
+  "is_visible_to_user": true,
+  "has_ipo_access_custom_price_limit": false,
+  "is_primary_account": true,
+  "order_form_version": 4,
+  "preset_percent_limit": null,
+  "order_form_type": "all_day_trading_v1_2",
+  "last_update_version": 3,
+  "placed_agent": "user",
+  "is_editable": false,
+  "replaces": null,
+  "user_cancel_request_state": "order_finalized",
+  "tax_lot_selection_type": "fifo",
+  "position_effect": "close",
+  "root_advanced_order_id": null,
+  "requested_notional_amount": null
+}
+
+
+===== g2_ events for ADT in last 2 hours - what's the writer doing? =====
+  id  |            event_type            |   status   | ticker | order_id |             error              | new_stop |        recorded_at         
+------+----------------------------------+------------+--------+----------+--------------------------------+----------+----------------------------
+ 5581 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:40:53.766625
+ 5580 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:40:53.108303
+ 5578 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:39:53.748306
+ 5577 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:39:53.116888
+ 5576 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:38:53.628059
+ 5575 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:38:52.999534
+ 5572 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:37:53.933954
+ 5571 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:37:53.074715
+ 5570 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:36:53.756388
+ 5569 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:36:53.1066
+ 5567 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:35:58.901194
+ 5566 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:35:58.26731
+ 5565 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:34:54.13005
+ 5564 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:34:53.3752
+ 5562 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:33:53.993948
+ 5561 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:33:53.245357
+ 5560 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:32:53.746381
+ 5559 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:32:53.112684
+ 5557 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:31:53.847005
+ 5556 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:31:53.109731
+ 5555 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:30:53.792102
+ 5554 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:30:53.094667
+ 5552 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:29:58.504847
+ 5551 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:29:57.876985
+ 5550 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:28:53.704814
+ 5549 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:28:53.070608
+ 5547 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:27:54.167283
+ 5546 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:27:53.500805
+ 5545 | g2_place_missing_stop_rejected   | rejected   | ADT    |          | Robinhood returned no order_id |          | 2026-04-30 21:26:53.77254
+ 5544 | g2_place_missing_stop_submitting | submitting | ADT    |          |                                |          | 2026-04-30 21:26:53.148525
+(30 rows)
+
+
+
+===== Robinhood positions: does broker still hold ADT? =====
+ADT held: []
+
+
+===== open Robinhood orders (any new ADT stop the writer placed?) =====
+Found Additional pages.
+Loading page 2 ...
+Loading page 3 ...
+ADT recent orders: 0
+
+
+===== drawdown breaker rows last 24h =====
+ id | snapshot_date | breaker_tripped |       breaker_reason        | total_heat_pct | capital |     regime      |         created_at         
+----+---------------+-----------------+-----------------------------+----------------+---------+-----------------+----------------------------
+ 18 | 2026-04-30    | t               | 5 consecutive losing trades |              0 |       0 | circuit_breaker | 2026-04-30 15:35:17.291883
+ 17 | 2026-04-30    | t               | 5 consecutive losing trades |              0 |       0 | circuit_breaker | 2026-04-30 13:07:27.580235
+ 16 | 2026-04-30    | t               | 5 consecutive losing trades |              0 |       0 | circuit_breaker | 2026-04-30 12:10:25.726249
+(3 rows)
+
+
+
+===== what 5 consecutive losing trades? =====
+  id  |  ticker  | status | broker_status |  entry  |  exit   |  pnl   |          exit_reason           |         exit_date          
+------+----------+--------+---------------+---------+---------+--------+--------------------------------+----------------------------
+ 1797 | SOL-USD  | closed | unknown       | 83.7333 | 83.4200 |  -0.94 | broker_reconcile_position_gone | 2026-04-30 15:56:03.30618
+ 1795 | AAVE-USD | closed | unknown       | 95.3317 | 93.6300 | -10.21 | broker_reconcile_position_gone | 2026-04-30 15:56:02.298273
+ 1781 | ABEV     | closed | filled        |  2.8550 |  2.8602 |  0.546 | stop                           | 2026-04-30 13:04:14.448
+ 1759 | WDCX     | closed | filled        | 62.8250 | 64.5000 |    6.7 | stop                           | 2026-04-30 08:02:06.963
+ 1793 | JOB      | closed |               |  0.2366 |  0.2349 |  -0.94 | broker_reconcile_position_gone | 2026-04-30 00:56:01.41611
+ 1792 | CRDL     | closed |               |  1.4485 |  1.3300 |  -23.7 | broker_reconcile_position_gone | 2026-04-30 00:56:01.405434
+ 1791 | CCCC     | closed |               |  2.8150 |  2.5700 | -36.75 | broker_reconcile_position_gone | 2026-04-30 00:56:01.395278
+ 1787 | IMTX     | closed |               | 10.4050 | 11.2000 |  23.85 | broker_reconcile_position_gone | 2026-04-30 00:56:01.387277
+ 1789 | EKSO     | closed |               | 11.7300 | 11.4000 |  -13.2 | broker_reconcile_position_gone | 2026-04-30 00:56:01.376761
+ 1790 | TLS      | closed |               |  4.3650 |  4.3900 |    2.5 | broker_reconcile_position_gone | 2026-04-30 00:56:01.340045
+ 1478 | ELTX     | closed |               | 12.0200 | 10.3200 |  -42.5 | broker_reconcile_position_gone | 2026-04-30 00:50:01.319638
+ 1788 | AIDX     | closed |               |  2.0000 |  1.5100 |  -73.5 | broker_reconcile_position_gone | 2026-04-30 00:50:01.308532
+ 1786 | VFS      | closed |               |  4.5398 |  4.0800 | -22.99 | broker_reconcile_position_gone | 2026-04-30 00:50:01.240008
+ 1513 | EKSO     | closed |               | 11.7300 | 11.4000 |  -13.2 | broker_reconcile_position_gone | 2026-04-30 00:42:04.664274
+ 1477 | GEO      | closed |               | 18.0300 | 18.9500 |  15.64 | broker_reconcile_position_gone | 2026-04-30 00:42:04.655371
+(15 rows)
+
+
+
+===== kill switch + drawdown breaker code-side checks =====
+kill_switch: {'active': False, 'reason': None}
+daily_loss_breach: {'breached': False, 'reason': 'within_global_daily_loss_cap_$300', 'realized_usd': -3.904, 'limit_usd': 300.0, 'source': 'usd', 'breakdown': {'autotrader_usd': -3.904, 'momentum_usd': 0.0}}
+
+
+===== is the writer respecting the breaker? (should it block during circuit_breaker regime?) =====
+place_missing_stop guards:
+  def place_missing_stop(
+    db: Session,
+    *,
+    trade_id: int,
+    bracket_intent_id: int,
+    ticker: str,
+    broker_source: str,
+    decision: ReconciliationDecision,
+    local_quantity: float,
+    stop_price: float,
+    adapter_factory: AdapterFactory = _default_adapter_factory,
+) -> WriterAction:
+    """Place a server-side stop for an open trade that has no broker
+    stop (missing_stop classification).
+
+    Guard rails:
+
+    * Flag must be on.
+    * Decision must be ``missing_stop``.
+    * Venue must be supported.
+    * ``local_quantity`` and ``stop_price`` must be positive.
+
+    Uses the real stop-loss primitive
+    (``place_stop_loss_sell_order``), NOT a marketable sell-limit. The
+    order rests at the broker and triggers on a downside break of
+    ``stop_price``.
+    """
+    if not _place_missing_stop_enabled():
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="disabled",
+            broker_source=broker_source, ticker=ticker,
+        )
+
+    if decision.kind != "missing_stop":
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="invalid_decision",
+            broker_source=broker_source, ticker=ticker,
+        )
+
+    if (broker_source or "").lower() not in _SUPPORTED_VENUES:
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="unsupported_venue",
+            broker_source=broker_source, ticker=ticker,
+        )
+
+    if local_quantity is None or float(local_quantity) <= 0:
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="invalid_decision",
+            broker_source=broker_source, ticker=ticker,
+        )
+    if stop_price is None or float(stop_price) <= 0:
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="invalid_decision",
+            broker_source=broker_source, ticker=ticker,
+        )
+
+    adapter = adapter_factory(broker_source)
+    client_oid = _build_coid("miss", bracket_intent_id, float(local_quantity))
+
+    _g2_event(
+        db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
+        ticker=ticker, broker_source=broker_source,
+        event_type="g2_place_missing_stop_submitting", status="submitting",
+        qty=float(local_quantity), stop_price=float(stop_price),
+        decision_kind=decision.kind, decision_severity=decision.severity,
+    )
+    try:
+        place_res = adapter.place_stop_loss_sell_order(
+            product_id=ticker,
+            base_size=str(float(local_quantity)),
+            trigger_price=str(float(stop_price)),
+            client_order_id=client_oid,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"{BRACKET_WRITER_G2} place_missing_stop raised for intent=%s: %s",
+            bracket_intent_id, exc, exc_info=True,
+        )
+        _g2_event(
+            db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
+            ticker=ticker, broker_source=broker_source,
+            event_type="g2_place_missing_stop_rejected", status="rejected",
+            qty=float(local_quantity), stop_price=float(stop_price),
+            error=str(exc)[:500],
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="place_failed",
+            broker_source=broker_source, ticker=ticker,
+        )
+    if not place_res.get("ok"):
+        logger.warning(
+            f"{BRACKET_WRITER_G2} place_missing_stop broker error intent=%s: %s",
+            bracket_intent_id, place_res.get("error"),
+        )
+        _g2_event(
+            db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
+            ticker=ticker, broker_source=broker_source,
+            event_type="g2_place_missing_stop_rejected", status="rejected",
+            qty=float(local_quantity), stop_price=float(stop_price),
+            error=str(place_res.get("error") or "")[:500],
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="place_failed",
+            broker_source=broker_source, ticker=ticker,
+            raw_broker_response=place_res,
+        )
+
+    new_oid = place_res.get("order_id") or ""
+    logger.info(
+        f"{BRACKET_WRITER_G2} place_missing_stop intent=%s ticker=%s qty=%s "
+        "price=%s new_order=%s",
+        bracket_intent_id, ticker, local_quantity, stop_price, new_oid,
+    )
+    _g2_event(
+        db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
+        ticker=ticker, broker_source=broker_source,
+        event_type="g2_place_missing_stop_submitted", status="submitted",
+        new_stop_order_id=new_oid,
+        qty=float(local_quantity), stop_price=float(stop_price),
+    )
+    return WriterAction(
+        action="place_missing_stop", ok=True, reason="ok",
+        broker_source=broker_source, ticker=ticker,
+        new_stop_order_id=new_oid,
+        new_stop_qty=float(local_quantity),
+        new_stop_price=float(stop_price),
+        raw_broker_response=place_res,
+    )
+
+

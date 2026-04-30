@@ -115,6 +115,26 @@ def apply_execution_event_to_trade(trade: Any, event: Any) -> None:
     avg_fill = _safe_float(getattr(event, "average_fill_price", None))
     status = (getattr(event, "status", None) or "").strip().lower()
 
+    # R27 (2026-04-30): respect terminal trade states. This function does
+    # NOT distinguish ENTRY fills from EXIT fills -- both look like
+    # ``status='filled'`` from the broker. Without the guard below, a SELL
+    # fill (exit) calls _finalize_filled_exit which sets trade.status =
+    # 'closed', then this same fill flows through record_execution_event
+    # which calls apply_execution_event_to_trade and the line "trade.status
+    # = 'open' if status == 'filled'" flips the closed trade BACK to open.
+    # Symptom: trade has exit_price + exit_date + pnl set, but
+    # status='open' -- and downstream loops (bracket reconciler, exit
+    # monitor) keep firing on the still-open-locally trade with no broker
+    # position. Real bug found 2026-04-30 on ADT/WDCX/ABEV.
+    #
+    # Once a trade is closed or cancelled with an exit_date populated, it
+    # is terminal -- record everything else from the event but do not
+    # reanimate trade.status.
+    _is_terminal = (
+        (getattr(trade, "status", "") or "").strip().lower() in ("closed", "cancelled")
+        and getattr(trade, "exit_date", None) is not None
+    )
+
     if getattr(event, "submitted_at", None) and getattr(trade, "submitted_at", None) is None:
         trade.submitted_at = event.submitted_at
     if getattr(event, "acknowledged_at", None):
@@ -136,11 +156,14 @@ def apply_execution_event_to_trade(trade: Any, event: Any) -> None:
         trade.filled_quantity = cumulative
         if getattr(trade, "remaining_quantity", None) is None and requested is not None:
             trade.remaining_quantity = max(0.0, requested - cumulative)
-        if cumulative > 0 and status in ("filled", "partially_filled", "open"):
+        if not _is_terminal and cumulative > 0 and status in ("filled", "partially_filled", "open"):
             trade.status = "open" if status == "filled" else "working"
     if avg_fill is not None and avg_fill > 0:
         trade.avg_fill_price = avg_fill
-        if status == "filled":
+        # Only seed entry_price from this event if the trade has not
+        # already closed -- on EXIT fills this same event would otherwise
+        # smash entry_price with the SELL avg fill price.
+        if not _is_terminal and status == "filled" and not getattr(trade, "exit_date", None):
             trade.entry_price = avg_fill
     # Safety: if the broker reports cancelled/rejected/failed but the
     # order actually executed (cumulative_filled_quantity > 0), prefer
@@ -150,17 +173,18 @@ def apply_execution_event_to_trade(trade: Any, event: Any) -> None:
     # 69e7a52f all reported filled via rh.orders.get_stock_order_info
     # but had state 'cancelled' at the moment of sync).
     has_real_fill = cumulative is not None and cumulative > 0
-    if status in ("cancelled", "canceled"):
-        trade.status = "open" if has_real_fill else "cancelled"
-    elif status in ("rejected", "failed", "expired"):
-        if has_real_fill:
+    if not _is_terminal:
+        if status in ("cancelled", "canceled"):
+            trade.status = "open" if has_real_fill else "cancelled"
+        elif status in ("rejected", "failed", "expired"):
+            if has_real_fill:
+                trade.status = "open"
+            else:
+                trade.status = "rejected" if status in ("rejected", "failed") else "cancelled"
+        elif status in ("queued", "pending", "confirmed", "unconfirmed", "open", "partially_filled"):
+            trade.status = "working"
+        elif status == "filled":
             trade.status = "open"
-        else:
-            trade.status = "rejected" if status in ("rejected", "failed") else "cancelled"
-    elif status in ("queued", "pending", "confirmed", "unconfirmed", "open", "partially_filled"):
-        trade.status = "working"
-    elif status == "filled":
-        trade.status = "open"
     # Broker_status: record the actual broker-reported status for audit,
     # unless we've overridden it due to cumulative-fill evidence — in
     # that case, record "filled" so downstream consumers see truth.

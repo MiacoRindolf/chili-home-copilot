@@ -1,0 +1,105 @@
+﻿# R23 ADT trade reconcile (out-of-sync after manual sale + stop cancel) 04/30/2026 14:43:08
+
+===== all open Robinhood trades vs broker positions =====
+  id  | ticker | status | broker_status | entry  |  exit  |  pnl  
+------+--------+--------+---------------+--------+--------+-------
+ 1694 | ADT    | open   | filled        | 7.1350 | 7.4100 | 11.55
+(1 row)
+
+
+
+===== broker positions ground truth (Robinhood) =====
+docker :   File "<string>", line 1
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-adt-reconcile.ps1:12 char:5
++     docker compose exec -T chili python -c "from app.services import  ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (  File "<string>", line 1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    from app.services import broker_service; positions = broker_service.get_positions() or []; [print(f'{p.get(" 
+ticker\)}
+                                                                                                      ^
+SyntaxError: unterminated string literal (detected at line 1)
+
+
+===== BEFORE: ADT trade row =====
+  id  | ticker | status | broker_status | entry  |  exit  |  pnl  | exit_reason |        exit_date        | pending_exit_status | pending_exit_reason 
+------+--------+--------+---------------+--------+--------+-------+-------------+-------------------------+---------------------+---------------------
+ 1694 | ADT    | open   | filled        | 7.1350 | 7.4100 | 11.55 | stop        | 2026-04-30 20:00:18.739 |                     | 
+(1 row)
+
+
+
+===== BEFORE: bracket intent for trade 1694 =====
+ id  | trade_id | intent_state |  stop  |      last_observed_at      
+-----+----------+--------------+--------+----------------------------
+ 206 |     1694 | reconciled   | 6.5642 | 2026-04-30 21:42:51.837543
+(1 row)
+
+
+
+===== reconcile: flip ADT trade 1694 to status=closed (broker exited at 20:00 UTC; pnl already set) =====
+BEGIN
+UPDATE 1
+  id  | status | broker_status | exit_reason |        exit_date        
+------+--------+---------------+-------------+-------------------------
+ 1694 | closed | filled        | stop        | 2026-04-30 20:00:18.739
+(1 row)
+
+COMMIT
+
+
+===== reconcile: terminate the bracket intent (intent_state=reconciled) =====
+BEGIN
+UPDATE 1
+ id  | trade_id | intent_state 
+-----+----------+--------------
+ 206 |     1694 | reconciled
+(1 row)
+
+COMMIT
+
+
+===== audit row =====
+  id   
+-------
+ 10332
+(1 row)
+
+INSERT 0 1
+
+
+===== wait 70s for next sweep =====
+ok
+
+
+===== AFTER sweep: bracket reconciliation last 90s =====
+        observed_at         |     mode      |     kind     | count 
+----------------------------+---------------+--------------+-------
+ 2026-04-30 21:42:51.837543 | authoritative | missing_stop |     1
+(1 row)
+
+
+
+===== AFTER sweep: g2_ events count last 90s (should be 0 -- no open trades to sweep) =====
+ new_events 
+------------
+          2
+(1 row)
+
+
+
+===== FINAL: open Robinhood trades =====
+ id | ticker | status | broker_status 
+----+--------+--------+---------------
+(0 rows)
+
+
+
+===== breaker context (informational only -- not auto-resetting) =====
+                                                                                                                          note                                                                                                                          
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ breaker tripped at 15:35 UTC on 5-consecutive-loss rule; daily realized pnl is only -3.90 USD (well under 300 cap); 5 losses are mostly synthetic broker_reconcile_position_gone exits with crude price estimates. OPERATOR DECISION whether to reset.
+(1 row)
+
+

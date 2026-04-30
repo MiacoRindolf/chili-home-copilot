@@ -1,0 +1,100 @@
+﻿# r27 apply terminal-state guard 04/30/2026 15:00:46
+
+===== apply edit via Python (host git works) =====
+inserted terminal-guard preamble
+gated status-mutation branches behind not _is_terminal
+ast OK
+wrote 508 lines to C:\dev\chili-home-copilot\app\services\trading\execution_audit.py
+
+
+
+===== py-compile =====
+OK
+
+
+===== git diff stat =====
+git : warning: in the working copy of 'app/services/trading/execution_audit.py', LF will be replaced by CRLF the next 
+time Git touches it
+At C:\dev\chili-home-copilot\scripts\dispatch-r27-apply.ps1:15 char:5
++     git diff --stat app/services/trading/execution_audit.py
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: in the... Git touches it:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ app/services/trading/execution_audit.py | 48 ++++++++++++++++++++++++---------
+ 1 file changed, 36 insertions(+), 12 deletions(-)
+
+
+===== force-recreate workers that handle order events =====
+docker :  Container chili-home-copilot-postgres-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r27-apply.ps1:19 char:5
++     docker compose up -d --force-recreate broker-sync-worker autotrad ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...gres-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-ollama-1 Running 
+ Container chili-home-copilot-broker-sync-worker-1 Recreate 
+ Container chili-home-copilot-chili-1 Recreate 
+ Container chili-home-copilot-autotrader-worker-1 Recreate 
+ Container chili-home-copilot-autotrader-worker-1 Recreated 
+ Container chili-home-copilot-broker-sync-worker-1 Recreated 
+ Container chili-home-copilot-chili-1 Recreated 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-broker-sync-worker-1 Starting 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-chili-1 Starting 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-autotrader-worker-1 Starting 
+ Container chili-home-copilot-broker-sync-worker-1 Started 
+ Container chili-home-copilot-autotrader-worker-1 Started 
+ Container chili-home-copilot-chili-1 Started 
+
+
+===== wait 15s =====
+ok
+
+
+===== container health =====
+chili-home-copilot-chili-1 | Up 15 seconds (healthy)
+chili-home-copilot-broker-sync-worker-1 | Up 15 seconds
+chili-home-copilot-autotrader-worker-1 | Up 15 seconds
+chili-home-copilot-scheduler-worker-1 | Up 2 hours
+chili-home-copilot-brain-worker-1 | Up 5 hours (healthy)
+chili-home-copilot-postgres-1 | Up 5 hours (healthy)
+chili-home-copilot-ollama-1 | Up 5 hours (healthy)
+
+
+===== audit row =====
+docker : ERROR:  value too long for type character varying(30)
+At C:\dev\chili-home-copilot\scripts\dispatch-r27-apply.ps1:29 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "INSERT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  value t...ter varying(30):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+
+===== verify open RH trades is still 0 (no spurious resurrection) =====
+ id | ticker | status 
+----+--------+--------
+(0 rows)
+
+
+
+===== verify recent g2_ events are quiet (no more writer loop) =====
+ count | max 
+-------+-----
+     0 | 
+(1 row)
+
+
