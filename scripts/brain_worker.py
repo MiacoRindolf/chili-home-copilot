@@ -745,15 +745,78 @@ def _apply_learning_result_to_stats(result: dict, cycle_stats: dict, db) -> None
                 logger.warning(f"[brain] Could not get live queue status: {qe}")
 
 
+def _learning_cycle_audit_begin() -> str | None:
+    """Insert a brain_batch_jobs 'running' row in its OWN short-lived session.
+
+    Round-18 FIX (2026-04-30): visibility for the legacy reconcile pass.
+    The cycle holds a single ~13-34min session that periodically dies
+    mid-flight (`server closed the connection unexpectedly` per FIX 31
+    notes). Without an audit row, those crashes are invisible.
+
+    Use a separate session for begin/finish so the audit row commits
+    independently of the cycle's session lifecycle. Returns the
+    job_id, or None if begin failed (in which case finish is skipped).
+    """
+    db = SessionLocal()
+    try:
+        from app.services.trading.brain_batch_job_log import brain_batch_job_begin
+        jid = brain_batch_job_begin(db, "learning_cycle")
+        db.commit()
+        return jid
+    except Exception as e:
+        logger.warning("[brain] learning_cycle audit begin failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        db.close()
+
+
+def _learning_cycle_audit_finish(jid: str | None, *, ok: bool, error: str | None,
+                                   meta: dict | None) -> None:
+    """Mark the audit row finished in its OWN short-lived session.
+
+    Round-18 FIX (2026-04-30). Caller is the cycle's wrapper; jid is
+    None when begin failed. Any exception here is swallowed -- the cycle
+    has already returned its real result; we don't want the audit
+    bookkeeping to mask it.
+    """
+    if not jid:
+        return
+    db = SessionLocal()
+    try:
+        from app.services.trading.brain_batch_job_log import brain_batch_job_finish
+        brain_batch_job_finish(db, jid, ok=ok, error=error, meta=meta)
+        db.commit()
+    except Exception as e:
+        logger.warning("[brain] learning_cycle audit finish failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
 def run_learning_cycle(status: BrainWorkerStatus) -> dict:
     """Execute the full in-process **reconcile pass** (``run_learning_cycle`` in learning.py).
 
     This is the legacy step-orchestrated pass (20+ steps); prescreen/scan are often cron-driven.
     Primary live operator truth is the durable work ledger + scheduler, not this step bar.
+
+    Round-18 FIX (2026-04-30): wrapped with brain_batch_jobs begin/finish
+    in separate sessions so a cycle that dies mid-flight (FIX 31's
+    'server closed the connection unexpectedly' scenario) still leaves
+    a 'running' or 'error' audit row. Previously these crashes were
+    silent.
     """
     from app.services.trading.learning import (
         run_learning_cycle as full_learning_cycle,
     )
+
+    audit_jid = _learning_cycle_audit_begin()
 
     cycle_stats = {
         "started": datetime.utcnow().isoformat(),
@@ -769,6 +832,8 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
         "snapshots_taken": 0,
         "insights_decayed": 0,
     }
+    audit_ok = False
+    audit_error: str | None = None
 
     use_remote = os.environ.get("CHILI_USE_BRAIN_SERVICE", "").strip().lower() in (
         "1",
@@ -804,7 +869,9 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
                     _apply_learning_result_to_stats(result, cycle_stats, db_remote)
                 finally:
                     db_remote.close()
+                audit_ok = True
             except Exception as e:
+                audit_error = f"remote: {e}"
                 logger.error(f"[brain] Remote reconcile pass failed: {e}")
                 import traceback
 
@@ -834,11 +901,20 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
                     "[brain] Reconcile pass did not run: %s",
                     result.get("reason", result),
                 )
+                # Don't mark error -- "already in progress" is benign.
+                audit_ok = True
+                audit_error = (
+                    f"skipped: {result.get('reason')}" if result.get("reason") else None
+                )
+            else:
+                audit_ok = True
             _apply_learning_result_to_stats(result, cycle_stats, db)
 
             cycle_stats["completed"] = datetime.utcnow().isoformat()
 
         except Exception as e:
+            audit_ok = False
+            audit_error = str(e)[:2000]
             logger.error(f"[brain] Full reconcile pass failed: {e}")
             import traceback
 
@@ -857,6 +933,21 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
     finally:
         stop_polling.set()
         poll_thread.join(timeout=8)
+        # Round-18: write the audit-finish row in its own session so it
+        # lands even if the cycle's session was torn down by a TCP reset.
+        _learning_cycle_audit_finish(
+            audit_jid,
+            ok=audit_ok,
+            error=audit_error,
+            meta={
+                "patterns_mined": cycle_stats.get("patterns_mined", 0),
+                "patterns_tested": cycle_stats.get("patterns_tested", 0),
+                "tickers_scanned": cycle_stats.get("tickers_scanned", 0),
+                "elapsed_s": cycle_stats.get("elapsed_s"),
+                "queue_pending": cycle_stats.get("queue_pending"),
+                "use_remote": use_remote,
+            },
+        )
 
 
 def _cleanup_on_exit():

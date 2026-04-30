@@ -1,0 +1,41 @@
+fix(brain): round-18 brain_batch_jobs visibility for learning_cycle
+
+R16 brain-worker audit noted: the legacy reconcile pass (run_learning_
+cycle in learning.py, ~13-34min single-session hold, ~20 steps) does
+NOT write to brain_batch_jobs. When the cycle dies mid-flight from
+'server closed the connection unexpectedly' (the FIX 31 scenario),
+operators have nothing in the audit table to point at. Cycles also
+return ok=False for benign reasons ("already in progress", "server
+shutting down") that should be visible distinctly from real crashes.
+
+Fix: wrap the brain_worker's local run_learning_cycle wrapper with
+brain_batch_job_begin/finish in SEPARATE short-lived sessions:
+
+  def run_learning_cycle(status):
+      audit_jid = _learning_cycle_audit_begin()  # own session
+      try:
+          ...cycle work using its own long-lived session...
+          audit_ok = True
+      except Exception as e:
+          audit_ok = False
+          audit_error = str(e)
+          ...
+      finally:
+          stop_polling.set(); poll_thread.join(...)
+          _learning_cycle_audit_finish(audit_jid, ok=, error=, meta=)
+
+Why separate sessions:
+- The cycle's session can be torn down by a TCP reset mid-flight.
+  If begin/finish were on that session, neither would commit on
+  failure -- exactly the case we need to be visible.
+- Tiny session, single INSERT, immediate commit -- cheap and reliable.
+
+The benign "skipped: already in progress" path marks audit_ok=True
+with the reason in error_message, so operators can distinguish real
+crashes from the lock-skip case at a glance.
+
+Files:
+- scripts/brain_worker.py: added _learning_cycle_audit_begin/finish
+  helpers and threaded audit_ok/audit_error/audit_jid through the
+  existing wrapper. Recovery via safe-Python-write because Edit tool
+  truncated again.
