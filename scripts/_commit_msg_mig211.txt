@@ -1,0 +1,22 @@
+fix(audit-2026-04-29): mig 211 backfill avg_return_pct from trading_backtests
+
+Follow-up to mig 210. Of the 442 patterns still NULL after mig 210, a
+deeper probe found 75 have data in `trading_backtests` (a different
+table from `trading_pattern_trades` that mig 210 used). Mig 210 only
+covered the per-trade table; mig 211 handles the summary table.
+
+Min n=5 threshold reuses chili_realized_ev_min_trades. Idempotent.
+Filters archived_at IS NULL so we don't pull from old archived runs.
+
+Verified observations from this round:
+- All 6 open trades have broker_order_id (post-A-5/A-6 phantom fixes)
+- 3 NEW open trades opened today (SOL-USD, GRT-USD, AAVE-USD) -- the
+  PDT gate correctly blocks STOCK trades but allows CRYPTO (PDT only
+  applies to equities). Pipeline working as intended.
+- Backtest queue is processing: 250 patterns backtested in last 24h,
+  42 in last 6h. The remaining ~367 NULL-arp patterns will fill in
+  as the queue continues to run.
+- 0 idle-in-tx leaks in chili-app/scheduler/autotrader/broker-sync.
+  Brain-worker holds 2 (long-running learning cycle, expected).
+- Heartbeat 96 runs in last 24h (target: 288 at 5min cadence; healthy
+  given today's container restarts).

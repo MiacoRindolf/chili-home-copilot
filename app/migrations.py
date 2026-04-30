@@ -14029,6 +14029,74 @@ def _migration_210_backfill_avg_return_pct_from_pattern_trades(conn) -> None:
         pass
 
 
+
+def _migration_211_backfill_avg_return_pct_from_trading_backtests(conn) -> None:
+    """Backfill scan_patterns.avg_return_pct from trading_backtests aggregates.
+
+    2026-04-30 follow-up to mig 210. After mig 210 backfilled from
+    trading_pattern_trades, 442 patterns still had NULL avg_return_pct.
+    A deeper probe found 75 of those have data in ``trading_backtests``
+    (a separate table that stores backtest summary rows, vs
+    trading_pattern_trades which stores per-trade rows).
+
+    The trading_backtests table has its own schema (return_pct, win_rate,
+    trade_count) that's separate from trading_pattern_trades. Mig 210
+    only handled the latter; this migration handles the former.
+
+    Per the no-hardcoded-fallback rule, the same min n=5 threshold from
+    chili_realized_ev_min_trades is used to gate writes. Idempotent:
+    only updates rows where avg_return_pct IS NULL.
+    """
+    if "scan_patterns" not in _tables(conn) or "trading_backtests" not in _tables(conn):
+        conn.commit()
+        return
+
+    res = conn.execute(text(
+        """
+        UPDATE scan_patterns sp
+        SET avg_return_pct = sub.avg_ret,
+            win_rate = sub.wr,
+            trade_count = sub.n,
+            updated_at = CURRENT_TIMESTAMP
+        FROM (
+            SELECT
+                scan_pattern_id,
+                COUNT(*) AS n,
+                AVG(return_pct) AS avg_ret,
+                AVG(win_rate) AS wr
+            FROM trading_backtests
+            WHERE scan_pattern_id IS NOT NULL
+              AND return_pct IS NOT NULL
+              AND win_rate IS NOT NULL
+              AND archived_at IS NULL
+            GROUP BY scan_pattern_id
+            HAVING COUNT(*) >= 5
+        ) sub
+        WHERE sp.id = sub.scan_pattern_id
+          AND sp.avg_return_pct IS NULL
+        RETURNING sp.id
+        """
+    ))
+    backfilled = res.rowcount or 0
+    conn.commit()
+
+    try:
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+                (user_id, event_type, description, related_insight_id, created_at)
+            VALUES (NULL, 'migration_211', :msg, NULL, CURRENT_TIMESTAMP)
+            """
+        ), {"msg": (
+            f"mig 211 backfilled avg_return_pct/win_rate/trade_count for "
+            f"{backfilled} patterns from trading_backtests aggregates "
+            f"(non-archived, min n=5)"
+        )})
+        conn.commit()
+    except Exception:
+        pass
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -14249,6 +14317,7 @@ MIGRATIONS = [
     ("208_pattern_trades_dedupe_and_clamp", _migration_208_pattern_trades_dedupe_and_clamp),
     ("209_widen_macro_regime_label_columns", _migration_209_widen_macro_regime_label_columns),
     ("210_backfill_avg_return_pct_from_pattern_trades", _migration_210_backfill_avg_return_pct_from_pattern_trades),
+    ("211_backfill_avg_return_pct_from_trading_backtests", _migration_211_backfill_avg_return_pct_from_trading_backtests),
 ]
 
 
