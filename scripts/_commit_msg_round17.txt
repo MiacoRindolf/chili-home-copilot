@@ -1,0 +1,40 @@
+fix(backtest): round-17 ON CONFLICT DO NOTHING in pattern_trade_storage
+
+R16 audit of brain-worker logs surfaced recurring UniqueViolation crashes
+on `trading_pattern_trades_natural_key_uniq` (added by mig 208). Example
+seen live: ADA-USD pattern 875 backtest, 33 trades, 1 collision -> all
+33 rows lost because the bulk db.commit() rolled back.
+
+Old writer:
+  for trade in trades[:50]:
+      db.add(PatternTradeRow(...))
+  db.commit()   # ANY UniqueViolation rolls back ALL 50
+
+New writer:
+  rows = [{...} for trade in trades[:50]]
+  db.execute(
+      pg_insert(PatternTradeRow.__table__)
+        .values(rows)
+        .on_conflict_do_nothing(
+            index_elements=[scan_pattern_id, ticker, as_of_ts, timeframe],
+            index_where=text("scan_pattern_id IS NOT NULL"),
+        )
+  )
+
+Rationale:
+- The unique partial index from mig 208 is doing its job (catching dups).
+  The writer just needs to handle the rejection gracefully.
+- ON CONFLICT DO NOTHING is the right primitive: dups skip, valid rows
+  insert atomically, rowcount reports actual inserted count.
+- The unique partial index has WHERE scan_pattern_id IS NOT NULL, so
+  ON CONFLICT must specify index_where matching exactly -- otherwise
+  PostgreSQL refuses (no inferable unique constraint matches).
+
+Caller (backtest_service._persist_pattern_trades_from_result) discards
+the return value, so the semantic shift from "rows attempted" to "rows
+inserted" is safe.
+
+Side effect: the brain-worker's pattern-trade write step no longer
+crashes on legitimate replay scenarios (e.g., re-running a backtest
+for a pattern that already has rows). Cycles that previously rolled
+back this step will now succeed.
