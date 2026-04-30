@@ -1,0 +1,40 @@
+﻿# r23 PRE-FLIGHT (verify stop semantics before flipping) 04/30/2026 10:19:00
+
+===== trade + bracket intent join (the data the writer actually sees) =====
+ trade_id | ticker | direction |  entry  | trade_stop_loss | trade_take_profit | intent_id | intent_state  | intent_stop | intent_target 
+----------+--------+-----------+---------+-----------------+-------------------+-----------+---------------+-------------+---------------
+     1694 | ADT    | long      |  7.1350 |          7.3976 |            7.8183 |       206 | shadow_logged |      6.5642 |        8.2052
+     1759 | WDCX   | long      | 62.8250 |         66.2500 |           80.5000 |       208 | shadow_logged |     57.7990 |       72.2488
+     1781 | ABEV   | long      |  2.8550 |          2.9300 |            3.0800 |       209 | shadow_logged |      2.6266 |        3.2832
+(3 rows)
+
+
+
+===== current best bid/ask for each ticker (broker call) =====
+docker : Traceback (most recent call last):
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-preflight.ps1:15 char:5
++     docker compose exec -T chili python -c "from app.services import  ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "<string>", line 1, in <module>
+  File "<string>", line 1, in <listcomp>
+AttributeError: module 'app.services.broker_service' has no attribute 'fetch_quote'
+
+
+===== stop semantics check (intent.stop_price vs current bid) =====
+ ticker |  entry  | intent_stop |     sanity     
+--------+---------+-------------+----------------
+ ADT    |  7.1350 |      6.5642 | below_entry_OK
+ WDCX   | 62.8250 |     57.7990 | below_entry_OK
+ ABEV   |  2.8550 |      2.6266 | below_entry_OK
+(3 rows)
+
+
+
+===== verify writer module sees the right stop_price (dry-run query in chili container) =====
+trade=1694 ticker=ADT qty=42.0 intent_stop=6.5642 intent_target=8.2052 intent_state=shadow_logged
+trade=1759 ticker=WDCX qty=4.0 intent_stop=57.799 intent_target=72.2488 intent_state=shadow_logged
+trade=1781 ticker=ABEV qty=105.0 intent_stop=2.6266 intent_target=3.2832 intent_state=shadow_logged
+

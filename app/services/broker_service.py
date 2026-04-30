@@ -2103,17 +2103,22 @@ def place_sell_stop_loss_order(
         )
 
         def _do_stop_sell():
-            # rh.orders.order(...) signature accepts stopPrice + trigger='stop'
-            # to place a stop-loss. orderType='market' makes the triggered
-            # order a market order; orderType='limit' would make a stop-limit.
-            # We choose market to guarantee fill on a fast drop.
+            # robin_stocks rh.orders.order(...) DERIVES order type internally
+            # from which prices are set:
+            #   stopPrice + no limitPrice  -> stop-loss MARKET (the trigger
+            #     converts to a market order on breach)
+            #   stopPrice + limitPrice     -> stop-LIMIT
+            #   limitPrice only            -> LIMIT
+            #   neither                    -> MARKET
+            # Older code here passed trigger='stop'/orderType='market' as
+            # explicit kwargs, but rh.orders.order rejects those with
+            # TypeError. Pass just stopPrice + side='sell' to land a real
+            # stop-loss-market order.
             return rh.orders.order(
                 symbol=ticker,
                 quantity=quantity,
                 side="sell",
                 stopPrice=round(float(trigger_price), 2),
-                trigger="stop",
-                orderType="market",
                 timeInForce="gtc",
                 extendedHours=session_kwargs["extendedHours"],
                 market_hours=session_kwargs["market_hours"],

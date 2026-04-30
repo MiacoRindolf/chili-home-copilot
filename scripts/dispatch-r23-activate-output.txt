@@ -1,0 +1,123 @@
+﻿# r23 ACTIVATE live missing-stop repair 04/30/2026 10:19:47
+
+===== open Robinhood trades (writer's targets) =====
+  id  | ticker | broker_source | status | broker_status |           broker_order_id            |  entry  |  stop   | quantity |      age_hours      
+------+--------+---------------+--------+---------------+--------------------------------------+---------+---------+----------+---------------------
+ 1781 | ABEV   | robinhood     | open   | filled        | 69f25fea-5c16-4433-8b04-8904d272987f |  2.8550 |  2.9300 |      105 | 21.5664157147222222
+ 1759 | WDCX   | robinhood     | open   | filled        | 69f2437f-94b4-4806-9afe-61e1ea652d81 | 62.8250 | 66.2500 |        4 | 23.5872083466666667
+ 1694 | ADT    | robinhood     | open   | filled        | 69f23c08-6066-4743-aa46-847628411212 |  7.1350 |  7.3976 |       42 | 24.1185750275000000
+(3 rows)
+
+
+
+===== BracketIntent state for those trades =====
+ intent_id | trade_id | ticker | intent_state  |  stop   |      last_observed_at      
+-----------+----------+--------+---------------+---------+----------------------------
+       209 |     1781 | ABEV   | shadow_logged |  2.6266 | 2026-04-30 17:19:07.085129
+       208 |     1759 | WDCX   | shadow_logged | 57.7990 | 2026-04-30 17:19:07.085129
+       206 |     1694 | ADT    | shadow_logged |  6.5642 | 2026-04-30 17:19:07.085129
+(3 rows)
+
+
+
+===== last 24h reconciliation kinds (what would the writer act on?) =====
+     kind     | severity | count 
+--------------+----------+-------
+ missing_stop | error    |  9739
+ agree        | info     |  4354
+ qty_drift    | error    |   236
+ qty_drift    | warn     |     1
+(4 rows)
+
+
+
+===== any prior g2_ execution_events (should be 0 -- writer never fired before) =====
+ prior_g2_events 
+-----------------
+               0
+(1 row)
+
+
+
+===== current .env entries for these flags (before) =====
+BRAIN_LIVE_BRACKETS_MODE=shadow
+
+
+===== append flags to .env (idempotent) =====
+ADDED CHILI_BRACKET_SWEEP_WRITER_ENABLED=1
+REPLACED BRAIN_LIVE_BRACKETS_MODE
+wrote .env, 2 changes
+
+
+===== current .env entries for these flags (after) =====
+BRAIN_LIVE_BRACKETS_MODE=authoritative
+CHILI_BRACKET_SWEEP_WRITER_ENABLED=1
+
+
+===== force-recreate broker-sync-worker (picks up .env) =====
+docker :  Container chili-home-copilot-ollama-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-activate.ps1:67 char:5
++     docker compose up -d --force-recreate broker-sync-worker
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...lama-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-postgres-1 Running 
+ Container chili-home-copilot-broker-sync-worker-1 Recreate 
+ Container chili-home-copilot-broker-sync-worker-1 Recreated 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-broker-sync-worker-1 Starting 
+ Container chili-home-copilot-broker-sync-worker-1 Started 
+
+
+===== broker-sync-worker health =====
+chili-home-copilot-broker-sync-worker-1 | Up 5 seconds
+
+
+===== verify flags landed in container =====
+{'sweep_writer': True, 'mode': 'authoritative', 'g2_enabled': True, 'place_missing_stop': True}
+
+
+===== wait 130s for at least one bracket reconciliation sweep =====
+ok
+
+
+===== newest reconciliation sweep (mode should now be authoritative) =====
+               sweep_id               |  mode  |     kind     | severity | count 
+--------------------------------------+--------+--------------+----------+-------
+ 44b1d4fb-5a95-4c5e-b6c6-416380000dde | shadow | missing_stop | error    |     3
+ 0e348972-6355-4a7e-b63d-8e97e99eb609 | shadow | missing_stop | error    |     3
+(2 rows)
+
+
+
+===== g2_ execution_events created by writer in the last 5 minutes =====
+ id | event_type | status | ticker | broker_source | order_id | reason | stop_price | qty | recorded_at 
+----+------------+--------+--------+---------------+----------+--------+------------+-----+-------------
+(0 rows)
+
+
+
+===== broker-sync-worker logs (last 50 bracket_writer_g2 / bracket_reconciliation lines) =====
+
+
+===== new broker stop orders (open SELL stops on robinhood since flip) =====
+Found Additional pages.
+Loading page 2 ...
+Loading page 3 ...
+count: 0
+first 5: []
+
+
+===== open Robinhood trades (post-snapshot) =====
+  id  | ticker | status | broker_status |           broker_order_id            |  entry  |  stop   
+------+--------+--------+---------------+--------------------------------------+---------+---------
+ 1781 | ABEV   | open   | filled        | 69f25fea-5c16-4433-8b04-8904d272987f |  2.8550 |  2.9300
+ 1759 | WDCX   | open   | filled        | 69f2437f-94b4-4806-9afe-61e1ea652d81 | 62.8250 | 66.2500
+ 1694 | ADT    | open   | filled        | 69f23c08-6066-4743-aa46-847628411212 |  7.1350 |  7.3976
+(3 rows)
+
+

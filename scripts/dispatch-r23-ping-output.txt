@@ -1,0 +1,79 @@
+﻿# r23 ping (post-crash daemon check) 04/30/2026 10:17:36
+
+===== host date =====
+
+Thursday, April 30, 2026 10:17:36 AM
+
+
+
+
+===== git log --oneline -3 =====
+38b687b fix(brackets): R23 wire G2 with real stop-loss + audit + R24 trade CHECK constraints
+e2b1d3b fix(patterns): round-22 mig 213 demote 4 negative-EV promoted patterns
+72638c4 fix(provider): round-21 yfinance cache key + ^VIX zero-volume guard
+
+
+===== docker ps (chili containers running?) =====
+chili-home-copilot-chili-1 | Up 20 minutes (healthy)
+chili-home-copilot-brain-worker-1 | Up 22 minutes (healthy)
+chili-home-copilot-scheduler-worker-1 | Up 22 minutes
+chili-home-copilot-autotrader-worker-1 | Up 22 minutes
+chili-home-copilot-broker-sync-worker-1 | Up 22 minutes
+chili-home-copilot-postgres-1 | Up 22 minutes (healthy)
+chili-home-copilot-ollama-1 | Up 22 minutes (healthy)
+
+
+===== broker-sync-worker last 30 log lines =====
+broker-sync-worker-1  | 2026-04-30 17:16:07,149 [INFO] app.services.trading.bracket_reconciliation_service: [bracket_reconciliation_ops] event=discrepancy mode=shadow sweep_id=3ed31eb2-41d4-4961-b604-279c69c8a19d trade_id=1694 bracket_intent_id=206 ticker=ADT broker_source=robinhood kind=missing_stop severity=error
+broker-sync-worker-1  | 2026-04-30 17:16:07,150 [INFO] app.services.trading.bracket_reconciliation_service: [bracket_reconciliation_ops] event=discrepancy mode=shadow sweep_id=3ed31eb2-41d4-4961-b604-279c69c8a19d trade_id=1759 bracket_intent_id=208 ticker=WDCX broker_source=robinhood kind=missing_stop severity=error
+broker-sync-worker-1  | 2026-04-30 17:16:07,150 [INFO] app.services.trading.bracket_reconciliation_service: [bracket_reconciliation_ops] event=discrepancy mode=shadow sweep_id=3ed31eb2-41d4-4961-b604-279c69c8a19d trade_id=1781 bracket_intent_id=209 ticker=ABEV broker_source=robinhood kind=missing_stop severity=error
+broker-sync-worker-1  | 2026-04-30 17:16:07,281 [INFO] app.services.trading.bracket_reconciliation_service: [bracket_reconciliation_ops] event=sweep_summary mode=shadow sweep_id=3ed31eb2-41d4-4961-b604-279c69c8a19d trades_scanned=3 brackets_checked=3 agree_count=0 orphan_stop=0 missing_stop=3 qty_drift=0 state_drift=0 price_drift=0 broker_down=0 unreconciled=0 took_ms=69.7445
+broker-sync-worker-1  | 2026-04-30 17:16:07,282 [INFO] app.services.trading_scheduler: [scheduler] bracket_reconciliation sweep done: trades=3 brackets=3 agree=0 drift=3 took_ms=69.7
+broker-sync-worker-1  | 2026-04-30 17:16:07,282 [INFO] apscheduler.executors.default: Job "Crypto stop-loss monitor (every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-04-30 17:18:07 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:16:07,282 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=bracket_reconciliation phase=ok duration_ms=229
+broker-sync-worker-1  | 2026-04-30 17:16:07,411 [INFO] apscheduler.executors.default: Job "Bracket reconciliation sweep (every 60s; mode=shadow) (trigger: interval[0:01:00], next run at: 2026-04-30 17:17:07 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:16:22,051 [INFO] apscheduler.executors.default: Running job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:17:22 UTC)" (scheduled at 2026-04-30 17:16:22.051416+00:00)
+broker-sync-worker-1  | 2026-04-30 17:16:22,054 [INFO] apscheduler.executors.default: Job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:17:22 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:16:27,051 [INFO] apscheduler.executors.default: Running job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:17:27 UTC)" (scheduled at 2026-04-30 17:16:27.051557+00:00)
+broker-sync-worker-1  | 2026-04-30 17:16:27,053 [INFO] apscheduler.executors.default: Job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:17:27 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:17:07,052 [INFO] apscheduler.executors.default: Running job "Drift escalation watchdog (every 120s) (trigger: interval[0:02:00], next run at: 2026-04-30 17:19:07 UTC)" (scheduled at 2026-04-30 17:17:07.051628+00:00)
+broker-sync-worker-1  | 2026-04-30 17:17:07,052 [INFO] apscheduler.executors.default: Running job "Bracket reconciliation sweep (every 60s; mode=shadow) (trigger: interval[0:01:00], next run at: 2026-04-30 17:18:07 UTC)" (scheduled at 2026-04-30 17:17:07.051858+00:00)
+broker-sync-worker-1  | 2026-04-30 17:17:07,052 [INFO] apscheduler.executors.default: Job "Drift escalation watchdog (every 120s) (trigger: interval[0:02:00], next run at: 2026-04-30 17:19:07 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:17:07,052 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=bracket_reconciliation phase=start
+broker-sync-worker-1  | 2026-04-30 17:17:07,105 [INFO] app.services.trading.bracket_reconciliation_service: [bracket_reconciliation_ops] event=discrepancy mode=shadow sweep_id=2177a604-2a19-4fb1-8f22-1a1c926f035c trade_id=1694 bracket_intent_id=206 ticker=ADT broker_source=robinhood kind=missing_stop severity=error
+broker-sync-worker-1  | 2026-04-30 17:17:07,106 [INFO] app.services.trading.bracket_reconciliation_service: [bracket_reconciliation_ops] event=discrepancy mode=shadow sweep_id=2177a604-2a19-4fb1-8f22-1a1c926f035c trade_id=1759 bracket_intent_id=208 ticker=WDCX broker_source=robinhood kind=missing_stop severity=error
+broker-sync-worker-1  | 2026-04-30 17:17:07,108 [INFO] app.services.trading.bracket_reconciliation_service: [bracket_reconciliation_ops] event=discrepancy mode=shadow sweep_id=2177a604-2a19-4fb1-8f22-1a1c926f035c trade_id=1781 bracket_intent_id=209 ticker=ABEV broker_source=robinhood kind=missing_stop severity=error
+broker-sync-worker-1  | 2026-04-30 17:17:07,153 [INFO] app.services.trading.bracket_reconciliation_service: [bracket_reconciliation_ops] event=sweep_summary mode=shadow sweep_id=2177a604-2a19-4fb1-8f22-1a1c926f035c trades_scanned=3 brackets_checked=3 agree_count=0 orphan_stop=0 missing_stop=3 qty_drift=0 state_drift=0 price_drift=0 broker_down=0 unreconciled=0 took_ms=20.9207
+broker-sync-worker-1  | 2026-04-30 17:17:07,154 [INFO] app.services.trading_scheduler: [scheduler] bracket_reconciliation sweep done: trades=3 brackets=3 agree=0 drift=3 took_ms=20.9
+broker-sync-worker-1  | 2026-04-30 17:17:07,154 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=bracket_reconciliation phase=ok duration_ms=101
+broker-sync-worker-1  | 2026-04-30 17:17:07,284 [INFO] apscheduler.executors.default: Job "Bracket reconciliation sweep (every 60s; mode=shadow) (trigger: interval[0:01:00], next run at: 2026-04-30 17:18:07 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:17:22,051 [INFO] apscheduler.executors.default: Running job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:18:22 UTC)" (scheduled at 2026-04-30 17:17:22.051416+00:00)
+broker-sync-worker-1  | 2026-04-30 17:17:22,054 [INFO] apscheduler.executors.default: Job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:18:22 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:17:27,052 [INFO] apscheduler.executors.default: Running job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:18:27 UTC)" (scheduled at 2026-04-30 17:17:27.051557+00:00)
+broker-sync-worker-1  | 2026-04-30 17:17:27,053 [INFO] apscheduler.executors.default: Job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:18:27 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:17:37,052 [INFO] apscheduler.executors.default: Running job "Memory watcher (every 300s, in-process) (trigger: interval[0:05:00], next run at: 2026-04-30 17:22:37 UTC)" (scheduled at 2026-04-30 17:17:37.051737+00:00)
+broker-sync-worker-1  | 2026-04-30 17:17:37,221 [INFO] app.services.trading_scheduler: [mem_watcher] vm_rss=185MB vm_size=1859MB threads=36 py_objects=268206 top_abs=[('tuple', 44246), ('function', 37061), ('dict', 31199), ('list', 15248), ('set', 10928), ('ReferenceType', 10257)] top_delta_since_last=[]
+broker-sync-worker-1  | 2026-04-30 17:17:37,221 [INFO] apscheduler.executors.default: Job "Memory watcher (every 300s, in-process) (trigger: interval[0:05:00], next run at: 2026-04-30 17:22:37 UTC)" executed successfully
+
+
+===== current .env brackets flags =====
+BRAIN_LIVE_BRACKETS_MODE=shadow
+
+
+===== any reconciliation sweep in last 10 min? =====
+ count |            max             
+-------+----------------------------
+    30 | 2026-04-30 17:17:07.087753
+(1 row)
+
+
+
+===== current open Robinhood trades =====
+  id  | ticker | status | broker_status | has_oid |  entry  |  stop   
+------+--------+--------+---------------+---------+---------+---------
+ 1781 | ABEV   | open   | filled        | t       |  2.8550 |  2.9300
+ 1759 | WDCX   | open   | filled        | t       | 62.8250 | 66.2500
+ 1694 | ADT    | open   | filled        | t       |  7.1350 |  7.3976
+(3 rows)
+
+

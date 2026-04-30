@@ -185,11 +185,27 @@ def _g2_event(
         from .execution_audit import record_execution_event
         from ...models.trading import Trade
 
-        trade = None
+        # Look up the trade only to extract user_id + scan_pattern_id for the
+        # event-row enrichment. We deliberately DO NOT pass ``trade=`` to
+        # ``record_execution_event`` because that triggers
+        # ``apply_execution_event_to_trade``, which interprets event status
+        # values like 'rejected' / 'submitted' as broker-state transitions
+        # on the underlying Trade row. The writer's status reflects the
+        # STOP-ORDER placement outcome, not the trade's own broker state --
+        # letting that helper fire would corrupt Trade.status (it bit us
+        # on 2026-04-30 when 3 trades got flipped to 'rejected' the moment
+        # the writer first ran).
+        user_id = None
+        scan_pattern_id = None
         try:
-            trade = db.get(Trade, int(trade_id)) if trade_id is not None else None
+            if trade_id is not None:
+                t = db.get(Trade, int(trade_id))
+                if t is not None:
+                    user_id = getattr(t, "user_id", None)
+                    scan_pattern_id = getattr(t, "scan_pattern_id", None)
         except Exception:
-            trade = None
+            user_id = None
+            scan_pattern_id = None
 
         payload = {
             "bracket_intent_id": bracket_intent_id,
@@ -200,15 +216,17 @@ def _g2_event(
             "stop_price": stop_price,
             "qty": qty,
             "error": error,
+            "trade_id": trade_id,
         }
         if extra:
             payload.update(extra)
 
         record_execution_event(
             db,
-            user_id=getattr(trade, "user_id", None),
+            user_id=user_id,
             ticker=ticker,
-            trade=trade,
+            trade=None,  # MUST stay None -- see comment above.
+            scan_pattern_id=scan_pattern_id,
             broker_source=broker_source,
             order_id=new_stop_order_id,
             event_type=event_type,

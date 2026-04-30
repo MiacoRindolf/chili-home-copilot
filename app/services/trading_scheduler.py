@@ -482,13 +482,12 @@ def _run_bracket_reconciliation_job():
     def _work() -> None:
         from ..config import settings as _cfg
         mode = (getattr(_cfg, "brain_live_brackets_mode", "off") or "off").lower()
-        if mode in ("off", "authoritative"):
-            if mode == "authoritative":
-                logger.warning(
-                    "[scheduler] bracket_reconciliation skipped: mode=authoritative "
-                    "(Phase G is shadow-only; Phase G.2 required to enable)",
-                )
+        if mode == "off":
             return
+        # Round 23 (2026-04-30): authoritative mode is now permitted; the
+        # service-layer run_reconciliation_sweep enforces the
+        # chili_bracket_sweep_writer_enabled gate and falls back to shadow
+        # when the writer flag is off. Phase G.2 wiring is live.
         from ..db import SessionLocal
         from .trading.bracket_reconciliation_service import (
             broker_manager_view_fn,
@@ -3829,7 +3828,9 @@ def start_scheduler():
             # FIX 45b (2026-04-29): bracket reconciliation belongs to broker-
             # sync-worker — it sweeps broker order state and is part of the
             # broker-call surface area we want isolated.
-            if include_broker_sync and _brk_mode not in ("off", "authoritative"):
+            # Round 23: register on shadow|compare|authoritative; the
+            # service-layer + sweep_writer flag gate authoritative mode.
+            if include_broker_sync and _brk_mode != "off":
                 _scheduler.add_job(
                     _run_bracket_reconciliation_job,
                     trigger=IntervalTrigger(seconds=_brk_interval_s),

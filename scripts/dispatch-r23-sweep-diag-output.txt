@@ -1,0 +1,189 @@
+﻿# r23 sweep diagnostic 04/30/2026 10:25:34
+
+===== now() and broker-sync-worker uptime =====
+              now              
+-------------------------------
+ 2026-04-30 17:25:34.879993+00
+(1 row)
+
+chili-home-copilot-broker-sync-worker-1 | Up 5 minutes
+
+
+===== FULL broker-sync-worker logs since restart (look for crashes / errors) =====
+broker-sync-worker-1  | [docker-entrypoint-chili] CHILI_SCHEDULER_ROLE=broker_sync_only (non-web command)
+broker-sync-worker-1  | 2026-04-30 17:19:58,339 [INFO] app.services.massive_client: [massive] HTTP pool api.massive.com: pool_connections=128 pool_maxsize=512 (raise MASSIVE_HTTP_* if you still see urllib3 'pool is full')
+broker-sync-worker-1  | 2026-04-30 17:19:58,626 [INFO] __main__: [chili_brain_io] concurrency profile host_cpus=32.0 cgroup_cpus=2.00 effective=2.0 snapshot_workers=4 prediction_workers=4 high/med/low=4/8/4
+broker-sync-worker-1  | 2026-04-30 17:19:59,233 [INFO] app.services.broker_service: [broker] Robinhood session restored from DB (no re-auth)
+broker-sync-worker-1  | 2026-04-30 17:19:59,233 [INFO] __main__: [scheduler_worker] Broker session restore: ok
+broker-sync-worker-1  | 2026-04-30 17:19:59,249 [INFO] __main__: [scheduler_worker] Kill switch restored: inactive
+broker-sync-worker-1  | 2026-04-30 17:19:59,250 [INFO] app.services.trading_scheduler: [scheduler] Role=broker_sync_only (heavy_scan_jobs=False web_jobs=False emit_heartbeat=False)
+broker-sync-worker-1  | 2026-04-30 17:19:59,252 [INFO] app.services.trading_scheduler: [scheduler] Kill switch restored: inactive
+broker-sync-worker-1  | 2026-04-30 17:19:59,252 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+broker-sync-worker-1  | 2026-04-30 17:19:59,252 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+broker-sync-worker-1  | 2026-04-30 17:19:59,252 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Added job "Robinhood order+position sync (ET 8am-8pm every 2min)" to job store "default"
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Added job "Day-trade fast stop/exit monitor (market hours every 1min)" to job store "default"
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Added job "Crypto stop-loss monitor (every 2min, 24/7)" to job store "default"
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Added job "Stuck-order watchdog (every 60s)" to job store "default"
+broker-sync-worker-1  | 2026-04-30 17:19:59,253 [INFO] apscheduler.scheduler: Added job "Execution-event lag gauge (every 60s)" to job store "default"
+broker-sync-worker-1  | 2026-04-30 17:19:59,254 [INFO] apscheduler.scheduler: Added job "Drift escalation watchdog (every 120s)" to job store "default"
+broker-sync-worker-1  | 2026-04-30 17:19:59,254 [INFO] apscheduler.scheduler: Added job "Memory watcher (every 300s, in-process)" to job store "default"
+broker-sync-worker-1  | 2026-04-30 17:19:59,254 [INFO] apscheduler.scheduler: Scheduler started
+broker-sync-worker-1  | 2026-04-30 17:19:59,254 [INFO] app.services.trading_scheduler: [scheduler] FIX C5: post-start canonical-job assertion OK for role=broker_sync_only (7 total jobs registered)
+broker-sync-worker-1  | 2026-04-30 17:19:59,254 [INFO] app.services.trading_scheduler: [scheduler] Trading scheduler started (brain worker runs run_learning_cycle; daily prescreen 2AM America/Los_Angeles; code brain every 4h, reasoning brain every 6h, project brain every 60min, weekly review Sun 6PM, broker sync market hours every 2min, price monitor every 5min, momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, crypto viability refresh every 30min 24/7, stock breakout scanner market hours every 15min, pattern imminent scanner every 15min; web pattern research + variant evolution run inside the brain worker learning cycle)
+broker-sync-worker-1  | 2026-04-30 17:19:59,254 [INFO] __main__: [scheduler_worker] Started (CHILI_SCHEDULER_ROLE=broker_sync_only)
+broker-sync-worker-1  | 2026-04-30 17:19:59,254 [INFO] __main__: [code_brain] DISABLED (set CHILI_DISPATCH_ENABLED=1 to turn on)
+broker-sync-worker-1  | 2026-04-30 17:20:00,000 [INFO] apscheduler.executors.default: Running job "Robinhood order+position sync (ET 8am-8pm every 2min) (trigger: cron[day_of_week='mon-fri', hour='8-20', minute='*/2'], next run at: 2026-04-30 13:20:00 EDT)" (scheduled at 2026-04-30 13:20:00-04:00)
+broker-sync-worker-1  | 2026-04-30 17:20:00,027 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=broker_sync phase=start
+broker-sync-worker-1  | 2026-04-30 17:20:00,069 [INFO] app.services.trading_scheduler: [scheduler] RH sync for user_id=1 (session owner)
+broker-sync-worker-1  | 2026-04-30 17:20:00,660 [INFO] app.services.broker_service: [broker] Order sync: 0 checked, 0 filled, 0 cancelled, 0 errors
+broker-sync-worker-1  | 2026-04-30 17:20:00,660 [INFO] app.services.trading_scheduler: [scheduler] RH order sync (user=1): {'synced': 0, 'filled': 0, 'cancelled': 0, 'errors': 0}
+broker-sync-worker-1  | Found Additional pages.
+broker-sync-worker-1  | Loading page 2 ...
+broker-sync-worker-1  | Loading page 3 ...
+broker-sync-worker-1  | 2026-04-30 17:20:12,582 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position PED qty=30.0 avg=16.37 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,585 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position EKSO qty=40.0 avg=11.73 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,587 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position TLS qty=100.0 avg=4.365 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,589 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position CCCC qty=150.0 avg=2.815 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,591 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position IMTX qty=30.0 avg=10.405 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,593 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1794 for GEO qty=17.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:20:12,597 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position CRDL qty=200.0 avg=1.4485 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,599 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position ELTX qty=25.0 avg=12.02 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,601 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position AIDX qty=150.0 avg=2.0 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,603 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position VFS qty=50.0 avg=4.5398 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,606 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position JOB qty=550.0 avg=0.2366 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,608 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position SOL-USD qty=3.0 avg=83.7333 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,610 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position GRT-USD qty=12376.0 avg=0.0245 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,612 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1784 for ADA-USD qty=2419.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:20:12,614 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1773 for AVAX-USD qty=31.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:20:12,616 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position AAVE-USD qty=6.0 avg=95.3317 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,618 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position ETH-USD qty=0.131984134927981 avg=2253.6932 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:20:12,688 [INFO] app.services.broker_service: [broker] Position sync: 0 created, 1 updated, 0 closed, 0 duplicates cancelled
+broker-sync-worker-1  | 2026-04-30 17:20:12,688 [INFO] app.services.trading_scheduler: [scheduler] RH position sync (user=1): {'created': 0, 'updated': 1, 'closed': 0, 'deduped': 0, '_live_tickers': {'VFS', 'CRDL', 'CCCC', 'JOB', 'GRT-USD', 'AVAX-USD', 'AAVE-USD', 'ETH-USD', 'ELTX', 'AIDX', 'EKSO', 'TLS', 'ADA-USD', 'SOL-USD', 'ADT', 'IMTX', 'GEO', 'PED'}}
+broker-sync-worker-1  | 2026-04-30 17:20:12,688 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=broker_sync phase=ok duration_ms=12660
+broker-sync-worker-1  | 2026-04-30 17:20:12,829 [INFO] apscheduler.executors.default: Job "Robinhood order+position sync (ET 8am-8pm every 2min) (trigger: cron[day_of_week='mon-fri', hour='8-20', minute='*/2'], next run at: 2026-04-30 13:22:00 EDT)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:20:29,253 [INFO] apscheduler.executors.default: Running job "Crypto stop-loss monitor (every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-04-30 17:22:29 UTC)" (scheduled at 2026-04-30 17:20:29.252937+00:00)
+broker-sync-worker-1  | 2026-04-30 17:20:29,266 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=crypto_stop_monitor phase=start
+broker-sync-worker-1  | 2026-04-30 17:20:29,304 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=crypto_stop_monitor phase=ok duration_ms=38
+broker-sync-worker-1  | 2026-04-30 17:20:29,464 [INFO] apscheduler.executors.default: Job "Crypto stop-loss monitor (every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-04-30 17:22:29 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:20:44,253 [INFO] apscheduler.executors.default: Running job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:21:44 UTC)" (scheduled at 2026-04-30 17:20:44.253050+00:00)
+broker-sync-worker-1  | 2026-04-30 17:20:44,269 [INFO] apscheduler.executors.default: Job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:21:44 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:20:49,253 [INFO] apscheduler.executors.default: Running job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:21:49 UTC)" (scheduled at 2026-04-30 17:20:49.253139+00:00)
+broker-sync-worker-1  | 2026-04-30 17:20:49,281 [INFO] apscheduler.executors.default: Job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:21:49 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:21:29,253 [INFO] apscheduler.executors.default: Running job "Drift escalation watchdog (every 120s) (trigger: interval[0:02:00], next run at: 2026-04-30 17:23:29 UTC)" (scheduled at 2026-04-30 17:21:29.253226+00:00)
+broker-sync-worker-1  | 2026-04-30 17:21:29,268 [INFO] apscheduler.executors.default: Job "Drift escalation watchdog (every 120s) (trigger: interval[0:02:00], next run at: 2026-04-30 17:23:29 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:21:44,253 [INFO] apscheduler.executors.default: Running job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:22:44 UTC)" (scheduled at 2026-04-30 17:21:44.253050+00:00)
+broker-sync-worker-1  | 2026-04-30 17:21:44,256 [INFO] apscheduler.executors.default: Job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:22:44 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:21:49,253 [INFO] apscheduler.executors.default: Running job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:22:49 UTC)" (scheduled at 2026-04-30 17:21:49.253139+00:00)
+broker-sync-worker-1  | 2026-04-30 17:21:49,255 [INFO] apscheduler.executors.default: Job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:22:49 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:21:59,253 [INFO] apscheduler.executors.default: Running job "Memory watcher (every 300s, in-process) (trigger: interval[0:05:00], next run at: 2026-04-30 17:26:59 UTC)" (scheduled at 2026-04-30 17:21:59.253326+00:00)
+broker-sync-worker-1  | 2026-04-30 17:21:59,418 [INFO] app.services.trading_scheduler: [mem_watcher] vm_rss=176MB vm_size=1713MB threads=34 py_objects=267239 top_abs=[('tuple', 44066), ('function', 36906), ('dict', 31099), ('list', 15158), ('set', 10895), ('ReferenceType', 10236)] top_delta_since_last=[]
+broker-sync-worker-1  | 2026-04-30 17:21:59,418 [INFO] apscheduler.executors.default: Job "Memory watcher (every 300s, in-process) (trigger: interval[0:05:00], next run at: 2026-04-30 17:26:59 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:22:00,000 [INFO] apscheduler.executors.default: Running job "Robinhood order+position sync (ET 8am-8pm every 2min) (trigger: cron[day_of_week='mon-fri', hour='8-20', minute='*/2'], next run at: 2026-04-30 13:24:00 EDT)" (scheduled at 2026-04-30 13:22:00-04:00)
+broker-sync-worker-1  | 2026-04-30 17:22:00,000 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=broker_sync phase=start
+broker-sync-worker-1  | 2026-04-30 17:22:00,024 [INFO] app.services.trading_scheduler: [scheduler] RH sync for user_id=1 (session owner)
+broker-sync-worker-1  | 2026-04-30 17:22:00,507 [INFO] app.services.broker_service: [broker] Order sync: 0 checked, 0 filled, 0 cancelled, 0 errors
+broker-sync-worker-1  | 2026-04-30 17:22:00,508 [INFO] app.services.trading_scheduler: [scheduler] RH order sync (user=1): {'synced': 0, 'filled': 0, 'cancelled': 0, 'errors': 0}
+broker-sync-worker-1  | 2026-04-30 17:22:00,512 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position PED qty=30.0 avg=16.37 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,514 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position EKSO qty=40.0 avg=11.73 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,516 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position TLS qty=100.0 avg=4.365 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,518 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position CCCC qty=150.0 avg=2.815 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,520 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position IMTX qty=30.0 avg=10.405 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,523 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1794 for GEO qty=17.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:22:00,525 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position CRDL qty=200.0 avg=1.4485 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,528 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position ELTX qty=25.0 avg=12.02 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,529 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position AIDX qty=150.0 avg=2.0 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,531 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position VFS qty=50.0 avg=4.5398 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,533 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position JOB qty=550.0 avg=0.2366 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,535 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position SOL-USD qty=3.0 avg=83.7333 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,538 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position GRT-USD qty=12376.0 avg=0.0245 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,540 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1784 for ADA-USD qty=2419.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:22:00,542 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1773 for AVAX-USD qty=31.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:22:00,544 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position AAVE-USD qty=6.0 avg=95.3317 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,546 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position ETH-USD qty=0.131984134927981 avg=2253.6932 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:22:00,591 [INFO] app.services.broker_service: [broker] Position sync: 0 created, 1 updated, 0 closed, 0 duplicates cancelled
+broker-sync-worker-1  | 2026-04-30 17:22:00,591 [INFO] app.services.trading_scheduler: [scheduler] RH position sync (user=1): {'created': 0, 'updated': 1, 'closed': 0, 'deduped': 0, '_live_tickers': {'VFS', 'CRDL', 'CCCC', 'JOB', 'GRT-USD', 'AVAX-USD', 'AAVE-USD', 'ETH-USD', 'ELTX', 'AIDX', 'EKSO', 'TLS', 'ADA-USD', 'SOL-USD', 'ADT', 'IMTX', 'GEO', 'PED'}}
+broker-sync-worker-1  | 2026-04-30 17:22:00,591 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=broker_sync phase=ok duration_ms=590
+broker-sync-worker-1  | 2026-04-30 17:22:00,714 [INFO] apscheduler.executors.default: Job "Robinhood order+position sync (ET 8am-8pm every 2min) (trigger: cron[day_of_week='mon-fri', hour='8-20', minute='*/2'], next run at: 2026-04-30 13:24:00 EDT)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:22:29,253 [INFO] apscheduler.executors.default: Running job "Crypto stop-loss monitor (every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-04-30 17:24:29 UTC)" (scheduled at 2026-04-30 17:22:29.252937+00:00)
+broker-sync-worker-1  | 2026-04-30 17:22:29,253 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=crypto_stop_monitor phase=start
+broker-sync-worker-1  | 2026-04-30 17:22:29,282 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=crypto_stop_monitor phase=ok duration_ms=28
+broker-sync-worker-1  | 2026-04-30 17:22:29,410 [INFO] apscheduler.executors.default: Job "Crypto stop-loss monitor (every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-04-30 17:24:29 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:22:44,253 [INFO] apscheduler.executors.default: Running job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:23:44 UTC)" (scheduled at 2026-04-30 17:22:44.253050+00:00)
+broker-sync-worker-1  | 2026-04-30 17:22:44,256 [INFO] apscheduler.executors.default: Job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:23:44 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:22:49,253 [INFO] apscheduler.executors.default: Running job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:23:49 UTC)" (scheduled at 2026-04-30 17:22:49.253139+00:00)
+broker-sync-worker-1  | 2026-04-30 17:22:49,255 [INFO] apscheduler.executors.default: Job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:23:49 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:23:29,253 [INFO] apscheduler.executors.default: Running job "Drift escalation watchdog (every 120s) (trigger: interval[0:02:00], next run at: 2026-04-30 17:25:29 UTC)" (scheduled at 2026-04-30 17:23:29.253226+00:00)
+broker-sync-worker-1  | 2026-04-30 17:23:29,253 [INFO] apscheduler.executors.default: Job "Drift escalation watchdog (every 120s) (trigger: interval[0:02:00], next run at: 2026-04-30 17:25:29 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:23:44,253 [INFO] apscheduler.executors.default: Running job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:24:44 UTC)" (scheduled at 2026-04-30 17:23:44.253050+00:00)
+broker-sync-worker-1  | 2026-04-30 17:23:44,256 [INFO] apscheduler.executors.default: Job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:24:44 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:23:49,253 [INFO] apscheduler.executors.default: Running job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:24:49 UTC)" (scheduled at 2026-04-30 17:23:49.253139+00:00)
+broker-sync-worker-1  | 2026-04-30 17:23:49,255 [INFO] apscheduler.executors.default: Job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:24:49 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:24:00,000 [INFO] apscheduler.executors.default: Running job "Robinhood order+position sync (ET 8am-8pm every 2min) (trigger: cron[day_of_week='mon-fri', hour='8-20', minute='*/2'], next run at: 2026-04-30 13:26:00 EDT)" (scheduled at 2026-04-30 13:24:00-04:00)
+broker-sync-worker-1  | 2026-04-30 17:24:00,000 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=broker_sync phase=start
+broker-sync-worker-1  | 2026-04-30 17:24:00,034 [INFO] app.services.trading_scheduler: [scheduler] RH sync for user_id=1 (session owner)
+broker-sync-worker-1  | 2026-04-30 17:24:00,453 [INFO] app.services.broker_service: [broker] Order sync: 0 checked, 0 filled, 0 cancelled, 0 errors
+broker-sync-worker-1  | 2026-04-30 17:24:00,453 [INFO] app.services.trading_scheduler: [scheduler] RH order sync (user=1): {'synced': 0, 'filled': 0, 'cancelled': 0, 'errors': 0}
+broker-sync-worker-1  | 2026-04-30 17:24:00,457 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position PED qty=30.0 avg=16.37 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,459 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position EKSO qty=40.0 avg=11.73 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,461 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position TLS qty=100.0 avg=4.365 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,463 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position CCCC qty=150.0 avg=2.815 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,466 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position IMTX qty=30.0 avg=10.405 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,468 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1794 for GEO qty=17.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:24:00,470 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position CRDL qty=200.0 avg=1.4485 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,472 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position ELTX qty=25.0 avg=12.02 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,474 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position AIDX qty=150.0 avg=2.0 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,477 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position VFS qty=50.0 avg=4.5398 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,479 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position JOB qty=550.0 avg=0.2366 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,481 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position SOL-USD qty=3.0 avg=83.7333 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,483 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position GRT-USD qty=12376.0 avg=0.0245 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,485 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1784 for ADA-USD qty=2419.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:24:00,486 [WARNING] app.services.broker_service: [broker_sync] FIX C2b: REFUSING to revive cancelled trade#1773 for AVAX-USD qty=31.0 -- no matching filled buy order in recent history; will retry next pass.
+broker-sync-worker-1  | 2026-04-30 17:24:00,488 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position AAVE-USD qty=6.0 avg=95.3317 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,491 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position ETH-USD qty=0.131984134927981 avg=2253.6932 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+broker-sync-worker-1  | 2026-04-30 17:24:00,557 [INFO] app.services.broker_service: [broker] Position sync: 0 created, 1 updated, 0 closed, 0 duplicates cancelled
+broker-sync-worker-1  | 2026-04-30 17:24:00,557 [INFO] app.services.trading_scheduler: [scheduler] RH position sync (user=1): {'created': 0, 'updated': 1, 'closed': 0, 'deduped': 0, '_live_tickers': {'VFS', 'CRDL', 'CCCC', 'JOB', 'GRT-USD', 'AVAX-USD', 'AAVE-USD', 'ETH-USD', 'ELTX', 'AIDX', 'EKSO', 'TLS', 'ADA-USD', 'SOL-USD', 'ADT', 'IMTX', 'GEO', 'PED'}}
+broker-sync-worker-1  | 2026-04-30 17:24:00,557 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=broker_sync phase=ok duration_ms=556
+broker-sync-worker-1  | 2026-04-30 17:24:00,696 [INFO] apscheduler.executors.default: Job "Robinhood order+position sync (ET 8am-8pm every 2min) (trigger: cron[day_of_week='mon-fri', hour='8-20', minute='*/2'], next run at: 2026-04-30 13:26:00 EDT)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:24:29,253 [INFO] apscheduler.executors.default: Running job "Crypto stop-loss monitor (every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-04-30 17:26:29 UTC)" (scheduled at 2026-04-30 17:24:29.252937+00:00)
+broker-sync-worker-1  | 2026-04-30 17:24:29,253 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=crypto_stop_monitor phase=start
+broker-sync-worker-1  | 2026-04-30 17:24:29,278 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=crypto_stop_monitor phase=ok duration_ms=25
+broker-sync-worker-1  | 2026-04-30 17:24:29,411 [INFO] apscheduler.executors.default: Job "Crypto stop-loss monitor (every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-04-30 17:26:29 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:24:44,253 [INFO] apscheduler.executors.default: Running job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:25:44 UTC)" (scheduled at 2026-04-30 17:24:44.253050+00:00)
+broker-sync-worker-1  | 2026-04-30 17:24:44,256 [INFO] apscheduler.executors.default: Job "Stuck-order watchdog (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:25:44 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:24:49,253 [INFO] apscheduler.executors.default: Running job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:25:49 UTC)" (scheduled at 2026-04-30 17:24:49.253139+00:00)
+broker-sync-worker-1  | 2026-04-30 17:24:49,255 [INFO] apscheduler.executors.default: Job "Execution-event lag gauge (every 60s) (trigger: interval[0:01:00], next run at: 2026-04-30 17:25:49 UTC)" executed successfully
+broker-sync-worker-1  | 2026-04-30 17:25:29,253 [INFO] apscheduler.executors.default: Running job "Drift escalation watchdog (every 120s) (trigger: interval[0:02:00], next run at: 2026-04-30 17:27:29 UTC)" (scheduled at 2026-04-30 17:25:29.253226+00:00)
+broker-sync-worker-1  | 2026-04-30 17:25:29,253 [INFO] apscheduler.executors.default: Job "Drift escalation watchdog (every 120s) (trigger: interval[0:02:00], next run at: 2026-04-30 17:27:29 UTC)" executed successfully
+
+
+===== broker-sync-worker logs filtered: ERROR / Traceback / authoritative / bracket =====
+
+broker-sync-worker-1  | 2026-04-30 17:20:00,660 [INFO] app.services.broker_service: [broker] Order sync: 0 checked, 0 
+filled, 0 cancelled, 0 errors
+broker-sync-worker-1  | 2026-04-30 17:20:00,660 [INFO] app.services.trading_scheduler: [scheduler] RH order sync 
+(user=1): {'synced': 0, 'filled': 0, 'cancelled': 0, 'errors': 0}
+broker-sync-worker-1  | 2026-04-30 17:22:00,507 [INFO] app.services.broker_service: [broker] Order sync: 0 checked, 0 
+filled, 0 cancelled, 0 errors
+broker-sync-worker-1  | 2026-04-30 17:22:00,508 [INFO] app.services.trading_scheduler: [scheduler] RH order sync 
+(user=1): {'synced': 0, 'filled': 0, 'cancelled': 0, 'errors': 0}
+broker-sync-worker-1  | 2026-04-30 17:24:00,453 [INFO] app.services.broker_service: [broker] Order sync: 0 checked, 0 
+filled, 0 cancelled, 0 errors
+broker-sync-worker-1  | 2026-04-30 17:24:00,453 [INFO] app.services.trading_scheduler: [scheduler] RH order sync 
+(user=1): {'synced': 0, 'filled': 0, 'cancelled': 0, 'errors': 0}
+
+
+
+
+===== scheduler jobs registered (in-process) =====
+NO SCHEDULER GLOBAL
+
+
+===== test calling run_reconciliation_sweep directly inside container =====
+effective mode: authoritative
+sweep ok: {'sweep_id': 'bbfc643f-bb76-428d-86c8-f875a2e074e8', 'mode': 'authoritative', 'trades_scanned': 3, 'brackets_checked': 3, 'agree': 0, 'orphan_stop': 0, 'missing_stop': 0, 'qty_drift': 0, 'state_drift': 0, 'price_drift': 0, 'broker_down': 3, 'unreconciled': 0, 'took_ms': 181.78504599995904, 'rows_written': 3}
+

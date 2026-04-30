@@ -1,0 +1,203 @@
+﻿# r23 recover trades + retry activation 04/30/2026 10:41:35
+
+===== before-recovery snapshot =====
+  id  | ticker |  status  | broker_status |  entry  |  exit   |  pnl  | exit_reason |        exit_date        
+------+--------+----------+---------------+---------+---------+-------+-------------+-------------------------
+ 1694 | ADT    | rejected | rejected      |  7.1350 |         |       |             | 
+ 1759 | WDCX   | rejected | rejected      | 62.8250 | 64.5000 |   6.7 | stop        | 2026-04-30 08:02:06.963
+ 1781 | ABEV   | rejected | rejected      |  2.8550 |  2.8602 | 0.546 | stop        | 2026-04-30 13:04:14.448
+(3 rows)
+
+
+
+===== recover trade 1694 ADT (no exit info, broker holds 42 sh -> status=open) =====
+BEGIN
+UPDATE 1
+  id  | status | broker_status 
+------+--------+---------------
+ 1694 | open   | filled
+(1 row)
+
+COMMIT
+
+
+===== recover trade 1759 WDCX (had real exit + pnl -> status=closed) =====
+BEGIN
+UPDATE 1
+  id  | status | broker_status 
+------+--------+---------------
+ 1759 | closed | filled
+(1 row)
+
+COMMIT
+
+
+===== recover trade 1781 ABEV (had real exit + pnl -> status=closed) =====
+BEGIN
+UPDATE 1
+  id  | status | broker_status 
+------+--------+---------------
+ 1781 | closed | filled
+(1 row)
+
+COMMIT
+
+
+===== audit row to record the recovery =====
+  id   
+-------
+ 10314
+(1 row)
+
+INSERT 0 1
+
+
+===== after-recovery snapshot =====
+  id  | ticker | status | broker_status |  entry  |  exit   |  pnl  
+------+--------+--------+---------------+---------+---------+-------
+ 1694 | ADT    | open   | filled        |  7.1350 |         |      
+ 1759 | WDCX   | closed | filled        | 62.8250 | 64.5000 |   6.7
+ 1781 | ABEV   | closed | filled        |  2.8550 |  2.8602 | 0.546
+(3 rows)
+
+
+
+===== py-compile bracket_writer_g2 + broker_service =====
+OK
+
+
+===== git diff bracket_writer_g2 (the trade=None fix) =====
+git : warning: in the working copy of 'app/services/trading/bracket_writer_g2.py', LF will be replaced by CRLF the 
+next time Git touches it
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-recover-and-retry.ps1:39 char:5
++     git diff app/services/trading/bracket_writer_g2.py | Select-Objec ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: in the... Git touches it:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+diff --git a/app/services/trading/bracket_writer_g2.py b/app/services/trading/bracket_writer_g2.py
+index 3ebf259..8f824b5 100644
+--- a/app/services/trading/bracket_writer_g2.py
++++ b/app/services/trading/bracket_writer_g2.py
+@@ -185,11 +185,27 @@ def _g2_event(
+         from .execution_audit import record_execution_event
+         from ...models.trading import Trade
+ 
+-        trade = None
++        # Look up the trade only to extract user_id + scan_pattern_id for the
++        # event-row enrichment. We deliberately DO NOT pass ``trade=`` to
++        # ``record_execution_event`` because that triggers
++        # ``apply_execution_event_to_trade``, which interprets event status
++        # values like 'rejected' / 'submitted' as broker-state transitions
++        # on the underlying Trade row. The writer's status reflects the
++        # STOP-ORDER placement outcome, not the trade's own broker state --
++        # letting that helper fire would corrupt Trade.status (it bit us
++        # on 2026-04-30 when 3 trades got flipped to 'rejected' the moment
++        # the writer first ran).
++        user_id = None
++        scan_pattern_id = None
+         try:
+-            trade = db.get(Trade, int(trade_id)) if trade_id is not None else None
++            if trade_id is not None:
++                t = db.get(Trade, int(trade_id))
++                if t is not None:
++                    user_id = getattr(t, "user_id", None)
++                    scan_pattern_id = getattr(t, "scan_pattern_id", None)
+         except Exception:
+-            trade = None
++            user_id = None
++            scan_pattern_id = None
+ 
+         payload = {
+             "bracket_intent_id": bracket_intent_id,
+@@ -200,15 +216,17 @@ def _g2_event(
+             "stop_price": stop_price,
+             "qty": qty,
+             "error": error,
++            "trade_id": trade_id,
+         }
+         if extra:
+             payload.update(extra)
+ 
+         record_execution_event(
+             db,
+-            user_id=getattr(trade, "user_id", None),
++            user_id=user_id,
+             ticker=ticker,
+-            trade=trade,
++            trade=None,  # MUST stay None -- see comment above.
++            scan_pattern_id=scan_pattern_id,
+             broker_source=broker_source,
+             order_id=new_stop_order_id,
+             event_type=event_type,
+
+
+===== force-recreate broker-sync-worker =====
+docker :  Container chili-home-copilot-ollama-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-recover-and-retry.ps1:45 char:5
++     docker compose up -d --force-recreate broker-sync-worker
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...lama-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-postgres-1 Running 
+ Container chili-home-copilot-broker-sync-worker-1 Recreate 
+ Container chili-home-copilot-broker-sync-worker-1 Recreated 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-broker-sync-worker-1 Starting 
+ Container chili-home-copilot-broker-sync-worker-1 Started 
+
+
+===== wait 90s for one bracket sweep =====
+ok
+
+
+===== trade 1694 status (should STAY open after sweep) =====
+  id  | ticker | status | broker_status 
+------+--------+--------+---------------
+ 1694 | ADT    | open   | filled
+(1 row)
+
+
+
+===== g2_ events post-fix (will record the broker outcome but not contaminate trade) =====
+  id  |            event_type            |   status   | ticker | error |        recorded_at         
+------+----------------------------------+------------+--------+-------+----------------------------
+ 5249 | g2_place_missing_stop_submitted  | submitted  | ADT    |       | 2026-04-30 17:42:17.209114
+ 5248 | g2_place_missing_stop_submitting | submitting | ADT    |       | 2026-04-30 17:42:16.006804
+(2 rows)
+
+
+
+===== broker-sync-worker logs since restart (look for actual stop placement) =====
+
+broker-sync-worker-1  | 2026-04-30 17:42:15,973 [INFO] app.services.trading.bracket_reconciliation_service: 
+[bracket_reconciliation_ops] event=discrepancy mode=authoritative sweep_id=ec9a2ec7-6e47-4228-9dc1-4c60b4a536a4 
+trade_id=1694 bracket_intent_id=206 ticker=ADT broker_source=robinhood kind=missing_stop severity=error
+broker-sync-worker-1  | 2026-04-30 17:42:17,085 [INFO] app.services.broker_service: [broker] SELL_STOP order placed: 
+ADT x42.0 trigger=6.5642 -> unconfirmed
+broker-sync-worker-1  | 2026-04-30 17:42:17,207 [INFO] app.services.trading.bracket_writer_g2: [bracket_writer_g2] 
+place_missing_stop intent=206 ticker=ADT qty=42.0 price=6.5642 new_order=69f3947a-61cf-4e11-99c4-1f45879749e0
+broker-sync-worker-1  | 2026-04-30 17:42:17,210 [INFO] app.services.trading.bracket_reconciliation_service: 
+[bracket_reconciliation_ops] event=writer_action mode=authoritative sweep_id=ec9a2ec7-6e47-4228-9dc1-4c60b4a536a4 
+trade_id=1694 bracket_intent_id=206 ticker=ADT broker_source=robinhood kind=missing_stop severity=error 
+writer=place_missing_stop ok=true reason=ok
+broker-sync-worker-1  | 2026-04-30 17:42:17,238 [INFO] app.services.trading.bracket_reconciliation_service: 
+[bracket_reconciliation_ops] event=sweep_summary mode=authoritative sweep_id=ec9a2ec7-6e47-4228-9dc1-4c60b4a536a4 
+trades_scanned=1 brackets_checked=1 agree_count=0 orphan_stop=0 missing_stop=1 qty_drift=0 state_drift=0 price_drift=0 
+broker_down=0 unreconciled=0 took_ms=1389.45
+
+
+
+
+===== any new sell-stop orders on broker =====
+Found Additional pages.
+Loading page 2 ...
+Loading page 3 ...
+recent ADT orders: 0
+
+all sell-stop orders: 0
+
