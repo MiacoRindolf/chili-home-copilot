@@ -1,0 +1,33 @@
+fix(prescreen): round-16 brain-worker idle-tx leak on prescreen reads
+
+User-directed audit of brain-worker learning cycle. Found 20 idle-in-
+transaction sessions on `chili-brain-worker`, oldest 25 min old, all
+on `SELECT trading_prescreen_candidates ... ORDER BY ticker_norm`.
+
+Same bug class as FIX 46 (scanner session leak):
+SQLAlchemy `session.close()` does NOT end an implicit read transaction.
+A SELECT-only path that doesn't commit/rollback leaves the session
+in 'idle in transaction' state until something explicitly clears it.
+Concurrent worker threads stack up these orphan sessions, each
+holding a read snapshot on `trading_prescreen_candidates` and a
+connection from the pool.
+
+Fix: explicit `db.rollback()` after the SELECT in
+`load_active_global_candidate_tickers`. The read has no writes to
+flush, so rollback is the cheapest release of locks + connection
+without forcing every caller to know about transaction state.
+
+Also killed the 16 leaked sessions live (immediate relief).
+
+Audit summary:
+- learning_cycle does NOT write to brain_batch_jobs (visibility gap;
+  separate finding)
+- Phase 2 event handlers fired 46 events in 24h (`broker_fill_closed`
+  37, `execution_feedback_digest` 3, `execution_quality_updated` 3,
+  `market_snapshots_batch` 2, `promotion_changed` 1) -- all in
+  `done` status, healthy
+- learning_events 24h: 223 'review' (mostly "Pattern produced 0
+  trades" -- round-12 zero-trade demote will reduce this), 83
+  'pattern_backtest_queue', 9 'confidence_decay'
+- The 25-minute idle-tx was the load-bearing problem; everything else
+  is operating cleanly

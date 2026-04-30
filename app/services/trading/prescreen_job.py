@@ -174,7 +174,18 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
 
 
 def load_active_global_candidate_tickers(db: Session) -> list[str]:
-    """Tickers for full scan: active global prescreen rows, ordered by ticker_norm."""
+    """Tickers for full scan: active global prescreen rows, ordered by ticker_norm.
+
+    Round-16 FIX (2026-04-30): explicit ``db.rollback()`` after the read
+    to close the implicit read transaction. Same bug class as FIX 46
+    (scanner session leak). Audit found 20 brain-worker sessions stuck
+    'idle in transaction' (oldest 25 min) all holding rows on
+    trading_prescreen_candidates because callers SELECT-then-don't-commit;
+    SQLAlchemy keeps the implicit tx open until the session is COMMIT/
+    ROLLBACK'd. Adding rollback here -- the read has no writes to flush,
+    so rollback is the cheapest way to release the locks + connection
+    without forcing the caller to know about transaction state.
+    """
     rows = (
         db.query(PrescreenCandidate.ticker_norm)
         .filter(PrescreenCandidate.user_id.is_(None))
@@ -182,6 +193,14 @@ def load_active_global_candidate_tickers(db: Session) -> list[str]:
         .order_by(PrescreenCandidate.ticker_norm.asc())
         .all()
     )
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "[prescreen_job] post-read rollback failed in "
+            "load_active_global_candidate_tickers; not fatal",
+            exc_info=True,
+        )
     return [r[0] for r in rows if r[0]]
 
 
