@@ -604,8 +604,15 @@ def submit_robinhood_trade_exit(
     except Exception:
         is_option_trade = False
     if is_option_trade:
+        # Round-20 FIX (2026-04-30): the prior version had
+        #   logger = __import__("logging").getLogger(__name__)
+        # inside this branch. Per Python scoping rules that makes ``logger``
+        # a function-local for the WHOLE function, so every non-option exit
+        # downstream raised UnboundLocalError on the module-logger calls
+        # at lines ~648/655 -- crashing the equity exit submission path on
+        # every monitor cycle. Module-level ``logger`` (top of file) is the
+        # right reference here.
         try:
-            logger = __import__("logging").getLogger(__name__)
             logger.info(
                 "[autotrader] DDD: skipping equity exit path for option trade#%s "
                 "(reason=%s); options_exit_monitor handles this",

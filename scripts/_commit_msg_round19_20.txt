@@ -1,0 +1,44 @@
+fix(critical): R19 systemic scripts mount + R20 Robinhood logger UnboundLocalError
+
+R20 (CRITICAL, third-party audit finding):
+robinhood_exit_execution.py:608 had
+    logger = __import__("logging").getLogger(__name__)
+inside the `if is_option_trade:` branch. Per Python scoping rules,
+that makes `logger` function-local for the WHOLE function. The
+non-option (stock) path then crashed with UnboundLocalError at
+lines 648/655 (the FIX A-5 broker-qty resolution logs) every
+monitor cycle, terminating equity exit submission BEFORE it could
+submit, reject, or even produce an autotrader_runs audit row.
+
+This is the load-bearing safety bug behind the recent exit storm:
+  - 1333/24h "Sell may cause PDT designation" rejections
+  - missing_stop reconciliation flagged but never repaired
+  - "Not enough shares to sell" 56/24h
+  - bracket_reconciliation stuck in shadow mode
+
+The crash hit BEFORE the broker call -- positions stayed exposed
+because the system thought it had an exit path it didn't.
+
+Fix: removed the local logger assignment. Module-level
+`logger = logging.getLogger(__name__)` (line 14) is the right
+reference. Recovery via safe-Python-write because Edit tool
+truncated the file again.
+
+R19 (systemic mount gap surfaced by R18b):
+brain-worker had no `./scripts:/app/scripts` mount, so script
+edits were silently ignored until R18b added it. That gap was
+systemic: mining-worker, backtest-worker, fast-scan-worker,
+scheduler-worker, broker-sync-worker, autotrader-worker all
+loaded `scripts/*.py` from the baked-in image, never picking up
+host edits.
+
+Fix: added `./scripts:/app/scripts` to all 6 worker services in
+docker-compose.yml. brain-worker already had it from R18b. chili
+and brain don't run from scripts/, so they're left alone.
+
+Side benefit: future scripts/ edits hot-reload on container
+restart, consistent with the existing ./app:/app/app pattern.
+
+Files:
+- app/services/trading/robinhood_exit_execution.py (R20)
+- docker-compose.yml (R19)

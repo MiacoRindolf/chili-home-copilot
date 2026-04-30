@@ -253,6 +253,8 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # Round-19 (2026-04-30): mount scripts/ -- workers loading scripts/*.py would otherwise run baked-in copies.
+      - ./scripts:/app/scripts
       # Round-18 (2026-04-30): mount scripts so changes to brain_worker.py
       # take effect on container restart without an image rebuild.
       # Previously scripts/ was baked into the image at build time, so
@@ -310,6 +312,8 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # Round-19 (2026-04-30): mount scripts/ -- workers loading scripts/*.py would otherwise run baked-in copies.
+      - ./scripts:/app/scripts
     depends_on:
       postgres:
         condition: service_healthy
@@ -352,6 +356,8 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # Round-19 (2026-04-30): mount scripts/ -- workers loading scripts/*.py would otherwise run baked-in copies.
+      - ./scripts:/app/scripts
     depends_on:
       postgres:
         condition: service_healthy
@@ -392,6 +398,8 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # Round-19 (2026-04-30): mount scripts/ -- workers loading scripts/*.py would otherwise run baked-in copies.
+      - ./scripts:/app/scripts
     depends_on:
       postgres:
         condition: service_healthy
@@ -501,6 +509,8 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # Round-19 (2026-04-30): mount scripts/ -- workers loading scripts/*.py would otherwise run baked-in copies.
+      - ./scripts:/app/scripts
       # DO NOT REMOVE — required for CHILI Dispatch (Phase D.2+)
       # Read-write project root: dispatch loop calls `git worktree add` here.
       # Read-only would block git's index/worktree metadata writes (.git/worktrees/...).
@@ -582,6 +592,8 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # Round-19 (2026-04-30): mount scripts/ -- workers loading scripts/*.py would otherwise run baked-in copies.
+      - ./scripts:/app/scripts
     depends_on:
       postgres:
         condition: service_healthy
@@ -648,6 +660,8 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # Round-19 (2026-04-30): mount scripts/ -- workers loading scripts/*.py would otherwise run baked-in copies.
+      - ./scripts:/app/scripts
     depends_on:
       postgres:
         condition: service_healthy
