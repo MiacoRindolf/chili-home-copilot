@@ -1,0 +1,35 @@
+fix(crypto+queue): round-13 asset-aware pause + crypto exit hardening
+
+User flagged that the round-12 market-hours pause unfairly blocked
+crypto patterns (which trade 24/7) and asked to look at crypto exits
+generally. Three concrete improvements:
+
+1. Asset-aware market-hours pause (`learning.py`)
+   Round 12 paused ALL backtests Mon-Fri 9:30 AM-4:00 PM ET because
+   throughput collapsed during US regular hours due to upstream-API
+   contention. But the contention is with STOCK trading systems --
+   crypto runs 24/7 on Coinbase / Robinhood-crypto endpoints which
+   are NOT contended during stock-market hours.
+   Fix: filter the batch to drop ONLY stock-only patterns
+   (asset_class IN ('stocks','stock')) during market hours. Crypto
+   ('crypto') and unspecified ('all', NULL) keep running. Cycle
+   only fully pauses when 100% of the batch is stock-only.
+
+2. Crypto exit broker-qty clamp (`crypto/exit_monitor.py`)
+   The A-5 clamp from round 1 explicitly skipped crypto. Now applied
+   symmetrically: before submitting place_crypto_sell_order, look up
+   the broker's actual position via get_crypto_positions(). If broker
+   holds 0 (already sold externally), mark as no_position. If broker
+   holds less than local Trade.quantity, clamp the sell qty. If the
+   broker call fails (qty unknown), defer per the no-hardcoded-fallback
+   rule -- never silently widen.
+
+3. Implausible-quote rejection (`crypto/exit_monitor._evaluate_exit_triggers`)
+   Found in audit: trade 585 ARB-USD was stopped at
+   `px=0.00075706 <= stop=0.110331` -- the upstream quote returned a
+   value 145x lower than reality (data error). The stop trigger fired
+   on garbage data and sold the position at the real -4.20 PnL.
+   Fix: reject any quote where px/entry > 10 or < 0.1. Returns
+   'no_trigger:implausible_quote' so the next pass can retry with a
+   fresh quote rather than acting on a corrupted one. When entry is
+   unset (0/None), skip the guard since we can't judge plausibility.

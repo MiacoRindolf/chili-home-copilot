@@ -80,10 +80,35 @@ def _evaluate_exit_triggers(
     target: Optional[float],
     direction: str = "long",
 ) -> tuple[bool, str]:
-    """Pure: should this trade exit at ``px``? Returns (should_exit, reason)."""
+    """Pure: should this trade exit at ``px``? Returns (should_exit, reason).
+
+    Round-13 FIX (2026-04-30): added price-sanity guard. Trade 585
+    (ARB-USD) was stopped at ``px=0.00075706 <= stop=0.110331`` -- the
+    price reading was 145x lower than reality (data error from upstream
+    quote provider), which triggered a "stop hit" on garbage data and
+    sold the position at the real market price -$4.20.
+    Refuse to trigger any exit when the observed price is implausibly
+    far from entry (>10x or <1/10 of entry). Per the no-hardcoded-fallback
+    rule: do NOT silently fall back to entry when px is bad -- return
+    'no_trigger:bad_quote' so the next pass can retry with a fresh quote.
+    """
     is_long = (direction or "long").lower() != "short"
     if px <= 0:
         return False, "no_quote"
+
+    # Sanity: a real price should be within 10x of entry. Stops are
+    # typically within 5-20% of entry; targets within 5-100%. A 10x
+    # divergence (or 0.1x) is an upstream-data error, not a real move.
+    # When entry is unset (0/None), skip this guard since we can't
+    # judge plausibility.
+    if entry and entry > 0:
+        ratio = px / entry
+        if ratio > 10.0 or ratio < 0.1:
+            return False, (
+                f"no_trigger:implausible_quote px={px} entry={entry} "
+                f"ratio={ratio:.4f} (rejected; refusing to act on data error)"
+            )
+
     if stop is not None and stop > 0:
         if is_long and px <= stop:
             return True, f"stop_loss_hit px={px} <= stop={stop}"
@@ -178,6 +203,60 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             if qty <= 0:
                 out["errors"].append(f"bad_qty:{t.ticker}")
                 continue
+
+            # Round-13 FIX (2026-04-30): clamp the sell qty to broker
+            # truth via get_crypto_positions(). Mirrors the A-5 stock fix
+            # in robinhood_exit_execution.py. Without this, a partial
+            # fill, manual sale, or stale broker_sync gives Robinhood a
+            # qty larger than what's actually held -- the broker rejects
+            # the sell and the monitor retries forever. Per the
+            # no-hardcoded-fallback rule: if broker truth is unknown,
+            # defer (do NOT silently widen the local qty).
+            try:
+                _crypto_positions = broker_service.get_crypto_positions() or []
+                _ticker_up = (t.ticker or "").upper()
+                _broker_qty = None
+                for _p in _crypto_positions:
+                    if (_p.get("ticker") or "").upper() == _ticker_up:
+                        try:
+                            _broker_qty = float(_p.get("quantity") or 0.0)
+                        except (TypeError, ValueError):
+                            _broker_qty = None
+                        break
+            except Exception:
+                logger.debug(
+                    "[crypto_exit] FIX A-5b broker-position fetch failed for %s",
+                    t.ticker, exc_info=True,
+                )
+                _broker_qty = None
+
+            if _broker_qty is None:
+                logger.warning(
+                    "[crypto_exit] FIX A-5b: cannot resolve broker qty for "
+                    "trade#%s %s (local_qty=%s); deferring sell to next pass.",
+                    t.id, t.ticker, qty,
+                )
+                out["deferred"] += 1
+                continue
+            if _broker_qty <= 0:
+                logger.warning(
+                    "[crypto_exit] FIX A-5b: broker holds 0 of %s "
+                    "(trade#%s local_qty=%s); position already closed externally. "
+                    "Marking trade with no_position; broker_sync close path "
+                    "will reconcile.",
+                    t.ticker, t.id, qty,
+                )
+                out["skipped"] += 1
+                out["errors"].append(f"broker_holds_zero:{t.ticker}")
+                continue
+            if _broker_qty < qty:
+                logger.warning(
+                    "[crypto_exit] FIX A-5b: clamping sell qty for "
+                    "trade#%s %s (local=%s -> broker=%s)",
+                    t.id, t.ticker, qty, _broker_qty,
+                )
+                qty = _broker_qty
+
             res = broker_service.place_crypto_sell_order(
                 ticker=t.ticker,
                 quantity=qty,

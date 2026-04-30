@@ -3243,12 +3243,21 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         get_retest_interval_days,
     )
 
-    # Round-12 FIX #3 (2026-04-30): soft pause during US regular session.
-    # Throughput-by-hour analysis showed a 95% drop from 9:30 AM-3:00 PM PT
-    # (16:30-22:00 UTC under DST) -- pure contention with live trading
-    # systems' market-data fetches. Make the pause explicit so live
-    # systems get reliable bandwidth and the queue doesn't burn cycles
-    # waiting on rate-limited upstream APIs.
+    # Round-12 FIX #3 + Round-13 FIX (2026-04-30): asset-aware soft pause
+    # during US regular session.
+    #
+    # Throughput-by-hour analysis showed a 95% drop from 9:30 AM-3:00 PM
+    # PT due to upstream-API contention with live STOCK trading systems
+    # (broker_sync, scanners, autotrader on Robinhood). Crypto trades
+    # 24/7 and runs on Coinbase/Robinhood-crypto endpoints, which are
+    # NOT contended during US stock-market hours -- crypto backtests can
+    # and SHOULD continue.
+    #
+    # Round 12 mistakenly paused the entire cycle. Round 13 narrows it:
+    # only patterns with asset_class='stocks'/'stock' are deferred during
+    # US regular session. asset_class IN ('crypto', 'all', NULL) keeps
+    # running.
+    _market_hours_active = False
     if bool(getattr(settings, "chili_brain_queue_market_hours_pause", True)):
         try:
             from datetime import datetime as _dt, time as _time
@@ -3258,27 +3267,52 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
             _wd = _et.weekday()
             # Mon-Fri, 9:30 AM - 4:00 PM ET = US regular session
             if _wd < 5 and _time(9, 30) <= _t < _time(16, 0):
-                logger.info(
-                    "[learning] Queue backtest: deferred (market_hours_pause; "
-                    "ET=%s); off-hours throughput is ~50/hr, market-hours is "
-                    "~1/hr due to upstream API contention -- pausing here to "
-                    "give live systems bandwidth.",
-                    _et.strftime("%H:%M"),
-                )
-                return {
-                    "backtests_run": 0,
-                    "patterns_processed": 0,
-                    "queue_empty": False,
-                    "queue_exploration_added": 0,
-                    "skipped_reason": "market_hours_pause",
-                }
+                _market_hours_active = True
         except Exception:
-            logger.debug("[learning] market_hours_pause check failed; continuing", exc_info=True)
+            logger.debug("[learning] market_hours check failed; continuing", exc_info=True)
 
     if batch_size is None:
         batch_size = settings.brain_queue_batch_size
     pattern_ids = list(get_pending_patterns(db, limit=batch_size, ids_only=True))
     exploration_added = 0
+
+    # Round-13: filter out stock-only patterns during market hours so crypto
+    # / 'all' / forex / options keep flowing while live stock systems get
+    # upstream-API bandwidth.
+    if _market_hours_active and pattern_ids:
+        from sqlalchemy import text as _sa_text
+        try:
+            stock_only_rows = db.execute(_sa_text(
+                "SELECT id FROM scan_patterns "
+                "WHERE id = ANY(:ids) "
+                "  AND LOWER(COALESCE(asset_class, 'all')) IN ('stocks', 'stock')"
+            ), {"ids": pattern_ids}).fetchall()
+            stock_only = {int(r[0]) for r in stock_only_rows}
+            if stock_only:
+                _before = len(pattern_ids)
+                pattern_ids = [p for p in pattern_ids if int(p) not in stock_only]
+                logger.info(
+                    "[learning] market_hours filter: dropped %s stock-only patterns "
+                    "from batch (kept %s crypto/all/options); ET=%s",
+                    len(stock_only), len(pattern_ids),
+                    _dt.now(_ZI("America/New_York")).strftime("%H:%M"),
+                )
+        except Exception:
+            logger.debug("[learning] market_hours batch filter failed; continuing with full batch", exc_info=True)
+        if not pattern_ids:
+            logger.info(
+                "[learning] Queue backtest: deferred (market_hours_pause); "
+                "all eligible patterns this cycle were stock-only. "
+                "Crypto + 'all' patterns will flow on the next cycle as soon "
+                "as they're queue-eligible.",
+            )
+            return {
+                "backtests_run": 0,
+                "patterns_processed": 0,
+                "queue_empty": False,
+                "queue_exploration_added": 0,
+                "skipped_reason": "market_hours_pause_stock_only",
+            }
 
     if getattr(settings, "brain_queue_exploration_enabled", True):
         explore_cap = max(0, int(getattr(settings, "brain_queue_exploration_max", 40)))
