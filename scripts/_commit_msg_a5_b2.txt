@@ -1,0 +1,39 @@
+fix(audit-2026-04-29): A-5 broker-qty clamp + B-2 avg_return_pct backfill
+
+A-5 (15 "Not enough shares to sell" rejections / 24h):
+  robinhood_exit_execution.py now resolves the broker's actual position
+  quantity via get_positions() before submitting a sell. If the broker
+  holds less than the local Trade.quantity (partial fill, manual sale,
+  stale broker_sync), the sell quantity is clamped to broker truth. If
+  the broker holds zero, the trade is treated as no_position. If the
+  broker quantity is unknown (API failure), the exit is deferred per
+  the no-hardcoded-fallback rule -- never silently widen.
+
+  Crypto path is unchanged (positions API is stocks-only and crypto
+  uses a different endpoint).
+
+B-2 (626/732 patterns with NULL avg_return_pct):
+  Mig 210 backfills avg_return_pct + win_rate + trade_count for
+  patterns whose only evidence is in trading_pattern_trades (backtest
+  replays) -- about 188 patterns. Aggregates use outcome_return_pct
+  (percent, post-mig-208 clamp) and label_win. Min sample threshold
+  reuses chili_realized_ev_min_trades (5) so we do not promote
+  fluke-driven stats. Idempotent: only writes when avg_return_pct IS
+  NULL, so it does not overwrite the realized values mig 207 already
+  wrote. The remaining 438 patterns have no backtest data anywhere
+  and need the backtest queue to fill them in -- that is a separate
+  concern.
+
+Plus: F-3 monitoring follow-up. The macro_regime_daily job is now
+wrapped with brain_batch_job_begin/finish so any future failure (writer
+exception, coverage_below_min skip, etc.) shows in brain_batch_jobs.
+
+A-4 wide_spread defer noise (74/24h): documented as deferred. ADT
+and WDCX dominate (89% of defers). Operator-judgment-dependent fix
+(silently skip vs LIMIT-at-bid vs drop-from-autopilot); revisit when
+operator selects an approach.
+
+A-6 dup_coid recoveries: recovery path verified working (3/2h all
+``monitor_exit_recovered`` -- broker_order_id is back-filled by
+idempotency_store lookup). The deeper "commit trade row before broker
+submit" refactor remains backlog.

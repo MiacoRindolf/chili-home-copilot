@@ -13956,6 +13956,79 @@ def _migration_209_widen_macro_regime_label_columns(conn) -> None:
         pass
 
 
+
+def _migration_210_backfill_avg_return_pct_from_pattern_trades(conn) -> None:
+    """Backfill scan_patterns.avg_return_pct + win_rate + trade_count for
+    patterns that have trading_pattern_trades data but didn't propagate.
+
+    2026-04-29 third-pass audit Finding B-2 found 626/732 patterns with
+    NULL avg_return_pct. Mig 207 backfilled patterns with realized
+    trading_trades (closed live trades). This migration handles the next
+    layer: 188 patterns whose only evidence is in trading_pattern_trades
+    (backtest replay).
+
+    Recomputes (avg_return_pct, win_rate, trade_count) from
+    trading_pattern_trades aggregates. Uses outcome_return_pct (in
+    percent, post-mig-208 clamp |<=100|) and label_win.
+
+    Only writes when scan_patterns.avg_return_pct IS NULL, so it does NOT
+    overwrite the realized values mig 207 already wrote. Idempotent.
+
+    Skips patterns where the backtest sample is below
+    chili_realized_ev_min_trades (default 5) so we do not promote
+    fluke-driven stats. Per the no-hardcoded-fallback rule, this min
+    threshold reuses the existing EV-gate setting.
+    """
+    if "scan_patterns" not in _tables(conn) or "trading_pattern_trades" not in _tables(conn):
+        conn.commit()
+        return
+
+    res = conn.execute(text(
+        """
+        UPDATE scan_patterns sp
+        SET avg_return_pct = sub.avg_ret,
+            win_rate = sub.wr,
+            trade_count = sub.n,
+            updated_at = CURRENT_TIMESTAMP
+        FROM (
+            SELECT
+                scan_pattern_id,
+                COUNT(*) AS n,
+                AVG(outcome_return_pct) AS avg_ret,
+                (SUM(CASE WHEN label_win = TRUE THEN 1.0 ELSE 0.0 END)
+                 / NULLIF(COUNT(*), 0)) AS wr
+            FROM trading_pattern_trades
+            WHERE scan_pattern_id IS NOT NULL
+              AND outcome_return_pct IS NOT NULL
+              AND label_win IS NOT NULL
+            GROUP BY scan_pattern_id
+            HAVING COUNT(*) >= 5
+        ) sub
+        WHERE sp.id = sub.scan_pattern_id
+          AND sp.avg_return_pct IS NULL
+        RETURNING sp.id
+        """
+    ))
+    backfilled = res.rowcount or 0
+    conn.commit()
+
+    try:
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+                (user_id, event_type, description, related_insight_id, created_at)
+            VALUES (NULL, 'migration_210', :msg, NULL, CURRENT_TIMESTAMP)
+            """
+        ), {"msg": (
+            f"mig 210 backfilled avg_return_pct/win_rate/trade_count for "
+            f"{backfilled} patterns from trading_pattern_trades aggregates "
+            f"(min n=5 sample threshold)"
+        )})
+        conn.commit()
+    except Exception:
+        pass
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -14175,6 +14248,7 @@ MIGRATIONS = [
     ("207_avg_return_pct_unit_fix", _migration_207_avg_return_pct_unit_fix),
     ("208_pattern_trades_dedupe_and_clamp", _migration_208_pattern_trades_dedupe_and_clamp),
     ("209_widen_macro_regime_label_columns", _migration_209_widen_macro_regime_label_columns),
+    ("210_backfill_avg_return_pct_from_pattern_trades", _migration_210_backfill_avg_return_pct_from_pattern_trades),
 ]
 
 
