@@ -616,7 +616,29 @@ def build_ai_context(
             if meta_prob is not None:
                 score = round((meta_prob - 0.5) * 20, 2)
             elif matches:
-                score = sum(m.get("score_boost", 1.0) * max(0.5, m.get("win_rate") or 0.5) * m.get("match_quality", 1.0) for m in matches)
+                # FIX E-1 (2026-04-29 audit): replace falsy-zero or-0.5 with
+                # a dynamic prior. A real WR=0 must NOT be floored at 0.5
+                # (coin-flip-equivalent) -- that is the bug pattern the
+                # operator flagged. Use the dynamic population WR as the
+                # prior when a match has no win_rate at all; if a match
+                # has a real WR (even 0.0), respect it.
+                from .dynamic_priors import population_win_rate as _pop_wr_fn
+                _pop_wr = _pop_wr_fn(db)
+                _terms = []
+                for _m in matches:
+                    _wr = _m.get("win_rate")
+                    if _wr is None:
+                        if _pop_wr is None:
+                            # No data anywhere -- skip this term entirely
+                            # rather than synthesize.
+                            continue
+                        _wr_eff = float(_pop_wr)
+                    else:
+                        _wr_eff = float(_wr)
+                    _terms.append(
+                        _m.get("score_boost", 1.0) * _wr_eff * _m.get("match_quality", 1.0)
+                    )
+                score = sum(_terms) if _terms else 0.0
                 score = max(-10.0, min(10.0, score))
             else:
                 score = 0.0

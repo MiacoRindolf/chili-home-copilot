@@ -242,7 +242,18 @@ def build_signal_from_breakout_alert(
     if alert.scan_pattern_id:
         feats["scan_pattern_id"] = int(alert.scan_pattern_id)
 
-    conf_score = _normalize_confidence(float(alert.score_at_alert or 0.5))
+    # FIX E-1 (2026-04-29 audit): no hardcoded 0.5 fallback. Respect a real
+    # 0 score (it means "no signal", not "coin flip"). If score_at_alert is
+    # truly None, abstain by leaving conf_score at 0 -- downstream gates can
+    # then refuse to size on missing input rather than treat it as neutral.
+    _sa = getattr(alert, "score_at_alert", None)
+    if _sa is None:
+        conf_score = _normalize_confidence(0.0)
+    else:
+        try:
+            conf_score = _normalize_confidence(float(_sa))
+        except (TypeError, ValueError):
+            conf_score = _normalize_confidence(0.0)
     tp_dec: Decimal | None = _decimal(target) if target else None
     exp_ret = (
         _decimal((target - entry) / entry)

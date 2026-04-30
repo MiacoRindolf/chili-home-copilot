@@ -396,10 +396,22 @@ def compute_live_drift_contract(
     bucket = max(1, min(8, n_use // max(1, min_trades)))
     window_count = min(bucket, 4) if n_use >= min_trades else 1
 
+    # FIX E-1 (2026-04-29 audit): no hardcoded 0.5 fallback. Compute a
+    # Bayesian-shrinkage confidence from the pattern realized n if the
+    # column is missing/None. Falls back to the dynamic prior, never to
+    # a magic constant. If even that is unavailable, the drift check is
+    # skipped (return early) so we do not inject a synthesized value.
+    _conf_raw = getattr(pattern, "confidence", None)
     try:
-        pat_conf = float(getattr(pattern, "confidence", 0.5) or 0.5)
+        pat_conf = float(_conf_raw) if _conf_raw is not None else None
     except (TypeError, ValueError):
-        pat_conf = 0.5
+        pat_conf = None
+    if pat_conf is None:
+        from .dynamic_priors import bayesian_pattern_confidence
+        pat_conf = bayesian_pattern_confidence(getattr(pattern, "trade_count", None))
+    if pat_conf is None:
+        # No data; abstain rather than synthesize.
+        return None
     ref = _carry_confidence_reference(prev_live_drift)
     if ref is None:
         ref = pat_conf
@@ -578,19 +590,35 @@ def apply_live_drift_to_pattern(
 
     ov["live_drift"] = contract
 
-    if not skip and tier in ("healthy", "warning", "critical") and bool(
-        getattr(settings, "brain_live_drift_confidence_nudge_enabled", True)
-    ):
+    _do_nudge = (
+        not skip
+        and tier in ("healthy", "warning", "critical")
+        and bool(getattr(settings, "brain_live_drift_confidence_nudge_enabled", True))
+    )
+    if _do_nudge:
+        anchor_f = None
         try:
             anchor_f = float(contract.get("confidence_reference"))
         except (TypeError, ValueError):
-            anchor_f = float(pattern.confidence or 0.5)
-        contract["confidence_reference"] = anchor_f
-        mult = _tier_confidence_multiplier(tier, settings)
-        lo = float(getattr(settings, "brain_live_drift_confidence_floor", 0.1) or 0.1)
-        hi = float(getattr(settings, "brain_live_drift_confidence_cap", 0.95) or 0.95)
-        new_c = max(lo, min(hi, anchor_f * mult))
-        pattern.confidence = round(new_c, 4)
+            # FIX E-1: no hardcoded 0.5 fallback. Use the pattern real
+            # confidence if non-None; otherwise compute the Bayesian
+            # prior from realized n; if even that is unavailable, abstain
+            # (skip the nudge entirely rather than synthesize).
+            _pc = getattr(pattern, "confidence", None)
+            try:
+                anchor_f = float(_pc) if _pc is not None else None
+            except (TypeError, ValueError):
+                anchor_f = None
+            if anchor_f is None:
+                from .dynamic_priors import bayesian_pattern_confidence as _bpc
+                anchor_f = _bpc(getattr(pattern, "trade_count", None))
+        if anchor_f is not None:
+            contract["confidence_reference"] = anchor_f
+            mult = _tier_confidence_multiplier(tier, settings)
+            lo = float(getattr(settings, "brain_live_drift_confidence_floor", 0.1) or 0.1)
+            hi = float(getattr(settings, "brain_live_drift_confidence_cap", 0.95) or 0.95)
+            new_c = max(lo, min(hi, anchor_f * mult))
+            pattern.confidence = round(new_c, 4)
 
     auto = bool(getattr(settings, "brain_live_drift_auto_challenged_enabled", False))
     n_s = int(contract.get("sample_count") or 0)

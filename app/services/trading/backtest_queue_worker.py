@@ -48,10 +48,24 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             _pdesc = " | ".join(_parts) if _parts else (
                 f"{pattern.name or 'Pattern'} — Composable pattern backtest"
             )
+            # FIX E-1 (2026-04-29 audit): no hardcoded 0.5 fallback for
+            # confidence. Use the pattern's real confidence if non-None;
+            # otherwise compute a Bayesian-shrinkage value from realized n
+            # (which yields ~0 for a brand-new pattern with no trades --
+            # honest "we don't know yet" -- never a synthesized 0.5).
+            from .dynamic_priors import bayesian_pattern_confidence as _bpc
+            _pc_raw = getattr(pattern, "confidence", None)
+            try:
+                _pc = float(_pc_raw) if _pc_raw is not None else None
+            except (TypeError, ValueError):
+                _pc = None
+            if _pc is None:
+                _pc = _bpc(getattr(pattern, "trade_count", None))
+            insight_confidence = _pc if _pc is not None else 0.0
             insight = TradingInsight(
                 user_id=user_id,
                 pattern_description=_pdesc,
-                confidence=pattern.confidence or 0.5,
+                confidence=insight_confidence,
                 evidence_count=0,
                 scan_pattern_id=pattern.id,
             )

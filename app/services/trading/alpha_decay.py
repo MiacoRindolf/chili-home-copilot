@@ -121,7 +121,22 @@ def check_alpha_decay(
         live_avg_ret_pct = sum(e["pnl_pct"] for e in evidence) / len(evidence)
         live_avg_ret_dollar = sum(e["pnl"] for e in evidence) / len(evidence)
 
-        oos_wr = pat.oos_win_rate or pat.win_rate or 0.50
+        # FIX E-1 (2026-04-29 audit): no hardcoded 0.50 fallback. Prefer
+        # OOS WR if known, else realized WR. If both are None, fall back to
+        # the population realized WR (dynamic prior). If even THAT is
+        # unknown, abstain from the decay check for this pattern -- never
+        # synthesize a coin-flip.
+        from .dynamic_priors import population_win_rate
+        if pat.oos_win_rate is not None:
+            oos_wr = float(pat.oos_win_rate)
+        elif pat.win_rate is not None:
+            oos_wr = float(pat.win_rate)
+        else:
+            _pop = population_win_rate(db)
+            if _pop is None:
+                # No data anywhere -- skip this pattern's decay check.
+                continue
+            oos_wr = _pop
 
         is_decayed = False
         reason_parts = []

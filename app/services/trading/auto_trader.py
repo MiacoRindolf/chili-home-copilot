@@ -1041,6 +1041,43 @@ def _execute_broker_buy(
         out["skipped"] += 1
         _autotrader_tick_note(out, kind="blocked", reason="rh_adapter_off", alert=alert)
         return None
+
+    # FIX A-3 (2026-04-29 third-pass audit): pre-flight crypto-supported
+    # check. The audit found 48/24h crypto alerts blocked AFTER the
+    # broker call returned ``crypto_not_supported_on_robinhood:<BASE>``
+    # (AKT, 1INCH, 2Z, ...). Burns broker quota and produces noisy
+    # blocked rows. The supported-list check already exists in
+    # broker_service._is_crypto_supported_on_robinhood; lift it upstream
+    # of the place_market_order call so unsupported symbols never reach
+    # the broker. Cached 5min by broker_service.get_crypto_quote.
+    _ticker = (alert.ticker or "").upper()
+    if _ticker.endswith("-USD"):
+        try:
+            from ...services.broker_service import _is_crypto_supported_on_robinhood
+            _base = _ticker[:-4]
+            if not _is_crypto_supported_on_robinhood(_base):
+                _audit(
+                    db,
+                    user_id=uid,
+                    alert=alert,
+                    decision="blocked",
+                    reason=f"broker:crypto_not_supported_on_robinhood:{_base}",
+                    rule_snapshot=snap,
+                    llm_snapshot=llm_snap,
+                )
+                out["skipped"] += 1
+                _autotrader_tick_note(
+                    out, kind="blocked",
+                    reason=f"broker:crypto_not_supported_on_robinhood:{_base}",
+                    alert=alert,
+                )
+                return None
+        except Exception:
+            logger.debug(
+                "[autotrader] FIX A-3 pre-flight crypto check failed for %s",
+                _ticker, exc_info=True,
+            )
+
     res = ad.place_market_order(
         product_id=alert.ticker,
         side="buy",
@@ -1316,6 +1353,33 @@ def _execute_new_entry(
         snap["qty_raw"] = round(qty_raw, 8)
 
     if live:
+        # FIX C1 (2026-04-29 third-pass audit): PDT-aware entry gate.
+        # The third-pass audit found 1,333/1,349 monitor exits in 24h
+        # rejected with "Sell may cause PDT designation." -- the autotrader
+        # was opening positions it could not legally close intraday.
+        # Refuse to open if we cannot prove either (a) account equity is
+        # >= $25K (PDT does not apply), or (b) day_trades_5d < 3 (4th
+        # would trigger). Per no-hardcoded-fallback: unknown state =>
+        # refuse, never assume.
+        from .pdt_guard import can_open_intraday_round_trip
+        _pdt_result = can_open_intraday_round_trip(db, user_id=uid)
+        if not _pdt_result.allowed:
+            _pdt_audit = dict(snap)
+            _pdt_audit["pdt_gate"] = _pdt_result.snapshot
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="blocked",
+                reason=f"pdt_guard:{_pdt_result.reason}",
+                rule_snapshot=_pdt_audit,
+                llm_snapshot=llm_snap,
+            )
+            out["blocked"] = out.get("blocked", 0) + 1
+            _autotrader_tick_note(
+                out, kind="blocked",
+                reason=f"pdt_guard:{_pdt_result.reason}", alert=alert,
+            )
+            return
+
         res = _execute_broker_buy(
             db,
             uid=uid,

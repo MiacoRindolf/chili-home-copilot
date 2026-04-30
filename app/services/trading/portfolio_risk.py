@@ -1051,6 +1051,61 @@ def _persist_breaker_state(tripped: bool, reason: str | None) -> None:
         logger.debug("[circuit_breaker] Failed to persist breaker state to DB", exc_info=True)
 
 
+def write_daily_breaker_liveness_snapshot(db: Session) -> dict[str, Any]:
+    """FIX G-1 (2026-04-29 third-pass audit): periodic liveness snapshot to
+    ``trading_risk_state``.
+
+    The breaker is event-driven (only writes on trip/reset), so a healthy
+    system shows a stale ``trading_risk_state`` row. The audit flagged
+    this as ``trading_risk_state 2 days stale`` and worried that Hard
+    Rule 2 was silently permissive. It isn't -- ``check_drawdown_breaker``
+    runs live on every ``unified_risk_check`` call. But ops cannot tell
+    "breaker is alive and not tripped" from "breaker writer is dead"
+    without a heartbeat row.
+
+    This function writes one snapshot per call -- intended to be called
+    from a daily scheduler job. The row is tagged ``regime='breaker_heartbeat'``
+    (distinct from the ``regime='circuit_breaker'`` row that
+    ``_persist_breaker_state`` uses on actual trips/resets) so the trip
+    log stays clean.
+
+    Returns the computed snapshot for logging.
+    """
+    from sqlalchemy import text
+    snapshot: dict[str, Any] = {}
+    try:
+        # Compute current breaker state non-destructively. Use the same
+        # entry point the gate uses; if it trips, _persist_breaker_state
+        # already wrote a 'circuit_breaker' row -- our heartbeat row is
+        # ADDITIONAL.
+        tripped, reason = check_drawdown_breaker(db, user_id=None)
+        snapshot = {
+            "tripped": bool(tripped),
+            "reason": reason,
+            "computed_at": datetime.utcnow().isoformat(timespec="seconds"),
+        }
+        db.execute(text(
+            "INSERT INTO trading_risk_state "
+            "(user_id, snapshot_date, breaker_tripped, breaker_reason, regime, capital) "
+            "VALUES (:uid, NOW(), :tripped, :reason, 'breaker_heartbeat', 0)"
+        ), {"uid": None, "tripped": bool(tripped), "reason": (reason or "alive")[:200]})
+        db.commit()
+        logger.info(
+            "[circuit_breaker] heartbeat snapshot written: tripped=%s reason=%s",
+            bool(tripped), reason,
+        )
+    except Exception:
+        logger.warning(
+            "[circuit_breaker] heartbeat snapshot write FAILED",
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    return snapshot
+
+
 def restore_breaker_from_db() -> None:
     """Restore circuit breaker state from DB on startup."""
     global _breaker_tripped, _breaker_reason

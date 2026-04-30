@@ -1268,16 +1268,84 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 )
                 qty_match = abs(float(revive.quantity or 0) - float(qty or 0)) < 1e-6
                 if price_match and qty_match:
+                    # FIX C2b (2026-04-29 third-pass audit follow-up): the
+                    # GGG revive path was reopening cancelled phantom trades
+                    # without an order_id, undoing mig 205's cleanup. Resolve
+                    # the order_id from recent history before reviving; if no
+                    # order can be found, skip the revive and let the next
+                    # reconcile pass retry once history is available.
+                    if revive.broker_order_id:
+                        _rev_resolved_id = revive.broker_order_id
+                    else:
+                        _rev_resolved_id = None
+                        try:
+                            _recent = get_recent_orders(limit=50)
+                            for _o in _recent or []:
+                                if (
+                                    (_o.get("ticker") or "").upper() == ticker.upper()
+                                    and (_o.get("side") or "").lower() == "buy"
+                                    and (_o.get("state") or "").lower() in ("filled", "partially_filled")
+                                    and _o.get("id")
+                                ):
+                                    _rev_resolved_id = str(_o["id"])
+                                    break
+                        except Exception:
+                            logger.debug(
+                                "[broker_sync] FIX C2b revive order-lookup failed for %s",
+                                ticker, exc_info=True,
+                            )
+                            _rev_resolved_id = None
+                    if not _rev_resolved_id:
+                        logger.warning(
+                            "[broker_sync] FIX C2b: REFUSING to revive cancelled "
+                            "trade#%s for %s qty=%s -- no matching filled buy order "
+                            "in recent history; will retry next pass.",
+                            revive.id, ticker, qty,
+                        )
+                        continue
                     revive.status = "open"
                     revive.broker_status = "filled"
+                    revive.broker_order_id = _rev_resolved_id
                     revive.filled_quantity = qty
                     revive.last_broker_sync = datetime.utcnow()
                     logger.warning(
-                        "[broker_sync] GGG revived trade#%s ticker=%s qty=%s price=%s",
-                        revive.id, ticker, qty, avg_price,
+                        "[broker_sync] GGG revived trade#%s ticker=%s qty=%s price=%s order_id=%s",
+                        revive.id, ticker, qty, avg_price, _rev_resolved_id,
                     )
                     updated += 1
                     continue
+            # FIX C2 (2026-04-29 third-pass audit): refuse to create a phantom
+            # Trade row with NULL broker_order_id. The Robinhood positions API
+            # does not surface the originating order_id; previously this writer
+            # inserted a Trade with broker_order_id=None.
+            resolved_order_id = None
+            try:
+                _recent = get_recent_orders(limit=50)
+                for _o in _recent or []:
+                    if (
+                        (_o.get("ticker") or "").upper() == ticker.upper()
+                        and (_o.get("side") or "").lower() == "buy"
+                        and (_o.get("state") or "").lower() in ("filled", "partially_filled")
+                        and _o.get("id")
+                    ):
+                        resolved_order_id = str(_o["id"])
+                        break
+            except Exception:
+                logger.debug(
+                    "[broker_sync] FIX C2 order-lookup failed for %s; will retry next pass",
+                    ticker, exc_info=True,
+                )
+                resolved_order_id = None
+
+            if not resolved_order_id:
+                logger.warning(
+                    "[broker_sync] FIX C2: position %s qty=%s avg=%s present in broker "
+                    "but no matching filled buy order found in recent history; "
+                    "REFUSING to create phantom Trade row. Next reconcile pass will retry.",
+                    ticker, qty, avg_price,
+                )
+                continue
+
             snapshot = _compute_trade_snapshot(ticker, avg_price)
             is_crypto = ticker.upper().endswith("-USD")
             trade = Trade(
@@ -1293,7 +1361,8 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 indicator_snapshot=snapshot,
                 last_broker_sync=datetime.utcnow(),
                 stop_model="atr_crypto_breakout" if is_crypto else "atr_swing",
-                notes=f"Auto-synced from Robinhood on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+                broker_order_id=resolved_order_id,
+                notes=f"Auto-synced from Robinhood on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} (order_id resolved from recent history)",
             )
             db.add(trade)
             db.flush()

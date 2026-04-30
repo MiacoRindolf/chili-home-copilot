@@ -13574,6 +13574,325 @@ def _migration_204_repair_rules_json_dict_types(conn) -> None:
     conn.commit()
 
 
+
+def _migration_205_phantom_trade_30min_sweep(conn) -> None:
+    """Tighter phantom-trade cleanup: cancel any open trade with NULL broker_order_id older than 30 minutes.
+
+    2026-04-29 third-pass audit found 4 open trades (GEO, ADA-USD, AAVE-USD,
+    AVAX-USD) with NULL broker_order_id created by ``broker_service.py:1283``
+    (broker_sync's auto-create-from-position path). Robinhood's positions API
+    does not surface the originating order_id, so this writer ends up
+    creating Trade rows with no broker liaison -- exactly the phantom shape
+    mig 201 tried to clean up, but mig 201's 24h window was too permissive.
+
+    This migration is the periodic-sweep counterpart to the broker_service
+    code fix that refuses to create the Trade in the first place. It catches
+    anything created BEFORE the code fix shipped.
+
+    Idempotent: only touches rows with status='open' AND
+    broker_order_id IS NULL AND created/observed > 30 minutes ago.
+    """
+    if "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+    res = conn.execute(text(
+        """
+        UPDATE trading_trades
+        SET status = 'cancelled',
+            exit_reason = COALESCE(exit_reason, 'phantom_no_broker_id_205'),
+            exit_date = COALESCE(exit_date, CURRENT_TIMESTAMP),
+            exit_price = COALESCE(exit_price, entry_price),
+            notes = COALESCE(notes, '')
+                || E'\n[mig205] cancelled: broker_order_id missing > 30min; '
+                || 'broker_sync auto-create path inserted Trade with no order liaison'
+        WHERE status = 'open'
+          AND (broker_order_id IS NULL OR broker_order_id = '')
+          AND (broker_status IS NULL OR broker_status = '')
+          AND COALESCE(submitted_at, last_broker_sync, entry_date)
+              < NOW() - INTERVAL '30 minutes'
+          AND (notes IS NULL OR notes NOT LIKE '%[mig205]%')
+        RETURNING id
+        """
+    ))
+    cancelled = res.rowcount or 0
+    conn.commit()
+
+    try:
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+                (user_id, event_type, description, related_insight_id, created_at)
+            VALUES (NULL, 'migration_205', :msg, NULL, CURRENT_TIMESTAMP)
+            """
+        ), {"msg": f"mig 205 cancelled {cancelled} phantom trades (NULL broker_order_id > 30min)"})
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _migration_207_avg_return_pct_unit_fix(conn) -> None:
+    """Recompute scan_patterns.avg_return_pct from realized trading_trades using percent.
+
+    2026-04-29 third-pass audit (Finding D-1) found that
+    ``scan_patterns.avg_return_pct`` has mixed units across rows:
+    pattern 1052 stores -0.033 (FRACTION = -3.3%) while pattern 537 stores
+    3.508 (PERCENT = +3.51%). The realized writer uses fraction; the
+    backtest seed writer uses percent. Same column, two unit conventions --
+    breaks any sizing/ranking that scales by avg_return_pct.
+
+    This migration:
+      1. For every pattern with realized closed trades, recompute
+         avg_return_pct directly from trading_trades using
+         ((exit-entry)/entry) * 100 -- consistent percent.
+      2. Adds CHECK constraint |avg_return_pct| <= 100.
+
+    Per the no-hardcoded-fallback principle, the recompute does NOT
+    use a magic ratio to detect fraction-vs-percent -- it joins the
+    canonical source (trading_trades) and recomputes from primaries.
+
+    Idempotent. Skips trades with NULL or zero entry_price (would div-by-0).
+    """
+    if "scan_patterns" not in _tables(conn) or "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+
+    res = conn.execute(text(
+        """
+        UPDATE scan_patterns sp
+        SET avg_return_pct = sub.avg_ret_pct,
+            win_rate = sub.win_rate,
+            trade_count = sub.n,
+            updated_at = CURRENT_TIMESTAMP
+        FROM (
+            SELECT
+                scan_pattern_id,
+                COUNT(*) AS n,
+                AVG(((exit_price - entry_price) / NULLIF(entry_price, 0)) * 100.0) AS avg_ret_pct,
+                (SUM(CASE WHEN COALESCE(pnl, 0) > 0 THEN 1.0 ELSE 0.0 END)
+                 / NULLIF(COUNT(*), 0)) AS win_rate
+            FROM trading_trades
+            WHERE status = 'closed'
+              AND scan_pattern_id IS NOT NULL
+              AND entry_price IS NOT NULL
+              AND entry_price > 0
+              AND exit_price IS NOT NULL
+            GROUP BY scan_pattern_id
+        ) sub
+        WHERE sp.id = sub.scan_pattern_id
+          AND sub.n > 0
+        RETURNING sp.id
+        """
+    ))
+    repaired = res.rowcount or 0
+    conn.commit()
+
+    conn.execute(text(
+        """
+        ALTER TABLE scan_patterns
+        DROP CONSTRAINT IF EXISTS scan_patterns_avg_return_pct_sane
+        """
+    ))
+    conn.execute(text(
+        """
+        ALTER TABLE scan_patterns
+        ADD CONSTRAINT scan_patterns_avg_return_pct_sane
+        CHECK (avg_return_pct IS NULL OR ABS(avg_return_pct) <= 100.0)
+        """
+    ))
+    conn.commit()
+
+    try:
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+                (user_id, event_type, description, related_insight_id, created_at)
+            VALUES (NULL, 'migration_207', :msg, NULL, CURRENT_TIMESTAMP)
+            """
+        ), {"msg": f"mig 207 recomputed avg_return_pct for {repaired} patterns from trading_trades; added CHECK |<=100|"})
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _migration_208_pattern_trades_dedupe_and_clamp(conn) -> None:
+    """Dedupe trading_pattern_trades + clamp impossible returns + add UNIQUE partial index.
+
+    2026-04-29 third-pass audit (Finding D-2) found:
+      * 1.96M rows in trading_pattern_trades.
+      * 127 rows with scan_pattern_id IS NULL and outcome_return_pct=985.97
+        (orphan rows from a single replayed event with no pattern attribution).
+      * Pattern 557 has 22 backtest trades on XRP-USD/2024-10-22 at
+        outcome_return_pct=338.63 -- exact duplicates differing only by id.
+      * No UNIQUE constraint on (scan_pattern_id, ticker, as_of_ts, timeframe).
+
+    This migration:
+      1. Deletes duplicate rows where (scan_pattern_id, ticker, as_of_ts,
+         timeframe) match -- keeps the row with the lowest id.
+      2. Sets outcome_return_pct to NULL where ABS > 100 (no real single-
+         trade return exceeds 100%; 985.97 / 338.63 are corruption from
+         divide-by-near-zero entry prices).
+      3. Adds CHECK constraint pattern_trades_ret_sane.
+      4. Adds UNIQUE partial index on the natural-key tuple.
+
+    Per the no-hardcoded-fallback principle, the 100% clamp threshold
+    is documented inline as a unit-correctness boundary (not a
+    statistical fallback for a missing measurement) -- it bounds the
+    physically possible range of a single trade's return.
+
+    Idempotent: each step uses IF NOT EXISTS / DROP IF EXISTS guards.
+    """
+    if "trading_pattern_trades" not in _tables(conn):
+        conn.commit()
+        return
+
+    res = conn.execute(text(
+        """
+        DELETE FROM trading_pattern_trades a
+        USING trading_pattern_trades b
+        WHERE a.id > b.id
+          AND a.scan_pattern_id IS NOT DISTINCT FROM b.scan_pattern_id
+          AND a.ticker = b.ticker
+          AND a.as_of_ts = b.as_of_ts
+          AND a.timeframe IS NOT DISTINCT FROM b.timeframe
+        """
+    ))
+    deduped = res.rowcount or 0
+    conn.commit()
+
+    res2 = conn.execute(text(
+        """
+        UPDATE trading_pattern_trades
+        SET outcome_return_pct = NULL
+        WHERE outcome_return_pct IS NOT NULL
+          AND ABS(outcome_return_pct) > 100.0
+        """
+    ))
+    clamped = res2.rowcount or 0
+    conn.commit()
+
+    conn.execute(text("""
+        ALTER TABLE trading_pattern_trades
+        DROP CONSTRAINT IF EXISTS pattern_trades_ret_sane
+    """))
+    conn.execute(text("""
+        ALTER TABLE trading_pattern_trades
+        ADD CONSTRAINT pattern_trades_ret_sane
+        CHECK (outcome_return_pct IS NULL OR ABS(outcome_return_pct) <= 100.0)
+    """))
+    conn.commit()
+
+    conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS trading_pattern_trades_natural_key_uniq
+        ON trading_pattern_trades (scan_pattern_id, ticker, as_of_ts, timeframe)
+        WHERE scan_pattern_id IS NOT NULL
+    """))
+    conn.commit()
+
+    try:
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+                (user_id, event_type, description, related_insight_id, created_at)
+            VALUES (NULL, 'migration_208', :msg, NULL, CURRENT_TIMESTAMP)
+            """
+        ), {"msg": f"mig 208 deduped={deduped}, clamped_outliers={clamped}, added CHECK + UNIQUE index"})
+        conn.commit()
+    except Exception:
+        pass
+
+
+
+def _migration_206_realized_ev_retroactive_demote(conn) -> None:
+    """One-time retroactive demote of patterns that fail the realized-EV gate.
+
+    2026-04-29 third-pass audit Finding B-1 found 10 of 12 promoted patterns
+    have ``trade_count=0`` (promoted via mig 197/199 on backtest evidence,
+    never realized-validated) and pattern 860 promoted with WR=0.0 / n=2.
+
+    The realized-EV gate (added 2026-04-28) is consulted at *promotion*
+    time but not periodically. This migration is the one-time retroactive
+    sweep; the daily ``realized_ev_demote_pass`` job
+    (``app/services/trading/realized_ev_demote_pass.py``) handles the
+    going-forward case.
+
+    Rules (mirror the daily job, applied via SQL):
+      - Demote any pattern with lifecycle_stage='promoted' AND realized
+        stats fail the gate AND the promotion is older than the settle
+        window (14 days by default). Patterns younger than that are left
+        alone -- they are still in the evidence-collection window.
+      - Patterns with trade_count=0 outside the settle window: demote
+        with reason 'no_evidence_after_settle'. They had a chance and
+        produced no realized evidence; let them re-prove via the queue.
+      - Patterns with n>=1 outside the settle window that fail the gate
+        (avg_return_pct <= 0 OR win_rate <= 0): demote with reason
+        'failing_realized_ev_gate'.
+
+    Idempotent. Safe to re-run.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    res1 = conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET lifecycle_stage = 'challenged',
+            promotion_status = 'demote_no_evidence_206',
+            promotion_demote_reason = COALESCE(promotion_demote_reason, '')
+                || E'\nmig206 retroactive: trade_count=0 after settle window; '
+                || 'no realized evidence; let pattern re-prove via queue',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE lifecycle_stage = 'promoted'
+          AND COALESCE(trade_count, 0) = 0
+          AND COALESCE(updated_at, CURRENT_TIMESTAMP)
+              < CURRENT_TIMESTAMP - INTERVAL '14 days'
+        RETURNING id
+        """
+    ))
+    demoted_no_evidence = res1.rowcount or 0
+    conn.commit()
+
+    res2 = conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET lifecycle_stage = 'challenged',
+            promotion_status = 'demote_failing_ev_206',
+            promotion_demote_reason = COALESCE(promotion_demote_reason, '')
+                || E'\nmig206 retroactive: realized stats fail EV gate; '
+                || 'win_rate=' || COALESCE(win_rate::text, 'NULL') || ', '
+                || 'avg_return_pct=' || COALESCE(avg_return_pct::text, 'NULL') || ', '
+                || 'trade_count=' || COALESCE(trade_count::text, 'NULL'),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE lifecycle_stage = 'promoted'
+          AND COALESCE(trade_count, 0) >= 1
+          AND COALESCE(updated_at, CURRENT_TIMESTAMP)
+              < CURRENT_TIMESTAMP - INTERVAL '14 days'
+          AND (
+              COALESCE(win_rate, 0) <= 0
+              OR COALESCE(avg_return_pct, 0) <= 0
+          )
+        RETURNING id
+        """
+    ))
+    demoted_failing = res2.rowcount or 0
+    conn.commit()
+
+    try:
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+                (user_id, event_type, description, related_insight_id, created_at)
+            VALUES (NULL, 'migration_206', :msg, NULL, CURRENT_TIMESTAMP)
+            """
+        ), {"msg": (
+            f"mig 206 retroactive EV demote: no_evidence={demoted_no_evidence} "
+            f"failing_gate={demoted_failing}"
+        )})
+        conn.commit()
+    except Exception:
+        pass
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -13788,6 +14107,10 @@ MIGRATIONS = [
     ("202_realized_pnl_repromotion", _migration_202_realized_pnl_repromotion),
     ("203_seed_crypto_native_patterns", _migration_203_seed_crypto_native_patterns),
     ("204_repair_rules_json_dict_types", _migration_204_repair_rules_json_dict_types),
+    ("205_phantom_trade_30min_sweep", _migration_205_phantom_trade_30min_sweep),
+    ("206_realized_ev_retroactive_demote", _migration_206_realized_ev_retroactive_demote),
+    ("207_avg_return_pct_unit_fix", _migration_207_avg_return_pct_unit_fix),
+    ("208_pattern_trades_dedupe_and_clamp", _migration_208_pattern_trades_dedupe_and_clamp),
 ]
 
 

@@ -417,13 +417,41 @@ def _predict_single_ticker(
         if meta_prob is not None:
             blended_score = round((meta_prob - 0.5) * 20, 2)
         elif matched_patterns:
+            # FIX E-1 (2026-04-29 audit): no falsy-zero or-0.5 fallback for
+            # win_rate or strength. Use the dynamic population win-rate as
+            # the prior when a match has no win_rate at all; respect a
+            # real 0.0 (do not floor it). Skip the term if even the
+            # dynamic prior is unavailable.
+            from .dynamic_priors import population_win_rate as _pop_wr_fn
+            from ...db import SessionLocal as _SL_priors
+            _pop_wr = None
+            try:
+                _priors_db = _SL_priors()
+                try:
+                    _pop_wr = _pop_wr_fn(_priors_db)
+                finally:
+                    _priors_db.close()
+            except Exception:
+                _pop_wr = None
             pattern_score = 0.0
             for m in matches:
-                raw_wr = m.get("win_rate") or 0.5
-                wr = raw_wr / 100.0 if raw_wr > 1 else raw_wr
+                raw_wr = m.get("win_rate")
+                if raw_wr is None:
+                    if _pop_wr is None:
+                        continue  # no data; skip this term
+                    wr = float(_pop_wr)
+                else:
+                    raw_wr = float(raw_wr)
+                    wr = raw_wr / 100.0 if raw_wr > 1 else raw_wr
                 quality = m.get("match_quality", 1.0)
-                strength = m.get("avg_strength", 0.5)
-                contrib = m.get("score_boost", 1.0) * max(0.5, wr) * quality * max(0.3, strength)
+                _str_raw = m.get("avg_strength")
+                if _str_raw is None:
+                    # Strength has no DB-side population mean equivalent
+                    # (it is per-match feature alignment); skip term if
+                    # strength is missing rather than synthesize.
+                    continue
+                strength = float(_str_raw)
+                contrib = m.get("score_boost", 1.0) * wr * quality * strength
                 pattern_score += contrib
             blended_score = max(-10.0, min(10.0, round(pattern_score, 2)))
         else:

@@ -1301,6 +1301,53 @@ def _run_data_retention_job():
     run_scheduler_job_guarded("data_retention", _work)
 
 
+def _run_realized_ev_demote_pass_job():
+    """Daily realized-EV demote pass over all promoted patterns.
+
+    FIX B-1 (2026-04-29 third-pass audit): re-applies the realized-EV gate
+    to every ``lifecycle_stage='promoted'`` pattern; demotes any that fail
+    outside the configured settle-in window. See
+    :mod:`app.services.trading.realized_ev_demote_pass`.
+    """
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.realized_ev_demote_pass import run_realized_ev_demote_pass
+
+        logger.info("[scheduler] Realized-EV demote pass starting")
+        db = SessionLocal()
+        try:
+            summary = run_realized_ev_demote_pass(db)
+            logger.info("[scheduler] Realized-EV demote pass done: %s", summary)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("realized_ev_demote_pass", _work)
+
+
+def _run_breaker_heartbeat_job():
+    """Daily drawdown-breaker liveness snapshot.
+
+    FIX G-1 (2026-04-29 third-pass audit): writes one row to
+    ``trading_risk_state`` with ``regime='breaker_heartbeat'`` so ops can
+    distinguish "breaker is alive and not tripped" from "breaker writer
+    is dead". The breaker itself is event-driven (only persists on
+    trip/reset); this is observability-only.
+    """
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.portfolio_risk import write_daily_breaker_liveness_snapshot
+
+        db = SessionLocal()
+        try:
+            write_daily_breaker_liveness_snapshot(db)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("breaker_heartbeat", _work)
+
+
 def _run_weekly_review_job():
     """Weekly performance review job."""
     from ..db import SessionLocal
@@ -3022,9 +3069,22 @@ def start_scheduler():
         # broker-call storm only affects this lane.
         include_broker_sync = role in ("all", "web", "worker", "broker_sync_only")
         _hb_env = os.environ.get("CHILI_SCHEDULER_EMIT_HEARTBEAT", "").strip().lower()
-        emit_worker_heartbeat = role == "worker" or (
-            role == "all" and _hb_env in ("1", "true", "yes", "on")
-        )
+        # FIX C5 (2026-04-29 third-pass audit): the container-split (FIX 45a/b)
+        # introduced role='cron_only' for the scheduler-worker container and
+        # set CHILI_SCHEDULER_EMIT_HEARTBEAT=1 there, but this gate was not
+        # updated to recognise that role. Result: scheduler_worker_heartbeat
+        # stopped firing 10h+ before the audit because its registration block
+        # below silently skipped. Make the env var authoritative when set
+        # truthy and include 'cron_only' / 'worker' / 'all' in the role-based
+        # default so the heartbeat fires from any scheduler-bearing container.
+        _hb_env_truthy = _hb_env in ("1", "true", "yes", "on")
+        _hb_env_falsy = _hb_env in ("0", "false", "no", "off")
+        if _hb_env_truthy:
+            emit_worker_heartbeat = True
+        elif _hb_env_falsy:
+            emit_worker_heartbeat = False
+        else:
+            emit_worker_heartbeat = role in ("worker", "cron_only", "all")
 
         _scheduler = BackgroundScheduler(daemon=True)
         logger.info(
@@ -3491,6 +3551,41 @@ def start_scheduler():
                 trigger=CronTrigger(hour=3, minute=30, timezone="America/Los_Angeles"),
                 id="data_retention",
                 name="Data retention sweep (daily 3:30AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # FIX B-1 (2026-04-29 third-pass audit): daily realized-EV demote
+        # pass. The audit found 10/12 promoted patterns had trade_count=0
+        # and pattern 860 was promoted with WR=0/n=2 -- the gate was only
+        # checked at promotion time. This job re-runs the gate every 24h
+        # over all promoted patterns and demotes any that fail outside
+        # the configured settle window. Mig 206 is the one-time
+        # retroactive sweep; this is the going-forward enforcement.
+        if include_web_light and bool(
+            getattr(settings, "chili_realized_ev_demote_pass_enabled", True)
+        ):
+            _scheduler.add_job(
+                _run_realized_ev_demote_pass_job,
+                trigger=CronTrigger(hour=4, minute=0, timezone="America/Los_Angeles"),
+                id="realized_ev_demote_pass",
+                name="Realized-EV demote pass (daily 4:00AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # FIX G-1 (2026-04-29 third-pass audit): daily breaker liveness
+        # snapshot to trading_risk_state. The audit found 'last write
+        # 2026-04-27, 2 days stale' and worried Hard Rule 2 was silently
+        # permissive. The breaker itself is event-driven and runs on
+        # every entry via unified_risk_check; this snapshot is purely
+        # an observability heartbeat so ops can tell "alive" from "dead".
+        if include_web_light:
+            _scheduler.add_job(
+                _run_breaker_heartbeat_job,
+                trigger=CronTrigger(hour=5, minute=0, timezone="America/Los_Angeles"),
+                id="breaker_heartbeat",
+                name="Drawdown-breaker liveness snapshot (daily 5:00AM PT)",
                 replace_existing=True,
                 max_instances=1,
             )
@@ -4274,6 +4369,43 @@ def start_scheduler():
             )
 
         _scheduler.start()
+
+        # FIX C5 (2026-04-29 third-pass audit): post-start verification that
+        # the canonical jobs the operator depends on are actually registered.
+        # The audit found scheduler_worker_heartbeat dead 10h+ because role
+        # 'cron_only' was missing from the heartbeat-emit gate above; that's
+        # been fixed, but we now also fail-LOUD if the registration block was
+        # bypassed for any future reason. WARN-not-raise so a misconfigured
+        # role (e.g. autotrader_only) doesn't crash startup, but log the
+        # missing canonical jobs so ops sees them.
+        try:
+            _registered_ids = {str(j.id) for j in _scheduler.get_jobs()}
+        except Exception:
+            _registered_ids = set()
+        _expected_per_role: dict[str, list[str]] = {
+            "worker": ["scheduler_worker_heartbeat"],
+            "cron_only": ["scheduler_worker_heartbeat"],
+            "all": ["scheduler_worker_heartbeat"],
+        }
+        _missing = [
+            j for j in _expected_per_role.get(role, [])
+            if j not in _registered_ids
+        ]
+        if _missing:
+            logger.error(
+                "[scheduler] FIX C5: post-start canonical-job assertion FAILED "
+                "for role=%s -- missing jobs: %s. Heartbeat-driven orphan "
+                "reconciler will mis-flag legitimate runs. Investigate the "
+                "registration block above.",
+                role, ", ".join(_missing),
+            )
+        else:
+            logger.info(
+                "[scheduler] FIX C5: post-start canonical-job assertion OK "
+                "for role=%s (%d total jobs registered)",
+                role, len(_registered_ids),
+            )
+
         _ps_note = (
             "daily prescreen 2AM America/Los_Angeles; "
             if getattr(settings, "brain_prescreen_scheduler_enabled", True)

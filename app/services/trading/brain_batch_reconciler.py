@@ -58,6 +58,13 @@ def reconcile_stale_batch_jobs(
     no_hb_cutoff = now - timedelta(minutes=stale_no_heartbeat_minutes)
     hb_cutoff = now - timedelta(minutes=stale_heartbeat_minutes)
 
+    # FIX C6 (2026-04-29 third-pass audit): capture job age in
+    # final_state_reason instead of the flat 'stale_heartbeat' /
+    # 'no_heartbeat' tokens. The audit found 32 orphans in 24h all tagged
+    # with the same flat token; the underlying ages varied from minutes to
+    # 12+ hours. Including the age (in minutes, computed from started_at)
+    # tells ops at a glance whether this is a mid-run stall or a job that
+    # never produced a heartbeat in its entire lifetime.
     rows_with_stale_hb = (
         db.execute(
             text(
@@ -66,7 +73,11 @@ def reconcile_stale_batch_jobs(
                 SET status = 'orphaned',
                     ended_at = :now,
                     orphaned_at = :now,
-                    final_state_reason = 'stale_heartbeat'
+                    final_state_reason =
+                        'stale_heartbeat:age_min='
+                        || ROUND(EXTRACT(EPOCH FROM (:now - started_at))/60.0)::int::text
+                        || ':last_hb_min='
+                        || ROUND(EXTRACT(EPOCH FROM (:now - heartbeat_at))/60.0)::int::text
                 WHERE status = 'running'
                   AND heartbeat_at IS NOT NULL
                   AND heartbeat_at < :hb_cutoff
@@ -86,7 +97,9 @@ def reconcile_stale_batch_jobs(
                 SET status = 'orphaned',
                     ended_at = :now,
                     orphaned_at = :now,
-                    final_state_reason = 'no_heartbeat'
+                    final_state_reason =
+                        'no_heartbeat:age_min='
+                        || ROUND(EXTRACT(EPOCH FROM (:now - started_at))/60.0)::int::text
                 WHERE status = 'running'
                   AND heartbeat_at IS NULL
                   AND started_at < :no_hb_cutoff

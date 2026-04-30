@@ -1,0 +1,72 @@
+fix(audit-2026-04-29): 10 fixes from third-pass audit + deploy
+
+CRITICAL fixes (all six items from the audit punch list):
+
+C1 PDT-aware entry gate: new app/services/trading/pdt_guard.py with
+   can_open_intraday_round_trip(); queries account equity (cached 60s)
+   and day_trades_5d count from trading_trades; refuses entry on
+   unknown state per the no-hardcoded-fallback principle. Wired into
+   auto_trader.py before _execute_broker_buy. Eliminated the
+   1,333-rejections/24h "Sell may cause PDT designation" storm by
+   refusing to OPEN positions the system cannot intraday-close.
+
+C2 Phantom-trade source plug: broker_service.py:1283 now resolves the
+   originating filled buy order_id via get_recent_orders() before
+   creating a Trade row from a Robinhood position; refuses to create
+   a phantom row with NULL broker_order_id. Mig 205 sweeps anything
+   still phantom > 30min.
+
+C2b GGG revive path: same order_id resolution applied to the revive
+   branch in broker_service.py to stop it from re-opening cancelled
+   phantoms without an order_id (regression from C2 surfaced post-deploy).
+
+C3 scan_patterns.avg_return_pct unit fix: mig 207 recomputes from
+   trading_trades using ((exit-entry)/entry)*100 (consistent percent);
+   adds CHECK constraint scan_patterns_avg_return_pct_sane.
+
+C4 trading_pattern_trades dedupe and clamp: mig 208 deletes duplicate
+   rows on (scan_pattern_id, ticker, as_of_ts, timeframe), clamps
+   ABS > 100% to NULL, adds CHECK constraint pattern_trades_ret_sane,
+   adds UNIQUE partial index trading_pattern_trades_natural_key_uniq.
+
+C5 scheduler_worker_heartbeat re-registration: trading_scheduler.py
+   was missing 'cron_only' from the heartbeat-emit gate after the
+   container split (FIX 45a/b). Heartbeat dead 10h+ at audit time.
+   Now CHILI_SCHEDULER_EMIT_HEARTBEAT env var is authoritative; default
+   includes worker/cron_only/all roles. Plus post-start canonical-job
+   assertion that logs ERROR if heartbeat is missing.
+
+C6 brain_batch_reconciler orphan reason: final_state_reason now
+   includes job age (no_heartbeat:age_min=N / stale_heartbeat:age_min=
+   N:last_hb_min=M) so ops can distinguish mid-run stalls from
+   never-heartbeated jobs.
+
+HIGH fixes (also bundled):
+
+B1 Daily realized_ev_demote_pass job + mig 206 retroactive sweep:
+   re-evaluates every promoted pattern at 4:00AM PT, demotes any
+   failing the EV gate outside the 14d settle window. Mig 206
+   one-time retroactive demote of patterns with trade_count=0 or
+   failing realized stats outside the settle window.
+
+E1 dynamic_priors module: new app/services/trading/dynamic_priors.py
+   with population_win_rate, population_avg_return_pct,
+   bayesian_pattern_win_rate, bayesian_pattern_confidence. Replaces 8+
+   hardcoded "or 0.5" / "confidence=0.5" call sites per the operator's
+   no-hardcoded-fallback principle: ai_context.py:619, alpha_decay.py:124,
+   learning_predictions.py:422, live_drift.py:400/587,
+   contracts/signal_emit.py:245, backtest_queue_worker.py:54.
+
+G1 Daily breaker_heartbeat liveness snapshot at 5:00AM PT to
+   trading_risk_state with regime='breaker_heartbeat' so ops can
+   distinguish "alive not tripped" from "writer dead". The breaker
+   itself is event-driven and runs on every entry via
+   unified_risk_check.
+
+A3 Crypto pre-flight in autotrader: refuses unsupported Robinhood
+   crypto symbols (AKT/1INCH/2Z/etc.) BEFORE the broker call via
+   _is_crypto_supported_on_robinhood(). Eliminates 48/24h wasted
+   broker calls.
+
+Audit doc: docs/AUDITS/2026-04-29.md.
+Memory: reference_2026_04_29_audit_fixes.md (next session).
