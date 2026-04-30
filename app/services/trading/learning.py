@@ -3243,6 +3243,38 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         get_retest_interval_days,
     )
 
+    # Round-12 FIX #3 (2026-04-30): soft pause during US regular session.
+    # Throughput-by-hour analysis showed a 95% drop from 9:30 AM-3:00 PM PT
+    # (16:30-22:00 UTC under DST) -- pure contention with live trading
+    # systems' market-data fetches. Make the pause explicit so live
+    # systems get reliable bandwidth and the queue doesn't burn cycles
+    # waiting on rate-limited upstream APIs.
+    if bool(getattr(settings, "chili_brain_queue_market_hours_pause", True)):
+        try:
+            from datetime import datetime as _dt, time as _time
+            from zoneinfo import ZoneInfo as _ZI
+            _et = _dt.now(_ZI("America/New_York"))
+            _t = _et.time()
+            _wd = _et.weekday()
+            # Mon-Fri, 9:30 AM - 4:00 PM ET = US regular session
+            if _wd < 5 and _time(9, 30) <= _t < _time(16, 0):
+                logger.info(
+                    "[learning] Queue backtest: deferred (market_hours_pause; "
+                    "ET=%s); off-hours throughput is ~50/hr, market-hours is "
+                    "~1/hr due to upstream API contention -- pausing here to "
+                    "give live systems bandwidth.",
+                    _et.strftime("%H:%M"),
+                )
+                return {
+                    "backtests_run": 0,
+                    "patterns_processed": 0,
+                    "queue_empty": False,
+                    "queue_exploration_added": 0,
+                    "skipped_reason": "market_hours_pause",
+                }
+        except Exception:
+            logger.debug("[learning] market_hours_pause check failed; continuing", exc_info=True)
+
     if batch_size is None:
         batch_size = settings.brain_queue_batch_size
     pattern_ids = list(get_pending_patterns(db, limit=batch_size, ids_only=True))

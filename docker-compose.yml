@@ -484,6 +484,14 @@ services:
       # extreme concentration cases (>0.90). Source:
       # app/services/trading/portfolio_risk.py:46.
       - BRAIN_RISK_MAX_AVG_CORRELATION=0.85
+      # Round-12 (2026-04-30) FIX #2: switch backtest queue executor to
+      # process pool. The actual backtest worker runs as a daemon thread
+      # in scheduler-worker (FIX 34); without this env, it defaults to
+      # threads = GIL-bound on the indicator-compute portion. process
+      # mode gives true CPU parallelism. Cap workers at 6 (matches the
+      # cpus limit below) so the process pool doesn't blow memory.
+      - BRAIN_QUEUE_BACKTEST_EXECUTOR=process
+      - BRAIN_QUEUE_PROCESS_CAP=6
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app

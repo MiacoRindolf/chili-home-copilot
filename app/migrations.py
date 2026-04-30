@@ -14097,6 +14097,32 @@ def _migration_211_backfill_avg_return_pct_from_trading_backtests(conn) -> None:
         pass
 
 
+
+def _migration_212_backtest_queue_zero_trade_counter(conn) -> None:
+    """Add scan_patterns.consecutive_zero_trade_runs column.
+
+    Round-12 (2026-04-30) follow-on to the audit. The backtest queue
+    burns cycles on patterns whose conditions never trigger across the
+    universe (review log: "Pattern produced 0 trades across N tickers").
+    Without a counter, those patterns get queued every cycle indefinitely.
+
+    This column lets the queue-worker increment on a 0-trade run, and
+    the priority scorer / demote pass to retire patterns with too many
+    consecutive zero-trade runs.
+
+    Idempotent: skips if column already present.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    if "consecutive_zero_trade_runs" not in _columns(conn, "scan_patterns"):
+        conn.execute(text(
+            "ALTER TABLE scan_patterns "
+            "ADD COLUMN consecutive_zero_trade_runs INTEGER NOT NULL DEFAULT 0"
+        ))
+        conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -14318,6 +14344,7 @@ MIGRATIONS = [
     ("209_widen_macro_regime_label_columns", _migration_209_widen_macro_regime_label_columns),
     ("210_backfill_avg_return_pct_from_pattern_trades", _migration_210_backfill_avg_return_pct_from_pattern_trades),
     ("211_backfill_avg_return_pct_from_trading_backtests", _migration_211_backfill_avg_return_pct_from_trading_backtests),
+    ("212_backtest_queue_zero_trade_counter", _migration_212_backtest_queue_zero_trade_counter),
 ]
 
 

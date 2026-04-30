@@ -1497,6 +1497,35 @@ def _run_breaker_heartbeat_job():
     run_scheduler_job_guarded("breaker_heartbeat", _work)
 
 
+def _run_backtest_priority_scorer_job():
+    """Daily backtest_priority scorer for scan_patterns.
+
+    FIX (round 12, 2026-04-30): the queue worker orders by priority
+    DESC but 726 of 732 patterns had priority=0, so the queue was
+    effectively FIFO. This job rescores all patterns based on
+    lifecycle / staleness / evidence-gap signals so the next batch
+    pulls the most-needed patterns first. See
+    :mod:`app.services.trading.backtest_queue_priority`.
+    """
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        if not bool(getattr(_settings, "chili_backtest_priority_scorer_enabled", True)):
+            logger.info("[scheduler] backtest_priority_scorer disabled via setting")
+            return
+        from ..db import SessionLocal
+        from .trading.backtest_queue_priority import run_priority_scoring
+
+        db = SessionLocal()
+        try:
+            summary = run_priority_scoring(db)
+            logger.info("[scheduler] backtest_priority_scorer done: %s", summary)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("backtest_priority_scorer", _work)
+
+
 def _run_weekly_review_job():
     """Weekly performance review job."""
     from ..db import SessionLocal
@@ -3735,6 +3764,22 @@ def start_scheduler():
                 trigger=CronTrigger(hour=5, minute=0, timezone="America/Los_Angeles"),
                 id="breaker_heartbeat",
                 name="Drawdown-breaker liveness snapshot (daily 5:00AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # FIX (round 12, 2026-04-30): backtest priority scorer at 6:00 AM PT.
+        # Runs after breaker heartbeat (5 AM) and before market open (6:30 AM PT)
+        # so the queue is freshly prioritized when overnight throughput is still
+        # peaking (the 16:00-22:00 UTC dead zone is past then).
+        if include_web_light and bool(
+            getattr(settings, "chili_backtest_priority_scorer_enabled", True)
+        ):
+            _scheduler.add_job(
+                _run_backtest_priority_scorer_job,
+                trigger=CronTrigger(hour=6, minute=0, timezone="America/Los_Angeles"),
+                id="backtest_priority_scorer",
+                name="Backtest priority scorer (daily 6:00AM PT)",
                 replace_existing=True,
                 max_instances=1,
             )

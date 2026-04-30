@@ -209,6 +209,38 @@ def mark_pattern_tested(
             getattr(pattern, "id", None), e,
         )
 
+    # Round-12 FIX #4 (2026-04-30): track consecutive zero-trade runs and
+    # auto-demote to prescreen tier after threshold. Patterns that produce
+    # 0 trades on the test universe are queue-burn -- they get re-tested
+    # every cycle indefinitely without ever yielding signal. After N
+    # consecutive zero-trade runs, demote to queue_tier='prescreen' so
+    # they only run when prescreen tier is enabled (rare).
+    try:
+        from ...config import settings as _s
+        threshold = max(1, int(getattr(_s, "chili_backtest_zero_trade_demote_threshold", 3)))
+        cur = int(getattr(pattern, "consecutive_zero_trade_runs", 0) or 0)
+        if backtests_run is not None and int(backtests_run) == 0:
+            new_count = cur + 1
+            pattern.consecutive_zero_trade_runs = new_count
+            if new_count >= threshold and (pattern.queue_tier or "full") != "prescreen":
+                logger.warning(
+                    "[backtest_queue] FIX C4d: pattern_id=%s '%s' has %s "
+                    "consecutive zero-trade runs (>= %s); demoting "
+                    "queue_tier full -> prescreen to free queue cycles.",
+                    pattern.id, getattr(pattern, "name", "?"),
+                    new_count, threshold,
+                )
+                pattern.queue_tier = "prescreen"
+        elif backtests_run is not None and int(backtests_run) > 0:
+            # Reset on any non-zero run -- only CONSECUTIVE zeros demote.
+            if cur != 0:
+                pattern.consecutive_zero_trade_runs = 0
+    except Exception:
+        logger.debug(
+            "[backtest_queue] zero-trade counter update failed for pattern id=%s",
+            getattr(pattern, "id", None), exc_info=True,
+        )
+
     db.commit()
     invalidate_queue_status_cache()
 

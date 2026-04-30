@@ -1,0 +1,54 @@
+fix(backtest_queue): round-12 5 throughput improvements
+
+User-requested follow-up to throughput investigation. Five concrete
+changes to the backtest queue:
+
+1) PRIORITY RANKING (`backtest_queue_priority.py` + scheduler cron):
+   The queue worker was already ordering by backtest_priority DESC,
+   but 726 of 732 patterns had priority=0, so it was effectively
+   FIFO with no signal. New module scores each pattern from
+   lifecycle/staleness/evidence-gap signals and writes back to
+   scan_patterns.backtest_priority. Daily cron at 6:00 AM PT.
+   Scoring (clamped 0-100):
+     +60 promoted   +50 challenged
+     +40 NULL avg_return_pct AND active
+     +30 promoted with trade_count<5
+     +20 stale >7d  +10 stale >14d
+     + 5 never tested AND active
+     -50 retired/decayed   -100 inactive
+   No hardcoded fallback values: every weight is a signal weight on
+   observed columns, not a substitute for missing data.
+
+2) PROCESS EXECUTOR (docker-compose.yml + config.py default):
+   Backtest indicator computation is GIL-bound on threads. Switched
+   to process pool for true CPU parallelism. scheduler-worker now
+   gets BRAIN_QUEUE_BACKTEST_EXECUTOR=process and
+   BRAIN_QUEUE_PROCESS_CAP=6 (matches the container's CPU limit).
+   config.py default flipped from "threads" to "process".
+
+3) MARKET-HOURS SOFT PAUSE (`learning.py:_auto_backtest_from_queue`):
+   Hour-of-day analysis showed 95% throughput collapse during US
+   regular session (16:00-22:00 UTC = 9:30 AM-3:00 PM PT) due to
+   contention with live trading systems' market-data fetches. The
+   queue now refuses new batches Mon-Fri 9:30 AM-4:00 PM ET so
+   live systems get reliable upstream-API bandwidth. Configurable
+   via chili_brain_queue_market_hours_pause (default True).
+
+4) ZERO-TRADE PATTERN DEMOTE (`backtest_queue.py:mark_pattern_tested`):
+   Mig 212 adds scan_patterns.consecutive_zero_trade_runs (default 0,
+   NOT NULL). When backtests_run=0, increment; when >0, reset to 0.
+   After N consecutive zero runs (default 3), demote queue_tier
+   'full' -> 'prescreen' so the pattern stops burning queue cycles.
+   The prescreen tier path (already in backtest_queue_worker) only
+   runs in the rare brain_queue_prescreen_enabled mode.
+   Configurable via chili_backtest_zero_trade_demote_threshold.
+
+5) (Round-10 already partially covered #5: brain_batch_jobs visibility
+   for the priority scorer. The backtest worker daemon thread itself
+   isn't covered by run_scheduler_job_guarded -- separate work item.)
+
+Mig 212: scan_patterns.consecutive_zero_trade_runs INTEGER DEFAULT 0.
+Idempotent.
+
+Verified per-fix with ast.parse + content assertions; deploy will
+recreate scheduler-worker so new env vars + new code take effect.

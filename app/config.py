@@ -889,6 +889,27 @@ class Settings(BaseSettings):
     # one-time retroactive sweep; this is the going-forward enforcement.
     chili_realized_ev_demote_pass_enabled: bool = True
     chili_realized_ev_demote_settle_days: int = 14
+    # Round-12 (2026-04-30): backtest queue improvements.
+    # 1. priority scorer runs daily and updates backtest_priority based
+    #    on lifecycle/staleness/evidence-gap signals.
+    chili_backtest_priority_scorer_enabled: bool = True
+    # 2. switch backtest executor to process pool for true CPU
+    #    parallelism. Threads are GIL-bound on the indicator-compute
+    #    portion of each backtest. Set per-worker memory cap so process
+    #    pool doesn't blow up on large universes.
+    chili_brain_queue_backtest_executor: str = "process"
+    chili_brain_queue_process_cap: int = 6
+    # 3. soft pause during US regular session: skip new batches
+    #    9:30-16:00 ET so live trading systems get market-data bandwidth.
+    #    Off-hours throughput already 50/hr; the dead zone during market
+    #    hours is contention, not a deliberate pause. Make it explicit
+    #    so live systems don't fight the queue worker.
+    chili_brain_queue_market_hours_pause: bool = True
+    # 4. zero-trade pattern demote: after N consecutive 0-trade backtest
+    #    runs, demote queue_tier to 'prescreen' so the pattern only runs
+    #    when the prescreen tier is enabled (rare). Prevents the queue
+    #    burning cycles indefinitely on dead patterns.
+    chili_backtest_zero_trade_demote_threshold: int = 3
     # 2026-04-28: pattern x regime ledger — turns shadow-mode regime
     # snapshots into actionable per-pattern evidence.
     chili_pattern_regime_ledger_enabled: bool = True
