@@ -253,6 +253,12 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
+      # Round-18 (2026-04-30): mount scripts so changes to brain_worker.py
+      # take effect on container restart without an image rebuild.
+      # Previously scripts/ was baked into the image at build time, so
+      # `force-recreate` kept running stale code -- the R18 audit-helper
+      # additions silently never loaded until this mount was added.
+      - ./scripts:/app/scripts
     depends_on:
       chili:
         condition: service_started
