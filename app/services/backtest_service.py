@@ -2064,7 +2064,8 @@ def run_pattern_backtest(
 
     try:
         from app.services.trading.data_quality import clean_ohlcv
-        df = clean_ohlcv(df)
+        # Round-21 FIX (2026-04-30): pass ticker so index series keep bars.
+        df = clean_ohlcv(df, symbol=ticker)
     except Exception:
         pass
 

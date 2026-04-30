@@ -1777,7 +1777,8 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
         df = fetch_ohlcv_df(ticker, period=period, interval=bar_interval)
         if df.empty or len(df) < min_len:
             return []
-        df = clean_ohlcv(df)
+        # Round-21 FIX (2026-04-30): pass ticker so index series keep bars.
+        df = clean_ohlcv(df, symbol=ticker)
         if len(df) < min_len:
             return []
     except Exception:

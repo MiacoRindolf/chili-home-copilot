@@ -218,7 +218,21 @@ def get_history(symbol: str, **kwargs) -> Any:
     period = kwargs.get("period", "6mo")
     interval = kwargs.get("interval", "1d")
     start = kwargs.get("start")
-    cache_key = f"hist:{symbol}:{period}:{interval}:{start}"
+    end = kwargs.get("end")
+    # Round-21 FIX (2026-04-30, third-party audit HIGH): cache key now
+    # includes ``end``, ``prepost``, ``auto_adjust``, ``actions`` -- any
+    # parameter that changes the returned DataFrame must be in the key.
+    # Prior code keyed only on (symbol, period, interval, start), so a
+    # caller asking for end=2026-02-01 would silently receive a cached
+    # answer to end=2026-03-01 issued seconds earlier. That's a "lying
+    # cache" -- different temporal questions getting the same answer.
+    prepost = kwargs.get("prepost", False)
+    auto_adjust = kwargs.get("auto_adjust", True)
+    actions = kwargs.get("actions", True)
+    cache_key = (
+        f"hist:{symbol}:{period}:{interval}:{start}:{end}"
+        f":pp={prepost}:aa={auto_adjust}:ac={actions}"
+    )
 
     cached = _cache_get(cache_key)
     if cached is not None:

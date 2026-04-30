@@ -1,0 +1,41 @@
+fix(provider): round-21 yfinance cache key + ^VIX zero-volume guard
+
+Two HIGH-severity findings from the 2026-04-30 third-party audit.
+
+R21a -- yfinance history cache key omits `end`:
+yf_session.get_history built cache_key from
+(symbol, period, interval, start) only. Two calls with different
+`end` arguments hit the same cache and the second got the first's
+DataFrame. Backtests, scanners, and diagnostics could silently
+receive stale slices for different requested end dates.
+
+Fix: include `end`, `prepost`, `auto_adjust`, `actions` in the
+cache key -- any parameter that changes the returned rows must
+be in the key. Cache stays bounded; the bug was correctness.
+
+R21b -- ^VIX wrapper returns 0 rows because of zero-volume filter:
+data_quality.filter_zero_volume blanket-dropped all bars where
+Volume == 0. For yfinance/Polygon index series (^VIX, ^GSPC, ^DJI,
+I:VIX, etc.) zero volume is normal -- they're price-only series
+with no exchange-volume concept. After Massive returns 403 for
+^VIX (no entitlement) the yfinance fallback DOES return data, but
+clean_ohlcv emptied it -- so VIX-dependent regime/risk gates saw
+"no data" and silently skipped or used stale fallbacks.
+
+Fix: added `_is_index_symbol` check (^... or I:...) and made
+`filter_zero_volume(df, symbol=...)` skip the filter for indexes.
+`clean_ohlcv` now accepts an optional `symbol` kwarg; updated
+4 callers (market_data._finalize_ohlcv_df, learning, backtest_
+service, leaving the 1 caller in test contexts unchanged).
+Stocks/ETFs/crypto behavior is identical -- the bypass is index-
+only.
+
+Recovery: Edit tool truncated 4 of 5 files; recovered all via
+safe-Python-write with ast.parse validation.
+
+Files:
+- app/services/yf_session.py (R21a)
+- app/services/trading/data_quality.py (R21b core)
+- app/services/trading/market_data.py (R21b caller)
+- app/services/trading/learning.py (R21b caller)
+- app/services/backtest_service.py (R21b caller)

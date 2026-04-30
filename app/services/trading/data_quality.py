@@ -57,9 +57,41 @@ def filter_bad_prints(df: pd.DataFrame, z_threshold: float = 5.0) -> pd.DataFram
     return df[mask].copy()
 
 
-def filter_zero_volume(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop bars with zero volume (often after-hours placeholder bars)."""
+def _is_index_symbol(symbol: str | None) -> bool:
+    """Index tickers (^VIX, ^GSPC, ^DJI, ^IXIC, ^RUT, etc.) legitimately
+    report zero volume on yfinance/Polygon. They are price-only series.
+
+    Round-21 FIX (2026-04-30, third-party audit HIGH): the prior
+    ``filter_zero_volume`` blanket-dropped all zero-volume bars, so
+    ^VIX and friends came out of ``clean_ohlcv`` empty. Regime gates
+    that depend on VIX then saw "no data" and silently skipped or
+    used stale fallbacks.
+    """
+    if not symbol:
+        return False
+    s = symbol.strip()
+    if not s:
+        return False
+    # yfinance index convention is the leading caret.
+    if s.startswith("^"):
+        return True
+    # Polygon convention is the I: prefix.
+    if s.upper().startswith("I:"):
+        return True
+    return False
+
+
+def filter_zero_volume(df: pd.DataFrame, *, symbol: str | None = None) -> pd.DataFrame:
+    """Drop bars with zero volume (often after-hours placeholder bars).
+
+    Skipped entirely for index tickers (``^VIX``, ``^GSPC``, etc.) where
+    zero volume is normal and dropping bars would empty the series.
+    Callers that know the symbol should pass it; ``clean_ohlcv`` does so.
+    """
     if df.empty or "Volume" not in df.columns:
+        return df
+    if _is_index_symbol(symbol):
+        # Don't filter -- zero volume is the norm for index price series.
         return df
     before = len(df)
     df = df[df["Volume"] > 0].copy()
@@ -110,10 +142,20 @@ def validate_ohlcv_integrity(df: pd.DataFrame) -> dict[str, Any]:
     return report
 
 
-def clean_ohlcv(df: pd.DataFrame, *, z_threshold: float = 5.0) -> pd.DataFrame:
-    """Apply all quality filters in sequence. Safe for indicator computation."""
+def clean_ohlcv(
+    df: pd.DataFrame,
+    *,
+    z_threshold: float = 5.0,
+    symbol: str | None = None,
+) -> pd.DataFrame:
+    """Apply all quality filters in sequence. Safe for indicator computation.
+
+    Round-21 FIX (2026-04-30): pass ``symbol`` to ``filter_zero_volume`` so
+    index tickers (^VIX, ^GSPC, ...) keep their bars. Without ``symbol``
+    the filter falls back to old blanket-drop behavior (safe for stocks).
+    """
     if df.empty:
         return df
-    df = filter_zero_volume(df)
+    df = filter_zero_volume(df, symbol=symbol)
     df = filter_bad_prints(df, z_threshold=z_threshold)
     return df

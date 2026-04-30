@@ -52,7 +52,9 @@ def _finalize_ohlcv_df(df: pd.DataFrame, *, ticker: str, interval: str, provider
     try:
         from .data_quality import clean_ohlcv, validate_ohlcv_integrity
 
-        out = clean_ohlcv(out)
+        # Round-21 FIX (2026-04-30): pass ticker so clean_ohlcv can skip
+        # zero-volume rejection for index series (^VIX, ^GSPC, I:VIX).
+        out = clean_ohlcv(out, symbol=ticker)
         integrity = validate_ohlcv_integrity(out)
         if not integrity.get("clean", False):
             logger.warning(
