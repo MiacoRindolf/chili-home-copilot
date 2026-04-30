@@ -248,17 +248,27 @@ def build_ledger(
 
     as_of = as_of or date.today()
     run_id = uuid.uuid4().hex[:32]
-    # FIX 9 (deep audit 2026-04-28): the live-trade writer was reading
-    # ``brain_breadth_relstr_mode`` (wrong settings key — that one belongs
-    # to the breadth snapshots writer). The result: 38 rows tagged
-    # ``mode='shadow'`` instead of ``mode='live'``, and the live ledger
-    # had 0 rows even though the writer was running.
+    # FIX 9 (deep audit 2026-04-28) + FIX F1 (third-pass audit 2026-04-29):
     #
-    # Now uses the dedicated key. Default 'live' is intentional: the
-    # backtest path tags 'backtest' explicitly, the live trade-driven
-    # writer should tag 'live' (this code path). 'shadow' is reserved
-    # for the explicit dry-run case via chili_pattern_regime_ledger_dry_run.
-    mode = str(_settings_get("brain_pattern_regime_perf_mode", "live") or "live").lower()
+    # The original FIX 9 read ``brain_pattern_regime_perf_mode`` to decide
+    # this writer's row tag. That setting is also the env-controlled state
+    # machine for the snapshot writers (off/shadow/compare/authoritative)
+    # and the operator keeps it at 'shadow' deliberately (Phase L.20.2 is
+    # not yet open). Result: even though THIS writer aggregates REAL closed
+    # live trades, every row gets tagged 'shadow' and downstream regime_gate
+    # reads zero 'live' rows.
+    #
+    # Decoupling: this writer's ledger label depends on its OWN dry-run
+    # flag, not on the upstream snapshot mode. When
+    # ``chili_pattern_regime_ledger_dry_run`` is False (default), the
+    # ledger draws from authoritative closed trades and should tag 'live'.
+    # When True, tag 'shadow' so the operator can validate without the
+    # gate honoring the result.
+    #
+    # The backtest path (separate function below) still tags 'backtest'
+    # explicitly, regardless of either setting.
+    _dry_run = bool(_settings_get("chili_pattern_regime_ledger_dry_run", False))
+    mode = "shadow" if _dry_run else "live"
 
     # For each regime_dimension, pull (trade, regime_label) and group.
     # Each dimension uses its own LATERAL join by ticker/date.

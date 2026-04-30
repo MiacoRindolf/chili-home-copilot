@@ -1,0 +1,29 @@
+fix(audit-2026-04-29): F-1/F-2 regime ledger live-vs-shadow decoupling
+
+Root cause: the `.env` file sets BRAIN_*_MODE=shadow for all regime
+state-machine settings (operator-deliberate; Phase L.20.2 is not yet
+open). The pattern_regime_ledger live-trade writer was reading the
+same setting, which forced its ledger rows to tag 'shadow' even though
+the writer itself aggregates authoritative closed-live-trade data.
+
+Result observed in third-pass audit: 0 rows in
+trading_pattern_regime_performance_daily tagged 'live' across all 4
+dimensions, despite chili-app and brain-worker running normally.
+
+Fix:
+
+1. Decouple pattern_regime_ledger from the snapshot state-machine
+   setting. Tag 'live' by default; tag 'shadow' only when the
+   dedicated `chili_pattern_regime_ledger_dry_run` flag is set.
+2. Update config.py defaults from "live" to "shadow" for the seven
+   regime state-machine settings (ticker/breadth/cross_asset/
+   vol_dispersion/intraday_session/macro_regime/pattern_regime_perf).
+   The previous "live" default was misleading: those services
+   validate against ("off", "shadow", "compare", "authoritative") and
+   coerce "live" to "off". Defaults now match the .env-deployed
+   reality and the operator's lifecycle ("shadow" until Phase L.20.2).
+3. Inline comment on each default documents the off/shadow/compare/
+   authoritative state machine for future devs.
+
+Memory: reference_2026_04_29_audit_fixes.md updated with F-1 status.
+Audit doc: docs/AUDITS/2026-04-29.md F-1/F-2 findings explained.

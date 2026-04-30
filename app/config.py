@@ -505,7 +505,7 @@ class Settings(BaseSettings):
     # by a daily scheduled sweep when mode != "off". L.17.1 never flips to
     # "authoritative"; the service layer hard-refuses that mode until the
     # L.17.2 plan is opened explicitly.
-    brain_macro_regime_mode: str = "live"
+    brain_macro_regime_mode: str = "shadow"  # FIX F1 (2026-04-29): default to shadow until Phase L.20.2 opens authoritative
     brain_macro_regime_ops_log_enabled: bool = True
     brain_macro_regime_cron_hour: int = 6
     brain_macro_regime_cron_minute: int = 30
@@ -525,7 +525,7 @@ class Settings(BaseSettings):
     # mode != "off". L.18.1 never flips to "authoritative"; the service
     # layer hard-refuses that mode until the L.18.2 plan is opened
     # explicitly.
-    brain_breadth_relstr_mode: str = "live"
+    brain_breadth_relstr_mode: str = "shadow"  # FIX F1 (2026-04-29): default to shadow until Phase L.20.2 opens authoritative
     brain_breadth_relstr_ops_log_enabled: bool = True
     brain_breadth_relstr_cron_hour: int = 6
     brain_breadth_relstr_cron_minute: int = 45
@@ -543,7 +543,7 @@ class Settings(BaseSettings):
     # trading_cross_asset_snapshots by a daily scheduled sweep when mode
     # != "off". L.19.1 never flips to "authoritative"; the service layer
     # hard-refuses that mode until the L.19.2 plan is opened explicitly.
-    brain_cross_asset_mode: str = "live"
+    brain_cross_asset_mode: str = "shadow"  # FIX F1 (2026-04-29): default to shadow until Phase L.20.2 opens authoritative
     brain_cross_asset_ops_log_enabled: bool = True
     brain_cross_asset_cron_hour: int = 7
     brain_cross_asset_cron_minute: int = 0
@@ -564,7 +564,7 @@ class Settings(BaseSettings):
     # Additive-only: no existing consumer reads this table; L.17/L.18/L.19
     # snapshots are unchanged, and the existing ``hurst_proxy_from_closes``
     # in the momentum-neural pipeline is not touched.
-    brain_ticker_regime_mode: str = "live"
+    brain_ticker_regime_mode: str = "shadow"  # FIX F1 (2026-04-29): default to shadow until Phase L.20.2 opens authoritative
     brain_ticker_regime_ops_log_enabled: bool = True
     brain_ticker_regime_cron_hour: int = 7
     brain_ticker_regime_cron_minute: int = 15
@@ -604,7 +604,7 @@ class Settings(BaseSettings):
     # opened explicitly. Additive-only: no existing consumer reads
     # this table; L.17/L.18/L.19/L.20 snapshots and
     # ``market_data.get_market_regime()`` are unchanged.
-    brain_vol_dispersion_mode: str = "live"
+    brain_vol_dispersion_mode: str = "shadow"  # FIX F1 (2026-04-29): default to shadow until Phase L.20.2 opens authoritative
     brain_vol_dispersion_ops_log_enabled: bool = True
     brain_vol_dispersion_cron_hour: int = 7
     brain_vol_dispersion_cron_minute: int = 30
@@ -647,7 +647,7 @@ class Settings(BaseSettings):
     # plan is opened explicitly. Additive-only: no existing consumer
     # reads this table; L.17-L.21 snapshots and ``get_market_regime()``
     # are unchanged.
-    brain_intraday_session_mode: str = "live"
+    brain_intraday_session_mode: str = "shadow"  # FIX F1 (2026-04-29): default to shadow until Phase L.20.2 opens authoritative
     brain_intraday_session_ops_log_enabled: bool = True
     # 22:00 local scheduler slot (post US cash close and after L.17-L.21
     # jobs at 06:30-07:30).
@@ -687,7 +687,7 @@ class Settings(BaseSettings):
     # Shadow-only: no sizing/promotion/stop behaviour reads this table
     # in M.1. ``mode`` supports ``off`` (default), ``shadow``, ``compare``;
     # service hard-refuses ``authoritative`` until M.2 is opened.
-    brain_pattern_regime_perf_mode: str = "live"
+    brain_pattern_regime_perf_mode: str = "shadow"  # FIX F1 (2026-04-29): default to shadow until Phase L.20.2 opens authoritative
     brain_pattern_regime_perf_ops_log_enabled: bool = True
     # 23:00 local scheduler slot (after L.22 at 22:00 has landed).
     brain_pattern_regime_perf_cron_hour: int = 23
