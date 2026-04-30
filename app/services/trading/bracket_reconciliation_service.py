@@ -401,6 +401,33 @@ def _stage_log_all(db: Session, batch: SweepBatch) -> int:
                     severity=decision.severity,
                 )
             )
+
+        # Phase G.2 writer hook (Round 23). No-op unless mode=authoritative.
+        writer_res = _invoke_writer_for_decision(
+            db,
+            mode=batch.mode,
+            sweep_id=batch.sweep_id,
+            local=lv,
+            broker=bv,
+            decision=decision,
+        )
+        if writer_res is not None and _ops_log_enabled():
+            logger.info(
+                format_bracket_reconciliation_ops_line(
+                    event="writer_action",
+                    mode=batch.mode,
+                    sweep_id=batch.sweep_id,
+                    trade_id=lv.trade_id,
+                    bracket_intent_id=lv.bracket_intent_id,
+                    ticker=lv.ticker,
+                    broker_source=lv.broker_source,
+                    kind=decision.kind,
+                    severity=decision.severity,
+                    writer=writer_res.get("writer"),
+                    ok=writer_res.get("ok"),
+                    reason=writer_res.get("reason"),
+                )
+            )
     batch.rows_written = rows_written
     return rows_written
 
@@ -498,6 +525,117 @@ def _summarize_from_batch(batch: SweepBatch, *, took_ms: float) -> SweepSummary:
         rows_written=batch.rows_written,
         decisions=decisions_payload,
     )
+
+
+# ── Phase G.2 writer-invocation hook (Round 23) ───────────────────────
+
+
+def _invoke_writer_for_decision(
+    db: Session,
+    *,
+    mode: str,
+    sweep_id: str,
+    local: LocalView,
+    broker: BrokerView,
+    decision: ReconciliationDecision,
+) -> dict[str, Any] | None:
+    """Invoke the Phase G.2 bracket writer for a classification that
+    represents a repairable drift, when mode + flags allow.
+
+    Gates (all must be True for the writer to fire):
+      * ``mode == "authoritative"`` (set by sweep entry point only when
+        ``chili_bracket_sweep_writer_enabled`` is True).
+      * ``local.trade_id`` and ``local.bracket_intent_id`` are present.
+      * ``local.broker_source`` is supported (currently Robinhood only).
+      * decision.kind is one of {missing_stop, qty_drift+partial_fill}.
+
+    Returns a dict describing the writer action (logged + summarised),
+    or ``None`` if no writer was invoked. Failures inside the writer
+    are surfaced via the dict's ``ok`` and ``reason`` keys, never as
+    exceptions reaching the sweep loop.
+    """
+    if mode != "authoritative":
+        return None
+    if local.trade_id is None or local.bracket_intent_id is None:
+        return None
+    if (local.broker_source or "").lower() != "robinhood":
+        return None
+
+    try:
+        from .bracket_writer_g2 import (
+            place_missing_stop,
+            resize_stop_for_partial_fill,
+        )
+    except Exception:
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} bracket_writer_g2 import failed for sweep %s",
+            sweep_id, exc_info=True,
+        )
+        return None
+
+    try:
+        if decision.kind == "missing_stop":
+            if local.stop_price is None or local.quantity is None:
+                return None
+            action = place_missing_stop(
+                db,
+                trade_id=int(local.trade_id),
+                bracket_intent_id=int(local.bracket_intent_id),
+                ticker=str(local.ticker or ""),
+                broker_source=str(local.broker_source or ""),
+                decision=decision,
+                local_quantity=float(local.quantity),
+                stop_price=float(local.stop_price),
+            )
+            return {
+                "writer": "place_missing_stop",
+                "ok": bool(action.ok),
+                "reason": action.reason,
+                "new_stop_order_id": action.new_stop_order_id,
+                "qty": action.new_stop_qty,
+                "stop_price": action.new_stop_price,
+            }
+
+        if decision.kind == "qty_drift":
+            payload = decision.delta_payload or {}
+            if payload.get("drift_kind") != "partial_fill":
+                return None
+            if local.stop_price is None:
+                return None
+            prior_id = (
+                broker.stop_order_id
+                if broker is not None and broker.stop_order_id
+                else None
+            )
+            if prior_id is None:
+                return None
+            action = resize_stop_for_partial_fill(
+                db,
+                trade_id=int(local.trade_id),
+                bracket_intent_id=int(local.bracket_intent_id),
+                ticker=str(local.ticker or ""),
+                broker_source=str(local.broker_source or ""),
+                decision=decision,
+                prior_stop_order_id=str(prior_id),
+                stop_price=float(local.stop_price),
+            )
+            return {
+                "writer": "resize_stop_for_partial_fill",
+                "ok": bool(action.ok),
+                "reason": action.reason,
+                "prior_stop_order_id": action.prior_stop_order_id,
+                "new_stop_order_id": action.new_stop_order_id,
+                "qty": action.new_stop_qty,
+                "stop_price": action.new_stop_price,
+            }
+    except Exception:
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} writer raised for trade %s sweep %s",
+            local.trade_id, sweep_id, exc_info=True,
+        )
+        return None
+
+    return None
 
 
 def _run_sweep_staged(
@@ -649,6 +787,33 @@ def _run_sweep_legacy(
                 )
             )
 
+        # Phase G.2 writer hook (Round 23). No-op unless mode=authoritative.
+        writer_res = _invoke_writer_for_decision(
+            db,
+            mode=mode,
+            sweep_id=sweep_id,
+            local=local,
+            broker=broker,
+            decision=decision,
+        )
+        if writer_res is not None and _ops_log_enabled():
+            logger.info(
+                format_bracket_reconciliation_ops_line(
+                    event="writer_action",
+                    mode=mode,
+                    sweep_id=sweep_id,
+                    trade_id=local.trade_id,
+                    bracket_intent_id=local.bracket_intent_id,
+                    ticker=local.ticker,
+                    broker_source=local.broker_source,
+                    kind=decision.kind,
+                    severity=decision.severity,
+                    writer=writer_res.get("writer"),
+                    ok=writer_res.get("ok"),
+                    reason=writer_res.get("reason"),
+                )
+            )
+
     took_ms = (time.perf_counter() - start) * 1000.0
     return SweepSummary(
         sweep_id=sweep_id,
@@ -698,10 +863,18 @@ def run_reconciliation_sweep(
         return _empty_off_summary(sweep_id)
 
     if mode == "authoritative":
-        raise RuntimeError(
-            "bracket_reconciliation_service.run_reconciliation_sweep refuses to run "
-            "in authoritative mode during Phase G; that cutover belongs to Phase G.2."
-        )
+        # Phase G.2 - authoritative mode is gated by the sweep-side
+        # writer flag. When the flag is OFF we fall back to shadow + log
+        # a loud warning; when ON we let the sweep run and invoke the
+        # G2 writer in the post-classify hook. The bracket_writer_g2
+        # module is responsible for its own per-action flags and venue
+        # check on top of this gate.
+        if not bool(getattr(settings, "chili_bracket_sweep_writer_enabled", False)):
+            logger.warning(
+                f"{BRACKET_RECONCILIATION} mode=authoritative requested but "
+                "chili_bracket_sweep_writer_enabled=False; falling back to shadow"
+            )
+            mode = "shadow"
 
     broker_view_fn = broker_view_fn or _noop_broker_view_fn
     tolerances = _tolerances_from_settings()

@@ -2186,6 +2186,16 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP"),
     )
+    # Round 23 - sweep-side gate that wires the G2 writer into the
+    # reconciliation sweep's post-classify hook. Default OFF so the
+    # Phase G.2 writer module can ship without immediately flipping the
+    # repair path live. To actually repair, flip BOTH this flag AND
+    # brain_live_brackets_mode="authoritative". The writer's own
+    # per-action flags (above) and venue check still apply on top.
+    chili_bracket_sweep_writer_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_BRACKET_SWEEP_WRITER_ENABLED"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

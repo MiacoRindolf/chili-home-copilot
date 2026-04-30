@@ -1,0 +1,109 @@
+﻿# r23 + r24 validate 04/30/2026 09:24:24
+
+===== git status -s (touched files only) =====
+ M app/config.py
+ M app/migrations.py
+ M app/services/broker_service.py
+ M app/services/trading/bracket_reconciliation_service.py
+ M app/services/trading/bracket_writer_g2.py
+ M app/services/trading/venue/robinhood_spot.py
+ M tests/test_bracket_writer_g2.py
+?? scripts/_fix_rh_spot.py
+?? scripts/_rewrite_bracket_writer_g2.py
+?? scripts/_wire_g2_into_sweep.py
+?? scripts/dispatch-r23-pytest.ps1
+?? scripts/dispatch-r23-r24-deploy.ps1
+?? scripts/dispatch-r23-r24-validate-output.txt
+?? scripts/dispatch-r23-r24-validate.ps1
+
+
+===== py-compile gate (R23 + R24 touched files) =====
+py-compile OK
+
+
+===== verify migration ids unique =====
+OK: 214 migrations, 0 retired; no ID collisions.
+
+
+
+===== import smoke (writer + adapter resolves) =====
+
+
+===== config flag visible =====
+
+
+===== pytest tests/test_bracket_writer_g2.py =====
+conda : ERROR conda.cli.main_run:execute(127): `conda run 
+python -m pytest tests/test_bracket_writer_g2.py -v 
+--no-header` failed. (See above for error)
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-r24-vali
+date.ps1:60 char:5
++     conda run -n chili-env python -m pytest 
+tests/test_bracket_writer ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR conda. 
+   cli...bove for error):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+============================= test session starts =============================
+collecting ... collected 0 items / 1 error
+
+=================================== ERRORS ====================================
+________________________ ERROR collecting test session ________________________
+C:\Users\rindo\miniconda3\envs\chili-env\Lib\site-packages\pluggy\_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\rindo\miniconda3\envs\chili-env\Lib\site-packages\pluggy\_manager.py:120: in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\rindo\miniconda3\envs\chili-env\Lib\site-packages\pytest_asyncio\plugin.py:626: in pytest_collectstart
+    pyobject = collector.obj
+               ^^^^^^^^^^^^^
+E   AttributeError: 'Package' object has no attribute 'obj'
+=========================== short test summary info ===========================
+ERROR  - AttributeError: 'Package' object has no attribute 'obj'
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+============================== 1 error in 0.29s ===============================
+
+
+
+===== git diff stat (touched files) =====
+git : warning: in the working copy of 'app/config.py', LF 
+will be replaced by CRLF the next time Git touches it
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-r24-vali
+date.ps1:64 char:5
++     git diff --stat HEAD -- app/config.py 
+app/migrations.py app/servi ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: in  
+   the... Git touches it:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: in the working copy of 'app/migrations.py', LF 
+will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 
+'app/services/broker_service.py', LF will be replaced by 
+CRLF the next time Git touches it
+warning: in the working copy of 
+'app/services/trading/bracket_reconciliation_service.py', 
+LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 
+'app/services/trading/bracket_writer_g2.py', LF will be 
+replaced by CRLF the next time Git touches it
+warning: in the working copy of 
+'app/services/trading/venue/robinhood_spot.py', LF will 
+be replaced by CRLF the next time Git touches it
+warning: in the working copy of 
+'tests/test_bracket_writer_g2.py', LF will be replaced by 
+CRLF the next time Git touches it
+ app/config.py                                      |  10 +
+ app/migrations.py                                  |  98 ++++++++
+ app/services/broker_service.py                     | 112 +++++++++
+ .../trading/bracket_reconciliation_service.py      | 181 +++++++++++++-
+ app/services/trading/bracket_writer_g2.py          | 271 +++++++++++++++++----
+ app/services/trading/venue/robinhood_spot.py       | 129 ++++++++++
+ tests/test_bracket_writer_g2.py                    |  22 +-
+ 7 files changed, 766 insertions(+), 57 deletions(-)
+

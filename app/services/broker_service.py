@@ -2049,6 +2049,118 @@ def place_sell_order(
         return {"ok": False, "error": str(e)}
 
 
+def place_sell_stop_loss_order(
+    ticker: str,
+    quantity: float,
+    *,
+    trigger_price: float,
+    market_hours_override: str | None = None,
+    extended_hours_override: bool | None = None,
+) -> dict[str, Any]:
+    """Place a server-side STOP-LOSS SELL order via Robinhood.
+
+    The order rests at the broker and triggers (becomes a market order)
+    when the last trade prints at or below ``trigger_price``. This is
+    the protective primitive used by the Phase G.2 bracket writer to
+    repair ``missing_stop`` reconciliation findings on open long
+    positions.
+
+    Why a stop-loss MARKET (not stop-limit): a stop-limit can fail to
+    fill on a fast gap-down because the limit price becomes non-marketable
+    once the bid drops below it. A stop-loss converts to a market order
+    on trigger, accepting slippage in exchange for guaranteed exit. For
+    a defensive risk-protection primitive, guaranteed exit is the right
+    trade-off.
+
+    Returns the same envelope as ``place_sell_order``:
+        {"ok": True,  "order_id": "...", "state": "...", "raw": {...}}
+        {"ok": False, "error": "..."}
+
+    Notes:
+        * Robinhood requires ``timeInForce='gtc'`` for stop orders;
+          'gfd' is rejected by the API.
+        * ``trigger_price`` must be strictly below the current bid for
+          a SELL stop-loss; the broker rejects "stop trigger above
+          current price" as ``invalid_stop_price``. The caller (the
+          bracket writer) is responsible for validating this before
+          submission â we don't fetch a quote here so the call stays
+          idempotent and free of side-effects on a probe.
+    """
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+    if trigger_price is None or float(trigger_price) <= 0:
+        return {"ok": False, "error": f"invalid trigger_price: {trigger_price!r}"}
+    if quantity is None or float(quantity) <= 0:
+        return {"ok": False, "error": f"invalid quantity: {quantity!r}"}
+
+    try:
+        import robin_stocks.robinhood as rh
+        session_kwargs = _rh_order_session_kwargs(
+            market_hours_override=market_hours_override,
+            extended_hours_override=extended_hours_override,
+        )
+
+        def _do_stop_sell():
+            # rh.orders.order(...) signature accepts stopPrice + trigger='stop'
+            # to place a stop-loss. orderType='market' makes the triggered
+            # order a market order; orderType='limit' would make a stop-limit.
+            # We choose market to guarantee fill on a fast drop.
+            return rh.orders.order(
+                symbol=ticker,
+                quantity=quantity,
+                side="sell",
+                stopPrice=round(float(trigger_price), 2),
+                trigger="stop",
+                orderType="market",
+                timeInForce="gtc",
+                extendedHours=session_kwargs["extendedHours"],
+                market_hours=session_kwargs["market_hours"],
+                jsonify=True,
+            )
+
+        result = _retry_api_call(_do_stop_sell, label=f"SELL_STOP {ticker}")
+
+        if result and isinstance(result, dict):
+            order_id = result.get("id") or ""
+            state = result.get("state", "unknown")
+            if not order_id:
+                error_msg = (
+                    result.get("detail")
+                    or result.get("error")
+                    or result.get("message")
+                    or "Robinhood returned no order_id"
+                )
+                logger.error(
+                    f"[broker] SELL_STOP rejected (no order_id): {ticker} "
+                    f"x{quantity} trigger={trigger_price} response={result}"
+                )
+                return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            logger.info(
+                f"[broker] SELL_STOP order placed: {ticker} x{quantity} "
+                f"trigger={trigger_price} -> {state}"
+            )
+            # Stop orders rest at the broker until triggered; do NOT poll
+            # to terminal here â that's a different lifecycle than a
+            # market order. The reconciliation sweep tracks broker state.
+            _cache.pop("recent_orders", None)
+            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+        else:
+            error_msg = str(result) if result else "Empty response from Robinhood"
+            logger.error(
+                f"[broker] SELL_STOP order failed for {ticker}: {error_msg}"
+            )
+            return {"ok": False, "error": error_msg}
+
+    except Exception as e:
+        logger.error(
+            f"[broker] SELL_STOP exception for {ticker}: {e}", exc_info=True
+        )
+        return {"ok": False, "error": str(e)}
+
+
+
 # ── Crypto order placement (Task KK) ───────────────────────────────────
 #
 # Robinhood crypto trades 24/7 with no PDT constraint. The `rh.orders`

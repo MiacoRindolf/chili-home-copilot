@@ -1,4 +1,23 @@
-"""Phase G.2 - bracket writer (ACTIVE).
+"""Rewrite app/services/trading/bracket_writer_g2.py with:
+  1. Real stop-loss primitive (place_stop_loss_sell_order) instead of
+     marketable sell-limit (place_limit_order_gtc).
+  2. record_execution_event audit-row writes at submit / ack / reject /
+     unprotected-window points.
+  3. Sweep-time epoch in client_order_id so retries don't collide with
+     the prior coid in idempotency_store.
+  4. db.get(Trade, trade_id) to populate user_id + scan_pattern_id on
+     the audit rows.
+
+Validated via ast.parse before write. Mirrors the Round 17/18/21 recovery
+pattern.
+"""
+import ast, sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+target = ROOT / "app" / "services" / "trading" / "bracket_writer_g2.py"
+
+NEW = '''"""Phase G.2 - bracket writer (ACTIVE).
 
 The Phase G sweep is read-only: it classifies drift but never repairs.
 Phase G.2 closes that gap by letting the reconciler act on specific
@@ -567,3 +586,19 @@ __all__ = [
     "place_missing_stop",
     "resize_stop_for_partial_fill",
 ]
+'''
+
+# Validate
+try:
+    ast.parse(NEW)
+    print("ast OK")
+except SyntaxError as e:
+    print(f"SYNTAX: {e}")
+    lines = NEW.split('\n')
+    for i in range(max(0, e.lineno - 5), min(len(lines), e.lineno + 3)):
+        print(f"{i+1}: {lines[i][:120]}")
+    sys.exit(1)
+
+with open(target, 'w', encoding='utf-8', newline='\n') as f:
+    f.write(NEW)
+print(f"wrote {len(NEW.splitlines())} lines to {target}")

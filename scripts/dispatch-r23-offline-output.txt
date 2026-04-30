@@ -1,0 +1,39 @@
+﻿# r23 offline self-test 04/30/2026 09:28:20
+
+===== offline self-test (no DB; runs writer logic via mocks) =====
+conda : [bracket_writer_g2] cancel failed intent=1 
+order=stop-x error=not_cancellable
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-offline.
+ps1:7 char:5
++     conda run -n chili-env python 
+scripts/_r23_offline_test.py
++     
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([bracket_wri 
+   ter...not_cancellable:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[bracket_writer_g2] PRIOR STOP CANCELLED BUT REPLACEMENT 
+FAILED intent=1 order=stop-danger error=market_closed - 
+position is currently unprotected
+
+PASS default_off blocks resize, never calls adapter
+PASS default_off blocks place, never calls adapter
+PASS place_missing_stop happy path uses place_stop_loss_sell_order
+PASS resize_stop happy path: cancel before place, uses real stop primitive
+PASS resize cancel-fail does not place
+PASS resize cancel-OK + place-FAIL = unprotected window CRITICAL
+PASS place rejects unsupported venue (coinbase)
+PASS place rejects wrong decision kind
+PASS sweep service _invoke_writer_for_decision present + mode-gated
+PASS config flag chili_bracket_sweep_writer_enabled present + default False
+PASS mig 214 registered after 213
+PASS broker_service.place_sell_stop_loss_order present with stop semantics
+
+=== summary: 12 passed, 0 failed ===
+
+
+
+===== exit code =====
+LASTEXITCODE = 0
+

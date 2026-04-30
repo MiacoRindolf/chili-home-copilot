@@ -14227,6 +14227,103 @@ def _migration_213_demote_negative_ev_promoted_patterns(conn) -> None:
         pass
 
 
+
+def _migration_214_trade_table_check_constraints(conn) -> None:
+    """Add NOT VALID CHECK constraints to trading_trades.
+
+    2026-04-30 audit (HIGH §1.1) found 67 rows in trading_trades with
+    invalid ranges:
+      * 60 cancelled crypto rows (Coinbase) with entry_price=0
+      *  5 closed/robinhood rows with entry_price=0
+      *  2 cancelled/robinhood rows with entry_price=0
+    Plus other zero-quantity legacy rows.
+
+    The Trade model already has @validates guards on entry_price /
+    exit_price at the SQLAlchemy layer (added after the 2026-04-19
+    Massive provider outage). The 67 rows are LEGACY -- they pre-date
+    the model validator. New ORM writes are rejected at write time.
+
+    Mig 207 already filters ``entry_price > 0`` when recomputing the
+    realized avg_return_pct, so the legacy rows do NOT poison
+    scan_patterns analytics. The remaining risk is:
+      * raw-SQL writes that bypass the SQLAlchemy validator
+      * future analytics readers that don't filter
+
+    This migration adds NOT VALID CHECK constraints at the DB level so
+    every new INSERT/UPDATE has to satisfy the same rule the validator
+    enforces. NOT VALID means existing rows are NOT scanned (no risk of
+    breaking startup if a legacy row violates), but every future write
+    is gated. This is the audit-recommended quarantine-first approach.
+
+    Constraints added:
+      * chk_trades_entry_price_positive: entry_price > 0
+      * chk_trades_quantity_positive:    quantity > 0
+      * chk_trades_exit_price_finite:    exit_price IS NULL OR exit_price > 0
+
+    PnL is intentionally NOT constrained -- legitimate losses can be
+    arbitrarily large negative values; bounding it would cap valid
+    drawdown signal.
+
+    Idempotent: DROP IF EXISTS before ADD; safe to re-run.
+    """
+    if "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+
+    constraints = [
+        ("chk_trades_entry_price_positive", "entry_price > 0"),
+        ("chk_trades_quantity_positive", "quantity > 0"),
+        (
+            "chk_trades_exit_price_finite",
+            "exit_price IS NULL OR exit_price > 0",
+        ),
+    ]
+    for name, expr in constraints:
+        try:
+            conn.execute(text(
+                f"ALTER TABLE trading_trades DROP CONSTRAINT IF EXISTS {name}"
+            ))
+            conn.execute(text(
+                f"ALTER TABLE trading_trades "
+                f"ADD CONSTRAINT {name} CHECK ({expr}) NOT VALID"
+            ))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+    try:
+        bad_count = conn.execute(text(
+            """
+            SELECT COUNT(*) FROM trading_trades
+            WHERE (entry_price IS NULL OR entry_price <= 0)
+               OR (quantity IS NULL OR quantity <= 0)
+               OR (exit_price IS NOT NULL AND exit_price <= 0)
+            """
+        )).scalar() or 0
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+              (user_id, event_type, description, created_at)
+            VALUES (NULL, 'migration_214', :desc, CURRENT_TIMESTAMP)
+            """
+        ), {
+            "desc": (
+                f"mig 214 added NOT VALID CHECK constraints on "
+                f"trading_trades (entry_price>0, quantity>0, "
+                f"exit_price>0|NULL); {bad_count} legacy rows still "
+                f"violate but are exempt from NOT VALID"
+            )[:1000],
+        })
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -14450,6 +14547,7 @@ MIGRATIONS = [
     ("211_backfill_avg_return_pct_from_trading_backtests", _migration_211_backfill_avg_return_pct_from_trading_backtests),
     ("212_backtest_queue_zero_trade_counter", _migration_212_backtest_queue_zero_trade_counter),
     ("213_demote_negative_ev_promoted_patterns", _migration_213_demote_negative_ev_promoted_patterns),
+    ("214_trade_table_check_constraints", _migration_214_trade_table_check_constraints),
 ]
 
 

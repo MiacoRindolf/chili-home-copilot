@@ -1,0 +1,178 @@
+﻿# r23 + r24 commit+deploy 04/30/2026 09:29:59
+
+===== git rev-parse HEAD (before) =====
+e2b1d3b72e0070dd4244667afce59c61e802ef6f
+
+
+===== py-compile gate (final guardrail) =====
+py-compile OK
+
+
+===== git add (touched files only) =====
+git : fatal: Unable to create 
+'C:/dev/chili-home-copilot/.git/index.lock': File exists.
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-r24-comm
+it-deploy.ps1:25 char:5
++     git add `
++     ~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (fatal: Unabl 
+   e t...': File exists.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+Another git process seems to be running in this 
+repository, e.g.
+an editor opened by 'git commit'. Please make sure all 
+processes
+are terminated then try again. If it still fails, a git 
+process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+git add complete
+
+
+===== git commit (one combined R23+R24 commit) =====
+git : fatal: Unable to create 
+'C:/dev/chili-home-copilot/.git/index.lock': File exists.
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-r24-comm
+it-deploy.ps1:48 char:5
++     git commit -m "fix(brackets): R23 wire G2 with real 
+stop-loss + a ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (fatal: Unabl 
+   e t...': File exists.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+Another git process seems to be running in this 
+repository, e.g.
+an editor opened by 'git commit'. Please make sure all 
+processes
+are terminated then try again. If it still fails, a git 
+process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+
+===== git rev-parse HEAD (after commit) =====
+e2b1d3b72e0070dd4244667afce59c61e802ef6f
+
+
+===== force-recreate chili (run mig 214) =====
+docker :  Container chili-home-copilot-postgres-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-r24-comm
+it-deploy.ps1:58 char:5
++     docker compose up -d --force-recreate chili
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container c 
+   hil...gres-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-ollama-1 Running 
+ Container chili-home-copilot-chili-1 Recreate 
+ Container chili-home-copilot-chili-1 Recreated 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-chili-1 Starting 
+ Container chili-home-copilot-chili-1 Started 
+
+
+===== wait 30s for migrations =====
+ok
+
+
+===== chili health =====
+chili-home-copilot-chili-1 | Up 30 seconds (healthy)
+
+
+===== schema_version contains mig 214 =====
+            version_id             |        applied_at         
+-----------------------------------+---------------------------
+ 214_trade_table_check_constraints | 2026-04-30 16:30:16.98486
+(1 row)
+
+
+
+===== trading_trades CHECK constraints present (chk_trades_*) =====
+             conname             |                               pg_get_constraintdef                               
+---------------------------------+----------------------------------------------------------------------------------
+ chk_trades_entry_price_positive | CHECK ((entry_price > (0)::double precision)) NOT VALID
+ chk_trades_exit_price_finite    | CHECK (((exit_price IS NULL) OR (exit_price > (0)::double precision))) NOT VALID
+ chk_trades_quantity_positive    | CHECK ((quantity > (0)::double precision)) NOT VALID
+(3 rows)
+
+
+
+===== audit row in trading_learning_events =====
+  id   |  event_type   |                                                                                  left                                                                                  
+-------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 10258 | migration_214 | mig 214 added NOT VALID CHECK constraints on trading_trades (entry_price>0, quantity>0, exit_price>0|NULL); 67 legacy rows still violate but are exempt from NOT VALID
+(1 row)
+
+
+
+===== legacy bad-range count (sanity check vs audit's ~67) =====
+ bad_rows | zero_entry | zero_qty | bad_exit 
+----------+------------+----------+----------
+       67 |         67 |        0 |        1
+(1 row)
+
+
+
+===== verify writer module + adapter signature in chili container =====
+place_stop_loss_sell_order present: True
+signature: (self, *, product_id: 'str', base_size: 'str', trigger_price: 'str', client_order_id: 'Optional[str]' = None, market_hours_override: 'Optional[str]' = None, extended_hours_override: 'Optional[bool]' = None) -> 'dict[str, Any]'
+
+
+===== config flags readable in chili container =====
+chili_bracket_sweep_writer_enabled: False
+brain_live_brackets_mode: shadow
+chili_bracket_writer_g2_enabled: True
+chili_bracket_writer_g2_place_missing_stop: True
+
+
+===== broker-sync-worker also picks up new writer module =====
+writer __all__: ['WriterAction', 'place_missing_stop', 'resize_stop_for_partial_fill']
+
+
+===== negative test: try violating chk_trades_entry_price_positive (should fail) =====
+BEGIN
+docker : ERROR:  null value in column "entry_date" of 
+relation "trading_trades" violates not-null constraint
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-r24-comm
+it-deploy.ps1:98 char:5
++     docker compose exec -T postgres psql -U chili -d 
+chili -c "BEGIN; ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  null 
+    va...null constraint:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+DETAIL:  Failing row contains (1798, null, CHK_TEST, 
+long, 0, null, 1, null, null, open, null, null, null, 
+null, null, null, null, null, null, null, null, null, 
+null, null, null, null, null, null, null, null, null, 
+null, null, null, null, null, null, null, null, null, 
+null, null, 0, null, null, null, null, null, null, null, 
+null, null).
+
+
+===== git push origin main (retry; will fail with DNS or buffer if host network still degraded) =====
+git : To 
+https://github.com/MiacoRindolf/chili-home-copilot.git
+At C:\dev\chili-home-copilot\scripts\dispatch-r23-r24-comm
+it-deploy.ps1:103 char:97
++ ... S or buffer if host network still degraded)" { git 
+push origin main }
++                                                    
+~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (To https://g 
+   ith...ome-copilot.git:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   72638c4..e2b1d3b  main -> main
+

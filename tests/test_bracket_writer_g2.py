@@ -211,7 +211,7 @@ def test_resize_cancels_then_places_when_enabled(db, monkeypatch):
 
     adapter = MagicMock()
     adapter.cancel_order.return_value = {"ok": True, "raw": {}}
-    adapter.place_limit_order_gtc.return_value = {
+    adapter.place_stop_loss_sell_order.return_value = {
         "ok": True, "order_id": "new-stop-1", "raw": {}
     }
     factory = MagicMock(return_value=adapter)
@@ -235,14 +235,19 @@ def test_resize_cancels_then_places_when_enabled(db, monkeypatch):
     calls = adapter.method_calls
     assert calls[0][0] == "cancel_order"
     assert calls[0][1] == ("old-stop-7",)
-    assert calls[1][0] == "place_limit_order_gtc"
+    assert calls[1][0] == "place_stop_loss_sell_order"
+    # Verify the writer routes via trigger_price (real broker stop),
+    # not limit_price (which would be a marketable sell-limit).
+    place_kwargs = calls[1][2]
+    assert "trigger_price" in place_kwargs
+    assert "limit_price" not in place_kwargs
 
 
 def test_place_missing_stop_happy_path(db, monkeypatch):
     monkeypatch.setattr(g2, "settings", _on_cfg())
 
     adapter = MagicMock()
-    adapter.place_limit_order_gtc.return_value = {
+    adapter.place_stop_loss_sell_order.return_value = {
         "ok": True, "order_id": "new-stop-m", "raw": {}
     }
     factory = MagicMock(return_value=adapter)
@@ -258,7 +263,10 @@ def test_place_missing_stop_happy_path(db, monkeypatch):
     assert result.new_stop_qty == 10.0
     assert result.new_stop_price == 91.0
     adapter.cancel_order.assert_not_called()
-    adapter.place_limit_order_gtc.assert_called_once()
+    adapter.place_stop_loss_sell_order.assert_called_once()
+    call_kwargs = adapter.place_stop_loss_sell_order.call_args.kwargs
+    assert "trigger_price" in call_kwargs
+    assert "limit_price" not in call_kwargs
 
 
 # ── Failure modes ──────────────────────────────────────────────────────
@@ -282,7 +290,7 @@ def test_resize_cancel_failure_does_not_place(db, monkeypatch):
     )
     assert result.ok is False
     assert result.reason == "cancel_failed"
-    adapter.place_limit_order_gtc.assert_not_called()
+    adapter.place_stop_loss_sell_order.assert_not_called()
 
 
 def test_resize_place_failure_after_successful_cancel_logs_critical(
@@ -296,7 +304,7 @@ def test_resize_place_failure_after_successful_cancel_logs_critical(
 
     adapter = MagicMock()
     adapter.cancel_order.return_value = {"ok": True, "raw": {}}
-    adapter.place_limit_order_gtc.return_value = {
+    adapter.place_stop_loss_sell_order.return_value = {
         "ok": False, "error": "market_closed"
     }
     factory = MagicMock(return_value=adapter)
@@ -322,7 +330,7 @@ def test_place_missing_stop_broker_error_returns_place_failed(db, monkeypatch):
     monkeypatch.setattr(g2, "settings", _on_cfg())
 
     adapter = MagicMock()
-    adapter.place_limit_order_gtc.return_value = {
+    adapter.place_stop_loss_sell_order.return_value = {
         "ok": False, "error": "insufficient_buying_power"
     }
     factory = MagicMock(return_value=adapter)
