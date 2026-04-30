@@ -5,7 +5,7 @@ Background
 ``brain_batch_jobs`` gets a single startup-time sweep at app boot
 (migration 081, line ~3073 in migrations.py) that marks running rows
 older than 4h as ``timeout``. But during long uptimes new orphans
-accumulate — on 2026-04-27 we found 40 stale 'running' rows from the
+accumulate -- on 2026-04-27 we found 40 stale 'running' rows from the
 morning that had been there 13+ hours without ever transitioning,
 because no periodic reconciler exists.
 
@@ -65,6 +65,14 @@ def reconcile_stale_batch_jobs(
     # 12+ hours. Including the age (in minutes, computed from started_at)
     # tells ops at a glance whether this is a mid-run stall or a job that
     # never produced a heartbeat in its entire lifetime.
+    #
+    # R25 fix (2026-04-30): SQLAlchemy text() treats every ``:identifier``
+    # token as a bind parameter regardless of single-quote context, so
+    # the original ``':last_hb_min='`` literal was being parsed as a
+    # bind reference to a parameter that did not exist -- the reconciler
+    # was raising InvalidRequestError on every 5min run since deploy
+    # (25 stale rows accumulated). Switched the separator to a comma so
+    # no ``:`` appears inside the literal.
     rows_with_stale_hb = (
         db.execute(
             text(
@@ -74,9 +82,9 @@ def reconcile_stale_batch_jobs(
                     ended_at = :now,
                     orphaned_at = :now,
                     final_state_reason =
-                        'stale_heartbeat:age_min='
+                        'stale_heartbeat,age_min='
                         || ROUND(EXTRACT(EPOCH FROM (:now - started_at))/60.0)::int::text
-                        || ':last_hb_min='
+                        || ',last_hb_min='
                         || ROUND(EXTRACT(EPOCH FROM (:now - heartbeat_at))/60.0)::int::text
                 WHERE status = 'running'
                   AND heartbeat_at IS NOT NULL
@@ -98,7 +106,7 @@ def reconcile_stale_batch_jobs(
                     ended_at = :now,
                     orphaned_at = :now,
                     final_state_reason =
-                        'no_heartbeat:age_min='
+                        'no_heartbeat,age_min='
                         || ROUND(EXTRACT(EPOCH FROM (:now - started_at))/60.0)::int::text
                 WHERE status = 'running'
                   AND heartbeat_at IS NULL

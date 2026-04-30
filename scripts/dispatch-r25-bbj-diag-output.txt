@@ -1,0 +1,194 @@
+﻿# r25 brain_batch_jobs heartbeat diagnosis 04/30/2026 13:02:02
+
+===== scheduler-worker uptime + role =====
+chili-home-copilot-scheduler-worker-1 | Up 3 hours
+CHILI_SCHEDULER_ROLE=cron_only
+
+
+===== scheduler-worker logs: brain_batch_reconciler job activity last 1 hour =====
+
+scheduler-worker-1  | 2026-04-30 19:15:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 19:20:57,008 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 19:25:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 19:30:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 19:35:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 19:40:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 19:45:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 19:50:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 19:55:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+scheduler-worker-1  | 2026-04-30 20:00:57,007 [WARNING] app.services.trading_scheduler: [scheduler_job] 
+brain_batch_reconciler failed: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+scheduler-worker-1  |                 SET status = 'orphaned',
+scheduler-worker-1  |                     orphaned_at = %(now)s,
+
+
+
+
+===== stale running rows DETAILED (with heartbeat_at + age + worker_instance_id) =====
+                  id                  |          job_type           | status  |         started_at         | heartbeat_at | worker_instance_id |       age_min        | hb_status 
+--------------------------------------+-----------------------------+---------+----------------------------+--------------+--------------------+----------------------+-----------
+ ba6e035f-b819-4456-bdf5-1f3cb63b1876 | brain_market_snapshots      | running | 2026-04-30 10:20:06.076177 |              |                    | 581.9548336000000000 | no_hb
+ b1f5e861-f97a-483f-a35f-6a620ae19950 | daily_market_scan           | running | 2026-04-30 11:46:44.184427 |              |                    | 495.3196961000000000 | no_hb
+ c609637a-3e67-428f-a55e-e78f410fd788 | brain_market_snapshots      | running | 2026-04-30 11:46:53.590833 |              |                    | 495.1629226666666667 | no_hb
+ fb344188-4ecd-4dd2-bdd1-9c9b1deb39a7 | crypto_breakout_scanner     | running | 2026-04-30 12:24:25.492083 |              |                    | 457.6312351666666667 | no_hb
+ f3b58ab1-26f3-4df1-9607-2887b79f270b | price_monitor               | running | 2026-04-30 12:25:00.025461 |              |                    | 457.0556788666666667 | no_hb
+ 38776adf-c9ae-42a0-b489-2340d68e4459 | daily_market_scan           | running | 2026-04-30 12:25:08.829251 |              |                    | 456.9089490333333333 | no_hb
+ 6f4c80f3-13fc-486a-b1bf-5bf0c53b7c44 | pattern_imminent_scanner    | running | 2026-04-30 13:36:32.736688 |              |                    | 385.5104917500000000 | no_hb
+ 2905feeb-c422-49bf-91b3-d886caf497f2 | learning_cycle              | running | 2026-04-30 13:42:45.045592 |              |                    | 379.3053433500000000 | no_hb
+ 764bfc08-385b-4e74-9b72-c04badff5050 | momentum_scanner            | running | 2026-04-30 14:00:00.001888 |              |                    | 362.0560717500000000 | no_hb
+ abb68cc5-e6db-42ca-aab1-17e7e5ede8ce | price_monitor               | running | 2026-04-30 14:00:00.003044 |              |                    | 362.0560524833333333 | no_hb
+ 1c2e4332-a347-4657-981c-2d4a52965fad | stock_breakout_scanner      | running | 2026-04-30 14:00:00.003378 |              |                    | 362.0560469166666667 | no_hb
+ c1027f1e-d79f-41c7-83ef-94ea01204404 | learning_cycle              | running | 2026-04-30 14:00:53.128632 |              |                    | 361.1706260166666667 | no_hb
+ e0654bdd-2146-408e-a78b-531e91860650 | pattern_imminent_scanner    | running | 2026-04-30 14:01:12.968613 |              |                    | 360.8399596666666667 | no_hb
+ 5b29d4ee-1bd0-4fbf-86d8-673d151090c5 | pattern_imminent_scanner    | running | 2026-04-30 14:01:12.985105 |              |                    | 360.8396848000000000 | no_hb
+ 8f106880-07a7-4c31-a5fc-0815668f5e10 | daily_market_scan           | running | 2026-04-30 14:01:27.921504 |              |                    | 360.5907448166666667 | no_hb
+ dedc02af-0c91-4ec0-9fdd-53005af1df8e | daily_market_scan           | running | 2026-04-30 14:01:27.953165 |              |                    | 360.5902171333333333 | no_hb
+ c2f270fe-987d-40fc-b341-f9f5febf6c65 | price_monitor               | running | 2026-04-30 14:05:00.223741 |              |                    | 357.0523742000000000 | no_hb
+ f673a08d-a8ac-40f0-9cf7-7445abb6ff0a | momentum_paper_runner_batch | running | 2026-04-30 14:06:48.128427 |              |                    | 355.2539627666666667 | no_hb
+ ddc7eb11-0d9e-417a-916d-fd05b5dd58a8 | pattern_imminent_scanner    | running | 2026-04-30 14:07:18.870106 |              |                    | 354.7416014500000000 | no_hb
+ b14ae3cf-5de7-41df-8329-745046769e0c | daily_market_scan           | running | 2026-04-30 14:07:33.850331 |              |                    | 354.4919310333333333 | no_hb
+ ffe3c9cd-fdae-41be-a431-def2abf3434f | learning_cycle              | running | 2026-04-30 15:13:25.554926 |              |                    | 288.6301877833333333 | no_hb
+ 025892e4-56a4-4bc5-ae06-96fbd6d2572f | pattern_imminent_scanner    | running | 2026-04-30 16:22:18.799897 |              |                    | 219.7427716000000000 | no_hb
+ 5d23d284-edc9-4a87-bb26-08045bf1e55e | pattern_imminent_scanner    | running | 2026-04-30 17:10:57.035471 |              |                    | 171.1055120333333333 | no_hb
+ b7225d81-8606-4749-baf2-2b96e971df4a | learning_cycle              | running | 2026-04-30 18:19:38.616774 |              |                    | 102.4124903166666667 | no_hb
+ 30b164e9-bf8a-4c85-8128-3b753f3a74ad | pattern_imminent_scanner    | running | 2026-04-30 19:25:57.03746  |              |                    |  36.1054788833333333 | no_hb
+(25 rows)
+
+
+
+===== is the brain_batch_reconciler job actually registered in scheduler-worker? =====
+NO SCHEDULER GLOBAL
+
+
+===== what role flags would scheduler-worker compute? (debugging include_web_light) =====
+role='cron_only'
+include_web_light = role in (all, web, cron_only) -> True
+include_broker_sync = role in (all, web, worker, broker_sync_only) -> False
+
+
+===== reconciler called manually right now (catches the stale rows) =====
+docker : Traceback (most recent call last):
+At C:\dev\chili-home-copilot\scripts\dispatch-r25-bbj-diag.ps1:44 char:5
++     docker compose exec -T scheduler-worker python -c @"
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1815, in _execute_context
+    context = constructor(
+              ^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py", line 1416, in _init_compiled
+    self.compiled_parameters = [
+                               ^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py", line 1417, in <listcomp>
+    compiled.construct_params(
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/compiler.py", line 1926, in construct_params
+    raise exc.InvalidRequestError(
+sqlalchemy.exc.InvalidRequestError: A value is required for bind parameter 'last_hb_min' (Background on this error at: 
+https://sqlalche.me/e/20/cd3x)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<string>", line 5, in <module>
+  File "/app/app/services/trading/brain_batch_reconciler.py", line 69, in reconcile_stale_batch_jobs
+    db.execute(
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py", line 2351, in execute
+    return self._execute_internal(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py", line 2258, in _execute_internal
+    result = conn.execute(
+             ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1419, in execute
+    return meth(
+           ^^^^^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/elements.py", line 527, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1641, in _execute_clauseelement
+    ret = self._execute_context(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1821, in _execute_context
+    self._handle_dbapi_exception(
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 2363, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py", line 1815, in _execute_context
+    context = constructor(
+              ^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py", line 1416, in _init_compiled
+    self.compiled_parameters = [
+                               ^
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py", line 1417, in <listcomp>
+    compiled.construct_params(
+  File "/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/compiler.py", line 1926, in construct_params
+    raise exc.InvalidRequestError(
+sqlalchemy.exc.StatementError: (sqlalchemy.exc.InvalidRequestError) A value is required for bind parameter 
+'last_hb_min'
+[SQL: 
+                UPDATE brain_batch_jobs
+                SET status = 'orphaned',
+                    ended_at = %(now)s,
+                    orphaned_at = %(now)s,
+                    final_state_reason =
+                        'stale_heartbeat:age_min='
+                        || ROUND(EXTRACT(EPOCH FROM (%(now)s - started_at))/60.0)::int::text
+                        || '%(last_hb_min)s='
+                        || ROUND(EXTRACT(EPOCH FROM (%(now)s - heartbeat_at))/60.0)::int::text
+                WHERE status = 'running'
+                  AND heartbeat_at IS NOT NULL
+                  AND heartbeat_at < %(hb_cutoff)s
+                RETURNING id, job_type
+                ]
+[parameters: [{'now': datetime.datetime(2026, 4, 30, 20, 2, 8, 498918), 'hb_cutoff': datetime.datetime(2026, 4, 30, 
+19, 52, 8, 498918)}]]
+(Background on this error at: https://sqlalche.me/e/20/cd3x)
+
+
+===== stale running rows AFTER manual reconcile =====
+  status  | count 
+----------+-------
+ ok       |  3335
+ running  |    25
+ error    |     6
+ orphaned |     3
+ timeout  |     1
+(5 rows)
+
+

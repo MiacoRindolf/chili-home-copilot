@@ -1,0 +1,120 @@
+﻿# r23 pulse check + survey for next item 04/30/2026 12:59:33
+
+===== all chili containers up? =====
+chili-home-copilot-broker-sync-worker-1 | Up 2 hours
+chili-home-copilot-chili-1 | Up 3 hours (healthy)
+chili-home-copilot-brain-worker-1 | Up 3 hours (healthy)
+chili-home-copilot-scheduler-worker-1 | Up 3 hours
+chili-home-copilot-autotrader-worker-1 | Up 3 hours
+chili-home-copilot-postgres-1 | Up 3 hours (healthy)
+chili-home-copilot-ollama-1 | Up 3 hours (healthy)
+
+
+===== bracket sweep distribution last 30 min =====
+     mode      | kind  | severity | count 
+---------------+-------+----------+-------
+ authoritative | agree | info     |    30
+(1 row)
+
+
+
+===== g2_ events distribution last 30 min =====
+ event_type | status | count 
+------------+--------+-------
+(0 rows)
+
+
+
+===== writer activity last 30 min (ADT stop still resting?) =====
+state= confirmed cum_qty= 0.00000000
+
+
+===== stale running brain_batch_jobs (audit's HIGH Â§7.1) =====
+          job_type           | count |           oldest           |           newest           |  oldest_minutes_ago  
+-----------------------------+-------+----------------------------+----------------------------+----------------------
+ brain_market_snapshots      |     2 | 2026-04-30 10:20:06.076177 | 2026-04-30 11:46:53.590833 | 579.5394691000000000
+ daily_market_scan           |     5 | 2026-04-30 11:46:44.184427 | 2026-04-30 14:07:33.850331 | 492.9043316000000000
+ crypto_breakout_scanner     |     1 | 2026-04-30 12:24:25.492083 | 2026-04-30 12:24:25.492083 | 455.2158706666666667
+ price_monitor               |     3 | 2026-04-30 12:25:00.025461 | 2026-04-30 14:05:00.223741 | 454.6403143666666667
+ pattern_imminent_scanner    |     7 | 2026-04-30 13:36:32.736688 | 2026-04-30 19:25:57.03746  | 383.0951272500000000
+ learning_cycle              |     4 | 2026-04-30 13:42:45.045592 | 2026-04-30 18:19:38.616774 | 376.8899788500000000
+ momentum_scanner            |     1 | 2026-04-30 14:00:00.001888 | 2026-04-30 14:00:00.001888 | 359.6407072500000000
+ stock_breakout_scanner      |     1 | 2026-04-30 14:00:00.003378 | 2026-04-30 14:00:00.003378 | 359.6406824166666667
+ momentum_paper_runner_batch |     1 | 2026-04-30 14:06:48.128427 | 2026-04-30 14:06:48.128427 | 352.8385982666666667
+(9 rows)
+
+
+
+===== brain_batch_jobs status distribution last 24h =====
+  status  | count 
+----------+-------
+ ok       |  3319
+ running  |    25
+ error    |     6
+ orphaned |     3
+ timeout  |     1
+(5 rows)
+
+
+
+===== brain_batch_jobs schema (does heartbeat_at column exist?) =====
+ column_name  |          data_type          
+--------------+-----------------------------
+ status       | character varying
+ started_at   | timestamp without time zone
+ heartbeat_at | timestamp without time zone
+(3 rows)
+
+
+
+===== exit-related autotrader decisions last 24h =====
+        decision        | count 
+------------------------+-------
+ monitor_exit_rejected  |  1095
+ monitor_exit_deferred  |   243
+ monitor_exit_recovered |    18
+ monitor_exit_filled    |    17
+ monitor_exit_cancelled |     4
+ monitor_exit_submitted |     3
+(6 rows)
+
+
+
+===== exit-deferred reasons distribution last 24h =====
+           reason           | count 
+----------------------------+-------
+ wide_spread                |   227
+ Market closed              |    14
+ Waiting for extended hours |     2
+(3 rows)
+
+
+
+===== exit-rejected reasons distribution last 24h =====
+                            reason                            | count 
+--------------------------------------------------------------+-------
+ Sell may cause PDT designation.                              |  1053
+ Not enough shares to sell.                                   |    41
+ JSON parse error - Expecting value: line 1 column 1 (char 0) |     1
+(3 rows)
+
+
+
+===== any new audit alerts since R23 deploy? =====
+       event_type       | count 
+------------------------+-------
+ pattern_backtest_queue |     7
+ review                 |     6
+ confidence_decay       |     1
+ update                 |     1
+(4 rows)
+
+
+
+===== open Robinhood trades summary =====
+  id  | ticker | status | broker_status | entry  
+------+--------+--------+---------------+--------
+ 1694 | ADT    | open   | filled        | 7.1350
+(1 row)
+
+

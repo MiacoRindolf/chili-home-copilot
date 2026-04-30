@@ -1,0 +1,66 @@
+﻿# r25 reconciler fix + verify 04/30/2026 13:04:58
+
+===== py-compile =====
+OK
+
+
+===== git status (sanity) =====
+ M app/services/trading/brain_batch_reconciler.py
+
+
+===== force-recreate scheduler-worker (pick up reconciler fix) =====
+docker :  Container chili-home-copilot-postgres-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r25-reconciler-fix.ps1:15 char:5
++     docker compose up -d --force-recreate scheduler-worker
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...gres-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-ollama-1 Running 
+ Container chili-home-copilot-scheduler-worker-1 Recreate 
+ Container chili-home-copilot-scheduler-worker-1 Recreated 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-scheduler-worker-1 Starting 
+ Container chili-home-copilot-scheduler-worker-1 Started 
+
+
+===== wait 12s =====
+ok
+
+
+===== scheduler-worker uptime =====
+chili-home-copilot-scheduler-worker-1 | Up 12 seconds
+
+
+===== manually run the reconciler now (should orphan all 25 stale rows) =====
+{'orphaned_total': 25, 'stale_heartbeat': 0, 'no_heartbeat': 25, 'by_job_type': {'brain_market_snapshots': 2, 'daily_market_scan': 5, 'crypto_breakout_scanner': 1, 'price_monitor': 3, 'pattern_imminent_scanner': 7, 'learning_cycle': 4, 'momentum_scanner': 1, 'stock_breakout_scanner': 1, 'momentum_paper_runner_batch': 1}}
+
+
+===== stale running rows AFTER manual reconcile =====
+  status  | count 
+----------+-------
+ ok       |  3355
+ orphaned |    28
+ error    |     6
+ running  |     1
+ timeout  |     1
+(5 rows)
+
+
+
+===== audit: most recent orphan rows + final_state_reason format =====
+        job_type         |  status  |    final_state_reason    |        orphaned_at         
+-------------------------+----------+--------------------------+----------------------------
+ crypto_breakout_scanner | orphaned | no_heartbeat,age_min=461 | 2026-04-30 20:05:18.679072
+ brain_market_snapshots  | orphaned | no_heartbeat,age_min=498 | 2026-04-30 20:05:18.679072
+ daily_market_scan       | orphaned | no_heartbeat,age_min=499 | 2026-04-30 20:05:18.679072
+ brain_market_snapshots  | orphaned | no_heartbeat,age_min=585 | 2026-04-30 20:05:18.679072
+ price_monitor           | orphaned | no_heartbeat,age_min=460 | 2026-04-30 20:05:18.679072
+(5 rows)
+
+
+
+===== wait 6 minutes for one scheduled reconciler run =====
