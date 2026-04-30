@@ -13893,6 +13893,69 @@ def _migration_206_realized_ev_retroactive_demote(conn) -> None:
         pass
 
 
+
+def _migration_209_widen_macro_regime_label_columns(conn) -> None:
+    """Widen varchar(16) regime label columns in trading_macro_regime_snapshots.
+
+    2026-04-29 third-pass audit Finding F-3 found macro_regime snapshots stale
+    2 days. Manual trigger surfaced the root cause: the daily writer computes
+    credit_regime='credit_tightening' (17 chars) which overflows the varchar(16)
+    column, causing every INSERT to fail with StringDataRightTruncation. The
+    cron has been firing daily since the value started exceeding 16 chars; each
+    run failed silently (the macro_regime job does not write brain_batch_jobs).
+
+    The macro_regime_service can produce these labels (per the model + service
+    code):
+      * credit_regime: ``credit_neutral`` / ``credit_tightening`` (17) /
+        ``credit_loosening`` (16)
+      * rates_regime:  ``rates_neutral`` / ``rates_tightening`` (16) /
+        ``rates_loosening`` (16)
+      * usd_regime:    ``usd_neutral`` / ``usd_strengthening`` (17) /
+        ``usd_weakening`` (13)
+      * vix_regime:    ``low`` / ``normal`` / ``elevated`` / ``stressed``
+      * composite:     ``risk_on`` / ``risk_off`` / ``neutral`` / ``defensive``
+      * spy_direction: ``up`` / ``down`` / ``flat``
+      * *_trend:       ``up`` / ``down`` / ``flat``
+
+    Widen all label-shaped varchar(16) columns to varchar(32) so the writer
+    cannot overflow with any current or near-future label set. Idempotent:
+    PostgreSQL ALTER TYPE varchar(32) is a no-op when the type is already
+    >= 32.
+    """
+    if "trading_macro_regime_snapshots" not in _tables(conn):
+        conn.commit()
+        return
+
+    cols = (
+        "spy_direction", "vix_regime", "composite",
+        "ief_trend", "shy_trend", "tlt_trend",
+        "rates_regime", "hyg_trend", "lqd_trend",
+        "credit_regime", "uup_trend", "usd_regime",
+    )
+    for col in cols:
+        conn.execute(text(
+            f"ALTER TABLE trading_macro_regime_snapshots "
+            f"ALTER COLUMN {col} TYPE VARCHAR(32)"
+        ))
+    conn.commit()
+
+    try:
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+                (user_id, event_type, description, related_insight_id, created_at)
+            VALUES (NULL, 'migration_209', :msg, NULL, CURRENT_TIMESTAMP)
+            """
+        ), {"msg": (
+            "mig 209 widened 12 label varchar(16) -> varchar(32) on "
+            "trading_macro_regime_snapshots; fixes credit_tightening "
+            "StringDataRightTruncation that silently failed daily INSERTs"
+        )})
+        conn.commit()
+    except Exception:
+        pass
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -14111,6 +14174,7 @@ MIGRATIONS = [
     ("206_realized_ev_retroactive_demote", _migration_206_realized_ev_retroactive_demote),
     ("207_avg_return_pct_unit_fix", _migration_207_avg_return_pct_unit_fix),
     ("208_pattern_trades_dedupe_and_clamp", _migration_208_pattern_trades_dedupe_and_clamp),
+    ("209_widen_macro_regime_label_columns", _migration_209_widen_macro_regime_label_columns),
 ]
 
 

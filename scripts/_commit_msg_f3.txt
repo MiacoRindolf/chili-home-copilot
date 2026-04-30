@@ -1,0 +1,28 @@
+fix(audit-2026-04-29): F-3 macro_regime varchar overflow + audit visibility
+
+Root cause: trading_macro_regime_snapshots.credit_regime is varchar(16),
+but the macro_regime_service computes credit_regime='credit_tightening'
+(17 chars). The daily INSERT has been failing every day since the value
+started exceeding 16 chars. The macro_regime_daily job was not wrapped
+with brain_batch_job_begin/finish, so the failure left no audit trail
+- the only sign was the snapshot table going stale.
+
+Fix:
+
+1. Mig 209 widens the 12 label-shaped varchar(16) columns on
+   trading_macro_regime_snapshots to varchar(32):
+     spy_direction, vix_regime, composite, ief_trend, shy_trend,
+     tlt_trend, rates_regime, hyg_trend, lqd_trend, credit_regime,
+     uup_trend, usd_regime
+   Idempotent via ALTER COLUMN TYPE which is a no-op when the type is
+   already wide enough.
+
+2. trading_scheduler._run_macro_regime_daily_job wraps execution with
+   brain_batch_job_begin/finish so any future failure (writer exception,
+   coverage_below_min skip, etc.) shows up in brain_batch_jobs with the
+   exception text in error_message.
+
+Verified locally (manual trigger before deploy): the writer computes
+credit_regime='credit_tightening' which would have failed pre-mig-209.
+
+Memory pointer at reference_2026_04_29_audit_fixes.md updated.

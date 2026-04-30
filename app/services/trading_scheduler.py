@@ -790,13 +790,28 @@ def _run_macro_regime_daily_job():
         from ..db import SessionLocal
         from .trading.macro_regime_service import compute_and_persist
 
+        # FIX F-3 (2026-04-29 third-pass audit): wrap with batch_job so
+        # failures are visible. Audit found macro_regime stale 2 days
+        # because the daily INSERT failed silently with
+        # StringDataRightTruncation on credit_regime varchar(16) and the
+        # job never wrote a brain_batch_jobs row to surface the failure.
+        # Mig 209 widens the columns; this wrapper makes future silent
+        # failures impossible.
+        from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
         db = SessionLocal()
+        _uid = getattr(settings, "brain_default_user_id", None)
+        jid = None
         try:
+            jid = brain_batch_job_begin(db, "macro_regime_daily", user_id=_uid)
+            db.commit()
             row = compute_and_persist(db)
             if row is None:
                 logger.info(
                     "[scheduler] macro_regime_daily: skipped "
                     "(off / coverage_below_min)",
+                )
+                brain_batch_job_finish(
+                    db, jid, ok=True, meta={"skipped": "coverage_below_min"},
                 )
             else:
                 logger.info(
@@ -805,10 +820,28 @@ def _run_macro_regime_daily_job():
                     row.regime_id, row.macro_label,
                     float(row.coverage_score), mode,
                 )
-        except Exception:
+                brain_batch_job_finish(
+                    db, jid, ok=True,
+                    meta={
+                        "regime_id": row.regime_id,
+                        "macro_label": row.macro_label,
+                        "coverage_score": float(row.coverage_score),
+                        "mode": mode,
+                    },
+                )
+            db.commit()
+        except Exception as exc:
             logger.exception(
                 "[scheduler] macro_regime_daily sweep failed",
             )
+            if jid is not None:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(exc)[:500])
+                    db.commit()
+                except Exception:
+                    logger.exception(
+                        "[scheduler] macro_regime_daily batch_job_finish failed"
+                    )
         finally:
             db.close()
 
