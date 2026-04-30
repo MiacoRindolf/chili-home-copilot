@@ -1,0 +1,29 @@
+fix(stop_engine): round-14 implausible-quote guard for stock exits
+
+Round 13 added an implausible-quote guard to the crypto exit path
+(`crypto/exit_monitor._evaluate_exit_triggers`) after finding trade
+585 ARB-USD was falsely stopped at `px=0.00075706 <= stop=0.110331`
+(145x mispricing from upstream data error).
+
+Round 14: applies the same guard to the STOCK exit decision path
+in `stop_engine.evaluate_trade`. This is the function that decides
+whether to fire `STOP_HIT` / `TARGET_HIT` events from the auto-trader
+monitor and pattern_position_monitor. Same vulnerability shape:
+a corrupted upstream quote could trigger a false stop or false
+target-hit, exiting the position at the real (different) price.
+
+Guard placement: right after the existing `price <= 0` check, before
+the stale-quote check. Reject quotes where `price/entry > 10` or
+`< 0.1` with `alert_event=DATA_IMPLAUSIBLE`. Returns the existing
+result shape so callers don't see a new event type they can't handle.
+The next pass will retry with a fresh quote.
+
+Per the no-hardcoded-fallback rule: do NOT silently substitute entry
+as the current price -- abstain (return early) and let the operator
+or next pass decide.
+
+Note on the 8 historic zombie_reconcile_orphan trades that have
+entry==exit (EKSO/PED/TLS/SOFX/IMTX/AIDX/VFS + BNB-USD): those are
+already in the honest pnl=NULL state (set by mig 200), so no
+backfill needed -- they're not lying to the brain. Different shape
+from the round-11 fake-$0 cases which DID need backfill.

@@ -346,6 +346,24 @@ def evaluate_trade(
         result.reason = "no valid price"
         return result
 
+    # Round-13/14 (2026-04-30): implausible-quote guard. Trade 585
+    # (ARB-USD crypto) was stopped at px=0.00075706 vs entry=0.1295 due
+    # to an upstream quote-provider data error -- the false stop fired
+    # and sold the position. Same vulnerability exists for stocks here.
+    # Reject any quote where ratio (price/entry) > 10 or < 0.1; the
+    # caller's next pass can retry with a fresh quote rather than acting
+    # on garbage data. Per the no-hardcoded-fallback rule: do NOT
+    # silently substitute entry as price -- abstain instead.
+    _ratio = market.price / float(entry)
+    if _ratio > 10.0 or _ratio < 0.1:
+        result.alert_event = "DATA_IMPLAUSIBLE"
+        result.reason = (
+            f"implausible quote: price=${market.price:,.4f} entry=${entry:,.4f} "
+            f"ratio={_ratio:.4f} (rejected; upstream quote data error). "
+            f"No stop changes; next pass retries with fresh quote."
+        )
+        return result
+
     if market.is_stale:
         result.alert_event = "DATA_STALE"
         result.reason = "quote is stale — no stop changes"
