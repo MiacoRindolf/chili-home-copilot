@@ -73,6 +73,12 @@ def _mem_is_duplicate(key: str) -> bool:
         return True
 
 
+def _mem_forget(key: str) -> None:
+    """Drop a single key from the in-memory cache."""
+    with _mem_lock:
+        _mem_cache.pop(key, None)
+
+
 def reset_for_tests() -> None:
     """Clear the in-memory cache (pytest helper)."""
     with _mem_lock:
@@ -265,6 +271,40 @@ def mark_broker_id(
     if not client_order_id or not broker_order_id:
         return
     _db_mark_broker_id(client_order_id, broker_order_id, status)
+
+
+def forget(client_order_id: Optional[str]) -> bool:
+    """Delete a coid from BOTH the memory cache and the persistent DB row.
+
+    FIX A-6 (2026-04-29 third-pass audit): the dup-coid recovery path
+    needs a way to invalidate an idempotency entry whose broker_order_id
+    is stuck in a terminal state (cancelled/rejected/expired). Without
+    this, the deterministic coid keeps resolving to the same dead order
+    forever and the monitor loop dup-recovers indefinitely.
+
+    Returns True when the key was found and deleted somewhere; False on
+    error or if it did not exist.
+    """
+    if not client_order_id:
+        return False
+    deleted_db = False
+    try:
+        sess = _session()
+        try:
+            res = sess.execute(
+                text("DELETE FROM venue_order_idempotency WHERE client_order_id = :k"),
+                {"k": client_order_id},
+            )
+            sess.commit()
+            deleted_db = bool(res.rowcount)
+        finally:
+            sess.close()
+    except Exception:
+        logger.debug(
+            "[idempotency_store] forget DB failed for %s", client_order_id, exc_info=True,
+        )
+    _mem_forget(client_order_id)
+    return deleted_db
 
 
 def resolve_broker_id(client_order_id: Optional[str]) -> Optional[str]:

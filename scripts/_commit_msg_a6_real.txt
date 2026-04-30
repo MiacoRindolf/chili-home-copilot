@@ -1,0 +1,30 @@
+fix(audit-2026-04-29): A-6 dup-coid loop on terminal recovered orders
+
+Root cause analysis (continuation of earlier A-6 audit finding):
+WDCX trade 1759 has been looping on coid 69f30c7e-57ab-4b every ~10 min
+for 3+ hours. The recovery path was working, but the recovered order_id
+turned out to be in a TERMINAL broker state (cancelled/rejected). The
+broker-status-poll fires shortly after recovery, sees the terminal
+state, and clears pending_exit_*. Next monitor pass: no pending exit,
+re-submits with the same deterministic coid, broker says dup-coid,
+recovery returns the same dead order_id, repeat forever.
+
+Fix:
+
+1. robinhood_exit_execution.py dup-coid recovery now calls
+   adapter.get_order(recovered_oid) to check the actual broker state.
+   When the recovered order is terminal (cancelled/canceled/rejected/
+   failed/expired):
+     - INVALIDATES the idempotency entry via idempotency_store.forget()
+     - Returns a non-recovery deferred result so the trade is logged as
+       'monitor_exit_deferred' with reason 'dup_coid_terminal_invalidated'
+     - The next monitor pass treats the coid as fresh; the new submission
+       reaches the broker as a real order rather than another dup recovery
+
+2. New idempotency_store.forget(coid) function: deletes both the DB
+   row and the in-memory cache entry. Returns True/False per the
+   no-hardcoded-fallback rule (caller can verify the operation).
+
+Note this complements (not replaces) the existing recovery path. Live
+recoveries where the broker order is still active continue to work --
+only terminal-state recoveries are invalidated.

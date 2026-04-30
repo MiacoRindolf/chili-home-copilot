@@ -626,6 +626,53 @@ def submit_robinhood_trade_exit(
         return {"ok": False, "error": "bad_qty"}
 
     # FIX A-5 (2026-04-29 third-pass audit): clamp the sell qty to what
+    # the broker ACTUALLY holds. Audit found 15/24h "Not enough shares to
+    # sell" rejections from local Trade.quantity overshooting broker truth
+    # (partial fill, manual sale, stale broker_sync). Per the no-hardcoded-
+    # fallback rule: if broker qty unknown, defer (do not silently widen).
+    is_crypto = (trade.ticker or "").upper().endswith("-USD")
+    if not is_crypto:
+        try:
+            from ...services.broker_service import get_positions
+            _positions = get_positions() or []
+            _broker_qty = None
+            _ticker_up = (trade.ticker or "").upper()
+            for _p in _positions:
+                if (_p.get("ticker") or "").upper() == _ticker_up:
+                    try:
+                        _broker_qty = float(_p.get("quantity") or 0.0)
+                    except (TypeError, ValueError):
+                        _broker_qty = None
+                    break
+        except Exception:
+            logger.debug(
+                "[rh_exit] FIX A-5 broker-position fetch failed for %s",
+                trade.ticker, exc_info=True,
+            )
+            _broker_qty = None
+
+        if _broker_qty is None:
+            logger.warning(
+                "[rh_exit] FIX A-5: cannot resolve broker quantity for %s "
+                "(trade#%s local_qty=%s); deferring exit.",
+                trade.ticker, trade.id, qty,
+            )
+            return {"ok": False, "error": "broker_qty_unknown_skip", "state": "deferred"}
+        if _broker_qty <= 0:
+            logger.warning(
+                "[rh_exit] FIX A-5: broker holds 0 shares of %s (trade#%s); "
+                "marking as no_position.",
+                trade.ticker, trade.id,
+            )
+            return {"ok": False, "error": "broker_holds_zero", "state": "no_position", "broker_qty": _broker_qty}
+        if _broker_qty < qty:
+            logger.warning(
+                "[rh_exit] FIX A-5: clamping sell qty for %s (trade#%s local=%s -> broker=%s)",
+                trade.ticker, trade.id, qty, _broker_qty,
+            )
+            qty = _broker_qty
+
+    # FIX A-5 (2026-04-29 third-pass audit): clamp the sell qty to what
     # the broker ACTUALLY holds. The audit found 15/24h exit rejections
     # with "Not enough shares to sell." -- the local Trade.quantity got
     # ahead of the broker's filled quantity (partial fill, manual sale,
@@ -870,6 +917,52 @@ def submit_robinhood_trade_exit(
                 )
                 recovered_oid = None
             if recovered_oid:
+                # FIX A-6 (2026-04-29 third-pass audit): if the recovered
+                # broker_order_id is in a terminal state (cancelled / rejected
+                # / expired), the broker-status-poll will immediately clear
+                # pending_exit_* and the next monitor pass will re-submit
+                # with the same deterministic coid -> same dup -> same dead
+                # recovery, ad infinitum. WDCX trade 1759 looped on this for
+                # 3+ hours. Detect terminal state and INVALIDATE the
+                # idempotency entry so the next attempt is treated as fresh.
+                _terminal_states = {
+                    "cancelled", "canceled", "rejected", "failed", "expired",
+                }
+                _broker_state = None
+                try:
+                    _ord_norm, _ = adapter.get_order(str(recovered_oid))
+                    if _ord_norm is not None:
+                        _broker_state = (
+                            getattr(_ord_norm, "state", None)
+                            or getattr(_ord_norm, "status", None)
+                            or ""
+                        ).lower()
+                except Exception:
+                    logger.debug(
+                        "[rh_exit] FIX A-6 broker-state lookup failed for %s",
+                        recovered_oid, exc_info=True,
+                    )
+                    _broker_state = None
+                if _broker_state in _terminal_states:
+                    try:
+                        idempotency_store.forget(client_order_id)
+                    except Exception:
+                        logger.debug(
+                            "[rh_exit] FIX A-6 idempotency_store.forget failed for coid=%s",
+                            client_order_id, exc_info=True,
+                        )
+                    logger.warning(
+                        "[rh_exit] FIX A-6: recovered order %s is terminal "
+                        "(state=%s); INVALIDATING coid=%s and deferring trade=%s.",
+                        recovered_oid, _broker_state, client_order_id, trade.id,
+                    )
+                    return {
+                        "ok": False,
+                        "error": "dup_coid_terminal_invalidated",
+                        "state": "deferred",
+                        "broker_state": _broker_state,
+                        "stale_order_id": str(recovered_oid),
+                    }
                 _mark_pending_exit_order(
                     db,
                     trade,
@@ -892,13 +985,14 @@ def submit_robinhood_trade_exit(
                             "client_order_id": client_order_id,
                             "broker_order_id": str(recovered_oid),
                             "recovery_path": "duplicate_coid_idempotency_lookup",
+                            "broker_state": _broker_state,
                         },
                     ),
                 )
                 logger.info(
                     "[rh_exit] dup-coid recovery: trade=%s coid=%s -> broker_oid=%s "
-                    "(reconciler will sync state)",
-                    trade.id, client_order_id, recovered_oid,
+                    "(reconciler will sync state, broker_state=%s)",
+                    trade.id, client_order_id, recovered_oid, _broker_state,
                 )
                 return {
                     "ok": True,
