@@ -1,0 +1,23 @@
+data(brain): round-11 backfill 5 historic fake-flat trades
+
+DATA-ONLY change (no code modified). One-shot operational script that
+uses the round-8 _resolve_close_exit_price() helper to retroactively
+correct 5 trades whose original close had fake PnL=$0 because
+_get_exit_price() fell back to entry_price (the bug round 8 fixed
+going forward).
+
+Backfilled (resolved exit prices from Robinhood order history):
+
+  Trade 393 RAY-USD : 0.717 -> 0.764  (+$19.74)
+  Trade 440 AAVE-USD: 97.36 -> 92.56  (-$14.40)
+  Trade 585 ARB-USD : 0.1295 -> 0.1277 (-$4.20)
+  Trade 610 AVAX-USD: 9.50  -> 9.14   (-$11.16)
+  Trade 611 ADA-USD : 0.2538 -> 0.2460 (-$9.30)
+
+Net: $0 -> -$19.32 in realized PnL. The brain's realized-EV signal
+now reflects truth (1 win, 4 losses) where it previously saw 5 flat
+trades. Patterns associated with these trades will be re-evaluated
+correctly by the daily realized_ev_demote_pass cron.
+
+Audit trail row written to trading_learning_events as
+event_type='fake_flat_pnl_backfill' (id 10156).
