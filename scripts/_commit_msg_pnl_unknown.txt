@@ -1,0 +1,37 @@
+fix(broker_sync): never fake PnL=$0 when exit price unknown
+
+Bug found in 2026-04-30 deeper-pass audit: every recent crypto trade
+closed via broker_reconcile_position_gone shows pnl=$0 with
+exit_price == entry_price (e.g., AVAX-USD 9.5/9.5/$0, ARB-USD
+0.1295/0.1295/$0, AAVE-USD 97.36/97.36/$0). Root cause:
+_get_exit_price() falls back to entry_price when fetch_quote fails,
+and sync_positions_to_db then computes (entry - entry) * qty = $0.
+
+This corrupts the brain's learning signal -- a real trade that the
+broker closed (operator manual sale, auto-liquidation, etc.) gets
+recorded as a flat trade. Patterns and tickers with these phantom
+flat closes look "neutral" to the realized-EV gate when they may
+actually be winners or losers.
+
+Fix (per the no-hardcoded-fallback principle):
+
+1. New _resolve_close_exit_price() that tries:
+   - Robinhood's recent order history for a filled SELL within 4 days
+     -> returns the broker-truth average_price
+   - Current market quote via fetch_quote
+   - None when neither yields a real price
+
+2. sync_positions_to_db close path now:
+   - Uses _resolve_close_exit_price()
+   - When a real price is recovered: stamp exit_price + compute pnl as before
+   - When NOT: leave exit_price=NULL, pnl=NULL,
+     exit_reason='broker_reconcile_no_exit_price'
+     The honest "we don't know" instead of a synthetic flat trade.
+
+3. Original _get_exit_price() retained for non-close paths that
+   genuinely want a fallback (e.g. snapshot computation), but with a
+   docstring pointing to the new _resolve_close_exit_price() for
+   reconcile-close.
+
+Operator can later look up the broker's actual fill in Robinhood UI
+and manually update pnl if any of these closes is material.

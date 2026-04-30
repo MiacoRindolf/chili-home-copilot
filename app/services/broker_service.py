@@ -1153,7 +1153,12 @@ def _compute_trade_snapshot(ticker: str, entry_price: float) -> str | None:
 
 
 def _get_exit_price(ticker: str, fallback_entry: float | None) -> float:
-    """Fetch current market price for *ticker*, falling back to entry price."""
+    """Fetch current market price for *ticker*. Falls back to entry price.
+
+    NOTE: Use :func:`_resolve_close_exit_price` for broker-reconcile-close
+    paths -- that variant returns None when no real price is recoverable
+    instead of synthesizing entry_price (which fakes PnL=$0).
+    """
     try:
         from .trading.market_data import fetch_quote
         quote = fetch_quote(ticker)
@@ -1162,6 +1167,73 @@ def _get_exit_price(ticker: str, fallback_entry: float | None) -> float:
     except Exception as exc:
         logger.debug(f"[broker] Could not fetch exit quote for {ticker}: {exc}")
     return float(fallback_entry or 0.0)
+
+
+def _resolve_close_exit_price(ticker: str) -> float | None:
+    """Resolve the actual exit price when a position has disappeared from
+    the broker. Tries (in order):
+
+      1. Robinhood's recent order history for a filled SELL on this ticker
+         within the last 4 days. Uses ``average_price``, the broker-truth
+         exit value.
+      2. Current market quote via fetch_quote (may not match the actual
+         fill but is closer than entry_price).
+      3. Returns ``None`` when neither is available -- caller MUST treat
+         None as "exit price unknown" and store pnl=NULL.
+
+    Per the no-hardcoded-fallback principle (operator feedback 2026-04-29):
+    do NOT silently substitute entry_price as the exit. That stamps the
+    trade as flat (PnL=$0) and corrupts the brain's learning signal.
+    """
+    # 1. Most-reliable: Robinhood order history
+    try:
+        recent = get_recent_orders(limit=80) or []
+        ticker_up = (ticker or "").upper()
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        cutoff = _dt.now(_tz.utc) - _td(days=4)
+        for o in recent:
+            if (o.get("ticker") or "").upper() != ticker_up:
+                continue
+            if (o.get("side") or "").lower() != "sell":
+                continue
+            if (o.get("state") or "").lower() not in ("filled", "partially_filled"):
+                continue
+            # parse created_at; filter to last 4 days only
+            ts_raw = o.get("created_at") or ""
+            try:
+                ts = _dt.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_tz.utc)
+            except (TypeError, ValueError):
+                ts = None
+            if ts is not None and ts < cutoff:
+                continue
+            px = o.get("price")
+            try:
+                if px is not None and float(px) > 0:
+                    return float(px)
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        logger.debug(
+            "[broker] _resolve_close_exit_price: order-history lookup failed for %s",
+            ticker, exc_info=True,
+        )
+
+    # 2. Fallback to current market quote
+    try:
+        from .trading.market_data import fetch_quote
+        quote = fetch_quote(ticker)
+        if quote and quote.get("price"):
+            return float(quote["price"])
+    except Exception:
+        logger.debug(
+            "[broker] _resolve_close_exit_price: fetch_quote failed for %s",
+            ticker, exc_info=True,
+        )
+
+    # 3. Unknown -- propagate None per no-hardcoded-fallback rule
+    return None
 
 
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
@@ -1462,22 +1534,47 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
         trade.status = "closed"
         trade.exit_date = datetime.utcnow()
-        if not trade.exit_reason:
-            trade.exit_reason = "broker_reconcile_position_gone"
         entry = trade.entry_price or 0.0
         qty = trade.quantity or 0.0
-        exit_price = _get_exit_price(trade.ticker, entry)
-        trade.exit_price = exit_price
-        if trade.direction == "short":
-            trade.pnl = round((entry - exit_price) * qty, 2)
+        # FIX (2026-04-30): try to resolve the REAL exit price from broker
+        # order history before falling through to a market quote. If neither
+        # is available, store pnl=NULL with exit_reason indicating unknown
+        # exit price -- never fake PnL=$0 by synthesizing exit=entry, which
+        # corrupts the brain's learning signal.
+        resolved_exit = _resolve_close_exit_price(trade.ticker)
+        if resolved_exit is not None and resolved_exit > 0:
+            trade.exit_price = float(resolved_exit)
+            if trade.direction == "short":
+                trade.pnl = round((entry - resolved_exit) * qty, 2)
+            else:
+                trade.pnl = round((resolved_exit - entry) * qty, 2)
+            if not trade.exit_reason:
+                trade.exit_reason = "broker_reconcile_position_gone"
+            trade.notes = (
+                (trade.notes or "")
+                + f"\nAuto-closed: position no longer on Robinhood "
+                f"({datetime.utcnow().strftime('%Y-%m-%d %H:%M')}). "
+                f"Exit ${resolved_exit:.4f} (resolved from order history or quote)."
+            )
         else:
-            trade.pnl = round((exit_price - entry) * qty, 2)
-        trade.notes = (
-            (trade.notes or "")
-            + f"\nAuto-closed: position no longer on Robinhood "
-            f"({datetime.utcnow().strftime('%Y-%m-%d %H:%M')}). "
-            f"Exit ~${exit_price:.2f} (market quote)."
-        )
+            # Honest unknown: do NOT fake PnL=0. Operator can later look up
+            # the broker's actual fill and reconcile manually.
+            trade.exit_price = None
+            trade.pnl = None
+            if not trade.exit_reason:
+                trade.exit_reason = "broker_reconcile_no_exit_price"
+            trade.notes = (
+                (trade.notes or "")
+                + f"\nAuto-closed: position no longer on Robinhood "
+                f"({datetime.utcnow().strftime('%Y-%m-%d %H:%M')}). "
+                f"Exit price UNKNOWN (no recent sell in order history, no live quote). "
+                f"PnL left NULL; reconcile manually if material."
+            )
+            logger.warning(
+                "[broker] %s closed without recoverable exit price; "
+                "trade#%s left with pnl=NULL (no fake PnL=0).",
+                trade.ticker, trade.id,
+            )
         try:
             from .trading.tca_service import apply_tca_on_trade_close
 
