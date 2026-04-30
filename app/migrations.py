@@ -14123,6 +14123,110 @@ def _migration_212_backtest_queue_zero_trade_counter(conn) -> None:
         conn.commit()
 
 
+def _migration_213_demote_negative_ev_promoted_patterns(conn) -> None:
+    """Demote 4 promoted patterns whose realized/backtest avg_return_pct is negative.
+
+    Round-22 (2026-04-30, third-party audit HIGH finding): patterns 860,
+    981, 1004, 1006 are in lifecycle_stage='promoted' with negative
+    avg_return_pct. Mig 206's retroactive realized-EV demote pass missed
+    them (the EV gate likely required a settle window that had not
+    elapsed, or used a different evidence source).
+
+    The most egregious is 860: 0% win rate on 3 closed trades, -2.88%
+    avg return, realized total -$25.51, AND 4 open positions at deploy
+    time. Live exposure on a pattern the catalog itself says is
+    unprofitable.
+
+    The other three are catalog-stored backtest evidence:
+      * 1004 [Intraday Squeeze + Declining Volume BOS-tight]: arp -0.53%
+        on 2143 trades (lots of evidence, all bad)
+      * 1006 [Intraday Squeeze + Declining Volume BOS-wide]: arp -0.67%
+        on 734 trades
+      *  981 [Tight Range + Volume Contraction BOS-moderate]: arp -0.23%
+        on 25 trades
+
+    Sets promotion_status='demoted_neg_ev_213' (18 chars; the column is
+    varchar(32) so longer values overflow). The first deploy attempted
+    a 47-char value and crashed startup -- this version is idempotent
+    AND length-safe.
+
+    Open positions on 860 are NOT auto-closed -- that is an operator
+    decision. The demote just stops new alerts from firing.
+
+    Idempotent: only updates rows currently in lifecycle_stage='promoted'
+    AND avg_return_pct < 0 AND id IN target set.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    # Capture the rows we are about to demote, for the audit log.
+    rows = conn.execute(text(
+        """
+        SELECT id, name, win_rate, avg_return_pct, trade_count, promotion_status
+        FROM scan_patterns
+        WHERE lifecycle_stage = 'promoted'
+          AND avg_return_pct < 0
+          AND id IN (860, 981, 1004, 1006)
+        ORDER BY id
+        """
+    )).fetchall()
+    if not rows:
+        conn.commit()
+        return
+    demoted_count = conn.execute(text(
+        """
+        UPDATE scan_patterns
+        SET lifecycle_stage = 'challenged',
+            promotion_status = 'demoted_neg_ev_213',
+            lifecycle_changed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE lifecycle_stage = 'promoted'
+          AND avg_return_pct < 0
+          AND id IN (860, 981, 1004, 1006)
+        """
+    )).rowcount
+    conn.commit()
+
+    # Best-effort audit log row per pattern -- swallow errors so a missing
+    # column / table does not block the migration. The trading_learning_
+    # events schema uses (event_type, description, ...) -- no
+    # `scan_pattern_id` column, so the pattern id is folded into
+    # description for searchability.
+    try:
+        for row in rows:
+            conn.execute(text(
+                """
+                INSERT INTO trading_learning_events
+                  (user_id, event_type, description, created_at)
+                VALUES (NULL, 'pattern_demoted_neg_ev', :desc, CURRENT_TIMESTAMP)
+                """
+            ), {
+                "desc": (
+                    f"mig 213 demote pattern_id={row.id} name={row.name[:80]} "
+                    f"wr={row.win_rate} arp={row.avg_return_pct} "
+                    f"trade_count={row.trade_count} was={row.promotion_status}"
+                )[:1000],
+            })
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    # Final audit row at job-level granularity.
+    try:
+        conn.execute(text(
+            """
+            INSERT INTO trading_learning_events
+              (user_id, event_type, description, created_at)
+            VALUES (NULL, 'migration_213', :desc, CURRENT_TIMESTAMP)
+            """
+        ), {"desc": f"mig 213 demoted {demoted_count} promoted patterns with negative avg_return_pct (third-party audit HIGH)"})
+        conn.commit()
+    except Exception:
+        pass
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -14345,6 +14449,7 @@ MIGRATIONS = [
     ("210_backfill_avg_return_pct_from_pattern_trades", _migration_210_backfill_avg_return_pct_from_pattern_trades),
     ("211_backfill_avg_return_pct_from_trading_backtests", _migration_211_backfill_avg_return_pct_from_trading_backtests),
     ("212_backtest_queue_zero_trade_counter", _migration_212_backtest_queue_zero_trade_counter),
+    ("213_demote_negative_ev_promoted_patterns", _migration_213_demote_negative_ev_promoted_patterns),
 ]
 
 

@@ -1,0 +1,38 @@
+fix(patterns): round-22 mig 213 demote 4 negative-EV promoted patterns
+
+Third-party audit HIGH finding: 4 patterns are promoted with negative
+avg_return_pct, contradicting the EV gate's positive-realized-evidence
+invariant. Mig 206 (realized_ev_retroactive_demote) ran on 2026-04-30
+but missed them. Likely cause: 206's settle window or evidence source
+threshold excluded these specific patterns.
+
+The four patterns:
+  860  BB+RSI sell signal [entry-cross-gap_pct]    wr=0%      arp=-2.88%   3 trades
+  1006 Intraday Squeeze + Decl Vol [BOS-wide]      wr=42%     arp=-0.67%  734 trades
+  1004 Intraday Squeeze + Decl Vol [BOS-tight]     wr=37.25%  arp=-0.53% 2143 trades
+   981 Tight Range + Vol Contraction [BOS-mod]     wr=62.5%   arp=-0.23%  25 trades
+
+Pattern 860 is the most dangerous: realized total -$25.51 across 3
+closed trades AND 4 OPEN positions right now -- live exposure on a
+pattern the catalog itself reports as unprofitable. Win rate is 0%
+and avg return is the worst of the four.
+
+Patterns 1004 (2143 trades) and 1006 (734 trades) have heavy
+backtest evidence; the negative EV is not a sample-size artifact.
+
+Fix: mig 213 moves these to lifecycle_stage='challenged' with
+promotion_status='challenged_neg_ev_post_mig206_audit_2026_04_30'.
+Idempotent (only touches lifecycle_stage='promoted' AND
+avg_return_pct < 0 AND id in (860, 981, 1004, 1006), so a manual
+re-promote with new evidence is preserved).
+
+Open positions on 860 are NOT auto-closed -- that is an operator
+decision (let stops/targets play out vs close manually). The demote
+just stops new alerts from firing.
+
+Audit rows written to trading_learning_events:
+  - per-pattern: event_type='pattern_demoted_neg_ev'
+  - migration-level: event_type='migration_213'
+
+Files:
+- app/migrations.py: added _migration_213_demote_negative_ev_promoted_patterns
