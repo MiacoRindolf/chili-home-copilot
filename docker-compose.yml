@@ -589,17 +589,16 @@ services:
       # FIX 33 carry-over for broker-call timeouts.
       - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
       - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
-      # 2026-05-01 HALT (post-Phase A re-enable): ELTX placement at
-      # 17:50:21 returned order_id with state=unconfirmed; chili logged
-      # "successful" but Robinhood actually rejected it (user saw the
-      # rejection in their app). Confirms the gap in our verification —
-      # we treat "API returned an order_id" as success without checking
-      # whether the order actually persisted at the broker. Halting the
-      # writer while we add post-placement state verification (poll the
-      # order's actual state after a 2s settle, transition to
-      # terminal_reject if rejected/cancelled). DO NOT re-enable until
-      # bracket_writer_g2 has a working verify_placement step.
-      - CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=0
+      # 2026-05-01 RE-ENABLED after Phase 4 post-placement verification.
+      # bracket_writer_g2 now polls broker truth (verify_order_landed,
+      # 3s window) before claiming success. Three verdicts: resting →
+      # CONFIRMED_AT_BROKER, rejected → mark_terminal_reject (no retry
+      # storm), unknown → conservative (no state change, next sweep
+      # re-checks). The "API returned an order_id, must be working"
+      # gap that produced the ELTX false-success on 2026-05-01 17:50
+      # is now closed — every place_missing_stop now confirms with the
+      # broker before declaring success.
+      - CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
