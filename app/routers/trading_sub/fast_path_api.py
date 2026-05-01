@@ -53,17 +53,21 @@ def _utc_today_start() -> datetime:
 
 
 def _fetch_open_paper_positions(limit: int = 200) -> list[dict[str, Any]]:
-    """Every paper_fill row whose execution hasn't been (yet) marked
-    closed by F5. F5 isn't shipped — so for now, every paper_fill is
-    treated as still open. When F5 lands and writes exit rows to
-    fast_executions, swap this for a NOT EXISTS subquery."""
+    """Every paper_fill row that has not yet been closed by F5.
+
+    F5's exit_manager writes to fast_exits with one row per closed
+    entry. An entry is "open" iff no fast_exits row references its id.
+    """
     sql = text("""
-        SELECT id, ticker, alert_type, side, quantity, fill_price,
-               notional_usd, latency_ms, decided_at
-        FROM fast_executions
-        WHERE decision = 'paper_fill'
-          AND mode = 'paper'
-        ORDER BY decided_at DESC
+        SELECT e.id, e.ticker, e.alert_type, e.side, e.quantity,
+               e.fill_price, e.notional_usd, e.latency_ms, e.decided_at
+        FROM fast_executions e
+        LEFT JOIN fast_exits x
+          ON x.entry_execution_id = e.id
+        WHERE e.decision = 'paper_fill'
+          AND e.mode = 'paper'
+          AND x.id IS NULL
+        ORDER BY e.decided_at DESC
         LIMIT :lim
     """)
     with engine.connect() as conn:

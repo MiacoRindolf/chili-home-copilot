@@ -14503,6 +14503,112 @@ def _migration_217_fast_executions(conn) -> None:
     conn.commit()
 
 
+def _migration_218_fast_exits(conn) -> None:
+    """F5 (2026-05-01) — fast-path paper/live exit log.
+
+    Each row is the close-event for one open position recorded in
+    ``fast_executions`` (decision='paper_fill' or 'live_placed'). One
+    exit row per entry. Open positions = entry rows with no
+    corresponding exit row.
+
+    Schema choice (separate table over extending fast_executions):
+      - Different write rates. Entry rows fire whenever a gated alert
+        passes (~tens/hour under current paper); exit rows fire only
+        when stop/target/time-stop trips. Independent partition cadence
+        means we can drop old exits on a different schedule than alerts.
+      - Cleaner open-position query: NOT EXISTS join on entry_execution_id
+        with one btree index — vs a self-join + decision-IN filter that
+        wouldn't compose with the existing CHECK constraint on
+        fast_executions.decision.
+      - Realized P/L lives with the close event, not interspersed with
+        NULL columns on entry rows.
+
+    Columns:
+      - ``entry_execution_id`` — references the fast_executions row
+        being closed. NOT a hard FK because Postgres cross-partition
+        FKs need extra ceremony; the F5 manager enforces uniqueness in
+        application logic + the unique index below.
+      - ``ticker``, ``side`` — denormalised for read efficiency. side
+        is the closing side ('sell' for closing a long).
+      - ``quantity``, ``entry_price``, ``exit_price`` — sizing &
+        realised levels. ``exit_price`` is the synthesised paper fill
+        (best_bid for long-close) or the broker fill on live.
+      - ``stop_at_entry``, ``target_at_entry`` — what the engine had
+        decided when the position opened. Useful for postmortem of
+        mid-run policy tweaks.
+      - ``exit_reason`` — one of: stop_hit, target_hit, time_stop,
+        manual, broker_error.
+      - ``realized_pnl_usd`` — (exit_price - entry_price) * quantity
+        on a long; sign-flipped for short. Excludes fees (paper).
+      - ``realized_return_pct`` — % move on the position.
+      - ``holding_period_s`` — exited_at - entered_at, for histogram.
+      - ``mode`` — 'paper' or 'live' at the moment of exit.
+      - ``broker_order_id`` — only set for live exits.
+      - ``brain_json`` — bracket-context payload (atr, stop_model,
+        regime, lifecycle_stage, win_rate) so we can postmortem stop
+        decisions without re-running the brain.
+      - ``latency_ms`` — exit-trigger -> exit-decision turnaround.
+
+    Indexes:
+      - (entry_execution_id) unique — application-level dedupe support.
+      - (ticker, exited_at DESC) — autopilot UI tail query.
+      - (exit_reason, exited_at DESC) — edge analysis.
+    """
+    inspector = sa_inspect(conn)
+    tables = set(inspector.get_table_names())
+    if "fast_exits" not in tables:
+        conn.execute(text(
+            """
+            CREATE TABLE fast_exits (
+                id                  BIGSERIAL,
+                entry_execution_id  BIGINT NOT NULL,
+                ticker              VARCHAR(32) NOT NULL,
+                side                VARCHAR(8) NOT NULL,
+                quantity            DOUBLE PRECISION NOT NULL,
+                entry_price         DOUBLE PRECISION NOT NULL,
+                exit_price          DOUBLE PRECISION NOT NULL,
+                stop_at_entry       DOUBLE PRECISION,
+                target_at_entry     DOUBLE PRECISION,
+                exit_reason         VARCHAR(24) NOT NULL,
+                realized_pnl_usd    DOUBLE PRECISION NOT NULL,
+                realized_return_pct DOUBLE PRECISION NOT NULL,
+                holding_period_s    DOUBLE PRECISION NOT NULL,
+                mode                VARCHAR(8) NOT NULL,
+                broker_order_id     VARCHAR(128),
+                brain_json          JSONB NOT NULL,
+                latency_ms          DOUBLE PRECISION,
+                entered_at          TIMESTAMP NOT NULL,
+                exited_at           TIMESTAMP NOT NULL,
+                PRIMARY KEY (id, exited_at),
+                CONSTRAINT fast_exits_reason_check
+                    CHECK (exit_reason IN (
+                        'stop_hit','target_hit','time_stop',
+                        'manual','broker_error'
+                    )),
+                CONSTRAINT fast_exits_mode_check
+                    CHECK (mode IN ('paper','live'))
+            ) PARTITION BY RANGE (exited_at)
+            """
+        ))
+        conn.execute(text(
+            "CREATE TABLE fast_exits_default "
+            "PARTITION OF fast_exits DEFAULT"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX ix_fast_exits_entry_uniq "
+            "ON fast_exits (entry_execution_id, exited_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fast_exits_ticker_exited "
+            "ON fast_exits (ticker, exited_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fast_exits_reason_exited "
+            "ON fast_exits (exit_reason, exited_at DESC)"
+        ))
+    conn.commit()
+
+
 def _migration_216_fast_alerts(conn) -> None:
     """F3 (2026-05-01) — fast-path event-driven scanner alerts.
 
@@ -14785,6 +14891,7 @@ MIGRATIONS = [
     ("215_fast_path_tables", _migration_215_fast_path_tables),
     ("216_fast_alerts", _migration_216_fast_alerts),
     ("217_fast_executions", _migration_217_fast_executions),
+    ("218_fast_exits", _migration_218_fast_exits),
 ]
 
 

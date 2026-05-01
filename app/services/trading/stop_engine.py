@@ -347,6 +347,47 @@ def _compute_initial_stop(
     )
 
 
+def compute_initial_bracket(
+    *,
+    entry: float,
+    direction: str = "long",
+    atr: float | None,
+    asset_class: str = "crypto",
+    stop_model: str = "atr_crypto_breakout",
+    regime: str = "cautious",
+    lifecycle_stage: str = "validated",
+    pattern_win_rate: float | None = None,
+    stop_mult_override: float | None = None,
+    target_mult_override: float | None = None,
+) -> tuple[float, float]:
+    """Public wrapper for initial (stop, target) bracket computation.
+
+    Same brain-aware policy as ``evaluate_trade`` uses internally on the
+    first pass (``_compute_initial_stop``), but callable from contexts
+    that don't have a Trade ORM row — fast-path executor / exit-manager,
+    backtest harnesses, simulators.
+
+    The bracket reflects regime + lifecycle + win-rate adjustments so a
+    crypto scalp opened in a risk_off regime gets a tighter stop than
+    the same setup in risk_on. Returns prices already aligned to the
+    venue tick (via :func:`tick_normalizer.normalize_price`).
+    """
+    is_crypto = (asset_class or "").strip().lower() == "crypto"
+    brain = BrainContext(
+        regime=regime,
+        regime_stop_factor=_REGIME_STOP_TIGHTEN.get(regime, 1.0),
+        warn_proximity=_REGIME_WARN_PROXIMITY.get(regime, WARN_PROXIMITY_R),
+        lifecycle_stage=lifecycle_stage,
+        lifecycle_stop_factor=_LIFECYCLE_STOP_FACTOR.get(lifecycle_stage, 1.0),
+        pattern_win_rate=pattern_win_rate,
+        stop_mult_override=stop_mult_override,
+        target_mult_override=target_mult_override,
+    )
+    return _compute_initial_stop(
+        entry, direction, atr, entry, stop_model, is_crypto, brain,
+    )
+
+
 def evaluate_trade(
     trade,
     market: MarketContext,

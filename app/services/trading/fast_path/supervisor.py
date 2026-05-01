@@ -21,6 +21,7 @@ from sqlalchemy.engine import Engine
 
 from .db_writer import FastPathDBWriter
 from .executor import FastPathExecutor
+from .exit_manager import FastPathExitManager
 from .healthz import HealthzServer
 from .settings import FastPathSettings
 from .status_tracker import StatusTracker
@@ -39,6 +40,7 @@ class FastPathSupervisor:
         self._ws: CoinbaseWSClient | None = None
         self._healthz: HealthzServer | None = None
         self._executor: FastPathExecutor | None = None
+        self._exit_manager: FastPathExitManager | None = None
         self._metrics_task: asyncio.Task | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -85,11 +87,21 @@ class FastPathSupervisor:
             self._executor = FastPathExecutor(
                 self._settings, self._engine, self._ws._book,  # noqa: SLF001
             )
+            # F5: exit manager closes the loop on F4 entries —
+            # streams top-of-book against per-position bracket
+            # (stop_engine-derived stop+target) and writes fast_exits
+            # rows with realized P/L. Paper-only in F5; live exit is
+            # a follow-up (same three-flag belt as live entry).
+            self._exit_manager = FastPathExitManager(
+                self._settings, self._engine, self._ws._book,  # noqa: SLF001
+            )
 
         if self._settings.enabled:
             await self._ws.start()
             if self._executor is not None:
                 await self._executor.start()
+            if self._exit_manager is not None:
+                await self._exit_manager.start()
         else:
             logger.warning(
                 "[fast_path] CHILI_FAST_PATH_ENABLED=0 — supervisor up "
@@ -118,8 +130,11 @@ class FastPathSupervisor:
         logger.info("[fast_path] shutting down")
         if self._metrics_task is not None:
             self._metrics_task.cancel()
-        # Stop the executor BEFORE the WS / writer so any in-flight
-        # decision finishes against a still-live writer/book.
+        # Stop in reverse of dependency order: exit manager depends on
+        # the executor's entry rows + the WS book; stop it FIRST so any
+        # in-flight exit finishes against a still-live book stream.
+        if self._exit_manager is not None:
+            await self._exit_manager.stop()
         if self._executor is not None:
             await self._executor.stop()
         if self._ws is not None:
@@ -193,6 +208,25 @@ class FastPathSupervisor:
                 writer.get("books_received"),
                 writer.get("books_written"),
             )
+        exit_mgr_stats = snap.get("exit_manager") or {}
+        if exit_mgr_stats:
+            logger.info(
+                "[fast_path] exit_manager polls=%s bootstrap=%s "
+                "open=%s stop_hit=%s target_hit=%s time_stop=%s "
+                "skipped_no_book=%s db_errors=%s last_decision=%s "
+                "max_hold_s=%.0f tickers=%s",
+                exit_mgr_stats.get("polls_total"),
+                exit_mgr_stats.get("positions_bootstrapped"),
+                exit_mgr_stats.get("open_positions_now"),
+                exit_mgr_stats.get("decisions_stop_hit"),
+                exit_mgr_stats.get("decisions_target_hit"),
+                exit_mgr_stats.get("decisions_time_stop"),
+                exit_mgr_stats.get("decisions_skipped_no_book"),
+                exit_mgr_stats.get("db_errors"),
+                exit_mgr_stats.get("last_decision_at"),
+                float(exit_mgr_stats.get("max_hold_s") or 0.0),
+                exit_mgr_stats.get("tickers_tracked"),
+            )
         executor_stats = snap.get("executor") or {}
         if executor_stats:
             logger.info(
@@ -258,6 +292,7 @@ class FastPathSupervisor:
             "status": self._status.snapshot() if self._status else {},
             "ws": self._ws.stats() if self._ws else {},
             "executor": self._executor.stats() if self._executor else {},
+            "exit_manager": self._exit_manager.stats() if self._exit_manager else {},
         }
 
 
