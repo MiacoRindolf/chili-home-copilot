@@ -1,0 +1,52 @@
+﻿# Flag 2 perps_lane current pulse 04/30/2026 17:25:58
+
+===== perp_quotes most recent rows by venue (is the job still firing?) =====
+docker : ERROR:  column pq.contract_id does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-flag2-pulse.ps1:6 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  column ... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: ..._1h FROM perp_quotes pq JOIN perp_contracts pc ON pq.contrac...
+                                                             ^
+
+
+===== perp_funding most recent =====
+docker : ERROR:  column "observed_at" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-flag2-pulse.ps1:10 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  column ... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: SELECT MAX(observed_at) AS most_recent, COUNT(*) FILTER (WHE...
+                   ^
+
+
+===== current chili_perps_lane_enabled flag value =====
+perps_lane_enabled: True
+
+
+===== search trading_scheduler.py for any 'perp' job (might use a different name than I expected) =====
+1548:    trades, which self-perpetuates duplicate rows when the scheduler writes
+4523:        # Q2 Task L ΓÇö perps ingestion (every hour).
+4524:        # Flag-gated by chili_perps_lane_enabled. Iterates over the seeded
+4525:        # perp_contracts and writes premium/funding/OI rows to perp_quotes,
+4526:        # perp_funding, perp_oi, perp_basis. Continues to no-op if the flag
+4532:                def _run_perps_ingestion_job() -> None:
+4536:                            settings, "chili_perps_lane_enabled", False
+4540:                        from app.services.trading.perps.ingestion import (
+4541:                            run_perps_ingestion_pass,
+4545:                            res = run_perps_ingestion_pass(_db)
+4546:                            logger.info("[perps] ingestion: %s", res)
+4550:                        logger.exception("[perps] ingestion failed")
+4553:                    _run_perps_ingestion_job,
+4555:                    id="perps_ingestion",
+4556:                    name="Perps premium/funding/OI ingestion (hourly)",
+4563:                "[scheduler] failed to register perps ingestion job"
+
+
+===== find the perps ingest module =====
+/app/app/services/trading/perps
+

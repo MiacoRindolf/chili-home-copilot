@@ -395,6 +395,24 @@ def _finalize_filled_exit(
     trade.pending_exit_limit_price = None
     trade.last_broker_sync = filled_at.replace(tzinfo=None)
     trade.broker_status = (raw_order.get("state") or raw_order.get("status") or trade.broker_status or "filled")
+    # R29 (2026-04-30): compute exit slippage. tca_reference_exit_price was
+    # captured at decision time (~line 910 of this file when the exit was
+    # submitted); trade.exit_price was just set above to the actual fill.
+    # apply_tca_on_trade_close returns silently if either is None, so this
+    # is a no-op for trades where the reference wasn't captured (e.g.
+    # synthetic-close paths in broker_sync that R28 cleaned up). Without
+    # this call the legitimate exit path was leaving tca_exit_slippage_bps
+    # NULL even though both inputs were available -- that gap kept Phase F
+    # producer (rebuild_all) from having any real slippage data to compute
+    # rolling cost estimates from.
+    try:
+        from .tca_service import apply_tca_on_trade_close
+        apply_tca_on_trade_close(trade)
+    except Exception:
+        logger.debug(
+            "[rh_exit] R29 apply_tca_on_trade_close failed for trade=%s",
+            getattr(trade, "id", None), exc_info=True,
+        )
     db.add(trade)
     db.commit()
     try:

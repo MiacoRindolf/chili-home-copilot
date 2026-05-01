@@ -1,0 +1,106 @@
+﻿# Phase H + Flag 2 prerequisite probe 04/30/2026 17:24:00
+
+===== Phase H: position sizer table row count + sample =====
+        column_name        
+---------------------------
+ id
+ proposal_id
+ source
+ ticker
+ direction
+ user_id
+ pattern_id
+ asset_class
+ regime
+ entry_price
+ stop_price
+ target_price
+ capital
+ calibrated_prob
+ payoff_fraction
+ cost_fraction
+ expected_net_pnl
+ kelly_fraction
+ kelly_scaled_fraction
+ proposed_notional
+ proposed_quantity
+ proposed_risk_pct
+ correlation_cap_triggered
+ correlation_bucket
+ max_bucket_notional
+ notional_cap_triggered
+ legacy_notional
+ legacy_quantity
+ legacy_source
+ divergence_bps
+(30 rows)
+
+docker : ERROR:  column "decided_at" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-phase-h-flag2-probe.ps1:9 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  column ... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: SELECT COUNT(*) AS total_rows, MIN(decided_at) AS oldest, MA...
+                                           ^
+
+
+===== Phase H: callers of position_sizer in production code =====
+
+
+===== Phase H: scheduled job presence =====
+
+
+===== Phase H: brain_position_sizer_mode allowed values + reader code =====
+
+
+===== Flag 2: hyperliquid network reachability from chili container =====
+api.hyperliquid.xyz:443 -> 18.154.206.121 TCP_OK
+robinhood.com:443 -> 3.169.231.80 TCP_OK
+
+hyperliquid HEAD failed: HTTPError: HTTP Error 405: Method Not Allowed
+
+
+===== Flag 2: perp_contracts seed (mig 184) =====
+     venue      | count 
+----------------+-------
+ hyperliquid    |    15
+ dydx_v4        |    12
+ kraken_futures |    12
+ binance        |     9
+(4 rows)
+
+
+
+===== Flag 2: prior ingest data (perp_quotes / perp_funding) =====
+     tbl      | count 
+--------------+-------
+ perp_quotes  |  2202
+ perp_funding |  2012
+ perp_oi      |  2094
+ perp_basis   |   854
+(4 rows)
+
+
+
+===== Flag 2: scheduled job presence =====
+
+
+===== container uptime + last R28 deploy state =====
+chili-home-copilot-broker-sync-worker-1 | Up 13 minutes
+chili-home-copilot-chili-1 | Up 2 hours (healthy)
+chili-home-copilot-autotrader-worker-1 | Up 2 hours
+chili-home-copilot-scheduler-worker-1 | Up 4 hours
+chili-home-copilot-brain-worker-1 | Up 7 hours (healthy)
+chili-home-copilot-postgres-1 | Up 7 hours (healthy)
+chili-home-copilot-ollama-1 | Up 7 hours (healthy)
+
+
+===== Phase 1 Flag 1: pattern_survival_features still has fresh rows from prior runs =====
+ rows |   latest   | distinct_patterns 
+------+------------+-------------------
+   67 | 2026-04-29 |                34
+(1 row)
+
+

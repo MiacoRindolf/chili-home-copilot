@@ -153,13 +153,16 @@ data flowing, gate on it:
 **Exit criterion:** Phase F authoritative for paper; cost-blind paper
 entries blocked for 14 days with measurable expectancy improvement.
 
-### Phase 3 — Promote Phase H (position sizer) shadow→compare→authoritative-paper (4–8 weeks)
+### Phase 3 — Promote Phase H (position sizer) shadow→authoritative-paper (4–8 weeks)
 
-Same pattern as Phase 2. The Kelly-aware, cost-corrected, portfolio-aware
-sizer is built and writes to `trading_position_sizer_log` in shadow.
-Compare mode would flag divergence between sizer-recommended and actual
-filled qty; authoritative-for-paper would route paper trades through the
-sizer.
+**Update 2026-05-01 (post-probe):** Phase H follows the same inert
+pattern as Phase F. The Kelly-aware sizer schema exists
+(`trading_position_sizer_log` has 30+ columns including
+`kelly_fraction`, `kelly_scaled_fraction`, `correlation_cap_triggered`,
+`divergence_bps`, etc.) but no producer / consumer / scheduled job is
+wired. Same shape as Phase F: same wiring needed (producer
+schedule + recorder hook + consumer gate). Will re-plan after Phase 2a/2b
+land.
 
 **Prerequisite:** Phase F at compare or authoritative — the sizer needs
 cost-corrected expected EV, which Phase F provides.
