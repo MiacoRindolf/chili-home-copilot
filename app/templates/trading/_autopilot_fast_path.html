@@ -1,0 +1,263 @@
+<section class="ap-section" id="ap-fast-path-section">
+  <div class="ap-section-header">
+    <h2 class="ap-section-title">
+      <span class="ap-fp-mode-badge" id="ap-fp-mode-badge" data-mode="paper">PAPER</span>
+      Fast Path · Crypto Scalping
+    </h2>
+    <span class="ap-fp-as-of" id="ap-fp-as-of"></span>
+  </div>
+
+  <div class="ap-fp-summary-row" id="ap-fp-summary">
+    <div class="ap-fp-card">
+      <div class="ap-fp-card-label">Open Paper Positions</div>
+      <div class="ap-fp-card-value" id="ap-fp-open-count">—</div>
+    </div>
+    <div class="ap-fp-card">
+      <div class="ap-fp-card-label">Notional In</div>
+      <div class="ap-fp-card-value" id="ap-fp-notional-in">$—</div>
+    </div>
+    <div class="ap-fp-card">
+      <div class="ap-fp-card-label">Floating P/L</div>
+      <div class="ap-fp-card-value" id="ap-fp-pnl-usd">$—</div>
+      <div class="ap-fp-card-sub" id="ap-fp-pnl-pct">—</div>
+    </div>
+    <div class="ap-fp-card">
+      <div class="ap-fp-card-label">Today · Fills / Rejects</div>
+      <div class="ap-fp-card-value">
+        <span id="ap-fp-today-fills">—</span>
+        <span class="ap-fp-divider">/</span>
+        <span id="ap-fp-today-rejects">—</span>
+      </div>
+      <div class="ap-fp-card-sub">
+        Live placed: <span id="ap-fp-today-live">—</span>
+      </div>
+    </div>
+    <div class="ap-fp-card ap-fp-auth">
+      <div class="ap-fp-card-label">Live authorized</div>
+      <div class="ap-fp-card-value" id="ap-fp-live-auth">—</div>
+    </div>
+  </div>
+
+  <div class="ap-fp-table-wrap">
+    <table class="ap-fp-table" id="ap-fp-positions-table">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Alert</th>
+          <th class="ap-fp-num">Qty</th>
+          <th class="ap-fp-num">Entry</th>
+          <th class="ap-fp-num">Mid</th>
+          <th class="ap-fp-num">P/L $</th>
+          <th class="ap-fp-num">P/L %</th>
+          <th class="ap-fp-num">Spread bps</th>
+          <th>Opened</th>
+        </tr>
+      </thead>
+      <tbody id="ap-fp-positions-tbody">
+        <tr><td colspan="9" class="ap-fp-empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <details class="ap-fp-decisions">
+    <summary>Recent decisions (paper fills + rejects)</summary>
+    <div class="ap-fp-decisions-wrap">
+      <table class="ap-fp-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Ticker</th>
+            <th>Alert</th>
+            <th>Decision</th>
+            <th>Reason / Notional</th>
+          </tr>
+        </thead>
+        <tbody id="ap-fp-decisions-tbody">
+          <tr><td colspan="5" class="ap-fp-empty">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </details>
+</section>
+
+<style>
+  /* Scoped to the fast-path section to avoid colliding with existing
+     autopilot styles. Lifted from the same palette as the rest of
+     the autopilot page so it sits naturally next to swing-trade. */
+  #ap-fast-path-section { margin: 1.25rem 0; }
+  .ap-fp-mode-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    margin-right: 0.5rem;
+    vertical-align: middle;
+  }
+  .ap-fp-mode-badge[data-mode="paper"] {
+    background: #fef3c7; color: #92400e; border: 1px solid #f59e0b;
+  }
+  .ap-fp-mode-badge[data-mode="live"] {
+    background: #dcfce7; color: #166534; border: 1px solid #16a34a;
+  }
+  .ap-fp-as-of {
+    font-size: 0.75rem; color: #64748b; margin-left: auto;
+  }
+  .ap-fp-summary-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 0.6rem; margin: 0.6rem 0 0.8rem;
+  }
+  .ap-fp-card {
+    background: var(--ap-card-bg, #ffffff);
+    border: 1px solid var(--ap-card-border, #e2e8f0);
+    border-radius: 8px;
+    padding: 0.55rem 0.75rem;
+  }
+  .ap-fp-card-label {
+    font-size: 0.7rem; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #64748b;
+  }
+  .ap-fp-card-value {
+    font-size: 1.05rem; font-weight: 600; color: #0f172a;
+  }
+  .ap-fp-card-sub {
+    font-size: 0.75rem; color: #475569; margin-top: 2px;
+  }
+  .ap-fp-divider { color: #94a3b8; margin: 0 0.35rem; }
+  .ap-fp-table-wrap { overflow-x: auto; }
+  .ap-fp-table {
+    width: 100%; border-collapse: collapse; font-size: 0.85rem;
+  }
+  .ap-fp-table th, .ap-fp-table td {
+    padding: 6px 10px; text-align: left;
+    border-bottom: 1px solid var(--ap-card-border, #e2e8f0);
+  }
+  .ap-fp-table .ap-fp-num { text-align: right; font-variant-numeric: tabular-nums; }
+  .ap-fp-empty { color: #94a3b8; text-align: center; }
+  .ap-fp-pnl-pos { color: #15803d; }
+  .ap-fp-pnl-neg { color: #b91c1c; }
+  .ap-fp-decisions { margin-top: 0.8rem; }
+  .ap-fp-decisions summary {
+    cursor: pointer; font-size: 0.85rem; color: #334155;
+    padding: 6px 0;
+  }
+  .ap-fp-decisions-wrap { padding: 0.4rem 0; }
+</style>
+
+<script>
+  (function () {
+    const POLL_MS = 5000;
+    const fmtUsd = (v) => {
+      const n = Number(v) || 0;
+      const sign = n < 0 ? "-$" : "$";
+      return sign + Math.abs(n).toFixed(Math.abs(n) >= 100 ? 2 : 4);
+    };
+    const fmtPct = (v) => {
+      const n = (Number(v) || 0) * 100;
+      return (n >= 0 ? "+" : "") + n.toFixed(3) + "%";
+    };
+    const fmtTime = (iso) => {
+      if (!iso) return "—";
+      try {
+        const d = new Date(iso);
+        return d.toLocaleTimeString();
+      } catch (e) { return iso; }
+    };
+    const pnlClass = (n) => (n > 0 ? "ap-fp-pnl-pos" : n < 0 ? "ap-fp-pnl-neg" : "");
+
+    function renderPositions(payload) {
+      const summary = payload.summary || {};
+      const positions = payload.open_positions || [];
+
+      // Header summary
+      document.getElementById("ap-fp-open-count").textContent = summary.open_count ?? 0;
+      document.getElementById("ap-fp-notional-in").textContent =
+        fmtUsd(summary.total_notional_in_usd);
+
+      const pnl = summary.total_unrealized_pnl_usd ?? 0;
+      const pnlEl = document.getElementById("ap-fp-pnl-usd");
+      pnlEl.textContent = fmtUsd(pnl);
+      pnlEl.className = "ap-fp-card-value " + pnlClass(pnl);
+      const pnlPctEl = document.getElementById("ap-fp-pnl-pct");
+      pnlPctEl.textContent = fmtPct(summary.total_unrealized_pct);
+      pnlPctEl.className = "ap-fp-card-sub " + pnlClass(summary.total_unrealized_pct);
+
+      document.getElementById("ap-fp-today-fills").textContent = summary.today_paper_fills ?? 0;
+      document.getElementById("ap-fp-today-rejects").textContent = summary.today_rejected ?? 0;
+      document.getElementById("ap-fp-today-live").textContent = summary.today_live_placed ?? 0;
+
+      const badge = document.getElementById("ap-fp-mode-badge");
+      const mode = (summary.mode || "paper").toLowerCase();
+      badge.dataset.mode = mode;
+      badge.textContent = mode.toUpperCase();
+
+      const authEl = document.getElementById("ap-fp-live-auth");
+      authEl.textContent = summary.live_authorized ? "YES" : "NO";
+      authEl.style.color = summary.live_authorized ? "#15803d" : "#94a3b8";
+
+      document.getElementById("ap-fp-as-of").textContent =
+        summary.as_of ? "as of " + fmtTime(summary.as_of) : "";
+
+      // Positions table
+      const tbody = document.getElementById("ap-fp-positions-tbody");
+      if (!positions.length) {
+        tbody.innerHTML =
+          '<tr><td colspan="9" class="ap-fp-empty">No open paper positions yet — alerts may all be below the score gate.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = positions.map((p) => {
+        const pCls = pnlClass(p.unrealized_pnl_usd);
+        return `<tr>
+          <td><b>${p.ticker}</b></td>
+          <td>${p.alert_type}</td>
+          <td class="ap-fp-num">${(p.quantity ?? 0).toFixed(6)}</td>
+          <td class="ap-fp-num">${(p.entry_price ?? 0).toFixed(4)}</td>
+          <td class="ap-fp-num">${(p.current_mid ?? 0).toFixed(4)}</td>
+          <td class="ap-fp-num ${pCls}">${fmtUsd(p.unrealized_pnl_usd)}</td>
+          <td class="ap-fp-num ${pCls}">${fmtPct(p.unrealized_pct)}</td>
+          <td class="ap-fp-num">${(p.spread_bps ?? 0).toFixed(2)}</td>
+          <td>${fmtTime(p.decided_at)}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderDecisions(payload) {
+      const tbody = document.getElementById("ap-fp-decisions-tbody");
+      const decisions = payload.decisions || [];
+      if (!decisions.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="ap-fp-empty">No decisions in window.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = decisions.map((d) => {
+        const isFill = d.decision === "paper_fill" || d.decision === "live_placed";
+        const detail = isFill
+          ? fmtUsd(d.notional_usd)
+          : (d.reject_reason || "—");
+        return `<tr>
+          <td>${fmtTime(d.decided_at)}</td>
+          <td><b>${d.ticker}</b></td>
+          <td>${d.alert_type}</td>
+          <td>${d.decision}</td>
+          <td>${detail}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    async function poll() {
+      try {
+        const [pos, dec] = await Promise.all([
+          fetch("/api/trading/fast-path/paper-trades?limit=50").then((r) => r.json()),
+          fetch("/api/trading/fast-path/recent-decisions?limit=30&minutes=120").then((r) => r.json()),
+        ]);
+        renderPositions(pos);
+        renderDecisions(dec);
+      } catch (e) {
+        console.warn("[fast-path] poll failed:", e);
+      }
+    }
+    poll();
+    setInterval(poll, POLL_MS);
+  })();
+</script>
