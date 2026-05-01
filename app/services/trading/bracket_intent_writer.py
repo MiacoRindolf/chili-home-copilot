@@ -364,33 +364,42 @@ def upsert_bracket_intent(
     if bracket_result is None:
         bracket_result = compute_bracket_intent(bracket_input)
 
-    new_state = "shadow_logged" if mode is IntentMode.SHADOW else "intent"
+    initial_state_str = "shadow_logged" if mode is IntentMode.SHADOW else "intent"
     shadow_flag = mode in _SHADOWING_MODES
 
     existing = db.execute(text("""
         SELECT id, intent_state FROM trading_bracket_intents WHERE trade_id = :tid
     """), {"tid": int(trade_id)}).fetchone()
 
-    if existing and (existing[1] or "").startswith(_AUTHORITATIVE_STATE_PREFIX):
-        if _ops_log_enabled():
-            logger.info(
-                format_bracket_intent_ops_line(
-                    event="intent_write_skipped",
-                    mode=mode.value,
-                    trade_id=trade_id,
-                    bracket_intent_id=int(existing[0]),
-                    ticker=bracket_input.ticker,
-                    intent_state=existing[1],
-                    reason="authoritative_state_protected",
+    # Phase 3.1 (2026-05-01): if the row already exists in a closed or
+    # legacy-authoritative state, the brain has nothing to do — the trade
+    # is over (or under Phase G frozen-authority protection). Skip the
+    # whole write rather than refreshing stale metadata.
+    if existing:
+        existing_state_raw = existing[1] or ""
+        existing_state = _coerce_state(existing_state_raw)
+        is_terminal = existing_state is IntentState.CLOSED
+        is_legacy_authoritative = existing_state_raw.startswith(_AUTHORITATIVE_STATE_PREFIX)
+        if is_terminal or is_legacy_authoritative:
+            if _ops_log_enabled():
+                logger.info(
+                    format_bracket_intent_ops_line(
+                        event="intent_write_skipped",
+                        mode=mode.value,
+                        trade_id=trade_id,
+                        bracket_intent_id=int(existing[0]),
+                        ticker=bracket_input.ticker,
+                        intent_state=existing_state_raw,
+                        reason="state_machine_protected",
+                    )
                 )
+            return UpsertResult(
+                intent_id=int(existing[0]),
+                created=False,
+                state=existing_state_raw,
+                stop_price=bracket_result.stop_price,
+                target_price=bracket_result.target_price,
             )
-        return UpsertResult(
-            intent_id=int(existing[0]),
-            created=False,
-            state=existing[1] or "",
-            stop_price=bracket_result.stop_price,
-            target_price=bracket_result.target_price,
-        )
 
     payload_json: dict[str, Any] = {
         "reasoning": bracket_result.reasoning,
@@ -425,7 +434,7 @@ def upsert_bracket_intent(
             "stop_model": bracket_result.stop_model_resolved,
             "pattern_id": bracket_input.pattern_id,
             "regime": bracket_input.regime,
-            "intent_state": new_state,
+            "intent_state": initial_state_str,
             "shadow_mode": shadow_flag,
             "broker_source": broker_source,
             "payload_json": _json_dumps(payload_json),
@@ -436,6 +445,10 @@ def upsert_bracket_intent(
     else:
         new_id = int(existing[0])
         created = False
+        # Phase 3.1 (2026-05-01): UPDATE never touches intent_state. The
+        # state machine in transition() owns state transitions exclusively.
+        # Upsert refreshes the brain's computed metadata (stop_price, target,
+        # regime, payload_json) — the row's state is whatever it was.
         db.execute(text("""
             UPDATE trading_bracket_intents
             SET
@@ -449,7 +462,6 @@ def upsert_bracket_intent(
                 stop_model = :stop_model,
                 pattern_id = :pattern_id,
                 regime = :regime,
-                intent_state = :intent_state,
                 shadow_mode = :shadow_mode,
                 broker_source = :broker_source,
                 payload_json = CAST(:payload_json AS JSONB),
@@ -467,13 +479,21 @@ def upsert_bracket_intent(
             "stop_model": bracket_result.stop_model_resolved,
             "pattern_id": bracket_input.pattern_id,
             "regime": bracket_input.regime,
-            "intent_state": new_state,
             "shadow_mode": shadow_flag,
             "broker_source": broker_source,
             "payload_json": _json_dumps(payload_json),
             "now": now,
         })
     db.commit()
+
+    # Phase 3.1: when updating an existing row, the state was preserved —
+    # report whichever state we were in. On insert, the state is the
+    # initial-state string we just wrote.
+    state_for_log = (
+        initial_state_str
+        if created
+        else (existing[1] if existing else initial_state_str)
+    )
 
     if _ops_log_enabled():
         logger.info(
@@ -491,7 +511,7 @@ def upsert_bracket_intent(
                 stop_model=bracket_result.stop_model_resolved,
                 pattern_id=bracket_input.pattern_id,
                 regime=bracket_input.regime,
-                intent_state=new_state,
+                intent_state=state_for_log,
                 broker_source=broker_source,
             )
         )
@@ -499,7 +519,7 @@ def upsert_bracket_intent(
     return UpsertResult(
         intent_id=new_id,
         created=created,
-        state=new_state,
+        state=state_for_log,
         stop_price=bracket_result.stop_price,
         target_price=bracket_result.target_price,
     )
