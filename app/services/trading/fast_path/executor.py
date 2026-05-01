@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -73,30 +74,170 @@ end-to-end latency (ws -> scanner -> alert row -> poll -> decision)
 without hammering the DB."""
 
 
-# ── Coinbase live stub ────────────────────────────────────────────────
+# ── Coinbase live placement ──────────────────────────────────────────
 
 
 class LiveExecutionNotAuthorized(RuntimeError):
     """Raised when the executor is asked to place a live Coinbase order
-    without ``CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED=1`` set, OR when the
-    live-execution path itself is not yet implemented in this build.
+    without ``CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED=1`` set OR a per-
+    trade safety belt is tripped (notional too large for first run,
+    broker not connected, etc).
 
-    The point of raising rather than silently no-op'ing is so an
-    operator who flips MODE=live without flipping AUTHORIZED gets a
-    visible failure they can debug, not a quietly-skipped trade.
+    Raising rather than silently no-op'ing means a misconfigured
+    deploy fails LOUD, not silently into a wrong-mode order.
     """
 
 
-def _place_coinbase_order_stub(*args, **kwargs) -> Any:
-    """Live placement intentionally not implemented in this commit.
+# First-live-trade safety belt: even with both authorization flags set,
+# any single live order whose notional exceeds this cap is rejected
+# unless the operator ALSO sets CHILI_FAST_PATH_LIVE_NOTIONAL_OK=1.
+# This is a third layer of defence against a configuration mistake
+# producing a too-large order on the first live activation.
+LIVE_FIRST_TRADE_USD_HARD_CAP = 10.0
+"""Maximum notional in USD per single live order without explicit
+operator opt-in. Default $10 — small enough that a misconfiguration
+costs lunch money, not rent. Override via
+``CHILI_FAST_PATH_LIVE_NOTIONAL_OK=1`` once you've validated the
+first few small live orders behave correctly."""
 
-    A future commit will wire ``coinbase-advanced-py`` here under the
-    AUTHORIZED interlock. Until then, this raises so a misconfigured
-    deploy can't accidentally send a market order.
+LIVE_VERIFY_TIMEOUT_S = 3.0
+"""How long we'll poll Coinbase for a definitive order state after
+placement before giving up. Mirror of the swing-path's
+``verify_order_landed`` window. Beyond this, we record the placement
+with state=unknown and let reconcile sweep up later."""
+
+LIVE_VERIFY_POLL_INTERVAL_S = 0.25
+
+
+def _live_notional_override() -> bool:
+    """Operator must set this ONCE they've verified the first live
+    order behaved correctly. Until then, even authorized live orders
+    are capped at ``LIVE_FIRST_TRADE_USD_HARD_CAP`` USD."""
+    raw = (os.environ.get("CHILI_FAST_PATH_LIVE_NOTIONAL_OK") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _place_coinbase_order_live(ticker: str, side: str, quantity: float,
+                               fill_price_hint: float, notional_usd: float) -> str:
+    """Place a real Coinbase market order and verify it landed at the
+    broker before returning the broker order_id.
+
+    This function is ONLY reachable when:
+      1. ``mode`` resolves to ``live`` after gate_mode_interlock (which
+         means CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED is set)
+      2. The executor's defence-in-depth re-check at point-of-place
+         confirms ``is_live_authorized()`` is still True
+      3. The notional is within the first-trade hard cap, or the
+         operator has set ``CHILI_FAST_PATH_LIVE_NOTIONAL_OK=1``
+
+    Failure modes that raise ``LiveExecutionNotAuthorized``:
+      - Coinbase SDK not importable / not connected
+      - Notional exceeds hard cap and override not set
+      - Side is something other than buy/sell
+
+    Failure modes that raise the underlying exception:
+      - Broker API errors (network, auth, insufficient balance, etc.)
+        — propagated so the executor records ``rejected`` with the
+        actual broker reason rather than silently swallowing.
+
+    Returns the broker order_id (string) only after we've confirmed
+    Coinbase received the order. We do NOT block until ``filled`` —
+    a market order against a live book typically fills in <1s but
+    can take longer; we accept ``open``/``pending`` as confirmed-at-
+    broker state and let F5 / reconcile track the fill itself.
     """
-    raise LiveExecutionNotAuthorized(
-        "live Coinbase placement not implemented; this build is paper-only"
+    # Defence-in-depth: re-read the auth flag at the moment of place.
+    # The gate already checked, but a race or reload could change env.
+    if not is_live_authorized():
+        raise LiveExecutionNotAuthorized(
+            "live placement attempted but CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED is unset"
+        )
+
+    # First-trade safety: small notional only, until operator opts in.
+    if notional_usd > LIVE_FIRST_TRADE_USD_HARD_CAP and not _live_notional_override():
+        raise LiveExecutionNotAuthorized(
+            f"notional ${notional_usd:.2f} exceeds first-trade cap "
+            f"${LIVE_FIRST_TRADE_USD_HARD_CAP:.2f}; set "
+            f"CHILI_FAST_PATH_LIVE_NOTIONAL_OK=1 after validating the "
+            f"first small live orders behave correctly"
+        )
+
+    if side not in ("buy", "sell"):
+        raise LiveExecutionNotAuthorized(f"unsupported side={side!r} for live placement")
+
+    # Lazy import keeps paper-mode boot independent of the Coinbase SDK
+    # state. If the SDK is unavailable, raise loud — easier to diagnose
+    # than a silent skip.
+    try:
+        from app.services import coinbase_service as cb
+    except Exception as exc:
+        raise LiveExecutionNotAuthorized(f"coinbase_service import failed: {exc}") from exc
+
+    if not cb.is_connected():
+        # Try to connect once before giving up — credentials may have
+        # been set after process boot.
+        try:
+            cb.connect()
+        except Exception:
+            pass
+    if not cb.is_connected():
+        raise LiveExecutionNotAuthorized(
+            "coinbase client not connected; configure credentials via vault or env"
+        )
+
+    # Loud, indelible record that a live order is about to leave.
+    logger.critical(
+        "[fast_path] LIVE PLACEMENT %s %s qty=%.8f hint_px=%.6f notional_usd=%.2f",
+        side.upper(), ticker, quantity, fill_price_hint, notional_usd,
     )
+
+    if side == "buy":
+        resp = cb.place_buy_order(ticker, quantity, order_type="market")
+    else:
+        resp = cb.place_sell_order(ticker, quantity, order_type="market")
+
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        # Broker rejected; surface message so the executor's reject
+        # row carries the real reason.
+        msg = (resp or {}).get("error", "unknown_broker_error")
+        raise RuntimeError(f"coinbase rejected order: {msg}")
+
+    order_id = str(resp.get("order_id") or "").strip()
+    if not order_id:
+        raise RuntimeError("coinbase response missing order_id")
+
+    # Post-placement verification — never claim success based on a
+    # local 'sent' flag alone (lesson from the Robinhood swing-path
+    # ELTX incident where chili logged "placed" but Robinhood had
+    # rejected within 250ms). Poll for up to LIVE_VERIFY_TIMEOUT_S.
+    deadline = time.monotonic() + LIVE_VERIFY_TIMEOUT_S
+    last_state = "unknown"
+    while time.monotonic() < deadline:
+        info = cb.get_order_by_id(order_id) or {}
+        state = str(info.get("status") or info.get("order_status") or "").lower()
+        if state:
+            last_state = state
+            if state in ("open", "pending", "filled"):
+                logger.critical(
+                    "[fast_path] LIVE PLACED+VERIFIED order_id=%s ticker=%s "
+                    "side=%s state=%s elapsed=%.2fs",
+                    order_id, ticker, side, state,
+                    LIVE_VERIFY_TIMEOUT_S - (deadline - time.monotonic()),
+                )
+                return order_id
+            if state in ("cancelled", "expired", "failed", "rejected"):
+                raise RuntimeError(f"coinbase terminal-rejected order {order_id}: {state}")
+        time.sleep(LIVE_VERIFY_POLL_INTERVAL_S)
+
+    # Timed out without a definitive state. We DO record the order_id
+    # so reconcile can find it — but log loud so the operator knows
+    # the verification window slipped.
+    logger.critical(
+        "[fast_path] LIVE PLACED but verify timed out order_id=%s ticker=%s "
+        "last_state=%r — reconcile must sweep",
+        order_id, ticker, last_state,
+    )
+    return order_id
 
 
 # ── Executor ──────────────────────────────────────────────────────────
@@ -324,11 +465,30 @@ class FastPathExecutor:
                     ticker, side, quantity, fill_price, notional_usd,
                 )
             except LiveExecutionNotAuthorized as exc:
-                # Stub raises today. Record the attempt so we can see
-                # an operator tried to flip it.
+                # Auth or safety-belt tripped (cap, broker not
+                # connected, etc). Reject row carries the real reason
+                # so the autopilot UI shows it.
                 await self._write_decision(
                     alert, ctx, decision="rejected",
-                    reject_reason=f"live_unimplemented:{exc}",
+                    reject_reason=f"live_blocked:{str(exc)[:48]}",
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=latency_ms,
+                )
+                self._metrics.decisions_rejected += 1
+                return
+            except Exception as exc:
+                # Broker error (network, terminal rejection, etc.) —
+                # surface it visibly. Do NOT update open_positions or
+                # daily_used since no order landed.
+                logger.exception(
+                    "[fast_path] live placement failed ticker=%s side=%s qty=%.8f: %s",
+                    ticker, side, quantity, exc,
+                )
+                await self._write_decision(
+                    alert, ctx, decision="rejected",
+                    reject_reason=f"live_error:{str(exc)[:48]}",
                     gate_run=gate_run, side=side,
                     quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
                     broker_order_id=None, decided_at=decided_at,
@@ -367,14 +527,23 @@ class FastPathExecutor:
     async def _place_live_order(self, ticker: str, side: str,
                                 quantity: float, fill_price: float,
                                 notional_usd: float) -> str:
-        """Wraps the live placement stub in an executor so the event
-        loop stays unblocked when the real implementation lands. For
-        now this just calls the synchronous stub and lets the
-        exception propagate."""
+        """Live Coinbase placement, off the event loop.
+
+        ``_place_coinbase_order_live`` does its own internal verify
+        polling (which sleeps); running it in the default thread pool
+        keeps the asyncio loop responsive for the next alert poll
+        while we wait for broker confirmation.
+
+        Raises ``LiveExecutionNotAuthorized`` if the safety belts trip
+        (cap exceeded, broker not connected, auth flag unset). The
+        caller's try/except converts that to a ``rejected`` decision
+        row with the failure reason — visible in the autopilot UI
+        so the operator can debug without grepping logs.
+        """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            _place_coinbase_order_stub,
+            _place_coinbase_order_live,
             ticker, side, quantity, fill_price, notional_usd,
         )
 
