@@ -30,6 +30,7 @@ from .alert_formatter import (
     format_target_hit,
     format_time_exit,
 )
+from .tick_normalizer import normalize_price as _norm_price
 
 logger = logging.getLogger(__name__)
 
@@ -306,8 +307,17 @@ def _compute_initial_stop(
             sl = entry * (1.0 + pct_stop)
             tp = entry * 0.85
 
-    rd = 8 if is_crypto else 4
-    return round(sl, rd), round(tp, rd)
+    # Phase 1 (2026-05-01): align stop+target to the venue's actual tick
+    # before storage. Previously this rounded equity to 4 decimals, which
+    # then mismatched the broker's 2-decimal rule and caused the broker
+    # to flag the rounded value as invalid post-acceptance. Pass
+    # asset_class explicitly because this function only has the bool;
+    # tick_normalizer's asset_class override skips the ticker pattern test.
+    asset = "crypto" if is_crypto else "equity"
+    return (
+        _norm_price(sl, "", asset_class=asset),
+        _norm_price(tp, "", asset_class=asset),
+    )
 
 
 def evaluate_trade(
@@ -648,10 +658,14 @@ def _apply_stop_to_trade(db: Session, trade, result: StopDecisionResult) -> None
         except (TypeError, ValueError):
             nt = 0.0
         if nt > 0:
-            rd = 8 if _is_crypto(getattr(trade, "ticker", "") or "") else 4
-            rounded = round(nt, rd)
+            # Phase 1 (2026-05-01): venue-aware tick alignment for take_profit.
+            # See _compute_initial_stop for why 4-decimal equity was wrong.
+            sym = getattr(trade, "ticker", "") or ""
+            asset = "crypto" if _is_crypto(sym) else "equity"
+            rounded = _norm_price(nt, sym, asset_class=asset)
             cur = float(trade.take_profit or 0)
-            if trade.take_profit is None or round(cur, rd) != rounded:
+            cur_aligned = _norm_price(cur, sym, asset_class=asset) if cur else 0.0
+            if trade.take_profit is None or cur_aligned != rounded:
                 trade.take_profit = rounded
                 changed = True
     if changed:

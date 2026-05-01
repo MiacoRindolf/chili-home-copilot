@@ -27,6 +27,7 @@ from .trading.broker_position_sync import (
     collapse_open_broker_position_duplicates,
     dedupe_positions_by_ticker,
 )
+from .trading.tick_normalizer import normalize_price
 
 logger = logging.getLogger(__name__)
 
@@ -2080,7 +2081,13 @@ def place_buy_order(
                 symbol=ticker,
                 quantity=quantity,
                 side="buy",
-                limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
+                # Phase 1 (2026-05-01): venue-aware tick alignment.
+                # Replaces destructive round(*, 2) which truncated sub-dollar
+                # equity prices (NMS Rule 612 sub-dollar tick is $0.0001).
+                limitPrice=(
+                    normalize_price(limit_price, ticker, asset_class="equity")
+                    if order_type == "limit" and limit_price else None
+                ),
                 timeInForce=tif,
                 extendedHours=session_kwargs["extendedHours"],
                 market_hours=session_kwargs["market_hours"],
@@ -2168,7 +2175,11 @@ def place_sell_order(
                 symbol=ticker,
                 quantity=quantity,
                 side="sell",
-                limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
+                # Phase 1 (2026-05-01): venue-aware tick alignment.
+                limitPrice=(
+                    normalize_price(limit_price, ticker, asset_class="equity")
+                    if order_type == "limit" and limit_price else None
+                ),
                 timeInForce=tif,
                 extendedHours=session_kwargs["extendedHours"],
                 market_hours=session_kwargs["market_hours"],
@@ -2287,7 +2298,11 @@ def place_sell_stop_loss_order(
                 symbol=ticker,
                 quantity=quantity,
                 side="sell",
-                stopPrice=round(float(trigger_price), 2),
+                # Phase 1 (2026-05-01): the destructive round(*, 2) here was
+                # the smoking-gun for the 2026-05-01 incident. CCCC 2.5898 →
+                # 2.59 was getting flagged invalid by Robinhood post-acceptance.
+                # tick_normalizer aligns to the venue's actual rule.
+                stopPrice=normalize_price(trigger_price, ticker, asset_class="equity"),
                 timeInForce="gtc",
                 extendedHours=session_kwargs["extendedHours"],
                 market_hours=session_kwargs["market_hours"],
@@ -2420,7 +2435,11 @@ def place_crypto_buy_order(
                 return rh.orders.order_buy_crypto_limit(
                     symbol=base,
                     quantity=quantity,
-                    limitPrice=round(float(limit_price), 2),
+                    # Phase 1 (2026-05-01): crypto needs 8-decimal precision.
+                    # The previous round(*, 2) silently destroyed sub-penny
+                    # crypto prices (DOGE-USD 0.10984 → 0.11 = 1.4% slippage).
+                    # ``ticker`` (full -USD form) drives venue detection.
+                    limitPrice=normalize_price(limit_price, ticker, asset_class="crypto"),
                     timeInForce="gtc",
                     jsonify=True,
                 )
@@ -2498,7 +2517,8 @@ def place_crypto_sell_order(
                 return rh.orders.order_sell_crypto_limit(
                     symbol=base,
                     quantity=quantity,
-                    limitPrice=round(float(limit_price), 2),
+                    # Phase 1 (2026-05-01): see place_crypto_buy_order for context.
+                    limitPrice=normalize_price(limit_price, ticker, asset_class="crypto"),
                     timeInForce="gtc",
                     jsonify=True,
                 )
@@ -2725,7 +2745,9 @@ def place_option_buy_order(
             return rh.orders.order_buy_option_limit(
                 positionEffect="open",
                 creditOrDebit="debit",  # buying-to-open is always a debit
-                price=round(float(limit_price), 2),
+                # Phase 1 (2026-05-01): OPRA tier alignment.
+                # Premium ≥ $3 → penny tick; < $3 → nickel ($0.05) tick.
+                price=normalize_price(limit_price, sym, asset_class="option"),
                 symbol=sym,
                 quantity=int(quantity),
                 expirationDate=expiration,
@@ -2825,7 +2847,8 @@ def place_option_sell_order(
             return rh.orders.order_sell_option_limit(
                 positionEffect=pe,
                 creditOrDebit=cod,
-                price=round(float(limit_price), 2),
+                # Phase 1 (2026-05-01): OPRA tier alignment.
+                price=normalize_price(limit_price, sym, asset_class="option"),
                 symbol=sym,
                 quantity=int(quantity),
                 expirationDate=expiration,
@@ -2927,9 +2950,13 @@ def place_option_spread(
         import robin_stocks.robinhood as rh
 
         def _do_spread():
+            # Phase 1 (2026-05-01): spread net premium follows OPRA tick.
+            # If individual legs are sub-$3, the spread net is too —
+            # nickel tick. tick_normalizer handles the dispatch.
+            spread_price = normalize_price(limit_price, sym, asset_class="option")
             if direction_l == "debit":
                 return rh.orders.order_option_debit_spread(
-                    price=round(float(limit_price), 2),
+                    price=spread_price,
                     symbol=sym,
                     quantity=int(quantity),
                     spread=spread,
@@ -2937,7 +2964,7 @@ def place_option_spread(
                     jsonify=True,
                 )
             return rh.orders.order_option_credit_spread(
-                price=round(float(limit_price), 2),
+                price=spread_price,
                 symbol=sym,
                 quantity=int(quantity),
                 spread=spread,
