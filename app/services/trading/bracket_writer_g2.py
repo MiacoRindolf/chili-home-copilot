@@ -802,6 +802,16 @@ def place_missing_stop(
             "cancelled %s covering sell order(s); proceeding to place stop",
             bracket_intent_id, ticker, cancelled,
         )
+        # Reset the local held_for_sells value: we just cancelled every
+        # open sell order for this ticker, so the held bucket is empty.
+        # Without this, the capping logic below would compute
+        # ``available = broker_qty - held_for_sells = 0`` from the stale
+        # pre-cancel value and the writer would attempt a 0-share
+        # placement (caught by the broker as "invalid quantity"). The
+        # broker's positions snapshot needs ~1s longer than our sleep to
+        # update, so re-querying isn't reliable; trusting our own cancel
+        # outcome is.
+        held_for_sells = 0.0
 
     # Cap at the available bucket if it's known and below local_quantity.
     if broker_qty is not None and held_for_sells is not None:
