@@ -1575,13 +1575,15 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 "trade#%s left with pnl=NULL (no fake PnL=0).",
                 trade.ticker, trade.id,
             )
-        try:
-            from .trading.tca_service import apply_tca_on_trade_close
-
-            trade.tca_reference_exit_price = exit_price
-            apply_tca_on_trade_close(trade)
-        except Exception:
-            pass
+        # R28 (2026-04-30): TCA call removed from this synthetic-close path.
+        # The original code did `tca_reference_exit_price = exit_price` then
+        # called apply_tca_on_trade_close, but `exit_price` was undefined in
+        # this scope (latent NameError silently swallowed by the bare
+        # except). Even if the var were valid, setting ref = fill produces
+        # slippage = 0 by construction -- a corrupt zero rather than a
+        # genuine measurement. Leaving tca_exit_slippage_bps NULL is the
+        # honest state for an externally-driven close where CHILI made no
+        # decision and has no reference price.
         try:
             from .trading.brain_work.execution_hooks import on_broker_reconciled_close
 
@@ -1671,13 +1673,14 @@ def cleanup_manual_trades(
                 f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}. "
                 f"Exit ~${exit_price:.2f} (market quote)."
             )
-            try:
-                from .trading.tca_service import apply_tca_on_trade_close
-
-                trade.tca_reference_exit_price = exit_price
-                apply_tca_on_trade_close(trade)
-            except Exception:
-                pass
+            # R28 (2026-04-30): TCA call removed from this synthetic-close
+            # path. The original code set tca_reference_exit_price = the
+            # SAME market quote it had just written to trade.exit_price,
+            # then called apply_tca_on_trade_close -- producing slippage =
+            # (ref - fill) / ref = 0 every time. Corrupt zeros that
+            # masquerade as real measurements. Leaving the column NULL
+            # is the honest state when CHILI synthesized the close from a
+            # market quote rather than a decision-time reference.
             try:
                 from .trading.brain_work.execution_hooks import on_broker_reconciled_close
 

@@ -88,13 +88,51 @@ ON starts the daily 03:30 PT feature-collection job and the weekly Sun
 parameter-learning has produced at least one non-trivial threshold update
 that the operator agrees with.
 
-### Phase 2 — Promote Phase F (execution realism) shadow→compare (3–6 weeks)
+### Phase 2 — Promote Phase F (execution realism) shadow→authoritative (3–8 weeks)
 
-The audit's highest-leverage recommendation. Phase F (`brain_execution_cost_mode`,
-`brain_venue_truth_mode`) writes execution-cost estimates and venue-truth logs
-in shadow. Promoting to "compare" means the autotrader compares the modeled
-cost against the realized cost on every fill, surfacing divergence — but does
-NOT yet gate on the model.
+**Update 2026-04-30 (post-probe):** the original plan assumed Phase F was
+in shadow mode with data accumulating, just not consumed. Probe showed
+the reality is more inert:
+- `trading_execution_cost_estimates`: 0 rows
+- `trading_venue_truth_log`: 0 rows
+- `compute_rolling_estimate` is NEVER called by any scheduled job
+- `record_venue_truth_observation` is NEVER called by any trade-close hook
+- `brain_execution_cost_mode` is checked only by the builder itself; no
+  consumer reads it
+- `_ALLOWED_MODES = ('off', 'shadow', 'authoritative')` — no `compare`
+  intermediate exists in the code
+
+So Phase 2 must be split:
+
+**Phase 2a — wire the producer + recorder (3–5 weeks).** Build the
+plumbing that fills the existing-but-empty tables. Three pieces:
+
+1. **Scheduled job** (`_run_execution_cost_rebuild_job`, daily 04:00 PT,
+   role=cron_only): iterate open universe, call
+   `compute_rolling_estimate` per (ticker, side, window_days), upsert
+   into `trading_execution_cost_estimates`. Mode-gated on
+   `brain_execution_cost_mode != 'off'`.
+
+2. **Trade-close hook**: when a Trade closes, fetch the modeled cost
+   estimate, compute realized slippage from
+   `trade.tca_entry_slippage_bps / tca_exit_slippage_bps`, and call
+   `record_venue_truth_observation` to land a row. Should run from
+   `_finalize_filled_exit` and from `sync_positions_to_db`'s close path.
+
+3. **Verify accumulation**: after 7 days of closed trades, both tables
+   should have non-zero rows. Read `/api/brain/ops-health` to verify
+   the `execution_cost` and `venue_truth` summary fields are non-empty.
+
+**Phase 2b — wire the consumer + flip mode (3 weeks after 2a).** With
+data flowing, gate on it:
+
+1. Read `execution_cost_model.estimate_cost_fraction` in autotrader
+   entry path (`auto_trader._gate_entry_cost`). Block entries where
+   `expected_cost > max_cost_bps_for_pattern`.
+2. Flip `brain_execution_cost_mode = authoritative` (now meaningful
+   because consumer reads it).
+3. Monitor for 14 days: did entry rate drop? did expectancy improve
+   net of cost?
 
 **Steps:**
 

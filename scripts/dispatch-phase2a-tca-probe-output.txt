@@ -1,0 +1,47 @@
+﻿# Phase 2a TCA prerequisite probe 04/30/2026 17:04:24
+
+===== TCA column coverage on closed trades last 30 days =====
+ broker_source | total_closed | has_entry_slip | has_exit_slip | both 
+---------------+--------------+----------------+---------------+------
+ robinhood     |          148 |              0 |           103 |    0
+ coinbase      |            1 |              0 |             0 |    0
+(2 rows)
+
+
+
+===== TCA-populated examples (most recent 10) =====
+  id  | ticker | broker_source | entry_slip | exit_slip |  entry  |  exit   |         exit_date          
+------+--------+---------------+------------+-----------+---------+---------+----------------------------
+  392 | SPY    | robinhood     |            |      0.00 |  4.0100 |  2.4400 | 
+ 1793 | JOB    | robinhood     |            |      0.00 |  0.2366 |  0.2349 | 2026-04-30 00:56:01.41611
+ 1792 | CRDL   | robinhood     |            |      0.00 |  1.4485 |  1.3300 | 2026-04-30 00:56:01.405434
+ 1791 | CCCC   | robinhood     |            |      0.00 |  2.8150 |  2.5700 | 2026-04-30 00:56:01.395278
+ 1787 | IMTX   | robinhood     |            |      0.00 | 10.4050 | 11.2000 | 2026-04-30 00:56:01.387277
+ 1789 | EKSO   | robinhood     |            |      0.00 | 11.7300 | 11.4000 | 2026-04-30 00:56:01.376761
+ 1790 | TLS    | robinhood     |            |      0.00 |  4.3650 |  4.3900 | 2026-04-30 00:56:01.340045
+ 1478 | ELTX   | robinhood     |            |      0.00 | 12.0200 | 10.3200 | 2026-04-30 00:50:01.319638
+ 1788 | AIDX   | robinhood     |            |      0.00 |  2.0000 |  1.5100 | 2026-04-30 00:50:01.308532
+ 1786 | VFS    | robinhood     |            |      0.00 |  4.5398 |  4.0800 | 2026-04-30 00:50:01.240008
+(10 rows)
+
+
+
+===== is the TCA writer actually firing? Check apply_tca_on_trade_close call sites =====
+
+
+===== candidate ticker universe for rebuild_all (closed trades last 60 days) =====
+ uniq_tickers | total_rows 
+--------------+------------
+          125 |        257
+(1 row)
+
+
+
+===== venue_truth.record_fill_observation call sites (any?) =====
+
+
+===== execution_cost_builder.rebuild_all call sites (any?) =====
+
+
+===== scheduler-worker role + sample of registered jobs (where would I add the new job?) =====
+

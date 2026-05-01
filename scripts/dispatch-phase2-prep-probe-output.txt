@@ -1,0 +1,86 @@
+﻿# Phase 2 prep: probe execution cost + venue truth state 04/30/2026 15:29:22
+
+===== current mode flags =====
+execution_cost_mode: shadow
+venue_truth_mode: shadow
+position_sizer_mode: shadow
+risk_dial_mode: shadow
+capital_reweight_mode: shadow
+
+
+===== trading_execution_cost_estimates: row counts and freshness =====
+ side | window_days | rows | most_recent | oldest 
+------+-------------+------+-------------+--------
+(0 rows)
+
+
+
+===== trading_execution_cost_estimates: top 10 most-active tickers =====
+ ticker | side | window_days | med_spread | p90_spread | med_slip | sample_trades | last_updated_at 
+--------+------+-------------+------------+------------+----------+---------------+-----------------
+(0 rows)
+
+
+
+===== trading_venue_truth_log: row counts by mode + paper/live =====
+ mode | paper_bool | rows | most_recent 
+------+------------+------+-------------
+(0 rows)
+
+
+
+===== trading_venue_truth_log: realized vs expected divergence (recent paper trades) =====
+ n | avg_exp_bps | avg_real_bps | avg_divergence_bps 
+---+-------------+--------------+--------------------
+ 0 |             |              |                   
+(1 row)
+
+
+
+===== execution_cost_builder mode + flags =====
+_ALLOWED_MODES: ('off', 'shadow', 'authoritative')
+_effective_mode(): shadow
+mode_is_active(): True
+
+
+===== consumers of execution_cost_model -- where would 'authoritative' actually gate decisions? =====
+execution_cost_model functions:
+  Any
+  CostFractionBreakdown
+  Mapping
+  dataclass
+  estimate_capacity_usd
+  estimate_cost_fraction
+
+
+===== trading_position_sizer_log row count + freshness (Phase H) =====
+docker : ERROR:  column "created_at" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-phase2-prep-probe.ps1:43 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  column ... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: SELECT COUNT(*) AS rows, MAX(created_at) AS most_recent FROM...
+                                     ^
+
+
+===== schema_version: most recent migrations applied =====
+                     version_id                     |         applied_at         
+----------------------------------------------------+----------------------------
+ 214_trade_table_check_constraints                  | 2026-04-30 16:30:16.98486
+ 213_demote_negative_ev_promoted_patterns           | 2026-04-30 15:36:39.108622
+ 212_backtest_queue_zero_trade_counter              | 2026-04-30 12:27:41.772699
+ 211_backfill_avg_return_pct_from_trading_backtests | 2026-04-30 11:31:42.211568
+ 210_backfill_avg_return_pct_from_pattern_trades    | 2026-04-30 10:58:08.18488
+ 209_widen_macro_regime_label_columns               | 2026-04-30 10:51:02.437573
+ 208_pattern_trades_dedupe_and_clamp                | 2026-04-30 10:17:10.534799
+ 207_avg_return_pct_unit_fix                        | 2026-04-30 09:58:01.874715
+ 206_realized_ev_retroactive_demote                 | 2026-04-30 09:49:28.387816
+ 205_phantom_trade_30min_sweep                      | 2026-04-30 09:49:28.221296
+(10 rows)
+
+
+
+===== what consumes brain_execution_cost_mode in trading code (grep hits) =====
+
