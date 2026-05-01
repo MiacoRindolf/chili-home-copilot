@@ -736,25 +736,60 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
-    # FIX 57 (2026-05-01) — cancel covering sell order, then proceed.
+    # FIX 57 (2026-05-01) + 2026-05-01 revision — covered-by-existing-sell handling.
     #
     # When every share is already committed to an existing sell order
     # (held_for_sells >= broker_qty), a SELL_STOP placement gets rejected
-    # with "Not enough shares to sell." Operator policy (user request,
-    # 2026-05-01): cancel the covering sell order(s) so the shares free
-    # up, then place the SELL_STOP on the now-free shares. The covering
-    # order is typically a take-profit limit-sell from a prior round —
-    # losing it means losing the upside lock-in, but the user prioritizes
-    # downside protection. After the cancel, we sleep ~2s for the cancel
-    # to propagate at Robinhood, then continue into the placement path.
-    # If the placement still fails (Robinhood race, instrument
-    # restriction, etc.), the existing FIX 52 terminal-reject cooldown
-    # absorbs the next attempt.
+    # with "Not enough shares to sell."
+    #
+    # DEFAULT POLICY (2026-05-01): SKIP placement. The covering sell order
+    # is typically a take-profit limit the user (or chili at an earlier
+    # round) deliberately placed. Cancelling it to free shares for a stop
+    # destroys the upside lock-in. The position is still protected — by
+    # the existing limit-sell, just at a different price level.
+    #
+    # OPT-IN POLICY: set ``CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1``
+    # to revive the original behavior — cancel the covering order, sleep
+    # 2s for the cancel to propagate, then place the SELL_STOP. Use this
+    # when downside protection is more important than upside lock-in for
+    # the position class you're trading.
     if (
         broker_qty is not None
         and held_for_sells is not None
         and held_for_sells >= broker_qty - 1e-9  # tolerance for float compare
     ):
+        cancel_covering = bool(
+            getattr(settings, "chili_bracket_writer_cancel_covering_sell", False)
+        )
+        if not cancel_covering:
+            logger.info(
+                f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+                "ticker=%s reason=covered_by_existing_sell broker_qty=%s "
+                "held_for_sells=%s (existing sell preserved; set "
+                "CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1 to override)",
+                bracket_intent_id, ticker, broker_qty, held_for_sells,
+            )
+            # Persist the skip so the reconciler doesn't re-classify as
+            # missing_stop next sweep — the position IS protected, just by
+            # the existing sell. Treat this as terminal_reject with a
+            # specific reason; operator can flip the env var + transition
+            # back to intent if they change their mind.
+            try:
+                from .bracket_intent_writer import mark_terminal_reject as _mtr
+                _mtr(
+                    db, int(bracket_intent_id),
+                    reason="covered_by_existing_sell:protected_by_limit",
+                )
+            except Exception:
+                logger.debug(
+                    f"{BRACKET_WRITER_G2} mark_terminal_reject persist failed",
+                    exc_info=True,
+                )
+            return WriterAction(
+                action="place_missing_stop", ok=False,
+                reason="covered_by_existing_sell",
+                broker_source=broker_source, ticker=ticker,
+            )
         logger.warning(
             f"{BRACKET_WRITER_G2} place_missing_stop intent=%s ticker=%s "
             "covered_by_existing_sell broker_qty=%s held_for_sells=%s — "

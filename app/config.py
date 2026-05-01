@@ -2186,6 +2186,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP"),
     )
+    # 2026-05-01 (Phase A re-enable): when an existing sell order covers
+    # the entire position (held_for_sells == quantity), a SELL_STOP would
+    # be rejected with "Not enough shares to sell." DEFAULT False → skip
+    # the placement and preserve the existing sell. Setting True reverts
+    # to the FIX 57 behavior — cancel the covering sell first, then place
+    # the stop. Operator opt-in: prioritise downside protection over
+    # upside lock-in for the affected positions.
+    chili_bracket_writer_cancel_covering_sell: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL"),
+    )
     # Round 23 - sweep-side gate that wires the G2 writer into the
     # reconciliation sweep's post-classify hook. Default OFF so the
     # Phase G.2 writer module can ship without immediately flipping the
