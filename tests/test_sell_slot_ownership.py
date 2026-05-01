@@ -31,6 +31,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = REPO_ROOT / "app"
 
 # Allowed SELL-placement files / directories.
+#
+# The guard's intent is "no AUTONOMOUS sell submissions outside the
+# bracket lifecycle modules". User-facing routers (manual sell from the
+# UI), the boundary services, and the dispatcher are all out of scope —
+# the user explicitly clicked sell, that's not the bracket race condition
+# we're guarding against.
 EXEMPT_PATHS = {
     APP_ROOT / "services" / "broker_service.py",
     APP_ROOT / "services" / "coinbase_service.py",
@@ -41,6 +47,7 @@ EXEMPT_PATHS = {
     APP_ROOT / "services" / "trading" / "momentum_neural" / "live_runner.py",
     APP_ROOT / "services" / "trading" / "momentum_neural" / "automation_query.py",
     APP_ROOT / "services" / "broker_account_repair.py",  # cleanup utility
+    APP_ROOT / "routers",  # user-facing endpoints (manual sells from UI)
 }
 
 
