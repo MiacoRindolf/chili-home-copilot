@@ -1,21 +1,5 @@
 """Phase G.2 - bracket writer (ACTIVE).
 
-FIX 52 (2026-05-01) — per-intent rejection cooldown for terminal-class
-broker rejections. When Robinhood rejects a SELL_STOP with "Not enough
-shares to sell" (or other terminal-class reasons that won't self-resolve
-on retry — qty mismatches, account-type restrictions, instrument-suspended
-flags), we mark the intent as cooled-down for ``_TERMINAL_REJECT_COOLDOWN``
-seconds. Subsequent sweep ticks within that window skip the placement
-attempt instead of producing another reject + Robinhood notification.
-
-This complements the pre-flight ``broker_qty`` check in the reconciler
-which catches the case where ``BrokerView.position_quantity`` is zero or
-stale-low. The cooldown handles the leftover case where the BrokerView
-reports plenty of shares but the broker still rejects (committed to
-other resting orders, T+1 unsettled, account restriction, etc.). One
-rejection is enough to start the storm; the cooldown stops it at one.
-"""
-
 The Phase G sweep is read-only: it classifies drift but never repairs.
 Phase G.2 closes that gap by letting the reconciler act on specific
 classification outcomes - resize a stop to match a partial fill, place
@@ -91,6 +75,20 @@ trail and venue-health metrics stay accurate.
   the watchdog flag is enabled.
 * The execution-event lag gauge catches stale broker state that
   would make the writer act on outdated data.
+
+FIX 52 (2026-05-01) - per-intent terminal-reject cooldown:
+
+When Robinhood rejects a SELL_STOP with "Not enough shares to sell" (or
+other terminal-class messages: instrument suspended, fractional-share
+restriction, T+1 settlement violation, etc.), we mark the intent as
+cooled-down for ``_TERMINAL_REJECT_COOLDOWN_SECS`` (1 hour). Subsequent
+sweep ticks within that window skip the placement entirely instead of
+producing another reject + Robinhood user notification. This complements
+the pre-flight ``broker_qty`` check in the reconciler (which catches
+the case where ``BrokerView.position_quantity`` is zero or stale-low);
+the cooldown handles the leftover case where the BrokerView reports
+plenty of shares but the broker still rejects. One rejection is enough
+to start a storm; the cooldown stops it at one.
 """
 from __future__ import annotations
 
@@ -156,6 +154,42 @@ def _is_in_reject_cooldown(bracket_intent_id: int) -> bool:
 def _arm_reject_cooldown(bracket_intent_id: int) -> None:
     _intent_reject_cooldown[int(bracket_intent_id)] = (
         time.time() + _TERMINAL_REJECT_COOLDOWN_SECS
+    )
+
+
+# FIX 53 (2026-05-01) — post-placement cooldown.
+#
+# When the broker accepts a stop placement (returns ok=true with an
+# order_id) but the order doesn't actually persist as a resting stop
+# (Robinhood may auto-cancel unconfirmed orders, or the order goes to
+# 'unconfirmed' and never confirms), the next 60-second sweep classifies
+# the intent as missing_stop again and places ANOTHER stop. The user
+# sees a Robinhood notification per placement-then-cancel cycle. The
+# 60-second sweep cadence is faster than the broker's confirm/cancel
+# cycle, so without a post-placement cooldown we churn 60+ orders per
+# hour against the same intent.
+#
+# Five-minute cooldown after a successful placement gives the broker
+# time to confirm or auto-cancel before we retry. If the stop genuinely
+# didn't take, the next attempt happens 5 min later, not 1 min later --
+# 12x reduction in placement spam without giving up on the intent.
+_POST_PLACE_COOLDOWN_SECS = 300  # 5 min
+_intent_post_place_cooldown: dict[int, float] = {}
+
+
+def _is_in_post_place_cooldown(bracket_intent_id: int) -> bool:
+    until = _intent_post_place_cooldown.get(int(bracket_intent_id))
+    if until is None:
+        return False
+    if time.time() >= until:
+        _intent_post_place_cooldown.pop(int(bracket_intent_id), None)
+        return False
+    return True
+
+
+def _arm_post_place_cooldown(bracket_intent_id: int) -> None:
+    _intent_post_place_cooldown[int(bracket_intent_id)] = (
+        time.time() + _POST_PLACE_COOLDOWN_SECS
     )
 
 
@@ -571,6 +605,22 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
+    # FIX 53 (2026-05-01) — short-circuit if we placed an order recently
+    # for this same intent. Lets the broker confirm or auto-cancel before
+    # we retry; otherwise the 60s sweep cadence outruns the broker's
+    # confirm cycle and we churn orders that all get cancelled.
+    if _is_in_post_place_cooldown(bracket_intent_id):
+        logger.info(
+            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+            "ticker=%s reason=in_post_place_cooldown",
+            bracket_intent_id, ticker,
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False,
+            reason="in_post_place_cooldown",
+            broker_source=broker_source, ticker=ticker,
+        )
+
     if (broker_source or "").lower() not in _SUPPORTED_VENUES:
         return WriterAction(
             action="place_missing_stop", ok=False, reason="unsupported_venue",
@@ -707,6 +757,9 @@ def place_missing_stop(
         "price=%s new_order=%s",
         bracket_intent_id, ticker, local_quantity, stop_price, new_oid,
     )
+    # FIX 53 — arm post-placement cooldown so we don't bombard the
+    # broker with duplicate stops faster than it can confirm them.
+    _arm_post_place_cooldown(bracket_intent_id)
     _g2_event(
         db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
         ticker=ticker, broker_source=broker_source,
