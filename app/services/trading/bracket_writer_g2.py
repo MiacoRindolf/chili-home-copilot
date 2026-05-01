@@ -506,7 +506,53 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
+    # FIX 51 (2026-05-01) — last-mile broker-quantity guard.
+    #
+    # The reconciler's _invoke_writer_for_decision already pre-flights the
+    # broker share count (skip if zero, cap if low). This second-line check
+    # protects callers that bypass the reconciler — tests, ad-hoc scripts,
+    # any future caller that forgets the pre-flight. We can't reach the
+    # BrokerView from here so we re-query positions through the adapter.
+    # If the broker actually has zero shares, fail fast with a structured
+    # reason so the caller doesn't paper over the rejection as a generic
+    # ``place_failed``.
     adapter = adapter_factory(broker_source)
+    try:
+        positions = adapter.get_positions() or {}
+        # Adapter shape: {ticker: {"quantity": float, ...}, ...}.
+        pos_entry = positions.get(ticker) or positions.get(str(ticker).upper()) or {}
+        broker_qty_raw = (
+            pos_entry.get("quantity") if isinstance(pos_entry, dict) else None
+        )
+        broker_qty = float(broker_qty_raw) if broker_qty_raw is not None else None
+    except Exception:
+        # If we can't read positions, defer to the broker — old behavior.
+        # The broker will reject "Not enough shares" if applicable; we won't
+        # block a legitimate placement just because the position-read failed.
+        broker_qty = None
+
+    if broker_qty is not None and broker_qty <= 0:
+        # Per module docstring, skipped early-returns do not record an audit
+        # row (they would fire every sweep on the same orphan intent and
+        # drown the audit log). The structured log line below is the
+        # operator-visible signal.
+        logger.warning(
+            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+            "ticker=%s reason=broker_qty_zero local_qty=%s",
+            bracket_intent_id, ticker, local_quantity,
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="broker_qty_zero",
+            broker_source=broker_source, ticker=ticker,
+        )
+    if broker_qty is not None and broker_qty < float(local_quantity):
+        logger.warning(
+            f"{BRACKET_WRITER_G2} place_missing_stop capping qty intent=%s "
+            "ticker=%s local_qty=%s broker_qty=%s",
+            bracket_intent_id, ticker, local_quantity, broker_qty,
+        )
+        local_quantity = broker_qty
+
     client_oid = _build_coid("miss", bracket_intent_id, float(local_quantity))
 
     _g2_event(

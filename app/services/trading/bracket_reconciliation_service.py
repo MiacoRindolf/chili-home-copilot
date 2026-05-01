@@ -674,6 +674,76 @@ def _invoke_writer_for_decision(
         if decision.kind == "missing_stop":
             if local.stop_price is None or local.quantity is None:
                 return None
+            # FIX 51 (2026-05-01) — pre-flight broker-quantity check.
+            #
+            # The writer was submitting SELL_STOP orders sized to
+            # ``local.quantity`` (the bracket_intent's stored qty) without
+            # confirming the user actually held that many shares. When the
+            # broker position drifted below local.quantity (manual sell,
+            # phantom trade, partial fill that didn't reconcile), every
+            # 2-min sweep produced a rejection storm:
+            #   "Not enough shares to sell." -> place_failed
+            #   classify next sweep as missing_stop again -> retry forever
+            # That looped at the broker AND triggered Robinhood reject
+            # notifications to the user. Triage 2026-05-01: AIDX, CCCC,
+            # CRDL, TLS, VFS were all exhibiting this for hours.
+            #
+            # Resolution rules (data already on hand from the BrokerView):
+            #   * broker not available           -> skip (broker_down sweep)
+            #   * broker_qty == 0 / None         -> skip; the position is
+            #     gone, the stop is meaningless, and trying produces an
+            #     immediate reject. The orphan-intent cleanup path is
+            #     responsible for clearing the bracket_intent row.
+            #   * broker_qty < local_qty         -> cap to broker_qty so we
+            #     still protect whatever is actually held. Better partial
+            #     coverage than no coverage.
+            #   * broker_qty >= local_qty        -> proceed unchanged.
+            local_qty = float(local.quantity)
+            broker_qty = (
+                float(broker.position_quantity)
+                if (broker is not None and broker.available
+                    and broker.position_quantity is not None)
+                else None
+            )
+            if broker_qty is None:
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} place_missing_stop SKIPPED "
+                    "trade=%s intent=%s ticker=%s reason=broker_qty_unknown",
+                    local.trade_id, local.bracket_intent_id, local.ticker,
+                )
+                return {
+                    "writer": "place_missing_stop",
+                    "ok": False,
+                    "reason": "skipped_broker_qty_unknown",
+                    "new_stop_order_id": None,
+                    "qty": None,
+                    "stop_price": None,
+                }
+            if broker_qty <= 0:
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} place_missing_stop SKIPPED "
+                    "trade=%s intent=%s ticker=%s reason=broker_qty_zero "
+                    "local_qty=%s",
+                    local.trade_id, local.bracket_intent_id, local.ticker,
+                    local_qty,
+                )
+                return {
+                    "writer": "place_missing_stop",
+                    "ok": False,
+                    "reason": "skipped_broker_qty_zero",
+                    "new_stop_order_id": None,
+                    "qty": None,
+                    "stop_price": None,
+                }
+            placement_qty = min(local_qty, broker_qty)
+            if placement_qty < local_qty:
+                logger.warning(
+                    f"{BRACKET_RECONCILIATION} place_missing_stop CAPPED "
+                    "trade=%s intent=%s ticker=%s local_qty=%s broker_qty=%s "
+                    "placing=%s (broker has fewer shares than bracket_intent)",
+                    local.trade_id, local.bracket_intent_id, local.ticker,
+                    local_qty, broker_qty, placement_qty,
+                )
             action = place_missing_stop(
                 db,
                 trade_id=int(local.trade_id),
@@ -681,7 +751,7 @@ def _invoke_writer_for_decision(
                 ticker=str(local.ticker or ""),
                 broker_source=str(local.broker_source or ""),
                 decision=decision,
-                local_quantity=float(local.quantity),
+                local_quantity=float(placement_qty),
                 stop_price=float(local.stop_price),
             )
             return {
