@@ -34,6 +34,7 @@ APP_ROOT = REPO_ROOT / "app"
 EXEMPT_PATHS = {
     APP_ROOT / "services" / "broker_service.py",
     APP_ROOT / "services" / "coinbase_service.py",
+    APP_ROOT / "services" / "broker_manager.py",  # dispatcher → broker_service / coinbase_service
     APP_ROOT / "services" / "trading" / "venue",
     APP_ROOT / "services" / "trading" / "bracket_writer_g2.py",
     APP_ROOT / "services" / "trading" / "robinhood_exit_execution.py",
