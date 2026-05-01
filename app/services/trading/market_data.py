@@ -1009,10 +1009,23 @@ def compute_indicators(
     if preloaded_df is None:
         with _ind_cache_lock:
             if len(_ind_cache) >= _IND_CACHE_MAX:
+                # FIX 50 (2026-05-01) — eviction had a hot-path bug: when ALL
+                # entries are within TTL (e.g. learning cycle is currently
+                # iterating through 10k+ tickers in <30 min), `stale` is empty,
+                # zero entries are deleted, and the next line still adds a new
+                # one. The dict grows unbounded beyond _IND_CACHE_MAX. Over
+                # 9 hours this was the primary scheduler-worker leak source —
+                # mem_watcher snapshots showed dict / list / function counts
+                # growing monotonically with the indicator-cache fingerprint.
+                # Falling back to `clear()` when no stale entries exist
+                # guarantees the size cap. (The same fallback already exists
+                # in scanner.py:_cache_put for the same reason.)
                 cutoff = now - _IND_CACHE_TTL
                 stale = [k for k, v in _ind_cache.items() if v[0] < cutoff]
                 for k in stale:
                     del _ind_cache[k]
+                if len(_ind_cache) >= _IND_CACHE_MAX:
+                    _ind_cache.clear()
             _ind_cache[cache_key] = (now, result)
     return result
 

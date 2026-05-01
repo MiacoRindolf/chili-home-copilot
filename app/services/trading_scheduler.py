@@ -2113,9 +2113,19 @@ def _run_memory_watcher_job():
             _vm_rss_kb = _vm_size_kb = _threads = 0
 
         counts: dict[str, int] = {}
+        # FIX 50 (2026-05-01) — track function/closure provenance. When the
+        # function count grows monotonically across snapshots, the question is
+        # WHICH function is being created on the hot path. Tally by
+        # __qualname__ for FunctionType objects only (cheap; ~50k objects max,
+        # one getattr each) so the next snapshot tells us the leaker by name.
+        qualname_counts: dict[str, int] = {}
         for obj in _gc.get_objects():
             t = type(obj).__name__
             counts[t] = counts.get(t, 0) + 1
+            if t == "function":
+                qn = getattr(obj, "__qualname__", None)
+                if qn:
+                    qualname_counts[qn] = qualname_counts.get(qn, 0) + 1
         total = sum(counts.values())
 
         # Top 12 by absolute count
@@ -2129,12 +2139,18 @@ def _run_memory_watcher_job():
         deltas.sort(reverse=True)
         top_delta = deltas[:5]
 
+        # Top 5 functions by absolute count — these are the survivors. Any
+        # __qualname__ with a count in the thousands is almost certainly a
+        # closure being created in a hot loop and pinned somewhere.
+        top_qualnames = sorted(qualname_counts.items(), key=lambda x: -x[1])[:5]
+
         logger.info(
             "[mem_watcher] vm_rss=%dMB vm_size=%dMB threads=%d py_objects=%d "
-            "top_abs=%s top_delta_since_last=%s",
+            "top_abs=%s top_delta_since_last=%s top_qualnames=%s",
             _vm_rss_kb // 1024, _vm_size_kb // 1024, _threads, total,
             [(t, n) for t, n in top_abs[:6]],
             [(t, f"+{d}", f"now={n}") for d, t, n in top_delta],
+            top_qualnames,
         )
 
         _mem_watcher_prev_counts = counts
