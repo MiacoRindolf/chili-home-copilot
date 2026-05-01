@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from .db_writer import FastPathDBWriter
+from .executor import FastPathExecutor
 from .healthz import HealthzServer
 from .settings import FastPathSettings
 from .status_tracker import StatusTracker
@@ -37,6 +38,7 @@ class FastPathSupervisor:
         self._status: StatusTracker | None = None
         self._ws: CoinbaseWSClient | None = None
         self._healthz: HealthzServer | None = None
+        self._executor: FastPathExecutor | None = None
         self._metrics_task: asyncio.Task | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -75,8 +77,19 @@ class FastPathSupervisor:
         await self._healthz.start()
         await self._db_writer.start()
 
+        # F4: executor reads from fast_alerts (written by F3 scanner)
+        # and decides paper/live actions. It's only useful when
+        # ingestion is enabled — if enabled=False, no alerts will be
+        # written, so don't spin it up.
+        if self._settings.enabled:
+            self._executor = FastPathExecutor(
+                self._settings, self._engine, self._ws._book,  # noqa: SLF001
+            )
+
         if self._settings.enabled:
             await self._ws.start()
+            if self._executor is not None:
+                await self._executor.start()
         else:
             logger.warning(
                 "[fast_path] CHILI_FAST_PATH_ENABLED=0 — supervisor up "
@@ -105,6 +118,10 @@ class FastPathSupervisor:
         logger.info("[fast_path] shutting down")
         if self._metrics_task is not None:
             self._metrics_task.cancel()
+        # Stop the executor BEFORE the WS / writer so any in-flight
+        # decision finishes against a still-live writer/book.
+        if self._executor is not None:
+            await self._executor.stop()
         if self._ws is not None:
             await self._ws.stop()
         if self._db_writer is not None:
@@ -176,6 +193,26 @@ class FastPathSupervisor:
                 writer.get("books_received"),
                 writer.get("books_written"),
             )
+        executor_stats = snap.get("executor") or {}
+        if executor_stats:
+            logger.info(
+                "[fast_path] executor mode=%s live_authorized=%s "
+                "polls=%s alerts_seen=%s paper_fill=%s live_placed=%s "
+                "rejected=%s db_errors=%s last_alert_id=%s "
+                "open_positions=%s tickers_held=%s daily_used_usd=%.2f",
+                executor_stats.get("mode"),
+                executor_stats.get("live_authorized"),
+                executor_stats.get("polls_total"),
+                executor_stats.get("alerts_seen"),
+                executor_stats.get("decisions_paper_fill"),
+                executor_stats.get("decisions_live_placed"),
+                executor_stats.get("decisions_rejected"),
+                executor_stats.get("db_errors"),
+                executor_stats.get("last_alert_id_seen"),
+                executor_stats.get("open_positions_total"),
+                executor_stats.get("tickers_with_position"),
+                float(executor_stats.get("daily_notional_used_usd") or 0.0),
+            )
         scanner_stats = ws_stats.get("scanner") or {}
         if scanner_stats:
             logger.info(
@@ -220,6 +257,7 @@ class FastPathSupervisor:
             "writer": self._db_writer.snapshot() if self._db_writer else {},
             "status": self._status.snapshot() if self._status else {},
             "ws": self._ws.stats() if self._ws else {},
+            "executor": self._executor.stats() if self._executor else {},
         }
 
 

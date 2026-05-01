@@ -1,0 +1,298 @@
+"""Fast-path execution gates (F4).
+
+A gate is a pure function that takes ``(alert, context)`` and returns
+``GateResult(allow=bool, reason=str, detail=dict)``. The executor runs
+all gates and ANDs their decisions: ANY gate denial blocks the trade.
+
+Gates are intentionally pure-Python and side-effect-free so they can be
+unit-tested in isolation and so the order in which the executor calls
+them doesn't affect outcomes. They never touch the database directly —
+the executor passes whatever state they need via ``context`` (open
+positions count, session notional spent, etc.).
+
+The mode interlock (paper vs live) is a gate too, not a special case:
+this lets the live path require BOTH ``CHILI_FAST_PATH_MODE=live`` AND
+the explicit authorization flag. If either is missing, the gate
+forces ``mode=paper`` for the decision; the executor then skips any
+broker call. There is intentionally no override path that bypasses the
+interlock — the gate's deny-reason gets written to fast_executions so
+operators can see why a live decision was downgraded to paper.
+"""
+from __future__ import annotations
+
+import os
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Callable
+
+
+# Default thresholds — tuned conservatively. Override via env where
+# noted; constants stay here so the gate semantics are visible.
+ALERT_RECENCY_MAX_AGE_S = 60.0
+"""An alert older than this is stale; reject. Snapshot-replay alerts
+on container restart can be hours old, so this gate is the primary
+guard against acting on backfill."""
+
+MIN_SIGNAL_SCORE = 0.30
+"""Below this, the alert isn't worth the round-trip. Default is set
+LOW (0.30) for paper-mode validation — we want to see fills happening
+so the autopilot view has something to display. Operators should
+tighten this to ~0.50+ before flipping to live; override via
+CHILI_FAST_PATH_EXEC_MIN_SCORE."""
+
+MAX_SPREAD_BPS = 8.0
+"""Don't enter into a wide market — slippage on a market order would
+eat the edge. Wider than 8 bps suggests a thin book or news event."""
+
+DEFAULT_NOTIONAL_USD = 25.0
+"""Per-trade notional in USD. Deliberately tiny for paper validation;
+F7 will replace this with Kelly-fraction sizing."""
+
+DAILY_NOTIONAL_BUDGET_USD = 500.0
+"""Cumulative notional traded today. When exceeded, reject regardless
+of signal quality. Override via CHILI_FAST_PATH_EXEC_DAILY_USD."""
+
+MAX_OPEN_POSITIONS_PER_PAIR = 1
+"""No pyramiding in the fast lane — one entry per ticker at a time."""
+
+
+# ── Result + Context types ───────────────────────────────────────────
+
+
+@dataclass
+class GateResult:
+    """Outcome of one gate. ``allow=False`` means this gate denies the
+    trade; the executor will reject the alert citing ``reason``.
+
+    ``detail`` is freeform (dict) for the postmortem JSONB column.
+    """
+    name: str
+    allow: bool
+    reason: str = ""
+    detail: dict = field(default_factory=dict)
+
+
+@dataclass
+class ExecContext:
+    """All the state a gate might need, gathered by the executor before
+    invoking gates so each gate stays pure.
+
+    The executor populates this from the in-memory book (best bid/ask),
+    the in-memory open-position counter (paper) or a broker query
+    (live), and the running daily-notional accumulator.
+    """
+    now_wall: datetime
+    """Decision time, naive UTC (matches DB convention)."""
+
+    best_bid: float = 0.0
+    best_ask: float = 0.0
+    spread_bps: float = 0.0
+    """Top-of-book at decision time, taken from the in-memory book."""
+
+    open_positions_for_ticker: int = 0
+    daily_notional_used_usd: float = 0.0
+
+    mode: str = "paper"
+    """``paper`` or ``live`` — what the supervisor was configured with."""
+
+    live_authorized: bool = False
+    """Operator has set CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED=1.
+    If False, the mode_interlock gate downgrades any live decision."""
+
+
+# ── Individual gates ─────────────────────────────────────────────────
+
+
+def gate_recency(alert: dict, ctx: ExecContext,
+                 *, max_age_s: float = ALERT_RECENCY_MAX_AGE_S) -> GateResult:
+    """Reject alerts whose ``fired_at`` is older than max_age_s.
+
+    Important: protects against snapshot-replay alerts. ws_client logs
+    historical bars on subscribe; the scanner sees them as bar_close
+    events; their fired_at can be hours old. Without this gate the
+    executor would happily act on yesterday's signal.
+    """
+    fired_at = alert.get("fired_at")
+    if not isinstance(fired_at, datetime):
+        return GateResult("recency", False, "fired_at_missing_or_invalid",
+                          {"raw": str(fired_at)})
+    age = (ctx.now_wall - fired_at).total_seconds()
+    if age > max_age_s:
+        return GateResult("recency", False, "alert_too_old",
+                          {"age_s": float(age), "max_age_s": float(max_age_s)})
+    if age < -5.0:
+        # Wall-clock skew larger than 5s is suspicious; reject rather
+        # than silently allowing a future-dated alert.
+        return GateResult("recency", False, "alert_in_future_skew",
+                          {"age_s": float(age)})
+    return GateResult("recency", True, "", {"age_s": float(age)})
+
+
+def gate_min_score(alert: dict, ctx: ExecContext,
+                   *, min_score: float = MIN_SIGNAL_SCORE) -> GateResult:
+    score = float(alert.get("signal_score") or 0.0)
+    if score < min_score:
+        return GateResult("min_score", False, "score_below_threshold",
+                          {"score": float(score), "min": float(min_score)})
+    return GateResult("min_score", True, "", {"score": float(score)})
+
+
+def gate_spread_sanity(alert: dict, ctx: ExecContext,
+                       *, max_spread_bps: float = MAX_SPREAD_BPS) -> GateResult:
+    """Reject when the live book is too wide. We grab spread from
+    ``ctx`` (current top-of-book), NOT from the alert's features
+    (which can be stale by a fraction of a second)."""
+    sp = float(ctx.spread_bps or 0.0)
+    # If we have NO book at all (best_bid/ask zero), we can't size
+    # safely; treat that as a hard deny rather than letting through.
+    if ctx.best_bid <= 0.0 or ctx.best_ask <= 0.0:
+        return GateResult("spread_sanity", False, "no_top_of_book",
+                          {"best_bid": ctx.best_bid, "best_ask": ctx.best_ask})
+    if sp > max_spread_bps:
+        return GateResult("spread_sanity", False, "spread_too_wide",
+                          {"spread_bps": float(sp), "max_bps": float(max_spread_bps)})
+    return GateResult("spread_sanity", True, "", {"spread_bps": float(sp)})
+
+
+def gate_capacity(alert: dict, ctx: ExecContext,
+                  *, max_per_pair: int = MAX_OPEN_POSITIONS_PER_PAIR) -> GateResult:
+    if ctx.open_positions_for_ticker >= max_per_pair:
+        return GateResult("capacity", False, "pair_already_held",
+                          {"open": int(ctx.open_positions_for_ticker),
+                           "max": int(max_per_pair)})
+    return GateResult("capacity", True, "",
+                      {"open": int(ctx.open_positions_for_ticker)})
+
+
+def gate_daily_budget(alert: dict, ctx: ExecContext,
+                      *, daily_max_usd: float = DAILY_NOTIONAL_BUDGET_USD,
+                      planned_notional_usd: float = DEFAULT_NOTIONAL_USD) -> GateResult:
+    used = float(ctx.daily_notional_used_usd or 0.0)
+    projected = used + planned_notional_usd
+    if projected > daily_max_usd:
+        return GateResult("daily_budget", False, "budget_exhausted",
+                          {"used_usd": used, "planned_usd": planned_notional_usd,
+                           "daily_max_usd": daily_max_usd})
+    return GateResult("daily_budget", True, "",
+                      {"used_usd": used, "projected_usd": projected})
+
+
+def gate_mode_interlock(alert: dict, ctx: ExecContext) -> GateResult:
+    """The trade-off this gate enforces:
+
+        IF settings say live AND operator authorized live, allow live.
+        IF settings say live AND operator did NOT authorize, downgrade
+            to paper (allow=True with reason='live_not_authorized').
+        IF settings say paper, always allow as paper.
+
+    The downgrade-to-paper case is interesting: we DO want the trade
+    to record (so the operator sees that a live attempt was wanted),
+    but it must execute as paper. The executor reads ``ctx.mode`` AFTER
+    the gate has run; this gate may *mutate* ctx.mode (the only side
+    effect in the gate suite, deliberately scoped here).
+    """
+    raw_mode = (ctx.mode or "paper").strip().lower()
+    if raw_mode == "live" and not ctx.live_authorized:
+        # Force-downgrade to paper. Document via reason for the
+        # decision row; the gate still ALLOWS the trade through (it
+        # will execute as paper).
+        ctx.mode = "paper"
+        return GateResult("mode_interlock", True, "live_not_authorized_downgraded_to_paper",
+                          {"requested_mode": "live", "effective_mode": "paper",
+                           "live_authorized_env_set": False})
+    if raw_mode not in ("paper", "live"):
+        # Any unknown mode is forced to paper.
+        ctx.mode = "paper"
+        return GateResult("mode_interlock", True, "unknown_mode_forced_to_paper",
+                          {"requested_mode": raw_mode, "effective_mode": "paper"})
+    return GateResult("mode_interlock", True, "",
+                      {"effective_mode": ctx.mode})
+
+
+# ── Composite runner ─────────────────────────────────────────────────
+
+
+# Default gate list; the executor uses this. Tests can pass custom
+# lists. Order doesn't matter for correctness (each gate evaluates
+# independently) but mode_interlock is run FIRST so any mode mutation
+# is visible to subsequent gates if they care.
+DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
+    gate_mode_interlock,
+    gate_recency,
+    gate_min_score,
+    gate_spread_sanity,
+    gate_capacity,
+    gate_daily_budget,
+)
+
+
+@dataclass
+class GateRunResult:
+    allow: bool
+    """All gates allowed."""
+    deny_reason: str
+    """Empty if allowed; otherwise the FIRST denying gate's reason."""
+    results: list[GateResult]
+    """Every gate's individual result, for the JSONB postmortem."""
+
+
+def run_gates(alert: dict, ctx: ExecContext,
+              gates: tuple = DEFAULT_GATES) -> GateRunResult:
+    """Run the gate list. Returns a composite decision."""
+    out: list[GateResult] = []
+    deny_reason = ""
+    allow_overall = True
+    for gate_fn in gates:
+        res = gate_fn(alert, ctx)
+        out.append(res)
+        if not res.allow and allow_overall:
+            allow_overall = False
+            deny_reason = f"{res.name}:{res.reason}"
+    return GateRunResult(allow=allow_overall, deny_reason=deny_reason, results=out)
+
+
+# ── Env loaders ──────────────────────────────────────────────────────
+
+
+def env_overrides() -> dict:
+    """Read tunable thresholds from environment so operators can tighten
+    paper-mode behavior without redeploying code."""
+    def _f(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name) or default)
+        except (TypeError, ValueError):
+            return default
+    return {
+        "min_score": _f("CHILI_FAST_PATH_EXEC_MIN_SCORE", MIN_SIGNAL_SCORE),
+        "max_spread_bps": _f("CHILI_FAST_PATH_EXEC_MAX_SPREAD_BPS", MAX_SPREAD_BPS),
+        "daily_max_usd": _f("CHILI_FAST_PATH_EXEC_DAILY_USD", DAILY_NOTIONAL_BUDGET_USD),
+        "default_notional_usd": _f("CHILI_FAST_PATH_EXEC_NOTIONAL_USD", DEFAULT_NOTIONAL_USD),
+    }
+
+
+def is_live_authorized() -> bool:
+    """Single source of truth for the live-trade kill switch.
+
+    BOTH conditions must hold for live placement:
+        - CHILI_FAST_PATH_MODE=live (settings)
+        - CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED=1 (operator-explicit env)
+
+    If either is missing, the executor must downgrade to paper. There
+    is intentionally NO third bypass — operators must actively flip the
+    AUTHORIZED flag to send real Coinbase orders.
+    """
+    raw = (os.environ.get("CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+__all__ = [
+    "GateResult", "ExecContext", "GateRunResult",
+    "gate_recency", "gate_min_score", "gate_spread_sanity",
+    "gate_capacity", "gate_daily_budget", "gate_mode_interlock",
+    "DEFAULT_GATES", "run_gates",
+    "ALERT_RECENCY_MAX_AGE_S", "MIN_SIGNAL_SCORE", "MAX_SPREAD_BPS",
+    "DEFAULT_NOTIONAL_USD", "DAILY_NOTIONAL_BUDGET_USD",
+    "MAX_OPEN_POSITIONS_PER_PAIR",
+    "env_overrides", "is_live_authorized",
+]

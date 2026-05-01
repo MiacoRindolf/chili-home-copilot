@@ -14430,6 +14430,79 @@ def _migration_215_fast_path_tables(conn) -> None:
     conn.commit()
 
 
+def _migration_217_fast_executions(conn) -> None:
+    """F4 (2026-05-01) — fast-path executor decision log.
+
+    Every decision the executor makes — whether to skip, to paper-fill,
+    or (eventually) to send a live Coinbase order — writes one row
+    here. Day-partitioned by ``decided_at`` so old decision history is
+    cheap to drop.
+
+    Columns:
+      - ``ticker``, ``alert_type``, ``alert_fired_at`` — the trigger we
+        responded to. NOT a foreign key (cross-partition FKs in
+        Postgres need extra ceremony and the dedupe value is low; the
+        scanner already gates by cooldown).
+      - ``decision`` — one of:
+          * ``paper_fill``   — paper mode, executor "filled" against
+                               in-memory best-bid/ask. No real order.
+          * ``live_placed``  — live mode, Coinbase order submitted.
+                               broker_order_id populated.
+          * ``rejected``     — gate failed; reject_reason set.
+      - ``mode`` — ``paper`` or ``live`` at the moment of decision.
+      - ``side`` — ``buy`` or ``sell``.
+      - ``quantity``, ``fill_price``, ``notional_usd`` — sizing.
+      - ``gates_json`` — full gate evaluation, all-pass and all-fail
+        recorded so we can postmortem WHY a decision came out that way.
+      - ``broker_order_id`` — nullable; only live decisions populate.
+      - ``latency_ms`` — alert -> decision turnaround. Fast lane KPI.
+
+    Indexes: (ticker, decided_at DESC), (decision, decided_at DESC).
+    """
+    inspector = sa_inspect(conn)
+    tables = set(inspector.get_table_names())
+    if "fast_executions" not in tables:
+        conn.execute(text(
+            """
+            CREATE TABLE fast_executions (
+                id                BIGSERIAL,
+                ticker            VARCHAR(32) NOT NULL,
+                alert_type        VARCHAR(48) NOT NULL,
+                alert_fired_at    TIMESTAMP NOT NULL,
+                decision          VARCHAR(16) NOT NULL,
+                reject_reason     VARCHAR(64),
+                mode              VARCHAR(8) NOT NULL,
+                side              VARCHAR(8) NOT NULL,
+                quantity          DOUBLE PRECISION,
+                fill_price        DOUBLE PRECISION,
+                notional_usd      DOUBLE PRECISION,
+                gates_json        JSONB NOT NULL,
+                broker_order_id   VARCHAR(128),
+                latency_ms        DOUBLE PRECISION,
+                decided_at        TIMESTAMP NOT NULL,
+                PRIMARY KEY (id, decided_at),
+                CONSTRAINT fast_executions_decision_check
+                    CHECK (decision IN ('paper_fill','live_placed','rejected')),
+                CONSTRAINT fast_executions_mode_check
+                    CHECK (mode IN ('paper','live'))
+            ) PARTITION BY RANGE (decided_at)
+            """
+        ))
+        conn.execute(text(
+            "CREATE TABLE fast_executions_default "
+            "PARTITION OF fast_executions DEFAULT"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fast_executions_ticker_decided "
+            "ON fast_executions (ticker, decided_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fast_executions_decision_decided "
+            "ON fast_executions (decision, decided_at DESC)"
+        ))
+    conn.commit()
+
+
 def _migration_216_fast_alerts(conn) -> None:
     """F3 (2026-05-01) — fast-path event-driven scanner alerts.
 
@@ -14711,6 +14784,7 @@ MIGRATIONS = [
     ("214_trade_table_check_constraints", _migration_214_trade_table_check_constraints),
     ("215_fast_path_tables", _migration_215_fast_path_tables),
     ("216_fast_alerts", _migration_216_fast_alerts),
+    ("217_fast_executions", _migration_217_fast_executions),
 ]
 
 
