@@ -1,0 +1,62 @@
+﻿# r34 verify - did readiness_unusable drop? 04/30/2026 22:09:10
+
+===== wait 60s for the next imminent run to complete =====
+done sleeping
+
+
+===== skip_reasons from the most recent pattern_imminent run (look for readiness_unusable count) =====
+
+scheduler-worker-1  | 2026-05-01 05:09:17,258 [INFO] app.services.trading.pattern_imminent_alerts: [pattern_imminent] 
+{'patterns_active': 549, 'patterns_with_tickers_evaluated': 4, 'global_ticker_universe': 160, 'universe_by_source': 
+{'watchlist': 0, 'prescreener': 78, 'predictions': 40, 'scanner': 46, 'defaults': 45}, 'tickers_scored': 68, 
+'skip_reasons': {'pattern_no_tickers': 4, 'pattern_no_conditions': 0, 'score_failed': 24, 'readiness_unusable': 0, 
+'all_conditions_met': 0, 'readiness_outside_band': 39, 'eta_too_long': 0, 'excluded_promotion_lifecycle': 541, 
+'insufficient_coverage_main': 0, 'below_composite_main': 0}, 'top_suppressed': [], 'equity_session_open': False, 'ok': 
+True, 'dry_run': False, 'candidates': 29, 'alerts_sent': 6, 'delivery_failed': 3, 'cooldown_skipped': 0, 
+'diversity_skipped': 23, 'us_session_context': {'us_session': 'closed', 'label': 'US stocks: session closed', 
+'equity_evaluation_active': False}, 'thresholds': {'min_readiness': 0.45, 'readiness_cap': 0.995, 'max_eta_hours': 
+4.0, 'evaluable_ratio_floor': 0.35, 'min_feature_coverage_main': 0.45, 'min_composite_main': 0.42}}
+scheduler-worker-1  | 2026-05-01 05:09:17,258 [INFO] app.services.trading_scheduler: [scheduler] Pattern imminent 
+result: {'patterns_active': 549, 'patterns_with_tickers_evaluated': 4, 'global_ticker_universe': 160, 
+'universe_by_source': {'watchlist': 0, 'prescreener': 78, 'predictions': 40, 'scanner': 46, 'defaults': 45}, 
+'tickers_scored': 68, 'skip_reasons': {'pattern_no_tickers': 4, 'pattern_no_conditions': 0, 'score_failed': 24, 
+'readiness_unusable': 0, 'all_conditions_met': 0, 'readiness_outside_band': 39, 'eta_too_long': 0, 
+'excluded_promotion_lifecycle': 541, 'insufficient_coverage_main': 0, 'below_composite_main': 0}, 'top_suppressed': 
+[], 'equity_session_open': False, 'ok': True, 'dry_run': False, 'candidates': 29, 'alerts_sent': 6, 'delivery_failed': 
+3, 'cooldown_skipped': 0, 'diversity_skipped': 23, 'us_session_context': {'us_session': 'closed', 'label': 'US stocks: 
+session closed', 'equity_evaluation_active': False}, 'thresholds': {'min_readiness': 0.45, 'readiness_cap': 0.995, 
+'max_eta_hours': 4.0, 'evaluable_ratio_floor': 0.35, 'min_feature_coverage_main': 0.45, 'min_composite_main': 0.42}}
+
+
+
+
+===== autotrader candidate_pool last 2min (any change from 0?) =====
+
+autotrader-worker-1  | 2026-05-01 05:09:02,527 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 05:09:12,503 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 05:09:44,246 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=6 batch=5 processed=5 placed=0 scaled_in=0 skipped=2 last_kind=blocked 
+last_reason=pdt_guard:pdt_limit_reached:43>=3 last_alert_id=6111 last_ticker=AAVE-USD
+autotrader-worker-1  | 2026-05-01 05:09:54,814 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=1 batch=1 processed=1 placed=0 scaled_in=0 skipped=0 last_kind=blocked 
+last_reason=pdt_guard:pdt_limit_reached:43>=3 last_alert_id=6112 last_ticker=KAS-USD
+autotrader-worker-1  | 2026-05-01 05:10:02,515 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+
+
+
+
+===== any breakout_alert pattern_imminent rows since R34? =====
+    alert_tier    | n |        most_recent         
+------------------+---+----------------------------
+ HIGH-SCORE SETUP | 1 | 2026-05-01 05:01:40.249375
+ RANGE TIGHTENING | 1 | 2026-05-01 05:01:40.349821
+ pattern_imminent | 6 | 2026-05-01 05:09:17.163496
+(3 rows)
+
+

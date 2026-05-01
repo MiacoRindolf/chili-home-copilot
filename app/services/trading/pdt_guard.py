@@ -116,6 +116,14 @@ def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | No
     """Count round-trip day trades (opened AND closed same calendar day)
     in the trailing 5 business days from ``trading_trades``.
 
+    R35 (2026-04-30): explicitly EXCLUDE crypto rows. SEC PDT regulation
+    applies only to securities accounts; crypto is a 24/7 cash market and
+    same-day crypto round-trips do not count as "day trades" toward the
+    4-in-5-business-days threshold. Without this filter the post-R34
+    crypto cadence would have inflated the count past the 3-trip ceiling
+    and refused EVERY entry, including legitimate equity entries when
+    the equity sub-ledger was below the PDT cap.
+
     Returns ``None`` on query failure; the caller MUST treat None as
     "unknown" and refuse the entry.
     """
@@ -134,6 +142,7 @@ def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | No
               AND exit_date IS NOT NULL
               AND DATE(entry_date) = DATE(exit_date)
               AND exit_date > :cutoff
+              AND ticker NOT LIKE '%-USD'
         """
         params: dict[str, Any] = {"cutoff": cutoff}
         if user_id is not None:
@@ -155,10 +164,13 @@ def can_open_intraday_round_trip(
     db: Session,
     *,
     user_id: int | None = None,
+    ticker: str | None = None,
 ) -> PdtGateResult:
     """Decide whether a new entry can be safely opened given PDT exposure.
 
     Returns a :class:`PdtGateResult` with ``allowed=True`` only when:
+      0. R35: ticker is crypto (``...-USD``) -- PDT is securities-only,
+         crypto is a 24/7 cash market and exempt by regulation.
       1. Account equity is known AND >= $25,000 (PDT does not apply), OR
       2. Account equity is known AND < $25,000 AND day_trades_5d < 3.
 
@@ -167,6 +179,24 @@ def can_open_intraday_round_trip(
     rule explicitly forbids assuming "probably above threshold" or
     "probably zero day trades".
     """
+    # R35 (2026-04-30): crypto bypass. SEC PDT regulation governs margin
+    # securities trading; crypto sits outside the rule. Without this
+    # short-circuit, post-R34 the crypto entry funnel was 100% blocked by
+    # 'pdt_limit_reached:43>=3' since the count included crypto round-trips.
+    if ticker and ticker.upper().endswith("-USD"):
+        return PdtGateResult(
+            allowed=True,
+            reason="crypto_not_pdt_eligible",
+            account_equity_usd=None,
+            day_trades_5d=None,
+            snapshot={
+                "ticker": ticker,
+                "asset_class": "crypto",
+                "pdt_equity_threshold_usd": PDT_EQUITY_THRESHOLD_USD,
+                "pdt_max_day_trades_5d": PDT_MAX_DAY_TRADES_5D,
+            },
+        )
+
     equity = _fetch_account_equity_usd()
     day_trades = _count_day_trades_5d(db, user_id=user_id)
 

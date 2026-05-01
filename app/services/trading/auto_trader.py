@@ -1361,8 +1361,17 @@ def _execute_new_entry(
         # >= $25K (PDT does not apply), or (b) day_trades_5d < 3 (4th
         # would trigger). Per no-hardcoded-fallback: unknown state =>
         # refuse, never assume.
+        #
+        # R35 (2026-04-30): SEC PDT rule applies ONLY to margin-account
+        # securities trades. Crypto is a 24/7 cash market and is exempt.
+        # Pass ticker context so the gate can short-circuit for crypto.
+        # Without this, post-R34 crypto candidates were 100% blocked by
+        # 'pdt_limit_reached:43>=3' even though the 43 day-trades were
+        # mostly crypto round-trips that PDT doesn't count.
         from .pdt_guard import can_open_intraday_round_trip
-        _pdt_result = can_open_intraday_round_trip(db, user_id=uid)
+        _pdt_result = can_open_intraday_round_trip(
+            db, user_id=uid, ticker=getattr(alert, "ticker", None),
+        )
         if not _pdt_result.allowed:
             _pdt_audit = dict(snap)
             _pdt_audit["pdt_gate"] = _pdt_result.snapshot
