@@ -1,0 +1,135 @@
+﻿# r30 cleanup (rename misleading job + remove dead auto-execute) 04/30/2026 19:05:46
+
+===== apply edits (host git) =====
+wrote 1159 lines to C:\dev\chili-home-copilot\app\services\trading\stop_engine.py
+wrote 4682 lines to C:\dev\chili-home-copilot\app\services\trading_scheduler.py
+
+
+
+===== py-compile both files =====
+OK
+
+
+===== git diff stat =====
+git : warning: in the working copy of 'app/services/trading/stop_engine.py', LF will be replaced by CRLF the next time 
+Git touches it
+At C:\dev\chili-home-copilot\scripts\dispatch-r30-cleanup.ps1:15 char:5
++     git diff --stat app/services/trading/stop_engine.py app/services/ ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: in the... Git touches it:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: in the working copy of 'app/services/trading_scheduler.py', LF will be replaced by CRLF the next time Git 
+touches it
+ app/services/trading/stop_engine.py | 11 ++++++++++-
+ app/services/trading_scheduler.py   | 25 ++++++++++++++++++++-----
+ 2 files changed, 30 insertions(+), 6 deletions(-)
+
+
+===== force-recreate broker-sync-worker (where crypto_stop_monitor job runs) =====
+docker :  Container chili-home-copilot-ollama-1 Running 
+At C:\dev\chili-home-copilot\scripts\dispatch-r30-cleanup.ps1:19 char:5
++     docker compose up -d --force-recreate broker-sync-worker
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( Container chil...lama-1 Running :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Container chili-home-copilot-postgres-1 Running 
+ Container chili-home-copilot-broker-sync-worker-1 Recreate 
+ Container chili-home-copilot-broker-sync-worker-1 Recreated 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-broker-sync-worker-1 Starting 
+ Container chili-home-copilot-broker-sync-worker-1 Started 
+
+
+===== wait 12s + container health =====
+chili-home-copilot-broker-sync-worker-1 | Up 12 seconds
+
+
+===== broker-sync-worker startup errors? =====
+
+
+===== verify the renamed job is registered (job_id should still be crypto_stop_monitor) =====
+crypto_stop_monitor jobs found: 0
+
+
+===== verify the function rename took effect =====
+_run_stop_alert_dispatch_job: True
+_run_crypto_stop_monitor_job (old): False
+
+
+===== verify _try_auto_execute_stop call removed from dispatch_stop_alerts =====
+R30 cleanup applied: False
+
+
+===== remove stale .git/index.lock =====
+no lock
+
+
+===== git add =====
+git : warning: in the working copy of 'app/services/trading/stop_engine.py', LF will be replaced by CRLF the next time 
+Git touches it
+At C:\dev\chili-home-copilot\scripts\dispatch-r30-cleanup.ps1:48 char:5
++     git add `
++     ~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: in the... Git touches it:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: in the working copy of 'app/services/trading_scheduler.py', LF will be replaced by CRLF the next time Git 
+touches it
+warning: in the working copy of 'scripts/_r30_cleanup_apply.py', LF will be replaced by CRLF the next time Git touches 
+it
+warning: in the working copy of 'scripts/dispatch-autotrader-monitor-live.ps1', LF will be replaced by CRLF the next 
+time Git touches it
+warning: in the working copy of 'scripts/dispatch-cadence-investigation.ps1', LF will be replaced by CRLF the next 
+time Git touches it
+warning: in the working copy of 'scripts/dispatch-crypto-exit-pass-trace.ps1', LF will be replaced by CRLF the next 
+time Git touches it
+warning: in the working copy of 'scripts/dispatch-r30-cleanup.ps1', LF will be replaced by CRLF the next time Git 
+touches it
+warning: in the working copy of 'scripts/dispatch-redundancy-impact-2.ps1', LF will be replaced by CRLF the next time 
+Git touches it
+warning: in the working copy of 'scripts/dispatch-redundancy-impact.ps1', LF will be replaced by CRLF the next time 
+Git touches it
+git add complete
+
+
+===== git commit =====
+[main 516b392] fix(r30): rename _run_crypto_stop_monitor_job -> _run_stop_alert_dispatch_job; remove dead _try_auto_execute_stop call (would have raced run_crypto_exit_pass if flag flipped)
+ 13 files changed, 1027 insertions(+), 6 deletions(-)
+ create mode 100644 scripts/_r30_cleanup_apply.py
+ create mode 100644 scripts/dispatch-autotrader-monitor-live-output.txt
+ create mode 100644 scripts/dispatch-autotrader-monitor-live.ps1
+ create mode 100644 scripts/dispatch-cadence-investigation-output.txt
+ create mode 100644 scripts/dispatch-cadence-investigation.ps1
+ create mode 100644 scripts/dispatch-crypto-exit-pass-trace-output.txt
+ create mode 100644 scripts/dispatch-crypto-exit-pass-trace.ps1
+ create mode 100644 scripts/dispatch-r30-cleanup.ps1
+ create mode 100644 scripts/dispatch-redundancy-impact-2-output.txt
+ create mode 100644 scripts/dispatch-redundancy-impact-2.ps1
+ create mode 100644 scripts/dispatch-redundancy-impact.ps1
+
+
+===== git rev-parse HEAD =====
+516b3924f9e07662390874dab90c0a0d6e13e661
+
+
+===== git log --oneline -3 =====
+516b392 fix(r30): rename _run_crypto_stop_monitor_job -> _run_stop_alert_dispatch_job; remove dead _try_auto_execute_stop call (would have raced run_crypto_exit_pass if flag flipped)
+74dcc99 docs(adr-005): canonical feature/label/execution-truth layer (response to third-party audit's biggest recommendation)
+ae4e66a fix(r29): wire apply_tca_on_trade_close into _finalize_filled_exit so legitimate exits compute slippage from decision-time reference
+
+
+===== git push origin main =====
+git : To https://github.com/MiacoRindolf/chili-home-copilot.git
+At C:\dev\chili-home-copilot\scripts\dispatch-r30-cleanup.ps1:73 char:28
++ S "git push origin main" { git push origin main }
++                            ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (To https://gith...ome-copilot.git:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   74dcc99..516b392  main -> main
+

@@ -1,0 +1,39 @@
+﻿# r30 verification (post-cleanup) 04/30/2026 19:08:02
+
+===== wait 90s for at least one crypto_stop_monitor cycle (every 2min) =====
+ok
+
+
+===== crypto_stop_monitor brain_batch_jobs since R30 deploy =====
+ count |            min             |            max             
+-------+----------------------------+----------------------------
+     3 | 2026-05-01 02:04:50.501616 | 2026-05-01 02:08:26.426336
+(1 row)
+
+
+
+===== stop_engine source confirmation: function call removed (look for the call, not the comment) =====
+still has live call (bad if True): False
+has REMOVED comment (good if True): True
+
+
+===== scheduler source confirmation: renamed function present =====
+new fn present: True
+old fn present: False
+new fn doc first line: Stop-alert dispatch for crypto positions (every 2 minutes, 24/7).
+
+
+===== broker-sync-worker logs for stop_alert_dispatch (last 3 min) =====
+
+broker-sync-worker-1  | 2026-05-01 02:08:26,426 [INFO] apscheduler.executors.default: Running job "Crypto stop-loss 
+monitor (every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-05-01 02:10:26 UTC)" (scheduled at 
+2026-05-01 02:08:26.425672+00:00)
+broker-sync-worker-1  | 2026-05-01 02:08:26,426 [INFO] app.services.trading_scheduler: [scheduler_job] 
+job_id=crypto_stop_monitor phase=start
+broker-sync-worker-1  | 2026-05-01 02:08:26,473 [INFO] app.services.trading_scheduler: [scheduler_job] 
+job_id=crypto_stop_monitor phase=ok duration_ms=46
+broker-sync-worker-1  | 2026-05-01 02:08:26,711 [INFO] apscheduler.executors.default: Job "Crypto stop-loss monitor 
+(every 2min, 24/7) (trigger: interval[0:02:00], next run at: 2026-05-01 02:10:26 UTC)" executed successfully
+
+
+
