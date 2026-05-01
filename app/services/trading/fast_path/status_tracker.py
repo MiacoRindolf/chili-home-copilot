@@ -1,0 +1,225 @@
+"""Per-pair status + circuit-breaker.
+
+Tracks: last bar timestamp, last sequence number observed, error counts
+within a 60s rolling window, reconnect counts. Decides when to flip a
+pair to ``degraded`` / ``paused`` / ``halted`` based on the rules in
+``docs/ARCHITECTURE-fast-path.md``.
+
+Persists state into ``fast_path_status`` (one row per ticker, upsert).
+
+Threading model: the tracker is owned by the supervisor and called
+from a single asyncio task. No locks required.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Deque
+
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+
+logger = logging.getLogger(__name__)
+
+
+# Canonical state values. Also enforced by the CHECK constraint on the
+# fast_path_status table.
+STATE_STREAMING = "streaming"
+STATE_DEGRADED = "degraded"
+STATE_PAUSED = "paused"
+STATE_HALTED = "halted"
+
+
+@dataclass
+class PairStatus:
+    ticker: str
+    state: str = STATE_PAUSED
+    last_bar_at: datetime | None = None
+    last_seq: int | None = None
+    last_error: str | None = None
+    last_reconnect_at: datetime | None = None
+    reconnect_count: int = 0
+    # Rolling 60s error timestamps (monotonic seconds)
+    _error_times: Deque[float] = field(default_factory=lambda: deque(maxlen=128))
+
+
+class StatusTracker:
+    """Maintains a ``PairStatus`` per ticker and persists state changes
+    to ``fast_path_status``.
+
+    The flush is bounded — at most one UPDATE per ticker per
+    ``flush_min_interval_s``, so bursts of state changes coalesce.
+    """
+
+    def __init__(
+        self,
+        engine: Engine,
+        cb_threshold: int = 5,
+        flush_min_interval_s: float = 1.0,
+    ) -> None:
+        self._engine = engine
+        self._cb_threshold = int(cb_threshold)
+        self._flush_min_interval = float(flush_min_interval_s)
+        self._pairs: dict[str, PairStatus] = {}
+        self._dirty: set[str] = set()
+        self._last_flush_at: dict[str, float] = {}
+
+    # ── Lifecycle ─────────────────────────────────────────────────────
+
+    def register(self, ticker: str) -> None:
+        """Make sure we track *ticker*. Idempotent."""
+        if ticker not in self._pairs:
+            self._pairs[ticker] = PairStatus(ticker=ticker)
+            self._dirty.add(ticker)
+
+    def get(self, ticker: str) -> PairStatus:
+        if ticker not in self._pairs:
+            self.register(ticker)
+        return self._pairs[ticker]
+
+    # ── Event recorders ───────────────────────────────────────────────
+
+    def mark_streaming(self, ticker: str) -> None:
+        ps = self.get(ticker)
+        if ps.state != STATE_STREAMING:
+            ps.state = STATE_STREAMING
+            self._dirty.add(ticker)
+
+    def mark_degraded(self, ticker: str, reason: str) -> None:
+        ps = self.get(ticker)
+        ps.state = STATE_DEGRADED
+        ps.last_error = (reason or "")[:500]
+        self._dirty.add(ticker)
+
+    def mark_paused(self, ticker: str, reason: str) -> None:
+        ps = self.get(ticker)
+        ps.state = STATE_PAUSED
+        ps.last_error = (reason or "")[:500]
+        self._dirty.add(ticker)
+        logger.warning(
+            "[fast_path] PAUSED ticker=%s reason=%s", ticker, reason[:200],
+        )
+
+    def mark_halted(self, ticker: str, reason: str) -> None:
+        ps = self.get(ticker)
+        ps.state = STATE_HALTED
+        ps.last_error = (reason or "")[:500]
+        self._dirty.add(ticker)
+        logger.critical(
+            "[fast_path] HALTED ticker=%s reason=%s", ticker, reason[:200],
+        )
+
+    def record_bar(self, ticker: str, bar_close_at: datetime, seq: int | None) -> None:
+        ps = self.get(ticker)
+        ps.last_bar_at = bar_close_at
+        if seq is not None:
+            ps.last_seq = int(seq)
+        # A successful bar implicitly clears stale degraded state.
+        if ps.state in (STATE_DEGRADED, STATE_PAUSED):
+            self.mark_streaming(ticker)
+        self._dirty.add(ticker)
+
+    def record_reconnect(self, ticker: str) -> None:
+        ps = self.get(ticker)
+        ps.reconnect_count += 1
+        ps.last_reconnect_at = datetime.utcnow()
+        self._dirty.add(ticker)
+
+    def record_error(self, ticker: str, error: str) -> bool:
+        """Return True if the circuit breaker tripped this call.
+
+        Side effect: when the per-60s threshold is reached, the pair
+        is moved to ``state='paused'``.
+        """
+        ps = self.get(ticker)
+        now = time.monotonic()
+        ps._error_times.append(now)
+        # Trim entries older than 60s
+        while ps._error_times and (now - ps._error_times[0]) > 60.0:
+            ps._error_times.popleft()
+        ps.last_error = (error or "")[:500]
+        self._dirty.add(ticker)
+        if len(ps._error_times) >= self._cb_threshold and ps.state != STATE_PAUSED:
+            self.mark_paused(
+                ticker,
+                f"circuit_breaker:{len(ps._error_times)}_errors_in_60s:{error[:100]}",
+            )
+            return True
+        return False
+
+    # ── Persistence ───────────────────────────────────────────────────
+
+    def flush(self, force: bool = False) -> int:
+        """Upsert dirty pairs into fast_path_status. Returns count flushed."""
+        if not self._dirty:
+            return 0
+        now = time.monotonic()
+        flushed = 0
+        with self._engine.begin() as conn:
+            for ticker in list(self._dirty):
+                last = self._last_flush_at.get(ticker, 0.0)
+                if not force and (now - last) < self._flush_min_interval:
+                    continue
+                ps = self._pairs[ticker]
+                conn.execute(text("""
+                    INSERT INTO fast_path_status (
+                        ticker, state, last_bar_at, last_seq,
+                        error_count_60s, last_error,
+                        last_reconnect_at, reconnect_count, updated_at
+                    ) VALUES (
+                        :ticker, :state, :last_bar_at, :last_seq,
+                        :error_count, :last_error,
+                        :last_reconnect_at, :reconnect_count, NOW()
+                    )
+                    ON CONFLICT (ticker) DO UPDATE SET
+                        state = EXCLUDED.state,
+                        last_bar_at = COALESCE(EXCLUDED.last_bar_at, fast_path_status.last_bar_at),
+                        last_seq = COALESCE(EXCLUDED.last_seq, fast_path_status.last_seq),
+                        error_count_60s = EXCLUDED.error_count_60s,
+                        last_error = COALESCE(EXCLUDED.last_error, fast_path_status.last_error),
+                        last_reconnect_at = COALESCE(EXCLUDED.last_reconnect_at, fast_path_status.last_reconnect_at),
+                        reconnect_count = EXCLUDED.reconnect_count,
+                        updated_at = NOW()
+                """), {
+                    "ticker": ticker,
+                    "state": ps.state,
+                    "last_bar_at": ps.last_bar_at,
+                    "last_seq": ps.last_seq,
+                    "error_count": len(ps._error_times),
+                    "last_error": ps.last_error,
+                    "last_reconnect_at": ps.last_reconnect_at,
+                    "reconnect_count": ps.reconnect_count,
+                })
+                self._last_flush_at[ticker] = now
+                self._dirty.discard(ticker)
+                flushed += 1
+        return flushed
+
+    # ── Snapshot for healthz ──────────────────────────────────────────
+
+    def snapshot(self) -> dict:
+        """Read-only summary for the healthz endpoint."""
+        out: dict = {"pairs": {}}
+        for ticker, ps in self._pairs.items():
+            out["pairs"][ticker] = {
+                "state": ps.state,
+                "last_bar_at": ps.last_bar_at.isoformat() if ps.last_bar_at else None,
+                "last_seq": ps.last_seq,
+                "error_count_60s": len(ps._error_times),
+                "reconnect_count": ps.reconnect_count,
+                "last_error": ps.last_error,
+            }
+        return out
+
+
+__all__ = [
+    "PairStatus",
+    "StatusTracker",
+    "STATE_STREAMING",
+    "STATE_DEGRADED",
+    "STATE_PAUSED",
+    "STATE_HALTED",
+]

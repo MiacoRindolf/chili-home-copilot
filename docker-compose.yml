@@ -688,6 +688,68 @@ services:
           cpus: "0.5"
           memory: 512M
 
+  # Phase F1 (2026-05-01): fast-data-worker — Coinbase WebSocket
+  # ingestion for crypto scalping. See docs/ARCHITECTURE-fast-path.md
+  # for the contract. Runs alongside the swing brain; neither depends
+  # on the other for liveness. Default off — set
+  # CHILI_FAST_PATH_ENABLED=1 to actually subscribe to Coinbase WS.
+  # The container always starts (so /healthz is reachable) but parks
+  # every pair in state=paused when disabled.
+  fast-data-worker:
+    image: chili-app:local
+    restart: unless-stopped
+    labels:
+      com.chili.service: fast-data-worker
+      com.chili.entrypoint: fast_data_worker
+    command: ["python", "scripts/fast_data_worker.py"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - CHILI_RUNNING_IN_DOCKER=1
+      - PYTHONUNBUFFERED=1
+      # Default OFF. Flip to 1 when you want to start streaming Coinbase.
+      - CHILI_FAST_PATH_ENABLED=0
+      - CHILI_FAST_PATH_MODE=paper
+      - CHILI_FAST_PATH_PAIRS=BTC-USD,ETH-USD,SOL-USD,AVAX-USD,DOGE-USD
+      - CHILI_FAST_PATH_QUEUE_MAX=10000
+      - CHILI_FAST_PATH_BATCH_SIZE=50
+      - CHILI_FAST_PATH_BATCH_INTERVAL_MS=200
+      - CHILI_FAST_PATH_BAR_WINDOW=500
+      - CHILI_FAST_PATH_BOOK_DEPTH=25
+      - CHILI_FAST_PATH_CB_THRESHOLD=5
+      - CHILI_FAST_PATH_HEALTHZ_PORT=8090
+    volumes:
+      - D:/CHILI-Docker/chili-data:/app/data
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8090/healthz').read()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        # Per architecture doc: 512MB hard limit, 1 CPU. Fast-data is
+        # tiny (5 pairs × 1m bars + L2). RSS should sit ~120-180MB.
+        # If it hits the cap, something is leaking — surface it loud.
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
 # ── Named volumes ───────────────────────────────────────────────────
 # Phase E.2: chili_dispatch_clones holds repos the brain clones on demand
 # (i.e. you point it at a github.com URL that isn't already on disk). The

@@ -91,3 +91,11 @@ coverage>=7.0.0,<8
 pytest-xdist>=3.5.0,<4
 pytest-asyncio>=0.23.8,<1   # 0.23.8+ for pytest 8.x Package.obj collection compat
 pytest-timeout>=2.1.0
+
+# Phase F1 (2026-05-01) — fast-data-worker (Coinbase WebSocket scalping).
+# `websockets` is already pulled by uvicorn[standard] but pinning it explicitly
+# here so the fast-path module's direct dependency is visible.
+# `aiohttp` is for the standalone /healthz endpoint in scripts/fast_data_worker.py
+# (not via FastAPI — fast-data-worker is its own asyncio process).
+websockets>=12,<14
+aiohttp>=3.9,<4

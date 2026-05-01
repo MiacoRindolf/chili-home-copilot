@@ -14324,6 +14324,112 @@ def _migration_214_trade_table_check_constraints(conn) -> None:
         except Exception:
             pass
 
+def _migration_215_fast_path_tables(conn) -> None:
+    """F1 (2026-05-01) — fast-lane scalping data model.
+
+    Three tables for the streaming Coinbase ingestion pipeline:
+
+    * ``fast_snapshots`` — closed 1m bars (and other intervals later);
+      day-partitioned for efficient pruning.
+    * ``fast_orderbook`` — top-N L2 snapshots; populated by F2, schema
+      ships in F1 so the consumer is ready when L2 lands.
+    * ``fast_path_status`` — per-pair circuit-breaker state, single
+      row per ticker.
+
+    See ``docs/ARCHITECTURE-fast-path.md`` for the contract these
+    tables back. Idempotent: each ``CREATE`` is conditional.
+    """
+    inspector = sa_inspect(conn)
+    tables = set(inspector.get_table_names())
+
+    # ── fast_snapshots (partitioned by bar_close_at, day-range) ──────
+    if "fast_snapshots" not in tables:
+        conn.execute(text(
+            """
+            CREATE TABLE fast_snapshots (
+                id              BIGSERIAL,
+                ticker          VARCHAR(32) NOT NULL,
+                interval        VARCHAR(8) NOT NULL DEFAULT '1m',
+                bar_open_at     TIMESTAMP NOT NULL,
+                bar_close_at    TIMESTAMP NOT NULL,
+                open_price      DOUBLE PRECISION NOT NULL,
+                high_price      DOUBLE PRECISION NOT NULL,
+                low_price       DOUBLE PRECISION NOT NULL,
+                close_price     DOUBLE PRECISION NOT NULL,
+                volume          DOUBLE PRECISION NOT NULL,
+                trade_count     INTEGER,
+                vwap            DOUBLE PRECISION,
+                source          VARCHAR(32) NOT NULL DEFAULT 'coinbase',
+                received_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (id, bar_close_at)
+            ) PARTITION BY RANGE (bar_close_at)
+            """
+        ))
+        # Default partition catches anything not in a specific day partition.
+        conn.execute(text(
+            "CREATE TABLE fast_snapshots_default "
+            "PARTITION OF fast_snapshots DEFAULT"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fast_snapshots_ticker_close "
+            "ON fast_snapshots (ticker, bar_close_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX ix_fast_snapshots_uniq_bar "
+            "ON fast_snapshots (ticker, interval, bar_close_at, source)"
+        ))
+
+    # ── fast_orderbook (partitioned by snapshot_at) ──────────────────
+    if "fast_orderbook" not in tables:
+        conn.execute(text(
+            """
+            CREATE TABLE fast_orderbook (
+                id              BIGSERIAL,
+                ticker          VARCHAR(32) NOT NULL,
+                snapshot_at     TIMESTAMP NOT NULL,
+                bid_levels      JSONB NOT NULL,
+                ask_levels      JSONB NOT NULL,
+                bid_total_size  DOUBLE PRECISION,
+                ask_total_size  DOUBLE PRECISION,
+                imbalance       DOUBLE PRECISION,
+                spread_bps      DOUBLE PRECISION,
+                source          VARCHAR(32) NOT NULL DEFAULT 'coinbase',
+                PRIMARY KEY (id, snapshot_at)
+            ) PARTITION BY RANGE (snapshot_at)
+            """
+        ))
+        conn.execute(text(
+            "CREATE TABLE fast_orderbook_default "
+            "PARTITION OF fast_orderbook DEFAULT"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fast_orderbook_ticker_at "
+            "ON fast_orderbook (ticker, snapshot_at DESC)"
+        ))
+
+    # ── fast_path_status (single row per ticker) ─────────────────────
+    if "fast_path_status" not in tables:
+        conn.execute(text(
+            """
+            CREATE TABLE fast_path_status (
+                ticker            VARCHAR(32) PRIMARY KEY,
+                state             VARCHAR(16) NOT NULL,
+                last_bar_at       TIMESTAMP,
+                last_seq          BIGINT,
+                error_count_60s   INTEGER NOT NULL DEFAULT 0,
+                last_error        TEXT,
+                last_reconnect_at TIMESTAMP,
+                reconnect_count   INTEGER NOT NULL DEFAULT 0,
+                updated_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+                CONSTRAINT fast_path_status_state_check
+                    CHECK (state IN ('streaming','degraded','paused','halted'))
+            )
+            """
+        ))
+
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -14548,6 +14654,7 @@ MIGRATIONS = [
     ("212_backtest_queue_zero_trade_counter", _migration_212_backtest_queue_zero_trade_counter),
     ("213_demote_negative_ev_promoted_patterns", _migration_213_demote_negative_ev_promoted_patterns),
     ("214_trade_table_check_constraints", _migration_214_trade_table_check_constraints),
+    ("215_fast_path_tables", _migration_215_fast_path_tables),
 ]
 
 
