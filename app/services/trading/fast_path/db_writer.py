@@ -60,6 +60,25 @@ class BookItem:
     source: str = "coinbase"
 
 
+@dataclass(frozen=True)
+class AlertItem:
+    """A scanner-emitted scalp alert (F3).
+
+    Sub-bar-close granularity but EXECUTION-RELEVANT: the F4 path will
+    consume these as triggers. They share the same backpressure rules
+    as bars (must never silently drop) — the scanner emits at most a
+    handful per minute per ticker thanks to cooldown gates, so the
+    queue should never be the bottleneck in healthy operation.
+    """
+
+    ticker: str
+    alert_type: str
+    fired_at: datetime
+    signal_score: float
+    features: dict
+    source: str = "fast_path"
+
+
 class FastPathDBWriter:
     """Async write-coalescer with bounded queue.
 
@@ -91,6 +110,9 @@ class FastPathDBWriter:
         self.bars_dropped_queue_full = 0
         self.books_received = 0
         self.books_written = 0
+        self.alerts_received = 0
+        self.alerts_written = 0
+        self.alerts_dropped_queue_full = 0
         self.consecutive_batch_failures = 0
 
     # ── Producer-side ─────────────────────────────────────────────────
@@ -126,6 +148,25 @@ class FastPathDBWriter:
         except asyncio.QueueFull:
             # Silent drop is OK for L2 — we always have a fresher snapshot
             # coming, so missing one is recoverable.
+            return False
+
+    def enqueue_alert(self, item: AlertItem) -> bool:
+        """Enqueue a scanner-emitted alert. NEVER blocks; on full queue
+        this is a hard error — alerts are execution-relevant and the
+        scanner's own cooldown gate already throttles emission rate, so
+        a full queue indicates the writer/DB itself is degraded."""
+        self.alerts_received += 1
+        try:
+            self._queue.put_nowait(item)
+            return True
+        except asyncio.QueueFull:
+            self.alerts_dropped_queue_full += 1
+            logger.critical(
+                "[fast_path] DROP_ALERT queue_full ticker=%s "
+                "alert_type=%s queue_max=%s — DB write path is "
+                "degraded; investigate immediately",
+                item.ticker, item.alert_type, self._queue_max,
+            )
             return False
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -203,6 +244,7 @@ class FastPathDBWriter:
     def _write_batch_sync(self, batch: list[Any]) -> None:
         bars = [b for b in batch if isinstance(b, BarItem)]
         books = [b for b in batch if isinstance(b, BookItem)]
+        alerts = [b for b in batch if isinstance(b, AlertItem)]
         with self._engine.begin() as conn:
             if bars:
                 conn.execute(
@@ -266,6 +308,30 @@ class FastPathDBWriter:
                     ],
                 )
                 self.books_written += len(books)
+            if alerts:
+                conn.execute(
+                    text("""
+                        INSERT INTO fast_alerts (
+                            ticker, alert_type, fired_at,
+                            signal_score, features, source
+                        ) VALUES (
+                            :ticker, :alert_type, :fired_at,
+                            :signal_score, CAST(:features AS JSONB), :source
+                        )
+                    """),
+                    [
+                        {
+                            "ticker": a.ticker,
+                            "alert_type": a.alert_type,
+                            "fired_at": a.fired_at,
+                            "signal_score": a.signal_score,
+                            "features": json.dumps(a.features),
+                            "source": a.source,
+                        }
+                        for a in alerts
+                    ],
+                )
+                self.alerts_written += len(alerts)
 
     # ── Observability ─────────────────────────────────────────────────
 
@@ -276,10 +342,13 @@ class FastPathDBWriter:
             "bars_dropped_queue_full": self.bars_dropped_queue_full,
             "books_received": self.books_received,
             "books_written": self.books_written,
+            "alerts_received": self.alerts_received,
+            "alerts_written": self.alerts_written,
+            "alerts_dropped_queue_full": self.alerts_dropped_queue_full,
             "consecutive_batch_failures": self.consecutive_batch_failures,
             "queue_depth": self._queue.qsize(),
             "queue_max": self._queue_max,
         }
 
 
-__all__ = ["BarItem", "BookItem", "FastPathDBWriter"]
+__all__ = ["BarItem", "BookItem", "AlertItem", "FastPathDBWriter"]

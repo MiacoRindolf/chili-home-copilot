@@ -14430,6 +14430,61 @@ def _migration_215_fast_path_tables(conn) -> None:
     conn.commit()
 
 
+def _migration_216_fast_alerts(conn) -> None:
+    """F3 (2026-05-01) — fast-path event-driven scanner alerts.
+
+    A row per detected scalp setup. Day-partitioned by ``fired_at`` so
+    we can drop old partitions cheaply (alerts decay fast — anything
+    over a few hours old has no executable value).
+
+    ``alert_type`` is a short enum:
+        - ``volume_breakout_long`` — closed bar volume >= N x rolling mean
+          AND close > open. Fires on bar close.
+        - ``imbalance_long`` / ``imbalance_short`` — order book imbalance
+          crosses a threshold (>0.65 long / <0.35 short). Fires on book
+          emit, with per-ticker cooldown to suppress duplicates.
+
+    ``signal_score`` is normalised to [0, 1] regardless of alert_type so
+    F4 can sort/filter cross-type. ``features`` is the freeform JSONB
+    payload — the inputs the scanner used at the moment of firing, kept
+    for postmortem and for the F6 pattern miner.
+
+    Dedupe: PRIMARY KEY (id, fired_at) with a UNIQUE on (ticker,
+    alert_type, fired_at) — the cooldown logic in the scanner is the
+    primary dedupe; the unique constraint is defence-in-depth.
+    """
+    inspector = sa_inspect(conn)
+    tables = set(inspector.get_table_names())
+    if "fast_alerts" not in tables:
+        conn.execute(text(
+            """
+            CREATE TABLE fast_alerts (
+                id              BIGSERIAL,
+                ticker          VARCHAR(32) NOT NULL,
+                alert_type      VARCHAR(48) NOT NULL,
+                fired_at        TIMESTAMP NOT NULL,
+                signal_score    DOUBLE PRECISION NOT NULL,
+                features        JSONB NOT NULL,
+                source          VARCHAR(32) NOT NULL DEFAULT 'fast_path',
+                PRIMARY KEY (id, fired_at)
+            ) PARTITION BY RANGE (fired_at)
+            """
+        ))
+        conn.execute(text(
+            "CREATE TABLE fast_alerts_default "
+            "PARTITION OF fast_alerts DEFAULT"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fast_alerts_ticker_fired "
+            "ON fast_alerts (ticker, fired_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fast_alerts_type_fired "
+            "ON fast_alerts (alert_type, fired_at DESC)"
+        ))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -14655,6 +14710,7 @@ MIGRATIONS = [
     ("213_demote_negative_ev_promoted_patterns", _migration_213_demote_negative_ev_promoted_patterns),
     ("214_trade_table_check_constraints", _migration_214_trade_table_check_constraints),
     ("215_fast_path_tables", _migration_215_fast_path_tables),
+    ("216_fast_alerts", _migration_216_fast_alerts),
 ]
 
 

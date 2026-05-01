@@ -176,6 +176,27 @@ class FastPathSupervisor:
                 writer.get("books_received"),
                 writer.get("books_written"),
             )
+        scanner_stats = ws_stats.get("scanner") or {}
+        if scanner_stats:
+            logger.info(
+                "[fast_path] scanner bars_seen=%s books_seen=%s "
+                "vol_breakout=%s imb_long=%s imb_short=%s spread_squeeze=%s "
+                "suppressed_cooldown=%s suppressed_warmup=%s tickers=%s "
+                "writer_alerts_received=%s writer_alerts_written=%s "
+                "writer_alerts_dropped=%s",
+                scanner_stats.get("bars_seen"),
+                scanner_stats.get("books_seen"),
+                scanner_stats.get("fired_volume_breakout_long"),
+                scanner_stats.get("fired_imbalance_long"),
+                scanner_stats.get("fired_imbalance_short"),
+                scanner_stats.get("fired_spread_squeeze"),
+                scanner_stats.get("suppressed_cooldown"),
+                scanner_stats.get("suppressed_warmup"),
+                scanner_stats.get("tickers_tracked"),
+                writer.get("alerts_received"),
+                writer.get("alerts_written"),
+                writer.get("alerts_dropped_queue_full"),
+            )
         for ticker, ps in (snap.get("status") or {}).get("pairs", {}).items():
             logger.info(
                 "[fast_path] pair=%s state=%s last_bar_at=%s "

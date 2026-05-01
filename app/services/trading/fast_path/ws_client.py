@@ -34,8 +34,9 @@ try:
 except ImportError:  # pragma: no cover - dependency added via requirements
     websockets = None  # type: ignore
 
-from .db_writer import BarItem, BookItem, FastPathDBWriter
+from .db_writer import AlertItem, BarItem, BookItem, FastPathDBWriter
 from .order_book import OrderBookAggregator
+from .scanner import MomentumScanner
 from .settings import FastPathSettings
 from .status_tracker import StatusTracker
 
@@ -69,6 +70,9 @@ class CoinbaseWSClient:
             output_levels=settings.book_depth,
             emit_interval_s=0.25,
         )
+        # F3: event-driven scalp scanner. Pure-Python; reads bars +
+        # books and emits alert dicts.
+        self._scanner = MomentumScanner()
         # Diagnostic counters — surfaced via stats() so the supervisor
         # metrics line shows whether we're seeing raw traffic at all
         # (vs only filtering it out as not-yet-closed).
@@ -241,6 +245,9 @@ class CoinbaseWSClient:
             # enqueue_book silently drops on backpressure — that's fine
             # for L2 sampling; a fresher snapshot is always coming.
             self._db_writer.enqueue_book(book)
+            # F3: scan the freshly-emitted book for imbalance setups.
+            for alert_dict in self._scanner.on_book_emit(item["ticker"], item):
+                self._dispatch_alert(alert_dict)
 
     def _handle_heartbeat(self, payload: dict[str, Any]) -> None:
         # Heartbeats per product confirm the connection is alive even
@@ -312,11 +319,50 @@ class CoinbaseWSClient:
             if ok:
                 self._last_persisted[ticker] = close_at
                 self._status.record_bar(ticker, close_at, seq=None)
+                # F3: scan the just-closed bar for volume/breakout setups.
+                # Build the dict the scanner expects (it stays decoupled
+                # from BarItem to keep it unit-testable in isolation).
+                bar_dict = {
+                    "ticker": str(ticker),
+                    "bar_close_at": close_at,
+                    "open": float(bar.open_price),
+                    "close": float(bar.close_price),
+                    "high": float(bar.high_price),
+                    "low": float(bar.low_price),
+                    "volume": float(bar.volume),
+                }
+                for alert_dict in self._scanner.on_bar_close(bar_dict):
+                    self._dispatch_alert(alert_dict)
         except (TypeError, ValueError) as exc:
             ticker = candle.get("product_id") or "_unknown"
             self._status.record_error(ticker, f"candle_parse:{type(exc).__name__}")
             logger.debug("[fast_path] candle parse failed: %s", exc, exc_info=True)
 
+
+    def _dispatch_alert(self, alert_dict: dict[str, Any]) -> None:
+        """Convert scanner-emitted dict into AlertItem and enqueue.
+
+        Kept narrow on purpose: the scanner returns plain dicts so it
+        stays infra-free for unit tests; this method is the seam where
+        we cross into the typed db_writer interface.
+        """
+        try:
+            item = AlertItem(
+                ticker=str(alert_dict["ticker"]),
+                alert_type=str(alert_dict["alert_type"]),
+                fired_at=alert_dict["fired_at"],
+                signal_score=float(alert_dict.get("signal_score") or 0.0),
+                features=dict(alert_dict.get("features") or {}),
+                source="fast_path",
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("[fast_path] scanner emitted malformed alert: %s", exc)
+            return
+        self._db_writer.enqueue_alert(item)
+        logger.info(
+            "[fast_path] ALERT ticker=%s type=%s score=%.3f features=%s",
+            item.ticker, item.alert_type, item.signal_score, item.features,
+        )
 
     def stats(self) -> dict[str, Any]:
         """Diagnostic counters — for the supervisor metrics line. Lets us
@@ -336,6 +382,8 @@ class CoinbaseWSClient:
             "last_unknown_channel": self._last_unknown_channel,
             # F2: nested order-book aggregator stats.
             "book": self._book.stats(),
+            # F3: nested scanner stats.
+            "scanner": self._scanner.stats(),
         }
 
 
