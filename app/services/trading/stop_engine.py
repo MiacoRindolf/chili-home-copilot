@@ -988,7 +988,16 @@ def dispatch_stop_alerts(
             msg = _fmt(ticker, price, reason, **_fmt_kw)
             dispatch_alert(db, user_id, STOP_HIT, ticker, msg, skip_throttle=True)
             dispatched += 1
-            _try_auto_execute_stop(db, user_id, alert)
+            # R30 cleanup (2026-04-30): _try_auto_execute_stop call REMOVED.
+            # Single source of truth for crypto exit execution is now
+            # ``run_crypto_exit_pass`` (called every 30s from
+            # ``tick_auto_trader_monitor``); equity exits run through
+            # ``submit_robinhood_trade_exit`` from the same monitor.
+            # Leaving the call here was dead code (gated by
+            # ``chili_auto_execute_stops=False``) but would have raced
+            # the autotrader execution path if anyone ever flipped the
+            # flag. dispatch_stop_alerts now does what its name says:
+            # dispatches alerts (Telegram + neural mesh), no execution.
 
         elif event == "TARGET_HIT":
             msg = format_target_hit(ticker, price, reason, **_fmt_kw)

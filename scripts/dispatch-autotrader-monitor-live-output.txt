@@ -1,0 +1,181 @@
+﻿# is auto_trader_monitor actually firing? 04/30/2026 18:55:11
+
+===== 1. is auto_trader_monitor in the live scheduler? =====
+total jobs: 0
+
+
+===== 2. autotrader-worker logs: any auto_trader_monitor activity (last 30 min) =====
+
+
+===== 3. autotrader-worker logs: ALL apscheduler activity last 5 min =====
+
+autotrader-worker-1  | 2026-05-01 01:53:20,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 
+monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:53:50 UTC)" (scheduled at 2026-05-01 
+01:53:20.499678+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:21,275 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 
+30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:53:50 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:25,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:35 UTC)" (scheduled at 2026-05-01 
+01:53:25.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:25,523 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:35 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:35,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:45 UTC)" (scheduled at 2026-05-01 
+01:53:35.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:35,522 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:45 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:45,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:55 UTC)" (scheduled at 2026-05-01 
+01:53:45.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:45,525 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:55 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:50,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 
+monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:54:20 UTC)" (scheduled at 2026-05-01 
+01:53:50.499678+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:51,172 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 
+30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:54:20 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:55,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:05 UTC)" (scheduled at 2026-05-01 
+01:53:55.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:55,524 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:05 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:05,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:15 UTC)" (scheduled at 2026-05-01 
+01:54:05.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:05,521 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:15 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:15,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:25 UTC)" (scheduled at 2026-05-01 
+01:54:15.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:15,520 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:25 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:20,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 
+monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:54:50 UTC)" (scheduled at 2026-05-01 
+01:54:20.499678+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:21,146 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 
+30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:54:50 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:25,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:35 UTC)" (scheduled at 2026-05-01 
+01:54:25.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:25,521 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:35 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:35,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:45 UTC)" (scheduled at 2026-05-01 
+01:54:35.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:35,521 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:45 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:45,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:55 UTC)" (scheduled at 2026-05-01 
+01:54:45.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:45,521 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:55 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:50,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 
+monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:55:20 UTC)" (scheduled at 2026-05-01 
+01:54:50.499678+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:51,119 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 
+30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:55:20 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:55,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:55:05 UTC)" (scheduled at 2026-05-01 
+01:54:55.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:55,522 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:55:05 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:55:05,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick 
+(every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:55:15 UTC)" (scheduled at 2026-05-01 
+01:55:05.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:55:05,522 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 
+10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:55:15 UTC)" executed successfully
+
+
+
+
+===== 4. all brain_batch_jobs by job_type last 24h =====
+          job_type           | count |        most_recent         
+-----------------------------+-------+----------------------------
+ neural_mesh_drain           |  1653 | 2026-05-01 01:54:47.279356
+ momentum_paper_runner_batch |   819 | 2026-05-01 01:55:01.732024
+ bracket_reconciliation      |   778 | 2026-05-01 01:54:50.501984
+ momentum_live_runner_batch  |   413 | 2026-05-01 01:54:12.278816
+ crypto_stop_monitor         |   397 | 2026-05-01 01:54:50.500922
+ broker_sync                 |   366 | 2026-05-01 00:58:00.000665
+ daytrade_fast_monitor       |   252 | 2026-04-30 16:59:00.000855
+ scheduler_worker_heartbeat  |   208 | 2026-05-01 01:55:11.731932
+ pattern_imminent_scanner    |   152 | 2026-05-01 01:50:26.755802
+ price_monitor               |   145 | 2026-05-01 00:55:00.000747
+ crypto_breakout_scanner     |   101 | 2026-05-01 01:50:16.731254
+ paper_trade_check           |    52 | 2026-05-01 01:50:06.732163
+ stock_breakout_scanner      |    40 | 2026-04-30 20:05:21.731698
+ pattern_position_monitor    |    29 | 2026-05-01 01:35:51.730767
+ daily_prescreen             |    19 | 2026-04-30 20:05:31.781992
+ daily_market_scan           |    14 | 2026-04-30 20:05:41.75564
+ monitor_decision_review     |    11 | 2026-05-01 01:05:06.733426
+ brain_market_snapshots      |     8 | 2026-04-30 18:11:22.0364
+ momentum_scanner            |     8 | 2026-04-30 14:45:00.001663
+ learning_cycle              |     6 | 2026-04-30 18:19:38.616774
+(20 rows)
+
+
+
+===== 5. autotrader-worker very recent log lines =====
+autotrader-worker-1  | 2026-05-01 01:52:51,254 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:52:51,257 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:53:20 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:52:55,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:05 UTC)" (scheduled at 2026-05-01 01:52:55.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:52:55,520 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:52:55,520 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:05 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:05,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:15 UTC)" (scheduled at 2026-05-01 01:53:05.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:05,521 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:53:05,522 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:15 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:15,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:25 UTC)" (scheduled at 2026-05-01 01:53:15.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:15,522 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:53:15,523 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:25 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:20,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:53:50 UTC)" (scheduled at 2026-05-01 01:53:20.499678+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:20,961 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:53:21,272 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:53:21,275 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:53:50 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:25,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:35 UTC)" (scheduled at 2026-05-01 01:53:25.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:25,522 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:53:25,523 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:35 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:35,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:45 UTC)" (scheduled at 2026-05-01 01:53:35.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:35,521 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:53:35,522 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:45 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:45,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:55 UTC)" (scheduled at 2026-05-01 01:53:45.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:45,524 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:53:45,525 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:53:55 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:50,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:54:20 UTC)" (scheduled at 2026-05-01 01:53:50.499678+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:50,857 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:53:51,169 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:53:51,172 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:54:20 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:53:55,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:05 UTC)" (scheduled at 2026-05-01 01:53:55.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:53:55,523 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:53:55,524 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:05 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:05,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:15 UTC)" (scheduled at 2026-05-01 01:54:05.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:05,520 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:54:05,521 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:15 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:15,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:25 UTC)" (scheduled at 2026-05-01 01:54:15.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:15,520 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:54:15,520 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:25 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:20,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:54:50 UTC)" (scheduled at 2026-05-01 01:54:20.499678+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:20,850 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:54:21,142 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:54:21,146 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:54:50 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:25,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:35 UTC)" (scheduled at 2026-05-01 01:54:25.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:25,520 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:54:25,521 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:35 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:35,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:45 UTC)" (scheduled at 2026-05-01 01:54:35.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:35,521 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:54:35,521 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:45 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:45,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:55 UTC)" (scheduled at 2026-05-01 01:54:45.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:45,521 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:54:45,521 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:54:55 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:50,500 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:55:20 UTC)" (scheduled at 2026-05-01 01:54:50.499678+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:50,825 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:54:51,116 [INFO] app.services.broker_service: [broker] refresh_token rejected by Robinhood (status=401 body={'error': 'invalid_grant'})
+autotrader-worker-1  | 2026-05-01 01:54:51,119 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-01 01:55:20 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:54:55,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:55:05 UTC)" (scheduled at 2026-05-01 01:54:55.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:54:55,521 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:54:55,522 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:55:05 UTC)" executed successfully
+autotrader-worker-1  | 2026-05-01 01:55:05,499 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:55:15 UTC)" (scheduled at 2026-05-01 01:55:05.499522+00:00)
+autotrader-worker-1  | 2026-05-01 01:55:05,521 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+autotrader-worker-1  | 2026-05-01 01:55:05,522 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-01 01:55:15 UTC)" executed successfully
+
+
+===== 6. is run_scheduler_job_guarded gating on the breaker? =====

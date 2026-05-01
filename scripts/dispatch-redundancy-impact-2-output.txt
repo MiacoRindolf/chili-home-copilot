@@ -1,0 +1,62 @@
+﻿# impact analysis (tight scope) 04/30/2026 19:00:58
+
+===== 1. is chili_auto_execute_stops on? =====
+auto_execute_stops: False
+
+
+===== 2. trading_alerts last 24h =====
+        alert_type         | count 
+---------------------------+-------
+ crypto_squeeze_firing     |   116
+ pattern_breakout_imminent |    88
+ crypto_breakout           |    68
+ stock_breakout            |    65
+ pattern_monitor           |    39
+ breakout_triggered        |    20
+ stop_approaching          |     5
+(7 rows)
+
+
+
+===== 3. crypto_stop_monitor brain_batch_jobs runs (last 24h) =====
+ count 
+-------
+   400
+(1 row)
+
+
+
+===== 4. all callers of place_crypto_sell_order =====
+/app/app/services/broker_service.py:2303:def place_crypto_sell_order(
+/app/app/services/trading/auto_trader_monitor.py:338:    # run_crypto_exit_pass own crypto exits via place_crypto_sell_order.
+/app/app/services/trading/crypto/exit_monitor.py:12:  - Uses ``broker_service.place_crypto_sell_order`` (mirrors crypto
+/app/app/services/trading/crypto/exit_monitor.py:260:            res = broker_service.place_crypto_sell_order(
+/app/app/services/trading/venue/robinhood_spot.py:499:                place_crypto_buy_order, place_crypto_sell_order,
+/app/app/services/trading/venue/robinhood_spot.py:507:                result = place_crypto_sell_order(
+
+
+===== 5. neural mesh sensor table presence =====
+ t 
+---
+ 
+(1 row)
+
+
+
+===== 6. broker auth state right now (post-reauth) =====
+
+
+===== 7. recent autotrader tick output =====
+
+autotrader-worker-1  | 2026-05-01 02:00:35,553 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 02:00:45,521 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 02:00:55,604 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+
+
+

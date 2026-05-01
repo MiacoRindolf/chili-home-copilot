@@ -1,0 +1,67 @@
+﻿# trace whether run_crypto_exit_pass actually fires + why it produces 0 closes 04/30/2026 18:53:13
+
+===== 1. autotrader-worker uptime + role =====
+chili-home-copilot-autotrader-worker-1 | Up 52 minutes
+ROLE=autotrader_only
+
+
+===== 2. is auto_trader_monitor job registered? =====
+ERR The term 'head' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+
+===== 3. recent auto_trader_monitor brain_batch_jobs runs (last 24h) =====
+ job_type | status | started_at | ended_at 
+----------+--------+------------+----------
+(0 rows)
+
+
+
+===== 4. autotrader-worker logs: any 'crypto_exit_pass' or 'run_crypto_exit_pass' lines (last 6h) =====
+
+
+===== 5. configured cadence for auto_trader_monitor + tick =====
+monitor_interval_s: 30
+tick_interval_s: 10
+crypto_exit_monitor_enabled: True
+autotrader_enabled: True
+
+
+===== 6. simulate run_crypto_exit_pass right now (no open RH crypto, but check the candidate pool logic) =====
+result: {'checked': 0, 'closed': 0, 'deferred': 0, 'skipped': 0, 'errors': [], 'candidate_pool': 0}
+
+
+===== 7. retroactively look at HISTORIC crypto trades: did any have stop_loss/take_profit set? =====
+  id  |  ticker  |   entry   |   exit    |   stop    |  target   |          exit_reason           | entry_date 
+------+----------+-----------+-----------+-----------+-----------+--------------------------------+------------
+ 1796 | GRT-USD  |    0.0245 |           |    0.0214 |    0.0277 | broker_reconcile_no_exit_price | 2026-04-30
+ 1797 | SOL-USD  |   83.7333 |   83.4200 |   74.7280 |   93.3224 | broker_reconcile_position_gone | 2026-04-30
+ 1795 | AAVE-USD |   95.3317 |   93.6300 |   76.5894 |  111.7200 | broker_reconcile_position_gone | 2026-04-30
+  585 | ARB-USD  |    0.1295 |    0.1277 |    0.1103 |    0.1485 | broker_reconcile_position_gone | 2026-04-29
+  440 | AAVE-USD |   97.3600 |   92.5600 |   80.6499 |  115.1900 | broker_reconcile_position_gone | 2026-04-29
+ 1775 | RAY-USD  |    0.7170 |    0.7980 |    0.7970 |    0.9213 | broker_reconcile_position_gone | 2026-04-29
+  611 | ADA-USD  |    0.2538 |    0.2460 |    0.2251 |    0.2833 | broker_reconcile_position_gone | 2026-04-29
+  610 | AVAX-USD |    9.5000 |    9.1400 |    8.2234 |   10.4986 | broker_reconcile_position_gone | 2026-04-29
+  384 | RAY-USD  |    0.7170 |    0.7392 |    0.5813 |    0.8710 |                                | 2026-04-27
+  397 | DOGE-USD |    0.0989 |    0.0982 |    0.0886 |    0.1094 |                                | 2026-04-27
+  393 | RAY-USD  |    0.7170 |    0.7640 |    0.7850 |    0.9213 | broker_reconcile_position_gone | 2026-04-27
+  390 | ETH-USD  |    0.0000 | 2291.3400 | 2128.2700 | 2712.6600 |                                | 2026-04-27
+  394 | ETH-USD  |    0.0000 | 2289.3100 | 2128.2700 | 2712.6600 |                                | 2026-04-27
+  380 | ETH-USD  |    0.0000 | 2290.1600 | 2305.0000 | 2712.6600 |                                | 2026-04-24
+  377 | ETH-USD  |    0.0000 | 2334.1400 | 2128.2700 | 2712.6600 |                                | 2026-04-23
+  314 | ETH-USD  | 1939.1613 | 2366.7500 | 2226.1431 |           |                                | 2026-04-20
+  225 | ETH-USD  | 1939.1613 | 2310.9000 | 1943.0396 |           |                                | 2026-04-20
+  313 | ETH-USD  | 1939.1613 | 2300.5000 | 1943.0396 |           |                                | 2026-04-20
+  331 | BNB-USD  |  680.4600 |  680.4600 |  624.3500 |  778.2515 | zombie_reconcile_orphan        | 2026-04-20
+(19 rows)
+
+
+
+===== 8. count of crypto trades in 30d that EVER had a stop_loss set vs not =====
+ total | with_stop | with_target 
+-------+-----------+-------------
+    95 |        37 |          28
+(1 row)
+
+
+
+===== 9. WHO is closing crypto trades? trace the close path =====
+

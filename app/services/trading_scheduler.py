@@ -1705,8 +1705,23 @@ def _run_daytrade_fast_monitor_job():
     run_scheduler_job_guarded("daytrade_fast_monitor", _work)
 
 
-def _run_crypto_stop_monitor_job():
-    """24/7 stop-engine check for crypto positions only (every 2 minutes)."""
+def _run_stop_alert_dispatch_job():
+    """Stop-alert dispatch for crypto positions (every 2 minutes, 24/7).
+
+    R30 cleanup (2026-04-30): renamed from ``_run_crypto_stop_monitor_job``.
+    The original name implied this job acts on stops (places sells when
+    triggered), but it actually only DISPATCHES alerts -- Telegram +
+    neural-mesh sensor events. Real crypto exit execution lives in
+    ``run_crypto_exit_pass`` called every 30s from
+    ``tick_auto_trader_monitor``. The two paths used to share an
+    auto-execute path via ``_try_auto_execute_stop`` (gated by
+    ``chili_auto_execute_stops=False``); that has been removed in R30
+    so the autotrader monitor is the single source of truth for exit
+    execution.
+
+    Job ID is intentionally kept as ``crypto_stop_monitor`` so
+    ``brain_batch_jobs`` history continuity is preserved.
+    """
     from ..db import SessionLocal
     from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
     from ..models.trading import Trade
@@ -1738,9 +1753,9 @@ def _run_crypto_stop_monitor_job():
                     summary = evaluate_all(db, uid)
                     dispatched = dispatch_stop_alerts(db, uid, summary)
                     if dispatched:
-                        logger.info("[scheduler] Crypto stop monitor uid=%s: %d alerts dispatched", uid, dispatched)
+                        logger.info("[scheduler] stop_alert_dispatch uid=%s: %d alerts dispatched", uid, dispatched)
                 except Exception:
-                    logger.warning("[scheduler] Crypto stop monitor failed for uid=%s", uid, exc_info=True)
+                    logger.warning("[scheduler] stop_alert_dispatch failed for uid=%s", uid, exc_info=True)
         finally:
             db.close()
 
@@ -3389,7 +3404,7 @@ def start_scheduler():
                 )
 
                 _scheduler.add_job(
-                    _run_crypto_stop_monitor_job,
+                    _run_stop_alert_dispatch_job,
                     trigger=IntervalTrigger(minutes=2),
                     id="crypto_stop_monitor",
                     name="Crypto stop-loss monitor (every 2min, 24/7)",
