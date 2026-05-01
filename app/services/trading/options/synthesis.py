@@ -98,9 +98,12 @@ def _pick_expiration(adapter, underlying: str, target_dte: int = 30) -> Optional
     expirations directly. Best-effort — None means caller should skip
     synthesis entirely.
     """
+    # Phase 3.2 (2026-05-01): broker SDK encapsulated in broker_service.
+    # synthesis is at app/services/trading/options/, broker_service at
+    # app/services/ — three relative levels up.
     try:
-        import robin_stocks.robinhood as rh
-        chains = rh.options.get_chains((underlying or "").strip().upper())
+        from ... import broker_service as _bs
+        chains = _bs.get_option_chains((underlying or "").strip().upper())
         if not isinstance(chains, dict):
             return None
         exps = chains.get("expiration_dates") or []

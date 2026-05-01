@@ -55,20 +55,15 @@ def _current_crypto_price(ticker: str) -> Optional[float]:
                 return float(p)
     except Exception as e:
         logger.debug("[crypto_exit] fetch_quote failed for %s: %s", ticker, e)
-    # Fallback: try the broker's own quote endpoint
+    # Fallback: try the broker's own quote endpoint.
+    # Phase 3.2 (2026-05-01): broker SDK encapsulated in broker_service.
     try:
         from ... import broker_service
-        if broker_service.is_connected():
-            try:
-                import robin_stocks.robinhood as rh
-                base = ticker.upper().split("-")[0]
-                q = rh.crypto.get_crypto_quote(base)
-                if q and q.get("mark_price"):
-                    return float(q["mark_price"])
-            except Exception as e:
-                logger.debug("[crypto_exit] rh.crypto.get_crypto_quote failed for %s: %s", ticker, e)
-    except Exception:
-        pass
+        q = broker_service.get_crypto_quote(ticker)
+        if q and q.get("mark_price"):
+            return float(q["mark_price"])
+    except Exception as e:
+        logger.debug("[crypto_exit] get_crypto_quote failed for %s: %s", ticker, e)
     return None
 
 

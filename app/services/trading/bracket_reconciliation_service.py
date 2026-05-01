@@ -179,8 +179,12 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
             for r in local_rows
         )
         if wanted_rh:
-            import robin_stocks.robinhood as rh
-            raw_orders = rh.orders.get_all_open_stock_orders() or []
+            # Phase 3.2 (2026-05-01): broker SDK is encapsulated in
+            # broker_service. The CI guard in
+            # tests/test_no_raw_broker_sdk_imports.py forbids new
+            # ``import robin_stocks`` outside the adapter set.
+            from .. import broker_service as _bs
+            raw_orders = _bs.get_open_stock_orders()
             for od in raw_orders:
                 if not isinstance(od, dict):
                     continue
@@ -200,12 +204,9 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
                 if not tkr:
                     inst_url = od.get("instrument") or od.get("instrument_url")
                     if inst_url:
-                        try:
-                            inst = rh.stocks.get_instrument_by_url(inst_url)
-                            if isinstance(inst, dict):
-                                tkr = (inst.get("symbol") or "").upper() or None
-                        except Exception:
-                            tkr = None
+                        inst = _bs.get_instrument_by_url(inst_url)
+                        if isinstance(inst, dict):
+                            tkr = (inst.get("symbol") or "").upper() or None
                 if not tkr:
                     continue
                 # If the same ticker has multiple working stops, prefer the

@@ -143,9 +143,9 @@ def _load_market_hours(raw_product: dict[str, Any], *, now_utc: datetime) -> dic
     if not mic:
         return None
     try:
-        import robin_stocks.robinhood as rh
-
-        return rh.markets.get_market_hours(mic, now_utc.astimezone(_ET).date().isoformat())
+        # Phase 3.2 (2026-05-01): broker SDK encapsulated in broker_service.
+        from .. import broker_service as _bs
+        return _bs.get_market_hours(mic, now_utc.astimezone(_ET).date().isoformat())
     except Exception:
         logger.debug("[rh_exit] market hours lookup failed for %s", mic, exc_info=True)
         return None
@@ -544,15 +544,10 @@ def _cancel_external_working_sells(
     knows about (``keep_order_id``).
     """
     cancelled: list[dict[str, Any]] = []
-    try:
-        import robin_stocks.robinhood as rh  # type: ignore
-    except Exception:
-        return cancelled
-
-    try:
-        open_orders = rh.orders.get_all_open_stock_orders() or []
-    except Exception:
-        logger.warning("[rh_exit] external-sell sweep: get_all_open_stock_orders failed", exc_info=True)
+    # Phase 3.2 (2026-05-01): broker SDK encapsulated in broker_service.
+    from .. import broker_service as _bs
+    open_orders = _bs.get_open_stock_orders()
+    if not open_orders:
         return cancelled
 
     _ACTIVE_RH_STATES = {"queued", "unconfirmed", "confirmed", "partially_filled", "new"}
@@ -567,10 +562,7 @@ def _cancel_external_working_sells(
         if side != "sell" or state not in _ACTIVE_RH_STATES:
             continue
         inst_url = str(order.get("instrument") or "")
-        try:
-            sym = rh.stocks.get_symbol_by_url(inst_url)
-        except Exception:
-            sym = ""
+        sym = _bs.get_symbol_by_url(inst_url) or ""
         if (sym or "").upper() != ticker.upper():
             continue
 

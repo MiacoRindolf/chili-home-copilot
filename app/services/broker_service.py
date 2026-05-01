@@ -2594,6 +2594,85 @@ def get_crypto_quote(ticker: str) -> dict[str, Any] | None:
         return None
 
 
+# ── Phase 3.2 (2026-05-01): single-importer wrappers ───────────────────
+#
+# Every robin_stocks call lives in this file and ``trading/venue/*``.
+# These wrappers exist so caller modules don't need to ``import
+# robin_stocks`` directly — the CI guard in
+# ``tests/test_no_raw_broker_sdk_imports.py`` enforces this. Future
+# venues (different broker SDK, unit-test mocking, etc.) just need to
+# replace the body of these functions.
+
+
+def get_open_stock_orders() -> list[dict[str, Any]]:
+    """All currently-open (non-terminal) equity orders for this account.
+
+    Returns a list of raw Robinhood order dicts; callers should not
+    assume schema beyond what they need (they typically dereference
+    ``id``, ``state``, ``side``, ``type``, ``trigger``, ``stop_price``,
+    ``price``, ``quantity``, ``instrument``).
+    """
+    if not _rh_available or not is_connected():
+        return []
+    try:
+        import robin_stocks.robinhood as rh
+        return rh.orders.get_all_open_stock_orders() or []
+    except Exception as e:
+        logger.warning("[broker] get_open_stock_orders failed: %s", e)
+        return []
+
+
+def get_instrument_by_url(instrument_url: str) -> dict[str, Any] | None:
+    """Look up the instrument record (symbol, simple_name, etc.) for a
+    Robinhood instrument URL. Used by reconciler / exit code that has
+    only the URL and needs the ticker symbol."""
+    if not _rh_available or not is_connected() or not instrument_url:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        return rh.stocks.get_instrument_by_url(instrument_url) or None
+    except Exception as e:
+        logger.warning("[broker] get_instrument_by_url failed: %s", e)
+        return None
+
+
+def get_symbol_by_url(instrument_url: str) -> str | None:
+    """Same as ``get_instrument_by_url`` but extracts just the symbol."""
+    if not _rh_available or not is_connected() or not instrument_url:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        return rh.stocks.get_symbol_by_url(instrument_url) or None
+    except Exception as e:
+        logger.warning("[broker] get_symbol_by_url failed: %s", e)
+        return None
+
+
+def get_market_hours(mic: str, date_iso: str) -> dict[str, Any] | None:
+    """Robinhood market-hours lookup by MIC and ISO date (YYYY-MM-DD)."""
+    if not _rh_available or not is_connected():
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        return rh.markets.get_market_hours(mic, date_iso) or None
+    except Exception as e:
+        logger.warning("[broker] get_market_hours(%s, %s) failed: %s", mic, date_iso, e)
+        return None
+
+
+def get_option_chains(symbol: str) -> dict[str, Any] | None:
+    """Fetch the full option-chains record for *symbol*. Used by options
+    synthesis. Returns the raw dict (callers handle missing keys)."""
+    if not _rh_available or not is_connected() or not symbol:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        return rh.options.get_chains(symbol.strip().upper())
+    except Exception as e:
+        logger.warning("[broker] get_option_chains(%s) failed: %s", symbol, e)
+        return None
+
+
 # ── Options order placement (Task MM) ──────────────────────────────────
 #
 # Robinhood options live at api.robinhood.com/options/ — same equity-scope
