@@ -1,5 +1,21 @@
 """Phase G.2 - bracket writer (ACTIVE).
 
+FIX 52 (2026-05-01) — per-intent rejection cooldown for terminal-class
+broker rejections. When Robinhood rejects a SELL_STOP with "Not enough
+shares to sell" (or other terminal-class reasons that won't self-resolve
+on retry — qty mismatches, account-type restrictions, instrument-suspended
+flags), we mark the intent as cooled-down for ``_TERMINAL_REJECT_COOLDOWN``
+seconds. Subsequent sweep ticks within that window skip the placement
+attempt instead of producing another reject + Robinhood notification.
+
+This complements the pre-flight ``broker_qty`` check in the reconciler
+which catches the case where ``BrokerView.position_quantity`` is zero or
+stale-low. The cooldown handles the leftover case where the BrokerView
+reports plenty of shares but the broker still rejects (committed to
+other resting orders, T+1 unsettled, account restriction, etc.). One
+rejection is enough to start the storm; the cooldown stops it at one.
+"""
+
 The Phase G sweep is read-only: it classifies drift but never repairs.
 Phase G.2 closes that gap by letting the reconciler act on specific
 classification outcomes - resize a stop to match a partial fill, place
@@ -90,6 +106,57 @@ from .bracket_reconciler import ReconciliationDecision
 from .ops_log_prefixes import BRACKET_WRITER_G2
 
 logger = logging.getLogger(__name__)
+
+
+# FIX 52 (2026-05-01) — per-intent rejection cooldown. Keyed on
+# bracket_intent_id; value is the unix timestamp at which the cooldown
+# expires (``time.time() + _TERMINAL_REJECT_COOLDOWN``). The set is
+# in-process and intentionally not persisted: a container restart should
+# allow ONE retry to confirm the rejection is still happening before
+# re-arming the cooldown. That one retry is bounded — it produces at
+# most one rejection per restart, not a storm.
+_TERMINAL_REJECT_COOLDOWN_SECS = 3600  # 1h
+_intent_reject_cooldown: dict[int, float] = {}
+
+# Substrings of broker error messages that we treat as terminal-class
+# (won't self-resolve in 1-2 minutes — retrying just spams the broker
+# and triggers user-visible reject notifications).
+_TERMINAL_REJECT_PATTERNS = (
+    "not enough shares",   # Robinhood "Not enough shares to sell."
+    "insufficient shares",
+    "instrument suspended",
+    "instrument is not allowed",
+    "uncovered",            # uncovered short
+    "fractional",           # fractional restriction (Robinhood doesn't allow stop-loss on fractionals)
+    "settlement",           # T+1 settlement violation messages
+    "good faith violation",
+)
+
+
+def _is_terminal_reject(error_text: str | None) -> bool:
+    """Return True for reject reasons we should not retry within an hour."""
+    if not error_text:
+        return False
+    needle = str(error_text).lower()
+    return any(pat in needle for pat in _TERMINAL_REJECT_PATTERNS)
+
+
+def _is_in_reject_cooldown(bracket_intent_id: int) -> bool:
+    """Return True if this intent is within the terminal-reject cooldown."""
+    until = _intent_reject_cooldown.get(int(bracket_intent_id))
+    if until is None:
+        return False
+    if time.time() >= until:
+        # Expired — drop the key so the dict doesn't grow forever.
+        _intent_reject_cooldown.pop(int(bracket_intent_id), None)
+        return False
+    return True
+
+
+def _arm_reject_cooldown(bracket_intent_id: int) -> None:
+    _intent_reject_cooldown[int(bracket_intent_id)] = (
+        time.time() + _TERMINAL_REJECT_COOLDOWN_SECS
+    )
 
 
 # Feature flags (all default True per the module docstring); any one
@@ -489,6 +556,21 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
+    # FIX 52 (2026-05-01) — short-circuit if this intent had a
+    # terminal-class rejection recently. See module docstring.
+    if _is_in_reject_cooldown(bracket_intent_id):
+        # Skipped early-returns aren't audited (per the docstring's "skipped"
+        # rule); just log so the operator can see the cooldown in effect.
+        logger.info(
+            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+            "ticker=%s reason=in_reject_cooldown",
+            bracket_intent_id, ticker,
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="in_reject_cooldown",
+            broker_source=broker_source, ticker=ticker,
+        )
+
     if (broker_source or "").lower() not in _SUPPORTED_VENUES:
         return WriterAction(
             action="place_missing_stop", ok=False, reason="unsupported_venue",
@@ -586,19 +668,35 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
     if not place_res.get("ok"):
-        logger.warning(
-            f"{BRACKET_WRITER_G2} place_missing_stop broker error intent=%s: %s",
-            bracket_intent_id, place_res.get("error"),
-        )
+        err_text = str(place_res.get("error") or "")
+        terminal = _is_terminal_reject(err_text)
+        if terminal:
+            # FIX 52 — arm the cooldown so the next 1h of sweeps skip
+            # this intent instead of producing another reject + Robinhood
+            # notification.
+            _arm_reject_cooldown(bracket_intent_id)
+            logger.warning(
+                f"{BRACKET_WRITER_G2} place_missing_stop terminal reject; "
+                "arming %ss cooldown intent=%s ticker=%s err=%s",
+                _TERMINAL_REJECT_COOLDOWN_SECS, bracket_intent_id, ticker,
+                err_text[:200],
+            )
+        else:
+            logger.warning(
+                f"{BRACKET_WRITER_G2} place_missing_stop broker error intent=%s: %s",
+                bracket_intent_id, err_text[:200],
+            )
         _g2_event(
             db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
             ticker=ticker, broker_source=broker_source,
             event_type="g2_place_missing_stop_rejected", status="rejected",
             qty=float(local_quantity), stop_price=float(stop_price),
-            error=str(place_res.get("error") or "")[:500],
+            error=err_text[:500],
+            extra={"terminal_reject": terminal},
         )
         return WriterAction(
-            action="place_missing_stop", ok=False, reason="place_failed",
+            action="place_missing_stop", ok=False,
+            reason="terminal_reject" if terminal else "place_failed",
             broker_source=broker_source, ticker=ticker,
             raw_broker_response=place_res,
         )
