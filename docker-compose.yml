@@ -589,15 +589,16 @@ services:
       # FIX 33 carry-over for broker-call timeouts.
       - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
       - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
-      # FIX 54 (2026-05-01) — kill-switch the missing-stop placement path
-      # in bracket_writer_g2 until we figure out why Robinhood is cancelling
-      # every accepted SELL_STOP (one cancellation notification per placement).
-      # FIX 51 (pre-flight broker-qty), 52 (terminal-reject cooldown), and
-      # 53 (post-placement cooldown) reduced the storm but didn't address the
-      # underlying broker behavior. Setting this to 0 stops new SELL_STOP
-      # placements entirely; existing broker-side stops are unaffected.
-      # Re-enable to "1" once the root cause of the cancellations is understood.
-      - CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=0
+      # FIX 54 (2026-05-01) — kill-switch was set to 0 for ~30 min while
+      # we diagnosed. Root cause confirmed by scripts/_eltx_probe.py:
+      # held_for_sells == quantity for AIDX/CCCC/CRDL/TLS/VFS/EKSO/PED
+      # (existing limit-sells covered all shares). FIX 55+57 now cancel
+      # the covering sell order before placing the stop. ELTX-style
+      # instrument-restriction cancellations are absorbed by FIX 56's
+      # placement-failure threshold (3 → arm 1h cooldown). Switch is
+      # back to 1; if a new pattern emerges and spam returns, flip to 0
+      # to halt placements while we investigate.
+      - CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app

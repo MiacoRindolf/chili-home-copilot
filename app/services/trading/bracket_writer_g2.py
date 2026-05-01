@@ -193,6 +193,45 @@ def _arm_post_place_cooldown(bracket_intent_id: int) -> None:
     )
 
 
+# FIX 56 (2026-05-01) — auto-cancel-pattern detection.
+#
+# When the broker accepts a SELL_STOP placement (returns ok=true with an
+# order_id) but Robinhood auto-cancels it within seconds — no
+# cancel_reason exposed via the API — the next post-place cooldown
+# expiry sees the same intent classified missing_stop again, places
+# another stop, gets cancelled again. ELTX exhibits this pattern:
+# 25 free shares, no covering sell order, yet 20 consecutive SELL_STOPs
+# placed in 30 minutes were all cancelled within ~1 second of placement.
+# Robinhood likely has an instrument-specific risk rule (small-cap
+# biotech, low-priced, etc.) that auto-cancels stop-loss orders.
+#
+# Without intervention, FIX 53's 5-min post-place cooldown limits the
+# spam to 12 placements/hour per intent, but the user still gets 12
+# cancellation notifications per hour. FIX 56 stops it at 3 placements
+# per intent then arms the 1h terminal-reject cooldown — 3
+# notifications, then silence.
+_PLACEMENT_FAILURE_THRESHOLD = 3
+_intent_placement_count: dict[int, int] = {}
+
+
+def _record_placement(bracket_intent_id: int) -> int:
+    """Increment per-intent placement counter; return the new count.
+
+    Counter is in-process; restart resets it (intentional — gives the
+    operator three retries per restart to confirm the broker is still
+    auto-cancelling before silencing the intent).
+    """
+    new = _intent_placement_count.get(int(bracket_intent_id), 0) + 1
+    _intent_placement_count[int(bracket_intent_id)] = new
+    return new
+
+
+def _reset_placement_count(bracket_intent_id: int) -> None:
+    """Clear the placement counter — used when we detect the position is
+    healthy (e.g., classification flips away from missing_stop)."""
+    _intent_placement_count.pop(int(bracket_intent_id), None)
+
+
 # Feature flags (all default True per the module docstring); any one
 # being off disables the corresponding action even when the top-level
 # flag is on.
@@ -638,29 +677,48 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
-    # FIX 51 (2026-05-01) — last-mile broker-quantity guard.
+    # FIX 55 (2026-05-01) — covered-by-existing-sell pre-flight.
     #
-    # The reconciler's _invoke_writer_for_decision already pre-flights the
-    # broker share count (skip if zero, cap if low). This second-line check
-    # protects callers that bypass the reconciler — tests, ad-hoc scripts,
-    # any future caller that forgets the pre-flight. We can't reach the
-    # BrokerView from here so we re-query positions through the adapter.
-    # If the broker actually has zero shares, fail fast with a structured
-    # reason so the caller doesn't paper over the rejection as a generic
-    # ``place_failed``.
+    # ROOT CAUSE of the AIDX/CCCC/CRDL/TLS/VFS/EKSO/PED rejection storm:
+    # every share of those positions was already committed to an existing
+    # limit-sell order placed weeks ago (target take-profit). Robinhood
+    # reports holdings as 150 AIDX, 150 CCCC, etc., but
+    # ``shares_held_for_sells == quantity``, so there are zero free shares
+    # to put under a SELL_STOP. Result: every sweep produced a "Not enough
+    # shares to sell" reject + Robinhood notification.
+    #
+    # FIX 51 (BrokerView.position_quantity) didn't catch this because it
+    # only checks total qty, not ``available_to_sell = qty - held_for_sells``.
+    # FIX 52 (terminal-reject cooldown) absorbed the storm but still let
+    # one placement through per restart. FIX 55 catches the case at the
+    # source: if all shares are already covered by an existing sell order,
+    # the position is protected — skip placement entirely. The existing
+    # limit IS the exit; we don't need to add a stop on top of it.
     adapter = adapter_factory(broker_source)
     try:
-        positions = adapter.get_positions() or {}
-        # Adapter shape: {ticker: {"quantity": float, ...}, ...}.
-        pos_entry = positions.get(ticker) or positions.get(str(ticker).upper()) or {}
-        broker_qty_raw = (
-            pos_entry.get("quantity") if isinstance(pos_entry, dict) else None
-        )
-        broker_qty = float(broker_qty_raw) if broker_qty_raw is not None else None
+        # Direct broker_service call (cleaner than adapter.get_positions
+        # which has a different shape). 60s cache built into the helper.
+        from .. import broker_service as _bs
+
+        held_for_sells = _bs.get_position_held_for_sells(ticker)
     except Exception:
-        # If we can't read positions, defer to the broker — old behavior.
-        # The broker will reject "Not enough shares" if applicable; we won't
-        # block a legitimate placement just because the position-read failed.
+        held_for_sells = None
+
+    # We need total qty too, to compute the available bucket. Use the
+    # adapter's get_products (same data source as BrokerView but reachable
+    # from here without plumbing the BrokerView through).
+    broker_qty: float | None = None
+    try:
+        products, _fresh = adapter.get_products()
+        for p in products or []:
+            raw = getattr(p, "raw", None) or {}
+            sym = raw.get("ticker") or getattr(p, "product_id", None)
+            if (sym or "").upper().strip() == str(ticker).upper().strip():
+                qty_raw = raw.get("quantity")
+                if qty_raw is not None:
+                    broker_qty = float(qty_raw)
+                break
+    except Exception:
         broker_qty = None
 
     if broker_qty is not None and broker_qty <= 0:
@@ -677,13 +735,86 @@ def place_missing_stop(
             action="place_missing_stop", ok=False, reason="broker_qty_zero",
             broker_source=broker_source, ticker=ticker,
         )
-    if broker_qty is not None and broker_qty < float(local_quantity):
+
+    # FIX 57 (2026-05-01) — cancel covering sell order, then proceed.
+    #
+    # When every share is already committed to an existing sell order
+    # (held_for_sells >= broker_qty), a SELL_STOP placement gets rejected
+    # with "Not enough shares to sell." Operator policy (user request,
+    # 2026-05-01): cancel the covering sell order(s) so the shares free
+    # up, then place the SELL_STOP on the now-free shares. The covering
+    # order is typically a take-profit limit-sell from a prior round —
+    # losing it means losing the upside lock-in, but the user prioritizes
+    # downside protection. After the cancel, we sleep ~2s for the cancel
+    # to propagate at Robinhood, then continue into the placement path.
+    # If the placement still fails (Robinhood race, instrument
+    # restriction, etc.), the existing FIX 52 terminal-reject cooldown
+    # absorbs the next attempt.
+    if (
+        broker_qty is not None
+        and held_for_sells is not None
+        and held_for_sells >= broker_qty - 1e-9  # tolerance for float compare
+    ):
         logger.warning(
-            f"{BRACKET_WRITER_G2} place_missing_stop capping qty intent=%s "
-            "ticker=%s local_qty=%s broker_qty=%s",
-            bracket_intent_id, ticker, local_quantity, broker_qty,
+            f"{BRACKET_WRITER_G2} place_missing_stop intent=%s ticker=%s "
+            "covered_by_existing_sell broker_qty=%s held_for_sells=%s — "
+            "cancelling covering sell order(s) before placing stop",
+            bracket_intent_id, ticker, broker_qty, held_for_sells,
         )
-        local_quantity = broker_qty
+        try:
+            from .. import broker_service as _bs
+
+            cancelled = _bs.cancel_open_sell_orders_for_ticker(ticker)
+        except Exception as exc:
+            logger.warning(
+                f"{BRACKET_WRITER_G2} cancel_open_sell_orders raised "
+                "intent=%s ticker=%s: %s",
+                bracket_intent_id, ticker, exc,
+            )
+            cancelled = 0
+
+        if cancelled <= 0:
+            # Cancel didn't run or didn't find any open orders — bail rather
+            # than trying to place against a position we can't free. Arm
+            # the 5-min post-place cooldown so the next sweep tries again
+            # rather than thrashing.
+            logger.warning(
+                f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+                "ticker=%s reason=cancel_zero_orders (no covering orders "
+                "found despite held_for_sells == broker_qty)",
+                bracket_intent_id, ticker,
+            )
+            _arm_post_place_cooldown(bracket_intent_id)
+            return WriterAction(
+                action="place_missing_stop", ok=False,
+                reason="cancel_zero_orders",
+                broker_source=broker_source, ticker=ticker,
+            )
+
+        # Give Robinhood a moment to propagate the cancel before we ask it
+        # to place a new order on the same shares. resize_stop_for_partial_fill
+        # uses an inline cancel + place sequence too; the broker confirms
+        # cancels in ~1-2s in practice. Treat slower-than-2s as an
+        # exception rather than the norm.
+        time.sleep(2)
+        logger.info(
+            f"{BRACKET_WRITER_G2} place_missing_stop intent=%s ticker=%s "
+            "cancelled %s covering sell order(s); proceeding to place stop",
+            bracket_intent_id, ticker, cancelled,
+        )
+
+    # Cap at the available bucket if it's known and below local_quantity.
+    if broker_qty is not None and held_for_sells is not None:
+        available = max(0.0, broker_qty - held_for_sells)
+        if available < float(local_quantity):
+            logger.warning(
+                f"{BRACKET_WRITER_G2} place_missing_stop capping qty intent=%s "
+                "ticker=%s local_qty=%s broker_qty=%s held_for_sells=%s "
+                "available=%s",
+                bracket_intent_id, ticker, local_quantity, broker_qty,
+                held_for_sells, available,
+            )
+            local_quantity = available
 
     client_oid = _build_coid("miss", bracket_intent_id, float(local_quantity))
 
@@ -760,6 +891,22 @@ def place_missing_stop(
     # FIX 53 — arm post-placement cooldown so we don't bombard the
     # broker with duplicate stops faster than it can confirm them.
     _arm_post_place_cooldown(bracket_intent_id)
+
+    # FIX 56 — detect auto-cancel pattern. Count consecutive placements
+    # for this intent; if we hit the threshold the broker is likely
+    # auto-cancelling every stop (ELTX-style instrument restriction).
+    # Arm the 1h terminal-reject cooldown so the user sees 3
+    # notifications then silence, instead of 12/hour forever.
+    placement_count = _record_placement(bracket_intent_id)
+    if placement_count >= _PLACEMENT_FAILURE_THRESHOLD:
+        logger.warning(
+            f"{BRACKET_WRITER_G2} place_missing_stop hit failure threshold "
+            "intent=%s ticker=%s placements=%s — arming %ss terminal-reject "
+            "cooldown (broker is auto-cancelling each placed stop)",
+            bracket_intent_id, ticker, placement_count,
+            _TERMINAL_REJECT_COOLDOWN_SECS,
+        )
+        _arm_reject_cooldown(bracket_intent_id)
     _g2_event(
         db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
         ticker=ticker, broker_source=broker_source,

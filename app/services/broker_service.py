@@ -1057,6 +1057,130 @@ def get_positions() -> list[dict[str, Any]]:
         return []
 
 
+def cancel_open_sell_orders_for_ticker(ticker: str) -> int:
+    """Cancel every open SELL order for *ticker*. Returns the count cancelled.
+
+    FIX 57 (2026-05-01): when an existing limit-sell (target take-profit)
+    fully commits the position's shares, a SELL_STOP can't be placed
+    ("Not enough shares to sell"). The user explicitly opted into
+    "cancel-and-replace": cancel the covering sell order(s) first, then
+    bracket_writer_g2 places the stop on the now-free shares. Trade-off:
+    the original take-profit ceiling is lost, but downside protection
+    (which the user prioritizes) is gained.
+
+    Iterates ``get_all_open_stock_orders()``, filters to side=sell for the
+    given ticker, calls ``cancel_stock_order`` on each. Best-effort —
+    individual cancellation failures don't abort the loop. Returns 0 if
+    the broker session is down.
+    """
+    if not is_connected():
+        return 0
+    sym = (ticker or "").upper().strip()
+    if not sym:
+        return 0
+    try:
+        import robin_stocks.robinhood as rh
+
+        all_open = rh.orders.get_all_open_stock_orders() or []
+        cancelled = 0
+        for o in all_open:
+            try:
+                if (o.get("side") or "").lower() != "sell":
+                    continue
+                instr_url = o.get("instrument")
+                inst = rh.helper.request_get(instr_url) if instr_url else {}
+                p_sym = ((inst or {}).get("symbol") or "").upper().strip()
+                if p_sym != sym:
+                    continue
+                order_id = o.get("id")
+                if not order_id:
+                    continue
+                try:
+                    rh.orders.cancel_stock_order(order_id)
+                    cancelled += 1
+                    logger.warning(
+                        "[broker] cancelled covering sell order ticker=%s id=%s "
+                        "type=%s qty=%s price=%s stop=%s — to free shares for "
+                        "SELL_STOP placement",
+                        sym, order_id, o.get("type"), o.get("quantity"),
+                        o.get("price"), o.get("stop_price"),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[broker] cancel of covering order %s failed: %s",
+                        order_id, exc,
+                    )
+            except Exception:
+                continue
+
+        # Bust the held cache so callers re-querying see the post-cancel state.
+        _cache.pop(f"held_for_sells::{sym}", None)
+        return cancelled
+    except Exception as exc:
+        logger.warning(
+            "[broker] cancel_open_sell_orders_for_ticker(%s) failed: %s", sym, exc,
+        )
+        return 0
+
+
+def get_position_held_for_sells(ticker: str) -> float | None:
+    """Return shares already committed to existing sell orders for *ticker*.
+
+    FIX 55 (2026-05-01): the bracket writer needs to know whether a position
+    is already protected by a resting sell order (target/take-profit limit
+    or otherwise) before submitting a new SELL_STOP. ``build_holdings``
+    doesn't expose this — only ``get_open_stock_positions`` does, via
+    ``shares_held_for_sells``.
+
+    Returns ``None`` if the broker session is down, the ticker is not held,
+    or the API call raises. The caller treats ``None`` as "unknown — defer
+    to the broker" rather than skipping (we don't want to block legitimate
+    placements just because a single API hiccup denied us the held data).
+
+    Cache TTL: 60s. Stop-loss placement runs once per minute per intent
+    (post FIX 53), so a 60s cache means at most one extra API call per
+    placement decision.
+    """
+    if not is_connected():
+        return None
+    sym = (ticker or "").upper().strip()
+    if not sym:
+        return None
+
+    cache_key = f"held_for_sells::{sym}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached if cached is not False else None
+
+    try:
+        import robin_stocks.robinhood as rh
+
+        positions = rh.get_open_stock_positions() or []
+        result: float | None = None
+        for p in positions:
+            try:
+                qty_total = float(p.get("quantity") or 0)
+                if qty_total <= 0:
+                    continue
+                instr_url = p.get("instrument")
+                inst = rh.helper.request_get(instr_url) if instr_url else {}
+                p_sym = ((inst or {}).get("symbol") or "").upper().strip()
+                if p_sym == sym:
+                    held = p.get("shares_held_for_sells")
+                    result = float(held) if held is not None else 0.0
+                    break
+            except Exception:
+                continue
+        # Cache the negative outcome too (False marker) so we don't churn the API
+        # for tickers that aren't currently held. _cache_set uses the module's
+        # default TTL (_CACHE_TTL).
+        _cache_set(cache_key, result if result is not None else False)
+        return result
+    except Exception as exc:
+        logger.warning("[broker] get_position_held_for_sells(%s) failed: %s", sym, exc)
+        return None
+
+
 def get_crypto_positions() -> list[dict[str, Any]]:
     """Current crypto holdings. Cached 5 min."""
     cached = _cache_get("crypto_positions")
