@@ -1,0 +1,22 @@
+﻿# verify auth-failure -> position-wipeout hypothesis 04/30/2026 19:47:42
+
+===== 1. simultaneous closes - timestamps in detail =====
+  id  |  ticker  |         exit_date          |          exit_reason           
+------+----------+----------------------------+--------------------------------
+ 1795 | AAVE-USD | 2026-04-30 15:56:02.298273 | broker_reconcile_position_gone
+ 1796 | GRT-USD  | 2026-04-30 15:56:03.159232 | broker_reconcile_no_exit_price
+ 1797 | SOL-USD  | 2026-04-30 15:56:03.30618  | broker_reconcile_position_gone
+(3 rows)
+
+
+
+===== 2. broker-sync-worker logs around 15:56 UTC (close window) =====
+
+
+===== 3. read sync_positions_to_db: does it have empty-positions guard? =====
+total lines: 393
+has empty-positions guard: False
+handles auth failure: True
+
+
+===== 4. read get_crypto_positions: failure modes =====

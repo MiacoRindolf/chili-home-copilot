@@ -1473,6 +1473,48 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     except Exception:
         logger.debug("[broker] alert-position link failed", exc_info=True)
 
+    # R32 (2026-04-30): guard against the auth-lapse / api-failure case.
+    # When ``rh_tickers`` is empty -- because get_positions() returned []
+    # while broker auth was failing, the network was flaky, or any other
+    # transient -- the original ``Trade.ticker.notin_(rh_tickers) if
+    # rh_tickers else True`` short-circuited to True, so EVERY open
+    # local trade joined the stale list and got auto-closed via
+    # ``broker_reconcile_position_gone``. That manufactured phantom
+    # losses (R31's consecutive-loss breaker fix closes that loop, but
+    # the underlying wipeout is THIS bug). Real incident: 2026-04-30
+    # 15:56:02-15:56:03 UTC, 3 crypto positions closed within 1 second.
+    #
+    # We CANNOT distinguish "broker auth is flapping" from "account
+    # legitimately has 0 positions" looking only at this snapshot.
+    # Default to safety: refuse to mass-close. If the operator really
+    # zeroed their account, repeated warnings will tell them to manually
+    # reconcile the stale local rows.
+    if not rh_tickers:
+        open_local_count = (
+            db.query(Trade)
+            .filter(
+                Trade.user_id == user_id,
+                Trade.broker_source == "robinhood",
+                Trade.status == "open",
+            )
+            .count()
+        )
+        if open_local_count > 0:
+            logger.warning(
+                "[broker_sync] R32 GUARD: get_positions() returned 0 positions "
+                "but %d local trade(s) are open. Likely broker auth issue or "
+                "transient API failure. REFUSING to mass-close (would "
+                "manufacture phantom broker_reconcile_position_gone losses). "
+                "Will retry next cycle.",
+                open_local_count,
+            )
+            return {
+                "created": created,
+                "updated": updated,
+                "closed": 0,
+                "skipped_reason": "empty_broker_positions_with_open_local_trades",
+            }
+
     stale = (
         db.query(Trade)
         .filter(
