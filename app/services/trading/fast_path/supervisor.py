@@ -156,6 +156,26 @@ class FastPathSupervisor:
             ws_stats.get("unknown_channel_total"),
             ws_stats.get("last_unknown_channel"),
         )
+        book_stats = ws_stats.get("book") or {}
+        if book_stats:
+            logger.info(
+                "[fast_path] book snapshots=%s updates_recv=%s updates_applied=%s "
+                "malformed=%s emitted=%s skip_no_snap=%s skip_throttled=%s "
+                "skip_empty=%s tickers=%s levels_held=%s "
+                "writer_books_received=%s writer_books_written=%s",
+                book_stats.get("snapshots_received"),
+                book_stats.get("updates_received"),
+                book_stats.get("updates_applied"),
+                book_stats.get("malformed_updates"),
+                book_stats.get("books_emitted"),
+                book_stats.get("emissions_skipped_no_snapshot"),
+                book_stats.get("emissions_skipped_throttled"),
+                book_stats.get("emissions_skipped_empty"),
+                book_stats.get("tickers_tracked"),
+                book_stats.get("total_levels_held"),
+                writer.get("books_received"),
+                writer.get("books_written"),
+            )
         for ticker, ps in (snap.get("status") or {}).get("pairs", {}).items():
             logger.info(
                 "[fast_path] pair=%s state=%s last_bar_at=%s "

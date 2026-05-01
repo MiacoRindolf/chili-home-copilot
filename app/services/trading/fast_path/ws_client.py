@@ -34,7 +34,8 @@ try:
 except ImportError:  # pragma: no cover - dependency added via requirements
     websockets = None  # type: ignore
 
-from .db_writer import BarItem, FastPathDBWriter
+from .db_writer import BarItem, BookItem, FastPathDBWriter
+from .order_book import OrderBookAggregator
 from .settings import FastPathSettings
 from .status_tracker import StatusTracker
 
@@ -62,6 +63,12 @@ class CoinbaseWSClient:
         self._task: asyncio.Task | None = None
         # Per-ticker last persisted bar_close_at — dedupe across reconnects.
         self._last_persisted: dict[str, datetime] = {}
+        # F2: L2 order-book aggregator. Initialized lazily so settings
+        # control depth + emit cadence centrally.
+        self._book = OrderBookAggregator(
+            output_levels=settings.book_depth,
+            emit_interval_s=0.25,
+        )
         # Diagnostic counters — surfaced via stats() so the supervisor
         # metrics line shows whether we're seeing raw traffic at all
         # (vs only filtering it out as not-yet-closed).
@@ -137,11 +144,17 @@ class CoinbaseWSClient:
     async def _connect_and_consume(self) -> None:
         url = self._settings.coinbase_ws_url
         # ping_interval keeps the connection alive; close_timeout caps clean shutdown.
+        # max_size 32MB: Coinbase L2 snapshots for BTC-USD / ETH-USD on
+        # initial subscribe can be 8-15 MB. 4 MB tripped 1009 (message
+        # too big) repeatedly under F2 smoke. 32 MB covers the largest
+        # observed snapshots with headroom; one-off allocation is fine
+        # against the 512 MB container cap (snapshot is freed after parse).
         async with websockets.connect(  # type: ignore[arg-type]
             url, ping_interval=20, ping_timeout=20, close_timeout=5,
-            max_size=2 ** 20,  # 1 MB; candles + heartbeats are tiny
+            max_size=32 * 2 ** 20,
         ) as ws:
             await self._subscribe(ws, "candles")
+            await self._subscribe(ws, "level2")
             await self._subscribe(ws, "heartbeats")
             for ticker in self._settings.pairs:
                 self._status.mark_streaming(ticker)
@@ -171,6 +184,10 @@ class CoinbaseWSClient:
         channel = payload.get("channel")
         if channel == "candles":
             self._handle_candles(payload)
+        elif channel in ("l2_data", "level2"):
+            # Coinbase Advanced Trade names this channel "level2" on the
+            # subscribe message but emits it as "l2_data" in events.
+            self._handle_l2(payload)
         elif channel == "heartbeats":
             self._heartbeats_total += 1
             self._handle_heartbeat(payload)
@@ -189,6 +206,41 @@ class CoinbaseWSClient:
                 logger.info("[fast_path] ws unknown channel=%r payload_keys=%s",
                             channel, list(payload.keys()))
         # Unknown channels are ignored (forward compat).
+
+    def _handle_l2(self, payload: dict[str, Any]) -> None:
+        """Apply Coinbase l2_data events to the in-memory book and
+        opportunistically emit a sampled BookItem to the DB writer.
+
+        We emit AT MOST one BookItem per ticker per ``emit_interval_s``
+        (default 250ms). Most events are absorbed without an emission;
+        the aggregator throttles internally."""
+        events = payload.get("events") or []
+        # Refresh status_tracker on traffic — L2 is the highest-frequency
+        # signal we have that the connection is alive for the pair.
+        for ev in events:
+            ticker = ev.get("product_id")
+            if ticker:
+                self._status.mark_streaming(ticker)
+            self._book.apply_event(ev)
+            if not ticker:
+                continue
+            item = self._book.maybe_emit(ticker)
+            if item is None:
+                continue
+            book = BookItem(
+                ticker=item["ticker"],
+                snapshot_at=item["snapshot_at"],
+                bid_levels=item["bid_levels"],
+                ask_levels=item["ask_levels"],
+                bid_total_size=item["bid_total_size"],
+                ask_total_size=item["ask_total_size"],
+                imbalance=item["imbalance"],
+                spread_bps=item["spread_bps"],
+                source="coinbase",
+            )
+            # enqueue_book silently drops on backpressure — that's fine
+            # for L2 sampling; a fresher snapshot is always coming.
+            self._db_writer.enqueue_book(book)
 
     def _handle_heartbeat(self, payload: dict[str, Any]) -> None:
         # Heartbeats per product confirm the connection is alive even
@@ -282,6 +334,8 @@ class CoinbaseWSClient:
             "subscriptions_total": self._subscriptions_total,
             "unknown_channel_total": self._unknown_channel_total,
             "last_unknown_channel": self._last_unknown_channel,
+            # F2: nested order-book aggregator stats.
+            "book": self._book.stats(),
         }
 
 
