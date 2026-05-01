@@ -299,13 +299,40 @@ def _compute_initial_stop(
             sl = entry + mult * atr
             tp = entry - tgt_mult * atr
     else:
-        pct_stop = 0.08 if (brain and brain.lifecycle_stage in ("decayed", "retired")) else 0.08
+        # Phase 4 (2026-05-01) — magic-number fallback flagged.
+        #
+        # The user's stated policy ("never `or 0.5` magic constants for
+        # missing measurements") forbids this branch existing at all,
+        # but several call sites currently expect a (sl, tp) tuple
+        # unconditionally. Removing the fallback here without updating
+        # those callers would crash the stop-management loop.
+        #
+        # Compromise pending Phase 4.b: keep the fallback so nothing
+        # breaks, but log CRITICAL each time it fires so the operator
+        # sees how often the brain is being asked to size a stop without
+        # ATR. Once the count is observed, the proper fix is to update
+        # the call sites to handle None and remove this branch entirely.
+        from .stop_engine_fallback_constants import (
+            FALLBACK_STOP_PCT_LONG,
+            FALLBACK_TP_MULT_LONG,
+            FALLBACK_STOP_PCT_SHORT,
+            FALLBACK_TP_MULT_SHORT,
+        )
+        logger.critical(
+            "[stop_engine] FALLBACK_FIRED: missing ATR, using configured "
+            "fallback constants. atr=%r price=%r entry=%s direction=%s "
+            "lifecycle=%s — observe frequency in [stop_engine] CRITICAL "
+            "log; if persistent, fix the upstream ATR pipeline rather "
+            "than tuning these constants.",
+            atr, price, entry, direction,
+            (brain.lifecycle_stage if brain else None),
+        )
         if direction == "long":
-            sl = entry * (1.0 - pct_stop)
-            tp = entry * 1.15
+            sl = entry * (1.0 - FALLBACK_STOP_PCT_LONG)
+            tp = entry * FALLBACK_TP_MULT_LONG
         else:
-            sl = entry * (1.0 + pct_stop)
-            tp = entry * 0.85
+            sl = entry * (1.0 + FALLBACK_STOP_PCT_SHORT)
+            tp = entry * FALLBACK_TP_MULT_SHORT
 
     # Phase 1 (2026-05-01): align stop+target to the venue's actual tick
     # before storage. Previously this rounded equity to 4 decimals, which

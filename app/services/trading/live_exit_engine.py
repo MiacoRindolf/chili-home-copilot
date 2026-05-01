@@ -40,9 +40,14 @@ def compute_live_exit_levels(
 
     exit_cfg = _load_exit_config(db, getattr(trade, "scan_pattern_id", None))
     entry = trade.entry_price
-    stop = trade.stop_price or entry * 0.97
+    # Phase 4 (2026-05-01): consolidated fallback (was inline 0.97).
+    # Single source of truth in stop_engine_fallback_constants.
+    from .stop_engine_fallback_constants import (
+        FALLBACK_INITIAL_STOP_PCT, FALLBACK_DEFAULT_RISK_PCT,
+    )
+    stop = trade.stop_price or entry * (1.0 - FALLBACK_INITIAL_STOP_PCT)
     is_long = getattr(trade, "direction", "long") == "long"
-    risk = abs(entry - stop) if entry and stop else entry * 0.03
+    risk = abs(entry - stop) if entry and stop else entry * FALLBACK_DEFAULT_RISK_PCT
 
     try:
         df = fetch_ohlcv_df(trade.ticker, period="3mo", interval="1d")

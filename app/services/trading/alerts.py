@@ -25,6 +25,13 @@ from .alert_formatter import (
 
 logger = logging.getLogger(__name__)
 
+# Phase 4 (2026-05-01): centralized magic-number fallbacks. Each
+# CRITICAL log line from this helper indicates a real upstream bug
+# (broker fetch failed) — fix the upstream rather than the constant.
+from .stop_engine_fallback_constants import (
+    resolve_capital_with_critical_log as _resolve_capital,
+)
+
 # ── Throttle / dedup / quality tracking ───────────────────────────────
 
 _recent_alerts: dict[str, float] = {}
@@ -329,7 +336,9 @@ def _emit_phase_h_shadow_from_pick(
                 direction="long",
                 entry_price=float(entry),
                 stop_price=float(stop),
-                capital=float(buying_power or 10000.0),
+                # Phase 4 (2026-05-01): channel the magic 10000.0 through the
+                # observable fallback so any firing is logged at CRITICAL.
+                capital=_resolve_capital(buying_power, caller=f"alerts:{source}"),
                 target_price=float(target) if target else None,
                 asset_class="crypto" if is_crypto else "equity",
                 user_id=user_id,
@@ -690,7 +699,7 @@ def generate_strategy_proposals(
             db, user_id, pick, ticker,
             entry=price, stop=stop, target=target,
             quantity=quantity,
-            buying_power=buying_power or 10000.0,
+            buying_power=_resolve_capital(buying_power, caller="alerts.generate_strategy_proposals"),
             source="alerts.generate_strategy_proposals",
         )
 
@@ -917,19 +926,27 @@ def create_proposal_from_pick(
 
     buying_power = _get_buying_power()
     quantity, position_size_pct = _compute_position_size(price, stop, buying_power, pick)
-    # Use default buying power so we never default to 1 share without brain math
+    # Phase 4 (2026-05-01): all four magic-number fallbacks routed through
+    # the centralized resolver. Every firing logs CRITICAL — operator can
+    # observe how often the broker fetch is failing.
     if quantity is None and position_size_pct is None:
-        quantity, position_size_pct = _compute_position_size(price, stop, 10000.0, pick)
+        quantity, position_size_pct = _compute_position_size(
+            price, stop,
+            _resolve_capital(None, caller="alerts.create_proposal_from_pick:size_path"),
+            pick,
+        )
     if quantity is None:
-        quantity = max(1, int((buying_power or 10000.0) * (_MAX_RISK_PCT / 100) / risk_per_share))
+        cap = _resolve_capital(buying_power, caller="alerts.create_proposal_from_pick:qty_fallback")
+        quantity = max(1, int(cap * (_MAX_RISK_PCT / 100) / risk_per_share))
     if position_size_pct is None:
-        position_size_pct = round(min(_POS_PCT_HARD_CAP, (quantity * price) / max(buying_power or 10000.0, 1) * 100), 2)
+        cap = _resolve_capital(buying_power, caller="alerts.create_proposal_from_pick:pct_fallback")
+        position_size_pct = round(min(_POS_PCT_HARD_CAP, (quantity * price) / max(cap, 1) * 100), 2)
 
     _emit_phase_h_shadow_from_pick(
         db, user_id, pick, ticker,
         entry=price, stop=stop, target=target,
         quantity=quantity,
-        buying_power=buying_power or 10000.0,
+        buying_power=_resolve_capital(buying_power, caller="alerts.create_proposal_from_pick:emit"),
         source="alerts.create_proposal_from_pick",
     )
     confidence = pick.get("brain_confidence") or (combined * 10)
