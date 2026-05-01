@@ -195,9 +195,28 @@ def flat_indicators_from_score(
         if v is not None:
             flat[key] = float(v)
 
+    # R34 (2026-04-30): scanner output has 'vol_ratio' inside score['indicators']
+    # AND sometimes at the top-level of score (intraday _score_ticker_intraday).
+    # Promoted patterns reference indicator keys 'volume_ratio' and 'gap_pct'
+    # by name in their conditions JSON (see indicator_core compute_all_from_df
+    # which exposes both as canonical names). Without these aliases in flat,
+    # _condition_has_data returns False for every condition that names them
+    # and pattern_imminent_alerts logs every crypto candidate as
+    # 'readiness_unusable / missing_indicators=[volume_ratio,gap_pct]' even
+    # when egress is healthy and the scanner did populate the underlying
+    # numbers. Fix: copy through with both names so condition lookup matches.
     vr = ind.get("vol_ratio")
+    if vr is None:
+        vr = score.get("vol_ratio")
     if vr is not None:
         flat["rel_vol"] = float(vr)
+        flat["volume_ratio"] = float(vr)
+
+    gp = ind.get("gap_pct")
+    if gp is None:
+        gp = score.get("gap_pct")
+    if gp is not None:
+        flat["gap_pct"] = float(gp)
 
     bb_pct = ind.get("bb_pct")
     if bb_pct is not None:

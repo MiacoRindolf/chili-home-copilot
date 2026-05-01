@@ -1,0 +1,26 @@
+﻿# net probe 2026-04-30T22:01:49.5645416-07:00
+---DNS + TCP via single python script---
+=== DNS resolution ===
+DNS OK : api.exchange.coinbase.com -> 104.18.36.178
+DNS OK : api.coinbase.com -> 172.64.152.241
+DNS OK : advanced-trade-ws.coinbase.com -> 172.64.152.241
+DNS OK : api.kraken.com -> 104.17.187.205
+DNS OK : api.coingecko.com -> 104.20.41.132
+DNS OK : api.binance.us -> 13.249.184.41
+DNS OK : www.bitstamp.net -> 107.154.133.13
+
+=== TCP:443 connect (5s timeout) ===
+TCP OK : api.exchange.coinbase.com:443
+TCP OK : api.coinbase.com:443
+TCP OK : advanced-trade-ws.coinbase.com:443
+TCP OK : api.kraken.com:443
+TCP OK : api.coingecko.com:443
+TCP OK : api.binance.us:443
+TCP OK : www.bitstamp.net:443
+
+=== HTTPS GET (5s timeout) ===
+OK [200] 22057B: https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=86400
+OK [401] 13B: https://api.coinbase.com/api/v3/brokerage/products/BTC-USD/ticker
+OK [200] 62255B: https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1440
+OK [200] 74837B: https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&da
+OK [200] 3742B: https://www.bitstamp.net/api/v2/ohlc/btcusd/?step=86400&limit=30

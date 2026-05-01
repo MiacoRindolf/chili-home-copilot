@@ -1,0 +1,355 @@
+﻿# post-egress brain pulse 04/30/2026 22:03:46
+
+===== scheduler-worker errors last 10min (now that egress is up, what's failing?) =====
+
+scheduler-worker-1  | 2026-05-01 05:01:06,504 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] USTB-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/USTB-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A06.260439%2B00%3A00&end=2026-04-29T08%3A01%3A06.26043
+9%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:06,529 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] 
+USTBL-USD 15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinba
+se.com/products/USTBL-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A06.295445%2B00%3A00&end=2026-04-29T08%3A01
+%3A06.295445%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:06,534 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] USX-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/USX-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A06.297058%2B00%3A00&end=2026-04-29T08%3A01%3A06.297058
+%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:06,729 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] VSN-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/VSN-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A06.501014%2B00%3A00&end=2026-04-29T08%3A01%3A06.501014
+%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:07,000 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] WFI-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/WFI-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A06.854510%2B00%3A00&end=2026-04-29T08%3A01%3A06.854510
+%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:07,462 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] 9BIT-USD 
+1d [2025-11-02..2026-05-01] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/prod
+ucts/9BIT-USD/candles?granularity=86400&start=2025-11-02T05%3A01%3A07.288624%2B00%3A00&end=2026-05-01T05%3A01%3A07.2886
+30%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:07,900 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] A-USD 1d 
+[2025-11-02..2026-05-01] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/product
+s/A-USD/candles?granularity=86400&start=2025-11-02T05%3A01%3A07.771102%2B00%3A00&end=2026-05-01T05%3A01%3A07.771115%2B0
+0%3A00
+scheduler-worker-1  | 2026-05-01 05:01:08,560 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] A7A5-USD 
+1d [2025-11-02..2026-05-01] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/prod
+ucts/A7A5-USD/candles?granularity=86400&start=2025-11-02T05%3A01%3A08.162533%2B00%3A00&end=2026-05-01T05%3A01%3A08.1625
+38%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:09,517 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] AB-USD 
+1d [2025-11-02..2026-05-01] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/prod
+ucts/AB-USD/candles?granularity=86400&start=2025-11-02T05%3A01%3A09.114290%2B00%3A00&end=2026-05-01T05%3A01%3A09.114295
+%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:10,326 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] 
+ACRED-USD 1d [2025-11-02..2026-05-01] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbas
+e.com/products/ACRED-USD/candles?granularity=86400&start=2025-11-02T05%3A01%3A09.771130%2B00%3A00&end=2026-05-01T05%3A0
+1%3A09.771137%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:11,286 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] XEC-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/XEC-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A10.785990%2B00%3A00&end=2026-04-29T08%3A01%3A10.785990
+%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:11,297 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] YLDS-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/YLDS-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A11.094236%2B00%3A00&end=2026-04-29T08%3A01%3A11.09423
+6%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:11,494 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] ZANO-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/ZANO-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A11.089719%2B00%3A00&end=2026-04-29T08%3A01%3A11.08971
+9%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:11,688 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] ZBCN-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/ZBCN-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A11.179402%2B00%3A00&end=2026-04-29T08%3A01%3A11.17940
+2%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:11,747 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] ZBT-USD 
+15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/pro
+ducts/ZBT-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A11.551935%2B00%3A00&end=2026-04-29T08%3A01%3A11.551935
+%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:11,790 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] ADI-USD 
+1d [2025-11-02..2026-05-01] request failed: 404 Client Error: Not Found for url: https://api.exchange.coinbase.com/prod
+ucts/ADI-USD/candles?granularity=86400&start=2025-11-02T05%3A01%3A11.373477%2B00%3A00&end=2026-05-01T05%3A01%3A11.37348
+2%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:12,235 [WARNING] app.services.trading.coinbase_ohlcv: [coinbase_ohlcv] 
+σ╕üσ«ëΣ║║τöƒ-USD 15m [2026-04-26..2026-04-29] request failed: 404 Client Error: Not Found for url: https://api.exchange
+.coinbase.com/products/%E5%B8%81%E5%AE%89%E4%BA%BA%E7%94%9F-USD/candles?granularity=900&start=2026-04-26T05%3A01%3A11.9
+66899%2B00%3A00&end=2026-04-29T08%3A01%3A11.966899%2B00%3A00
+scheduler-worker-1  | 2026-05-01 05:01:35,357 [ERROR] yfinance: $SQ: possibly delisted; no price data found  
+(period=1y) (Yahoo error = "No data found, symbol may be delisted")
+scheduler-worker-1  | 2026-05-01 05:01:35,580 [ERROR] yfinance: $SQ: possibly delisted; no price data found  
+(period=5d) (Yahoo error = "No data found, symbol may be delisted")
+scheduler-worker-1  | 2026-05-01 05:01:40,200 [INFO] app.services.trading.scanner: [crypto_breakout] Done: 123/250 
+scored, 0 errors, 50.7s, score>=6: 120, score>=7: 119, squeezes: 11, top: AERO-USD (10.0)
+
+
+
+
+===== brain-worker activity last 10min =====
+
+FractionalBacktest.run:  81%|ΓûêΓûêΓûêΓûêΓûêΓûêΓûêΓûê  | 1056/1307 [00:02<00:00, 517.19bar/s]
+FractionalBacktest.run:   0%|          | 0/1226 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/937 [00:00<?, ?bar/s]2026-05-01 05:01:18,940 [INFO] [exit_engine_ops] 
+mode=shadow source=backtest position_id=none ticker=none legacy_action=exit_time_decay 
+canonical_action=exit_time_decay agree=true config_hash=05b7598a0dabafe1 sample_pct=1.000
+brain-worker-1  | 2026-05-01 05:01:18,968 [INFO] [exit_engine_ops] mode=shadow source=backtest position_id=none 
+ticker=none legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true config_hash=05b7598a0dabafe1 
+sample_pct=1.000
+FractionalBacktest.run:   0%|          | 0/1287 [00:00<?, ?bar/s]2026-05-01 05:02:19,485 [INFO] [exit_engine_ops] 
+mode=shadow source=backtest position_id=none ticker=none legacy_action=exit_time_decay 
+canonical_action=exit_time_decay agree=true config_hash=05b7598a0dabafe1 sample_pct=1.000
+FractionalBacktest.run:   0%|          | 0/1427 [00:00<?, ?bar/s]2026-05-01 05:02:46,908 [INFO] [exit_engine_ops] 
+mode=shadow source=backtest position_id=none ticker=none legacy_action=exit_time_decay 
+canonical_action=exit_time_decay agree=true config_hash=05b7598a0dabafe1 sample_pct=1.000
+brain-worker-1  | 2026-05-01 05:02:47,504 [INFO] [exit_engine_ops] mode=shadow source=backtest position_id=none 
+ticker=none legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true config_hash=05b7598a0dabafe1 
+sample_pct=1.000
+brain-worker-1  | 2026-05-01 05:02:47,825 [INFO] [exit_engine_ops] mode=shadow source=backtest position_id=none 
+ticker=none legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true config_hash=05b7598a0dabafe1 
+sample_pct=1.000
+FractionalBacktest.run:   0%|          | 0/1370 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1077 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1075 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1073 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1074 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1432 [00:00<?, ?bar/s]2026-05-01 05:03:23,352 [INFO] [exit_engine_ops] 
+mode=shadow source=backtest position_id=none ticker=none legacy_action=exit_time_decay 
+canonical_action=exit_time_decay agree=true config_hash=05b7598a0dabafe1 sample_pct=1.000
+FractionalBacktest.run:   0%|          | 0/1075 [00:00<?, ?bar/s][A
+
+
+
+
+===== autotrader candidate flow last 5min (any rise from 0?) =====
+
+autotrader-worker-1  | 2026-05-01 05:02:59,310 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 05:03:09,309 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 05:03:19,311 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 05:03:29,310 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 05:03:39,318 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+
+
+
+
+===== pattern_imminent recent run? (look for run_pattern_imminent_scan log lines) =====
+
+scheduler-worker-1  | 2026-05-01 04:45:54,754 [INFO] app.services.trading_scheduler: [scheduler_job] 
+job_id=pattern_imminent_scanner phase=start
+scheduler-worker-1  | 2026-05-01 04:46:55,408 [INFO] app.services.trading.pattern_imminent_alerts: [pattern_imminent] 
+{'patterns_active': 549, 'patterns_with_tickers_evaluated': 4, 'global_ticker_universe': 160, 'universe_by_source': 
+{'watchlist': 0, 'prescreener': 78, 'predictions': 40, 'scanner': 46, 'defaults': 46}, 'tickers_scored': 68, 
+'skip_reasons': {'pattern_no_tickers': 4, 'pattern_no_conditions': 0, 'score_failed': 24, 'readiness_unusable': 51, 
+'all_conditions_met': 0, 'readiness_outside_band': 17, 'eta_too_long': 0, 'excluded_promotion_lifecycle': 541, 
+'insufficient_coverage_main': 0, 'below_composite_main': 0}, 'top_suppressed': [{'ticker': '1INCH-USD', 'pattern_id': 
+583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': '2Z-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'AAVE-USD', 'pattern_id': 583, 'reason': 
+'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 
+'ADA-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': 
+['volume_ratio', 'gap_pct']}, {'ticker': 'GNO-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 
+0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'BTC-USD', 'pattern_id': 583, 
+'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, 
+{'ticker': 'ZEC-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'XPL-USD', 'pattern_id': 583, 'reason': 
+'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 
+'SOL-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': 
+['volume_ratio', 'gap_pct']}, {'ticker': 'STX-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 
+0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'GRT-USD', 'pattern_id': 583, 
+'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, 
+{'ticker': 'HBAR-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'KAS-USD', 'pattern_id': 583, 'reason': 
+'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 
+'ASTER-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': 
+['volume_ratio', 'gap_pct']}, {'ticker': 'DOT-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 
+0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'XLM-USD', 'pattern_id': 583, 
+'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, 
+{'ticker': 'WLD-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': '1INCH-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': '2Z-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'AAVE-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'ADA-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'GNO-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'BTC-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'ZEC-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'XPL-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'SOL-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'STX-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'GRT-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'HBAR-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'KAS-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'ASTER-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'DOT-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'XLM-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'WLD-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': '1INCH-USD', 'pattern_id': 585, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': '2Z-USD', 'pattern_id': 585, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'AAVE-USD', 
+'pattern_id': 585, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'ADA-USD', 'pattern_id': 585, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'GNO-USD', 'pattern_id': 585, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'BTC-USD', 
+'pattern_id': 585, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}], 'equity_session_open': False, 'ok': True, 'dry_run': False, 'candidates': 0, 'alerts_sent': 0, 
+'delivery_failed': 0, 'cooldown_skipped': 0, 'diversity_skipped': 0, 'us_session_context': {'us_session': 'closed', 
+'label': 'US stocks: session closed', 'equity_evaluation_active': False}, 'thresholds': {'min_readiness': 0.45, 
+'readiness_cap': 0.995, 'max_eta_hours': 4.0, 'evaluable_ratio_floor': 0.35, 'min_feature_coverage_main': 0.45, 
+'min_composite_main': 0.42}}
+scheduler-worker-1  | 2026-05-01 04:46:55,448 [INFO] app.services.trading_scheduler: [scheduler_job] 
+job_id=pattern_imminent_scanner phase=ok duration_ms=60696
+scheduler-worker-1  | 2026-05-01 05:00:54,375 [INFO] app.services.trading_scheduler: [scheduler_job] 
+job_id=pattern_imminent_scanner phase=start
+scheduler-worker-1  | 2026-05-01 05:01:40,705 [INFO] app.services.trading.pattern_imminent_alerts: [pattern_imminent] 
+{'patterns_active': 549, 'patterns_with_tickers_evaluated': 4, 'global_ticker_universe': 160, 'universe_by_source': 
+{'watchlist': 0, 'prescreener': 78, 'predictions': 40, 'scanner': 46, 'defaults': 46}, 'tickers_scored': 68, 
+'skip_reasons': {'pattern_no_tickers': 4, 'pattern_no_conditions': 0, 'score_failed': 24, 'readiness_unusable': 51, 
+'all_conditions_met': 0, 'readiness_outside_band': 17, 'eta_too_long': 0, 'excluded_promotion_lifecycle': 541, 
+'insufficient_coverage_main': 0, 'below_composite_main': 0}, 'top_suppressed': [{'ticker': '1INCH-USD', 'pattern_id': 
+583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': '2Z-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'AAVE-USD', 'pattern_id': 583, 'reason': 
+'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 
+'ADA-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': 
+['volume_ratio', 'gap_pct']}, {'ticker': 'GNO-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 
+0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'BTC-USD', 'pattern_id': 583, 
+'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, 
+{'ticker': 'ZEC-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'XPL-USD', 'pattern_id': 583, 'reason': 
+'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 
+'SOL-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': 
+['volume_ratio', 'gap_pct']}, {'ticker': 'STX-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 
+0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'GRT-USD', 'pattern_id': 583, 
+'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, 
+{'ticker': 'HBAR-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'KAS-USD', 'pattern_id': 583, 'reason': 
+'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 
+'ASTER-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': 
+['volume_ratio', 'gap_pct']}, {'ticker': 'DOT-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 
+0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'XLM-USD', 'pattern_id': 583, 
+'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 'missing_indicators': ['volume_ratio', 'gap_pct']}, 
+{'ticker': 'WLD-USD', 'pattern_id': 583, 'reason': 'readiness_unusable', 'coverage': 0.3333333333333333, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': '1INCH-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': '2Z-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'AAVE-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'ADA-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'GNO-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'BTC-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'ZEC-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'XPL-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'SOL-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'STX-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'GRT-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'HBAR-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'KAS-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'ASTER-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'DOT-USD', 'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'XLM-USD', 'pattern_id': 586, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'WLD-USD', 
+'pattern_id': 586, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': '1INCH-USD', 'pattern_id': 585, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': '2Z-USD', 'pattern_id': 585, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'AAVE-USD', 
+'pattern_id': 585, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}, {'ticker': 'ADA-USD', 'pattern_id': 585, 'reason': 'readiness_unusable', 'coverage': 0.0, 
+'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'GNO-USD', 'pattern_id': 585, 'reason': 
+'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 'gap_pct']}, {'ticker': 'BTC-USD', 
+'pattern_id': 585, 'reason': 'readiness_unusable', 'coverage': 0.0, 'missing_indicators': ['volume_ratio', 
+'gap_pct']}], 'equity_session_open': False, 'ok': True, 'dry_run': False, 'candidates': 0, 'alerts_sent': 0, 
+'delivery_failed': 0, 'cooldown_skipped': 0, 'diversity_skipped': 0, 'us_session_context': {'us_session': 'closed', 
+'label': 'US stocks: session closed', 'equity_evaluation_active': False}, 'thresholds': {'min_readiness': 0.45, 
+'readiness_cap': 0.995, 'max_eta_hours': 4.0, 'evaluable_ratio_floor': 0.35, 'min_feature_coverage_main': 0.45, 
+'min_composite_main': 0.42}}
+scheduler-worker-1  | 2026-05-01 05:01:40,749 [INFO] app.services.trading_scheduler: [scheduler_job] 
+job_id=pattern_imminent_scanner phase=ok duration_ms=46374
+
+
+
+
+===== brain_batch_jobs heartbeats =====
+docker : ERROR:  column "job_name" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-post-egress-pulse.ps1:22 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  column "job_name" does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: SELECT job_name, last_run_at, status, last_run_seconds, last...
+               ^
+HINT:  Perhaps you meant to reference the column "brain_batch_jobs.job_type".
+
+
+===== breakout_alerts last 30min (pattern_imminent dispatches) =====
+docker : ERROR:  relation "breakout_alert" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-post-egress-pulse.ps1:26 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  relatio... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: ...OUNT(*) AS n, MAX(alerted_at) AS most_recent FROM breakout_a...
+                                                             ^
+
+
+===== trading_market_snapshots ingestion (recent rows = mining is alive) =====
+docker : ERROR:  relation "market_snapshot" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-post-egress-pulse.ps1:30 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  relatio... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: ...nc('minute', created_at) AS bucket, COUNT(*) FROM market_sna...
+                                                             ^
+
+
+===== scan_pattern lifecycle counts (still 1 promoted? should be growing) =====
+docker : ERROR:  relation "scan_pattern" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-post-egress-pulse.ps1:34 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  relatio... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: SELECT lifecycle, COUNT(*) FROM scan_pattern GROUP BY lifecy...
+                                        ^
+
+
+===== live coinbase OHLCV fetch test (does the brain actually get data now?) =====
+docker : Traceback (most recent call last):
+At C:\dev\chili-home-copilot\scripts\dispatch-post-egress-pulse.ps1:38 char:5
++     docker compose exec -T scheduler-worker python -c "
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "<string>", line 2, in <module>
+ImportError: cannot import name 'fetch_candles_coinbase' from 'app.services.trading.coinbase_ohlcv' 
+(/app/app/services/trading/coinbase_ohlcv.py)
+
+
+===== scheduler heartbeat =====
+docker : ERROR:  relation "scheduler_worker_heartbeat" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-post-egress-pulse.ps1:49 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  relatio... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: SELECT * FROM scheduler_worker_heartbeat ORDER BY id DESC LI...
+                      ^
+

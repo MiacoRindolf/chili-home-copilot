@@ -1129,6 +1129,17 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                 "bb_pct": round((price - float(bb_lower)) / (float(bb_upper) - float(bb_lower)) * 100, 1)
                     if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
                 "vol_ratio": round(vol_latest / vol_avg, 2) if vol_avg > 0 else None,
+                # R34 (2026-04-30): patterns reference 'volume_ratio' and
+                # 'gap_pct' by canonical name (see indicator_core
+                # compute_all_from_df). Surface both so pattern_imminent's
+                # flat_indicators_from_score can satisfy the condition data
+                # check; missing them caused every crypto candidate to log
+                # 'readiness_unusable / missing_indicators=[volume_ratio,
+                # gap_pct]' in pattern_imminent_alerts.
+                "volume_ratio": round(vol_latest / vol_avg, 2) if vol_avg > 0 else None,
+                "gap_pct": round(
+                    (price - float(close.iloc[-2])) / float(close.iloc[-2]) * 100, 2
+                ) if len(close) >= 2 and float(close.iloc[-2]) > 0 else 0.0,
             },
         }
     except Exception:
