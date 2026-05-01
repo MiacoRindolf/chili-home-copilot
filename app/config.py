@@ -2645,6 +2645,10 @@ class Settings(BaseSettings):
     pattern_imminent_readiness_cap: float = 0.995
     pattern_imminent_max_per_run: int = 12
     pattern_imminent_cooldown_hours: float = 3.0
+    # R33 (2026-04-30): crypto markets are 24/7 and tighter-coupled to news/whales,
+    # so a 3h cooldown wastes intraday opportunity. Default to 0.5h (30min) for
+    # crypto tickers; equity stays at 3h. _cooldown_active is asset-class-aware.
+    pattern_imminent_cooldown_hours_crypto: float = 0.5
     pattern_imminent_max_tickers_per_run: int = 160
     pattern_imminent_scope_tickers_cap: int = 32
     pattern_imminent_evaluable_ratio_floor: float = 0.35

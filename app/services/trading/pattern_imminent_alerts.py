@@ -698,6 +698,10 @@ def run_pattern_imminent_scan(
 
     max_alerts = int(settings.pattern_imminent_max_per_run)
     cooldown_h = float(settings.pattern_imminent_cooldown_hours)
+    # R33 (2026-04-30): crypto cooldown is shorter than equity (24/7 markets,
+    # tighter-coupled to news/whales). _cooldown_active called below picks
+    # whichever value applies based on ticker asset class.
+    cooldown_h_crypto = float(getattr(settings, "pattern_imminent_cooldown_hours_crypto", 0.5))
     max_per_ticker = max(1, int(getattr(settings, "pattern_imminent_max_per_ticker_per_run", 2)))
     max_per_pattern = max(1, int(getattr(settings, "pattern_imminent_max_per_pattern_per_run", 3)))
     max_eta = float(settings.pattern_imminent_max_eta_hours)
@@ -727,7 +731,9 @@ def run_pattern_imminent_scan(
             break
         pat = c["pattern"]
         ticker = c["ticker"]
-        if _cooldown_active(db, user_id, ticker, pat.id, cooldown_h):
+        # R33: pick crypto cooldown for crypto tickers, equity cooldown otherwise.
+        ticker_cooldown_h = cooldown_h_crypto if is_crypto(ticker) else cooldown_h
+        if _cooldown_active(db, user_id, ticker, pat.id, ticker_cooldown_h):
             skipped_cd += 1
             continue
         if per_ticker.get(ticker, 0) >= max_per_ticker:

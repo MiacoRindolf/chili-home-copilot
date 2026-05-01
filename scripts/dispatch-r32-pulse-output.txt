@@ -1,0 +1,89 @@
+﻿# r32 + breaker pulse 04/30/2026 21:12:34
+
+===== broker-sync logs since deploy: any R32 GUARD firings? =====
+
+
+===== broker-sync logs since deploy: any sync_positions errors? =====
+
+
+===== broker auth health (refresh_token / 401 / invalid_grant) =====
+
+
+===== trading_risk_state recent rows (R31 self-clear?) =====
+ id | snapshot_date | breaker_tripped |       breaker_reason        |     regime      |         created_at         
+----+---------------+-----------------+-----------------------------+-----------------+----------------------------
+ 18 | 2026-04-30    | t               | 5 consecutive losing trades | circuit_breaker | 2026-04-30 15:35:17.291883
+ 17 | 2026-04-30    | t               | 5 consecutive losing trades | circuit_breaker | 2026-04-30 13:07:27.580235
+ 16 | 2026-04-30    | t               | 5 consecutive losing trades | circuit_breaker | 2026-04-30 12:10:25.726249
+ 15 | 2026-04-27    | f               |                             | circuit_breaker | 2026-04-27 19:24:31.910488
+ 14 | 2026-04-23    | f               |                             | circuit_breaker | 2026-04-23 19:14:33.773756
+ 13 | 2026-04-20    | f               |                             | circuit_breaker | 2026-04-20 20:00:53.344882
+ 12 | 2026-04-20    | f               |                             | circuit_breaker | 2026-04-20 19:27:12.764154
+ 11 | 2026-04-20    | f               |                             | circuit_breaker | 2026-04-20 18:59:26.542985
+(8 rows)
+
+
+
+===== open trades right now (live count -- should be > 0) =====
+docker : ERROR:  relation "trades" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-r32-pulse.ps1:22 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  relation "trades" does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: ...(WHERE broker_source='coinbase') AS cb_count FROM trades WHE...
+                                                             ^
+
+
+===== exits since R32 deploy (broker_reconcile_* should not appear) =====
+docker : ERROR:  relation "trades" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-r32-pulse.ps1:26 char:5
++     docker compose exec -T postgres psql -U chili -d chili -c "SELECT ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR:  relation "trades" does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 1: SELECT id, ticker, exit_reason, exit_date FROM trades WHERE ...
+                                                       ^
+
+
+===== force a fresh breaker recheck (writes new row if state changed) =====
+check result: (False, None)
+
+
+===== post-recheck trading_risk_state =====
+ id | snapshot_date | breaker_tripped |       breaker_reason        |     regime      |         created_at         
+----+---------------+-----------------+-----------------------------+-----------------+----------------------------
+ 18 | 2026-04-30    | t               | 5 consecutive losing trades | circuit_breaker | 2026-04-30 15:35:17.291883
+ 17 | 2026-04-30    | t               | 5 consecutive losing trades | circuit_breaker | 2026-04-30 13:07:27.580235
+ 16 | 2026-04-30    | t               | 5 consecutive losing trades | circuit_breaker | 2026-04-30 12:10:25.726249
+(3 rows)
+
+
+
+===== in-process is_breaker_tripped (autotrader) =====
+tripped: False
+status: {'tripped': False, 'reason': None}
+
+
+===== autotrader candidate_pool latest tick (do we have candidates again?) =====
+
+autotrader-worker-1  | 2026-05-01 04:11:57,244 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 04:12:07,244 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 04:12:17,247 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 04:12:27,243 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+autotrader-worker-1  | 2026-05-01 04:12:37,245 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 
+candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- 
+last_ticker=-
+
+
+
