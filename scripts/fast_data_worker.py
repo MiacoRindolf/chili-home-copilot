@@ -21,6 +21,12 @@ import logging
 import os
 import sys
 
+# Mirror brain_worker.py / scheduler_worker.py: insert repo root onto sys.path
+# so `from app.<x> import ...` works regardless of cwd. Python prepends the
+# script's directory (``scripts/``) to sys.path, NOT the cwd, so without this
+# the ``app`` package — sibling of ``scripts/`` — isn't importable.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def _configure_logging() -> None:
     level = (os.environ.get("LOG_LEVEL") or "INFO").upper()

@@ -709,8 +709,10 @@ services:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - CHILI_RUNNING_IN_DOCKER=1
       - PYTHONUNBUFFERED=1
-      # Default OFF. Flip to 1 when you want to start streaming Coinbase.
-      - CHILI_FAST_PATH_ENABLED=0
+      # Default OFF in compose; .env or shell can flip via interpolation.
+      # F1 smoke test enabled 2026-05-01 — set CHILI_FAST_PATH_ENABLED=0
+      # in .env (or unset) to disable without editing this file.
+      - CHILI_FAST_PATH_ENABLED=${CHILI_FAST_PATH_ENABLED:-1}
       - CHILI_FAST_PATH_MODE=paper
       - CHILI_FAST_PATH_PAIRS=BTC-USD,ETH-USD,SOL-USD,AVAX-USD,DOGE-USD
       - CHILI_FAST_PATH_QUEUE_MAX=10000

@@ -138,6 +138,24 @@ class FastPathSupervisor:
             return
         snap = self._snapshot()
         writer = snap.get("writer", {})
+        ws_stats = snap.get("ws", {})
+        # WS-level stats are global, not per-pair — log them once at the
+        # top of each metrics tick so we can see whether raw traffic is
+        # flowing at all (and where it's being filtered).
+        logger.info(
+            "[fast_path] ws raw_messages=%s candles_events=%s candles=%s "
+            "filtered_unclosed=%s filtered_dedupe=%s heartbeats=%s "
+            "subscriptions=%s unknown=%s last_unknown=%s",
+            ws_stats.get("raw_messages_total"),
+            ws_stats.get("raw_candles_events_total"),
+            ws_stats.get("raw_candles_total"),
+            ws_stats.get("candles_filtered_unclosed"),
+            ws_stats.get("candles_filtered_dedupe"),
+            ws_stats.get("heartbeats_total"),
+            ws_stats.get("subscriptions_total"),
+            ws_stats.get("unknown_channel_total"),
+            ws_stats.get("last_unknown_channel"),
+        )
         for ticker, ps in (snap.get("status") or {}).get("pairs", {}).items():
             logger.info(
                 "[fast_path] pair=%s state=%s last_bar_at=%s "
@@ -160,6 +178,7 @@ class FastPathSupervisor:
             "pairs_configured": list(self._settings.pairs),
             "writer": self._db_writer.snapshot() if self._db_writer else {},
             "status": self._status.snapshot() if self._status else {},
+            "ws": self._ws.stats() if self._ws else {},
         }
 
 

@@ -62,6 +62,18 @@ class CoinbaseWSClient:
         self._task: asyncio.Task | None = None
         # Per-ticker last persisted bar_close_at — dedupe across reconnects.
         self._last_persisted: dict[str, datetime] = {}
+        # Diagnostic counters — surfaced via stats() so the supervisor
+        # metrics line shows whether we're seeing raw traffic at all
+        # (vs only filtering it out as not-yet-closed).
+        self._raw_messages_total: int = 0
+        self._raw_candles_events_total: int = 0
+        self._raw_candles_total: int = 0
+        self._candles_filtered_unclosed: int = 0
+        self._candles_filtered_dedupe: int = 0
+        self._heartbeats_total: int = 0
+        self._subscriptions_total: int = 0
+        self._unknown_channel_total: int = 0
+        self._last_unknown_channel: str | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -149,6 +161,7 @@ class CoinbaseWSClient:
     # ── Message routing ───────────────────────────────────────────────
 
     def _handle_message(self, raw: str | bytes) -> None:
+        self._raw_messages_total += 1
         try:
             payload = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
@@ -159,10 +172,22 @@ class CoinbaseWSClient:
         if channel == "candles":
             self._handle_candles(payload)
         elif channel == "heartbeats":
+            self._heartbeats_total += 1
             self._handle_heartbeat(payload)
         elif channel == "subscriptions":
-            # Coinbase confirms subscriptions — purely informational.
+            self._subscriptions_total += 1
+            # Coinbase confirms subscriptions — log once per call so we
+            # can see exactly what got accepted server-side.
+            logger.info("[fast_path] subscription confirmed: %s",
+                        payload.get("events"))
             return
+        else:
+            self._unknown_channel_total += 1
+            self._last_unknown_channel = channel
+            # Sample-log unknown channels so we know what to whitelist.
+            if self._unknown_channel_total <= 5:
+                logger.info("[fast_path] ws unknown channel=%r payload_keys=%s",
+                            channel, list(payload.keys()))
         # Unknown channels are ignored (forward compat).
 
     def _handle_heartbeat(self, payload: dict[str, Any]) -> None:
@@ -179,8 +204,10 @@ class CoinbaseWSClient:
     def _handle_candles(self, payload: dict[str, Any]) -> None:
         events = payload.get("events") or []
         now_ts = datetime.now(timezone.utc).timestamp()
+        self._raw_candles_events_total += len(events)
         for ev in events:
             candles = ev.get("candles") or []
+            self._raw_candles_total += len(candles)
             for candle in candles:
                 self._maybe_emit_bar(candle, now_ts)
 
@@ -206,6 +233,7 @@ class CoinbaseWSClient:
             end_s = start_s + 60.0
             # Only persist if the bar is closed (with a small grace).
             if (end_s + BAR_CLOSE_GRACE_S) > now_ts:
+                self._candles_filtered_unclosed += 1
                 return
             close_at = datetime.fromtimestamp(end_s, tz=timezone.utc).replace(tzinfo=None)
             open_at = datetime.fromtimestamp(start_s, tz=timezone.utc).replace(tzinfo=None)
@@ -213,6 +241,7 @@ class CoinbaseWSClient:
             # Dedupe: don't re-enqueue an already-persisted bar.
             last = self._last_persisted.get(ticker)
             if last is not None and close_at <= last:
+                self._candles_filtered_dedupe += 1
                 return
 
             bar = BarItem(
@@ -235,6 +264,25 @@ class CoinbaseWSClient:
             ticker = candle.get("product_id") or "_unknown"
             self._status.record_error(ticker, f"candle_parse:{type(exc).__name__}")
             logger.debug("[fast_path] candle parse failed: %s", exc, exc_info=True)
+
+
+    def stats(self) -> dict[str, Any]:
+        """Diagnostic counters — for the supervisor metrics line. Lets us
+        distinguish "no live updates" (raw_messages_total stuck) vs
+        "filtered out" (candles_filtered_unclosed climbing) vs "dedup
+        thrash" (candles_filtered_dedupe climbing).
+        """
+        return {
+            "raw_messages_total": self._raw_messages_total,
+            "raw_candles_events_total": self._raw_candles_events_total,
+            "raw_candles_total": self._raw_candles_total,
+            "candles_filtered_unclosed": self._candles_filtered_unclosed,
+            "candles_filtered_dedupe": self._candles_filtered_dedupe,
+            "heartbeats_total": self._heartbeats_total,
+            "subscriptions_total": self._subscriptions_total,
+            "unknown_channel_total": self._unknown_channel_total,
+            "last_unknown_channel": self._last_unknown_channel,
+        }
 
 
 __all__ = ["CoinbaseWSClient", "BAR_CLOSE_GRACE_S"]
