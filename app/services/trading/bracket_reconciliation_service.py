@@ -659,6 +659,28 @@ def _invoke_writer_for_decision(
     if (local.broker_source or "").lower() != "robinhood":
         return None
 
+    # Phase 3.3 (2026-05-01): gate on the intent's persistent state. If
+    # the intent has been parked at terminal_reject (broker repeatedly
+    # rejected, ELTX-style auto-cancel pattern, etc.) or already closed,
+    # the writer must not fire. This replaces the in-process FIX 52
+    # _intent_reject_cooldown dict's role for reconciler invocations
+    # (the dict still exists as a fast-path inside the writer itself).
+    intent_state_raw = (local.intent_state or "").lower().strip()
+    if intent_state_raw in ("terminal_reject", "closed"):
+        logger.info(
+            f"{BRACKET_RECONCILIATION} writer SKIPPED state-gated "
+            "trade=%s intent=%s ticker=%s state=%s",
+            local.trade_id, local.bracket_intent_id, local.ticker, intent_state_raw,
+        )
+        return {
+            "writer": "state_gated_skip",
+            "ok": False,
+            "reason": f"state_{intent_state_raw}",
+            "new_stop_order_id": None,
+            "qty": None,
+            "stop_price": None,
+        }
+
     try:
         from .bracket_writer_g2 import (
             place_missing_stop,

@@ -862,13 +862,25 @@ def place_missing_stop(
         err_text = str(place_res.get("error") or "")
         terminal = _is_terminal_reject(err_text)
         if terminal:
-            # FIX 52 — arm the cooldown so the next 1h of sweeps skip
-            # this intent instead of producing another reject + Robinhood
-            # notification.
+            # Phase 3.3 (2026-05-01): persist the terminal reject in the
+            # state machine, not just the in-process dict. The reconciler
+            # gates on intent_state and won't invoke the writer again on a
+            # terminal_reject row until an operator transitions it back
+            # to intent. Keep the in-process arm too as belt-and-
+            # suspenders during the migration window.
             _arm_reject_cooldown(bracket_intent_id)
+            try:
+                from .bracket_intent_writer import mark_terminal_reject as _mtr
+                _mtr(db, int(bracket_intent_id), reason=f"terminal_reject:{err_text[:100]}")
+            except Exception:
+                logger.debug(
+                    f"{BRACKET_WRITER_G2} mark_terminal_reject persist failed",
+                    exc_info=True,
+                )
             logger.warning(
                 f"{BRACKET_WRITER_G2} place_missing_stop terminal reject; "
-                "arming %ss cooldown intent=%s ticker=%s err=%s",
+                "arming %ss cooldown + state_machine.terminal_reject "
+                "intent=%s ticker=%s err=%s",
                 _TERMINAL_REJECT_COOLDOWN_SECS, bracket_intent_id, ticker,
                 err_text[:200],
             )
@@ -902,21 +914,58 @@ def place_missing_stop(
     # broker with duplicate stops faster than it can confirm them.
     _arm_post_place_cooldown(bracket_intent_id)
 
+    # Phase 3.3 (2026-05-01): on successful placement, persist the state
+    # transition (intent → confirmed_at_broker). The reconciler treats
+    # confirmed_at_broker as "broker accepted; check on next sweep" so
+    # it doesn't classify missing_stop again until the broker truth is
+    # observed. Best-effort — failure to transition doesn't undo the
+    # placement (the order is real at the broker either way).
+    try:
+        from .bracket_intent_writer import (
+            IntentState as _IS,
+            transition as _tr,
+        )
+        _tr(
+            db, int(bracket_intent_id),
+            to_state=_IS.CONFIRMED_AT_BROKER,
+            reason=f"placed_stop:{new_oid[:8]}",
+        )
+    except Exception:
+        logger.debug(
+            f"{BRACKET_WRITER_G2} state transition to confirmed_at_broker failed",
+            exc_info=True,
+        )
+
     # FIX 56 — detect auto-cancel pattern. Count consecutive placements
     # for this intent; if we hit the threshold the broker is likely
     # auto-cancelling every stop (ELTX-style instrument restriction).
     # Arm the 1h terminal-reject cooldown so the user sees 3
     # notifications then silence, instead of 12/hour forever.
+    #
+    # Phase 3.3 (2026-05-01): also persist via the state machine — the
+    # reconciler will gate on intent_state and skip subsequent sweeps.
     placement_count = _record_placement(bracket_intent_id)
     if placement_count >= _PLACEMENT_FAILURE_THRESHOLD:
         logger.warning(
             f"{BRACKET_WRITER_G2} place_missing_stop hit failure threshold "
             "intent=%s ticker=%s placements=%s — arming %ss terminal-reject "
-            "cooldown (broker is auto-cancelling each placed stop)",
+            "cooldown + state_machine.terminal_reject (broker is auto-"
+            "cancelling each placed stop)",
             bracket_intent_id, ticker, placement_count,
             _TERMINAL_REJECT_COOLDOWN_SECS,
         )
         _arm_reject_cooldown(bracket_intent_id)
+        try:
+            from .bracket_intent_writer import mark_terminal_reject as _mtr
+            _mtr(
+                db, int(bracket_intent_id),
+                reason=f"placement_threshold_{placement_count}_consecutive_failed_stops",
+            )
+        except Exception:
+            logger.debug(
+                f"{BRACKET_WRITER_G2} mark_terminal_reject persist failed",
+                exc_info=True,
+            )
     _g2_event(
         db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
         ticker=ticker, broker_source=broker_source,
