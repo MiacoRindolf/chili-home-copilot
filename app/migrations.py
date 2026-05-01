@@ -14609,6 +14609,45 @@ def _migration_218_fast_exits(conn) -> None:
     conn.commit()
 
 
+def _migration_219_fast_exits_native_view(conn) -> None:
+    """F5-cleanup (2026-05-01) — view for native-only realized P/L.
+
+    The exit_manager's bootstrap routine picks up ANY paper_fill row
+    that lacks a corresponding fast_exits row, including F4-era
+    entries that existed before F5 was running. For those legacy
+    entries the bracket (stop, target, ATR) was computed at F5
+    bootstrap time, not at fill time — using ATR-of-now, regime-of-now.
+    Mixing them with F5-native trades (where bracket was set within
+    seconds of fill) into a single P/L pool is textbook training/test
+    contamination, so we filter them out.
+
+    Detection: ``brain_json->>'computed_at' - entered_at < 60s``.
+    For F5-native trades the gap is sub-second (executor writes the
+    paper_fill, exit_manager picks it up on the next ~1s poll). For
+    inherited entries it's minutes-to-hours. The 60s threshold leaves
+    a wide gap on either side of any plausible boundary.
+
+    Anyone doing edge analysis or feeding F6's training set should
+    select from ``fast_exits_native``, not ``fast_exits``. The
+    underlying table still has every row — the view just hides the
+    contaminated ones.
+    """
+    conn.execute(text(
+        """
+        CREATE OR REPLACE VIEW fast_exits_native AS
+        SELECT *
+        FROM fast_exits
+        WHERE (brain_json ? 'computed_at')
+          AND (
+            EXTRACT(EPOCH FROM (
+                (brain_json->>'computed_at')::timestamp - entered_at
+            )) < 60
+          )
+        """
+    ))
+    conn.commit()
+
+
 def _migration_216_fast_alerts(conn) -> None:
     """F3 (2026-05-01) — fast-path event-driven scanner alerts.
 
@@ -14892,6 +14931,7 @@ MIGRATIONS = [
     ("216_fast_alerts", _migration_216_fast_alerts),
     ("217_fast_executions", _migration_217_fast_executions),
     ("218_fast_exits", _migration_218_fast_exits),
+    ("219_fast_exits_native_view", _migration_219_fast_exits_native_view),
 ]
 
 
