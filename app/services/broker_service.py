@@ -1208,10 +1208,18 @@ def get_crypto_positions() -> list[dict[str, Any]]:
                     avg_cost = avg_cost / qty
 
                 currency = pos.get("currency", {})
+                ticker_full = currency.get("code", "???") + "-USD"
+                # Phase 1 (2026-05-01): preserve crypto's 8-decimal precision.
+                # The previous round(avg_cost, 4) silently truncated cost basis
+                # for sub-penny coins, then the reconciler classified
+                # price_drift against the unrounded broker truth.
                 positions.append({
-                    "ticker": currency.get("code", "???") + "-USD",
+                    "ticker": ticker_full,
                     "quantity": qty,
-                    "average_buy_price": round(avg_cost, 4) if avg_cost else 0,
+                    "average_buy_price": (
+                        normalize_price(avg_cost, ticker_full, asset_class="crypto")
+                        if avg_cost else 0
+                    ),
                     "name": currency.get("name", ""),
                     "type": "crypto",
                 })

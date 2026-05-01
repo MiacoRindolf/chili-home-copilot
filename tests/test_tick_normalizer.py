@@ -37,7 +37,7 @@ def test_equity_above_dollar_rounds_to_two_decimals(raw, expected):
 
 
 def test_equity_above_dollar_aligns_to_penny_tick():
-    assert tick_size("AAPL", 150.0) == pytest.approx(0.01)
+    assert float(tick_size("AAPL", 150.0)) == pytest.approx(0.01)
 
 
 # ── Equity, price < $1 — 4 decimals (NMS sub-dollar) ──────────────────
@@ -57,7 +57,7 @@ def test_equity_below_dollar_rounds_to_four_decimals(raw, expected):
 
 
 def test_equity_below_dollar_aligns_to_basis_point_tick():
-    assert tick_size("PENNY", 0.5) == pytest.approx(0.0001)
+    assert float(tick_size("PENNY", 0.5)) == pytest.approx(0.0001)
 
 
 # ── Crypto — 8 decimals ───────────────────────────────────────────────
@@ -77,7 +77,7 @@ def test_crypto_keeps_eight_decimals(raw, expected):
 
 
 def test_crypto_aligns_to_eight_decimal_tick():
-    assert tick_size("BTC-USD", 78293.82) == pytest.approx(1e-8)
+    assert float(tick_size("BTC-USD", 78293.82)) == pytest.approx(1e-8)
 
 
 def test_btc_8dec_value_round_trips():
@@ -124,13 +124,13 @@ SAMPLE_CALL_LOW = "AAPL241220C00010000"
 
 
 def test_option_premium_above_three_uses_penny_tick():
-    assert tick_size(SAMPLE_CALL_3PLUS, 5.0) == pytest.approx(0.01)
+    assert float(tick_size(SAMPLE_CALL_3PLUS, 5.0)) == pytest.approx(0.01)
     assert normalize_price(5.234, SAMPLE_CALL_3PLUS) == 5.23
 
 
 def test_option_premium_below_three_uses_nickel_tick():
     # OPRA "nickel tier" — sub-$3 options aligned to $0.05
-    assert tick_size(SAMPLE_CALL_LOW, 1.0) == pytest.approx(0.05)
+    assert float(tick_size(SAMPLE_CALL_LOW, 1.0)) == pytest.approx(0.05)
     assert normalize_price(0.07, SAMPLE_CALL_LOW) == pytest.approx(0.05)
     assert normalize_price(0.13, SAMPLE_CALL_LOW) == pytest.approx(0.15)
 

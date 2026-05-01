@@ -19,6 +19,7 @@ from .trading.broker_position_sync import (
     collapse_open_broker_position_duplicates,
     dedupe_positions_by_ticker,
 )
+from .trading.tick_normalizer import normalize_price, normalize_quantity
 
 logger = logging.getLogger(__name__)
 
@@ -355,17 +356,20 @@ def place_buy_order(
 
     try:
         if order_type == "limit" and limit_price:
+            # Phase 1 (2026-05-01): venue-aware tick + qty normalization.
+            # Coinbase pairs are crypto; the previous round(price, 2) silently
+            # truncated sub-penny prices like 0.10984 → 0.11.
             resp = client.limit_order_gtc_buy(
                 client_order_id=client_order_id,
                 product_id=product_id,
-                base_size=str(round(quantity, 8)),
-                limit_price=str(round(limit_price, 2)),
+                base_size=str(normalize_quantity(quantity, ticker)),
+                limit_price=str(normalize_price(limit_price, ticker, asset_class="crypto")),
             )
         else:
             resp = client.market_order_buy(
                 client_order_id=client_order_id,
                 product_id=product_id,
-                base_size=str(round(quantity, 8)),
+                base_size=str(normalize_quantity(quantity, ticker)),
             )
 
         rd = resp if isinstance(resp, dict) else resp.__dict__ if hasattr(resp, "__dict__") else {}
@@ -414,17 +418,18 @@ def place_sell_order(
 
     try:
         if order_type == "limit" and limit_price:
+            # Phase 1 (2026-05-01): see place_buy_order for context.
             resp = client.limit_order_gtc_sell(
                 client_order_id=client_order_id,
                 product_id=product_id,
-                base_size=str(round(quantity, 8)),
-                limit_price=str(round(limit_price, 2)),
+                base_size=str(normalize_quantity(quantity, ticker)),
+                limit_price=str(normalize_price(limit_price, ticker, asset_class="crypto")),
             )
         else:
             resp = client.market_order_sell(
                 client_order_id=client_order_id,
                 product_id=product_id,
-                base_size=str(round(quantity, 8)),
+                base_size=str(normalize_quantity(quantity, ticker)),
             )
 
         rd = resp if isinstance(resp, dict) else resp.__dict__ if hasattr(resp, "__dict__") else {}

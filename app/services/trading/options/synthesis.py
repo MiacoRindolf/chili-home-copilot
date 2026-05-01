@@ -235,12 +235,17 @@ def synthesize_option_meta(
     cost_per_contract_usd = limit_price * 100.0
     contracts = max(1, int(notional_usd // cost_per_contract_usd))
 
+    # Phase 1 (2026-05-01): align limit_price to OPRA tick before persisting.
+    # Premium ≥ $3 → penny tick; < $3 → nickel tick. The downstream broker
+    # submission also normalizes, but doing it here means the persisted spec
+    # matches what'll actually be submitted (single source of truth).
+    from ..tick_normalizer import normalize_price as _np_synth
     return {
         "underlying": sym,
         "strike": target_strike,
         "expiration": expiration,
         "option_type": "call",
-        "limit_price": round(limit_price, 2),
+        "limit_price": _np_synth(limit_price, sym, asset_class="option"),
         "quantity": int(contracts),
         "synthesis_source": "equity_substitute",
         "synthesis_target_dte": target_dte,

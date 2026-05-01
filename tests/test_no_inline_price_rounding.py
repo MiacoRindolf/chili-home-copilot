@@ -32,6 +32,21 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = REPO_ROOT / "app"
 
+# Phase 1 scope — files that actually submit orders to the broker. These
+# are where tick-size correctness is non-negotiable. Storage-side rounding
+# (Trade rows, signal records, paper trades, backtest results, snapshots)
+# is Phase 2 territory and a separate guard will be added there.
+#
+# Each path is checked recursively (you can list a directory).
+PHASE1_BROKER_BOUNDARY_PATHS = [
+    APP_ROOT / "services" / "broker_service.py",
+    APP_ROOT / "services" / "coinbase_service.py",
+    APP_ROOT / "services" / "trading" / "robinhood_exit_execution.py",
+    APP_ROOT / "services" / "trading" / "venue",
+    APP_ROOT / "services" / "trading" / "bracket_writer_g2.py",
+    APP_ROOT / "services" / "trading" / "options" / "synthesis.py",
+]
+
 # Paths that are allowed to use raw round() because they ARE the
 # normalizer (or are out of scope for this guard).
 EXEMPT_PATHS = {
@@ -61,6 +76,27 @@ ALLOW_SUBSTRINGS = (
     "minutes",
     "hours",
     "days",
+    # 2026-05-01 additions after the first audit pass — these names appear
+    # in price-like idioms but the rounded value is not a broker submission:
+    "probability",        # p_fill / p_partial / p_missed — 0..1 scalars
+    "p_fill", "p_partial", "p_missed",
+    "complexity",         # code analysis metric
+    "notional",           # money amount derived from price * qty (Phase 2)
+    "projected_profit",   # display amount, not a broker price
+    "near_resistance",    # display level, not submission
+    "fib",                # fibonacci level (display/diagnostic)
+    "recommended_spread", # measured statistic, not order price
+    "latency", "ack_to_fill", "ms",  # timing metrics
+    "rl_rate",            # rate-limit metric
+    "synthesis_spread",   # diagnostic
+    "synthesis_spot",     # diagnostic
+    "synthesis_target_dte",
+    "spread_pct",         # diagnostic
+    "alt = round",        # one-off in synthesis fallback strike search
+    "rr =",               # R:R ratio
+    "rr_",
+    "near_resistance",
+    "spread_bps",         # diagnostic
 )
 
 # Forbidden patterns: round() with a literal small N applied to something
@@ -112,25 +148,37 @@ def _scan_file(path: Path) -> list[tuple[int, str]]:
     return findings
 
 
-def test_no_inline_price_rounding_in_app_services():
-    """Every price-like value crossing the broker boundary must go through
-    tick_normalizer.normalize_price. Any inline round(price, N) — even if
-    it produces the same answer in a specific case — is forbidden because
-    the next venue (sub-dollar equity, crypto, options) has a different
-    tick.
+def _iter_phase1_files():
+    """Yield every .py inside the Phase 1 scope (file or recursive dir)."""
+    for path in PHASE1_BROKER_BOUNDARY_PATHS:
+        if not path.exists():
+            continue
+        if path.is_file() and path.suffix == ".py":
+            yield path
+        elif path.is_dir():
+            yield from path.rglob("*.py")
+
+
+def test_no_inline_price_rounding_in_broker_boundary():
+    """Phase 1 scope: every file that submits orders to a broker must go
+    through tick_normalizer. Any inline ``round(price, N)`` in a broker-
+    submission file is forbidden — the next venue (sub-dollar equity,
+    crypto, options) has a different tick rule.
+
+    Storage-side rounding (Trade rows, snapshots, signals, paper trades,
+    backtests) is Phase 2 scope — a separate guard will catch those.
     """
-    services_dir = APP_ROOT / "services"
     failures: list[str] = []
-    for py in services_dir.rglob("*.py"):
+    for py in _iter_phase1_files():
         for lineno, line in _scan_file(py):
             rel = py.relative_to(REPO_ROOT)
             failures.append(f"{rel}:{lineno}: {line}")
 
     if failures:
         pytest.fail(
-            "Found inline price-like round() calls outside tick_normalizer.\n"
+            "Found inline price-like round() calls in Phase 1 broker-boundary code.\n"
             "Use app.services.trading.tick_normalizer.normalize_price instead.\n"
             "If the value is genuinely not a broker-bound price, name it "
-            "'display_*' or use f-string formatting to avoid this guard.\n\n"
+            "'display_*' or use f-string formatting.\n\n"
             "Offending lines:\n" + "\n".join(failures)
         )

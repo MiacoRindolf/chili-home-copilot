@@ -77,12 +77,20 @@ def _extract_market_mic(raw_product: dict[str, Any]) -> str | None:
     return parts[-1].upper()
 
 
-def _round_limit_price(price: float) -> float:
+def _round_limit_price(price: float, ticker: str = "") -> float:
+    """Tick-align a limit price for broker submission.
+
+    Phase 1 (2026-05-01): delegates to tick_normalizer so equity sub-dollar
+    (4 decimals), equity ≥$1 (2 decimals), and crypto (8 decimals) are
+    handled uniformly. Previously this hand-rolled the equity rule and
+    didn't know about crypto. Pass *ticker* when you have it; the function
+    falls back to equity rules if ticker is empty.
+    """
     if price <= 0:
         return 0.0
-    if price < 1.0:
-        return round(price, 4)
-    return round(price, 2)
+    from .tick_normalizer import normalize_price as _np
+    asset = "crypto" if (ticker or "").upper().endswith("-USD") else "equity"
+    return _np(price, ticker or "", asset_class=asset)
 
 
 def _is_whole_share_quantity(quantity: float) -> bool:
@@ -513,7 +521,7 @@ def _prepare_offhours_limit(
         }
     return {
         "ok": True,
-        "limit_price": _round_limit_price(float(bid)),
+        "limit_price": _round_limit_price(float(bid), ticker=ticker),
         "reference_price": _safe_float(getattr(tick, "mid", None)) or _safe_float(getattr(tick, "last_price", None)) or float(bid),
         "spread_bps": round(float(spread_bps), 3),
     }
