@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## ⭐ FIRST: read the strategy protocol
+
+This project uses a **Cowork-directed workflow**. A separate Cowork session writes plans and the operator runs `claude` to execute them.
+
+**On every Claude Code session start, after reading this file, ALSO read in order:**
+
+1. `docs/STRATEGY/PROTOCOL.md` — defines the loop, file conventions, and hard rules
+2. `docs/STRATEGY/CURRENT_PLAN.md` — the active initiative
+3. `docs/STRATEGY/NEXT_TASK.md` — the specific task for this run
+
+If `NEXT_TASK.md` has `STATUS: PENDING`, plan briefly, confirm scope with the operator if anything's ambiguous, then execute. When done, write `docs/STRATEGY/CC_REPORTS/YYYY-MM-DD_<slug>.md`, mark `NEXT_TASK.md` as `STATUS: DONE`, and commit.
+
+If `NEXT_TASK.md` has `STATUS: DONE`, the operator hasn't queued a new task yet — say so and ask what they need.
+
 ## Project overview
 
 CHILI is a local-first household assistant whose most sophisticated subsystem is an autonomous trading brain. Models recommend/decide inside typed, policy-bound envelopes; deterministic systems validate, constrain, execute, audit, and veto. Live trades touch real brokers (Robinhood, Coinbase), so correctness and safety rules are load-bearing, not cosmetic.
