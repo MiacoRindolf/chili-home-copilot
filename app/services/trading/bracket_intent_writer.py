@@ -1,14 +1,47 @@
-"""Phase G - persistence layer for bracket intents (shadow-safe).
+"""Phase G/G.2 - sole persistence layer for bracket intents.
 
-Upserts one row into ``trading_bracket_intents`` per live ``Trade`` with
-the bracket we would have placed at the broker. In shadow mode the
-broker child order ids stay NULL and ``intent_state`` transitions only
-through ``intent`` / ``shadow_logged`` / ``reconciled``.
+This module is the SINGLE place in the codebase that writes to the
+``trading_bracket_intents`` table. Every state mutation goes through
+the explicit state machine in ``transition()``. Illegal transitions
+(e.g. ``closed`` → ``intent``) are rejected, returning a structured
+result so the caller can log + give up rather than producing the kind
+of cascade we saw on 2026-05-01.
 
 The writer does **not** call the broker, does not compute the bracket
 (that's the pure ``bracket_intent.compute_bracket_intent``), and does
 not run the reconciliation sweep. It is the single persistence surface
-callers should use from the emitter call-site.
+callers should use from any emitter / reconciler / executor call-site.
+
+State machine (Phase 3.1, 2026-05-01)
+-------------------------------------
+
+States:
+
+* ``intent``               — brain decided; broker not yet engaged
+* ``shadow_logged``        — shadow / dry-run mode; never acted on
+* ``confirmed_at_broker``  — broker accepted the SELL stop / target orders
+* ``reconciled``           — broker truth matches local intent (steady state)
+* ``amending``             — drift detected; repair in flight (replaces the
+                             FIX 53 post-place cooldown)
+* ``exiting``              — exit order placed; awaiting fill
+* ``terminal_reject``      — broker rejected with a non-retryable reason
+                             (replaces the FIX 52 in-process cooldown)
+* ``closed``               — trade complete (filled or cancelled at broker)
+
+Legal transitions (anything else is rejected by ``transition()``):
+
+* ``intent``               → confirmed_at_broker, shadow_logged, terminal_reject, closed
+* ``shadow_logged``        → intent (mode flip), closed
+* ``confirmed_at_broker``  → reconciled, amending, exiting, terminal_reject, closed
+* ``reconciled``           → amending, exiting, terminal_reject, closed
+* ``amending``             → confirmed_at_broker, terminal_reject, closed
+* ``exiting``              → closed
+* ``terminal_reject``      → intent (operator override), closed
+* ``closed``               → (terminal; no further transitions)
+
+Legacy ``authoritative_*`` strings (e.g. ``"authoritative_submitted"``,
+``"authoritative_reconciled"``) are recognized as synonyms during the
+migration window — see ``_legacy_state_alias()``.
 """
 from __future__ import annotations
 
@@ -44,6 +77,217 @@ class IntentMode(str, Enum):
     SHADOW = "shadow"
     COMPARE = "compare"
     AUTHORITATIVE = "authoritative"
+
+
+class IntentState(str, Enum):
+    """Canonical intent_state values (Phase 3.1, 2026-05-01).
+
+    Values are byte-identical with the existing column contents so we
+    don't need a migration. The ``LEGACY_*`` synonyms below are
+    accepted as aliases until rows are repaired by a follow-up sweep.
+    """
+
+    INTENT = "intent"
+    SHADOW_LOGGED = "shadow_logged"
+    CONFIRMED_AT_BROKER = "confirmed_at_broker"
+    RECONCILED = "reconciled"
+    AMENDING = "amending"
+    EXITING = "exiting"
+    TERMINAL_REJECT = "terminal_reject"
+    CLOSED = "closed"
+
+
+# Legacy state strings still found in older rows. Treat them as their
+# new-name synonym for transition validation. The rows are not rewritten
+# in-place; that's a separate cleanup pass.
+_LEGACY_STATE_ALIASES: dict[str, IntentState] = {
+    "authoritative": IntentState.CONFIRMED_AT_BROKER,
+    "authoritative_submitted": IntentState.CONFIRMED_AT_BROKER,
+    "authoritative_reconciled": IntentState.RECONCILED,
+    "authoritative_amending": IntentState.AMENDING,
+    "authoritative_exiting": IntentState.EXITING,
+}
+
+
+def _coerce_state(raw: str | IntentState | None) -> IntentState | None:
+    """Normalize a stored intent_state string to the canonical enum.
+
+    Returns ``None`` if the value is unrecognized (caller decides whether
+    that's an error or a no-op).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, IntentState):
+        return raw
+    s = str(raw).strip().lower()
+    if not s:
+        return None
+    if s in _LEGACY_STATE_ALIASES:
+        return _LEGACY_STATE_ALIASES[s]
+    try:
+        return IntentState(s)
+    except ValueError:
+        return None
+
+
+# Phase 3.1 state machine — every entry's value is the set of states
+# that are legal transitions FROM the key. Anything not in the set is
+# rejected by transition().
+_LEGAL_TRANSITIONS: dict[IntentState, frozenset[IntentState]] = {
+    IntentState.INTENT: frozenset({
+        IntentState.CONFIRMED_AT_BROKER,
+        IntentState.SHADOW_LOGGED,
+        IntentState.TERMINAL_REJECT,
+        IntentState.CLOSED,
+        IntentState.RECONCILED,  # broker already has matching orders
+    }),
+    IntentState.SHADOW_LOGGED: frozenset({
+        IntentState.INTENT,        # mode flip from shadow → live
+        IntentState.CLOSED,
+    }),
+    IntentState.CONFIRMED_AT_BROKER: frozenset({
+        IntentState.RECONCILED,
+        IntentState.AMENDING,
+        IntentState.EXITING,
+        IntentState.TERMINAL_REJECT,
+        IntentState.CLOSED,
+    }),
+    IntentState.RECONCILED: frozenset({
+        IntentState.AMENDING,
+        IntentState.EXITING,
+        IntentState.TERMINAL_REJECT,
+        IntentState.CLOSED,
+    }),
+    IntentState.AMENDING: frozenset({
+        IntentState.CONFIRMED_AT_BROKER,
+        IntentState.RECONCILED,
+        IntentState.EXITING,
+        IntentState.TERMINAL_REJECT,
+        IntentState.CLOSED,
+    }),
+    IntentState.EXITING: frozenset({
+        IntentState.CLOSED,
+        IntentState.RECONCILED,  # exit cancelled, position still resting
+    }),
+    IntentState.TERMINAL_REJECT: frozenset({
+        IntentState.INTENT,        # operator manually fixed the underlying issue
+        IntentState.CLOSED,
+    }),
+    IntentState.CLOSED: frozenset(),  # terminal
+}
+
+
+@dataclass(frozen=True)
+class TransitionResult:
+    """What ``transition()`` returns. ``ok=False`` is structured rejection
+    (state didn't move), not an exception. Callers log and move on."""
+
+    ok: bool
+    intent_id: int
+    prev_state: IntentState | None
+    new_state: IntentState | None
+    reason: str  # 'ok' | 'illegal_transition' | 'no_such_intent' | 'unrecognized_state'
+
+
+def is_terminal_state(state: IntentState | str | None) -> bool:
+    s = _coerce_state(state)
+    return s is IntentState.CLOSED
+
+
+def transition(
+    db: Session,
+    intent_id: int,
+    *,
+    to_state: IntentState | str,
+    reason: str = "",
+    expected_from: IntentState | str | list | None = None,
+) -> TransitionResult:
+    """Move an intent row from its current state to ``to_state`` if the
+    transition is legal. The single source of truth for intent_state
+    mutation.
+
+    Parameters
+    ----------
+    db : Session
+        SQLAlchemy session. Caller controls commit boundary; this helper
+        does NOT commit (so a sweep can batch many transitions).
+    intent_id : int
+        bracket_intent row id.
+    to_state : IntentState | str
+        Desired new state.
+    reason : str
+        Free-form audit reason; persisted in ``last_diff_reason``.
+    expected_from : IntentState | list | None
+        Optional precondition. If set, the transition is rejected when
+        the current state isn't in this set. Useful when a caller's
+        decision was based on an assumed state — protects against TOCTOU
+        races (the row was mutated between the caller's read and our
+        write).
+
+    Returns a ``TransitionResult`` describing the outcome.
+    """
+    target = _coerce_state(to_state)
+    if target is None:
+        return TransitionResult(False, intent_id, None, None, "unrecognized_state")
+
+    # Read current state. We use SELECT FOR UPDATE so concurrent calls
+    # serialize at the row level — the second caller sees the post-
+    # transition state and either takes its own legal path or rejects.
+    row = db.execute(text(
+        "SELECT intent_state FROM trading_bracket_intents WHERE id = :id "
+        "FOR UPDATE"
+    ), {"id": int(intent_id)}).fetchone()
+
+    if row is None:
+        return TransitionResult(False, intent_id, None, target, "no_such_intent")
+
+    prev = _coerce_state(row[0])
+    if prev is None:
+        return TransitionResult(False, intent_id, None, target, "unrecognized_state")
+
+    # expected_from check (caller's precondition).
+    if expected_from is not None:
+        if isinstance(expected_from, (list, tuple, set, frozenset)):
+            allowed_from = {_coerce_state(s) for s in expected_from}
+        else:
+            allowed_from = {_coerce_state(expected_from)}
+        allowed_from.discard(None)
+        if prev not in allowed_from:
+            return TransitionResult(False, intent_id, prev, target, "illegal_transition")
+
+    # State-machine check.
+    if target == prev:
+        # Idempotent: requesting the current state is a no-op success.
+        return TransitionResult(True, intent_id, prev, target, "ok")
+    if target not in _LEGAL_TRANSITIONS.get(prev, frozenset()):
+        return TransitionResult(False, intent_id, prev, target, "illegal_transition")
+
+    db.execute(text(
+        "UPDATE trading_bracket_intents "
+        "SET intent_state = :new_state, "
+        "    last_diff_reason = COALESCE(:reason, last_diff_reason), "
+        "    last_observed_at = NOW(), "
+        "    updated_at = NOW() "
+        "WHERE id = :id"
+    ), {
+        "id": int(intent_id),
+        "new_state": target.value,
+        "reason": (reason or "")[:128] or None,
+    })
+
+    if _ops_log_enabled():
+        logger.info(
+            format_bracket_intent_ops_line(
+                event="state_transition",
+                mode=_effective_mode().value,
+                bracket_intent_id=intent_id,
+                reason=(reason or "")[:128],
+                from_state=prev.value,
+                to_state=target.value,
+            )
+        )
+
+    return TransitionResult(True, intent_id, prev, target, "ok")
 
 
 # Prefix used in persisted ``intent_state`` column values. When the live
@@ -273,37 +517,83 @@ def mark_reconciled(
     Used by the reconciliation service when the broker now agrees with
     our local view (or when the Trade has closed). Returns True when a
     row was updated.
+
+    Phase 3.1 (2026-05-01): backed by ``transition()`` so illegal
+    transitions (e.g. closed → reconciled) are rejected and logged
+    instead of silently overwriting state.
     """
     mode = _effective_mode(mode_override)
     if mode is IntentMode.OFF:
         return False
 
-    # NB: the ``LIKE 'authoritative%'`` clause uses the string prefix
-    # directly because SQL parameter substitution can't templatize a
-    # LIKE pattern without introducing complexity; the literal matches
-    # ``_AUTHORITATIVE_STATE_PREFIX`` by construction.
-    result = db.execute(text("""
-        UPDATE trading_bracket_intents
-        SET intent_state = 'reconciled',
-            last_observed_at = NOW(),
-            last_diff_reason = :reason,
-            updated_at = NOW()
-        WHERE id = :id
-          AND intent_state NOT LIKE 'authoritative%'
-    """), {"id": int(intent_id), "reason": reason[:128] if reason else None})
-    db.commit()
+    result = transition(
+        db,
+        int(intent_id),
+        to_state=IntentState.RECONCILED,
+        reason=reason or "mark_reconciled",
+    )
+    if result.ok:
+        db.commit()
+    return bool(result.ok)
 
-    updated = bool(result.rowcount)
-    if updated and _ops_log_enabled():
-        logger.info(
-            format_bracket_intent_ops_line(
-                event="mark_reconciled",
-                mode=mode.value,
-                bracket_intent_id=intent_id,
-                reason=reason[:128] if reason else None,
-            )
-        )
-    return updated
+
+def mark_terminal_reject(
+    db: Session,
+    intent_id: int,
+    *,
+    reason: str,
+    mode_override: str | None = None,
+) -> bool:
+    """Phase 3.1 — replace the in-process FIX 52 cooldown with a real state.
+
+    When the broker repeatedly rejects with a non-retryable reason
+    ("Not enough shares to sell.", instrument-suspended, etc.), the
+    executor calls this. The reconciler then SKIPS the intent on
+    subsequent sweeps (no more retries, no more notifications) until
+    an operator manually transitions it back to ``intent`` after fixing
+    the underlying issue (e.g. cancelling a covering limit-sell).
+
+    Returns True when the row transitioned. False on illegal transition
+    (e.g. the row is already closed).
+    """
+    mode = _effective_mode(mode_override)
+    if mode is IntentMode.OFF:
+        return False
+    result = transition(
+        db,
+        int(intent_id),
+        to_state=IntentState.TERMINAL_REJECT,
+        reason=reason or "terminal_reject",
+    )
+    if result.ok:
+        db.commit()
+    return bool(result.ok)
+
+
+def mark_closed(
+    db: Session,
+    intent_id: int,
+    *,
+    reason: str,
+    mode_override: str | None = None,
+) -> bool:
+    """Move an intent to terminal ``closed`` state.
+
+    Called when the underlying Trade has fully exited (filled stop /
+    target / manual close). After this, the intent never moves again.
+    """
+    mode = _effective_mode(mode_override)
+    if mode is IntentMode.OFF:
+        return False
+    result = transition(
+        db,
+        int(intent_id),
+        to_state=IntentState.CLOSED,
+        reason=reason or "mark_closed",
+    )
+    if result.ok:
+        db.commit()
+    return bool(result.ok)
 
 
 def bump_last_observed(
@@ -403,10 +693,17 @@ def _json_dumps(value: Any) -> str:
 
 
 __all__ = [
+    "IntentMode",
+    "IntentState",
+    "TransitionResult",
     "UpsertResult",
     "bracket_intent_summary",
     "bump_last_observed",
+    "is_terminal_state",
+    "mark_closed",
     "mark_reconciled",
+    "mark_terminal_reject",
     "mode_is_active",
+    "transition",
     "upsert_bracket_intent",
 ]
