@@ -940,20 +940,119 @@ def place_missing_stop(
         )
 
     new_oid = place_res.get("order_id") or ""
+
+    # Phase 4 (2026-05-01) — post-placement verification.
+    #
+    # The API call returning ok=true with an order_id is NOT proof the
+    # order persisted at the broker. ELTX exhibited this on 2026-05-01:
+    # place_stop_loss_sell_order returned order_id 69f4e7df with state
+    # "unconfirmed", chili logged "successful", and Robinhood cancelled
+    # the order within 250ms (user saw the rejection in their app, the
+    # API didn't surface a reject_reason, and chili treated it as a win).
+    #
+    # verify_order_landed polls the broker for up to 3 seconds (six 0.5s
+    # samples) waiting for the state to move out of "unconfirmed". One of
+    # three outcomes:
+    #   * resting   → real success; transition to CONFIRMED_AT_BROKER
+    #   * rejected  → broker post-cancelled; treat as terminal-class
+    #                 reject (mark_terminal_reject), DON'T transition to
+    #                 confirmed_at_broker, increment placement_count for
+    #                 the FIX 56 threshold tracker.
+    #   * unknown   → verify window timed out; conservative — log a
+    #                 WARNING, arm post-place cooldown, leave state alone.
+    try:
+        from .. import broker_service as _bs
+        verdict, obs_state = _bs.verify_order_landed(new_oid)
+    except Exception:
+        verdict, obs_state = ("unknown", None)
+        logger.debug(
+            f"{BRACKET_WRITER_G2} verify_order_landed raised",
+            exc_info=True,
+        )
+
+    if verdict == "rejected":
+        logger.warning(
+            f"{BRACKET_WRITER_G2} place_missing_stop POST-ACCEPT REJECTED "
+            "intent=%s ticker=%s order=%s observed_state=%s — broker "
+            "cancelled within verify window. Treating as terminal-class "
+            "failure, not success.",
+            bracket_intent_id, ticker, new_oid[:8], obs_state,
+        )
+        # Arm reject cooldown (FIX 52 fast-path) AND persist terminal_reject.
+        _arm_reject_cooldown(bracket_intent_id)
+        try:
+            from .bracket_intent_writer import mark_terminal_reject as _mtr
+            _mtr(
+                db, int(bracket_intent_id),
+                reason=f"post_accept_{obs_state}:order_{new_oid[:8]}",
+            )
+        except Exception:
+            logger.debug(
+                f"{BRACKET_WRITER_G2} mark_terminal_reject persist failed",
+                exc_info=True,
+            )
+        # Record this as a placement (for the FIX 56 threshold) so a
+        # subsequent restart that loses the in-memory cooldown still
+        # tracks consecutive failures.
+        _record_placement(bracket_intent_id)
+        _g2_event(
+            db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
+            ticker=ticker, broker_source=broker_source,
+            event_type="g2_place_missing_stop_post_accept_rejected",
+            status="rejected",
+            new_stop_order_id=new_oid,
+            qty=float(local_quantity), stop_price=float(stop_price),
+            error=f"post_accept_state:{obs_state}",
+            extra={"verify_verdict": verdict, "observed_state": obs_state},
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False,
+            reason="post_accept_rejected",
+            broker_source=broker_source, ticker=ticker,
+            new_stop_order_id=new_oid,
+            raw_broker_response=place_res,
+        )
+
+    if verdict == "unknown":
+        logger.warning(
+            f"{BRACKET_WRITER_G2} place_missing_stop UNVERIFIED "
+            "intent=%s ticker=%s order=%s last_observed_state=%s — verify "
+            "window expired without the order leaving 'unconfirmed'. "
+            "Treating conservatively: arming post-place cooldown, NOT "
+            "transitioning state. Next sweep will re-check broker truth.",
+            bracket_intent_id, ticker, new_oid[:8], obs_state,
+        )
+        _arm_post_place_cooldown(bracket_intent_id)
+        _g2_event(
+            db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
+            ticker=ticker, broker_source=broker_source,
+            event_type="g2_place_missing_stop_unverified",
+            status="unverified",
+            new_stop_order_id=new_oid,
+            qty=float(local_quantity), stop_price=float(stop_price),
+            extra={"verify_verdict": verdict, "observed_state": obs_state},
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False,
+            reason="unverified",
+            broker_source=broker_source, ticker=ticker,
+            new_stop_order_id=new_oid,
+            raw_broker_response=place_res,
+        )
+
+    # verdict == "resting" → real success.
     logger.info(
         f"{BRACKET_WRITER_G2} place_missing_stop intent=%s ticker=%s qty=%s "
-        "price=%s new_order=%s",
-        bracket_intent_id, ticker, local_quantity, stop_price, new_oid,
+        "price=%s new_order=%s verified_state=%s",
+        bracket_intent_id, ticker, local_quantity, stop_price, new_oid, obs_state,
     )
-    # FIX 53 — arm post-placement cooldown so we don't bombard the
-    # broker with duplicate stops faster than it can confirm them.
+    # FIX 53 — arm post-placement cooldown so the next sweep doesn't
+    # immediately re-classify and try again.
     _arm_post_place_cooldown(bracket_intent_id)
 
-    # Phase 3.3 (2026-05-01): on successful placement, persist the state
-    # transition (intent → confirmed_at_broker). The reconciler treats
-    # confirmed_at_broker as "broker accepted; check on next sweep" so
-    # it doesn't classify missing_stop again until the broker truth is
-    # observed. Best-effort — failure to transition doesn't undo the
+    # Phase 3.3 + Phase 4 (2026-05-01): only transition to
+    # confirmed_at_broker AFTER the broker has verified the order is
+    # resting. Best-effort — failure to transition doesn't undo the
     # placement (the order is real at the broker either way).
     try:
         from .bracket_intent_writer import (
@@ -963,7 +1062,7 @@ def place_missing_stop(
         _tr(
             db, int(bracket_intent_id),
             to_state=_IS.CONFIRMED_AT_BROKER,
-            reason=f"placed_stop:{new_oid[:8]}",
+            reason=f"placed_stop_verified:{new_oid[:8]}",
         )
     except Exception:
         logger.debug(

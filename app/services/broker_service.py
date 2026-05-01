@@ -2673,6 +2673,68 @@ def get_option_chains(symbol: str) -> dict[str, Any] | None:
         return None
 
 
+def get_stock_order_info(order_id: str) -> dict[str, Any] | None:
+    """Fetch the current state record for a single stock order.
+
+    Phase 4 (2026-05-01): introduced as the basis for post-placement
+    verification — the previous "we placed it, must be working" assumption
+    was wrong (Robinhood accepts API calls and cancels seconds later for
+    some instruments). Callers poll this to detect post-acceptance
+    rejection within a short window.
+    """
+    if not _rh_available or not is_connected() or not order_id:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        return rh.orders.get_stock_order_info(order_id) or None
+    except Exception as e:
+        logger.warning("[broker] get_stock_order_info(%s) failed: %s", order_id, e)
+        return None
+
+
+def verify_order_landed(
+    order_id: str,
+    *,
+    max_wait_s: float = 3.0,
+    poll_interval_s: float = 0.5,
+) -> tuple[str, str | None]:
+    """Poll the broker until the order reaches a terminal-or-resting state.
+
+    Returns ``(verdict, observed_state)`` where ``verdict`` is one of:
+
+    * ``"resting"``   — broker confirmed (state in confirmed/queued/partially_filled/filled).
+                        The order is live at the broker; safe to treat as success.
+    * ``"rejected"``  — broker rejected/cancelled within the verify window.
+                        Caller should NOT treat this as success regardless of
+                        what the original place_*_order API call returned.
+    * ``"unknown"``   — verify window expired before the state moved away from
+                        ``unconfirmed`` / ``new`` / etc. Conservative callers
+                        treat unknown as not-yet-success.
+
+    Phase 4 (2026-05-01): the gap this closes is exactly the ELTX bug —
+    place_stop_loss_sell_order returned an order_id with state=unconfirmed,
+    we logged "successful", and the user saw a rejection in the Robinhood
+    app because the broker cancelled within 250ms. ``verify_order_landed``
+    sees that cancellation in time to surface it.
+    """
+    import time
+
+    if not order_id:
+        return ("unknown", None)
+    deadline = time.time() + float(max_wait_s)
+    observed = None
+    while time.time() < deadline:
+        info = get_stock_order_info(order_id) or {}
+        observed = (info.get("state") or "").strip().lower() or None
+        if observed in ("rejected", "cancelled", "failed"):
+            return ("rejected", observed)
+        if observed in ("confirmed", "queued", "partially_filled", "filled"):
+            return ("resting", observed)
+        # state likely "unconfirmed" or "new" — keep polling
+        time.sleep(float(poll_interval_s))
+    return ("unknown", observed)
+
+
 # ── Options order placement (Task MM) ──────────────────────────────────
 #
 # Robinhood options live at api.robinhood.com/options/ — same equity-scope
