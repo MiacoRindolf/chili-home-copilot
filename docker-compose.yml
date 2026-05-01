@@ -589,15 +589,17 @@ services:
       # FIX 33 carry-over for broker-call timeouts.
       - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
       - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
-      # 2026-05-01: re-enabled after Phase 1 (tick-size correctness) +
-      # Phase 3.1-3.6 (state machine + ownership CI guards). The
-      # cancel-covering-sell behavior that destroyed take-profit limits
-      # is now opt-in via CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1
-      # (default off — preserve existing limit-sells). With the default,
-      # the writer still places SELL_STOPs for genuinely-orphan trades
-      # (no covering order) but skips when a position is already
-      # protected by a resting sell.
-      - CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=1
+      # 2026-05-01 HALT (post-Phase A re-enable): ELTX placement at
+      # 17:50:21 returned order_id with state=unconfirmed; chili logged
+      # "successful" but Robinhood actually rejected it (user saw the
+      # rejection in their app). Confirms the gap in our verification —
+      # we treat "API returned an order_id" as success without checking
+      # whether the order actually persisted at the broker. Halting the
+      # writer while we add post-placement state verification (poll the
+      # order's actual state after a 2s settle, transition to
+      # terminal_reject if rejected/cancelled). DO NOT re-enable until
+      # bracket_writer_g2 has a working verify_placement step.
+      - CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=0
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
