@@ -276,6 +276,17 @@ class FastPathExitManager:
                     ticker, entry_price, atr, exc,
                 )
                 continue
+            # IMPORTANT: ``computed_at`` is set ONCE here, at the moment
+            # the bracket is decided. For F5-native trades that's within
+            # ~1s of ``entered_at``; for F4-era inherited entries adopted
+            # at first F5 boot it can be hours after entry. The gap
+            # between this timestamp and ``entered_at`` is the load-
+            # bearing classifier behind migration 219's
+            # ``fast_exits_native`` view (see _migration_219_fast_exits_
+            # native_view in app/migrations.py). Do NOT refresh this
+            # timestamp on later updates or on restart-driven re-bootstrap
+            # — that silently breaks the native-vs-inherited filter and
+            # contaminates F6's training set with backfilled brackets.
             brain_payload = {
                 "atr": atr,
                 "stop_model": "atr_crypto_breakout",
