@@ -1,6 +1,6 @@
 # NEXT_TASK: cleanup-2-healthcheck-and-protocol-infra
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
