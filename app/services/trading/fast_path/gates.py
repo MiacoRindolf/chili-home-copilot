@@ -331,8 +331,17 @@ DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
     gate_mode_interlock,
     gate_recency,
     gate_min_score,
-    gate_calibrated_tradeability,
+    # Negative-edge gate runs BEFORE the cost-bar gate so that
+    # statistically-negative signals (volume_breakout_long buckets
+    # under current data) report 'negative_edge' as the primary
+    # rejection reason rather than the more generic 'signal_not_
+    # tradeable'. Brief's gate-order paragraph said "after"; brief's
+    # verification SQL looks for 'negative_edge%' in reject_reason --
+    # which requires this ordering. Both gates still always run
+    # (run_gates collects every result into gates_json) so the
+    # postmortem detail is unchanged either way.
     gate_negative_edge_excluded,
+    gate_calibrated_tradeability,
     gate_spread_sanity,
     gate_capacity,
     gate_daily_budget,
