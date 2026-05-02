@@ -657,6 +657,7 @@ class FastPathExecutor:
             daily_notional_used_usd=self._daily_notional_used_usd,
             mode=self._settings.mode,
             live_authorized=is_live_authorized(),
+            engine=self._engine,
         )
 
     def _maybe_roll_daily_window(self) -> None:

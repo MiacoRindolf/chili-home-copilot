@@ -87,6 +87,9 @@ class _OpenPosition:
     target_price: float
     atr: float | None
     brain_payload: dict[str, Any] = field(default_factory=dict)
+    # F6.5: per-position calibrated max-hold. None means "use global
+    # MAX_HOLD_S_DEFAULT" (cold-start fallback path).
+    max_hold_s: float | None = None
 
 
 @dataclass
@@ -256,26 +259,69 @@ class FastPathExitManager:
                     "qty=%r price=%r", entry_id, qty, entry_price,
                 )
                 continue
+            # F6.5: try calibrated bracket and max_hold_s first; each
+            # falls back independently to the cold-start default. We
+            # need alert_type and signal_score for the lookup -- both
+            # live on fast_alerts joined by (ticker, alert_type,
+            # alert_fired_at) on the fast_executions row.
+            alert_meta = self._fetch_source_alert_meta(entry_id)
+            calibrated_bracket = None
+            calibrated_max_hold = None
+            bracket_source = "atr_fallback"
+            if alert_meta is not None:
+                from .calibration import (
+                    compute_calibrated_bracket,
+                    get_calibrated_max_hold_s,
+                )
+                try:
+                    calibrated_bracket = compute_calibrated_bracket(
+                        self._engine,
+                        ticker=ticker,
+                        alert_type=alert_meta["alert_type"],
+                        signal_score=float(alert_meta["signal_score"]),
+                        entry=entry_price,
+                        direction="long" if side == "buy" else "short",
+                    )
+                    calibrated_max_hold = get_calibrated_max_hold_s(
+                        self._engine,
+                        ticker=ticker,
+                        alert_type=alert_meta["alert_type"],
+                        signal_score=float(alert_meta["signal_score"]),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[fast_path] exit_manager calibration lookup failed "
+                        "entry_id=%d: %s -- falling back to ATR",
+                        entry_id, exc,
+                    )
+
             # Brackets need ATR — pull the most recent N closed bars.
             atr = self._compute_atr(ticker)
-            try:
-                from ..stop_engine import compute_initial_bracket
-                stop, target = compute_initial_bracket(
-                    entry=entry_price,
-                    direction="long" if side == "buy" else "short",
-                    atr=atr,
-                    asset_class="crypto",
-                    stop_model="atr_crypto_breakout",
-                    regime=self._read_regime_or_default(),
-                    lifecycle_stage="validated",
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[fast_path] exit_manager compute_initial_bracket failed "
-                    "ticker=%s entry=%s atr=%r: %s — skipping",
-                    ticker, entry_price, atr, exc,
-                )
-                continue
+            if calibrated_bracket is not None:
+                stop, target = calibrated_bracket
+                bracket_source = "calibrated"
+            else:
+                try:
+                    from ..stop_engine import compute_initial_bracket
+                    stop, target = compute_initial_bracket(
+                        entry=entry_price,
+                        direction="long" if side == "buy" else "short",
+                        atr=atr,
+                        asset_class="crypto",
+                        stop_model="atr_crypto_breakout",
+                        regime=self._read_regime_or_default(),
+                        lifecycle_stage="validated",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[fast_path] exit_manager compute_initial_bracket failed "
+                        "ticker=%s entry=%s atr=%r: %s — skipping",
+                        ticker, entry_price, atr, exc,
+                    )
+                    continue
+            # F6.5: enrich brain_json with calibration provenance so
+            # postmortem analysis can tell whether a position used
+            # empirical or ATR-fallback brackets without re-querying.
             # IMPORTANT: ``computed_at`` is set ONCE here, at the moment
             # the bracket is decided. For F5-native trades that's within
             # ~1s of ``entered_at``; for F4-era inherited entries adopted
@@ -294,6 +340,8 @@ class FastPathExitManager:
                 "lifecycle_stage": "validated",
                 "atr_lookback_bars": ATR_LOOKBACK_BARS,
                 "computed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                "bracket_source": bracket_source,
+                "calibrated_max_hold_s": calibrated_max_hold,
             }
             self._open[entry_id] = _OpenPosition(
                 entry_execution_id=entry_id,
@@ -306,6 +354,10 @@ class FastPathExitManager:
                 target_price=float(target),
                 atr=atr,
                 brain_payload=brain_payload,
+                max_hold_s=(
+                    float(calibrated_max_hold)
+                    if calibrated_max_hold is not None else None
+                ),
             )
             self._metrics.positions_bootstrapped += 1
             logger.info(
@@ -313,6 +365,37 @@ class FastPathExitManager:
                 "entry=%.6f stop=%.6f target=%.6f atr=%r",
                 entry_id, ticker, qty, entry_price, stop, target, atr,
             )
+
+    def _fetch_source_alert_meta(self, entry_execution_id: int) -> dict | None:
+        """JOIN fast_executions <-> fast_alerts on the denormalised
+        (ticker, alert_type, alert_fired_at) tuple to recover the
+        signal_score for calibration lookup.
+
+        Inherited bootstrap entries have no matching alert row -- the
+        return is None and the caller falls back to ATR. F4-native
+        entries always have a match (the executor wrote the row from
+        the alert it consumed).
+        """
+        try:
+            with self._engine.begin() as conn:
+                row = conn.execute(text("""
+                    SELECT a.alert_type, a.signal_score
+                    FROM fast_executions e
+                    JOIN fast_alerts a
+                      ON a.ticker = e.ticker
+                     AND a.alert_type = e.alert_type
+                     AND a.fired_at = e.alert_fired_at
+                    WHERE e.id = :eid
+                    LIMIT 1
+                """), {"eid": int(entry_execution_id)}).mappings().one_or_none()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        return {
+            "alert_type": row["alert_type"],
+            "signal_score": float(row["signal_score"] or 0.0),
+        }
 
     @staticmethod
     def _read_regime_or_default() -> str:
@@ -389,12 +472,16 @@ class FastPathExitManager:
         # Order matters: stop (capital preservation) > target (profit
         # taking) > time stop (forced flatten). For a long, the exit
         # price is best_bid in all three cases (paper market sell).
+        # F6.5: per-position max_hold_s if calibrated; else global.
+        effective_max_hold = (
+            pos.max_hold_s if pos.max_hold_s is not None else self._max_hold_s
+        )
         if pos.side == "buy":
             if best_bid <= pos.stop_price:
                 exit_reason = "stop_hit"
             elif best_bid >= pos.target_price:
                 exit_reason = "target_hit"
-            elif held_s >= self._max_hold_s:
+            elif held_s >= effective_max_hold:
                 exit_reason = "time_stop"
         else:
             # No spot-short positions in F4; defensive only.
@@ -402,7 +489,7 @@ class FastPathExitManager:
                 exit_reason = "stop_hit"
             elif best_ask <= pos.target_price:
                 exit_reason = "target_hit"
-            elif held_s >= self._max_hold_s:
+            elif held_s >= effective_max_hold:
                 exit_reason = "time_stop"
 
         if exit_reason is None:

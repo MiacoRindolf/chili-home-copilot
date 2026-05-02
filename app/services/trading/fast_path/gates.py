@@ -100,6 +100,14 @@ class ExecContext:
     """Operator has set CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED=1.
     If False, the mode_interlock gate downgrades any live decision."""
 
+    engine: Any = None
+    """Optional read-only SQLAlchemy engine for calibration lookup.
+    F6.5: gate_calibrated_tradeability uses it to query
+    fast_signal_decay. Pure-gate semantics preserved -- the engine
+    is opaque to the gate, used only for SELECT statements via the
+    ``app.services.trading.fast_path.calibration`` helpers. Optional
+    so cold-start / unit tests still work without DB."""
+
 
 # ── Individual gates ─────────────────────────────────────────────────
 
@@ -136,6 +144,59 @@ def gate_min_score(alert: dict, ctx: ExecContext,
         return GateResult("min_score", False, "score_below_threshold",
                           {"score": float(score), "min": float(min_score)})
     return GateResult("min_score", True, "", {"score": float(score)})
+
+
+def gate_calibrated_tradeability(alert: dict, ctx: ExecContext) -> GateResult:
+    """F6.5: empirical-edge gate.
+
+    Consults ``fast_signal_decay`` via
+    ``calibration.is_score_tradeable`` to deny signals whose score
+    bucket has historically NOT cleared the trading-cost bar
+    (mean_return_at_best_horizon > TRADEABLE_COST_MULT × cost).
+
+    Three outcomes:
+      - calibrated tradeable (True)  -> allow with verdict='tradeable'
+      - calibrated not-tradeable     -> deny with reason='not_tradeable'
+      - insufficient data (None)     -> allow with verdict='no_data',
+        leaving gate_min_score's static threshold to gate the trade
+
+    Engine missing from ctx (e.g. unit-test path): allows
+    unconditionally with verdict='no_engine'. Keeps gate semantics
+    backwards-compatible with existing tests.
+    """
+    if ctx.engine is None:
+        return GateResult("calibration", True, "", {"verdict": "no_engine"})
+    try:
+        from .calibration import is_score_tradeable
+        verdict = is_score_tradeable(
+            ctx.engine,
+            ticker=str(alert.get("ticker") or ""),
+            alert_type=str(alert.get("alert_type") or ""),
+            signal_score=float(alert.get("signal_score") or 0.0),
+        )
+    except Exception as exc:
+        # Calibration failures should NOT block trades -- fall through
+        # to gate_min_score's static check.
+        return GateResult(
+            "calibration", True, "",
+            {"verdict": "lookup_failed", "error": str(exc)[:120]},
+        )
+    if verdict is False:
+        return GateResult(
+            "calibration", False, "signal_not_tradeable",
+            {"verdict": "false",
+             "reason": "calibrated_mean_below_tradeable_threshold"},
+        )
+    if verdict is True:
+        return GateResult(
+            "calibration", True, "",
+            {"verdict": "true"},
+        )
+    # None: insufficient data
+    return GateResult(
+        "calibration", True, "",
+        {"verdict": "insufficient_data"},
+    )
 
 
 def gate_spread_sanity(alert: dict, ctx: ExecContext,
@@ -221,6 +282,7 @@ DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
     gate_mode_interlock,
     gate_recency,
     gate_min_score,
+    gate_calibrated_tradeability,
     gate_spread_sanity,
     gate_capacity,
     gate_daily_budget,
@@ -288,7 +350,8 @@ def is_live_authorized() -> bool:
 
 __all__ = [
     "GateResult", "ExecContext", "GateRunResult",
-    "gate_recency", "gate_min_score", "gate_spread_sanity",
+    "gate_recency", "gate_min_score", "gate_calibrated_tradeability",
+    "gate_spread_sanity",
     "gate_capacity", "gate_daily_budget", "gate_mode_interlock",
     "DEFAULT_GATES", "run_gates",
     "ALERT_RECENCY_MAX_AGE_S", "MIN_SIGNAL_SCORE", "MAX_SPREAD_BPS",
