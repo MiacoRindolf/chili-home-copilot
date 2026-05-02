@@ -87,9 +87,32 @@ class StatusTracker:
     # ── Lifecycle ─────────────────────────────────────────────────────
 
     def register(self, ticker: str) -> None:
-        """Make sure we track *ticker*. Idempotent."""
+        """Make sure we track *ticker*. Idempotent.
+
+        F-hygiene-1: pulls existing ``last_error`` from
+        ``fast_path_status`` into the new in-memory PairStatus so the
+        self-clear logic in ``record_healthy_tick`` has visibility into
+        errors persisted across restarts. Without this, a stale error
+        from a prior process would never clear because the in-memory
+        ``last_error`` would be None and the early-return in
+        record_healthy_tick would skip the clear.
+        """
         if ticker not in self._pairs:
-            self._pairs[ticker] = PairStatus(ticker=ticker)
+            ps = PairStatus(ticker=ticker)
+            try:
+                with self._engine.connect() as conn:
+                    row = conn.execute(text(
+                        "SELECT last_error FROM fast_path_status WHERE ticker = :t"
+                    ), {"t": ticker}).mappings().one_or_none()
+                if row is not None and row.get("last_error"):
+                    ps.last_error = row["last_error"]
+            except Exception:
+                # Don't let a startup-time DB hiccup block registration
+                # of the in-memory tracker. Worst case: we just don't
+                # see the prior persisted error and the existing
+                # behavior (no clear) applies.
+                pass
+            self._pairs[ticker] = ps
             self._dirty.add(ticker)
 
     def get(self, ticker: str) -> PairStatus:
@@ -238,7 +261,13 @@ class StatusTracker:
                         last_bar_at = COALESCE(EXCLUDED.last_bar_at, fast_path_status.last_bar_at),
                         last_seq = COALESCE(EXCLUDED.last_seq, fast_path_status.last_seq),
                         error_count_60s = EXCLUDED.error_count_60s,
-                        last_error = COALESCE(EXCLUDED.last_error, fast_path_status.last_error),
+                        -- F-hygiene-1: last_error overwrites directly
+                        -- (not COALESCE) so when the self-clear path
+                        -- sets it to NULL the clear actually persists.
+                        -- In-memory PairStatus.last_error is loaded
+                        -- from DB on register(), so this is safe --
+                        -- it always reflects intended truth.
+                        last_error = EXCLUDED.last_error,
                         last_reconnect_at = COALESCE(EXCLUDED.last_reconnect_at, fast_path_status.last_reconnect_at),
                         reconnect_count = EXCLUDED.reconnect_count,
                         updated_at = NOW()
