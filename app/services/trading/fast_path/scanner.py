@@ -34,11 +34,12 @@ it must stay safe to unit test without spinning up infra.
 """
 from __future__ import annotations
 
+import heapq
 import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,24 @@ SPREAD_SQUEEZE_BPS = 1.5
 SPREAD_SQUEEZE_VOL_MULT = 1.2
 SPREAD_SQUEEZE_COOLDOWN_S = 60.0
 
+# F8a: starting value for the pullback-fade experiment. F6 showed
+# volume_breakout_long has mean forward return ≈ −28.5 bps over n=120,
+# meaning price reverts after the climax. The hypothesis is that
+# entering long at t + DELAY_S captures the recovery half of that
+# mean-reversion cycle. 30s is a defensible starting point picked from
+# the F6 decay curve where the negative return appears to bottom
+# (between the 1s and 60s horizons). Calibration from
+# fast_signal_decay is a follow-up task once we have ≥1 day of data.
+VOL_BREAKOUT_PULLBACK_DELAY_S = 30.0
+
+# Hard cap on the in-memory pending-deferred-emit heap. With ~120
+# volume_breakout_long alerts per ~24h × 1 deferred each ≈ 5/hr,
+# steady state is well under this. The cap exists to prevent runaway
+# memory if the scanner gets stuck and alerts spike. Above the cap we
+# drop the *new* arrival (not the head) and warn -- the head is about
+# to fire anyway, so dropping it would waste already-scheduled work.
+MAX_PENDING_DEFERRED = 1000
+
 
 @dataclass
 class _PerTickerState:
@@ -68,6 +87,26 @@ class _PerTickerState:
     # Most-recent observed spread_bps (for spread_squeeze; refreshed on
     # every book emit).
     last_spread_bps: float = 0.0
+
+
+@dataclass(order=True)
+class _DeferredEmit:
+    """One pending volume_breakout_pullback_long emission.
+
+    F8a: when a volume_breakout_long fires, we schedule this for
+    fired_at + DELAY_S. The natural event flow (the next book emit
+    on the same ticker after the deadline) drains the heap and
+    converts to a real alert with fired_at = now (NOT the original's
+    timestamp -- the whole point is that the deferred fire-time is
+    the moment of the deferred entry).
+    """
+    deadline_unix: float
+    seq: int = field(compare=True)
+    ticker: str = field(compare=False)
+    original_fired_at: datetime = field(compare=False)
+    delay_s: float = field(compare=False)
+    signal_score: float = field(compare=False)
+    features: dict = field(compare=False, default_factory=dict)
 
 
 class MomentumScanner:
@@ -83,11 +122,17 @@ class MomentumScanner:
         self.bars_seen = 0
         self.books_seen = 0
         self.fired_volume_breakout_long = 0
+        self.fired_volume_breakout_pullback_long = 0
         self.fired_imbalance_long = 0
         self.fired_imbalance_short = 0
         self.fired_spread_squeeze = 0
         self.suppressed_cooldown = 0
         self.suppressed_warmup = 0
+        # F8a pullback-fade experiment.
+        self._pullback_heap: list[_DeferredEmit] = []
+        self._pullback_seq: int = 0
+        self.deferred_scheduled = 0
+        self.deferred_dropped_overcap = 0
 
     # ── Bar-close handler ──────────────────────────────────────────────
 
@@ -126,22 +171,34 @@ class MomentumScanner:
                 # Score saturates at 4x mean (uncommon mega-spike).
                 ratio = vol / mean_vol
                 score = max(0.0, min(1.0, (ratio - 1.0) / 4.0))
+                vbl_features = {
+                    "volume": float(vol),
+                    "mean_vol_lookback": int(len(st.recent_vols)),
+                    "mean_vol": float(mean_vol),
+                    "vol_ratio": float(ratio),
+                    "open": float(open_p),
+                    "close": float(close_p),
+                    "ret_pct": float((close_p - open_p) / open_p if open_p else 0.0),
+                }
                 alerts.append({
                     "ticker": ticker,
                     "alert_type": "volume_breakout_long",
                     "fired_at": ts,
                     "signal_score": float(score),
-                    "features": {
-                        "volume": float(vol),
-                        "mean_vol_lookback": int(len(st.recent_vols)),
-                        "mean_vol": float(mean_vol),
-                        "vol_ratio": float(ratio),
-                        "open": float(open_p),
-                        "close": float(close_p),
-                        "ret_pct": float((close_p - open_p) / open_p if open_p else 0.0),
-                    },
+                    "features": vbl_features,
                 })
                 self.fired_volume_breakout_long += 1
+                # F8a: schedule a deferred volume_breakout_pullback_long
+                # emit for ts + DELAY_S. The natural event flow (next
+                # book emit on this ticker after the deadline) will
+                # drain it. Same (ticker, signal_score, features
+                # lineage) as the original; alert_type differs.
+                self._schedule_pullback_deferred(
+                    ticker=ticker,
+                    original_fired_at=ts,
+                    signal_score=float(score),
+                    original_features=vbl_features,
+                )
             # Layered signal: tight spread + above-average volume on a
             # green bar. Spread comes from the most recent book emit; if
             # we haven't seen one yet, last_spread_bps is 0 and the
@@ -195,6 +252,15 @@ class MomentumScanner:
         imb = float(book.get("imbalance") or 0.5)
         ts: datetime = book.get("snapshot_at") or datetime.now(timezone.utc).replace(tzinfo=None)
         alerts: list[dict] = []
+        # F8a: drain pending pullback-deferred emits whose deadline has
+        # crossed. The book emit IS the event clock -- we don't poll on
+        # a timer. Each drained emit becomes an alert with fired_at=now
+        # and gets the CURRENT book's best_bid/best_ask in features so
+        # the decay miner uses the post-pullback entry price (not the
+        # original breakout-bar close).
+        alerts.extend(self._drain_pullback_due(
+            now_wall=ts, triggering_ticker=ticker, triggering_book=book,
+        ))
         if imb >= IMBALANCE_LONG_THRESHOLD:
             if self._cooldown_ok(st, "imbalance_long", IMBALANCE_COOLDOWN_S, now_monotonic):
                 alerts.append(self._book_alert(ticker, "imbalance_long", ts, imb, book))
@@ -220,6 +286,130 @@ class MomentumScanner:
             return False
         state.last_fire[alert_type] = now
         return True
+
+    def _schedule_pullback_deferred(
+        self,
+        *,
+        ticker: str,
+        original_fired_at: datetime,
+        signal_score: float,
+        original_features: dict,
+    ) -> None:
+        """Push a deferred pullback emit onto the heap. Capped at
+        ``MAX_PENDING_DEFERRED``; new arrivals are dropped (with a
+        WARNING) above the cap rather than evicting already-scheduled
+        emits whose deadlines are imminent."""
+        if len(self._pullback_heap) >= MAX_PENDING_DEFERRED:
+            self.deferred_dropped_overcap += 1
+            logger.warning(
+                "[fast_path] scanner pullback-deferred heap at cap %d -- "
+                "dropping new schedule ticker=%s",
+                MAX_PENDING_DEFERRED, ticker,
+            )
+            return
+        deadline_unix = (
+            original_fired_at.replace(tzinfo=timezone.utc).timestamp()
+            if original_fired_at.tzinfo is None
+            else original_fired_at.timestamp()
+        ) + VOL_BREAKOUT_PULLBACK_DELAY_S
+        self._pullback_seq += 1
+        self.deferred_scheduled += 1
+        # Carry the lineage explicitly so the decay miner / postmortem
+        # analysis can join back to the original alert via
+        # (ticker, alert_type='volume_breakout_long', fired_at).
+        carried = {
+            "original_fired_at": original_fired_at.isoformat(),
+            "delay_s": VOL_BREAKOUT_PULLBACK_DELAY_S,
+            "original_alert_type": "volume_breakout_long",
+            # Copy of original features so postmortem doesn't need a
+            # second SELECT.
+            "original_volume": float(original_features.get("volume") or 0.0),
+            "original_mean_vol": float(original_features.get("mean_vol") or 0.0),
+            "original_vol_ratio": float(original_features.get("vol_ratio") or 0.0),
+            "original_close": float(original_features.get("close") or 0.0),
+            "original_ret_pct": float(original_features.get("ret_pct") or 0.0),
+        }
+        heapq.heappush(self._pullback_heap, _DeferredEmit(
+            deadline_unix=deadline_unix,
+            seq=self._pullback_seq,
+            ticker=ticker,
+            original_fired_at=original_fired_at,
+            delay_s=VOL_BREAKOUT_PULLBACK_DELAY_S,
+            signal_score=signal_score,
+            features=carried,
+        ))
+
+    def _drain_pullback_due(self, *, now_wall: datetime,
+                            triggering_ticker: str | None = None,
+                            triggering_book: dict | None = None) -> list[dict]:
+        """Pop and emit any pullback-deferred entries whose deadline
+        has elapsed. Called from on_book_emit so the book emit IS the
+        event clock. Returns 0..N alerts.
+
+        ``fired_at`` on emitted alerts is set to ``now_wall`` (the
+        current book-emit timestamp), NOT the original alert's time --
+        the deferred fire-time IS the entry moment for the pullback
+        signal.
+
+        ``book`` is the current top-of-book dict; used to enrich the
+        deferred alert's features with the post-pullback ``best_bid``
+        / ``best_ask`` so the decay miner uses the realistic entry
+        price for forward-return measurement.
+        """
+        if not self._pullback_heap:
+            return []
+        if now_wall.tzinfo is not None:
+            now_unix = now_wall.timestamp()
+        else:
+            now_unix = now_wall.replace(tzinfo=timezone.utc).timestamp()
+        # Pull current best_bid/best_ask once for the whole drain pass.
+        cur_best_bid = 0.0
+        cur_best_ask = 0.0
+        if triggering_book is not None:
+            bid_levels = triggering_book.get("bid_levels") or []
+            ask_levels = triggering_book.get("ask_levels") or []
+            if bid_levels:
+                try:
+                    cur_best_bid = float(bid_levels[0][0])
+                except (TypeError, ValueError, IndexError):
+                    pass
+            if ask_levels:
+                try:
+                    cur_best_ask = float(ask_levels[0][0])
+                except (TypeError, ValueError, IndexError):
+                    pass
+        out: list[dict] = []
+        while self._pullback_heap and self._pullback_heap[0].deadline_unix <= now_unix:
+            obs = heapq.heappop(self._pullback_heap)
+            # The drain happens on whatever ticker's book emit triggered
+            # this pass; the popped entry's ticker may differ. We still
+            # emit on the popped entry's ticker, but the price we
+            # capture in features is from the triggering book emit.
+            # That's a (small) source of slippage in the experiment --
+            # in practice the per-ticker book emit cadence is ~3/sec,
+            # so the wall-clock gap between same-ticker emits is well
+            # under 1s. Postmortem can join fast_orderbook for the
+            # exact-ticker mid at fired_at if needed.
+            features = dict(obs.features)
+            # Carry post-pullback book if we have one. If a different-
+            # ticker book is what triggered the drain, we DON'T mix
+            # prices -- only set best_bid/best_ask when the triggering
+            # ticker IS for the popped entry's ticker.
+            if (triggering_ticker == obs.ticker
+                    and cur_best_bid > 0 and cur_best_ask > 0):
+                features["best_bid"] = cur_best_bid
+                features["best_ask"] = cur_best_ask
+                features["close"] = cur_best_ask  # decay miner long-fallback
+            out.append({
+                "ticker": obs.ticker,
+                "alert_type": "volume_breakout_pullback_long",
+                "fired_at": now_wall.replace(tzinfo=None) if now_wall.tzinfo
+                            else now_wall,
+                "signal_score": float(obs.signal_score),
+                "features": features,
+            })
+            self.fired_volume_breakout_pullback_long += 1
+        return out
 
     @staticmethod
     def _book_alert(ticker: str, alert_type: str, ts: datetime,
@@ -248,12 +438,18 @@ class MomentumScanner:
             "bars_seen": self.bars_seen,
             "books_seen": self.books_seen,
             "fired_volume_breakout_long": self.fired_volume_breakout_long,
+            "fired_volume_breakout_pullback_long":
+                self.fired_volume_breakout_pullback_long,
             "fired_imbalance_long": self.fired_imbalance_long,
             "fired_imbalance_short": self.fired_imbalance_short,
             "fired_spread_squeeze": self.fired_spread_squeeze,
             "suppressed_cooldown": self.suppressed_cooldown,
             "suppressed_warmup": self.suppressed_warmup,
             "tickers_tracked": len(self._state),
+            "pullback_pending_heap": len(self._pullback_heap),
+            "pullback_deferred_scheduled": self.deferred_scheduled,
+            "pullback_deferred_dropped_overcap":
+                self.deferred_dropped_overcap,
         }
 
 
