@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from .db_writer import FastPathDBWriter
+from .decay_miner import FastPathDecayMiner
 from .executor import FastPathExecutor
 from .exit_manager import FastPathExitManager
 from .healthz import HealthzServer
@@ -41,6 +42,7 @@ class FastPathSupervisor:
         self._healthz: HealthzServer | None = None
         self._executor: FastPathExecutor | None = None
         self._exit_manager: FastPathExitManager | None = None
+        self._decay_miner: FastPathDecayMiner | None = None
         self._metrics_task: asyncio.Task | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -95,6 +97,17 @@ class FastPathSupervisor:
             self._exit_manager = FastPathExitManager(
                 self._settings, self._engine, self._ws._book,  # noqa: SLF001
             )
+            # F6: signal-decay miner. Event-driven brain node that
+            # LISTENs on fp_alert_inserted / fp_exit_inserted /
+            # fp_book_inserted (NOTIFY triggers in migration 221) and
+            # Welford-updates fast_signal_decay (migration 220) so
+            # exit_manager / gates can later read calibrated values
+            # instead of the current hardcoded magic numbers.
+            # Independent of executor: even if F4 is paused, learning
+            # from raw fast_alerts continues.
+            self._decay_miner = FastPathDecayMiner(
+                self._settings, self._engine,
+            )
 
         if self._settings.enabled:
             await self._ws.start()
@@ -102,6 +115,8 @@ class FastPathSupervisor:
                 await self._executor.start()
             if self._exit_manager is not None:
                 await self._exit_manager.start()
+            if self._decay_miner is not None:
+                await self._decay_miner.start()
         else:
             logger.warning(
                 "[fast_path] CHILI_FAST_PATH_ENABLED=0 — supervisor up "
@@ -133,6 +148,10 @@ class FastPathSupervisor:
         # Stop in reverse of dependency order: exit manager depends on
         # the executor's entry rows + the WS book; stop it FIRST so any
         # in-flight exit finishes against a still-live book stream.
+        # decay_miner is independent of all of these; stop it first so
+        # its LISTEN connection is closed before db_writer drains.
+        if self._decay_miner is not None:
+            await self._decay_miner.stop()
         if self._exit_manager is not None:
             await self._exit_manager.stop()
         if self._executor is not None:
@@ -207,6 +226,25 @@ class FastPathSupervisor:
                 book_stats.get("total_levels_held"),
                 writer.get("books_received"),
                 writer.get("books_written"),
+            )
+        decay_stats = snap.get("decay_miner") or {}
+        if decay_stats:
+            obs_per = decay_stats.get("obs_finalized_per_horizon") or {}
+            obs_total = sum(int(v or 0) for v in obs_per.values())
+            logger.info(
+                "[fast_path] decay_miner alerts=%s exits=%s book_ticks=%s "
+                "obs_scheduled=%s obs_finalized=%d backfilled=%s "
+                "pending_heap=%s validations=%s db_errors=%s last_finalize=%s",
+                decay_stats.get("alerts_received"),
+                decay_stats.get("exits_received"),
+                decay_stats.get("book_ticks_received"),
+                decay_stats.get("obs_scheduled"),
+                obs_total,
+                decay_stats.get("backfilled_rows_written"),
+                decay_stats.get("pending_heap_size"),
+                decay_stats.get("validations_recorded"),
+                decay_stats.get("db_errors"),
+                decay_stats.get("last_finalize_at"),
             )
         exit_mgr_stats = snap.get("exit_manager") or {}
         if exit_mgr_stats:
@@ -293,6 +331,7 @@ class FastPathSupervisor:
             "ws": self._ws.stats() if self._ws else {},
             "executor": self._executor.stats() if self._executor else {},
             "exit_manager": self._exit_manager.stats() if self._exit_manager else {},
+            "decay_miner": self._decay_miner.stats() if self._decay_miner else {},
         }
 
 
