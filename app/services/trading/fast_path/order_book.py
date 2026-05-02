@@ -101,6 +101,11 @@ class OrderBookAggregator:
         self.emissions_skipped_throttled = 0
         self.emissions_skipped_empty = 0
         self.last_unknown_side: str | None = None
+        # Wall-clock timestamp of the most recent successful emit across
+        # any ticker. Distinct from the per-ticker monotonic `last_emit_at`
+        # (used for throttling). Surfaced via stats() so /healthz can
+        # detect "L2 books are still flowing" without a DB query.
+        self.last_emit_at_wall: datetime | None = None
 
     # ── Apply incoming L2 events ──────────────────────────────────────
 
@@ -218,9 +223,11 @@ class OrderBookAggregator:
 
         book.last_emit_at = now_m
         self.books_emitted += 1
+        emit_wall = now_wall or datetime.now(timezone.utc).replace(tzinfo=None)
+        self.last_emit_at_wall = emit_wall
         return {
             "ticker": ticker,
-            "snapshot_at": now_wall or datetime.now(timezone.utc).replace(tzinfo=None),
+            "snapshot_at": emit_wall,
             "bid_levels": bid_levels,
             "ask_levels": ask_levels,
             "bid_total_size": float(bid_total),
@@ -241,6 +248,10 @@ class OrderBookAggregator:
             "emissions_skipped_no_snapshot": self.emissions_skipped_no_snapshot,
             "emissions_skipped_throttled": self.emissions_skipped_throttled,
             "emissions_skipped_empty": self.emissions_skipped_empty,
+            "last_emit_at_wall": (
+                self.last_emit_at_wall.isoformat()
+                if self.last_emit_at_wall else None
+            ),
             "tickers_tracked": len(self._books),
             "total_levels_held": sum(
                 len(b.bids) + len(b.asks) for b in self._books.values()
