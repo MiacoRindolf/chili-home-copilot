@@ -289,13 +289,17 @@ class FastPathSupervisor:
         if scanner_stats:
             logger.info(
                 "[fast_path] scanner bars_seen=%s books_seen=%s "
-                "vol_breakout=%s imb_long=%s imb_short=%s spread_squeeze=%s "
+                "vol_breakout=%s vol_pullback=%s pullback_heap=%s pullback_dropped=%s "
+                "imb_long=%s imb_short=%s spread_squeeze=%s "
                 "suppressed_cooldown=%s suppressed_warmup=%s tickers=%s "
                 "writer_alerts_received=%s writer_alerts_written=%s "
                 "writer_alerts_dropped=%s",
                 scanner_stats.get("bars_seen"),
                 scanner_stats.get("books_seen"),
                 scanner_stats.get("fired_volume_breakout_long"),
+                scanner_stats.get("fired_volume_breakout_pullback_long"),
+                scanner_stats.get("pullback_pending_heap"),
+                scanner_stats.get("pullback_deferred_dropped_overcap"),
                 scanner_stats.get("fired_imbalance_long"),
                 scanner_stats.get("fired_imbalance_short"),
                 scanner_stats.get("fired_spread_squeeze"),
