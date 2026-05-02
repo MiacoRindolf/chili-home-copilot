@@ -1,188 +1,212 @@
-# NEXT_TASK: f8a-fix-per-ticker-heaps
+# NEXT_TASK: f-hygiene-1
 
 STATUS: DONE
 
 ## Goal
 
-Fix the cross-ticker drain bug in F8a's deferred-emit scanner heap so that every `volume_breakout_pullback_long` alert lands in `fast_signal_decay` with usable price-capture, not just the lucky ones whose ticker matched the triggering book emit. After this task:
+Three small soak-safe hardening items, bundled into one task with three commits. None of these change strategy behavior or thresholds; all three address visibility and safety gaps surfaced across the last several runs (F6, cleanup-2, F8a-fix). The F8a soak window keeps running in parallel and will accumulate organic data while these land.
 
-1. **The pullback experiment's data pipeline produces no spurious drops.** Each scheduled deferred emit drains on its own ticker's next book emit (not on whichever ticker happens to fire first). Every drained alert has current `best_bid`/`best_ask`/`close` in `features` by construction.
-2. **The architectural change is invisible to the decay miner and to the rest of the scanner.** Same alert shape, same NOTIFY trigger, same gate stack. Pure internal refactor of `MomentumScanner._pullback_heap`.
-3. **Organic data starts accumulating cleanly** after the fix lands and the system soaks naturally.
+After this task:
 
-This is a focused defect repair, not a feature add. One commit.
+1. **Decay miner failures become visible.** A watchdog task in the supervisor monitors the `decay_miner` asyncio task and surfaces a heartbeat / restart signal when it dies silently. Deferred since F6.
+2. **`last_error` in `fast_path_status` self-clears after sustained recovery.** A stale error from a transient hiccup at startup no longer haunts the operator dashboard for hours. Deferred since cleanup-2.
+3. **The scanner drain invariant is `-O`-safe.** Replaces the `assert obs.ticker == triggering_ticker` in `_drain_pullback_due` with an explicit `if/raise RuntimeError`, so the invariant survives even if the container ever runs Python with optimizations on. Surfaced in F8a-fix as Open Question 4.
+
+Three commits, all soak-safe, no strategy impact, no calibration retuning.
 
 ## Why now
 
-F8a's CC report (`docs/STRATEGY/CC_REPORTS/2026-05-02_f8a-volume-breakout-pullback-fade.md`) verified the architectural skeleton works but surfaced a bug: the global `_pullback_heap: list[_DeferredEmit]` drains on every book emit regardless of ticker. When `on_book_emit(ticker=BTC, ...)` fires, it pops EVERY entry past deadline — including AVAX, ETH, SOL entries — and tries to enrich them with BTC's book, which doesn't apply. The non-matching pops emit alerts with empty `best_bid`/`best_ask`/`close`, and the decay miner drops them as malformed.
-
-Of 19 catchup pullback alerts, only 2 produced `fast_signal_decay` rows. **90% data loss.** Until this is fixed, the F8a experiment can't accumulate enough samples to reach the decay miner's MIN_SAMPLES floor, no matter how long the soak runs.
-
-We picked **per-ticker heaps** over DB-lookup-at-drain in the F8a review because it's cleaner (one-line invariant), zero new I/O, same memory bound, and avoids three downstream failure modes (stale book / missing book / DB latency).
+- The F8a fix is verified (5.4% → 100% capture rate) and the soak window is running. Organic data accumulation needs ~24h to be statistically meaningful — that's the bottleneck for F8a evaluation, not engineering work. We can either sit idle or land soak-safe hardening that we'll want anyway.
+- All three items are deferred work that's been waiting for a slot. None of them modifies any threshold, gate, or trading-logic path — they're hygiene around the already-working subsystem.
+- The `-O` safety item is fresh from F8a-fix's open question. Folding it in now while the context is hot is cheaper than reopening the file in a future task.
 
 ## Architectural commitments
 
-- **Same event-driven shape as F8a.** No `while True: sleep(N)`. Per-ticker heap drains on that ticker's own next book emit.
-- **No new magic numbers.** `MAX_PENDING_DEFERRED = 1000` cap stays as a *global* cap (sum across all per-ticker heaps), so steady-state memory is unchanged. Optional: split to a per-ticker cap of 200 (= 1000 / 5 pairs) — explicit choice in the brief below.
-- **No miner changes.** The miner gets the same alert payload structure; it just gets it on every drain instead of 1-in-N.
-- **No gate changes.** No new gates, no constants modified, no migrations.
-- **Single commit.** This is one logical defect repair.
+- **Event-driven shape preserved.** Watchdog uses asyncio task `done()` / `exception()` introspection on a low-frequency timer (e.g., every 60s). No polling-of-database, no extra LISTEN channels.
+- **No new magic numbers.** Constants introduced (watchdog interval, recovery window for `last_error` clearing) are explicit named constants at module top with comments — not buried literals.
+- **Idempotent, additive changes.** Every subtask is additive: deletion only happens for the `assert` line being replaced. No deletions of behavior.
+- **No miner / scanner / executor / gate changes** beyond the three explicit edits below.
+- **No migrations.** No schema work.
+- **Three commits.** Each subtask = one logical commit.
 
-## Scope — single commit
+## Scope — three commits
 
-In `app/services/trading/fast_path/scanner.py`:
+### Commit 1: Watchdog on `decay_miner` asyncio task
 
-### 1. Replace `_pullback_heap` with `_pullback_heaps` keyed by ticker
+**File:** `app/services/trading/fast_path/supervisor.py` (and any small status-surface helper if needed)
+
+**What:**
+
+The supervisor already starts `decay_miner` as a long-lived asyncio task. Today, if it crashes inside the LISTEN loop (e.g., a Postgres reconnect bug, an unexpected payload shape, a lib upgrade), the task ends silently and no further `fast_signal_decay` rows are written. The supervisor doesn't notice because nothing is watching.
+
+Add a watchdog coroutine that runs alongside the supervisor loop:
+
+```python
+WATCHDOG_INTERVAL_S = 60.0  # how often to check task health
+
+async def _decay_miner_watchdog(task: asyncio.Task, status_tracker: StatusTracker) -> None:
+    """Surface silent decay_miner failures via fast_path_status.last_error."""
+    while True:
+        await asyncio.sleep(WATCHDOG_INTERVAL_S)
+        if task.done():
+            try:
+                exc = task.exception()
+            except asyncio.CancelledError:
+                logger.warning("[fast_path] decay_miner watchdog: task was cancelled")
+                status_tracker.record_error("decay_miner", "task cancelled")
+                return
+            if exc is not None:
+                logger.error(
+                    "[fast_path] decay_miner watchdog: task died with %s: %s",
+                    type(exc).__name__, exc,
+                )
+                status_tracker.record_error(
+                    "decay_miner", f"{type(exc).__name__}: {exc}"
+                )
+            else:
+                logger.warning("[fast_path] decay_miner watchdog: task ended without exception")
+                status_tracker.record_error("decay_miner", "task ended unexpectedly")
+            return
+```
+
+Wire it in the supervisor's task-launch block:
+
+```python
+decay_task = asyncio.create_task(decay_miner.run(...))
+asyncio.create_task(_decay_miner_watchdog(decay_task, status_tracker))
+```
+
+**Status surface:** `fast_path_status.last_error` (existing field) is the right channel — operator dashboard already surfaces it. No new fields required. The existing `record_error` helper is reused.
+
+**Restart policy:** Out of scope. The watchdog *reports*; it doesn't *restart*. A restart policy is its own decision (do we want infinite retries? exponential backoff? circuit breaker?) and should not be folded into a hygiene pass. Reporting is the soak-safe minimum.
+
+**Verification:**
+- Boot fast-data-worker; confirm `[fast_path] decay_miner watchdog` startup log line is present.
+- (Optional, manual) — kill the decay_miner task in a Python REPL via `task.cancel()` in a test harness; confirm `last_error` populates within 60s.
+
+### Commit 2: Clear stale `last_error` in `fast_path_status` after sustained recovery
+
+**File:** `app/services/trading/fast_path/status_tracker.py` (or wherever `last_error` is owned — locate via grep on `last_error` and `fast_path_status` if unsure)
+
+**What:**
+
+Today, `last_error` is set on any error and never cleared on recovery. A transient hiccup at startup (e.g., a single 1009 frame, a brief reconnect) leaves the operator dashboard showing an error for the rest of the day even though the system has been streaming normally for hours. Deferred since cleanup-2.
+
+Add a sliding-window recovery clear:
+
+```python
+ERROR_CLEAR_AFTER_HEALTHY_MIN = 5.0  # clear last_error after 5 min of clean streaming
+
+class StatusTracker:
+    ...
+    def record_healthy_tick(self) -> None:
+        """Called by the WS streaming loop on each successful book/bar emit."""
+        now = time.monotonic()
+        if self._last_error is None:
+            self._last_error_cleared_at = now  # nothing to clear; just refresh
+            return
+        if self._last_healthy_streak_started is None:
+            self._last_healthy_streak_started = now
+        elif (now - self._last_healthy_streak_started) >= ERROR_CLEAR_AFTER_HEALTHY_MIN * 60.0:
+            logger.info(
+                "[fast_path] status_tracker: clearing stale last_error after %.1f min healthy streak",
+                ERROR_CLEAR_AFTER_HEALTHY_MIN,
+            )
+            self._last_error = None
+            self._last_error_at = None
+            self._last_healthy_streak_started = None
+
+    def record_error(self, source: str, msg: str) -> None:
+        # existing behavior plus:
+        self._last_healthy_streak_started = None
+```
+
+Hook `record_healthy_tick()` into the existing WS streaming loop wherever each book/bar is successfully delivered.
+
+**Why 5 minutes specifically:** This is a UX recovery threshold, not a strategy threshold. 5 minutes is long enough that a flapping connection won't keep clearing-and-resetting (the next error within 5 min restarts the streak), and short enough that the operator sees recovery on the same dashboard refresh. Document the choice inline.
+
+**Note this is NOT a magic number in the F6 sense.** A magic number would be something like "trading-cost threshold = 0.05%" — a strategy parameter that should be calibrated from data. This is operator UX timing, on the same shelf as "auto-refresh dashboard every 30s." Different category.
+
+**Verification:**
+- Trigger an error (e.g., kill a fixture briefly), observe `last_error` populates.
+- Wait 5 minutes of clean streaming, observe `last_error` clears with the log line above.
+
+### Commit 3: Replace `assert` with `if/raise RuntimeError` in scanner drain
+
+**File:** `app/services/trading/fast_path/scanner.py`
+
+**What:** Single-line surgical change in `_drain_pullback_due`:
 
 ```python
 # Before
-self._pullback_heap: list[_DeferredEmit] = []
+assert obs.ticker == triggering_ticker, (
+    f"_drain_pullback_due invariant violated: heap key "
+    f"{triggering_ticker} contained entry for {obs.ticker}"
+)
 
 # After
-self._pullback_heaps: dict[str, list[_DeferredEmit]] = {}
-```
-
-`heapq` works on plain lists, so each value remains a list-as-heap — same semantics, just keyed by ticker.
-
-### 2. Update the schedule path (`_schedule_pullback_deferred`)
-
-When scheduling a deferred emit for ticker T:
-- `heap = self._pullback_heaps.setdefault(T, [])`
-- `heapq.heappush(heap, _DeferredEmit(...))`
-
-The cap check applies to the global sum, not the per-ticker length:
-```python
-total_pending = sum(len(h) for h in self._pullback_heaps.values())
-if total_pending >= MAX_PENDING_DEFERRED:
-    self.deferred_dropped_overcap += 1
-    logger.warning(
-        "[fast_path] scanner deferred-emit cap reached "
-        "(total_pending=%d, cap=%d); dropping new arrival ticker=%s",
-        total_pending, MAX_PENDING_DEFERRED, T,
+if obs.ticker != triggering_ticker:
+    raise RuntimeError(
+        f"_drain_pullback_due invariant violated: heap key "
+        f"{triggering_ticker} contained entry for {obs.ticker}"
     )
-    return
 ```
 
-Sum-across-dict is O(N_tickers) where N_tickers ≤ 5. Negligible cost.
+**Why:** Python `-O` flag strips `assert` statements. The fast-data-worker container doesn't currently use `-O` (verified in F8a-fix), but if anyone ever flips it (perf tuning, base-image change, build-arg drift), the per-ticker invariant guard becomes a silent no-op and we re-introduce exactly the silent-data-corruption mode F8a-fix was meant to close. `raise RuntimeError` survives `-O`.
 
-### 3. Update the drain path (`_drain_pullback_due` or wherever it lives)
-
-The drain is now scoped to the triggering ticker:
-
-```python
-def _drain_pullback_due(self, triggering_ticker: str, current_book: dict, now_unix: float) -> list[dict]:
-    heap = self._pullback_heaps.get(triggering_ticker)
-    if not heap:
-        return []
-    drained: list[dict] = []
-    while heap and heap[0].deadline_unix <= now_unix:
-        obs = heapq.heappop(heap)
-        # By construction obs.ticker == triggering_ticker, so the
-        # current_book always applies. Inline-assert this invariant
-        # so a future refactor that breaks per-ticker keying explodes
-        # loudly instead of silently shipping malformed observations.
-        assert obs.ticker == triggering_ticker, (
-            f"_drain_pullback_due invariant violated: heap key "
-            f"{triggering_ticker} contained entry for {obs.ticker}"
-        )
-        drained.append(self._build_pullback_alert(obs, current_book, now_unix))
-    return drained
-```
-
-The `assert` is intentional — this method MUST only see entries for its own key. If a future change breaks per-ticker semantics, the assert ensures we hear about it immediately rather than silently corrupting decay data again.
-
-### 4. Update `stats()` to report total heap depth across all per-ticker heaps
-
-```python
-total_pending = sum(len(h) for h in self._pullback_heaps.values())
-return {
-    ...
-    "pullback_pending_heap": total_pending,
-    "pullback_per_ticker_pending": {t: len(h) for t, h in self._pullback_heaps.items() if h},
-    ...
-}
-```
-
-The supervisor's per-minute metrics line that currently shows `pullback_heap=0` continues to read the same key and sees the global total — unchanged operator UX. The new `pullback_per_ticker_pending` field is for debugging when a specific ticker's book channel goes quiet.
-
-### 5. Verify behavior
-
-After deploy, restart fast-data-worker so the snapshot-replay catchup re-runs:
-
-```sql
--- Should produce N rows (= count of replayed volume_breakout_long bars), all with non-empty
--- best_bid, best_ask, close in features
-SELECT
-  COUNT(*) AS total,
-  COUNT(*) FILTER (WHERE features ? 'best_bid' AND features->>'best_bid' != '') AS with_best_bid,
-  COUNT(*) FILTER (WHERE features ? 'close' AND features->>'close' != '') AS with_close
-FROM fast_alerts
-WHERE alert_type = 'volume_breakout_pullback_long'
-  AND fired_at > NOW() - INTERVAL '15 minutes';
-```
-
-Expected: `total = with_best_bid = with_close`. Pre-fix that was `~total / 5` because only 1 in 5 ticker pops matched.
-
-Then verify decay miner observation rate:
-
-```sql
-SELECT alert_type,
-       COUNT(*) AS rows,
-       SUM(sample_count) AS total_obs
-FROM fast_signal_decay
-WHERE alert_type = 'volume_breakout_pullback_long'
-GROUP BY alert_type;
-```
-
-`total_obs` should track `total` from the alerts query × number-of-horizons-crossed-since-fire. Pre-fix ratio was wildly under what alert count would predict; post-fix it should match.
+**Verification:** Boot fast-data-worker; observe at least one natural drain wave; confirm no behavioral difference (the invariant should never trip in practice — that's the point).
 
 ## Brain integration (reuse, don't rewrite)
 
-- `MomentumScanner` class — extend in place. Don't subclass, don't refactor unrelated methods.
-- `_DeferredEmit` dataclass — unchanged.
-- `heapq` stdlib — same usage pattern as before, just one heap-per-ticker instead of one heap-per-scanner.
-- F6 decay miner — unchanged. It receives correctly-shaped alerts and Welford-updates as normal.
+- `StatusTracker` (commit 2) — extend in place with `record_healthy_tick` + the streak-tracking fields. Don't subclass.
+- Supervisor (commit 1) — add the watchdog coroutine alongside existing task launches. Same pattern as the other supervisor tasks.
+- Scanner (commit 3) — surgical line replacement, nothing else.
 
 ## Constraints / do not touch
 
-- **All 8 live-placement safety belts.** Same as always.
+- **All 8 live-placement safety belts.** No changes to executor, gates, or live-flag logic.
 - **Default mode stays paper.**
-- **`VOL_BREAKOUT_PULLBACK_DELAY_S = 30.0`.** Don't tune. Calibration from data is a follow-up after the experiment runs.
-- **`MAX_PENDING_DEFERRED = 1000` cap.** Stays as global cap. Don't split per-ticker.
-- **Decay miner code.** Don't touch. The fix is upstream.
-- **Calibration helpers, gates, exit_manager.** All untouched.
+- **No strategy threshold tuning.** Don't touch `VOL_BREAKOUT_MULT`, `VOL_BREAKOUT_PULLBACK_DELAY_S`, `MAX_PENDING_DEFERRED`, the calibration constants, or any gate threshold.
+- **No miner code changes** beyond the watchdog wrapper. The watchdog *observes* the miner task; it doesn't reach into the miner's logic.
+- **No migrations.**
+- **No new gates.**
+- **No restart policy on decay_miner.** Watchdog reports; restart policy is a separate, future decision.
 - **`models/trading.py` and `.env.example`.** Continue to leave them alone.
-- **The unsolicited observability commit (`c5f9746`)'s metric line.** Keep it; it's genuinely useful. Just update the field name if needed to reflect the new aggregation.
 
 ## Out of scope
 
-- F8b (calibrating `DELAY_S` from data once organic firings accumulate).
-- F9 (new signal types — order-book momentum, trade-tape, etc.).
-- Unit-test harness for the deferred-emit pipeline.
-- Watchdog task on decay_miner.
+- Restart policy / supervised retry on decay_miner crash (future task once we see one in the wild and decide on the right policy).
+- Watchdogs on other asyncio tasks (scanner, ws_listener, exit_manager). Same pattern would apply, but doing all of them in one go is a refactor; one at a time on a "found a real failure mode here" basis is cleaner.
+- F8b (calibrating `VOL_BREAKOUT_PULLBACK_DELAY_S` from data once organic firings accumulate).
+- F9 (new signal types).
+- Lazy eviction of expired-but-undrained heap entries (still deferred from F8a-fix).
 - Any tuning of any threshold.
-- Lowering `VOL_BREAKOUT_MULT` to seed firings faster. Don't.
 
 ## Success criteria
 
-1. `git log --oneline -3` shows one new commit including `app/services/trading/fast_path/scanner.py`, pushed to origin.
-2. `docker compose ps fast-data-worker` healthy after deploy. (No new behavior at WS / book layer; risk confined to scanner internals.)
-3. Post-deploy `total = with_best_bid = with_close` in the verification SQL above.
-4. `fast_signal_decay.sample_count` for `volume_breakout_pullback_long` grows proportionally to `fast_alerts` row count after restart, not at the prior ~10% rate.
-5. The supervisor's per-minute metrics line shows `pullback_heap=N` (global total across per-ticker dicts), with `N=0` after each natural drain wave (entries don't accumulate between book emits).
-6. `docs/STRATEGY/CC_REPORTS/<date>_f8a-fix-per-ticker-heaps.md` written following PROTOCOL.md format. Include verbatim verification SQL outputs (the `total/with_best_bid/with_close` counts pre and post — even if "pre" is from F8a's report).
+1. `git log --oneline -5` shows three new commits, pushed to origin, with messages clearly identifying subtask (`feat(fast-path): decay_miner watchdog`, `fix(fast-path): clear stale last_error after healthy streak`, `chore(fast-path): -O-safe scanner drain invariant`).
+2. `docker compose ps fast-data-worker` healthy after deploy.
+3. `docker compose logs fast-data-worker --since 2m` shows the new watchdog startup log line for decay_miner.
+4. After ≥5 minutes of clean streaming, `fast_path_status.last_error` is `NULL` (or whatever the cleared sentinel is) — verifiable via the supervisor metrics line or a direct DB query against `fast_path_status`.
+5. Scanner drain path no longer contains `assert obs.ticker ==`; `grep -n "raise RuntimeError" app/services/trading/fast_path/scanner.py` shows the new guard in `_drain_pullback_due`.
+6. F8a soak continues uninterrupted — no spurious decay_miner restarts, no spurious `last_error` populations, no behavioral changes to drain output.
+7. `docs/STRATEGY/CC_REPORTS/<date>_f-hygiene-1.md` written following PROTOCOL.md format. Include:
+   - The three commit SHAs and their diffs (file + LOC counts).
+   - Verification of each subtask separately.
+   - Any surprises or deviations.
 
 ## Open questions for Cowork (surface in your report only if relevant)
 
-1. **Should the assert in `_drain_pullback_due` log + skip rather than raise** in production? My instinct: keep it as `assert`. If the per-ticker invariant breaks, that's a structural bug we want loud, not a silent data corruption. Asserts are cheap and the failure mode is "scanner crashes; supervisor restarts; we see the trace in logs." That's better than silently dropping observations again.
+1. **Should the watchdog also restart the task** rather than just reporting? My instinct (and the brief): no — restart policy is its own decision and shouldn't be folded into a hygiene pass. But if you find evidence of a recoverable failure mode while implementing (e.g., a transient psycopg2 disconnect that's clearly safe to retry), flag it.
 
-2. **Per-ticker pending dict in `stats()` could grow if many distinct tickers fire.** Currently 5 pairs configured; pollute-with-stale-empty-keys is bounded. If we ever scale to 100+ pairs we'd want to clean up empty keys; for now the dict has ≤ 5 entries always.
+2. **5-minute recovery window for `last_error` clear.** This is operator-UX timing, not a strategy threshold, but if you see a reason it interacts with anything load-bearing (e.g., another subsystem reads `last_error` and treats absence as health signal), call it out.
 
-3. **No explicit eviction of expired-but-undrained entries** if a ticker's book channel goes silent for hours. Heap entries for that ticker just sit there until the next book emit. The candle_freshness healthcheck (F6.5 cleanup-2) would already detect prolonged silence on a ticker; that's a different alarm. Worth flagging only if you want a lazy-eviction pass on a low-frequency timer (e.g. every 5 min, drop expired entries with `pullback_dropped_expired += 1`). Not in scope for this task.
+3. **`record_healthy_tick` integration point.** I described it as "wherever each book/bar is successfully delivered." If you find a cleaner single chokepoint (e.g., one place after both bar and book successfully push to fast_snapshots / fast_orderbook), use it; if both are needed, hook both.
+
+4. **The supervisor metrics line.** Currently shows error counts and heap depths. Worth adding a line entry for "watchdog healthy" / "watchdog reporting"? Not required; if it's one line of additive logging, fine; if it's a metrics-line refactor, defer.
 
 ## Rollback plan
 
-- Single-commit revert restores the pre-F8a-fix global heap. Existing `fast_alerts` rows of type `volume_breakout_pullback_long` stay; they have correct lineage; only post-revert observations would resume the prior 10% effective rate. Harmless; just a regression in data quality.
-- No migrations.
-- No data migrations or backfills.
-- No live-placement risk: scanner-internal change with the same alert payload shape and the same gate stack.
+- Each commit can be individually reverted. Commit 1 (watchdog) is purely additive — revert restores no-watchdog state. Commit 2 (last_error clear) — revert restores never-clear state. Commit 3 (assert→raise) — revert restores `assert`, which is what we had during F8a-fix's soak.
+- No migrations. No data migrations. No schema changes.
+- No live-placement risk: none of these touch the executor, gates, or any path that interacts with the broker.
