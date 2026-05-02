@@ -31,6 +31,73 @@ from .ws_client import CoinbaseWSClient
 logger = logging.getLogger(__name__)
 
 
+# F-hygiene-1: how often the decay_miner watchdog polls task.done().
+# Read-only introspection on a long-lived asyncio Task; not on the hot
+# path. 60s is short enough that operators see a silent failure on the
+# next dashboard refresh, long enough to keep the loop quiet.
+WATCHDOG_INTERVAL_S = 60.0
+
+
+async def _decay_miner_watchdog(
+    task: asyncio.Task,
+    status_tracker: StatusTracker,
+) -> None:
+    """Surface silent decay_miner failures via fast_path_status.last_error.
+
+    The decay_miner runs as a long-lived asyncio task. If it dies
+    inside its LISTEN loop (psycopg2 reconnect bug, payload-shape
+    crash, lib upgrade) the task ends silently and no further
+    fast_signal_decay rows get written -- but the supervisor doesn't
+    notice because nothing is watching. This watchdog polls
+    ``task.done()`` every WATCHDOG_INTERVAL_S; on death it records the
+    cause via ``status_tracker.record_error("decay_miner", ...)`` so
+    the existing operator dashboard surfaces it.
+
+    Reports only -- does NOT restart. Restart policy is its own
+    decision (retries? backoff? circuit-breaker?) and should not be
+    folded into a hygiene pass.
+    """
+    logger.info(
+        "[fast_path] decay_miner watchdog started (interval=%.0fs)",
+        WATCHDOG_INTERVAL_S,
+    )
+    try:
+        while True:
+            await asyncio.sleep(WATCHDOG_INTERVAL_S)
+            if task.done():
+                try:
+                    exc = task.exception()
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "[fast_path] decay_miner watchdog: task was cancelled",
+                    )
+                    status_tracker.record_error(
+                        "decay_miner", "task cancelled",
+                    )
+                    return
+                except asyncio.InvalidStateError:
+                    # Race: task just transitioned to done; try once more.
+                    continue
+                if exc is not None:
+                    logger.error(
+                        "[fast_path] decay_miner watchdog: task died with %s: %s",
+                        type(exc).__name__, exc,
+                    )
+                    status_tracker.record_error(
+                        "decay_miner", f"{type(exc).__name__}: {exc}"[:480],
+                    )
+                else:
+                    logger.warning(
+                        "[fast_path] decay_miner watchdog: task ended without exception",
+                    )
+                    status_tracker.record_error(
+                        "decay_miner", "task ended unexpectedly",
+                    )
+                return
+    except asyncio.CancelledError:
+        return
+
+
 class FastPathSupervisor:
     def __init__(self, settings: FastPathSettings, engine: Engine) -> None:
         self._settings = settings
@@ -43,6 +110,7 @@ class FastPathSupervisor:
         self._executor: FastPathExecutor | None = None
         self._exit_manager: FastPathExitManager | None = None
         self._decay_miner: FastPathDecayMiner | None = None
+        self._decay_watchdog_task: asyncio.Task | None = None
         self._metrics_task: asyncio.Task | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -117,6 +185,15 @@ class FastPathSupervisor:
                 await self._exit_manager.start()
             if self._decay_miner is not None:
                 await self._decay_miner.start()
+                # F-hygiene-1: watchdog reports silent decay_miner
+                # failures via status_tracker.last_error. Reports only;
+                # no restart policy.
+                miner_task = self._decay_miner.get_task()
+                if miner_task is not None and self._status is not None:
+                    self._decay_watchdog_task = asyncio.create_task(
+                        _decay_miner_watchdog(miner_task, self._status),
+                        name="fast_path_decay_watchdog",
+                    )
         else:
             logger.warning(
                 "[fast_path] CHILI_FAST_PATH_ENABLED=0 — supervisor up "
@@ -150,6 +227,8 @@ class FastPathSupervisor:
         # in-flight exit finishes against a still-live book stream.
         # decay_miner is independent of all of these; stop it first so
         # its LISTEN connection is closed before db_writer drains.
+        if self._decay_watchdog_task is not None:
+            self._decay_watchdog_task.cancel()
         if self._decay_miner is not None:
             await self._decay_miner.stop()
         if self._exit_manager is not None:

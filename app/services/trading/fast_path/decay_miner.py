@@ -711,6 +711,17 @@ class FastPathDecayMiner:
                 "h": int(horizon_s), "x": float(x),
             })
 
+    # ── Watchdog accessor ─────────────────────────────────────────────
+
+    def get_task(self) -> asyncio.Task | None:
+        """Return the running asyncio Task (or None if start() not called).
+
+        F-hygiene-1: the supervisor's watchdog uses this to introspect
+        ``done()`` / ``exception()`` for silent-failure detection. Read-
+        only -- the watchdog doesn't restart the task; it just reports.
+        """
+        return self._task
+
     # ── Observability ─────────────────────────────────────────────────
 
     def stats(self) -> dict[str, Any]:
