@@ -33,6 +33,16 @@ STATE_PAUSED = "paused"
 STATE_HALTED = "halted"
 
 
+# F-hygiene-1: clear last_error after this many seconds of clean
+# streaming. Operator UX, not strategy timing -- a transient hiccup
+# at startup shouldn't show as an active error for hours after
+# normal streaming resumed. 5 minutes is long enough that a flapping
+# connection won't keep clearing-and-resetting (a fresh error within
+# the window resets the streak), short enough that a healthy stream
+# clears the dashboard within one operator refresh window.
+ERROR_CLEAR_AFTER_HEALTHY_S = 5.0 * 60.0
+
+
 @dataclass
 class PairStatus:
     ticker: str
@@ -44,6 +54,13 @@ class PairStatus:
     reconnect_count: int = 0
     # Rolling 60s error timestamps (monotonic seconds)
     _error_times: Deque[float] = field(default_factory=lambda: deque(maxlen=128))
+    # F-hygiene-1: monotonic timestamp of when the current healthy
+    # streak began. None means "no streak in progress" (either we just
+    # started, or an error reset it). After ERROR_CLEAR_AFTER_HEALTHY_S
+    # of continuous healthy ticks, last_error self-clears so a
+    # transient hiccup at boot doesn't haunt the operator dashboard
+    # for hours. Reset on every record_error.
+    _healthy_streak_started: float | None = None
 
 
 class StatusTracker:
@@ -121,6 +138,43 @@ class StatusTracker:
         if ps.state in (STATE_DEGRADED, STATE_PAUSED):
             self.mark_streaming(ticker)
         self._dirty.add(ticker)
+        # F-hygiene-1: every successful bar is a healthy-tick. After
+        # ERROR_CLEAR_AFTER_HEALTHY_S of continuous healthy ticks the
+        # ticker's last_error self-clears so a transient startup hiccup
+        # doesn't haunt the operator dashboard for hours.
+        self.record_healthy_tick(ticker)
+
+    def record_healthy_tick(self, ticker: str) -> None:
+        """Mark *ticker* as having had a successful data delivery.
+
+        Called from record_bar (successful 1m candle). Each successful
+        delivery either starts a streak (if none in progress) or
+        extends one. After ERROR_CLEAR_AFTER_HEALTHY_S of unbroken
+        streak the ticker's last_error self-clears.
+
+        Idempotent and cheap; safe to call from any successful-data
+        path.
+        """
+        ps = self.get(ticker)
+        now = time.monotonic()
+        if ps.last_error is None:
+            # Nothing to clear; just keep the streak fresh so the
+            # next error->recovery cycle has a clean baseline.
+            ps._healthy_streak_started = now
+            return
+        if ps._healthy_streak_started is None:
+            ps._healthy_streak_started = now
+            return
+        if (now - ps._healthy_streak_started) >= ERROR_CLEAR_AFTER_HEALTHY_S:
+            logger.info(
+                "[fast_path] status_tracker: clearing stale last_error on "
+                "ticker=%s after %.0f min healthy streak (was: %s)",
+                ticker, ERROR_CLEAR_AFTER_HEALTHY_S / 60.0,
+                (ps.last_error or "")[:120],
+            )
+            ps.last_error = None
+            ps._healthy_streak_started = None
+            self._dirty.add(ticker)
 
     def record_reconnect(self, ticker: str) -> None:
         ps = self.get(ticker)
@@ -141,6 +195,11 @@ class StatusTracker:
         while ps._error_times and (now - ps._error_times[0]) > 60.0:
             ps._error_times.popleft()
         ps.last_error = (error or "")[:500]
+        # F-hygiene-1: any new error resets the healthy-streak clock.
+        # The recovery threshold is "uninterrupted streak", not
+        # "cumulative time"; a flap-and-recover pattern shouldn't
+        # silently clear the most-recent error.
+        ps._healthy_streak_started = None
         self._dirty.add(ticker)
         if len(ps._error_times) >= self._cb_threshold and ps.state != STATE_PAUSED:
             self.mark_paused(
