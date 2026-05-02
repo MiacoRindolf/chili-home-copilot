@@ -395,15 +395,16 @@ class MomentumScanner:
         out: list[dict] = []
         while heap and heap[0].deadline_unix <= now_unix:
             obs = heapq.heappop(heap)
-            # By construction obs.ticker == triggering_ticker. Inline-
-            # assert this invariant so a future refactor that breaks
-            # per-ticker keying explodes loudly instead of silently
-            # shipping malformed observations the way the global-heap
-            # implementation did.
-            assert obs.ticker == triggering_ticker, (
-                f"_drain_pullback_due invariant violated: heap key "
-                f"{triggering_ticker} contained entry for {obs.ticker}"
-            )
+            # By construction obs.ticker == triggering_ticker. Explicit
+            # if/raise (rather than assert) so the invariant survives
+            # if anyone ever runs Python with -O optimisations on --
+            # asserts get stripped under -O, which would silently re-
+            # introduce the data-corruption mode F8a-fix closed.
+            if obs.ticker != triggering_ticker:
+                raise RuntimeError(
+                    f"_drain_pullback_due invariant violated: heap key "
+                    f"{triggering_ticker} contained entry for {obs.ticker}"
+                )
             features = dict(obs.features)
             if cur_best_bid > 0 and cur_best_ask > 0:
                 features["best_bid"] = cur_best_bid
