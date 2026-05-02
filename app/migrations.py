@@ -14668,6 +14668,136 @@ def _migration_220_fast_signal_decay(conn) -> None:
     conn.commit()
 
 
+def _migration_221_fast_path_notify_triggers(conn) -> None:
+    """F6 (2026-05-02) -- AFTER INSERT triggers emitting Postgres
+    NOTIFY on fast_alerts / fast_exits / fast_orderbook so the
+    decay_miner can react event-driven instead of polling.
+
+    Channels (json_build_object payloads, cast to text):
+      - ``fp_alert_inserted`` -- triggers a forward-return observation
+        schedule for every horizon
+      - ``fp_exit_inserted`` -- triggers validation residual update
+        on the matching alert's bucket row
+      - ``fp_book_inserted`` -- the natural event clock; replaces
+        an explicit timer for finalizing pending observations whose
+        deadline has elapsed
+
+    Trigger-based (not application-level) so the NOTIFY is atomic
+    with the INSERT and survives any future code path that writes
+    these tables. ``DROP TRIGGER IF EXISTS`` makes the migration
+    re-runnable.
+
+    Cadence: alerts fire ~10/min; exits fire as positions close;
+    book inserts fire ~14/sec across all 5 tickers under live load.
+    Postgres NOTIFY is sub-ms; this is well within tolerable
+    overhead.
+    """
+    inspector = sa_inspect(conn)
+    tables = set(inspector.get_table_names())
+    if "fast_alerts" in tables:
+        conn.execute(text(
+            """
+            CREATE OR REPLACE FUNCTION fp_alert_inserted_notify()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_notify(
+                    'fp_alert_inserted',
+                    json_build_object(
+                        'id', NEW.id,
+                        'ticker', NEW.ticker,
+                        'alert_type', NEW.alert_type,
+                        'fired_at', NEW.fired_at,
+                        'signal_score', NEW.signal_score
+                    )::text
+                );
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ))
+        conn.execute(text(
+            "DROP TRIGGER IF EXISTS trg_fp_alert_inserted ON fast_alerts"
+        ))
+        conn.execute(text(
+            """
+            CREATE TRIGGER trg_fp_alert_inserted
+            AFTER INSERT ON fast_alerts
+            FOR EACH ROW
+            EXECUTE FUNCTION fp_alert_inserted_notify()
+            """
+        ))
+
+    if "fast_exits" in tables:
+        conn.execute(text(
+            """
+            CREATE OR REPLACE FUNCTION fp_exit_inserted_notify()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_notify(
+                    'fp_exit_inserted',
+                    json_build_object(
+                        'id', NEW.id,
+                        'entry_execution_id', NEW.entry_execution_id,
+                        'ticker', NEW.ticker,
+                        'exit_reason', NEW.exit_reason,
+                        'realized_return_pct', NEW.realized_return_pct,
+                        'holding_period_s', NEW.holding_period_s,
+                        'exited_at', NEW.exited_at
+                    )::text
+                );
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ))
+        conn.execute(text(
+            "DROP TRIGGER IF EXISTS trg_fp_exit_inserted ON fast_exits"
+        ))
+        conn.execute(text(
+            """
+            CREATE TRIGGER trg_fp_exit_inserted
+            AFTER INSERT ON fast_exits
+            FOR EACH ROW
+            EXECUTE FUNCTION fp_exit_inserted_notify()
+            """
+        ))
+
+    if "fast_orderbook" in tables:
+        # Book emits at ~14/sec across all subscribed pairs under
+        # live load. Payload kept minimal -- the miner only needs
+        # ticker + snapshot_at to know "wake up and check the heap".
+        conn.execute(text(
+            """
+            CREATE OR REPLACE FUNCTION fp_book_inserted_notify()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_notify(
+                    'fp_book_inserted',
+                    json_build_object(
+                        'ticker', NEW.ticker,
+                        'snapshot_at', NEW.snapshot_at
+                    )::text
+                );
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ))
+        conn.execute(text(
+            "DROP TRIGGER IF EXISTS trg_fp_book_inserted ON fast_orderbook"
+        ))
+        conn.execute(text(
+            """
+            CREATE TRIGGER trg_fp_book_inserted
+            AFTER INSERT ON fast_orderbook
+            FOR EACH ROW
+            EXECUTE FUNCTION fp_book_inserted_notify()
+            """
+        ))
+
+    conn.commit()
+
+
 def _migration_219_fast_exits_native_view(conn) -> None:
     """F5-cleanup (2026-05-01) — view for native-only realized P/L.
 
@@ -14992,6 +15122,7 @@ MIGRATIONS = [
     ("218_fast_exits", _migration_218_fast_exits),
     ("219_fast_exits_native_view", _migration_219_fast_exits_native_view),
     ("220_fast_signal_decay", _migration_220_fast_signal_decay),
+    ("221_fast_path_notify_triggers", _migration_221_fast_path_notify_triggers),
 ]
 
 
