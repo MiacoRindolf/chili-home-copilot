@@ -14609,6 +14609,65 @@ def _migration_218_fast_exits(conn) -> None:
     conn.commit()
 
 
+def _migration_220_fast_signal_decay(conn) -> None:
+    """F6 (2026-05-02) — empirical signal-decay statistics per
+    (ticker, alert_type, score_bucket, horizon_s).
+
+    Each row is the running forward-return distribution for one
+    bucket: "given an alert of type T fired at score-bucket B on
+    ticker K, what was the (mid_at_horizon - entry_at_alert) /
+    entry_at_alert distribution at horizon H seconds?". The decay
+    miner Welford-updates ``mean_return`` / ``m2_return`` (variance
+    via M2 / sample_count) on each new observation; consumers
+    (exit_manager, gates, stop_engine) read calibrated values via
+    a single index seek per decision.
+
+    Score buckets: cowork-suggested boundaries ``low<0.40``,
+    ``med 0.40-0.65``, ``high>=0.65`` -- enforced by CHECK so a
+    typo in the miner can't silently create a fourth bucket.
+
+    Horizons: convention is 1, 5, 30, 60, 300, 1800, 3600, 14400
+    seconds -- spans the imbalance signal's quant-lit predictive
+    window (1-5s) up through the current MAX_HOLD_S default (4h).
+    Not enforced by CHECK so additional horizons are easy to add.
+
+    Validation columns track how well the predicted distribution
+    matched realized fast_exits outcomes -- updated when the
+    decay_miner sees an exit row matching a tracked alert.
+
+    Idempotent: only creates if missing.
+    """
+    inspector = sa_inspect(conn)
+    tables = set(inspector.get_table_names())
+    if "fast_signal_decay" not in tables:
+        conn.execute(text(
+            """
+            CREATE TABLE fast_signal_decay (
+                ticker         VARCHAR(32) NOT NULL,
+                alert_type     VARCHAR(48) NOT NULL,
+                score_bucket   VARCHAR(8)  NOT NULL,
+                horizon_s      INTEGER     NOT NULL,
+                sample_count   BIGINT      NOT NULL DEFAULT 0,
+                mean_return    DOUBLE PRECISION NOT NULL DEFAULT 0,
+                m2_return      DOUBLE PRECISION NOT NULL DEFAULT 0,
+                realized_validation_count BIGINT NOT NULL DEFAULT 0,
+                realized_validation_residual DOUBLE PRECISION NOT NULL DEFAULT 0,
+                last_updated   TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (ticker, alert_type, score_bucket, horizon_s),
+                CONSTRAINT fast_signal_decay_bucket_check
+                    CHECK (score_bucket IN ('low', 'med', 'high')),
+                CONSTRAINT fast_signal_decay_horizon_check
+                    CHECK (horizon_s > 0)
+            )
+            """
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_fsd_lookup "
+            "ON fast_signal_decay (ticker, alert_type, score_bucket)"
+        ))
+    conn.commit()
+
+
 def _migration_219_fast_exits_native_view(conn) -> None:
     """F5-cleanup (2026-05-01) — view for native-only realized P/L.
 
@@ -14932,6 +14991,7 @@ MIGRATIONS = [
     ("217_fast_executions", _migration_217_fast_executions),
     ("218_fast_exits", _migration_218_fast_exits),
     ("219_fast_exits_native_view", _migration_219_fast_exits_native_view),
+    ("220_fast_signal_decay", _migration_220_fast_signal_decay),
 ]
 
 
