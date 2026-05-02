@@ -128,8 +128,11 @@ class MomentumScanner:
         self.fired_spread_squeeze = 0
         self.suppressed_cooldown = 0
         self.suppressed_warmup = 0
-        # F8a pullback-fade experiment.
-        self._pullback_heap: list[_DeferredEmit] = []
+        # F8a pullback-fade experiment. Per-ticker heaps so each
+        # ticker's deferred entries drain only on that ticker's own
+        # next book emit -- avoids the cross-ticker price-capture bug
+        # the global-heap implementation had.
+        self._pullback_heaps: dict[str, list[_DeferredEmit]] = {}
         self._pullback_seq: int = 0
         self.deferred_scheduled = 0
         self.deferred_dropped_overcap = 0
@@ -295,16 +298,21 @@ class MomentumScanner:
         signal_score: float,
         original_features: dict,
     ) -> None:
-        """Push a deferred pullback emit onto the heap. Capped at
-        ``MAX_PENDING_DEFERRED``; new arrivals are dropped (with a
-        WARNING) above the cap rather than evicting already-scheduled
-        emits whose deadlines are imminent."""
-        if len(self._pullback_heap) >= MAX_PENDING_DEFERRED:
+        """Push a deferred pullback emit onto this ticker's heap.
+
+        Capped at ``MAX_PENDING_DEFERRED`` *globally* (sum across all
+        per-ticker heaps); new arrivals are dropped above the cap
+        rather than evicting already-scheduled emits whose deadlines
+        are imminent. Sum-across-dict is O(N_tickers) and N_tickers
+        ≤ 5 in production, so the cap check is negligible cost.
+        """
+        total_pending = sum(len(h) for h in self._pullback_heaps.values())
+        if total_pending >= MAX_PENDING_DEFERRED:
             self.deferred_dropped_overcap += 1
             logger.warning(
-                "[fast_path] scanner pullback-deferred heap at cap %d -- "
-                "dropping new schedule ticker=%s",
-                MAX_PENDING_DEFERRED, ticker,
+                "[fast_path] scanner deferred-emit cap reached "
+                "(total_pending=%d, cap=%d); dropping new arrival ticker=%s",
+                total_pending, MAX_PENDING_DEFERRED, ticker,
             )
             return
         deadline_unix = (
@@ -329,7 +337,8 @@ class MomentumScanner:
             "original_close": float(original_features.get("close") or 0.0),
             "original_ret_pct": float(original_features.get("ret_pct") or 0.0),
         }
-        heapq.heappush(self._pullback_heap, _DeferredEmit(
+        heap = self._pullback_heaps.setdefault(ticker, [])
+        heapq.heappush(heap, _DeferredEmit(
             deadline_unix=deadline_unix,
             seq=self._pullback_seq,
             ticker=ticker,
@@ -342,21 +351,26 @@ class MomentumScanner:
     def _drain_pullback_due(self, *, now_wall: datetime,
                             triggering_ticker: str | None = None,
                             triggering_book: dict | None = None) -> list[dict]:
-        """Pop and emit any pullback-deferred entries whose deadline
-        has elapsed. Called from on_book_emit so the book emit IS the
-        event clock. Returns 0..N alerts.
+        """Pop and emit any pullback-deferred entries on the
+        triggering ticker's heap whose deadline has elapsed. Called
+        from on_book_emit so the book emit IS the event clock.
+        Returns 0..N alerts.
 
         ``fired_at`` on emitted alerts is set to ``now_wall`` (the
         current book-emit timestamp), NOT the original alert's time --
         the deferred fire-time IS the entry moment for the pullback
         signal.
 
-        ``book`` is the current top-of-book dict; used to enrich the
-        deferred alert's features with the post-pullback ``best_bid``
-        / ``best_ask`` so the decay miner uses the realistic entry
-        price for forward-return measurement.
+        ``triggering_book`` is the current top-of-book for
+        ``triggering_ticker``; by per-ticker-keyed-heap construction
+        any popped entry's ticker matches the triggering ticker, so
+        the book always applies. Asserted below to make a future
+        regression that breaks per-ticker semantics fail loudly.
         """
-        if not self._pullback_heap:
+        if not triggering_ticker:
+            return []
+        heap = self._pullback_heaps.get(triggering_ticker)
+        if not heap:
             return []
         if now_wall.tzinfo is not None:
             now_unix = now_wall.timestamp()
@@ -379,24 +393,19 @@ class MomentumScanner:
                 except (TypeError, ValueError, IndexError):
                     pass
         out: list[dict] = []
-        while self._pullback_heap and self._pullback_heap[0].deadline_unix <= now_unix:
-            obs = heapq.heappop(self._pullback_heap)
-            # The drain happens on whatever ticker's book emit triggered
-            # this pass; the popped entry's ticker may differ. We still
-            # emit on the popped entry's ticker, but the price we
-            # capture in features is from the triggering book emit.
-            # That's a (small) source of slippage in the experiment --
-            # in practice the per-ticker book emit cadence is ~3/sec,
-            # so the wall-clock gap between same-ticker emits is well
-            # under 1s. Postmortem can join fast_orderbook for the
-            # exact-ticker mid at fired_at if needed.
+        while heap and heap[0].deadline_unix <= now_unix:
+            obs = heapq.heappop(heap)
+            # By construction obs.ticker == triggering_ticker. Inline-
+            # assert this invariant so a future refactor that breaks
+            # per-ticker keying explodes loudly instead of silently
+            # shipping malformed observations the way the global-heap
+            # implementation did.
+            assert obs.ticker == triggering_ticker, (
+                f"_drain_pullback_due invariant violated: heap key "
+                f"{triggering_ticker} contained entry for {obs.ticker}"
+            )
             features = dict(obs.features)
-            # Carry post-pullback book if we have one. If a different-
-            # ticker book is what triggered the drain, we DON'T mix
-            # prices -- only set best_bid/best_ask when the triggering
-            # ticker IS for the popped entry's ticker.
-            if (triggering_ticker == obs.ticker
-                    and cur_best_bid > 0 and cur_best_ask > 0):
+            if cur_best_bid > 0 and cur_best_ask > 0:
                 features["best_bid"] = cur_best_bid
                 features["best_ask"] = cur_best_ask
                 features["close"] = cur_best_ask  # decay miner long-fallback
@@ -434,6 +443,7 @@ class MomentumScanner:
     # ── Observability ──────────────────────────────────────────────────
 
     def stats(self) -> dict:
+        total_pending = sum(len(h) for h in self._pullback_heaps.values())
         return {
             "bars_seen": self.bars_seen,
             "books_seen": self.books_seen,
@@ -446,7 +456,14 @@ class MomentumScanner:
             "suppressed_cooldown": self.suppressed_cooldown,
             "suppressed_warmup": self.suppressed_warmup,
             "tickers_tracked": len(self._state),
-            "pullback_pending_heap": len(self._pullback_heap),
+            # Global pending-heap total -- existing supervisor metrics
+            # line reads this; behavior unchanged from operator UX.
+            "pullback_pending_heap": total_pending,
+            # Per-ticker breakdown for debugging when a specific
+            # ticker's book channel goes quiet. Empty entries omitted.
+            "pullback_per_ticker_pending": {
+                t: len(h) for t, h in self._pullback_heaps.items() if h
+            },
             "pullback_deferred_scheduled": self.deferred_scheduled,
             "pullback_deferred_dropped_overcap":
                 self.deferred_dropped_overcap,
