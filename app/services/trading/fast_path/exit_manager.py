@@ -342,6 +342,11 @@ class FastPathExitManager:
                 "computed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 "bracket_source": bracket_source,
                 "calibrated_max_hold_s": calibrated_max_hold,
+                "effective_max_hold_s": (
+                    float(calibrated_max_hold)
+                    if calibrated_max_hold is not None
+                    else float(self._max_hold_s)
+                ),
             }
             self._open[entry_id] = _OpenPosition(
                 entry_execution_id=entry_id,

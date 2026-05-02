@@ -67,6 +67,23 @@ TRADEABLE_COST_MULT = float(
     os.environ.get("CHILI_FAST_PATH_TRADEABLE_COST_MULT", "2.0")
 )
 
+# F6.5: hardware/network reality, not a strategy choice. Coinbase live
+# placement round-trip (place + broker confirm + exit + broker confirm)
+# is ~200-500ms typical. A calibrated max_hold_s shorter than this is
+# empirically saying "this signal isn't tradeable at our latency
+# profile" -- the cleaner expression is "we don't try to hold for less
+# than the floor; if calibration argues for that, fall through to the
+# floor and let the position prove or disprove its edge over a
+# survivable horizon." Override via env if hardware reality changes.
+CALIB_EXEC_FLOOR_S = int(
+    os.environ.get("CHILI_FAST_PATH_CALIB_EXEC_FLOOR_S", "10")
+)
+
+# F6.5: dedup tracker for the floor-substitution INFO log. Logs once
+# per (ticker, alert_type, score_bucket) per process so we can see
+# the floor operating without spamming. Cleared on process restart.
+_FLOOR_LOG_SEEN: set[tuple[str, str, str]] = set()
+
 
 # ── Internal: row -> stats helpers ───────────────────────────────────
 
@@ -161,7 +178,23 @@ def get_calibrated_max_hold_s(
     best = _best_sharpe_row(rows)
     if best is None:
         return None
-    return int(best["horizon_s"])
+    raw_horizon = int(best["horizon_s"])
+    if raw_horizon < CALIB_EXEC_FLOOR_S:
+        # F6.5: latency floor. Don't schedule holds shorter than
+        # round-trip placement latency -- the position can't actually
+        # close in that window. Return the floor instead; let the
+        # position survive long enough to prove or disprove its edge.
+        key = (ticker, alert_type, bucket)
+        if key not in _FLOOR_LOG_SEEN:
+            _FLOOR_LOG_SEEN.add(key)
+            logger.info(
+                "[fast_path] calibration max_hold_s floored ticker=%s "
+                "alert_type=%s bucket=%s calibrated=%ds floor=%ds "
+                "(signal predictive horizon below execution latency)",
+                ticker, alert_type, bucket, raw_horizon, CALIB_EXEC_FLOOR_S,
+            )
+        return CALIB_EXEC_FLOOR_S
+    return raw_horizon
 
 
 def is_score_tradeable(
@@ -246,4 +279,5 @@ __all__ = [
     "MIN_SAMPLES_FOR_CALIB",
     "TRADING_COST_FRAC",
     "TRADEABLE_COST_MULT",
+    "CALIB_EXEC_FLOOR_S",
 ]
