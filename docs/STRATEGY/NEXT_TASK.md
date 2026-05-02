@@ -1,145 +1,173 @@
-# NEXT_TASK: cleanup-2-healthcheck-and-protocol-infra
+# NEXT_TASK: autopilot-trades-history
 
 STATUS: DONE
 
 ## Goal
 
-Three small, scope-disjoint cleanup commits land before F6 starts. After this task:
+Add a "Trades History" section to the autopilot page so the operator can see past fast-path round trips (closed paper trades) the momentum scalper has executed. After this task:
 
-1. **Strategy infrastructure is in version control.** `CLAUDE.md` (the protocol pointer block Cowork added) plus the entire `docs/STRATEGY/` tree (PROTOCOL.md, CURRENT_PLAN.md, NEXT_TASK.md, the CC_REPORT and review from F5 cleanup) are committed and pushed.
-2. **Container `(healthy)` is durable.** The 90s `last_bar_at` healthcheck threshold no longer flaps when Coinbase's candles channel goes quiet on low-volatility pairs. Probe is split into two orthogonal checks (ws connectivity vs. candle freshness).
-3. **The bracket-age classifier is documented.** A code comment in `exit_manager.py` explains why `brain_json.computed_at` vs. `entered_at` produces the bimodal distribution that `fast_exits_native` view relies on, so a future refactor doesn't accidentally normalize them and silently break the native/inherited filter.
+1. **The autopilot page shows closed round trips** alongside the existing open-positions table — same `_autopilot_fast_path.html` partial, new section below the open positions.
+2. **Realized P/L stats are on the page** — total realized P/L, win rate, win/loss count, average return, average holding time. At-a-glance answer to "is the strategy actually working?"
+3. **Native vs. inherited toggle.** Default view shows F5-native trades only (using the `fast_exits_native` view); a toggle lets the operator include the 11 inherited bootstrap positions for completeness.
+4. **Auto-refresh on the same 5s cadence as the existing sections** (consistent UX; no need to reinvent the polling pattern).
+
+This is operator-tooling, not strategy work. Pure read-only UI on top of `fast_exits` + `fast_exits_native`.
 
 ## Why now
 
-The F5 cleanup CC_REPORT confirmed:
-- The unhealthy state is recurring and structurally driven by a too-tight healthcheck threshold (not transient, not a WS issue)
-- F5's bracket-age classifier trick uses a load-bearing implicit invariant (`computed_at` is set once at bracket-decision time, not refreshed) that needs an inline comment so it's not lost
-- Three working-tree changes (CLAUDE.md, docs/STRATEGY/, this very task file) are uncommitted — the protocol requires its own infrastructure to be versioned
+After F5 cleanup, we have the data: 3 native round trips closed, 5 floating-green positions still open, and 11 inherited bootstrap positions whose exits accumulate in the same table over time. The operator currently has no UI surface for any of this — they have to run SQL via dispatch to see it. F6 (signal half-life mining) is going to take the longer development cycle; in the meantime, having a real-time trades view lets the operator watch the strategy actually work and gives both Cowork and the operator a tighter feedback loop on whether the realized data is trending toward "edge" or "noise."
 
-We're not shipping F6 over a flapping unhealthy container — every future log review and incident triage gets harder. These are all small, surgical, low-risk changes.
+This is also a small, well-scoped task that exercises the existing autopilot UI patterns without introducing any new infrastructure.
 
-## Scope — three subtasks, three commits, ordered
+## Scope — three subtasks, ordered
 
-### 1. Commit strategy infrastructure FIRST
+### 1. New API endpoints in `fast_path_api.py`
 
-```
-git add CLAUDE.md docs/STRATEGY/
-git status   # confirm only those paths are staged
-git commit -m "chore: strategy protocol infrastructure (Cowork ↔ Claude Code handoff)"
-git push
-```
+Add two endpoints under the existing `/api/trading/fast-path/` prefix:
 
-The commit should include:
-- `CLAUDE.md` (just the new "FIRST" section pointer block at the top)
-- `docs/STRATEGY/PROTOCOL.md`
-- `docs/STRATEGY/CURRENT_PLAN.md`
-- `docs/STRATEGY/NEXT_TASK.md` (this file, which the previous task marked DONE — that gets committed in its DONE state since it's a historical record of what F5 cleanup was)
-- `docs/STRATEGY/CC_REPORTS/.gitkeep`
-- `docs/STRATEGY/CC_REPORTS/2026-05-01_f5-cleanup-and-baseline.md`
-- `docs/STRATEGY/COWORK_REVIEWS/2026-05-01_F5_exit_manager.md`
-- `docs/STRATEGY/COWORK_REVIEWS/2026-05-01_f5-cleanup-and-baseline.md`
+**`GET /api/trading/fast-path/closed-trades`** — recent fast_exits rows.
 
-Do NOT include `app/models/trading.py` or `.env.example` — both are unrelated working-tree changes the previous CC_REPORT correctly excluded.
+Query parameters:
+- `limit` (default 50, max 200)
+- `include_inherited` (default `false`) — when `false`, queries from `fast_exits_native`; when `true`, queries from `fast_exits` directly.
 
-### 2. Healthcheck split-probe
-
-Modify `app/services/trading/fast_path/healthz.py`. Current single check on `last_bar_at` freshness with a 90s threshold flaps because Coinbase's candles channel goes silent on low-volatility pairs while WS, heartbeats, and L2 books continue normally.
-
-**Refactor into two orthogonal probes that AND together for the 200/503 verdict:**
-
-- **`ws_connected`** — passes if WS connection is healthy. Signals: `error_count_60s < cb_threshold` AND a recent heartbeat-or-book-or-bar event (i.e. SOME freshness on SOME channel) within a short window. Suggested threshold: **60s**. Reads `fast_path_status` per pair plus the most-recent `fast_orderbook.snapshot_at`.
-
-- **`candle_freshness`** — passes if AT LEAST ONE pair has a `fast_snapshots` row within a long window. Suggested threshold: **300s (5 min)**. The "at least one" is deliberate — Coinbase legitimately emits no candles for individual quiet pairs for several minutes, but they don't all go quiet at once. If they DO all go silent for 5 min, that's a real outage.
-
-`/healthz` returns 200 iff both probes pass. The response body should include both probe states so an operator can see WHICH check failed without log diving:
-
+Response shape:
 ```json
 {
-  "ok": true,
-  "ws_connected": true,
-  "candle_freshness": true,
-  "details": {
-    "ws_window_s": 60,
-    "candle_window_s": 300,
-    "newest_book_age_s": 0.4,
-    "newest_bar_age_s": 47.2,
-    "freshest_pair_for_bars": "ETH-USD"
-  }
+  "trades": [
+    {
+      "id": 123,
+      "entry_execution_id": 56,
+      "ticker": "DOGE-USD",
+      "alert_type": "imbalance_long",
+      "side": "buy",
+      "quantity": 228.54,
+      "entry_price": 0.10939,
+      "exit_price": 0.108990,
+      "exit_reason": "stop_hit",
+      "realized_pnl_usd": -0.0914,
+      "realized_return_pct": -0.366,
+      "holding_period_s": 2621,
+      "stop_at_entry": 0.108991,
+      "target_at_entry": 0.110297,
+      "entered_at": "2026-05-01T21:32:23.161",
+      "exited_at": "2026-05-01T22:46:03.697",
+      "mode": "paper",
+      "is_native": true
+    },
+    ...
+  ],
+  "as_of": "2026-05-02T00:35:00"
 }
 ```
 
-Boot grace logic stays as-is (the existing 30s grace on first start should still apply to `candle_freshness` — give the snapshot replay time to populate).
+The `is_native` field is present whether you query the view or the base table — for the native view it's always true; for the all-inclusive query, derive it via the bracket-age trick (`(brain_json->>'computed_at')::timestamp - entered_at < INTERVAL '60 seconds'`) so the UI can color-code which rows are inherited.
 
-Then commit:
+You'll need the `alert_type` from `fast_executions` (it's not on `fast_exits` itself) — JOIN on `entry_execution_id`. Keep the JOIN cheap (LIMIT first, then JOIN, with the index on `(entry_execution_id, exited_at)` doing the work).
+
+**`GET /api/trading/fast-path/realized-stats`** — aggregate across closed trades.
+
+Query parameters:
+- `include_inherited` (default `false`)
+- `since_hours` (default 24) — rolling window, default 24 hours
+
+Response shape:
+```json
+{
+  "round_trips": 3,
+  "wins": 0,
+  "losses": 3,
+  "win_rate_pct": 0.00,
+  "total_pnl_usd": -0.2743,
+  "avg_return_pct": -0.366,
+  "avg_holding_s": 2621,
+  "best_trade_pnl_usd": -0.0892,
+  "worst_trade_pnl_usd": -0.0936,
+  "by_reason": {
+    "stop_hit": {"count": 3, "total_pnl_usd": -0.2743},
+    "target_hit": {"count": 0, "total_pnl_usd": 0.0},
+    "time_stop": {"count": 0, "total_pnl_usd": 0.0}
+  },
+  "by_ticker": {
+    "DOGE-USD": {"count": 3, "total_pnl_usd": -0.2743}
+  },
+  "since_hours": 24,
+  "include_inherited": false,
+  "as_of": "2026-05-02T00:35:00"
+}
 ```
-git add app/services/trading/fast_path/healthz.py
-git commit -m "fix(fast-path): split /healthz into ws_connected + candle_freshness probes"
-git push
-```
 
-After commit, restart fast-data-worker and observe `(healthy)` consistently for **at least 10 minutes** before declaring success. If it still flaps, STOP and flag — don't iterate calibrations in this task.
+`by_reason` always has the three keys (`stop_hit`, `target_hit`, `time_stop`) even when zero — the UI doesn't have to handle missing keys.
 
-### 3. Document the bracket-age classifier invariant
+Both endpoints follow the same patterns as the existing `paper-trades` / `recent-decisions` / `summary` endpoints — read-only, two queries max each, connect+execute+close pattern that's already in the file.
 
-In `app/services/trading/fast_path/exit_manager.py`, find the spot where `brain_json` gets populated (you wrote this in F5; the report mentions `computed_at` is set at bootstrap time). Add a docstring/inline comment along the lines of:
+### 2. Update `_autopilot_fast_path.html` partial
 
-```python
-# IMPORTANT: brain_json["computed_at"] is set ONCE at the moment the
-# bracket is decided — at entry time for native F5 trades, at bootstrap
-# time for inherited F4-era positions. The gap between this and
-# ``entered_at`` is what migration 219's ``fast_exits_native`` view
-# uses to filter inherited rows out of P/L analysis. Do not refresh
-# this timestamp on later updates; doing so silently breaks the
-# native-vs-inherited classifier.
-```
+Add a third section below the existing open-positions table and decisions feed: "Closed Round Trips."
 
-Adjust wording to match your preferred style; the load-bearing fact is "computed_at is set once at bracket-decision time and must never be refreshed."
+Section structure:
+- **Header bar** with title, "F5-native only" toggle (defaults ON), as-of timestamp.
+- **Stats row** of cards (mirroring the existing summary row pattern): round trips, win rate, total realized P/L, avg return, avg holding time. Color-code P/L green/red, win rate above/below 50% green/red.
+- **Trades table** with columns: time exited, ticker, alert type, side, qty, entry, exit, P/L $, P/L %, hold time, exit reason. Color-code P/L cells. Show `is_native: false` rows with a subtle visual cue (e.g., italicized ticker + an `(inherited)` suffix).
+- **Toggle behavior** — flipping "include inherited" re-fetches both endpoints with `include_inherited=true` and re-renders.
+- **Auto-refresh every 5s** matching the existing sections.
 
-Then commit:
-```
-git add app/services/trading/fast_path/exit_manager.py
-git commit -m "docs(fast-path): document bracket-age classifier invariant in exit_manager"
-git push
-```
+Keep the styling scoped under `#ap-fast-path-section .ap-fp-history-*` so it doesn't collide with anything. Reuse `.ap-fp-card`, `.ap-fp-table`, `.ap-fp-pnl-pos`, `.ap-fp-pnl-neg` classes that already exist in the partial.
+
+Empty state: when no closed trades exist (which won't be the case on this repo, but matters for fresh deploys), show "No closed round trips yet — strategy will populate as positions exit." in the table empty cell.
+
+### 3. Smoke test on the live system
+
+After deploy:
+1. Restart `chili` (the web container — fast-data-worker doesn't serve UI). The web container reads `fast_path_api.py`.
+2. Browse to `https://localhost:8000/trading/autopilot` (operator-side; you can't actually open a browser, but verify the partial renders by curl/python-fetch and grep for the new section's hooks like `ap-fp-history-tbody`).
+3. Hit both new endpoints directly (via the existing dispatch pattern from inside `chili`):
+   - `/api/trading/fast-path/closed-trades?limit=10` — should return 3 native trades by default.
+   - `/api/trading/fast-path/closed-trades?limit=20&include_inherited=true` — should return more (the 11 inherited bootstraps will populate as exit_manager closes them).
+   - `/api/trading/fast-path/realized-stats` — verify the aggregate matches what the verbatim SQL from the F5-cleanup CC report produces (`COUNT=3, total_pnl_usd=-0.18, win_rate=0`).
 
 ## Brain integration (reuse, don't rewrite)
 
-- `app/services/trading/fast_path/healthz.py` — read it for context, refactor in place.
-- `app/services/trading/fast_path/status_tracker.py` — its `error_count_60s` and `last_reconnect_at` fields are what the `ws_connected` probe should read.
-- `app/services/trading/fast_path/db_writer.py` — its in-memory queue depth could optionally be a third signal for `ws_connected` (if queue is healthy, downstream is consuming, which is upstream evidence WS is alive). Not required.
+- `app/routers/trading_sub/fast_path_api.py` — extend in place. Don't create a new router file.
+- `app/templates/trading/_autopilot_fast_path.html` — extend in place. Don't create a new partial.
+- `fast_exits_native` view — already created in migration 219. Use it as the default query source.
+- `app/routers/trading_sub/_utils.py` if a `json_safe` helper exists there — use it; otherwise the existing endpoints' inline approach (`.isoformat()` on datetimes) is fine.
 
 ## Constraints / do not touch
 
-- **Live-placement safety belts.** All 8 layers in `_place_coinbase_order_live`, `is_live_authorized()`, the mode_interlock gate.
-- **Strategy thresholds.** No tuning of `MIN_SIGNAL_SCORE`, `MAX_SPREAD_BPS`, `IMBALANCE_LONG_THRESHOLD`, `VOL_BREAKOUT_MULT`, `ALERT_RECENCY_MAX_AGE_S`, `MAX_OPEN_POSITIONS_PER_PAIR`, `DAILY_NOTIONAL_BUDGET_USD`. None of them. F6 will derive these from data.
-- **Stop / target / time-stop bracket policy.** Same as last task — F6 needs the existing distribution as training signal.
-- **The 11 inherited bootstrap positions.** Don't touch them. Exit manager handles them naturally.
-- **`models/trading.py` and `.env.example` working-tree changes.** These are someone else's work. Leave uncommitted; they'll be picked up in their proper commit later.
+- **Live-placement safety belts.** Same as always.
+- **Strategy thresholds.** No tuning of any constant.
+- **Bracket policy.** F6 will derive these.
+- **The existing UI sections.** Don't refactor open-positions or recent-decisions tables. Add the new section, leave the others alone.
+- **DB schema.** No migrations. The `is_native` field is computed at query time, not stored.
+- **The Coinbase live path.** Read-only UI surface; doesn't touch placement.
 
 ## Out of scope
 
-- F6 signal half-life mining (next task after this).
-- Tuning any healthcheck threshold beyond the 60s + 300s defaults proposed above (if you have a strong reason to deviate, propose it in Open Questions, don't deviate silently).
-- Changing the `/healthz` URL, port, or endpoint shape beyond adding the JSON response body fields described.
-- LISTEN/NOTIFY conversion. Watchdog task. Correlation gate. Anything new.
+- F6 (signal half-life mining) — separate next task.
+- A "manage trades" view (close, modify, etc.) — read-only.
+- Per-trade clickthrough to a detail page — text table only.
+- WebSocket / SSE push — keep the 5s polling pattern of the existing UI.
+- Any new visualization libraries (Chart.js, Plotly, etc.). If a chart is desired, leave it for a separate task.
+- Filtering by ticker / alert type — operator can sort the table mentally for now.
+- Pagination beyond `limit` — top 50 is enough for an autopilot view.
 
 ## Success criteria
 
-1. `git log --oneline -5` shows three new commits, all pushed to origin
-2. `git status` is clean for the three sets of files this task touched (untouched files stay untouched)
-3. After the healthz commit + container restart, `docker compose ps fast-data-worker` shows `(healthy)` for at least 10 consecutive minutes (verify by waiting and re-checking; healthcheck runs every 30s by compose default, so 20+ green checks)
-4. `curl -k https://localhost:8000` is irrelevant — instead `docker compose exec fast-data-worker python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8090/healthz').read())"` should return JSON with `ws_connected: true` AND `candle_freshness: true`
-5. `docs/STRATEGY/CC_REPORTS/2026-05-02_cleanup-2-healthcheck-and-protocol-infra.md` written following PROTOCOL.md format. (Date may roll to 2026-05-02 by the time you finish; use whatever today's UTC date actually is.)
+1. `git log --oneline -3` shows a new commit containing both the API endpoint additions and the UI partial changes (single commit since they're a coherent feature).
+2. `curl -k -s https://localhost:8000/api/trading/fast-path/closed-trades?limit=5` (or the python-urllib equivalent from inside the chili container) returns valid JSON with `trades` array containing the 3 currently-closed native trades.
+3. `curl -k -s https://localhost:8000/api/trading/fast-path/realized-stats` returns aggregate matching the F5-cleanup SQL benchmark: 3 round trips, 0 wins, 3 losses, total_pnl_usd ≈ -0.18, win_rate_pct = 0.
+4. Fetching `https://localhost:8000/trading/autopilot` (text body via python-urllib) contains the strings `ap-fp-history-section`, `ap-fp-history-tbody`, and `Closed Round Trips`.
+5. `docs/STRATEGY/CC_REPORTS/2026-05-02_autopilot-trades-history.md` written with: what shipped, screenshot-equivalent (a sample row from each endpoint pasted as JSON), any deferrals, Open Questions.
 
 ## Open questions for Cowork (surface in your report only if relevant)
 
-- **Are 60s (ws) and 300s (candles) the right thresholds?** I picked them from Coinbase candle-cadence anecdata. If you observe live data after deploy that suggests one or both should move (e.g., even 300s is too tight on extremely quiet pairs), document the observation and propose new defaults — don't tune them inside this task.
-- **Should the `details` block in the /healthz JSON also include per-pair age breakdown?** The current proposal returns aggregate (newest book age, freshest pair for bars) which is enough for binary decisions. Per-pair detail would help debugging but bloats the response. Defer to your judgment; if you add per-pair, keep it under a `pairs:` key so the top level stays small.
-- **Anything you want me to retroactively add to PROTOCOL.md?** First end-to-end run revealed F5-cleanup followed it cleanly. If anything was ambiguous, surface it.
+- The 24h `since_hours` default — is that the right rolling window for "realized stats"? My logic: scalp sessions tend to span hours, not days, so 24h captures both intraday and overnight context. If you find data showing a different window makes more sense (e.g., 4h or 12h), propose it.
+- Should the trades table sort newest-first (default) or have a column-sort UI? My vote: default newest-first only, keep the table simple. Column-sort is feature creep for a v1.
+- Color cues for inherited rows — I suggested italics + `(inherited)` suffix. If you have a stronger UX instinct (e.g., gray text, a small tag chip), follow it. Just keep them visibly distinct from native rows so the operator never confuses them in P/L analysis.
 
 ## Rollback plan
 
-- Strategy infra commit: simple revert; no behavioral change in app code.
-- Healthcheck commit: revert restores 90s single-probe behavior. Container will go back to flapping but won't crash. Safe.
-- exit_manager comment commit: pure docstring change, no behavior. Pure rollback.
+- API endpoints are read-only and additive — revert removes them, no data migration needed.
+- UI partial change is additive — revert removes the section, no JS dependencies left dangling.
+- Single commit means single revert.

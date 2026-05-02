@@ -78,6 +78,66 @@
       </table>
     </div>
   </details>
+
+  <div class="ap-fp-history" id="ap-fp-history-section">
+    <div class="ap-fp-history-header">
+      <h3 class="ap-fp-history-title">Closed Round Trips</h3>
+      <label class="ap-fp-history-toggle">
+        <input type="checkbox" id="ap-fp-history-native-only" checked>
+        F5-native only
+      </label>
+      <span class="ap-fp-as-of" id="ap-fp-history-as-of"></span>
+    </div>
+
+    <div class="ap-fp-summary-row" id="ap-fp-history-stats">
+      <div class="ap-fp-card">
+        <div class="ap-fp-card-label">Round Trips</div>
+        <div class="ap-fp-card-value" id="ap-fp-history-rt">—</div>
+        <div class="ap-fp-card-sub" id="ap-fp-history-wl">—</div>
+      </div>
+      <div class="ap-fp-card">
+        <div class="ap-fp-card-label">Win Rate</div>
+        <div class="ap-fp-card-value" id="ap-fp-history-winrate">—</div>
+      </div>
+      <div class="ap-fp-card">
+        <div class="ap-fp-card-label">Realized P/L</div>
+        <div class="ap-fp-card-value" id="ap-fp-history-pnl">$—</div>
+        <div class="ap-fp-card-sub" id="ap-fp-history-avg-ret">—</div>
+      </div>
+      <div class="ap-fp-card">
+        <div class="ap-fp-card-label">Avg Holding</div>
+        <div class="ap-fp-card-value" id="ap-fp-history-avg-hold">—</div>
+      </div>
+      <div class="ap-fp-card">
+        <div class="ap-fp-card-label">Best / Worst</div>
+        <div class="ap-fp-card-value" id="ap-fp-history-best">—</div>
+        <div class="ap-fp-card-sub" id="ap-fp-history-worst">—</div>
+      </div>
+    </div>
+
+    <div class="ap-fp-table-wrap">
+      <table class="ap-fp-table" id="ap-fp-history-table">
+        <thead>
+          <tr>
+            <th>Exited</th>
+            <th>Ticker</th>
+            <th>Alert</th>
+            <th>Side</th>
+            <th class="ap-fp-num">Qty</th>
+            <th class="ap-fp-num">Entry</th>
+            <th class="ap-fp-num">Exit</th>
+            <th class="ap-fp-num">P/L $</th>
+            <th class="ap-fp-num">P/L %</th>
+            <th class="ap-fp-num">Held</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="ap-fp-history-tbody">
+          <tr><td colspan="11" class="ap-fp-empty">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </section>
 
 <style>
@@ -144,6 +204,36 @@
     padding: 6px 0;
   }
   .ap-fp-decisions-wrap { padding: 0.4rem 0; }
+
+  /* Closed Round Trips section */
+  #ap-fp-history-section { margin-top: 1.25rem; }
+  .ap-fp-history-header {
+    display: flex; align-items: center; gap: 0.85rem;
+    margin-bottom: 0.4rem;
+  }
+  .ap-fp-history-title {
+    font-size: 1rem; font-weight: 600; color: #0f172a; margin: 0;
+  }
+  .ap-fp-history-toggle {
+    font-size: 0.8rem; color: #475569; cursor: pointer;
+    user-select: none; display: inline-flex; align-items: center;
+    gap: 0.35rem;
+  }
+  .ap-fp-history-toggle input { cursor: pointer; }
+  /* Inherited rows: italic ticker + (inherited) suffix + softer text. */
+  #ap-fp-history-tbody tr.ap-fp-history-inherited td { color: #64748b; }
+  #ap-fp-history-tbody tr.ap-fp-history-inherited td:nth-child(2) {
+    font-style: italic;
+  }
+  .ap-fp-history-tag {
+    display: inline-block; margin-left: 4px;
+    font-size: 0.65rem; color: #64748b;
+    background: #f1f5f9; border-radius: 4px;
+    padding: 1px 5px; vertical-align: middle;
+  }
+  /* Win-rate cue: green >=50, red <50, neutral when zero trades. */
+  .ap-fp-winrate-good { color: #15803d; }
+  .ap-fp-winrate-bad { color: #b91c1c; }
 </style>
 
 <script>
@@ -245,18 +335,122 @@
       }).join("");
     }
 
+    function fmtHoldingTime(s) {
+      const n = Number(s) || 0;
+      if (n < 60) return n.toFixed(0) + "s";
+      if (n < 3600) return (n / 60).toFixed(1) + "m";
+      return (n / 3600).toFixed(1) + "h";
+    }
+
+    function renderHistoryStats(payload) {
+      const rt = payload.round_trips ?? 0;
+      document.getElementById("ap-fp-history-rt").textContent = rt;
+      document.getElementById("ap-fp-history-wl").textContent =
+        rt > 0 ? `${payload.wins ?? 0}W · ${payload.losses ?? 0}L` : "—";
+
+      const wr = payload.win_rate_pct ?? 0;
+      const wrEl = document.getElementById("ap-fp-history-winrate");
+      wrEl.textContent = rt > 0 ? wr.toFixed(1) + "%" : "—";
+      wrEl.className = "ap-fp-card-value " + (
+        rt === 0 ? "" : (wr >= 50 ? "ap-fp-winrate-good" : "ap-fp-winrate-bad")
+      );
+
+      const pnl = payload.total_pnl_usd ?? 0;
+      const pnlEl = document.getElementById("ap-fp-history-pnl");
+      pnlEl.textContent = fmtUsd(pnl);
+      pnlEl.className = "ap-fp-card-value " + pnlClass(pnl);
+      const avgRet = payload.avg_return_pct ?? 0;
+      const avgRetEl = document.getElementById("ap-fp-history-avg-ret");
+      avgRetEl.textContent = rt > 0 ? "avg " + avgRet.toFixed(3) + "%" : "—";
+      avgRetEl.className = "ap-fp-card-sub " + pnlClass(avgRet);
+
+      document.getElementById("ap-fp-history-avg-hold").textContent =
+        rt > 0 ? fmtHoldingTime(payload.avg_holding_s) : "—";
+
+      const best = payload.best_trade_pnl_usd ?? 0;
+      const worst = payload.worst_trade_pnl_usd ?? 0;
+      document.getElementById("ap-fp-history-best").textContent =
+        rt > 0 ? "↑ " + fmtUsd(best) : "—";
+      document.getElementById("ap-fp-history-worst").textContent =
+        rt > 0 ? "↓ " + fmtUsd(worst) : "";
+
+      document.getElementById("ap-fp-history-as-of").textContent =
+        payload.as_of ? "as of " + fmtTime(payload.as_of) : "";
+    }
+
+    function renderHistoryTrades(payload) {
+      const tbody = document.getElementById("ap-fp-history-tbody");
+      const trades = payload.trades || [];
+      if (!trades.length) {
+        tbody.innerHTML =
+          '<tr><td colspan="11" class="ap-fp-empty">No closed round trips yet — strategy will populate as positions exit.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = trades.map((t) => {
+        const pCls = pnlClass(t.realized_pnl_usd);
+        const inhCls = t.is_native ? "" : "ap-fp-history-inherited";
+        const inhTag = t.is_native ? "" : '<span class="ap-fp-history-tag">inherited</span>';
+        // realized_return_pct comes back already as % (e.g. -0.366),
+        // not a fraction — don't multiply by 100 like fmtPct does.
+        const retPct = (Number(t.realized_return_pct) || 0);
+        const retSign = retPct >= 0 ? "+" : "";
+        return `<tr class="${inhCls}">
+          <td>${fmtTime(t.exited_at)}</td>
+          <td><b>${t.ticker}</b>${inhTag}</td>
+          <td>${t.alert_type ?? "—"}</td>
+          <td>${t.side}</td>
+          <td class="ap-fp-num">${(t.quantity ?? 0).toFixed(6)}</td>
+          <td class="ap-fp-num">${(t.entry_price ?? 0).toFixed(4)}</td>
+          <td class="ap-fp-num">${(t.exit_price ?? 0).toFixed(4)}</td>
+          <td class="ap-fp-num ${pCls}">${fmtUsd(t.realized_pnl_usd)}</td>
+          <td class="ap-fp-num ${pCls}">${retSign}${retPct.toFixed(3)}%</td>
+          <td class="ap-fp-num">${fmtHoldingTime(t.holding_period_s)}</td>
+          <td>${t.exit_reason}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function historyIncludeInherited() {
+      const cb = document.getElementById("ap-fp-history-native-only");
+      // Toggle is "F5-native only" (checked = native only, unchecked = include inherited).
+      return cb && !cb.checked;
+    }
+
     async function poll() {
       try {
-        const [pos, dec] = await Promise.all([
+        const includeInh = historyIncludeInherited();
+        const histQs = "include_inherited=" + (includeInh ? "true" : "false");
+        const [pos, dec, hist, stats] = await Promise.all([
           fetch("/api/trading/fast-path/paper-trades?limit=50").then((r) => r.json()),
           fetch("/api/trading/fast-path/recent-decisions?limit=30&minutes=120").then((r) => r.json()),
+          fetch("/api/trading/fast-path/closed-trades?limit=50&" + histQs).then((r) => r.json()),
+          fetch("/api/trading/fast-path/realized-stats?" + histQs).then((r) => r.json()),
         ]);
         renderPositions(pos);
         renderDecisions(dec);
+        renderHistoryStats(stats);
+        renderHistoryTrades(hist);
       } catch (e) {
         console.warn("[fast-path] poll failed:", e);
       }
     }
+
+    // Toggle: re-fetch immediately on change so the operator sees the
+    // effect without waiting for the next 5s tick.
+    document.addEventListener("DOMContentLoaded", () => {
+      const cb = document.getElementById("ap-fp-history-native-only");
+      if (cb) cb.addEventListener("change", () => { poll(); });
+    });
+    // If the partial loaded *after* DOMContentLoaded already fired
+    // (which is the common case in the autopilot SPA), wire up now.
+    {
+      const cb = document.getElementById("ap-fp-history-native-only");
+      if (cb && !cb.dataset.bound) {
+        cb.dataset.bound = "1";
+        cb.addEventListener("change", () => { poll(); });
+      }
+    }
+
     poll();
     setInterval(poll, POLL_MS);
   })();

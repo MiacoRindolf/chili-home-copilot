@@ -272,6 +272,202 @@ def get_recent_decisions(limit: int = Query(50, ge=1, le=200),
     return JSONResponse({"decisions": out, "since": since.isoformat()})
 
 
+@router.get("/closed-trades")
+def get_closed_trades(
+    limit: int = Query(50, ge=1, le=200),
+    include_inherited: bool = Query(False),
+) -> JSONResponse:
+    """Recent closed fast-path round trips (one row per fast_exits row).
+
+    Defaults to F5-native trades only (uses the ``fast_exits_native``
+    view from migration 219). Set ``include_inherited=true`` to include
+    F4-era bootstrap-adopted positions whose brackets were computed
+    at F5 boot rather than at entry time -- useful for a complete
+    history view but contaminates P/L analysis if mixed with native.
+
+    The ``is_native`` field on each row lets the UI color-code
+    inherited rows; on the native-only view it's always true, on the
+    all-inclusive view it's derived from the bracket-age gap.
+    """
+    if include_inherited:
+        # Source = base table; classifier computed inline via the
+        # ``computed_at - entered_at`` gap that migration 219's view
+        # documents. < 60s => native; otherwise inherited.
+        sql = text("""
+            SELECT x.id, x.entry_execution_id, x.ticker, e.alert_type,
+                   x.side, x.quantity, x.entry_price, x.exit_price,
+                   x.exit_reason, x.realized_pnl_usd, x.realized_return_pct,
+                   x.holding_period_s, x.stop_at_entry, x.target_at_entry,
+                   x.entered_at, x.exited_at, x.mode,
+                   COALESCE(
+                     (x.brain_json ? 'computed_at') AND
+                     EXTRACT(EPOCH FROM (
+                       (x.brain_json->>'computed_at')::timestamp - x.entered_at
+                     )) < 60,
+                     FALSE
+                   ) AS is_native
+            FROM fast_exits x
+            LEFT JOIN fast_executions e ON e.id = x.entry_execution_id
+            ORDER BY x.exited_at DESC
+            LIMIT :lim
+        """)
+    else:
+        sql = text("""
+            SELECT x.id, x.entry_execution_id, x.ticker, e.alert_type,
+                   x.side, x.quantity, x.entry_price, x.exit_price,
+                   x.exit_reason, x.realized_pnl_usd, x.realized_return_pct,
+                   x.holding_period_s, x.stop_at_entry, x.target_at_entry,
+                   x.entered_at, x.exited_at, x.mode,
+                   TRUE AS is_native
+            FROM fast_exits_native x
+            LEFT JOIN fast_executions e ON e.id = x.entry_execution_id
+            ORDER BY x.exited_at DESC
+            LIMIT :lim
+        """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"lim": int(limit)}).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        for ts_col in ("entered_at", "exited_at"):
+            if d.get(ts_col):
+                d[ts_col] = d[ts_col].isoformat()
+        # Keep numeric types JSON-friendly; psycopg returns Decimal for
+        # DOUBLE PRECISION sometimes, float for others. Coerce.
+        for num_col in ("quantity", "entry_price", "exit_price",
+                        "realized_pnl_usd", "realized_return_pct",
+                        "holding_period_s", "stop_at_entry",
+                        "target_at_entry"):
+            if d.get(num_col) is not None:
+                d[num_col] = float(d[num_col])
+        d["is_native"] = bool(d.get("is_native"))
+        out.append(d)
+    return JSONResponse({
+        "trades": out,
+        "include_inherited": bool(include_inherited),
+        "as_of": _utc_now_naive().isoformat(),
+    })
+
+
+@router.get("/realized-stats")
+def get_realized_stats(
+    include_inherited: bool = Query(False),
+    since_hours: int = Query(24, ge=1, le=24 * 30),
+) -> JSONResponse:
+    """Aggregate realized P/L over closed fast-path round trips.
+
+    Same native-vs-all-inclusive selector as ``/closed-trades``. The
+    ``since_hours`` window is rolling: rows whose ``exited_at`` is
+    within the last N hours.
+
+    ``by_reason`` always emits the three canonical exit-reason keys
+    (``stop_hit``, ``target_hit``, ``time_stop``) so the UI doesn't
+    have to handle missing keys; reasons outside that set ('manual',
+    'broker_error') are aggregated into a separate ``other`` bucket.
+    """
+    source = "fast_exits" if include_inherited else "fast_exits_native"
+    since_dt = _utc_now_naive() - timedelta(hours=int(since_hours))
+
+    # One pass for headline stats; one pass each for the by_reason
+    # and by_ticker breakouts. All three queries are cheap on the
+    # (ticker, exited_at DESC) and (exit_reason, exited_at DESC)
+    # indexes already on fast_exits.
+    headline_sql = text(f"""
+        SELECT
+            COUNT(*) AS round_trips,
+            COUNT(*) FILTER (WHERE realized_pnl_usd > 0) AS wins,
+            COUNT(*) FILTER (WHERE realized_pnl_usd <= 0) AS losses,
+            COALESCE(SUM(realized_pnl_usd), 0) AS total_pnl_usd,
+            AVG(realized_return_pct) AS avg_return_pct,
+            AVG(holding_period_s) AS avg_holding_s,
+            MAX(realized_pnl_usd) AS best_trade_pnl_usd,
+            MIN(realized_pnl_usd) AS worst_trade_pnl_usd
+        FROM {source}
+        WHERE exited_at >= :since
+    """)
+    by_reason_sql = text(f"""
+        SELECT exit_reason,
+               COUNT(*) AS n,
+               COALESCE(SUM(realized_pnl_usd), 0) AS pnl_usd
+        FROM {source}
+        WHERE exited_at >= :since
+        GROUP BY exit_reason
+    """)
+    by_ticker_sql = text(f"""
+        SELECT ticker,
+               COUNT(*) AS n,
+               COALESCE(SUM(realized_pnl_usd), 0) AS pnl_usd
+        FROM {source}
+        WHERE exited_at >= :since
+        GROUP BY ticker
+        ORDER BY n DESC
+    """)
+    with engine.connect() as conn:
+        headline = conn.execute(headline_sql, {"since": since_dt}).mappings().one_or_none() or {}
+        by_reason_rows = conn.execute(by_reason_sql, {"since": since_dt}).mappings().all()
+        by_ticker_rows = conn.execute(by_ticker_sql, {"since": since_dt}).mappings().all()
+
+    rt = int(headline.get("round_trips") or 0)
+    wins = int(headline.get("wins") or 0)
+    losses = int(headline.get("losses") or 0)
+    total_pnl = float(headline.get("total_pnl_usd") or 0.0)
+
+    # by_reason: always include the three primary exit reasons even at zero.
+    canonical = ("stop_hit", "target_hit", "time_stop")
+    by_reason: dict[str, dict[str, float]] = {
+        k: {"count": 0, "total_pnl_usd": 0.0} for k in canonical
+    }
+    other_count = 0
+    other_pnl = 0.0
+    for row in by_reason_rows:
+        reason = row["exit_reason"]
+        if reason in by_reason:
+            by_reason[reason]["count"] = int(row["n"])
+            by_reason[reason]["total_pnl_usd"] = float(row["pnl_usd"] or 0.0)
+        else:
+            other_count += int(row["n"])
+            other_pnl += float(row["pnl_usd"] or 0.0)
+    if other_count:
+        by_reason["other"] = {"count": other_count, "total_pnl_usd": other_pnl}
+
+    by_ticker = {
+        row["ticker"]: {
+            "count": int(row["n"]),
+            "total_pnl_usd": float(row["pnl_usd"] or 0.0),
+        }
+        for row in by_ticker_rows
+    }
+
+    return JSONResponse({
+        "round_trips": rt,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": (round(100.0 * wins / rt, 2) if rt > 0 else 0.0),
+        "total_pnl_usd": total_pnl,
+        "avg_return_pct": (
+            float(headline["avg_return_pct"])
+            if headline.get("avg_return_pct") is not None else 0.0
+        ),
+        "avg_holding_s": (
+            float(headline["avg_holding_s"])
+            if headline.get("avg_holding_s") is not None else 0.0
+        ),
+        "best_trade_pnl_usd": (
+            float(headline["best_trade_pnl_usd"])
+            if headline.get("best_trade_pnl_usd") is not None else 0.0
+        ),
+        "worst_trade_pnl_usd": (
+            float(headline["worst_trade_pnl_usd"])
+            if headline.get("worst_trade_pnl_usd") is not None else 0.0
+        ),
+        "by_reason": by_reason,
+        "by_ticker": by_ticker,
+        "since_hours": int(since_hours),
+        "include_inherited": bool(include_inherited),
+        "as_of": _utc_now_naive().isoformat(),
+    })
+
+
 @router.get("/summary")
 def get_summary() -> JSONResponse:
     """Lightweight header summary — no positions list, just counters
