@@ -84,6 +84,15 @@ CALIB_EXEC_FLOOR_S = int(
 # the floor operating without spamming. Cleared on process restart.
 _FLOOR_LOG_SEEN: set[tuple[str, str, str]] = set()
 
+# F6.5: minimum sample count before the negative-edge auto-exclusion
+# rule fires. 30 is the conventional t-stat-stability floor; below it
+# the upper-CI computation is too noisy to trust as a "definitive
+# negative" verdict. Override via env if a stronger statistical
+# argument applies.
+MIN_NEGEDGE_SAMPLES = int(
+    os.environ.get("CHILI_FAST_PATH_MIN_NEGEDGE_SAMPLES", "30")
+)
+
 
 # ── Internal: row -> stats helpers ───────────────────────────────────
 
@@ -272,12 +281,77 @@ def compute_calibrated_bracket(
     return float(stop), float(target)
 
 
+def is_negative_edge_excluded(
+    engine: Engine,
+    *,
+    ticker: str,
+    alert_type: str,
+    signal_score: float,
+) -> tuple[bool, dict[str, Any]]:
+    """F6.5: statistically-significant negative edge detector.
+
+    Looks at the (ticker, alert_type, score_bucket)'s best-Sharpe
+    horizon and returns ``(True, evidence)`` iff:
+
+      - sample_count >= MIN_NEGEDGE_SAMPLES, AND
+      - mean_return + 2 * stderr < 0
+
+    Where ``stderr = sqrt(m2 / n) / sqrt(n)`` (per the brief). This is
+    a "we're 95% confident the true mean is below zero" test -- if it
+    holds, the signal is empirically *negatively* predictive and
+    should be blocked regardless of score.
+
+    Returns ``(False, evidence)`` when:
+      - The bucket has no qualifying horizon (caller allows through).
+      - The best horizon's upper CI is at or above zero (uncertain or
+        positive; let downstream gates decide).
+      - Sample count below MIN_NEGEDGE_SAMPLES (insufficient data).
+
+    Evidence dict carries the underlying numbers so the gate can
+    surface them in the rejection JSON for postmortem.
+    """
+    bucket = score_bucket(signal_score)
+    rows = _fetch_bucket_rows(
+        engine, ticker=ticker, alert_type=alert_type, bucket=bucket,
+    )
+    best = _best_sharpe_row(rows, min_samples=MIN_NEGEDGE_SAMPLES)
+    if best is None:
+        return False, {
+            "score_bucket": bucket,
+            "verdict": "insufficient_samples",
+            "min_samples": MIN_NEGEDGE_SAMPLES,
+        }
+    n = int(best["sample_count"] or 0)
+    mean = float(best["mean_return"] or 0.0)
+    m2 = float(best["m2_return"] or 0.0)
+    # Per brief: stderr = sqrt(m2 / n) / sqrt(n)  =  sqrt(m2) / n  (large n).
+    if n <= 0:
+        return False, {"score_bucket": bucket, "verdict": "no_samples"}
+    stderr = math.sqrt(max(0.0, m2 / float(n))) / math.sqrt(float(n))
+    upper_ci = mean + 2.0 * stderr
+    evidence = {
+        "score_bucket": bucket,
+        "horizon_s": int(best["horizon_s"]),
+        "sample_count": n,
+        "mean_return": mean,
+        "stderr": stderr,
+        "upper_ci": upper_ci,
+    }
+    if upper_ci < 0.0:
+        evidence["verdict"] = "negative_edge"
+        return True, evidence
+    evidence["verdict"] = "non_negative"
+    return False, evidence
+
+
 __all__ = [
     "get_calibrated_max_hold_s",
     "is_score_tradeable",
+    "is_negative_edge_excluded",
     "compute_calibrated_bracket",
     "MIN_SAMPLES_FOR_CALIB",
     "TRADING_COST_FRAC",
     "TRADEABLE_COST_MULT",
     "CALIB_EXEC_FLOOR_S",
+    "MIN_NEGEDGE_SAMPLES",
 ]

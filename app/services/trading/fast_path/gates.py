@@ -199,6 +199,55 @@ def gate_calibrated_tradeability(alert: dict, ctx: ExecContext) -> GateResult:
     )
 
 
+def gate_negative_edge_excluded(alert: dict, ctx: ExecContext) -> GateResult:
+    """F6.5: statistically-significant negative edge auto-block.
+
+    Distinct from gate_calibrated_tradeability (which fails signals
+    that don't beat the trading-cost bar). This gate fails signals
+    whose *upper* 95% CI on mean_return is below zero -- i.e., we're
+    confident the true expected return is negative. Such signals are
+    not just "uneconomic to trade", they're "expected to lose money
+    even if free to trade."
+
+    Three outcomes:
+      - statistically negative (n>=30, mean+2*stderr<0) -> deny
+        with reason='negative_edge', evidence in detail
+      - non-negative or insufficient data -> allow (other gates
+        still apply)
+      - engine missing or lookup failure -> allow (preserves
+        backwards compatibility with unit tests)
+
+    Order in DEFAULT_GATES: AFTER gate_calibrated_tradeability
+    (so a signal that fails cost-bar AND is negative reports the
+    cost-bar reason; we keep the more specific/actionable
+    rejection visible at the top of the diagnosis chain) but
+    BEFORE gate_capacity (capacity is per-pair state; this is
+    per-signal state).
+    """
+    if ctx.engine is None:
+        return GateResult("negative_edge", True, "",
+                          {"verdict": "no_engine"})
+    try:
+        from .calibration import is_negative_edge_excluded
+        excluded, evidence = is_negative_edge_excluded(
+            ctx.engine,
+            ticker=str(alert.get("ticker") or ""),
+            alert_type=str(alert.get("alert_type") or ""),
+            signal_score=float(alert.get("signal_score") or 0.0),
+        )
+    except Exception as exc:
+        return GateResult(
+            "negative_edge", True, "",
+            {"verdict": "lookup_failed", "error": str(exc)[:120]},
+        )
+    if excluded:
+        return GateResult(
+            "negative_edge", False, "negative_edge",
+            evidence,
+        )
+    return GateResult("negative_edge", True, "", evidence)
+
+
 def gate_spread_sanity(alert: dict, ctx: ExecContext,
                        *, max_spread_bps: float = MAX_SPREAD_BPS) -> GateResult:
     """Reject when the live book is too wide. We grab spread from
@@ -283,6 +332,7 @@ DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
     gate_recency,
     gate_min_score,
     gate_calibrated_tradeability,
+    gate_negative_edge_excluded,
     gate_spread_sanity,
     gate_capacity,
     gate_daily_budget,
@@ -351,7 +401,7 @@ def is_live_authorized() -> bool:
 __all__ = [
     "GateResult", "ExecContext", "GateRunResult",
     "gate_recency", "gate_min_score", "gate_calibrated_tradeability",
-    "gate_spread_sanity",
+    "gate_negative_edge_excluded", "gate_spread_sanity",
     "gate_capacity", "gate_daily_budget", "gate_mode_interlock",
     "DEFAULT_GATES", "run_gates",
     "ALERT_RECENCY_MAX_AGE_S", "MIN_SIGNAL_SCORE", "MAX_SPREAD_BPS",
