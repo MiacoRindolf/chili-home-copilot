@@ -1,175 +1,168 @@
-# NEXT_TASK: audit-missing-stop-emergency-repair
+# NEXT_TASK: bracket-intent-stale-label-cleanup
 
 STATUS: DONE
 
 ## Goal
 
-Eliminate the live position risk surfaced by the 2026-05-03 audit: seven open Robinhood equity trades have no broker stop order because their bracket intents are parked at `terminal_reject`, and the reconciler's `state_gated_skip` path (added 2026-05-01 as part of FIX 51-53) has no escape valve when the position is still open.
+Close the structural gap surfaced by `audit-missing-stop-emergency-repair` (CC report 2026-05-03): `bracket_intents.broker_stop_order_id` is never UPDATEd by any code in the tree, so the local mirror column is dead and `intent_state='terminal_reject'` rows persist indefinitely on positions the broker has already protected. This produced the audit's $2,107→$276 false-alarm pattern.
+
+This task closes both halves of the loop in one commit:
+
+1. **Mirror writer for `broker_stop_order_id`.** On every sweep where `BrokerView.available is True`, sync `bracket_intents.broker_stop_order_id` from `BrokerView.stop_order_id`. Treat the column as advisory cache, not authority. Broker truth stays load-bearing at decision time; the mirror exists for diagnosis, audit, and admin display.
+2. **Auto-transition `intent_state='terminal_reject' → 'reconciled'`** when classifier returns `kind=agree` on a subsequent sweep. Closes the stale-label loop for the 6 surviving false-alarm rows from today's sweep + any future ones.
 
 Success means:
 
-1. **The seven existing positions are protected** — by operator triage (close, manual re-arm, or controlled writer repair). This is human action, not code.
-2. **A new code path exists** for `open trade + missing_stop + intent_state=terminal_reject`, gated behind a feature flag defaulted OFF, that distinguishes phantom positions from real exposure and re-arms the latter through the existing FIX-51 broker-qty-aware writer.
-3. **Regression test in place** that exercises the new path against all three branches (phantom, real exposure with sufficient broker qty, real exposure with capped broker qty).
-4. **Alerting wired** so the next time this state appears the operator is paged before 24-48h elapse silently.
-5. **Broker-sync reconciliation reports `missing_stop=0`** for open Robinhood equities after triage + flag flip.
+- The 6 stale-label rows from today (AIDX 1812 / CCCC 1813 / CRDL 1814 / IMTX 1818 / TLS 1821 / VFS 1822) transition to `intent_state='reconciled'` and get their `broker_stop_order_id` populated from broker truth on the next sweep after deploy.
+- ELTX 1816 (which got a real broker stop placed today) gets its NULL mirror filled with the actual `69f7c5b8-…` order ID.
+- After deploy + flag flip, the SQL probe `SELECT count(*) FROM trading_bracket_intents WHERE state='terminal_reject' AND broker_stop_order_id IS NULL AND id IN (220,221,222,224,226,229,230)` returns 0.
+- Future audits reading `broker_stop_order_id IS NULL` get accurate signal instead of ~85% false-alarm noise.
 
-This task ships **code + ops triage**, not analysis. Deliverable is `docs/STRATEGY/CC_REPORTS/<date>_audit-missing-stop-emergency-repair.md`.
+This task ships **code + verification observations**, not analysis. Deliverable is `docs/STRATEGY/CC_REPORTS/<date>_bracket-intent-stale-label-cleanup.md`.
 
 ## Why now
 
-The 2026-05-03 audit (`docs/AUDITS/2026-05-03.md`) and the Cowork reevaluation (`docs/STRATEGY/COWORK_REVIEWS/2026-05-03_audit-reevaluation.md`) both flag this as the highest-priority outstanding risk.
+Pulled directly from `audit-missing-stop-emergency-repair` Open Questions #1 and #2 (see `docs/STRATEGY/CC_REPORTS/2026-05-03_audit-missing-stop-emergency-repair.md`). Cowork review (`docs/STRATEGY/COWORK_REVIEWS/2026-05-03_audit-missing-stop-emergency-repair.md`) recommended both as YES.
 
-Concrete state at audit time:
+Three reasons to do this next:
 
-| trade_id | ticker | open since | broker_stop_order_id | intent_state |
-|---|---|---|---|---|
-| 1822 | VFS | 2026-05-01 17:50 | NULL | terminal_reject |
-| 1821 | TLS | 2026-05-01 17:50 | NULL | terminal_reject |
-| 1818 | IMTX | 2026-05-02 16:51 | NULL | terminal_reject |
-| 1816 | ELTX | 2026-05-01 18:03 | NULL | terminal_reject |
-| 1814 | CRDL | 2026-05-01 17:50 | NULL | terminal_reject |
-| 1813 | CCCC | 2026-05-01 17:50 | NULL | terminal_reject |
-| 1812 | AIDX | 2026-05-01 17:50 | NULL | terminal_reject |
+1. **Closes the false-alarm root cause while context is fresh.** The diagnostic pattern that misclassified $2,107 of "exposure" as risk was the never-UPDATEd mirror column. Every future audit will hit the same misread until we fix it.
+2. **Stops the 6h-throttle log noise.** After the throttle expires for the 5 `covered_by_existing_sell` positions, every sweep will fire `state_gated_skip` for them indefinitely. The auto-transition closes that loop.
+3. **Today's sweep generated perfect verification data.** We can confirm the mirror write and auto-transition produce the expected steady state on the very next sweep after deploy — same 7 trades, same intents, broker state unchanged, observable diff.
 
-Broker-sync logs show every 2-min sweep classifying these as `missing_stop` and skipping repair with `reason=state_terminal_reject`. The state gate at `app/services/trading/bracket_reconciliation_service.py:668-682` was added 2026-05-01 to stop the SELL_STOP rejection storm; it does that job but lacks an escape valve for "open position + missing stop" — the failure mode currently in production.
+`f8b-verification-soak-3` (preserved at `docs/STRATEGY/QUEUED/`) remains scheduled for re-promotion on/after 2026-05-04 16:30 UTC. Today's task does not affect it.
 
-The previously queued `f8b-verification-soak-3` is preserved at `docs/STRATEGY/QUEUED/f8b-verification-soak-3.md` for re-promotion on/after 2026-05-04 16:30 UTC. It is a data-window-gated analysis task, so deferring it costs nothing.
-
-## Step 1 — Operator triage (human action, BEFORE code deploy)
-
-Claude Code begins by enumerating the current state from the database (read-only) and presenting it to the operator. The operator decides per-position:
-
-- **Close** the position via the broker (manual sell), OR
-- **Manually re-arm** the stop via the broker UI (operator clicks), OR
-- **Mark for controlled writer repair** (the new code path will handle it after deploy).
-
-For each decision, Claude Code records the chosen action in the CC_REPORT. Claude Code does NOT close positions or place broker orders during this step. Read-only DB probes only.
-
-Recommended SQL (read-only):
-
-```sql
-SELECT t.id AS trade_id, t.ticker, t.status, t.broker_source,
-       bi.id AS intent_id, bi.state AS intent_state,
-       bi.broker_stop_order_id, bi.stop_price,
-       bi.quantity AS local_qty, bi.updated_at
-FROM trading_trades t
-JOIN trading_bracket_intents bi ON bi.trade_id = t.id
-WHERE t.status = 'open'
-  AND t.broker_source = 'robinhood'
-  AND bi.broker_stop_order_id IS NULL
-  AND bi.state = 'terminal_reject'
-ORDER BY bi.updated_at;
-```
-
-This list may have shifted since the audit (positions closed or new ones surfaced). Operate on the live list, not the audit's snapshot.
-
-## Step 2 — Code: emergency-repair path
+## Step 1 — Code: mirror writer + auto-transition
 
 ### Where the change lives
 
-- `app/services/trading/bracket_reconciliation_service.py` — add an emergency-repair branch ABOVE the existing `state_gated_skip` at lines 668-682. Do NOT remove the existing gate; the new branch is *additive*.
-- `app/services/trading/bracket_writer_g2.py` — reuse `place_missing_stop` and its FIX-51 broker-qty-aware logic. No new writer needed.
-- `app/config.py` (or equivalent) — add the feature flag `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED`, defaulting `False`.
+- `app/services/trading/bracket_reconciliation_service.py` — the sweep / classifier loop. Find the call site where `BrokerView` is constructed per-intent and the classifier returns its `ReconciliationDecision`. Add the mirror-write + auto-transition there.
+- `app/services/trading/bracket_intent_writer.py` — if there is a canonical writer module for `bracket_intents` mutations (the audit-missing-stop-emergency-repair task confirmed mutations live at lines 266, 413, 453, 641 in this file), add the new writer functions there. Reuse the single-writer ownership pattern. Do NOT bypass it.
+- `app/migrations.py` — no schema change needed. `broker_stop_order_id` already exists as a nullable column.
 
-### Decision logic for the new branch
+### Mirror-writer behavior
 
-The new branch fires when ALL of the following are true:
+For every intent the sweep classifies (i.e., where `BrokerView.available is True`):
 
-- `decision.kind == "missing_stop"`
-- `local.intent_state == "terminal_reject"`
-- The associated trade is `status == 'open'`
-- `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED` is True (the operator-controlled flag)
+- If `BrokerView.stop_order_id` is non-null AND differs from local `bracket_intents.broker_stop_order_id` (NULL or stale value): UPDATE local to broker value. Emit an info log: `[bracket_reconciliation] mirror_write trade=<id> intent=<id> ticker=<> old=<NULL|prev> new=<broker_id>`.
+- If `BrokerView.stop_order_id` is NULL AND local `broker_stop_order_id` is non-null: UPDATE local to NULL (the broker order has been canceled / filled / orphaned). Emit info log: `[bracket_reconciliation] mirror_clear trade=<id> intent=<id> ticker=<> old=<prev>`.
+- If `BrokerView.available is False`: NO mirror write this sweep. Broker-down means we have no observation.
+- If both sides agree: no-op, no log.
 
-Three sub-branches based on `BrokerView.position_quantity`:
+The mirror writer is called from inside the sweep loop, AFTER the classifier returns its decision, BEFORE `_invoke_writer_for_decision` runs. The order matters: the classifier's `kind=agree` decision was made against the current `BrokerView`, so writing the mirror first means downstream `_invoke_writer_for_decision` calls operate on a freshly-synced row. (In practice this matters mostly for tests; the live sweep doesn't re-read the row mid-loop.)
 
-1. **`broker.available == False` or `broker_qty is None`** → skip silently this sweep, retry next. Mirror FIX 51's `skipped_broker_qty_unknown`. Do NOT escalate; broker-down sweeps are not actionable.
+### Auto-transition behavior
 
-2. **`broker_qty == 0` → phantom open trade.** Mark the trade `closed` with `closed_reason='phantom_after_terminal_reject'` and the bracket_intent `state='closed'` with `closed_reason='phantom'`. Emit a CRITICAL log: `[bracket_reconciliation] EMERGENCY-REPAIR phantom_close trade=<id> intent=<id> ticker=<>`. Do NOT place a broker stop — the position is gone.
+Inside the same sweep loop, AFTER the classifier returns:
 
-3. **`broker_qty > 0`** → real exposure. Place the stop via the existing FIX-51 path (`place_missing_stop` with `placement_qty = min(local_qty, broker_qty)`). Wrap in a per-intent attempt counter so the new path executes at most once per intent per 6h: if the placement rejects again, the new path re-locks immediately and reverts to `state_gated_skip` until manual operator intervention. Emit a CRITICAL log on entry and another on success/rejection.
+- If `decision.kind == 'agree'` AND `local.intent_state == 'terminal_reject'`: UPDATE `bracket_intents.state = 'reconciled'`, set `last_diff_reason = 'auto_reconciled_after_terminal_reject'`. Emit a CRITICAL log (this is operationally important — a position previously labeled in failure has been confirmed healthy): `[bracket_reconciliation] auto_reconcile trade=<id> intent=<id> ticker=<> from=terminal_reject to=reconciled`.
+- Audit emit via existing `_g2_event(writer="auto_reconcile_terminal_reject", ...)` so the transition shows up in `trading_execution_events`.
+- Idempotent: if `intent_state` is already `reconciled`, no-op.
 
-Per-intent attempt persistence: a new column `terminal_reject_repair_last_attempt_at TIMESTAMPTZ` on `trading_bracket_intents` (migration 222 — verify this is the next free ID via `scripts/verify-migration-ids.ps1`). The 6h throttle is checked against `now() - terminal_reject_repair_last_attempt_at`. Use `_dynamic_throttle_seconds()` if such a helper already exists in the brain; otherwise the constant goes in module-level config (NOT inline) and is named.
+### Authority contract preservation
 
-### Audit emission
+Critical: the local column is **advisory cache**, not authority. Document this at the writer site with a comment, and:
 
-Every emergency-repair attempt — phantom, success, rejection-relock — must write a `trading_bracket_writer_actions` row (or whatever audit table the FIX-51 path already uses) with the new writer name `emergency_terminal_reject_repair` so the funnel-accounting and operator postmortem queries pick it up.
+- `_invoke_writer_for_decision` and all reconciler decision paths MUST continue reading from `BrokerView`, not from `bracket_intents.broker_stop_order_id`. The mirror is a *consequence* of the sweep, not an *input*.
+- A grep for new `broker_stop_order_id` reads in any decision-making code path is a regression. Audit-table reads, admin-UI reads, debugging reads — fine. Decision-time reads — not fine.
+- The classifier's `kind=agree` path should not change behavior. The new transition is a side effect of `kind=agree`, not a new branch in the classifier.
 
-### Operator alert wiring
+### Feature flag
 
-When the new branch fires, also write to the alerting channel the brain already uses for CRITICAL operational events. Reuse the existing alerting plumbing — do not invent a new one. If the brain currently has no alerting channel for bracket-reconciliation events, flag this back in Open Questions and proceed without it for now (the CRITICAL log line is the minimum bar).
+`CHILI_BRACKET_INTENT_MIRROR_ENABLED`, defaulting `False` in `app/config.py` (mirror Field pattern from `chili_bracket_missing_stop_repair_enabled`). Default OFF in compose too — the operator flips manually after reading the deploy. Same operational pattern as the emergency-repair task.
 
-## Step 3 — Regression tests
+When the flag is OFF, neither the mirror-write nor the auto-transition fires. Pre-existing `state_gated_skip` and `kind=agree` no-op behavior preserved.
 
-Add `tests/test_bracket_emergency_terminal_reject_repair.py` covering:
+## Step 2 — Regression tests
 
-1. **Phantom branch.** Seed: open trade, terminal_reject intent, broker_qty=0. Assert: trade closed, intent closed, no broker order placed, audit row written, throttle column set.
-2. **Real-exposure success.** Seed: open trade, terminal_reject intent, broker_qty=local_qty=10, FIX-51 writer mock succeeds. Assert: stop placed at min(local, broker), trade stays open, intent state transitions to whatever `place_missing_stop` sets on success, audit row written, throttle set, CRITICAL log line emitted.
-3. **Real-exposure capped.** Seed: open trade, terminal_reject intent, local_qty=20, broker_qty=10. Assert: stop placed at qty=10 with the warning log line.
-4. **Real-exposure rejection-relock.** Seed: open trade, terminal_reject intent, broker_qty>0, FIX-51 writer mock returns `ok=False`. Assert: throttle set, intent state stays `terminal_reject` (no progression), next call within 6h returns `state_gated_skip` and does NOT retry.
-5. **Throttle expiry.** Same seed as (4) but advance the clock past 6h. Assert: new attempt fires.
-6. **Flag OFF.** Seed: open trade, terminal_reject intent, broker_qty>0, flag False. Assert: returns `state_gated_skip`, no broker call, no audit row.
-7. **Broker unavailable.** Seed: as above but `broker.available == False`. Assert: skipped silently, no audit row, no throttle bump.
+Add `tests/test_bracket_intent_stale_label_cleanup.py` covering:
 
-All tests use `chili_test` per the conftest guard. No mocks-of-mocks — use the real `_invoke_writer_for_decision` entry point with a stubbed `place_missing_stop`.
+1. **Mirror write on `kind=agree` when local NULL, broker has order.** Seed: terminal_reject intent, broker_stop_order_id NULL, BrokerView.stop_order_id='abc'. Assert: post-sweep local broker_stop_order_id='abc', state='reconciled', audit event written, both log lines emitted.
+2. **Mirror write on `kind=agree` when local stale, broker has different order.** Seed: local broker_stop_order_id='old', BrokerView.stop_order_id='new'. Assert: local updated to 'new', state transitions to reconciled.
+3. **Mirror clear on `kind=missing_stop` when local has order, broker NULL.** Seed: local broker_stop_order_id='dead', BrokerView.stop_order_id=None, BrokerView.position_quantity > 0. Assert: local cleared to NULL, mirror_clear log emitted, state stays terminal_reject (auto-transition doesn't fire because kind != agree).
+4. **No mirror write when broker unavailable.** Seed: BrokerView.available=False. Assert: local row unchanged, no log lines, no audit event.
+5. **No-op when both sides agree.** Seed: local broker_stop_order_id='abc', BrokerView.stop_order_id='abc', state='reconciled'. Assert: no UPDATE issued, no audit event, no log lines.
+6. **Auto-transition idempotency.** Run twice on a `state='reconciled'` row with `kind=agree`. Assert: only first run produces the audit event; second is no-op.
+7. **Flag OFF preserves pre-existing behavior.** Seed: terminal_reject intent, kind=agree on broker truth, flag False. Assert: local row unchanged (broker_stop_order_id stays NULL, state stays terminal_reject), no logs, no audit events.
+8. **Authority contract canary.** Static check: grep `app/services/trading/bracket_reconciliation_service.py` and `app/services/trading/bracket_writer_g2.py` for reads of `bracket_intents.broker_stop_order_id` in decision-making code paths (anything called from `_invoke_writer_for_decision` or its descendants). Fail the test if any new read is detected. Implement as a static analysis test using `ast` or a literal grep.
+9. **No-op for `kind=agree` rows that were never `terminal_reject`.** Seed: state='reconciled', kind=agree. Assert: no auto-transition fires (already reconciled). Mirror still writes if applicable (covered by tests 1+2).
 
-## Step 4 — Deploy + verify
+All tests use `chili_test` per the conftest guard.
 
-1. Land the migration and code on the dirty worktree's existing branch (or `git checkout -B fix/audit-missing-stop-emergency-repair` if the worktree is too dirty to commit cleanly — use judgment).
+## Step 3 — Deploy + verify
+
+1. Land the code on a clean commit. Run `scripts/verify-migration-ids.ps1` (no schema change, but standard hygiene).
 2. **Run the regression tests against `chili_test` and report results in the CC_REPORT.**
-3. Restart the affected workers (`broker-sync-worker` is the one that drives the reconciler). `docker compose restart broker-sync-worker`.
-4. **Operator triage of the seven existing positions** must be complete before flipping the flag. The CC_REPORT should show the operator-decided action per position, with timestamps if available.
-5. Flip `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=1` (operator action — Claude Code requests, doesn't self-authorize). Restart broker-sync-worker.
-6. Watch one full sweep cycle (~2 minutes) and capture `[bracket_reconciliation] EMERGENCY-REPAIR ...` lines in the CC_REPORT.
-7. Verify `missing_stop=0` for open Robinhood equities via the same SQL as Step 1.
+3. Pre-deploy SQL probe (capture in CC_REPORT):
+
+```sql
+SELECT bi.id AS intent_id, t.id AS trade_id, t.ticker,
+       bi.state AS intent_state, bi.broker_stop_order_id, bi.last_diff_reason
+FROM trading_bracket_intents bi
+JOIN trading_trades t ON t.id = bi.trade_id
+WHERE bi.id IN (220, 221, 222, 224, 226, 229, 230)
+ORDER BY bi.id;
+```
+
+Expected pre-deploy state: all `state='terminal_reject'`, all `broker_stop_order_id IS NULL` (per CC_REPORT for audit-missing-stop-emergency-repair).
+
+4. Restart `broker-sync-worker` to pick up the new code with flag OFF. Verify behavior unchanged: same `state_gated_skip` / `state='terminal_reject'` lines (after the 6h emergency-repair throttle expires).
+5. Operator flips `CHILI_BRACKET_INTENT_MIRROR_ENABLED=1` in `docker-compose.yml` `broker-sync-worker.environment`. `docker compose up -d --force-recreate --no-deps broker-sync-worker`.
+6. Watch one full sweep cycle (~2 minutes). Capture `mirror_write` and `auto_reconcile` log lines in the CC_REPORT.
+7. Post-flip SQL probe (same query as step 3). Expected:
+   - All 7 rows: `state='reconciled'`, `last_diff_reason='auto_reconciled_after_terminal_reject'`.
+   - 1816 (ELTX): `broker_stop_order_id='69f7c5b8-7e15-4176-a31f-1544696055d5'`.
+   - 220, 221, 222, 226, 229, 230 (AIDX, CCCC, CRDL, IMTX, TLS, VFS): `broker_stop_order_id` populated with whatever the broker reports for the existing protective sell orders.
+8. **Critical post-deploy canary:** the `state_gated_skip` log lines for those 7 trades should stop appearing on subsequent sweeps. Capture log diff (last sweep before flag flip vs. first 3 sweeps after) in the CC_REPORT.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `app/services/trading/bracket_writer_g2.place_missing_stop` — the FIX-51 broker-qty-aware writer. Reuse, do not duplicate.
-- `app/services/trading/bracket_reconciliation_service._invoke_writer_for_decision` — the existing entry point. Add the new branch inside it, above the existing `state_gated_skip` at lines 668-682.
-- The `BrokerView` struct already exposes `available`, `position_quantity` — use them; do not query the broker again.
-- The `trading_bracket_writer_actions` audit table (or whatever FIX 51 writes to) — reuse for the new writer name.
-- Migration framework in `app/migrations.py` — add `_migration_222_terminal_reject_repair_throttle()` per the existing pattern. Idempotent. Check with `scripts/verify-migration-ids.ps1` before commit.
+- `BrokerView.stop_order_id` — already populated by the broker truth path; just read it.
+- `BrokerView.available` — gates whether to mirror at all.
+- `bracket_intent_writer.py` UPDATE site at line 266/453/641 — extend or reuse for the new mutations. Single-writer ownership preserved.
+- `_g2_event(writer=...)` audit emission — reuse for `auto_reconcile_terminal_reject` writer name.
+- `_invoke_writer_for_decision` entry point in `bracket_reconciliation_service.py` — the new code is upstream of this; do not modify the function itself.
 
 ## Constraints / do not touch
 
-- **Do not modify the live-fast-path safety belts** (8 belts, three flags). PROTOCOL Hard Rule 1.
-- **Do not remove the `state_gated_skip` branch** at lines 668-682. The new branch is additive.
-- **Do not flip `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED` to default True.** Default OFF, operator flips manually after triage.
-- **Do not place broker orders during Step 1 (operator triage).**
-- **Do not bypass the `chili_test` guard in conftest.py.** PROTOCOL Hard Rule 5.
-- **Migration ID must not collide.** Run `scripts/verify-migration-ids.ps1` before commit.
-- **No magic numbers.** The 6h throttle goes in named module-level config or a brain function — not inline.
+- **Do not modify the live-fast-path safety belts.** PROTOCOL Hard Rule 1.
+- **Do not promote `bracket_intents.broker_stop_order_id` to authority.** Decision-time consumers must continue reading `BrokerView`. Test #8 enforces this.
+- **Do not change the emergency-repair branch** shipped in `ef50d3f` or its 6h throttle.
+- **Do not flip `CHILI_BRACKET_INTENT_MIRROR_ENABLED` to default True in code.** Default OFF; operator flips manually.
+- **Do not bundle this with the unsupported-crypto pre-filter task** (audit HIGH #4). One logical change per commit.
+- **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
+- **No magic numbers.** No new constants needed; the mirror writer reads `BrokerView` and writes back, no thresholds involved.
 
 ## Out of scope
 
-- Fixing the `terminal_reject` *root cause* — i.e., why Robinhood was rejecting the original SELL_STOP submissions. That's a separate investigation; the emergency-repair path handles the symptom.
+- `covered_by_existing_sell` provenance investigation (Open Q #3 — were the original "rejected" SELL_STOPs the ones now covering?). Separate task.
+- 6h emergency-repair throttle tuning (Open Q #4). Separate task if soak shows mistuning.
 - Unsupported-crypto pre-filter (audit HIGH #4). Next task after this.
-- Venue-truth shadow-log wiring (audit HIGH #2). Queued behind the soak-3.
+- Venue-truth shadow-log wiring (audit HIGH #2). Queued behind soak-3.
 - Pullback-exit signal-specific cold-start hold (audit HIGH #3). Queued.
-- CHECK-constraint migrations (audit MEDIUM #7-8). Bundle later.
-- `fetch_ohlcv_batch` crypto-skip parity (audit MEDIUM #5). Queued.
-- Any change to F8b allowlist or fast-path calibration tables. The fast-path is paper and orthogonal.
+- Investigation into why `terminal_reject` was set on these 7 in the first place. Out of scope.
+- Any change to the classifier's `kind=` enum. The auto-transition is a *consumer* of `kind=agree`, not a new kind.
+- Migrating the existing 7 rows via a one-shot migration. The new code path will resolve them on the next sweep; no migration needed.
 
 ## Success criteria
 
-1. Migration 222 (or next-free ID) added, registered in `MIGRATIONS`, idempotent, applies cleanly on app startup. `verify-migration-ids.ps1` passes.
-2. New emergency-repair branch lives in `bracket_reconciliation_service.py` above the existing `state_gated_skip`. Existing gate untouched.
-3. `tests/test_bracket_emergency_terminal_reject_repair.py` exists and all seven scenarios pass.
-4. Operator triage completed for the seven positions (or however many remain at task start). Per-position action recorded in the CC_REPORT.
-5. Feature flag `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED` exists, defaults False, documented in the CC_REPORT.
-6. After flag flip + worker restart, the SQL probe in Step 1 returns 0 rows. CC_REPORT shows the verification.
-7. CC_REPORT written at `docs/STRATEGY/CC_REPORTS/<date>_audit-missing-stop-emergency-repair.md` per PROTOCOL format. One commit (or tight series), pushed.
+1. New code lives in `bracket_reconciliation_service.py` (sweep loop hook) and `bracket_intent_writer.py` (writer functions). Existing `_invoke_writer_for_decision` and the emergency-repair branch untouched.
+2. Feature flag `CHILI_BRACKET_INTENT_MIRROR_ENABLED` exists in `app/config.py`, defaults False, documented in CC_REPORT.
+3. `tests/test_bracket_intent_stale_label_cleanup.py` exists, all 9 scenarios pass against `chili_test`. Test #8 specifically asserts the authority contract holds.
+4. After flag flip + worker restart, the SQL probe in Step 3.7 returns the expected post-state (all 7 rows reconciled with mirror populated). CC_REPORT shows pre/post diff.
+5. CC_REPORT log-diff section shows `state_gated_skip` for these 7 trades stops appearing after deploy.
+6. CC_REPORT written at `docs/STRATEGY/CC_REPORTS/<date>_bracket-intent-stale-label-cleanup.md` per PROTOCOL format. One commit (or tight series), pushed.
 
 ## Open questions for Cowork (surface in your report only if relevant)
 
-1. **Should the 6h throttle be configurable per-broker?** Robinhood-specific failure modes might differ from Coinbase if/when the same path is extended. Default uniform; flag if the implementation surfaces a reason for differentiation.
-2. **Is there an existing alerting channel for bracket-reconciliation CRITICAL events?** If yes, name it; if no, the CRITICAL log line is the minimum bar and a follow-up alerting wiring task should be queued.
-3. **If broker_qty > local_qty (broker has MORE shares than the bracket_intent recorded)** — the FIX-51 path covers this case (`min(local_qty, broker_qty) = local_qty`), but it leaves residual unprotected exposure. Surface this if observed; it's a separate bug class (likely manual buy or reconciliation drift) that should not be silently absorbed.
-4. **Phantom-detection vs orphan-intent cleanup overlap.** FIX-51's comments mention an "orphan-intent cleanup path" responsible for clearing bracket_intent rows when the position is gone. If the new phantom-close branch overlaps that path's responsibilities, surface the boundary.
+1. **Is there a canonical writer module to extend, or should the new writer live alongside the sweep code?** The audit-missing-stop-emergency-repair task identified mutations in `bracket_intent_writer.py`. If that's the single-writer module, extend it. If the sweep code already has its own narrow writer (e.g., for `last_seen_at`), surface the boundary so we don't duplicate.
+2. **Should `mirror_write` log lines be downgraded from info to debug?** Each sweep touches up to ~50 intents; a steady-state cluster of "no-op" or "mirror_write to same value" logs could become noise. Recommend: keep info for cases where the mirror actually changed (added, cleared, updated), debug for no-ops. Surface if the implementation reveals a different threshold makes more sense.
+3. **Does any consumer outside the reconciler currently read `bracket_intents.broker_stop_order_id`?** The CC_REPORT for audit-missing-stop-emergency-repair confirmed no UPDATE site exists, but didn't grep for READ sites. If the admin UI or any audit query reads it expecting NULL-or-real semantics, populating it changes their visible state. Surface the grep results in the CC_REPORT so any consumer behavior change is documented.
+4. **What's the right value for `last_diff_reason` on the auto-reconcile transition?** I proposed `'auto_reconciled_after_terminal_reject'`. If the codebase has an enum or convention, surface it.
 
 ## Rollback plan
 
-- **Code rollback:** Revert the commit. Migration 222 is additive (new column with default NULL); leaving the column in place is safe.
-- **Flag rollback:** Set `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=0` and restart `broker-sync-worker`. The new branch becomes a no-op; behavior reverts to pre-task `state_gated_skip` for terminal-reject intents. Open positions remain protected by whatever Step 1 triage decided.
-- **Migration rollback:** None required — the column is nullable and unused once the flag is off. If aggressive cleanup is desired later, write a follow-up migration to drop the column.
+- **Code rollback:** Revert the commit. No schema change; nothing to undo at the DB layer beyond the rows that got their `broker_stop_order_id` populated and `state` transitioned. Those are correct values; leaving them in the rolled-back-but-populated state is safe.
+- **Flag rollback:** Set `CHILI_BRACKET_INTENT_MIRROR_ENABLED=0` and restart `broker-sync-worker`. The new code becomes a no-op. Pre-existing classifier behavior resumes. Already-mirrored rows stay populated (which is fine — they're advisory).
+- **If a downstream consumer breaks** because it relied on `broker_stop_order_id` being NULL: that's a contract bug we exposed, not a regression of this task. Fix the consumer.
+- **No live-broker rollback needed.** This task makes no broker calls.

@@ -606,6 +606,15 @@ services:
       # broker stops via FIX-51 writer. IMTX has reconciled to kind=agree
       # and is unaffected. 6h throttle prevents repair storms.
       - CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=1
+      # 2026-05-03 bracket-intent-stale-label-cleanup. Mirrors
+      # BrokerView.stop_order_id into local advisory cache and auto-
+      # transitions terminal_reject -> reconciled when classifier says
+      # kind=agree on a subsequent sweep. Closes the stale-label loop
+      # left by the emergency-repair task: 6 of 7 rows had broker
+      # protection but local intent_state was stuck. DB-only writes;
+      # no broker calls. Default OFF; flipped here after CC report
+      # acknowledged the structural gap.
+      - CHILI_BRACKET_INTENT_MIRROR_ENABLED=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
