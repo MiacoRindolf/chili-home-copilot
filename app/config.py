@@ -2225,6 +2225,20 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED"),
     )
+    # bracket-intent-stale-label-cleanup (2026-05-03) — additive sweep-loop
+    # hook that does two things when ON:
+    #   1. Mirror BrokerView.stop_order_id into bracket_intents.broker_stop_order_id
+    #      (advisory cache; decision-time consumers MUST keep reading BrokerView).
+    #   2. Auto-transition intent_state='terminal_reject' → 'reconciled' when
+    #      classifier returns kind=agree on a subsequent sweep, with last_diff_reason
+    #      'auto_reconciled_after_terminal_reject' and a CRITICAL log line.
+    # Flag OFF preserves prior behavior (mark_reconciled silently fails on the
+    # terminal_reject → reconciled transition because the standard state machine
+    # does not allow it; the explicit auto-reconcile writer bypasses that).
+    chili_bracket_intent_mirror_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_BRACKET_INTENT_MIRROR_ENABLED"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

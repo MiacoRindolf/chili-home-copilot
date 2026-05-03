@@ -25,7 +25,12 @@ from ...config import settings
 from ...trading_brain.infrastructure.bracket_reconciliation_ops_log import (
     format_bracket_reconciliation_ops_line,
 )
-from .bracket_intent_writer import bump_last_observed, mark_reconciled
+from .bracket_intent_writer import (
+    bump_last_observed,
+    mark_auto_reconciled_after_terminal_reject,
+    mark_reconciled,
+    sync_broker_stop_order_id_mirror,
+)
 from .bracket_reconciler import (
     BrokerView,
     LocalView,
@@ -447,6 +452,133 @@ def _stage_classify_all(batch: SweepBatch) -> list[ReconciliationDecision]:
     return out
 
 
+# ── bracket-intent-stale-label-cleanup (2026-05-03) ────────────────────
+# Sweep-loop hook applied AFTER the classifier returns and BEFORE
+# _invoke_writer_for_decision runs. Two effects when the flag is ON:
+#   (1) Mirror BrokerView.stop_order_id into the local advisory cache
+#       column. The local column is NEVER read by decision-time code
+#       (test #8 enforces this); it exists for admin/audit visibility.
+#   (2) Auto-transition intent_state='terminal_reject' → 'reconciled'
+#       when the classifier reports kind=agree on a subsequent sweep.
+#       Closes the stale-label loop seen on AIDX/CCCC/CRDL/IMTX/TLS/VFS
+#       on 2026-05-03 where broker truth had reconciled but local rows
+#       were stuck due to the state-machine's terminal_reject cooldown.
+#
+# Both effects are silent (return None) when:
+#   - feature flag is OFF (chili_bracket_intent_mirror_enabled)
+#   - broker.available is False (no observation, no mirror write)
+#   - bracket_intent_id is None (orphan trade row, nothing to mirror)
+
+
+def _apply_intent_mirror_writes(
+    db: Session,
+    *,
+    sweep_id: str,
+    mode: str,
+    local: LocalView,
+    broker: BrokerView,
+    decision: ReconciliationDecision,
+) -> None:
+    """Mirror broker stop-order id and auto-transition stale terminal_reject
+    rows when the classifier subsequently reports kind=agree.
+
+    Failure-tolerant: any helper exception is logged at debug and the
+    sweep continues; mirror writes are advisory and an auto-transition
+    rejection just leaves the row in its prior state for the next sweep.
+    """
+    if not getattr(settings, "chili_bracket_intent_mirror_enabled", False):
+        return
+    if local.bracket_intent_id is None:
+        return
+    if not broker.available:
+        return
+
+    intent_id = int(local.bracket_intent_id)
+    ticker = local.ticker or "?"
+    broker_source = local.broker_source or "?"
+    broker_stop_order_id = broker.stop_order_id
+
+    # ── Mirror write ─────────────────────────────────────────────────
+    try:
+        changed, prev_value = sync_broker_stop_order_id_mirror(
+            db,
+            intent_id,
+            broker_value=broker_stop_order_id,
+        )
+        if changed:
+            if broker_stop_order_id:
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} mirror_write trade=%s intent=%s "
+                    f"ticker=%s old=%s new=%s",
+                    local.trade_id, intent_id, ticker,
+                    prev_value or "NULL", broker_stop_order_id,
+                )
+            else:
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} mirror_clear trade=%s intent=%s "
+                    f"ticker=%s old=%s",
+                    local.trade_id, intent_id, ticker,
+                    prev_value or "NULL",
+                )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug(
+            f"{BRACKET_RECONCILIATION} mirror sync failed for intent %s",
+            intent_id, exc_info=True,
+        )
+
+    # ── Auto-transition: terminal_reject → reconciled on kind=agree ──
+    if decision.kind != "agree":
+        return
+    if (local.intent_state or "").lower() != "terminal_reject":
+        return
+
+    try:
+        transitioned = mark_auto_reconciled_after_terminal_reject(db, intent_id)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug(
+            f"{BRACKET_RECONCILIATION} auto-reconcile failed for intent %s",
+            intent_id, exc_info=True,
+        )
+        return
+
+    if not transitioned:
+        # Idempotent path: row was no longer in terminal_reject (concurrent
+        # sweep already moved it). Quiet no-op.
+        return
+
+    logger.critical(
+        f"{BRACKET_RECONCILIATION} auto_reconcile trade=%s intent=%s ticker=%s "
+        f"from=terminal_reject to=reconciled "
+        f"(broker subsequently agrees; clearing stale label)",
+        local.trade_id, intent_id, ticker,
+    )
+
+    try:
+        from .bracket_writer_g2 import _g2_event
+        _g2_event(
+            db,
+            trade_id=int(local.trade_id) if local.trade_id is not None else 0,
+            bracket_intent_id=intent_id,
+            ticker=ticker,
+            broker_source=broker_source,
+            event_type="bracket_writer_action",
+            status="auto_reconcile_terminal_reject",
+            decision_kind=decision.kind,
+            decision_severity=decision.severity,
+            extra={
+                "writer": "auto_reconcile_terminal_reject",
+                "sweep_id": sweep_id,
+                "mode": mode,
+                "broker_stop_order_id": broker_stop_order_id,
+            },
+        )
+    except Exception:  # pragma: no cover - defensive audit
+        logger.debug(
+            f"{BRACKET_RECONCILIATION} auto-reconcile audit emit failed for intent %s",
+            intent_id, exc_info=True,
+        )
+
+
 # ── Stage 4: log_all (DB writes + intent bumps + ops-log emission) ─────
 
 
@@ -519,6 +651,19 @@ def _stage_log_all(db: Session, batch: SweepBatch) -> int:
                     severity=decision.severity,
                 )
             )
+
+        # bracket-intent-stale-label-cleanup hook (gated, no-op when flag OFF).
+        # Runs BEFORE _invoke_writer_for_decision so the auto-transition can
+        # land (terminal_reject → reconciled) before the next branch reads
+        # intent_state on the same sweep.
+        _apply_intent_mirror_writes(
+            db,
+            sweep_id=batch.sweep_id,
+            mode=batch.mode,
+            local=lv,
+            broker=bv,
+            decision=decision,
+        )
 
         # Phase G.2 writer hook (Round 23). No-op unless mode=authoritative.
         writer_res = _invoke_writer_for_decision(
@@ -1340,6 +1485,17 @@ def _run_sweep_legacy(
                     severity=decision.severity,
                 )
             )
+
+        # bracket-intent-stale-label-cleanup hook (gated, no-op when flag OFF).
+        # See helper docstring; same wiring as the staged path in _stage_log_all.
+        _apply_intent_mirror_writes(
+            db,
+            sweep_id=sweep_id,
+            mode=mode,
+            local=local,
+            broker=broker,
+            decision=decision,
+        )
 
         # Phase G.2 writer hook (Round 23). No-op unless mode=authoritative.
         writer_res = _invoke_writer_for_decision(

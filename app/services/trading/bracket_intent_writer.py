@@ -649,6 +649,87 @@ def bump_last_observed(
     return bool(result.rowcount)
 
 
+# ── bracket-intent-stale-label-cleanup (2026-05-03) ────────────────────
+# Two writers added to support the sweep-loop mirror + auto-transition.
+# Both gated upstream by ``chili_bracket_intent_mirror_enabled``; the
+# writers themselves are unconditional helpers (the gate lives in the
+# reconciler so tests can drive the writers directly).
+
+
+def sync_broker_stop_order_id_mirror(
+    db: Session,
+    intent_id: int,
+    *,
+    broker_value: str | None,
+) -> tuple[bool, str | None]:
+    """Mirror ``BrokerView.stop_order_id`` into the local
+    ``trading_bracket_intents.broker_stop_order_id`` column.
+
+    The local column is an **advisory cache**, not authority.
+    Decision-time consumers (``_invoke_writer_for_decision`` and any
+    caller it reaches) MUST continue to read from ``BrokerView``; this
+    mirror exists so external readers (admin UI, audit queries,
+    debugging) see broker truth without re-querying the broker.
+
+    Returns ``(changed, prev_value)`` where ``changed`` is True only
+    when the column actually moved. No-ops short-circuit (no UPDATE,
+    no ``updated_at`` bump) so quiet sweeps don't churn the timestamp.
+
+    Caller controls commit boundary; this helper does NOT commit.
+    """
+    row = db.execute(text(
+        "SELECT broker_stop_order_id FROM trading_bracket_intents WHERE id = :id"
+    ), {"id": int(intent_id)}).fetchone()
+    if row is None:
+        return False, None
+    prev = row[0]
+    # Normalize: empty string == None for change detection.
+    prev_norm = prev if prev else None
+    new_norm = broker_value if broker_value else None
+    if prev_norm == new_norm:
+        return False, prev_norm
+    db.execute(text(
+        "UPDATE trading_bracket_intents "
+        "SET broker_stop_order_id = :v, updated_at = NOW() "
+        "WHERE id = :id"
+    ), {"id": int(intent_id), "v": new_norm})
+    return True, prev_norm
+
+
+def mark_auto_reconciled_after_terminal_reject(
+    db: Session,
+    intent_id: int,
+) -> bool:
+    """Explicit ``terminal_reject → reconciled`` transition for the case
+    where broker truth subsequently agrees with our local view on a
+    sweep.
+
+    The standard ``transition()`` state machine does NOT permit this
+    move (terminal_reject's only legal exits are INTENT — manual fix —
+    or CLOSED). That gate is correct for the cooldown semantics
+    introduced by FIX 52: a non-retryable rejection should not silently
+    self-heal. But when the broker is actually reporting a working stop
+    that matches our intent, the rejection is moot and the intent is
+    cosmetically stuck.
+
+    This writer is the reviewable, audited bypass: a raw UPDATE with
+    ``WHERE intent_state = 'terminal_reject'`` precondition. Idempotent
+    by construction — a row already in any other state is unaffected.
+
+    Caller controls commit boundary; this helper does NOT commit.
+    """
+    result = db.execute(text(
+        "UPDATE trading_bracket_intents "
+        "SET intent_state = 'reconciled', "
+        "    last_diff_reason = 'auto_reconciled_after_terminal_reject', "
+        "    last_observed_at = NOW(), "
+        "    updated_at = NOW() "
+        "WHERE id = :id "
+        "  AND intent_state = 'terminal_reject'"
+    ), {"id": int(intent_id)})
+    return bool(result.rowcount)
+
+
 # ── Diagnostics summary ────────────────────────────────────────────────
 
 
@@ -720,10 +801,12 @@ __all__ = [
     "bracket_intent_summary",
     "bump_last_observed",
     "is_terminal_state",
+    "mark_auto_reconciled_after_terminal_reject",
     "mark_closed",
     "mark_reconciled",
     "mark_terminal_reject",
     "mode_is_active",
+    "sync_broker_stop_order_id_mirror",
     "transition",
     "upsert_bracket_intent",
 ]
