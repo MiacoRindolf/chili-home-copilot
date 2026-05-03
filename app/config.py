@@ -2207,6 +2207,24 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_BRACKET_SWEEP_WRITER_ENABLED"),
     )
+    # audit-missing-stop-emergency-repair (2026-05-03) — additive escape
+    # valve for the bracket reconciler's state_gated_skip when the intent
+    # is parked at terminal_reject AND the trade is still open. With the
+    # flag OFF (default) behavior is unchanged: state_gated_skip continues
+    # to short-circuit. With the flag ON, the new branch fires per-intent
+    # at most once per CHILI_BRACKET_TERMINAL_REJECT_REPAIR_THROTTLE_SECONDS
+    # (default 6h, see bracket_reconciliation_service module-level constant).
+    # Three sub-branches by broker quantity: phantom-close (qty=0), real-
+    # exposure repair (qty>0, calls FIX-51 place_missing_stop), or
+    # broker_unavailable skip. Any rejection by the FIX-51 path bumps the
+    # throttle so the gate re-locks; manual operator action is required to
+    # unstick. Operator must triage existing terminal_reject positions
+    # BEFORE flipping this flag (close, manually re-arm, or accept the
+    # writer's controlled retry).
+    chili_bracket_missing_stop_repair_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

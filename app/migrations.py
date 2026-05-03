@@ -14668,6 +14668,37 @@ def _migration_220_fast_signal_decay(conn) -> None:
     conn.commit()
 
 
+def _migration_222_bracket_intent_terminal_reject_repair_throttle(conn) -> None:
+    """audit-missing-stop-emergency-repair (2026-05-03).
+
+    Adds ``terminal_reject_repair_last_attempt_at`` to
+    ``trading_bracket_intents``. Tracks per-intent the last time the
+    emergency-repair path (a new branch in
+    ``bracket_reconciliation_service._invoke_writer_for_decision``)
+    fired against this intent, regardless of outcome.
+
+    The throttle keeps a single misbehaving intent from being retried
+    on every 2-min sweep -- if a placement attempt rejects again, the
+    column is set to NOW() and the gate re-locks for
+    ``CHILI_BRACKET_TERMINAL_REJECT_REPAIR_THROTTLE_SECONDS`` (default
+    6h). Phantom-close path also bumps the column to keep the audit
+    trail consistent (the trade is closed at that point, so further
+    attempts are moot, but the column reflects 'we acted on this row').
+
+    Nullable so existing rows are unaffected; default NULL means
+    'never attempted' which the gate interprets as throttle-expired.
+    Idempotent.
+    """
+    inspector = sa_inspect(conn)
+    cols = {c["name"] for c in inspector.get_columns("trading_bracket_intents")}
+    if "terminal_reject_repair_last_attempt_at" not in cols:
+        conn.execute(text(
+            "ALTER TABLE trading_bracket_intents "
+            "ADD COLUMN terminal_reject_repair_last_attempt_at TIMESTAMP"
+        ))
+    conn.commit()
+
+
 def _migration_221_fast_path_notify_triggers(conn) -> None:
     """F6 (2026-05-02) -- AFTER INSERT triggers emitting Postgres
     NOTIFY on fast_alerts / fast_exits / fast_orderbook so the
@@ -15123,6 +15154,8 @@ MIGRATIONS = [
     ("219_fast_exits_native_view", _migration_219_fast_exits_native_view),
     ("220_fast_signal_decay", _migration_220_fast_signal_decay),
     ("221_fast_path_notify_triggers", _migration_221_fast_path_notify_triggers),
+    ("222_bracket_intent_terminal_reject_repair_throttle",
+     _migration_222_bracket_intent_terminal_reject_repair_throttle),
 ]
 
 

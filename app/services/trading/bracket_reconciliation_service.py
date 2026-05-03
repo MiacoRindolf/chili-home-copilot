@@ -40,6 +40,26 @@ from .bracket_reconciler import (
 # pattern-matched prod alerts on ``[bracket_reconciliation]`` /
 # ``[bracket_watchdog]``.
 BRACKET_RECONCILIATION = "[bracket_reconciliation]"
+
+# audit-missing-stop-emergency-repair (2026-05-03):
+# Per-intent throttle for the emergency-repair branch in
+# _invoke_writer_for_decision. The branch fires at most once per
+# CHILI_BRACKET_TERMINAL_REJECT_REPAIR_THROTTLE_SECONDS per intent.
+# Why 6h: long enough that a misbehaving intent doesn't churn against
+# a broker-side problem (Robinhood was rate-limiting the SELL_STOP
+# rejection storm at ~2-min sweep cadence); short enough that if the
+# operator manually re-arms the broker stop, the next sweep within
+# that day will reconcile it. Operator override:
+# CHILI_BRACKET_TERMINAL_REJECT_REPAIR_THROTTLE_SECONDS env var
+# (read at module import, not per-call -- consistent with other
+# bracket throttles).
+import os as _os
+EMERGENCY_REPAIR_THROTTLE_SECONDS: float = float(
+    _os.environ.get(
+        "CHILI_BRACKET_TERMINAL_REJECT_REPAIR_THROTTLE_SECONDS",
+        str(6 * 3600),
+    )
+)
 BRACKET_WATCHDOG = "[bracket_watchdog]"
 
 logger = logging.getLogger(__name__)
@@ -628,6 +648,316 @@ def _summarize_from_batch(batch: SweepBatch, *, took_ms: float) -> SweepSummary:
 # ── Phase G.2 writer-invocation hook (Round 23) ───────────────────────
 
 
+def _try_emergency_repair_terminal_reject(
+    db: Session,
+    *,
+    local: LocalView,
+    broker: BrokerView,
+    decision: ReconciliationDecision,
+    sweep_id: str,
+) -> dict[str, Any] | None:
+    """audit-missing-stop-emergency-repair (2026-05-03).
+
+    Escape-valve for the bracket reconciler when intent_state is
+    parked at ``terminal_reject`` AND the trade is still open AND
+    decision.kind == ``missing_stop``. The caller must verify those
+    pre-conditions plus the feature flag.
+
+    Returns:
+      * dict (writer-action shape) when this branch handled the
+        intent — caller should treat as the final outcome.
+      * None when this branch deliberately skipped (broker unavailable
+        or throttle active) and the caller should fall through to the
+        existing ``state_gated_skip``.
+
+    Three actionable sub-branches:
+
+      1. ``broker.available is False`` or ``broker_qty is None`` ->
+         skip silently this sweep, retry next. No throttle bump
+         (this isn't an attempted repair, it's an absence of broker
+         data). Returns None.
+
+      2. ``broker_qty == 0`` -> phantom open trade. Mark the trade
+         ``status='closed'`` with ``closed_reason='phantom_after_
+         terminal_reject'`` and the bracket intent ``intent_state=
+         'closed'`` with last_diff_reason='phantom'. Bump throttle.
+         Emit CRITICAL log + audit event. Returns the writer dict.
+
+      3. ``broker_qty > 0`` -> real exposure. Throttle-check; if
+         active, return None (fall through to state_gated_skip). If
+         not throttled, call FIX-51 ``place_missing_stop`` with
+         min(local_qty, broker_qty). Bump throttle either way. Emit
+         CRITICAL log on entry; emit success/rejection log + audit
+         event on completion. Returns the writer dict.
+
+    Any unexpected exception is caught and converts to a structured
+    failure dict (caller receives an outcome row, not a raised
+    exception that escapes to the sweep loop).
+    """
+    try:
+        # Sub-branch 1: broker availability gate. Mirrors FIX-51.
+        if broker is None or not broker.available:
+            logger.info(
+                f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR SKIPPED "
+                "trade=%s intent=%s ticker=%s reason=broker_unavailable",
+                local.trade_id, local.bracket_intent_id, local.ticker,
+            )
+            return None  # fall through to state_gated_skip
+        if broker.position_quantity is None:
+            logger.info(
+                f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR SKIPPED "
+                "trade=%s intent=%s ticker=%s reason=broker_qty_unknown",
+                local.trade_id, local.bracket_intent_id, local.ticker,
+            )
+            return None  # fall through
+
+        broker_qty = float(broker.position_quantity)
+
+        # Sub-branch 2: phantom open trade.
+        if broker_qty <= 0.0:
+            now_ts = _utc_now_naive()
+            try:
+                # Close the trade row + bracket_intent + bump throttle
+                # in one transaction. SqlAlchemy session is the caller's;
+                # commit/rollback semantics follow the sweep loop.
+                # NOTE: trading_trades has no closed_reason / updated_at
+                # columns; use exit_reason (varchar(50)) + exit_date per
+                # the convention in app/services/trading/portfolio.py.
+                db.execute(
+                    text(
+                        "UPDATE trading_trades SET status='closed', "
+                        "exit_reason='phantom_after_terminal_reject', "
+                        "exit_date=:now "
+                        "WHERE id=:tid AND status='open'"
+                    ),
+                    {"tid": int(local.trade_id), "now": now_ts},
+                )
+                db.execute(
+                    text(
+                        "UPDATE trading_bracket_intents SET "
+                        "intent_state='closed', "
+                        "last_diff_reason='phantom_after_terminal_reject', "
+                        "terminal_reject_repair_last_attempt_at=:now, "
+                        "updated_at=:now "
+                        "WHERE id=:iid"
+                    ),
+                    {"iid": int(local.bracket_intent_id), "now": now_ts},
+                )
+                db.commit()
+            except Exception:
+                logger.exception(
+                    f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR phantom_close "
+                    "persist FAILED trade=%s intent=%s ticker=%s",
+                    local.trade_id, local.bracket_intent_id, local.ticker,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                return {
+                    "writer": "emergency_terminal_reject_repair",
+                    "ok": False,
+                    "reason": "phantom_close_persist_failed",
+                    "new_stop_order_id": None,
+                    "qty": None,
+                    "stop_price": None,
+                }
+            logger.critical(
+                f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR phantom_close "
+                "trade=%s intent=%s ticker=%s broker_qty=0 -- trade closed "
+                "without broker order (no stop placed; position is gone)",
+                local.trade_id, local.bracket_intent_id, local.ticker,
+            )
+            try:
+                from .bracket_writer_g2 import _g2_event
+                _g2_event(
+                    db,
+                    trade_id=int(local.trade_id),
+                    bracket_intent_id=int(local.bracket_intent_id),
+                    ticker=str(local.ticker or ""),
+                    broker_source=str(local.broker_source or ""),
+                    event_type="emergency_terminal_reject_repair",
+                    status="phantom_close",
+                    decision_kind=str(decision.kind),
+                    decision_severity=str(decision.severity),
+                    extra={"sweep_id": sweep_id, "broker_qty": broker_qty},
+                )
+            except Exception:
+                logger.warning(
+                    f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR phantom_close "
+                    "audit emit failed trade=%s",
+                    local.trade_id, exc_info=True,
+                )
+            return {
+                "writer": "emergency_terminal_reject_repair",
+                "ok": True,
+                "reason": "phantom_closed",
+                "new_stop_order_id": None,
+                "qty": 0.0,
+                "stop_price": None,
+            }
+
+        # Sub-branch 3: real exposure. Check throttle first.
+        last_attempt = _fetch_last_repair_attempt(db, int(local.bracket_intent_id))
+        now_ts = _utc_now_naive()
+        if last_attempt is not None:
+            elapsed = (now_ts - last_attempt).total_seconds()
+            if elapsed < EMERGENCY_REPAIR_THROTTLE_SECONDS:
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR THROTTLED "
+                    "trade=%s intent=%s ticker=%s elapsed=%.0fs throttle=%.0fs",
+                    local.trade_id, local.bracket_intent_id, local.ticker,
+                    elapsed, EMERGENCY_REPAIR_THROTTLE_SECONDS,
+                )
+                return None  # fall through to state_gated_skip
+
+        local_qty = float(local.quantity or 0.0)
+        if local_qty <= 0.0 or local.stop_price is None:
+            return {
+                "writer": "emergency_terminal_reject_repair",
+                "ok": False,
+                "reason": "invalid_local_qty_or_stop_price",
+                "new_stop_order_id": None,
+                "qty": None,
+                "stop_price": None,
+            }
+        placement_qty = min(local_qty, broker_qty)
+
+        logger.critical(
+            f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR trade=%s intent=%s "
+            "ticker=%s broker_qty=%s local_qty=%s placing=%s stop=%s "
+            "(intent was terminal_reject; attempting controlled repair)",
+            local.trade_id, local.bracket_intent_id, local.ticker,
+            broker_qty, local_qty, placement_qty, local.stop_price,
+        )
+
+        # Bump the throttle BEFORE placing so a crash mid-place doesn't
+        # leave the throttle un-set (caller would get state_gated_skip
+        # next sweep, which is the safer failure mode).
+        _bump_repair_attempt(db, int(local.bracket_intent_id), now_ts)
+
+        from .bracket_writer_g2 import place_missing_stop, _g2_event
+        action = place_missing_stop(
+            db,
+            trade_id=int(local.trade_id),
+            bracket_intent_id=int(local.bracket_intent_id),
+            ticker=str(local.ticker or ""),
+            broker_source=str(local.broker_source or ""),
+            decision=decision,
+            local_quantity=float(placement_qty),
+            stop_price=float(local.stop_price),
+        )
+        log_fn = logger.critical if action.ok else logger.error
+        log_fn(
+            f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR result trade=%s "
+            "intent=%s ticker=%s ok=%s reason=%s new_stop_order_id=%s "
+            "qty=%s stop_price=%s",
+            local.trade_id, local.bracket_intent_id, local.ticker,
+            action.ok, action.reason, action.new_stop_order_id,
+            action.new_stop_qty, action.new_stop_price,
+        )
+        try:
+            _g2_event(
+                db,
+                trade_id=int(local.trade_id),
+                bracket_intent_id=int(local.bracket_intent_id),
+                ticker=str(local.ticker or ""),
+                broker_source=str(local.broker_source or ""),
+                event_type="emergency_terminal_reject_repair",
+                status="success" if action.ok else "rejection_relock",
+                new_stop_order_id=action.new_stop_order_id,
+                qty=action.new_stop_qty,
+                stop_price=action.new_stop_price,
+                error=None if action.ok else action.reason,
+                decision_kind=str(decision.kind),
+                decision_severity=str(decision.severity),
+                extra={
+                    "sweep_id": sweep_id,
+                    "broker_qty": broker_qty,
+                    "local_qty": local_qty,
+                    "placement_qty": placement_qty,
+                },
+            )
+        except Exception:
+            logger.warning(
+                f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR audit emit failed "
+                "trade=%s",
+                local.trade_id, exc_info=True,
+            )
+        return {
+            "writer": "emergency_terminal_reject_repair",
+            "ok": bool(action.ok),
+            "reason": action.reason,
+            "new_stop_order_id": action.new_stop_order_id,
+            "qty": action.new_stop_qty,
+            "stop_price": action.new_stop_price,
+        }
+    except Exception:
+        logger.exception(
+            f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR unexpected error "
+            "trade=%s intent=%s ticker=%s",
+            local.trade_id, local.bracket_intent_id, local.ticker,
+        )
+        return {
+            "writer": "emergency_terminal_reject_repair",
+            "ok": False,
+            "reason": "unexpected_error",
+            "new_stop_order_id": None,
+            "qty": None,
+            "stop_price": None,
+        }
+
+
+def _utc_now_naive():
+    """Naive UTC for timestamp columns in this module (DB column type
+    is ``timestamp without time zone``)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _fetch_last_repair_attempt(db: Session, bracket_intent_id: int):
+    """Read the throttle timestamp; None if never attempted or column
+    missing (older schema before migration 222)."""
+    try:
+        row = db.execute(
+            text(
+                "SELECT terminal_reject_repair_last_attempt_at "
+                "FROM trading_bracket_intents WHERE id=:iid"
+            ),
+            {"iid": int(bracket_intent_id)},
+        ).first()
+    except Exception:
+        return None
+    if row is None or row[0] is None:
+        return None
+    return row[0]
+
+
+def _bump_repair_attempt(db: Session, bracket_intent_id: int, ts) -> None:
+    """Persist the throttle timestamp. Failures swallow + log so the
+    calling repair attempt isn't aborted by an audit-side issue."""
+    try:
+        db.execute(
+            text(
+                "UPDATE trading_bracket_intents "
+                "SET terminal_reject_repair_last_attempt_at=:ts, "
+                "    updated_at=:ts "
+                "WHERE id=:iid"
+            ),
+            {"iid": int(bracket_intent_id), "ts": ts},
+        )
+        db.commit()
+    except Exception:
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR throttle bump "
+            "failed intent=%s", bracket_intent_id, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _invoke_writer_for_decision(
     db: Session,
     *,
@@ -666,6 +996,40 @@ def _invoke_writer_for_decision(
     # _intent_reject_cooldown dict's role for reconciler invocations
     # (the dict still exists as a fast-path inside the writer itself).
     intent_state_raw = (local.intent_state or "").lower().strip()
+
+    # audit-missing-stop-emergency-repair (2026-05-03):
+    # Additive escape valve for the case where intent_state ==
+    # 'terminal_reject' AND the trade is still open AND we have a
+    # missing_stop classification. Without this branch, the
+    # state_gated_skip below short-circuits forever and the position
+    # has no broker stop -- the failure mode that produced the 7-trade
+    # incident this task fixes. Gated behind
+    # chili_bracket_missing_stop_repair_enabled (default OFF). On the
+    # first invocation past throttle: bump
+    # terminal_reject_repair_last_attempt_at, classify by broker_qty,
+    # phantom-close OR call FIX-51 place_missing_stop, audit either
+    # way. Any rejection re-locks via the throttle until manual
+    # operator intervention.
+    if (
+        intent_state_raw == "terminal_reject"
+        and decision.kind == "missing_stop"
+        and (local.trade_status or "").lower() == "open"
+        and getattr(settings, "chili_bracket_missing_stop_repair_enabled", False)
+    ):
+        repair_result = _try_emergency_repair_terminal_reject(
+            db,
+            local=local,
+            broker=broker,
+            decision=decision,
+            sweep_id=sweep_id,
+        )
+        if repair_result is not None:
+            return repair_result
+        # repair_result is None when broker_qty unknown OR throttle
+        # active OR a structural pre-condition failed; in those cases
+        # fall through to state_gated_skip below for the same logging
+        # behavior the operator already sees.
+
     if intent_state_raw in ("terminal_reject", "closed"):
         logger.info(
             f"{BRACKET_RECONCILIATION} writer SKIPPED state-gated "
