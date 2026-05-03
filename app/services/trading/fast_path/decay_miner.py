@@ -585,19 +585,43 @@ class FastPathDecayMiner:
 
         # Update the validation columns Welford-style on the residual.
         # Residual is |realized - predicted|; we keep the running mean.
+        #
+        # F-hygiene-3.1: switched UPDATE → INSERT...ON CONFLICT DO UPDATE
+        # so validations land even when the (ticker, alert_type, bucket,
+        # horizon_s) cell has no forward-return observation yet (typical
+        # for long-horizon cells where the matching obs is still pending
+        # in the heap). Pre-fix: ~70% of validations silently dropped
+        # because the UPDATE matched 0 rows. The new-row case implies
+        # mean_return=0 (no prediction yet), so residual = ABS(realized);
+        # the existing Welford update path is unchanged for already-
+        # populated cells. Caveat: this can create rows with
+        # sample_count=0 and realized_validation_count>0; downstream
+        # consumers that read mean_return must already gate on
+        # sample_count>0 (verified pre-merge via grep).
         with self._engine.begin() as conn:
             conn.execute(text("""
-                UPDATE fast_signal_decay
-                   SET realized_validation_count = realized_validation_count + 1,
-                       realized_validation_residual =
-                           realized_validation_residual
-                           + (ABS(:realized - mean_return) - realized_validation_residual)
-                             / (realized_validation_count + 1),
-                       last_updated = NOW()
-                 WHERE ticker = :t
-                   AND alert_type = :at
-                   AND score_bucket = :sb
-                   AND horizon_s = :h
+                INSERT INTO fast_signal_decay (
+                    ticker, alert_type, score_bucket, horizon_s,
+                    sample_count, mean_return, m2_return,
+                    realized_validation_count, realized_validation_residual,
+                    last_updated
+                )
+                VALUES (
+                    :t, :at, :sb, :h,
+                    0, 0, 0,
+                    1, ABS(:realized),
+                    NOW()
+                )
+                ON CONFLICT (ticker, alert_type, score_bucket, horizon_s)
+                DO UPDATE SET
+                    realized_validation_count =
+                        fast_signal_decay.realized_validation_count + 1,
+                    realized_validation_residual =
+                        fast_signal_decay.realized_validation_residual
+                        + (ABS(:realized - fast_signal_decay.mean_return)
+                           - fast_signal_decay.realized_validation_residual)
+                          / (fast_signal_decay.realized_validation_count + 1),
+                    last_updated = NOW()
             """), {
                 "realized": realized_return_frac,
                 "t": ticker, "at": alert_type, "sb": bucket,
