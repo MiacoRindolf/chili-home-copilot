@@ -599,6 +599,13 @@ services:
       # is now closed — every place_missing_stop now confirms with the
       # broker before declaring success.
       - CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=1
+      # 2026-05-03 emergency repair branch for trade-open + missing_stop +
+      # intent_state=terminal_reject. Migration 222 + emergency-repair logic
+      # in bracket_reconciliation_service. Enabled to repair 6 unprotected
+      # equity positions (AIDX, CCCC, CRDL, ELTX, TLS, VFS) by placing real
+      # broker stops via FIX-51 writer. IMTX has reconciled to kind=agree
+      # and is unaffected. 6h throttle prevents repair storms.
+      - CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app

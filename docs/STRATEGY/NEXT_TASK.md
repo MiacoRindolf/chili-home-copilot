@@ -1,275 +1,175 @@
-# NEXT_TASK: f8b-verification-soak-2
+# NEXT_TASK: audit-missing-stop-emergency-repair
 
 STATUS: DONE
 
 ## Goal
 
-Re-execute the F8b verification analysis with ≥ 24h of post-deploy realized data. The first verification soak (f8b-verification-soak) ran 10 minutes after deploy and was correctly reported as inconclusive (zero post-deploy distinct exits). This is the briefed re-run at the originally projected target.
+Eliminate the live position risk surfaced by the 2026-05-03 audit: seven open Robinhood equity trades have no broker stop order because their bracket intents are parked at `terminal_reject`, and the reconciler's `state_gated_skip` path (added 2026-05-01 as part of FIX 51-53) has no escape valve when the position is still open.
 
-After this task:
+Success means:
 
-1. **BTC's allowlist membership is decided** with verdict-grade evidence: n ≥ 20 distinct post-deploy exits at the calibrated 5s delay.
-2. **SOL's calibrated 25s delay is validated** against expected counterfactual (+3.47 bps target) via realized P/L.
-3. **The next strategic move is named** with one of three outcomes: F9 (both drift negative), F8b-tightened (BTC drops, SOL stays), or "F8b stays in production" (both positive).
+1. **The seven existing positions are protected** — by operator triage (close, manual re-arm, or controlled writer repair). This is human action, not code.
+2. **A new code path exists** for `open trade + missing_stop + intent_state=terminal_reject`, gated behind a feature flag defaulted OFF, that distinguishes phantom positions from real exposure and re-arms the latter through the existing FIX-51 broker-qty-aware writer.
+3. **Regression test in place** that exercises the new path against all three branches (phantom, real exposure with sufficient broker qty, real exposure with capped broker qty).
+4. **Alerting wired** so the next time this state appears the operator is paged before 24-48h elapse silently.
+5. **Broker-sync reconciliation reports `missing_stop=0`** for open Robinhood equities after triage + flag flip.
 
-This is **a pure analysis task**, identical in structure to f8b-verification-soak. Deliverable is `docs/STRATEGY/CC_REPORTS/<date>_f8b-verification-soak-2.md`. Zero code commits.
-
-## When to run
-
-**On or after 2026-05-04 16:30 UTC** — ~24h after F8b deploy at 2026-05-03 16:29:20 UTC.
-
-If operator runs before 16:30 UTC, apply the same pre-window provision as f8b-verification-soak: bump per-ticker minimum to n=30, report sub-threshold tickers as "inconclusive — more soak."
+This task ships **code + ops triage**, not analysis. Deliverable is `docs/STRATEGY/CC_REPORTS/<date>_audit-missing-stop-emergency-repair.md`.
 
 ## Why now
 
-f8b-verification-soak (2026-05-03 16:38 UTC) confirmed:
-- F8b allowlist gate is working correctly (zero false rejects).
-- Zero post-deploy distinct exits (~10 min elapsed). Inconclusive verdict.
-- **Drift signal:** BTC went +5.66 → +3.65 bps (n=8 → n=9); SOL went +3.34 → +1.58 bps (n=13 → n=14). Both toward zero. Suggestive of counterfactual correctness, not yet conclusive.
-- 6 first verdict-grade decay cells crossed n=30 (mostly at h=1, structurally not falsifying).
-- DOGE high pullback now auto-blocks via F6.5 negative-edge gate (architectural validation).
-- F-hygiene-4.2's C fix empirically verified (~30 bps DOGE residual reduction).
+The 2026-05-03 audit (`docs/AUDITS/2026-05-03.md`) and the Cowork reevaluation (`docs/STRATEGY/COWORK_REVIEWS/2026-05-03_audit-reevaluation.md`) both flag this as the highest-priority outstanding risk.
 
-The post-deploy cohort is the only thing missing. ~24h more soak should produce 15-25 BTC and 12-18 SOL distinct closed exits — enough for verdict-grade per-ticker analysis.
+Concrete state at audit time:
 
-## Architectural commitments
+| trade_id | ticker | open since | broker_stop_order_id | intent_state |
+|---|---|---|---|---|
+| 1822 | VFS | 2026-05-01 17:50 | NULL | terminal_reject |
+| 1821 | TLS | 2026-05-01 17:50 | NULL | terminal_reject |
+| 1818 | IMTX | 2026-05-02 16:51 | NULL | terminal_reject |
+| 1816 | ELTX | 2026-05-01 18:03 | NULL | terminal_reject |
+| 1814 | CRDL | 2026-05-01 17:50 | NULL | terminal_reject |
+| 1813 | CCCC | 2026-05-01 17:50 | NULL | terminal_reject |
+| 1812 | AIDX | 2026-05-01 17:50 | NULL | terminal_reject |
 
-- **Read-only against `fast_signal_decay` + `fast_alerts` + `fast_exits` + `fast_executions` + `fast_path_status`.** No mutations.
-- **No code changes.** One CC report, one doc commit.
-- **Use the existing tier system** (verdict-grade ≥ 30 for decay cells; ≥ 20 for distinct realized exits per the F8b decision tree).
-- **Three lenses, in priority order** (same as f8b-verification-soak):
-  - **Realized P/L per-ticker** on the post-deploy cohort (PRIMARY).
-  - **Validation-residual at h=1800** (SECONDARY — measure cleaner now post-C-fix).
-  - **Decay-miner mean ± 2σ** at horizons ≥ 5s (TERTIARY — verdict-grade cells now exist; track which horizons cross).
+Broker-sync logs show every 2-min sweep classifying these as `missing_stop` and skipping repair with `reason=state_terminal_reject`. The state gate at `app/services/trading/bracket_reconciliation_service.py:668-682` was added 2026-05-01 to stop the SELL_STOP rejection storm; it does that job but lacks an escape valve for "open position + missing stop" — the failure mode currently in production.
 
-## Scope — analysis, not code
+The previously queued `f8b-verification-soak-3` is preserved at `docs/STRATEGY/QUEUED/f8b-verification-soak-3.md` for re-promotion on/after 2026-05-04 16:30 UTC. It is a data-window-gated analysis task, so deferring it costs nothing.
 
-### 1. Distinct realized P/L per-ticker, post-deploy cohort
+## Step 1 — Operator triage (human action, BEFORE code deploy)
 
-**Pinned deploy timestamp: 2026-05-03 16:29:20 UTC.**
+Claude Code begins by enumerating the current state from the database (read-only) and presenting it to the operator. The operator decides per-position:
 
-```sql
-WITH pullback_eids AS (
-  SELECT e.id FROM fast_executions e
-  JOIN fast_alerts a ON a.ticker=e.ticker
-                    AND a.alert_type=e.alert_type
-                    AND a.fired_at=e.alert_fired_at
-  WHERE a.alert_type='volume_breakout_pullback_long'
-    AND e.decided_at > '2026-05-03 16:29:20'
-)
-SELECT e.ticker, COUNT(*) AS exits,
-       ROUND(SUM(x.realized_pnl_usd)::numeric, 4) AS pnl,
-       COUNT(*) FILTER (WHERE x.realized_pnl_usd > 0) AS wins,
-       ROUND((100.0 * COUNT(*) FILTER (WHERE x.realized_pnl_usd > 0)
-              / NULLIF(COUNT(*), 0))::numeric, 1) AS win_rate_pct,
-       ROUND(AVG(x.realized_return_pct * 100)::numeric, 2) AS avg_ret_bps,
-       ROUND(AVG(x.holding_period_s)::numeric, 0) AS avg_hold_s
-FROM fast_exits x
-JOIN fast_executions e ON e.id = x.entry_execution_id
-WHERE x.entry_execution_id IN (SELECT id FROM pullback_eids)
-GROUP BY e.ticker ORDER BY exits DESC;
-```
+- **Close** the position via the broker (manual sell), OR
+- **Manually re-arm** the stop via the broker UI (operator clicks), OR
+- **Mark for controlled writer repair** (the new code path will handle it after deploy).
 
-**Critical: use IN-subquery, not top-level JOIN. The JOIN form inflates by JOIN cardinality (the n=142 → 37 bug from f-leak-1.5 and the n=56 → 14 scratch bug from f8b-verification-soak).** The runbook (`docs/RUNBOOKS/fast_alerts-microsecond-dup.md`) documents the convention.
+For each decision, Claude Code records the chosen action in the CC_REPORT. Claude Code does NOT close positions or place broker orders during this step. Read-only DB probes only.
 
-Report:
-
-| Ticker | F8a-rerun-2 actual | F8b counterfactual | f8b-verification-soak (10min) | This run (~24h) | Verdict |
-|---|---|---|---|---|---|
-| BTC-USD | +5.66 bps n=8 | −0.75 bps n=69 | 0 post-deploy | ? | ? |
-| SOL-USD | +3.34 bps n=13 | +3.47 bps n=43 | 0 post-deploy | ? | ? |
-
-### 2. Cluster-correlation handling
-
-**The 14 catchup paper_fills opened at 2026-05-03 16:29:33 are time-correlated.** They entered at near-identical market state. Treat their aggregate P/L as ONE data point if they all close green or all red.
+Recommended SQL (read-only):
 
 ```sql
--- Identify the catchup-batch fills specifically
-SELECT e.ticker, COUNT(*) AS n,
-       MIN(e.decided_at) AS earliest,
-       MAX(e.decided_at) AS latest,
-       MIN(x.realized_pnl_usd) AS min_pnl,
-       MAX(x.realized_pnl_usd) AS max_pnl,
-       AVG(x.realized_pnl_usd) AS avg_pnl,
-       STDDEV(x.realized_pnl_usd) AS stddev_pnl
-FROM fast_executions e
-JOIN fast_exits x ON x.entry_execution_id = e.id
-WHERE e.alert_type='volume_breakout_pullback_long'
-  AND e.decided_at BETWEEN '2026-05-03 16:29:30' AND '2026-05-03 16:29:40'
-GROUP BY e.ticker;
+SELECT t.id AS trade_id, t.ticker, t.status, t.broker_source,
+       bi.id AS intent_id, bi.state AS intent_state,
+       bi.broker_stop_order_id, bi.stop_price,
+       bi.quantity AS local_qty, bi.updated_at
+FROM trading_trades t
+JOIN trading_bracket_intents bi ON bi.trade_id = t.id
+WHERE t.status = 'open'
+  AND t.broker_source = 'robinhood'
+  AND bi.broker_stop_order_id IS NULL
+  AND bi.state = 'terminal_reject'
+ORDER BY bi.updated_at;
 ```
 
-If `stddev_pnl` is small (e.g., < 30% of |avg_pnl|), the cluster is highly correlated — note this in the report and apply the "one data point" interpretation.
+This list may have shifted since the audit (positions closed or new ones surfaced). Operate on the live list, not the audit's snapshot.
 
-### 3. Allowlist gate efficacy
+## Step 2 — Code: emergency-repair path
 
-```sql
--- Per-ticker reject distribution since deploy
-SELECT e.ticker, e.reject_reason, COUNT(*) AS n
-FROM fast_executions e
-WHERE e.alert_type='volume_breakout_pullback_long'
-  AND e.decided_at > '2026-05-03 16:29:20'
-  AND e.decision='rejected'
-GROUP BY 1, 2 ORDER BY 1, n DESC;
+### Where the change lives
 
--- Allowlist false-reject canary
-SELECT COUNT(*) AS false_rejects
-FROM fast_executions e
-WHERE e.alert_type='volume_breakout_pullback_long'
-  AND e.decided_at > '2026-05-03 16:29:20'
-  AND e.ticker IN ('BTC-USD', 'SOL-USD')
-  AND e.reject_reason LIKE 'pullback_ticker%';
--- Expected: 0.
-```
+- `app/services/trading/bracket_reconciliation_service.py` — add an emergency-repair branch ABOVE the existing `state_gated_skip` at lines 668-682. Do NOT remove the existing gate; the new branch is *additive*.
+- `app/services/trading/bracket_writer_g2.py` — reuse `place_missing_stop` and its FIX-51 broker-qty-aware logic. No new writer needed.
+- `app/config.py` (or equivalent) — add the feature flag `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED`, defaulting `False`.
 
-### 4. Validation-residual at h=1800, post-F-hygiene-4.2 fix
+### Decision logic for the new branch
 
-```sql
-SELECT ticker, score_bucket, horizon_s, sample_count,
-       realized_validation_count AS val_n,
-       ROUND(realized_validation_residual::numeric * 10000, 2) AS resid_bps,
-       ROUND(mean_return::numeric * 10000, 3) AS miner_mean_bps
-FROM fast_signal_decay
-WHERE alert_type='volume_breakout_pullback_long'
-  AND realized_validation_count > 0
-ORDER BY ticker, horizon_s;
-```
+The new branch fires when ALL of the following are true:
 
-Track residual reduction trajectory across cells. By 24h the C fix's effect should be visible across all DOGE cells (residuals dropping from 30+ bps toward ~5 bps).
+- `decision.kind == "missing_stop"`
+- `local.intent_state == "terminal_reject"`
+- The associated trade is `status == 'open'`
+- `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED` is True (the operator-controlled flag)
 
-### 5. SOL calibrated-delay efficacy
+Three sub-branches based on `BrokerView.position_quantity`:
 
-```sql
-WITH pullback_eids AS (
-  SELECT e.id, e.decided_at FROM fast_executions e
-  JOIN fast_alerts a ON a.ticker=e.ticker AND a.alert_type=e.alert_type
-                    AND a.fired_at=e.alert_fired_at
-  WHERE a.alert_type='volume_breakout_pullback_long' AND e.ticker='SOL-USD'
-)
-SELECT
-  CASE WHEN p.decided_at < '2026-05-03 16:29:20' THEN 'pre-F8b (30s)' ELSE 'post-F8b (25s)' END AS era,
-  COUNT(DISTINCT p.id) AS exits,
-  ROUND(AVG(x.realized_return_pct * 100)::numeric, 2) AS avg_ret_bps,
-  ROUND((100.0 * COUNT(DISTINCT p.id) FILTER (WHERE x.realized_pnl_usd > 0)
-         / NULLIF(COUNT(DISTINCT p.id), 0))::numeric, 1) AS win_rate_pct
-FROM fast_exits x
-JOIN pullback_eids p ON p.id = x.entry_execution_id
-GROUP BY era ORDER BY era;
-```
+1. **`broker.available == False` or `broker_qty is None`** → skip silently this sweep, retry next. Mirror FIX 51's `skipped_broker_qty_unknown`. Do NOT escalate; broker-down sweeps are not actionable.
 
-Counterfactual predicted SOL post-F8b should be +3.47 bps vs pre-F8b's −2.45 bps on the same data — a ~6 bps swing. Realized data on the new cohort tests this.
+2. **`broker_qty == 0` → phantom open trade.** Mark the trade `closed` with `closed_reason='phantom_after_terminal_reject'` and the bracket_intent `state='closed'` with `closed_reason='phantom'`. Emit a CRITICAL log: `[bracket_reconciliation] EMERGENCY-REPAIR phantom_close trade=<id> intent=<id> ticker=<>`. Do NOT place a broker stop — the position is gone.
 
-### 6. Decay-miner per-cell snapshot (verdict-grade growth)
+3. **`broker_qty > 0`** → real exposure. Place the stop via the existing FIX-51 path (`place_missing_stop` with `placement_qty = min(local_qty, broker_qty)`). Wrap in a per-intent attempt counter so the new path executes at most once per intent per 6h: if the placement rejects again, the new path re-locks immediately and reverts to `state_gated_skip` until manual operator intervention. Emit a CRITICAL log on entry and another on success/rejection.
 
-```sql
-SELECT
-  CASE WHEN sample_count >= 30 THEN 'verdict_grade'
-       WHEN sample_count >= 10 THEN 'suggestive'
-       ELSE 'sparse' END AS tier,
-  COUNT(*) AS cells, SUM(sample_count) AS total_obs
-FROM fast_signal_decay
-WHERE alert_type='volume_breakout_pullback_long'
-GROUP BY tier ORDER BY tier;
-```
+Per-intent attempt persistence: a new column `terminal_reject_repair_last_attempt_at TIMESTAMPTZ` on `trading_bracket_intents` (migration 222 — verify this is the next free ID via `scripts/verify-migration-ids.ps1`). The 6h throttle is checked against `now() - terminal_reject_repair_last_attempt_at`. Use `_dynamic_throttle_seconds()` if such a helper already exists in the brain; otherwise the constant goes in module-level config (NOT inline) and is named.
 
-Detail the verdict-grade cells specifically. Which horizons crossed? At horizons ≥ 5s, has any cell's mean ± 2σ landed entirely positive or entirely negative?
+### Audit emission
 
-### 7. Decay-miner health
+Every emergency-repair attempt — phantom, success, rejection-relock — must write a `trading_bracket_writer_actions` row (or whatever audit table the FIX-51 path already uses) with the new writer name `emergency_terminal_reject_repair` so the funnel-accounting and operator postmortem queries pick it up.
 
-Standard checks:
-- `obs_scheduled / obs_finalized` ratio.
-- `pending_heap` oscillation per `dispatch-decay-heap-trend.ps1 24`.
-- `db_errors` should still be 0.
-- Watchdog OK heartbeat.
+### Operator alert wiring
 
-### 8. Decision tree
+When the new branch fires, also write to the alerting channel the brain already uses for CRITICAL operational events. Reuse the existing alerting plumbing — do not invent a new one. If the brain currently has no alerting channel for bracket-reconciliation events, flag this back in Open Questions and proceed without it for now (the CRITICAL log line is the minimum bar).
 
-```
-For each of {BTC-USD, SOL-USD}:
+## Step 3 — Regression tests
 
-  IF post-deploy distinct exits ≥ 20 AND mean_bps ≥ +1 (clearly positive):
-    -> KEEP in allowlist; pre-F8b suspicions refuted.
-  ELIF post-deploy distinct exits ≥ 20 AND mean_bps ≤ -1 (clearly negative):
-    -> DROP from allowlist (next code task).
-  ELIF post-deploy distinct exits ≥ 20 AND mean_bps in [-1, +1] (near-zero):
-    -> Inconclusive at this n; recommend more soak; trading-cost noise dominates.
-  ELIF post-deploy distinct exits < 20:
-    -> Insufficient. Recommend f8b-verification-soak-3 with projected ETA.
+Add `tests/test_bracket_emergency_terminal_reject_repair.py` covering:
 
-Combine outcomes:
+1. **Phantom branch.** Seed: open trade, terminal_reject intent, broker_qty=0. Assert: trade closed, intent closed, no broker order placed, audit row written, throttle column set.
+2. **Real-exposure success.** Seed: open trade, terminal_reject intent, broker_qty=local_qty=10, FIX-51 writer mock succeeds. Assert: stop placed at min(local, broker), trade stays open, intent state transitions to whatever `place_missing_stop` sets on success, audit row written, throttle set, CRITICAL log line emitted.
+3. **Real-exposure capped.** Seed: open trade, terminal_reject intent, local_qty=20, broker_qty=10. Assert: stop placed at qty=10 with the warning log line.
+4. **Real-exposure rejection-relock.** Seed: open trade, terminal_reject intent, broker_qty>0, FIX-51 writer mock returns `ok=False`. Assert: throttle set, intent state stays `terminal_reject` (no progression), next call within 6h returns `state_gated_skip` and does NOT retry.
+5. **Throttle expiry.** Same seed as (4) but advance the clock past 6h. Assert: new attempt fires.
+6. **Flag OFF.** Seed: open trade, terminal_reject intent, broker_qty>0, flag False. Assert: returns `state_gated_skip`, no broker call, no audit row.
+7. **Broker unavailable.** Seed: as above but `broker.available == False`. Assert: skipped silently, no audit row, no throttle bump.
 
-  Both KEEP: F8b stays; consider live-eligibility brief next.
-  BTC DROP, SOL KEEP: F8b-tightened (drop BTC, recalibrate); consider F9 in parallel.
-  BTC KEEP, SOL DROP: surprising (counterfactual was opposite); investigate.
-  Both DROP: F9 immediately; the fade hypothesis fails on the strongest subset.
-  Both inconclusive: more soak.
-```
+All tests use `chili_test` per the conftest guard. No mocks-of-mocks — use the real `_invoke_writer_for_decision` entry point with a stubbed `place_missing_stop`.
 
-### 9. Apply cluster-correlation interpretation
+## Step 4 — Deploy + verify
 
-If the catchup-batch fills (entered at 16:29:33) all close in the same direction, treat their aggregate as one data point. This affects the post-deploy n: e.g., 18 distinct exits with 14 from the cluster = effective n ≈ 4 + 1 = 5, not 18. **Surface this explicitly in the verdict.**
-
-### 10. Write the CC report
-
-`docs/STRATEGY/CC_REPORTS/<date>_f8b-verification-soak-2.md` follows PROTOCOL.md format. Include:
-- Four-eval comparison table (F8a-rerun-2 / F8b counterfactual / f8b-verification-soak / this run).
-- Per-ticker per-lens verdicts.
-- Cluster-correlation analysis on the catchup-batch fills.
-- SOL calibrated-delay efficacy (post-F8b 25s vs pre-F8b 30s).
-- Validation-residual trajectory (DOGE specifically).
-- Verdict-grade decay cells: which horizons crossed?
-- Recommendation for next NEXT_TASK with one-line description.
+1. Land the migration and code on the dirty worktree's existing branch (or `git checkout -B fix/audit-missing-stop-emergency-repair` if the worktree is too dirty to commit cleanly — use judgment).
+2. **Run the regression tests against `chili_test` and report results in the CC_REPORT.**
+3. Restart the affected workers (`broker-sync-worker` is the one that drives the reconciler). `docker compose restart broker-sync-worker`.
+4. **Operator triage of the seven existing positions** must be complete before flipping the flag. The CC_REPORT should show the operator-decided action per position, with timestamps if available.
+5. Flip `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=1` (operator action — Claude Code requests, doesn't self-authorize). Restart broker-sync-worker.
+6. Watch one full sweep cycle (~2 minutes) and capture `[bracket_reconciliation] EMERGENCY-REPAIR ...` lines in the CC_REPORT.
+7. Verify `missing_stop=0` for open Robinhood equities via the same SQL as Step 1.
 
 ## Brain integration (reuse, don't rewrite)
 
-- Same SQL patterns as f8b-verification-soak — refined to use IN-subquery + DISTINCT consistently.
-- F-hygiene-4.2 fix in place — residual analysis is now meaningful.
-- F-hygiene-3.1 UPSERT in place — validation-count tracks growing.
-- F-leak-1.5 integrity probe pattern — `IN (SELECT id ...)` for distinct counts.
-- `docs/RUNBOOKS/fast_alerts-microsecond-dup.md` — canonical query patterns.
+- `app/services/trading/bracket_writer_g2.place_missing_stop` — the FIX-51 broker-qty-aware writer. Reuse, do not duplicate.
+- `app/services/trading/bracket_reconciliation_service._invoke_writer_for_decision` — the existing entry point. Add the new branch inside it, above the existing `state_gated_skip` at lines 668-682.
+- The `BrokerView` struct already exposes `available`, `position_quantity` — use them; do not query the broker again.
+- The `trading_bracket_writer_actions` audit table (or whatever FIX 51 writes to) — reuse for the new writer name.
+- Migration framework in `app/migrations.py` — add `_migration_222_terminal_reject_repair_throttle()` per the existing pattern. Idempotent. Check with `scripts/verify-migration-ids.ps1` before commit.
 
 ## Constraints / do not touch
 
-- **No code commits.**
-- **No threshold tuning.**
-- **No live placement enable.**
-- **No migrations.**
-- **No fast-data-worker restart.**
-- **Per-ticker analysis is mandatory.** Aggregate is misleading because the underlying tickers were bimodal.
-- **Realized P/L is the primary verdict lens.**
-- **Use IN-subquery for distinct counts.** Top-level JOINs inflate.
-- **Cluster-correlation interpretation is mandatory** when the catchup-batch is part of the cohort.
+- **Do not modify the live-fast-path safety belts** (8 belts, three flags). PROTOCOL Hard Rule 1.
+- **Do not remove the `state_gated_skip` branch** at lines 668-682. The new branch is additive.
+- **Do not flip `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED` to default True.** Default OFF, operator flips manually after triage.
+- **Do not place broker orders during Step 1 (operator triage).**
+- **Do not bypass the `chili_test` guard in conftest.py.** PROTOCOL Hard Rule 5.
+- **Migration ID must not collide.** Run `scripts/verify-migration-ids.ps1` before commit.
+- **No magic numbers.** The 6h throttle goes in named module-level config or a brain function — not inline.
 
 ## Out of scope
 
-- Code changes to drop BTC from the allowlist (next task if BTC drifts negative).
-- F9 signal redesign brief (next task if both drift negative).
-- f-hygiene-5 (structural B fix). Can run in parallel.
-- f-leak-3. Still conditional on next OOM event.
-- Live-eligibility decision. Separate brief.
-- DELAY_S recalibration. Manual re-run of `scripts/calibrate-pullback-delay.py` after this verifies framework.
+- Fixing the `terminal_reject` *root cause* — i.e., why Robinhood was rejecting the original SELL_STOP submissions. That's a separate investigation; the emergency-repair path handles the symptom.
+- Unsupported-crypto pre-filter (audit HIGH #4). Next task after this.
+- Venue-truth shadow-log wiring (audit HIGH #2). Queued behind the soak-3.
+- Pullback-exit signal-specific cold-start hold (audit HIGH #3). Queued.
+- CHECK-constraint migrations (audit MEDIUM #7-8). Bundle later.
+- `fetch_ohlcv_batch` crypto-skip parity (audit MEDIUM #5). Queued.
+- Any change to F8b allowlist or fast-path calibration tables. The fast-path is paper and orthogonal.
 
 ## Success criteria
 
-1. `git log --oneline -3` shows ONE new commit, pushed: `docs(strategy): F8b verification soak-2 report + mark NEXT_TASK done`. No code commits.
-2. Per-ticker realized P/L on post-deploy cohort reported, with cluster-correlation interpretation applied.
-3. Verdict named for each of BTC and SOL using the decision tree.
-4. Verbatim verification SQL section reproduces verdict from raw table state.
-5. Recommendation for next NEXT_TASK includes a one-line description.
-6. F8a soak continues uninterrupted on fast-data-worker.
+1. Migration 222 (or next-free ID) added, registered in `MIGRATIONS`, idempotent, applies cleanly on app startup. `verify-migration-ids.ps1` passes.
+2. New emergency-repair branch lives in `bracket_reconciliation_service.py` above the existing `state_gated_skip`. Existing gate untouched.
+3. `tests/test_bracket_emergency_terminal_reject_repair.py` exists and all seven scenarios pass.
+4. Operator triage completed for the seven positions (or however many remain at task start). Per-position action recorded in the CC_REPORT.
+5. Feature flag `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED` exists, defaults False, documented in the CC_REPORT.
+6. After flag flip + worker restart, the SQL probe in Step 1 returns 0 rows. CC_REPORT shows the verification.
+7. CC_REPORT written at `docs/STRATEGY/CC_REPORTS/<date>_audit-missing-stop-emergency-repair.md` per PROTOCOL format. One commit (or tight series), pushed.
 
 ## Open questions for Cowork (surface in your report only if relevant)
 
-1. **If BTC stays positive on n≥20 post-allowlist** despite counterfactual-uniform-negative, the explanation is likely contemporaneous gate filtering (cooldown / capacity / score thresholds correlate with positive BTC outcomes). Surface what the gates filtered for; that's input to F9's design.
-
-2. **If SOL drifts negative or inconclusive at higher n**, the F8a verdict is "fade refuted on all tickers." F9 becomes the only path forward.
-
-3. **Cluster-correlation effect on n.** If 14 of 25 post-deploy exits are from the catchup batch and all closed green, effective n is ~12 (10 distinct organic + 1 cluster + ~1 noise). Be explicit in the verdict about which n drove the call.
-
-4. **Verdict-grade cells at horizons ≥ 5s.** If any have mean ± 2σ landing fully on one side of zero, the calibrated-edge gate will start using that signal automatically. Surface explicitly — it's the system tightening, the trade rate may drop as a side-effect.
-
-5. **DOGE residual trajectory post-C-fix.** By 24h the post-fix-only DOGE cells should average ~5 bps residuals (vs 30+ bps pre-fix). Confirms the C fix delivered as predicted; no action required.
+1. **Should the 6h throttle be configurable per-broker?** Robinhood-specific failure modes might differ from Coinbase if/when the same path is extended. Default uniform; flag if the implementation surfaces a reason for differentiation.
+2. **Is there an existing alerting channel for bracket-reconciliation CRITICAL events?** If yes, name it; if no, the CRITICAL log line is the minimum bar and a follow-up alerting wiring task should be queued.
+3. **If broker_qty > local_qty (broker has MORE shares than the bracket_intent recorded)** — the FIX-51 path covers this case (`min(local_qty, broker_qty) = local_qty`), but it leaves residual unprotected exposure. Surface this if observed; it's a separate bug class (likely manual buy or reconciliation drift) that should not be silently absorbed.
+4. **Phantom-detection vs orphan-intent cleanup overlap.** FIX-51's comments mention an "orphan-intent cleanup path" responsible for clearing bracket_intent rows when the position is gone. If the new phantom-close branch overlaps that path's responsibilities, surface the boundary.
 
 ## Rollback plan
 
-- N/A. No code changes. CC report is informational; no production impact.
+- **Code rollback:** Revert the commit. Migration 222 is additive (new column with default NULL); leaving the column in place is safe.
+- **Flag rollback:** Set `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=0` and restart `broker-sync-worker`. The new branch becomes a no-op; behavior reverts to pre-task `state_gated_skip` for terminal-reject intents. Open positions remain protected by whatever Step 1 triage decided.
+- **Migration rollback:** None required — the column is nullable and unused once the flag is off. If aggressive cleanup is desired later, write a follow-up migration to drop the column.
