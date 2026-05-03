@@ -1,244 +1,275 @@
-# NEXT_TASK: f-hygiene-4
+# NEXT_TASK: f8b-pullback-allowlist-and-calibrate
 
 STATUS: DONE
 
 ## Goal
 
-Investigate and explain the systematic 13–40 bps disagreement between decay-miner mean and realized validation residual at horizon=1800. Apply a surgical fix at the root cause if scope permits in one session, OR diagnose-and-document if it requires structural change. The calibration helpers (`is_score_tradeable`, `is_negative_edge_excluded`, `compute_calibrated_bracket`) all use miner-mean as their gate input — if the predictor is off by ~30 bps from realized truth, every gate decision is built on wrong guidance.
+Convert the F8a-evaluation-rerun-2 finding ("subset-supported on {BTC, SOL}") into actionable signal scope:
+
+1. **Add a ticker-allowlist gate** that permits `volume_breakout_pullback_long` paper fills only on `{BTC-USD, SOL-USD}` and blocks the rest with a clear gate-reject reason. Static gate, no calibration dependency.
+2. **Derive per-ticker `VOL_BREAKOUT_PULLBACK_DELAY_S` from counterfactual analysis** of existing `fast_orderbook` data — sweep candidate delay values, score by counterfactual realized-equivalent return, pick the delay that maximizes per-ticker. **No magic number; data-derived.**
+3. **Apply the calibrated per-ticker delays** as a gate-time-of-eval lookup, not a code constant. Future re-calibration just re-runs the counterfactual.
+
+This is the first F-series task that moves toward production-eligible signal scope. **Default mode stays paper** — no live placement enabled. The 8 safety belts stay intact.
 
 After this task:
 
-1. **The cause of the miner-mean vs validation-residual disagreement is identified** with evidence.
-2. **A surgical fix lands at the root** if the diagnosis points to a localized issue, OR a structural-change brief is queued for f-hygiene-5 if it doesn't.
-3. **F8b/F9 sequencing has a clean calibration baseline.** F8b on {BTC, SOL} is meaningful only if the predictor it tunes against is accurate.
+1. **Pullback fills land only on the verdict-supported subset** {BTC, SOL}. ETH/DOGE/AVAX get gate-rejected with reason `pullback_ticker_not_allowed`.
+2. **Per-ticker DELAY_S is data-derived** from counterfactual optimization, not hand-set. Output committed as a config artifact (e.g., `app/services/trading/fast_path/_calibrated/pullback_delay_per_ticker.json`) that the gate reads.
+3. **The next 24h+ soak produces realized P/L exclusively on the positive subset.** F8b's verification: realized aggregate should be unambiguously positive (BTC-USD: +5.66 bps was the prior baseline; expected to maintain or improve).
 
-Up to 2 commits: investigation/diagnosis (may be 0 commits), surgical fix (1 commit if scope permits).
+Up to 3 commits: gate, calibration script, calibration output.
 
 ## Why now
 
-- f8a-evaluation-rerun-2 surfaced the disagreement: 13–40 bps systematic positive offset (realized return > miner mean) across 6 cells with `realized_validation_count > 0` at horizon=1800. ETH med h=1800: residual=+31 bps, miner_mean=−16 bps → 47 bps disagreement. SOL high h=1800: residual=+32 bps, miner_mean=−8 bps → 40 bps disagreement. These aren't sampling noise at val_n=1-2; the direction is consistent.
-- The systematic positive direction means **the miner is underpredicting realized return**. Negative-edge gate over-blocks signals; tradeability gate is conservative-by-mistake.
-- F8b would calibrate `VOL_BREAKOUT_PULLBACK_DELAY_S` against miner-mean. If miner-mean is 30 bps off truth, calibration moves DELAY_S to a wrong value. **Fix the predictor before tuning the parameter.**
+- F8a-evaluation-rerun-2 verdict: realized P/L is verdict-grade at n=43; bimodal split is structural (BTC/SOL+ vs ETH/DOGE−). The fade hypothesis is *subset-supported*, not blanket-supported.
+- F-hygiene-4 closed cleanly. Hypothesis C (price-column mismatch) fixed for DOGE. Hypothesis B (horizon mismatch) deferred to f-hygiene-5; **doesn't block F8b** because F8b operates on the realized-P/L lens (post-exit truth), not the miner-mean lens (the predictor with the 30 bps systematic disagreement).
+- Continued soak on the full ticker set produces more negative-edge data on ETH/DOGE without changing strategic information. Better to scope down and sharpen.
+- Operator's stated discipline ("no magic numbers"): hard-coding DELAY_S=30 is a magic number. Counterfactual calibration derives it from data.
 
 ## Architectural commitments
 
-- **Investigation first, fix only if warranted.** Same shape as F-hygiene-2's `db_errors` investigation. Five hypotheses; let evidence drive the diagnosis.
-- **Surgical fix at the root, not patches at consumers.** If the miner is sampling wrong, fix the miner. Don't paper over by changing the gates' input source (that's a workaround, not a fix).
-- **No threshold tuning.** This task identifies what's broken; it doesn't tune anything.
-- **No producer-side change to `fast_alerts`.** Same constraint as f-hygiene-3: the catchup-batch dup pattern is intentional.
-- **No live-placement changes. Default mode stays paper.**
-- **No fast-data-worker restart unnecessarily.** If a fix is loadable without restart (config / data-only), prefer that. If the fix requires restart, document the ~30s soak interruption in the report (same convention as f-hygiene-3.1).
+- **Static gate + data-derived calibration.** The allowlist gate is a static condition (ticker IN allowlist). The per-ticker DELAY_S is read from a calibration artifact that's regenerated on demand.
+- **Default mode stays paper. No live-placement enable.** The 8 safety belts continue gating any future live transition.
+- **No new strategy thresholds beyond what the calibration produces.** Per-ticker DELAY_S replaces the global constant; that's a simplification, not addition.
+- **No miner / scanner / executor / gate refactor** beyond the explicit additions.
+- **No migrations.**
+- **Counterfactual analysis is offline, repeatable, and committed as a script.** Not a one-off operator computation.
 
-## Scope — investigation, not a-priori fix
+## Scope
 
-### Subtask 1: Diagnose the disagreement source
+### Commit 1: Ticker-allowlist gate for `volume_breakout_pullback_long`
 
-Five hypotheses, each falsifiable with a specific check. Run all five; let evidence narrow.
+**File:** `app/services/trading/fast_path/gates.py`
 
-#### Hypothesis A — Entry-time bias
+**What:**
 
-The miner observes forward-return at the *alert-fire* moment. Actual paper entry happens after gate decisions (executor poll cycle, gate stack evaluation, broker simulation latency). If the gap is meaningful (>= 1s), the miner's "forward return at horizon=N from fire" doesn't match the executor's "forward return at horizon=N from entry."
+Add a new gate (or extend an existing one) that checks whether the alert's ticker is in the `volume_breakout_pullback_long` allowlist. Order it AFTER calibrated gates (`gate_negative_edge_excluded`, `gate_calibrated_tradeability`) but BEFORE the executor-side decision.
 
-**Check:**
+```python
+# F8b: per-signal-class ticker allowlist
+PULLBACK_LONG_ALLOWLIST: frozenset[str] = frozenset({"BTC-USD", "SOL-USD"})
 
-```sql
--- Compare alert fired_at to execution executed_at for pullback alerts
-SELECT
-  AVG(EXTRACT(EPOCH FROM (e.executed_at - a.fired_at))) AS avg_fire_to_entry_s,
-  PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (e.executed_at - a.fired_at))) AS median_s,
-  PERCENTILE_DISC(0.9) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (e.executed_at - a.fired_at))) AS p90_s,
-  COUNT(*) AS n
-FROM fast_executions e
-JOIN fast_alerts a ON a.ticker=e.ticker
-                 AND a.alert_type=e.alert_type
-                 AND a.fired_at=e.alert_fired_at
-WHERE a.alert_type='volume_breakout_pullback_long';
+def gate_pullback_ticker_allowed(alert: AlertContext) -> GateResult:
+    """Block volume_breakout_pullback_long for tickers not in F8b's allowlist.
+
+    F8a-evaluation-rerun-2 verified n=43 realized exits with bimodal per-ticker
+    edge: BTC/SOL positive (+4.22 bps avg, n=21), ETH/DOGE negative (-10 bps avg,
+    n=22). Restricting to the positive subset is necessary to make the signal
+    class production-eligible.
+    """
+    if alert.alert_type != "volume_breakout_pullback_long":
+        return GateResult(passed=True, reason="not_pullback_long_signal")
+    if alert.ticker in PULLBACK_LONG_ALLOWLIST:
+        return GateResult(passed=True, reason="ticker_allowed")
+    return GateResult(
+        passed=False,
+        reason=f"pullback_ticker_not_allowed:{alert.ticker}",
+    )
 ```
 
-**Falsification test:** if median fire-to-entry gap is < 1 second, this hypothesis is rejected (the miner-vs-executor measurement points are too close to explain 30 bps).
+Wire into the gate stack at the right position (verify against existing order; should be near `gate_calibrated_tradeability` or after `gate_negative_edge_excluded`).
 
-#### Hypothesis B — Horizon mismatch
+**Constraint:** Don't extend the allowlist to other tickers without explicit Cowork direction. Don't make the allowlist parameterizable via config in this commit (premature). Hard-coded set is fine for now; if/when we add more signal classes with different allowlists, extract to config.
 
-The miner records forward-return at exactly `horizon_s` seconds after fire. Realized exit happens at *variable* time within the closest-horizon bucket. If exits systematically cluster before or after the miner's measurement point, residuals skew.
+**Verification:**
 
-**Check:**
+After deploy + 30 min of soak:
 
 ```sql
--- For each closed exit, compare realized hold time to its mapped horizon
-SELECT
-  CASE
-    WHEN x.holding_period_s < 100 THEN '<100s'
-    WHEN x.holding_period_s < 600 THEN '100-600s'
-    WHEN x.holding_period_s < 2700 THEN '600-2700s'
-    WHEN x.holding_period_s < 5400 THEN '2700-5400s'
-    ELSE '>5400s'
-  END AS hold_bucket,
-  COUNT(*) AS exits,
-  AVG(x.realized_return_pct * 100) AS avg_bps
-FROM fast_exits x
-WHERE x.entry_execution_id IN (
+-- Pullback alerts vs paper fills, per ticker
+WITH pullback_eids AS (
   SELECT e.id FROM fast_executions e
   JOIN fast_alerts a ON a.ticker=e.ticker
                     AND a.alert_type=e.alert_type
                     AND a.fired_at=e.alert_fired_at
   WHERE a.alert_type='volume_breakout_pullback_long'
+    AND a.fired_at > NOW() - INTERVAL '30 minutes'
 )
-GROUP BY hold_bucket;
-```
-
-**Falsification test:** if hold-time within the 1800s mapped bucket varies >> 30% (e.g., some at 1200s, some at 2400s within the "1800s closest-horizon" group), the miner's "exactly 1800s after fire" measurement isn't comparable.
-
-#### Hypothesis C — Price-column mismatch
-
-Miner forward-return uses one price column; realized return uses another. If `close` (or mid) is used by miner, but executor entry/exit uses `best_bid`/`best_ask` (with 1-2 bps spread offset), the systematic difference appears.
-
-**Check:**
-
-```bash
-# Read decay_miner.py to find what column it uses for forward-return computation
-grep -n "forward_return\|forward_price\|future_close\|future_book\|best_bid\|best_ask\|close" \
-  app/services/trading/fast_path/decay_miner.py
-
-# Read fast_exits realized-return computation
-grep -rn "realized_return\|realized_pnl" app/services/trading/fast_path/ \
-  | grep -v test
-```
-
-**Falsification test:** if miner uses `close` and exits use `best_bid`/`best_ask`, the systematic offset is exactly the half-spread. Coinbase BTC-USD spread is ~0.001 bps (negligible); ETH ~4 bps; SOL ~10 bps; DOGE ~90 bps. The 30+ bps disagreement isn't half-spread, but per-ticker disagreements should correlate with spread if this hypothesis holds.
-
-#### Hypothesis D — Catchup-batch dup contamination
-
-f-hygiene-3 surfaced that dup alerts produce identical observations during cold-start backfill. If the cold-start ran during a market regime that's no longer representative, the miner mean is biased toward that regime, and recent realized exits diverge.
-
-**Check:**
-
-```sql
--- How many decay observations come from cold-start backfill vs live observations?
--- Cold-start backfill happens at container startup; live obs happen continuously.
--- The miner's `last_updated` column isn't sufficient because it updates on every change.
--- Best proxy: check fast_alerts that landed with the original snapshot-replay catchup
--- (id <= some cutoff) vs current.
-SELECT
-  CASE WHEN a.id <= 2300 THEN 'pre-fix-catchup' ELSE 'post-fix-live' END AS era,
-  COUNT(*) AS alerts,
-  AVG(EXTRACT(EPOCH FROM (NOW() - a.fired_at))) AS avg_age_s
+SELECT a.ticker,
+       COUNT(*) AS alerts,
+       COUNT(DISTINCT e.id) AS paper_fills
 FROM fast_alerts a
+LEFT JOIN fast_executions e ON e.id IN (SELECT id FROM pullback_eids)
+                            AND e.ticker=a.ticker
 WHERE a.alert_type='volume_breakout_pullback_long'
-GROUP BY era;
+  AND a.fired_at > NOW() - INTERVAL '30 minutes'
+GROUP BY a.ticker;
 ```
 
-**Falsification test:** if pre-fix-catchup era is < 20% of total alerts, the cold-start contamination can't account for 30 bps systematic drift in current measurements.
+Expected: BTC-USD and SOL-USD have alerts > 0 AND paper_fills > 0; ETH/DOGE/AVAX have alerts > 0 AND paper_fills = 0. The gate-reject log lines should show `reason=pullback_ticker_not_allowed:ETH-USD` (etc.) for blocked alerts.
 
-#### Hypothesis E — Score-bucket mismatch
+### Commit 2: Counterfactual DELAY_S sweep script
 
-The miner aggregates by `score_bucket` computed at fire time (in `decay_miner._handle_alert_inserted`). The exit references the SAME bucket via the residual computation. But if the residual computation re-derives the bucket from a slightly different score (e.g., recomputed from features), they won't match.
+**File:** `scripts/calibrate-pullback-delay.py` (new)
 
-**Check:**
+**What:**
 
-```bash
-grep -n "score_bucket\|bucket_for_score\|score_to_bucket" \
-  app/services/trading/fast_path/decay_miner.py \
-  app/services/trading/fast_path/calibration.py \
-  app/services/trading/fast_path/exit_manager.py
+Offline analysis script that:
+- Reads `fast_alerts` for a specific ticker + signal class over a configurable history window (default: last 14 days).
+- For each alert, looks up `fast_orderbook` at multiple candidate delay values (e.g., `{5, 10, 15, 20, 25, 30, 45, 60, 90, 120}` seconds).
+- Computes the counterfactual entry price (best_bid for long) at each delay.
+- Looks up the realized exit price (best_bid at hold-period-after-fire) for actual closed trades.
+- For alerts that didn't get filled (gate-rejected), simulates a hypothetical fill at the candidate delay's entry price and uses the same hold-period-distribution from actual trades to estimate realized return.
+- Per-ticker, finds the delay value that maximizes mean realized-equivalent return weighted by sample count.
+- Outputs the optimum to `app/services/trading/fast_path/_calibrated/pullback_delay_per_ticker.json`.
+
+```python
+# Pseudocode
+PULLBACK_DELAY_CANDIDATES_S = [5, 10, 15, 20, 25, 30, 45, 60, 90, 120]
+HISTORY_WINDOW_DAYS = 14
+
+def calibrate(ticker: str) -> int:
+    alerts = fetch_alerts(ticker, alert_type="volume_breakout_pullback_long")
+    by_delay: dict[int, list[float]] = {d: [] for d in PULLBACK_DELAY_CANDIDATES_S}
+    for alert in alerts:
+        for delay_s in PULLBACK_DELAY_CANDIDATES_S:
+            entry_price = book_lookup(alert.ticker, alert.fired_at + delay_s, "best_bid")
+            exit_price = synthesize_exit_price(alert)  # uses actual hold-period dist
+            if entry_price and exit_price:
+                ret = (exit_price - entry_price) / entry_price
+                by_delay[delay_s].append(ret)
+    # Pick delay with highest n-weighted mean return
+    optimum_s = max(
+        by_delay.keys(),
+        key=lambda d: (mean(by_delay[d]) if by_delay[d] else float("-inf")),
+    )
+    return optimum_s
+
+def main() -> None:
+    out = {ticker: calibrate(ticker) for ticker in ALLOWLIST_TICKERS}
+    save_calibration_artifact(out)
 ```
 
-**Falsification test:** if alert-time and exit-time both call the same `score_to_bucket(score)` helper with the same `score`, they're identical. If they reference different score columns or recompute, that's the bug.
-
-### Subtask 2: Surgical fix at the identified source
-
-Once Subtask 1 narrows the hypothesis, apply a single targeted fix.
-
-**Decision branches:**
-
-- **Branch A — Hypothesis A (entry-time bias) confirmed.** Fix: shift the miner's forward-return reference point from `fired_at` to `executed_at` for paper-fill cases. Touch `decay_miner` to use the execution timestamp when an execution exists. Surgical, ~10 LOC.
-
-- **Branch B — Hypothesis B (horizon mismatch) confirmed.** Fix: instead of measuring forward-return at exactly `horizon_s`, average the actual hold-time bucket distribution into the residual computation, OR add a hold-time-weighted observation alongside the fixed-horizon one. Larger scope; possibly defer to f-hygiene-5.
-
-- **Branch C — Hypothesis C (price-column mismatch) confirmed.** Fix: align miner's price column with executor's. If executor uses `(best_bid + best_ask) / 2` (mid), miner should too. If executor uses fill prices, miner needs a different reference (deferred to per-trade lookup if computationally feasible).
-
-- **Branch D — Hypothesis D (catchup-batch contamination) confirmed.** Fix: don't include cold-start-replayed observations in the running mean. Either dedupe at observation-write time (touches `decay_miner._handle_alert_inserted`) or filter at read time. Surgical-ish, but the cold-start-backfill section is load-bearing for early-soak data; needs careful handling.
-
-- **Branch E — Hypothesis E (score-bucket mismatch) confirmed.** Fix: ensure both alert-time and exit-time go through the same `score_to_bucket()` helper. Likely a one-liner.
-
-- **Branch F — Multiple hypotheses contribute.** Fix the largest one this session; document the others for f-hygiene-5.
-
-- **Branch G — None of the 5 hypotheses fits.** Document findings; queue f-hygiene-5 with new hypotheses derived from the data.
-
-**Constraint:** if Branch B (horizon mismatch) requires a structural rework of the miner's forward-return logic, defer to its own brief. f-hygiene-4 should ship Subtask 1's diagnosis even if Subtask 2 doesn't fit the session.
+**Constraint:** No magic candidate set. The candidate list `[5, 10, 15, ...]` is *itself* a hyperparameter — but it's grid-search granularity, not a strategy threshold. Document it inline; if the optimum lands at the boundary (5 or 120), expand the search.
 
 **Verification:**
 
-After the fix, restart fast-data-worker (acceptable ~30s soak interruption per f-hygiene-3 precedent). Wait 30+ minutes for new observations and exits to land. Re-run the validation-residual query from f8a-evaluation-rerun-2's report:
+Run the script on a copy of production data. Output should produce a JSON with per-ticker optima:
 
-```sql
-SELECT ticker, score_bucket, horizon_s, sample_count,
-       realized_validation_count AS val_n,
-       ROUND(realized_validation_residual::numeric * 10000, 2) AS resid_bps,
-       ROUND(mean_return::numeric * 10000, 3) AS miner_mean_bps,
-       ROUND((realized_validation_residual - mean_return)::numeric * 10000, 2) AS disagreement_bps
-FROM fast_signal_decay
-WHERE alert_type='volume_breakout_pullback_long' AND realized_validation_count>0
-ORDER BY horizon_s, ticker;
+```json
+{
+  "BTC-USD": 30,
+  "SOL-USD": 45,
+  "_metadata": {
+    "calibrated_at": "2026-05-03T...",
+    "history_window_days": 14,
+    "candidates_s": [5, 10, 15, 20, 25, 30, 45, 60, 90, 120],
+    "samples_per_ticker": {"BTC-USD": 47, "SOL-USD": 62}
+  }
+}
 ```
 
-Target: per-cell `disagreement_bps` should drop below the pre-fix range (13–40 bps) on the new validations. Pre-fix-era cells will retain their original residuals (already accumulated); the fix matters for new validations going forward.
+Numbers will differ; the actual optima are the artifact.
+
+### Commit 3: Wire the calibration artifact into the executor
+
+**File:** `app/services/trading/fast_path/executor.py` (or wherever DELAY_S is consumed)
+
+**What:**
+
+Replace the global `VOL_BREAKOUT_PULLBACK_DELAY_S` constant with a per-ticker lookup that reads the calibration artifact at startup:
+
+```python
+import json
+from pathlib import Path
+
+CALIBRATION_PATH = Path(__file__).parent / "_calibrated" / "pullback_delay_per_ticker.json"
+
+def _load_pullback_delay_calibration() -> dict[str, int]:
+    """Load per-ticker pullback delay from calibration artifact."""
+    if not CALIBRATION_PATH.exists():
+        logger.warning(
+            "[fast_path] pullback delay calibration artifact missing; "
+            "using fallback constant 30s for all tickers"
+        )
+        return {}
+    with CALIBRATION_PATH.open() as f:
+        data = json.load(f)
+    return {k: int(v) for k, v in data.items() if not k.startswith("_")}
+
+_PULLBACK_DELAY_PER_TICKER = _load_pullback_delay_calibration()
+
+def get_pullback_delay_s(ticker: str) -> float:
+    """Per-ticker pullback delay. Falls back to 30s if not calibrated."""
+    return float(_PULLBACK_DELAY_PER_TICKER.get(ticker, 30))
+```
+
+Replace direct uses of `VOL_BREAKOUT_PULLBACK_DELAY_S` with `get_pullback_delay_s(ticker)` in the scanner / executor.
+
+**Constraint:** Fallback to 30s is the only static number; everything else is data-derived. The fallback exists so the system doesn't crash if the artifact is missing — but it shouldn't be the operative value in normal operation.
+
+**Verification:**
+
+Restart fast-data-worker. First scanner tick should log:
+
+```
+[fast_path] pullback delay loaded: BTC-USD=30s SOL-USD=45s (artifact=...)
+```
+
+Subsequent pullback alerts use the per-ticker delay.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `decay_miner._handle_alert_inserted` and `_handle_exit_inserted` — extend in place; don't restructure.
-- `fast_signal_decay` table — read-only for diagnosis; UPSERT pattern from F-hygiene-3.1 is unchanged.
-- `score_to_bucket()` (or equivalent) — verify both call sites use the same helper.
-- f-leak-1.5's integrity probe pattern — adapt for the diagnostic queries.
-- F-hygiene-3's runbook (`docs/RUNBOOKS/fast_alerts-microsecond-dup.md`) — referenced for any dup-related discussion.
+- Existing gate stack — extend in place; add new gate at the right ordering position.
+- `fast_orderbook` table — read-only for the counterfactual sweep.
+- `fast_alerts` + `fast_executions` + `fast_exits` — read-only for the actual-trade reference.
+- Scanner / executor — single substitution of constant lookup → function lookup.
+- Calibration artifact pattern — establishes the convention for future signal-class calibrations.
 
 ## Constraints / do not touch
 
-- **All 8 live-placement safety belts.** Untouched.
-- **Default mode stays paper.**
-- **No threshold tuning.** Don't change `VOL_BREAKOUT_MULT`, `VOL_BREAKOUT_PULLBACK_DELAY_S`, MIN_SAMPLES, score-bucket cutoffs, or any gate threshold.
+- **All 8 live-placement safety belts.** Untouched. Default mode stays paper.
+- **No live-mode flip.** This task does not enable live placement on {BTC, SOL} or anyone else.
+- **No threshold tuning beyond DELAY_S calibration.** `VOL_BREAKOUT_MULT`, MIN_SAMPLES, score-bucket cutoffs, etc. all unchanged.
 - **No producer-side change to `fast_alerts`.** Catchup-batch dups stay.
-- **No miner refactor** beyond the surgical fix at the identified hypothesis site.
+- **No miner code changes.** F-hygiene-5 (structural B fix) is a separate task; can run in parallel.
 - **No migrations.** No schema work.
-- **`models/trading.py`, `.env.example`, executor, exit_manager, gate stack, calibration helpers.** Don't touch beyond what the fix-site requires.
-- **No new gates.**
-- **F8a soak protection:** if a restart is needed, document the ~30s interruption; don't restart unnecessarily.
+- **No global state.** Calibration artifact is read at startup; if regenerated, requires container restart (acceptable cost).
+- **`models/trading.py`, `.env.example`.** Continue to leave alone.
+- **Don't extend allowlist to ETH/DOGE/AVAX.** F8a-evaluation-rerun-2 explicitly named those as negative-edge.
 
 ## Out of scope
 
-- F8b: per-ticker calibration on {BTC, SOL}. Comes after this task.
-- F9: signal redesign. Comes after F8b's outcome.
-- f-leak-3: still conditional on next OOM event.
-- Refactor of decay_miner's flush logic.
-- Change to the closest-horizon mapping (separate signal-design decision).
+- Live placement enablement. Separate task with its own approval gate.
+- f-hygiene-5 (structural B fix). Can run in parallel; doesn't conflict.
+- f-leak-3. Still conditional on next OOM event.
+- F9 signal redesign. After F8b's verification.
 - Cross-pair correlation analysis.
-- The "write validations to nearby horizons with weights" idea (separate signal-design decision).
+- Auto-recalibration on a schedule. Manual re-run is fine for now.
+- A `re-run calibration` API endpoint. Manual script invocation suffices.
+- Adjusting `VOL_BREAKOUT_MULT` per-ticker. Different lever; separate decision.
 
 ## Success criteria
 
-1. `git log --oneline -5` shows 0–2 new commits, pushed to origin. Diagnosis-only run produces 0 code commits + 1 doc commit; diagnosis + fix produces 1 code commit + 1 doc commit.
-2. `docs/STRATEGY/CC_REPORTS/<date>_f-hygiene-4.md` written with:
-   - Per-hypothesis check results, with the falsification verdict for each (rejected / supported / inconclusive).
-   - The named root cause (or "no single hypothesis explains it" with branch-G framing).
-   - The applied fix (or deferred-to-f-hygiene-5 with a brief one-liner).
-   - Pre-fix vs post-fix disagreement table for the cells with `realized_validation_count > 0`.
-3. F8a soak continues uninterrupted (or the ~30s restart is documented).
-4. The recommendation for next NEXT_TASK is named explicitly: F8b on {BTC, SOL}, F9, f-hygiene-5 (deferred fix), or "soak more then re-evaluate."
+1. `git log --oneline -5` shows up to 3 new commits, pushed: gate, calibration script, calibration artifact + executor wire-up. The calibration artifact JSON is committed (under `_calibrated/`) so future sessions can read its history.
+2. After deploy + 30 min: ETH/DOGE/AVAX pullback alerts have 0 paper fills (all gate-rejected with `pullback_ticker_not_allowed:<ticker>`); BTC/SOL pullback alerts produce paper fills as before.
+3. Calibration artifact exists at `app/services/trading/fast_path/_calibrated/pullback_delay_per_ticker.json` with at minimum `BTC-USD` and `SOL-USD` entries.
+4. The first scanner tick after restart logs the per-ticker delays loaded from the artifact.
+5. F8a soak interruption is documented (~30s for the restart).
+6. `docs/STRATEGY/CC_REPORTS/<date>_f8b-pullback-allowlist-and-calibrate.md` written with:
+   - Per-ticker calibration optima from the script.
+   - Sample-count and mean-return at each candidate delay (the sweep table).
+   - First 30 min of post-deploy gate-reject lines for ETH/DOGE/AVAX.
+   - Recommendation for next NEXT_TASK (verify via 24h soak, then maybe live-eligibility decision).
 
 ## Open questions for Cowork (surface in your report only if relevant)
 
-1. **If multiple hypotheses contribute** (Branch F), surface which is the LARGEST contributor and the magnitude of its share. The fix should target that one; the others can wait if they're smaller.
+1. **If the calibrated optimum differs significantly per ticker** (e.g., BTC=15s, SOL=90s), that's strategically informative — different microstructure absorbs the breakout at different rates. Surface explicitly with the magnitude of the difference.
 
-2. **If the fix is in shared code** (`decay_miner.py`, which scheduler-worker also runs), the fix benefits both processes. Confirm via mem_watcher logs.
+2. **If the calibration produces a very small sample count per ticker** (e.g., n=3 for SOL), the optimum is unreliable. Default to keeping the 30s fallback for that ticker until more samples accumulate. Don't fabricate certainty.
 
-3. **If the cold-start backfill (Hypothesis D) is the cause**, the fix has a secondary effect: it'd reduce the number of "early-soak observations" the miner sees, which means F-hygiene-3's UPSERT would land more cold-cell rows. This compounds positively.
+3. **If the optimum lands at the search-grid boundary** (5s or 120s), expand the search and re-run. The grid-search bounds are educated guesses; if reality is outside them, follow the data.
 
-4. **If Hypothesis B (horizon mismatch) is confirmed**, the fix likely touches signal design, not just code. Defer to f-hygiene-5 with a clear scope. f-hygiene-4 can still ship Subtask 1's diagnosis.
+4. **If counterfactual optimization shows that even the optimum has negative or near-zero realized-equivalent return**, that means {BTC, SOL} aren't actually a positive subset — the realized P/L pattern was noise at low n. Surface explicitly; F9 becomes more attractive than continued F8b iteration.
 
-5. **If validation residuals are CONSISTENTLY positive** (which they are at the cells we have), that's a more specific signal than "off by 30 bps" — it means the miner systematically *underpredicts*. That points more strongly to Hypothesis A (entry-time bias: the alert fires, the price moves further before entry, miner records the smaller move; realized return captures the bigger move) or Hypothesis B (horizon mismatch: miner records at h=1800 exactly; realized exits land at variable times when the move has continued).
+5. **The gate-reject reason `pullback_ticker_not_allowed:<ticker>`** could be made more informative (e.g., include the realized P/L it was filtered out for). Premature optimization; basic reason is fine for now.
 
 ## Rollback plan
 
-- Subtask 1 (diagnosis): no code changes.
-- Subtask 2 (fix): one targeted change to `decay_miner.py` or `calibration.py`. Revert restores prior behavior; miner-mean accuracy returns to pre-fix state. Existing `fast_signal_decay` rows are untouched (the fix affects new observations going forward).
+- Commit 1 (gate): single localized change. Revert removes the allowlist; pullback fills resume on all 5 tickers.
+- Commit 2 (calibration script): purely additive; revert removes the script.
+- Commit 3 (artifact + wire-up): two parts. Revert the artifact alone falls back to the 30s default for all tickers; revert the wire-up restores the global constant. Both revertible without data loss.
+- F8a soak interruption ~30s; resumes immediately.
 - No migrations. No data migrations. No schema changes.
-- No live-placement risk: none of these touch the executor, gates, broker code, or strategy thresholds.
+- No live-placement risk: gate is restrictive (blocks tickers); calibration changes a delay value within paper mode.
