@@ -1,202 +1,214 @@
-# NEXT_TASK: f-leak-2
+# NEXT_TASK: f-hygiene-3
 
 STATUS: DONE
 
 ## Goal
 
-Identify and surgically fix the chili main app's memory leak. f-leak-1 contained the host-level RAM pressure (WSL2 cap + container limits + observability) but did not fix the underlying leak — chili still trends toward its 3 GiB cap and OOM-restart-cycles when triggered. This task identifies the specific leak holder using in-process diagnostics, then applies a surgical fix.
+Two structural-correctness items, both surfaced by prior CC reports as silent measurement bugs that affect F8a evaluation quality. Same shape as F-hygiene-1 and F-hygiene-2: small, soak-safe, no strategy impact, no calibration retuning. Queued first in a three-task sequence (f-hygiene-3 → f8a-evaluation-rerun-2 → F9 / further) per operator's "yes do all of them."
 
 After this task:
 
-1. **chili main app's leak source is identified** with a specific code-path and a specific Python type / closure that's surviving GC.
-2. **A surgical fix lands** that either (a) bounds the offending structure (LRU/TTL/cap), (b) hoists a per-request constructor to module/app scope so it's reused, or (c) cancels/joins a Thread/Timer holder. Same surgical-fix shape as FIX 50 (`_ind_cache`).
-3. **Verification shows ≤ 1/10th the prior memory growth slope** over a 30-minute observation window after the fix lands.
-4. **The mem_watcher instrumentation stays in chili** so future leaks surface immediately, the same way scheduler-worker's mem_watcher already catches them.
+1. **Decay-miner's validation-count is no longer silently undercounted by ~95%.** `_handle_exit_inserted`'s UPDATE-only path becomes UPSERT so validation residuals land even when the bucket cell doesn't yet have a forward-return observation.
+2. **Downstream queries that join on `(ticker, alert_type, fired_at)` are duplicate-tolerant.** The microsecond-dup pattern (catchup-batch fires multiple alerts with identical `fired_at`) has already bit `decay_miner._handle_exit_inserted` (F-hygiene-2.1) and `f8a-evaluation-rerun`'s report query (n=142 → 37 inflation). Audit the codebase for the same pattern; add `LIMIT 1` / `DISTINCT` / canonical-id reference at remaining sites.
+3. **F8a-evaluation-rerun-2 (next task) starts with cleaner data:** validation-count is no longer silently dropped, and any join-based count won't be inflated.
 
-Up to 3 commits: instrumentation, fix, optional follow-on.
+Up to 3 commits. Subtask 2 may be 0 or N commits depending on how many sites need the fix.
 
 ## Why now
 
-f-leak-1's findings (commits `b8e710d`, `ffcb0d9`, `ae2e7f4`) plus its CC report:
-
-- **Host is now defensible** (WSL2 cap pending operator's `wsl --shutdown` + Docker restart). The leak hunt no longer races against the operator's ability to use their computer.
-- **The dispatch-stats-logger from f-leak-1.1** has been running and now has a real time series for the chili RSS curve.
-- **Scheduler-worker's existing mem_watcher (FIX 49)** is already showing the codebase's leak pattern: `_make_invoke_excepthook.<locals>.invoke_excepthook` survivors growing +14/min — that's `threading.py`'s per-Thread closure. **Something is creating Thread (or Timer) objects faster than GC reclaims them.** Same pattern almost certainly afflicts chili.
-- **Operator action items from f-leak-1 are independent of this task.** Operator can apply WSL2 cap and start the stats-logger in parallel with this task running.
+- f8a-evaluation-rerun's Open Question 2 named the validation-count gap explicitly: ~95% silent drop rate (7 validations vs 142 actual exits). Fix at the source: switch UPDATE → INSERT...ON CONFLICT DO UPDATE for the validation columns.
+- f-leak-1.5's postgres integrity probe found the n=142 was JOIN-cardinality inflation (actual = 37 distinct exits) caused by the same microsecond-dup pattern. F-hygiene-2.1 fixed it for `decay_miner._handle_exit_inserted` but not retroactively for analysis queries. Need a codebase audit for remaining sites.
+- F8a-evaluation-rerun-2 will run with the same SQL the operator types `claude` to execute. If the underlying data is silently dropping validations or the queries are silently inflating counts, the verdict is wrong by construction. Fix the measurement before re-running the analysis.
 
 ## Architectural commitments
 
-- **Surgical fix, not refactor.** Find the specific holder; bound or hoist it. No restructuring of request handlers, no new abstraction layers.
-- **Reuse, don't reinvent.** Lift mem_watcher from `scripts/brain_worker.py` (or wherever FIX 49 placed it) into chili as-is. Don't write a new diagnostic.
-- **Event-driven shape preserved.** No new polling loops, no new background tasks beyond what mem_watcher already does in scheduler-worker.
-- **No migrations. No strategy threshold changes. No gate changes. No live-placement changes.**
-- **Default mode stays paper. fast-data-worker untouched** (it's clean per f-leak-1's snapshot — 157 MiB / 512 MiB).
+- **Surgical fixes at error sites, not refactors.** UPSERT is one site (`decay_miner._handle_exit_inserted`). Microsecond-dup audit is grep-based discovery + per-site `LIMIT 1` / `ORDER BY id DESC LIMIT 1` / `DISTINCT` patches.
+- **Don't change insertion semantics.** The `fast_alerts` table has duplicates by design (catchup batch). Adding a UNIQUE constraint would silently drop deferred emits. Fix downstream consumers to be duplicate-tolerant; don't change the producer.
+- **No new magic numbers.** Any constants are diagnostic-cadence, not strategy.
+- **Idempotent, additive changes.** Subtask 1's UPSERT changes update semantics in a strictly-more-permissive direction (UPDATE-zero-rows → INSERT new row). Subtask 2's audit patches make queries strictly-more-correct.
+- **No miner / scanner / executor / gate code changes** beyond Subtask 1's UPSERT and Subtask 2's per-site patches.
+- **No migrations.** No schema work — UPSERT is application-level SQL.
 
 ## Scope
 
-### Commit 1: Lift `mem_watcher` from scheduler-worker into chili
+### Commit 1: Validation-count UPSERT in `_handle_exit_inserted`
 
-**Files:** TBD via grep — likely `app/main.py` or wherever chili's startup lives, plus copy/import the existing mem_watcher helper.
-
-**What:**
-
-f-leak-1's CC report identified scheduler-worker's `mem_watcher` (FIX 49) as the right diagnostic surface — it logs RSS + top object-type counts every minute. chili doesn't have it. Lifting it gives chili the same in-process visibility:
-
-1. Find FIX 49's mem_watcher implementation (likely `scripts/brain_worker.py` or a shared helper). `grep -nE "mem_watcher|FIX 49" -r app/ scripts/` to locate.
-2. Make it importable from `app/services/diagnostics/mem_watcher.py` if it isn't already shared.
-3. Wire it into chili's startup — add a `@app.on_event("startup")` handler that spawns the watcher coroutine.
-4. Match the cadence: every 60s, log RSS + `Counter(type(o).__name__ for o in gc.get_objects()).most_common(20)`.
-
-The point is that chili's main process now self-reports its top object types every minute. After 30 minutes of running, the survivor counts that grow monotonically are the leak.
-
-**Verification:**
-- `docker compose restart chili`
-- `docker compose logs chili --since 5m | grep -i "mem_watcher\|top types"` shows the per-minute lines.
-- Wait 30 min, then check the survivor diff between t=1min and t=30min.
-
-### Commit 2: Surgical fix at the identified leak site
-
-**File(s):** Whatever Commit 1's mem_watcher diagnostic identifies.
+**File:** `app/services/trading/fast_path/decay_miner.py`
 
 **What:**
 
-Once the leaking object class is named (likely `function` / `cell` / `dict` / `list` / `Thread` / `Timer`), grep the codebase for the construction site:
+Currently `_handle_exit_inserted` does:
+
+```python
+UPDATE fast_signal_decay
+SET realized_validation_count = realized_validation_count + 1,
+    realized_validation_residual = realized_validation_residual + :residual
+WHERE ticker = :ticker AND alert_type = :alert_type
+  AND score_bucket = :bucket AND horizon_s = :horizon
+```
+
+If the row doesn't exist (the bucket cell hasn't received any forward-return observation yet), this affects 0 rows and the validation event is silently lost. Per f8a-evaluation-rerun: 95% silent drop rate.
+
+**Fix:** Switch to INSERT...ON CONFLICT DO UPDATE:
+
+```python
+INSERT INTO fast_signal_decay (
+    ticker, alert_type, score_bucket, horizon_s,
+    sample_count, mean_return, m2_return,
+    realized_validation_count, realized_validation_residual,
+    last_updated
+)
+VALUES (
+    :ticker, :alert_type, :bucket, :horizon,
+    0, 0, 0,                                            -- no forward-return obs yet
+    1, :residual,
+    NOW()
+)
+ON CONFLICT (ticker, alert_type, score_bucket, horizon_s)
+DO UPDATE SET
+    realized_validation_count = fast_signal_decay.realized_validation_count + 1,
+    realized_validation_residual = fast_signal_decay.realized_validation_residual + EXCLUDED.realized_validation_residual,
+    last_updated = NOW()
+```
+
+**Caveat:** This creates rows where `sample_count = 0`, `mean_return = 0`, `m2_return = 0`, but `realized_validation_count > 0`. Downstream consumers that read mean_return must already handle `sample_count = 0` correctly (it means "no observation"). Verify by grep before merging:
 
 ```bash
-grep -rnE "Thread\(|Timer\(|ThreadPoolExecutor\(|run_in_executor\(|httpx\.Client\(|requests\.Session\(|httpx\.AsyncClient\(" app/
+grep -rn "mean_return\|fast_signal_decay" app/ | grep -v test
 ```
 
-Apply ONE of these surgical fixes depending on what's found:
-
-**Pattern A — per-request executor / session / client:**
-```python
-# Before (in some endpoint or handler):
-def handle_thing():
-    client = httpx.Client()  # creates new connection pool + thread per call
-    result = client.get(...)
-    # client never explicitly closed; Thread leaks
-
-# After:
-# Hoist to module scope or app.state:
-_HTTP_CLIENT = httpx.Client()  # one per process
-
-def handle_thing():
-    result = _HTTP_CLIENT.get(...)
-```
-
-**Pattern B — uncancelled `threading.Timer`:**
-```python
-# Before:
-def schedule_retry(...):
-    t = threading.Timer(5.0, fn)
-    t.start()
-    # t never .cancel()'d on success; survives even when fn ran
-
-# After:
-# Use asyncio.create_task with explicit cleanup, OR maintain a registry of
-# active timers and cancel-on-completion.
-```
-
-**Pattern C — unbounded cache (FIX 50 style):**
-```python
-# Before:
-_cache: dict[str, Any] = {}
-
-def get_cached(key):
-    if key not in _cache:
-        _cache[key] = compute(key)
-    return _cache[key]
-
-# After:
-from functools import lru_cache
-# Or: cachetools.TTLCache with explicit max + ttl.
-```
-
-**Constraint:** Don't apply a sweeping cap (e.g., "all dicts limited to N"). Find the SPECIFIC holder, fix the SPECIFIC site.
-
-**Decision branches:**
-- **A. Single clear holder identified.** One commit, surgical fix.
-- **B. Multiple smaller leaks compounding.** Fix the largest one; document others for f-leak-3.
-- **C. Holder identified but the fix requires a structural change.** Document; defer the fix to its own brief; close f-leak-2 with the diagnosis only.
+If any consumer reads `mean_return` without first checking `sample_count > 0`, that's a separate bug (and not introduced by this fix; just exposed). Flag in the report; don't fix in this commit.
 
 **Verification:**
-- `docker compose restart chili`
-- Wait 30 min observing mem_watcher.
-- Compare RSS slope and top-type survivors before vs after the fix.
-- Target: slope ≤ 1/10 pre-fix slope on the previously-leaking type.
-- Reference data: f-leak-1's stats-logger has the pre-fix curve; this task's mem_watcher has the post-fix curve.
 
-### Commit 3 (optional): Same fix in scheduler-worker if the pattern matches
+Before fix:
 
-**File(s):** Likely the same code path that's affecting both processes (chili and scheduler-worker share most of `app/`).
+```sql
+SELECT realized_validation_count, COUNT(*) AS cells
+FROM fast_signal_decay
+WHERE alert_type = 'volume_breakout_pullback_long'
+GROUP BY realized_validation_count;
+```
+
+After fix + 30 min of new exits:
+
+Same query; expect the `realized_validation_count > 0` row count to grow proportionally to actual `fast_exits` rows referencing pullback alerts. Target: validation-count sum approaching the distinct-exit count (37 currently for pullback) instead of stuck at 7.
+
+### Commit 2 (or N): Microsecond-dup query audit + per-site fix
+
+**Files:** TBD via grep — anywhere a JOIN-on-`(ticker, alert_type, fired_at)` is used.
 
 **What:**
 
-scheduler-worker's mem_watcher already showed +14/min Thread-closure survivors. If Commit 2's fix happens to land in shared code (under `app/`), the leak is fixed in both places automatically. If chili's leak is in chili-only code (e.g., a router), scheduler may have a separate but similar leak.
+The `fast_alerts` table has rows with identical `(ticker, alert_type, fired_at)` to the microsecond, due to the catchup-batch pattern (F8a's snapshot-replay fires multiple deferred emits stamped with the same `now()`). F-hygiene-2.1 fixed this for `decay_miner._handle_exit_inserted`'s `.one_or_none()` → `.first()` with `ORDER BY id DESC LIMIT 1`. Other sites probably have the same issue.
 
-If the fix is shared-code: confirm scheduler-worker also benefits via its existing mem_watcher logs (compare survivor counts pre/post).
+**Steps:**
 
-If chili-only: document scheduler-worker's leak for follow-up; don't refactor in this task.
+1. Find all JOINs / lookups against `fast_alerts` on the composite key:
 
-**Decision:** This commit only happens if Commit 2's fix is in shared code AND the matching pattern is also visible in scheduler-worker.
+   ```bash
+   grep -rnE "FROM fast_alerts|JOIN fast_alerts|fast_alerts\." app/ | grep -v test
+   grep -rnE "\.alert_type\s*==.*\.fired_at\s*==|alert_type\s*=.*fired_at\s*=" app/
+   ```
+
+2. For each match, classify:
+   - **Aggregate (COUNT, SUM, AVG, etc.):** Likely affected by JOIN inflation. Add `DISTINCT ON (...)` or rewrite as `IN (subquery)` returning canonical ids. Same shape as f-leak-1.5's integrity probe.
+   - **Single-row lookup:** Add `ORDER BY id DESC LIMIT 1` (same convention as F-hygiene-2.1).
+   - **Already canonical-id-keyed (joins on `fast_alerts.id`):** No change needed.
+
+3. Apply the per-site patch.
+
+**Decision branches:**
+
+- **A. Few sites (≤ 3) need fix.** One commit per site, plus optionally a final commit consolidating any shared utility.
+- **B. Many sites (> 3) need fix.** Group by file. Multiple commits OK; each one says explicitly which site/sites and what classification.
+- **C. Zero sites need fix.** F-hygiene-2.1 + the canonical-id-keyed joins already cover everything. Document in CC report; no commit.
+
+**Constraint:** Don't add a UNIQUE constraint on `(ticker, alert_type, fired_at)`. The producer relies on duplicates landing. If we ever add nanosecond-resolution fired_at or a sub-microsecond serial column, that's a separate structural decision — not in this hygiene pass.
+
+**Verification:**
+
+Re-run the integrity probe (`scripts/dispatch-postgres-integrity.ps1`) and the f8a-evaluation-rerun report query. Specifically:
+
+```sql
+-- Distinct pullback exit count (should be ~37, NOT ~142):
+SELECT COUNT(*) FILTER (WHERE entry_execution_id IN (
+  SELECT e.id FROM fast_executions e
+  JOIN fast_alerts a ON a.ticker = e.ticker
+                    AND a.alert_type = e.alert_type
+                    AND a.fired_at = e.alert_fired_at
+  WHERE a.alert_type = 'volume_breakout_pullback_long'
+)) AS pullback_exits FROM fast_exits;
+```
+
+If the counts now match across all canonical/inflated query forms, Subtask 2 is verified.
+
+### Commit 3 (optional): Document the convention
+
+**File:** `docs/RUNBOOKS/fast_alerts-microsecond-dup.md` (new) OR a comment block at the top of `decay_miner.py`.
+
+**What:**
+
+Brief runbook explaining the duplicate-microsecond pattern, why it's accepted (catchup batch is intentional), and the canonical query patterns (`ORDER BY id DESC LIMIT 1` for single-row lookups, `IN (SELECT id ...)` for aggregates, `JOIN ON fast_alerts.id` when an upstream table has the canonical id).
+
+This makes the convention discoverable for future contributors and prevents the same bug from re-emerging.
+
+**Decision:** Optional. If Subtask 2 finds 0 sites needing fix, skip this; the convention is already encoded in the existing fix sites. If it finds many, the runbook is worth writing.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `mem_watcher` from FIX 49 — lift, don't rebuild.
-- `dispatch-stats-logger.ps1` from f-leak-1.1 — already running, gives the system-level RSS curve.
-- `dispatch-stats-trend.ps1` from f-leak-1.1 — read this for "is the slope reduced?" verification.
-- FIX 50's structural pattern (`_ind_cache` + LRU/TTL) — the template for any cache-class fix.
+- `_handle_exit_inserted` in `decay_miner.py` — extend the existing UPDATE in place, don't restructure.
+- F-hygiene-2.1's `ORDER BY id DESC LIMIT 1` convention — reuse exactly.
+- f-leak-1.5's integrity probe — used for verification.
+- F8a-fix's `id > 2300` convention — used in the verification SQL.
 
 ## Constraints / do not touch
 
 - **All 8 live-placement safety belts.** Untouched.
 - **Default mode stays paper.**
-- **No strategy threshold tuning.**
+- **No strategy threshold tuning.** Don't change `VOL_BREAKOUT_MULT`, `VOL_BREAKOUT_PULLBACK_DELAY_S`, MIN_SAMPLES, or any gate threshold.
+- **No miner Welford-update path changes** beyond Subtask 1's UPSERT. The mean/m2 computation is unchanged; only the validation-count side becomes UPSERT.
 - **No migrations.**
-- **No miner / scanner / executor / gate code changes.** chili's leak is in request-handling or app-startup territory, not the fast-path subsystem.
-- **No fast-data-worker changes.** Clean, stable, leave alone.
-- **No restart of fast-data-worker** during this task — it would interrupt the F8a soak that's still accumulating data for f8a-evaluation-rerun-2.
+- **No new gates.**
+- **No producer-side change to `fast_alerts`.** Don't add a UNIQUE constraint, don't add a sub-microsecond serial, don't change `fired_at` resolution.
+- **No fast-data-worker restart** (would interrupt F8a soak that's accumulating data for f8a-evaluation-rerun-2).
 - **`models/trading.py`, `.env.example`, executor, exit_manager, gate stack, calibration helpers.** Continue to leave alone.
-- **The chili docker-compose memory limit (3 GiB)** stays. Increasing it would just make restart-cycles take longer — doesn't fix the leak.
 
 ## Out of scope
 
-- Refactor of chili's request handling.
-- Refactor of mem_watcher itself.
-- Migrating mem_watcher to a shared metrics endpoint.
-- Investigating brain-worker's CPU 109% (f-leak-1 found it's a known FractionalBacktest, not a regression).
-- Fixing the scheduler-worker leak (unless trivially shared-code with chili — Commit 3 branch).
-- f8a-evaluation-rerun-2 / F9 / f-leak-3 / f-hygiene-3 — all wait until the leak is fixed.
-- The structural `fast_alerts` duplicate-microsecond pattern (deferred from f-leak-1's review; future structural pass).
-- Repairing any orphaned rows (f-leak-1 found none in critical tables).
+- f8a-evaluation-rerun-2 (next-after-this task).
+- F9 (queued after that).
+- f-leak-3 (still conditional on next OOM event).
+- scheduler-worker per-Thread closure leak (separate, future task per f-leak-2 review).
+- Any tuning of any threshold.
+- Producer-side change to make `fast_alerts` canonical-id-keyed at insertion (would require migration; structural decision).
+- Refactor of decay_miner's flush logic.
 
 ## Success criteria
 
-1. `git log --oneline -5` shows up to 3 new commits, pushed to origin. Commit 1 (mem_watcher lift) is required; Commit 2 (fix) is required if a holder is identified; Commit 3 (scheduler echo) is optional.
-2. After Commit 1 lands and chili restarts: `docker compose logs chili --since 5m | grep "top types"` shows per-minute mem_watcher lines.
-3. The CC report `docs/STRATEGY/CC_REPORTS/<date>_f-leak-2.md` includes:
-   - The specific Python type / closure / cache that was leaking, with growth rate (objects/min).
-   - The specific code path that holds it (file + line).
-   - The specific surgical fix applied (or "deferred to f-leak-3" with rationale per branch C).
-   - Pre/post mem_watcher survivor counts demonstrating the slope reduction.
-4. Post-fix slope ≤ 1/10 pre-fix slope on the previously-leaking type, OR the report includes branch C documentation explaining why this couldn't be achieved in a single session.
-5. F8a soak continues uninterrupted on fast-data-worker. No behavioral changes to any strategy code path.
-6. Total committed-container memory after fix: chili stable at <50% of its 3 GiB cap over a 1h window (target: ≤ 1.5 GiB).
+1. `git log --oneline -5` shows 1–3 new commits, pushed to origin. Each clearly identifies subtask and site.
+2. Subtask 1 verified: `realized_validation_count` for `volume_breakout_pullback_long` no longer stuck at 7. Specific target depends on actual exit-count growth over the verification window — but the *ratio* of validations to exits should approach 1:1 instead of ~1:20.
+3. Subtask 2 verified: any aggregate query against `fast_alerts` joined on the composite key returns the distinct count, not the inflated count. Re-run f-leak-1.5's integrity probe to confirm.
+4. F8a soak continues uninterrupted on fast-data-worker. No behavioral changes to any strategy code path.
+5. `docs/STRATEGY/CC_REPORTS/<date>_f-hygiene-3.md` written following PROTOCOL.md format. Include:
+   - Subtask 1: pre-fix and post-fix validation-count distributions.
+   - Subtask 2: list of sites found, per-site classification, per-site patch.
+   - Verbatim verification SQL for next review.
 
 ## Open questions for Cowork (surface in your report only if relevant)
 
-1. **If Commit 2's fix is in shared code under `app/`, scheduler-worker's existing leak should also benefit.** Confirm via scheduler's mem_watcher logs (compare survivor counts pre/post fix). If it doesn't benefit, scheduler has a separate but similar leak — flag for f-leak-3.
+1. **If Subtask 2 finds zero sites needing fix**, that means F-hygiene-2.1 already covered everything. Confirm by re-running the f-leak-1.5 integrity probe AND the f8a-evaluation-rerun report query. If both return canonical counts, Subtask 2 is closed cleanly.
 
-2. **If the leak is event-driven (e.g., fires on specific user actions or specific scheduler jobs)** rather than a steady drip, mem_watcher might not show monotonic growth in a 30-min window. Use the dispatch-stats-logger time series from f-leak-1.1 (which has been running for hours by now) to identify which 30-min windows DID show growth, and run mem_watcher during a known-growth window if possible.
+2. **The UPSERT in Subtask 1 creates `sample_count = 0, realized_validation_count > 0` rows.** Downstream consumers that read `mean_return` should already gate on `sample_count > 0`. If grep finds a consumer that doesn't, that's a pre-existing bug surfaced by this fix — not caused by it. Flag separately; don't fold the fix into f-hygiene-3.
 
-3. **If the holder is identified as `httpx.Client()` per request**, switching to a single module-level client may interact with chili's async/sync boundary. httpx's sync `Client` and async `AsyncClient` are not interchangeable. If chili's request handlers are mostly async, use `AsyncClient` and ensure a single instance per event loop.
+3. **If many query sites need patching (Subtask 2 branch B)**, consider whether a shared helper would prevent re-emergence. Same pattern as F-hygiene-2's "code-twin between exit_manager and decay_miner" observation. Not in scope for this task; surface as a future structural-pass candidate.
 
-4. **If branch C (defer the fix)** — the task still ships value via Commit 1 (mem_watcher in chili = future-proof diagnostic). Document the surfaced findings carefully; the next session works from a much better starting point.
+4. **The "F-hygiene-3 validation cleanup" makes f8a-evaluation-rerun-2 measurement-grade-cleaner**, but doesn't change any strategy code. If this hygiene pass surfaces a strategy-relevant gap (e.g., the validation residuals start showing meaningful per-bucket signal once they accumulate), surface for f8a-evaluation-rerun-2's brief — but don't act on it here.
 
 ## Rollback plan
 
-- Commit 1 (mem_watcher lift): purely additive. Revert removes the diagnostic; no behavioral change.
-- Commit 2 (fix): targeted file change. Revert restores prior behavior; chili leak resumes; WSL2 cap from f-leak-1 still protects the host.
-- Commit 3 (optional shared-code echo): same as Commit 2.
+- Subtask 1 (UPSERT): targeted SQL change in one method. Revert restores prior UPDATE-only behavior; validation-count goes back to ~95% silent drop. Existing rows are untouched.
+- Subtask 2 (per-site patches): each is a localized change. Per-site revert restores prior query; would re-introduce inflation for that site only.
+- Subtask 3 (optional runbook): purely additive doc.
 - No migrations. No data migrations. No schema changes.
 - No live-placement risk: none of these touch the executor, gates, broker code, or strategy thresholds.
