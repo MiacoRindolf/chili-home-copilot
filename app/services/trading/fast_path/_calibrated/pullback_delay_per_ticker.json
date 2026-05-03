@@ -1,0 +1,29 @@
+{
+  "_metadata": {
+    "calibrated_at": "2026-05-03T16:26:54.429662+00:00",
+    "history_window_days": 14,
+    "candidates_s": [
+      5,
+      10,
+      15,
+      20,
+      25,
+      30,
+      45,
+      60,
+      90,
+      120
+    ],
+    "min_samples_per_cell": 10,
+    "samples_per_ticker": {
+      "BTC-USD": 69,
+      "SOL-USD": 43
+    },
+    "boundary_warnings": [
+      "optimum at lower bound (5s); expand search"
+    ],
+    "skipped": {}
+  },
+  "BTC-USD": 5,
+  "SOL-USD": 25
+}

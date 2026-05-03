@@ -265,6 +265,45 @@ def gate_spread_sanity(alert: dict, ctx: ExecContext,
     return GateResult("spread_sanity", True, "", {"spread_bps": float(sp)})
 
 
+# F8b: signal-class-specific ticker allowlists.
+#
+# F8a-evaluation-rerun-2 verified n=43 distinct realized exits on the
+# pullback signal with bimodal per-ticker edge:
+#   BTC-USD:  +5.66 bps avg, 62.5% win rate (n=8)
+#   SOL-USD:  +3.34 bps avg, 38.5% win rate (n=13)
+#   ETH-USD:  -6.44 bps avg, 30.0% win rate (n=10)
+#   DOGE-USD: -14.39 bps avg, 16.7% win rate (n=12)
+# Restricting to the positive subset is necessary to make the signal
+# class production-eligible. Hard-coded set is fine while we have
+# one signal class with a known split; if/when more signal classes
+# add their own allowlists, extract to a config artifact.
+PULLBACK_LONG_ALLOWLIST: frozenset[str] = frozenset({"BTC-USD", "SOL-USD"})
+
+
+def gate_pullback_ticker_allowed(alert: dict, ctx: ExecContext) -> GateResult:
+    """F8b: per-signal-class ticker allowlist.
+
+    Pass-through for any alert NOT of type ``volume_breakout_pullback_long``.
+    For pullback alerts, only tickers in ``PULLBACK_LONG_ALLOWLIST``
+    proceed; others rejected with a per-ticker reason so the postmortem
+    is self-documenting.
+    """
+    alert_type = str(alert.get("alert_type") or "")
+    if alert_type != "volume_breakout_pullback_long":
+        return GateResult("pullback_ticker", True, "",
+                          {"verdict": "not_pullback_long_signal"})
+    ticker = str(alert.get("ticker") or "")
+    if ticker in PULLBACK_LONG_ALLOWLIST:
+        return GateResult("pullback_ticker", True, "",
+                          {"verdict": "ticker_allowed", "ticker": ticker})
+    return GateResult(
+        "pullback_ticker", False,
+        f"pullback_ticker_not_allowed:{ticker}",
+        {"verdict": "blocked", "ticker": ticker,
+         "allowlist": sorted(PULLBACK_LONG_ALLOWLIST)},
+    )
+
+
 def gate_capacity(alert: dict, ctx: ExecContext,
                   *, max_per_pair: int = MAX_OPEN_POSITIONS_PER_PAIR) -> GateResult:
     if ctx.open_positions_for_ticker >= max_per_pair:
@@ -342,6 +381,14 @@ DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
     # postmortem detail is unchanged either way.
     gate_negative_edge_excluded,
     gate_calibrated_tradeability,
+    # F8b: signal-class-specific ticker allowlist runs AFTER the
+    # calibrated-edge gates so that a calibrated negative-edge or
+    # not-tradeable verdict still reports as the primary reject
+    # reason (more actionable than the allowlist filter), and BEFORE
+    # the price-sanity / capacity / budget gates because the
+    # allowlist is purely a signal-eligibility check that doesn't
+    # care about per-decision state.
+    gate_pullback_ticker_allowed,
     gate_spread_sanity,
     gate_capacity,
     gate_daily_budget,
@@ -410,7 +457,8 @@ def is_live_authorized() -> bool:
 __all__ = [
     "GateResult", "ExecContext", "GateRunResult",
     "gate_recency", "gate_min_score", "gate_calibrated_tradeability",
-    "gate_negative_edge_excluded", "gate_spread_sanity",
+    "gate_negative_edge_excluded", "gate_pullback_ticker_allowed",
+    "gate_spread_sanity",
     "gate_capacity", "gate_daily_budget", "gate_mode_interlock",
     "DEFAULT_GATES", "run_gates",
     "ALERT_RECENCY_MAX_AGE_S", "MIN_SIGNAL_SCORE", "MAX_SPREAD_BPS",
