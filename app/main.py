@@ -650,6 +650,32 @@ async def lifespan(app: FastAPI):
     # Broker restore runs inside _run_deferred_startup (not here) so Robinhood login
     # cannot block application startup.
     threading.Thread(target=_run_deferred_startup, daemon=True, name="chili-deferred-startup").start()
+
+    # f-leak-2: in-process mem_watcher daemon. Logs RSS + top-types +
+    # top-qualnames every 60s so the next leak hunt has live in-process
+    # visibility. Skipped when CHILI_SCHEDULER_ROLE=all (scheduler-worker
+    # already runs the same watcher via APScheduler — would be duplicate
+    # noise). Also skipped under CHILI_PYTEST so unit tests aren't
+    # polluted by a running daemon thread.
+    import os as _os
+    _scheduler_role = (_os.environ.get("CHILI_SCHEDULER_ROLE") or "").strip().lower()
+    _pytest_mode = (_os.environ.get("CHILI_PYTEST") or "").strip() == "1"
+    if _scheduler_role != "all" and not _pytest_mode:
+        try:
+            from .services.diagnostics.mem_watcher import start_thread_watcher
+            start_thread_watcher(
+                interval_s=60.0,
+                log_prefix="[mem_watcher]",
+                name="chili-mem-watcher",
+            )
+            logging.getLogger("chili.startup").info(
+                "[startup] chili mem_watcher started (interval=60s)"
+            )
+        except Exception:
+            logging.getLogger("chili.startup").exception(
+                "[startup] chili mem_watcher failed to start"
+            )
+
     yield
     _stop_massive_ws()
     stop_scheduler()
