@@ -1,198 +1,186 @@
-# NEXT_TASK: f-hygiene-2
+# NEXT_TASK: f8a-evaluation-rerun
 
 STATUS: DONE
 
 ## Goal
 
-Three soak-safe observability hardening items, bundled into one task. Same shape as F-hygiene-1: small, additive, zero strategy impact, no calibration retuning. The F8a soak window keeps running; this lands during the wait.
+Re-run the F8a fade hypothesis evaluation against accumulated `fast_signal_decay` data after ~24h of additional soak. Same brief shape as `f8a-evaluation` (which produced an "insufficient data" verdict at 2026-05-02 17:48 UTC); the data is now expected to have matured to verdict-grade in ~3+ cells.
+
+This is **a pure analysis task**, identical in structure to the prior evaluation. Deliverable is `docs/STRATEGY/CC_REPORTS/<date>_f8a-evaluation-rerun.md`. Zero code commits unless something is fundamentally broken in the data pipeline.
 
 After this task:
 
-1. **`db_errors = 13` on decay_miner is diagnosed.** Either documented as a known-transient category (no fix needed), or fixed at the actual error site. We've been seeing this stable-but-nonzero number since F8a-fix's verification window. F8a-evaluation surfaced it. Investigate now while the context is fresh.
-2. **Watchdog silence-as-health flips to positive confirmation.** Currently the watchdog only logs on death. Adding a one-line `decay_miner watchdog OK` per supervisor tick (60s) makes "alive" observable rather than inferred. F-hygiene-1 Open Question 4, F8a-evaluation Open Question 3.
-3. **`pending_heap` trend is observable.** Currently we infer "oscillating, not growing" from a single point-in-time read. A small diagnostic script that rolls a grep across `docker compose logs` to extract the time series of `pending_heap=N` values over the last N hours makes oscillation provable. F8a-evaluation Open Question 4.
+1. **The fade hypothesis has a verdict, or another honest "still waiting" with an updated ETA.** If the data is statistically actionable, write the verdict. If still not, project the next re-run window with current per-hour rates.
+2. **The next strategic move is named.** Either F8b (calibrate `VOL_BREAKOUT_PULLBACK_DELAY_S` from data, move toward live), F9 (new signal types — fade refuted), or "soak another N hours and re-run again."
+3. **No code changes.** No threshold tuning. No new gates. No retroactive scope creep into F8b.
 
-Up to 3 commits, all soak-safe.
+## When to run
 
-## Why now
+**On or after 2026-05-03 17:00 UTC** — this is the projected re-run time from the prior f8a-evaluation, computed from observed per-cell rates (~1.35/hr DOGE-high-bucket × need 23 more samples ≈ 17h conservatively, rounded up to 24h).
 
-- F8a-evaluation surfaced three observability gaps that all have the same flavor: things we *infer* are healthy could be made *observable* with small, additive changes. Same investment as F-hygiene-1's watchdog + `last_error` self-clear.
-- F8a-evaluation-rerun is gated on the 24h soak (re-run at 2026-05-03 17:00 UTC). This task does NOT extend that window — all three items are observability-only, no behavior changes.
-- `db_errors=13` is the kind of stable-but-undiagnosed thing that quietly grows. Cheap to investigate now.
+If the operator runs `claude` before 17:00 UTC, Claude Code should:
+- Still execute the analysis, but
+- Note in the report that the soak window is below the projected ETA, and
+- Apply more conservative interpretation thresholds to any verdict-grade cells that exist.
+
+If the operator runs after 17:00 UTC, proceed as briefed.
+
+## Why now (relative to prior evaluation)
+
+- F8a-evaluation at 2026-05-02 17:48 UTC found 0 verdict-grade cells, 2 suggestive (both DOGE-USD horizon=1, expected-negative because horizon=1 IS the fire moment), 81 sparse.
+- ETA projection said ~24h to reach 3+ verdict-grade cells under steady-state ~1.35/hr DOGE-high-bucket rate.
+- F-hygiene-2 fix (commit `742394f`, `decay_miner exit-validation join MultipleResultsFound`) landed on 2026-05-03 02:30-ish UTC. Pre-fix, exit-validation residuals were silently dropped on duplicate-`fired_at` alerts; post-fix they land correctly. **This may marginally improve `realized_validation_count` density** for any pullback alerts that produced an exit lineage during the soak — though the bigger constraint (gate stack blocks pullback fills, no `fast_exits` rows reference pullback alerts in paper mode) is unchanged. Most cells will still show `realized_validation_count = 0`; only edge cases improve.
+- F8a-fix's 100% capture rate invariant has held continuously through the soak window. F-hygiene-1's `last_error` self-clear continues working naturally.
 
 ## Architectural commitments
 
-- **Event-driven shape preserved.** No new polling loops, no new DB writes, no new LISTEN channels.
-- **No new magic numbers.** Any constants introduced (e.g., the rolling-grep window) are explicit, named, documented, in a UX/diagnostic category — not strategy thresholds.
-- **Idempotent, additive changes.** No deletions of behavior.
-- **No miner / scanner / executor / gate changes** beyond the explicit edits below.
-- **No migrations.** No schema work.
-- **Up to 3 commits.** Subtask 1 may produce 0 commits if the investigation concludes "known-transient, no action."
+- **Read-only against `fast_signal_decay` + `fast_alerts` + `fast_path_status`.** No mutations.
+- **No new code.** No edits to scanner, miner, executor, gates, calibration helpers, or any module.
+- **Use the existing MIN_SAMPLES floor and negative-edge exclusion criterion** the brain already encodes — don't re-derive them inline.
+- **Honest reporting.** Same tier system as the prior brief (verdict-grade ≥ 30, suggestive 10–29, sparse < 10). Don't fabricate verdicts from suggestive cells.
+- **One CC report, no code commits.**
 
-## Scope
+## Scope — analysis, not code
 
-### Commit 1 (or zero): Diagnose `db_errors = 13` on decay_miner
+### 1. Pull current state of `fast_signal_decay` for `volume_breakout_pullback_long`
 
-**Investigation first, fix only if warranted.**
+```sql
+SELECT ticker, score_bucket, horizon_s,
+       sample_count,
+       mean_return,
+       m2_return,
+       CASE WHEN sample_count > 1
+            THEN SQRT(m2_return / (sample_count - 1)) / SQRT(sample_count)
+            ELSE NULL
+       END AS stderr_return,
+       realized_validation_count,
+       realized_validation_residual,
+       last_updated
+FROM fast_signal_decay
+WHERE alert_type = 'volume_breakout_pullback_long'
+ORDER BY ticker, score_bucket, horizon_s;
+```
 
-Run:
+Bucket the cells into the same three tiers:
+- **Verdict-grade** (`sample_count >= 30`)
+- **Suggestive** (`10 <= sample_count < 30`)
+- **Sparse** (`sample_count < 10`)
+
+### 2. Cross-reference with `fast_alerts`
+
+- Total `volume_breakout_pullback_long` alerts written since F8a-fix landed (`id > 2300`).
+- Capture rate (with `best_bid` AND `close`) over the same window — should still be ~100%; flag any drift.
+- Hourly distribution over the last 24h to spot bursts vs steady accumulation.
+- **Compare to prior evaluation's snapshot:** at 2026-05-02 17:48 UTC there were 114 post-fix alerts, 208 observations, 83 cells. How much have these grown?
+
+### 3. Decay-miner health snapshot
+
+Same checks as the prior brief:
+- `obs_scheduled` vs `obs_finalized` ratio.
+- `pending_heap` size — should oscillate around steady-state per F-hygiene-2.3's diagnostic. If it now grows monotonically, that's a finding.
+- `db_errors` — **should be 0 throughout the post-`742394f` window** (durably 0, not just zero on the immediate post-restart probe). Run the dispatch script: `.\scripts\dispatch-decay-heap-trend.ps1 12` and verify.
+- Watchdog OK heartbeat firing: `docker compose logs fast-data-worker --since 5m | grep "watchdog: OK"` should show ~5 lines.
+
+### 4. Verdict logic — same decision tree
+
+```
+IF >= 3 verdict-grade cells AND >= 1 of them is positive (mean - 2*stderr > 0)
+  AND no verdict-grade cell is negative (mean + 2*stderr < 0):
+    -> "Fade hypothesis SUPPORTED at <list horizons>. Recommend F8b."
+
+ELIF >= 3 verdict-grade cells AND all are negative or zero:
+    -> "Fade hypothesis REFUTED. Recommend F9."
+
+ELIF some verdict-grade cells positive, some negative, no consistent pattern:
+    -> "Fade signal is noisy. Recommend either: (a) longer soak, OR (b) F8b
+        only on the consistently-positive horizons."
+
+ELIF < 3 verdict-grade cells:
+    -> "Insufficient data. Recommend continuing soak."
+```
+
+**Important refinement from f8a-evaluation:** horizon=1s is the *fire moment* (no reversion has elapsed); negative-CI there is structurally expected, not evidence against the fade. **Apply the verdict only to horizons ≥ 5s.** A horizon=1s cell that's negative is informational, not falsifying.
+
+If after 48h total soak (i.e., this re-run still finds < 3 verdict-grade cells at horizons ≥ 5s), **strongly consider whether `VOL_BREAKOUT_MULT = 2.0` makes the signal too rare to evaluate in any reasonable timeframe.** That's a strategic discussion (lower MULT = more firings = noisier data, vs. pivot to F9 = different signal shape). Surface as Open Question if relevant.
+
+### 5. ETA projection (if more soak is needed)
+
+Same shape as prior:
+- Average alerts/hour over last 24h (excluding spikes).
+- Projected hours-to-MIN_SAMPLES at the median bucket of horizons ≥ 5s.
+- Specific clock time at which it's reasonable to re-run.
+
+### 6. Write the CC report
+
+`docs/STRATEGY/CC_REPORTS/<date>_f8a-evaluation-rerun.md` follows PROTOCOL.md format. Include explicit comparison to the prior f8a-evaluation snapshot:
+
+| Metric | 2026-05-02 17:48 (prior) | This run | Δ |
+|---|---|---|---|
+| Verdict-grade cells | 0 | ? | ? |
+| Suggestive cells | 2 | ? | ? |
+| Sparse cells | 81 | ? | ? |
+| Total observations | 208 | ? | ? |
+| Total post-fix alerts (`id > 2300`) | 114 | ? | ? |
+| `db_errors` | 13 (frozen) | ? (should be 0 throughout window) | ? |
+
+Plus the verdict (or "still insufficient" with updated ETA), per-cell table for verdict-grade and suggestive cells, health snapshot, recommendation, open questions.
+
+### 7. Verbatim verification SQL — for next review
+
+Same SQL set as the prior brief. Append:
 
 ```bash
-docker compose logs fast-data-worker --since 24h \
-  | grep -iE "decay_miner.*ERROR|decay_miner.*[Ee]xception|psycopg2.*decay" \
-  | head -50
+# F-hygiene-2.3 dispatch script — heap + errs trend over last 12h
+.\scripts\dispatch-decay-heap-trend.ps1 12
 ```
-
-What we want to know:
-- Is it the same error repeating, or different errors?
-- Is it a known-transient category (psycopg2 reconnect, brief lock contention) or something deeper (constraint violation, type mismatch, unhandled JSONB shape)?
-- Does the count keep growing (ticking up by 1 every N minutes) or is it frozen at 13 from a single burst at startup?
-
-**Decision branches:**
-
-- **A. Known-transient category** (e.g., `OperationalError: server closed the connection unexpectedly` retried successfully). Document in the CC report's "Findings" section as "expected operational noise; not actionable." No code commit. Add the error category to a comment near the `db_errors` counter so the next investigator sees the previous diagnosis.
-
-- **B. Real bug in the miner's DB write path** (constraint violation, type mismatch). One commit fixing the actual error site. The fix should be surgical — not a refactor of the miner's flush logic.
-
-- **C. Frozen at 13 from a startup-time burst** (no further growth). Document and move on. No code commit. May be worth resetting the counter on next supervisor restart, but don't fold a counter-reset into this task — that's its own decision.
-
-**Constraint:** Don't suppress the error. If it's real, fix it. If it's not real, document it. Hiding it (try/except: pass without logging) is the wrong move.
-
-**Verification:**
-- If A or C: the CC report includes the grep output (sanitized) and the diagnosis category.
-- If B: re-run the grep after the fix; new errors should be 0 or substantively reduced.
-
-### Commit 2: Positive-confirmation `[fast_path] decay_miner watchdog OK` log line
-
-**File:** `app/services/trading/fast_path/supervisor.py` (the `_decay_miner_watchdog` coroutine added in F-hygiene-1 commit `000fbc0`)
-
-**What:**
-
-Currently the watchdog only logs on task death. Silence implies health, but operators inferring health from absence is fragile. Add a positive-confirmation log line on each tick:
-
-```python
-async def _decay_miner_watchdog(task: asyncio.Task, status_tracker: StatusTracker) -> None:
-    """Surface decay_miner task health every WATCHDOG_INTERVAL_S."""
-    while True:
-        await asyncio.sleep(WATCHDOG_INTERVAL_S)
-        if task.done():
-            # ... existing death-handling logic unchanged ...
-            return
-        # F-hygiene-2: positive confirmation. Logged at INFO so it ends up
-        # in the same place as the supervisor metrics tick. Aligns with
-        # the 60s WATCHDOG_INTERVAL_S so each metrics tick has one
-        # corresponding watchdog OK line.
-        logger.info("[fast_path] decay_miner watchdog: OK")
-```
-
-**Status surface:** None changed. The log line is for human / log-aggregator consumption, not for `fast_path_status`. Keep `fast_path_status.last_error` as the death-only signal.
-
-**Verification:**
-- After deploy, `docker compose logs fast-data-worker --since 5m | grep "watchdog: OK"` shows ~5 lines (one per minute).
-- After deploy, the `db_errors` line cadence is unchanged (this isn't a DB write).
-
-### Commit 3: `pending_heap` time-series diagnostic script
-
-**File:** `scripts/dispatch-decay-heap-trend.ps1` (new)
-
-**What:**
-
-Rolling-grep across `docker compose logs fast-data-worker` to extract the time series of `pending_heap=N` from supervisor metrics lines. Outputs to `scripts/dispatch-decay-heap-trend-output.txt` in the dispatch-script convention.
-
-**Note:** Diagnostic script lives outside the application — no app code changes.
-
-```powershell
-# Extract pending_heap time series from fast-data-worker logs over the last N hours.
-# Outputs: timestamp, pending_heap, obs_scheduled, obs_finalized, db_errors
-# So we can answer: is pending_heap oscillating, growing, or stable? Is db_errors
-# accumulating linearly with time, or frozen?
-$ErrorActionPreference = "Continue"
-Set-Location $PSScriptRoot\..
-$out = "scripts/dispatch-decay-heap-trend-output.txt"
-"# decay_miner trend $(Get-Date -Format o)" | Out-File $out -Encoding utf8
-
-# Default 24h window; override via first arg.
-$hours = if ($args.Count -gt 0) { $args[0] } else { "24" }
-"---window: last ${hours}h---" | Add-Content $out
-
-docker compose logs fast-data-worker --since "${hours}h" 2>&1 `
-  | Select-String -Pattern "decay_miner alerts=" `
-  | ForEach-Object {
-      # Each metrics line looks like:
-      #   2026-05-02 17:45:27 [INFO] ... decay_miner alerts=1051 ... pending_heap=1112 ... db_errors=13 ...
-      $line = $_.ToString()
-      if ($line -match "(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})") {
-        $ts = $Matches[1]
-        $alerts = if ($line -match "alerts=(\d+)")          { $Matches[1] } else { "?" }
-        $heap   = if ($line -match "pending_heap=(\d+)")    { $Matches[1] } else { "?" }
-        $sched  = if ($line -match "obs_scheduled=(\d+)")   { $Matches[1] } else { "?" }
-        $final  = if ($line -match "obs_finalized=(\d+)")   { $Matches[1] } else { "?" }
-        $errs   = if ($line -match "db_errors=(\d+)")       { $Matches[1] } else { "?" }
-        "$ts  alerts=$alerts  heap=$heap  scheduled=$sched  finalized=$final  errs=$errs"
-      }
-    } `
-  | Add-Content $out
-
-Write-Output "done"
-```
-
-**Verification:** Run the script; output should show ~60 entries per hour (one per supervisor tick). If `pending_heap` oscillates between, say, 800 and 1200 over 24h with no monotonic trend, the heap is healthy. If it grows linearly, that's a finding.
-
-**Note on a no-code alternative:** We could persist this to a small `fast_path_metrics_history` table for SQL queryability. Don't. The dispatch-script + log-grep approach is zero-code, perfectly soak-safe, and equally informative for the question we're asking. If we ever need to query metrics history programmatically (e.g., a brain consumer), THAT is when we add the table — not now.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `_decay_miner_watchdog` (commit 2) — extend the existing F-hygiene-1 coroutine in place. Single new log line, no structural change.
-- Diagnostic script (commit 3) — uses the dispatch-script convention already established (e.g., `scripts/dispatch-fast-path-soak-status.ps1`).
-- Investigation (commit 1) — pure log-reading, no app code unless a real bug surfaces.
+- `fast_signal_decay` table — truth source. Don't approximate from `fast_alerts`.
+- `app/services/trading/fast_path/calibration.py` — MIN_SAMPLES + negative-edge logic.
+- `scripts/dispatch-decay-heap-trend.ps1` — F-hygiene-2.3 diagnostic for heap + errs trend.
+- F8a-evaluation's CC report (`docs/STRATEGY/CC_REPORTS/2026-05-02_f8a-evaluation.md`) — prior snapshot for the comparison table.
+- F8a-fix's CC report (`docs/STRATEGY/CC_REPORTS/2026-05-02_f8a-fix-per-ticker-heaps.md`) — `id > 2300` convention.
 
 ## Constraints / do not touch
 
-- **All 8 live-placement safety belts.** No changes.
-- **Default mode stays paper.**
-- **No strategy threshold tuning.** Don't touch `VOL_BREAKOUT_MULT`, `VOL_BREAKOUT_PULLBACK_DELAY_S`, `MAX_PENDING_DEFERRED`, `MIN_SAMPLES`, the negative-edge exclusion criterion, or any gate.
-- **No miner code changes** beyond fixing a real bug if subtask 1 finds one. The fix would be surgical to the actual error site — not a refactor of the flush logic.
+- **No code commits.** Zero. The deliverable is one markdown file.
+- **No threshold tuning.** Don't change `VOL_BREAKOUT_MULT`, `VOL_BREAKOUT_PULLBACK_DELAY_S`, MIN_SAMPLES, the negative-edge exclusion criterion, score bucket cutoffs, or anything else.
+- **No live placement enable.** Default mode stays paper.
 - **No migrations.**
-- **No new gates.**
-- **No restart policy on decay_miner crash.** Out of scope (still — same as F-hygiene-1).
-- **No new DB tables, no new columns.** The `pending_heap` time-series is log-grep, not persisted.
-- **`models/trading.py`, `.env.example`, executor, exit_manager.** Continue to leave them alone.
+- **Don't conflate `volume_breakout_long` with `volume_breakout_pullback_long`** — different alert types.
+- **Don't average across tickers** without flagging — bucket per `(ticker, score_bucket, horizon_s)`.
+- **Don't extrapolate from spikes** — treat the 11:00 UTC 2026-05-02 60-alert spike as one data point, same convention as prior.
+- **Apply verdict logic only at horizons ≥ 5s** — horizon=1s is the fire moment, not the fade test.
 
 ## Out of scope
 
-- Restart policy / supervised retry on decay_miner crash. Future task.
-- Watchdogs on other asyncio tasks (scanner, ws_listener, exit_manager). Same pattern, but doing all of them in one go is a refactor.
-- Persisted metrics-history table for programmatic querying. Premature.
-- Resetting the `db_errors` counter at supervisor boot (separate decision; could be useful but folds counter semantics into this task).
-- F8a-evaluation-rerun (separate, later task — at 2026-05-03 17:00 UTC).
-- F8b / F9.
-- Any tuning of any threshold.
+- F8b: calibrating `VOL_BREAKOUT_PULLBACK_DELAY_S`. Next task if verdict supports.
+- F9: new signal types. Next task if verdict refutes.
+- F7: Kelly sizing. Still deferred.
+- Live-mode enablement.
+- Refactoring the decay miner.
+- The code-twin shared-helper between exit_manager and decay_miner (deferred from F-hygiene-2).
+- Cross-pair correlation analysis.
 
 ## Success criteria
 
-1. `git log --oneline -5` shows up to 3 new commits, pushed to origin. Each commit message clearly identifies its subtask.
-2. `docker compose ps fast-data-worker` healthy after deploy.
-3. After Commit 2 deploys: `docker compose logs fast-data-worker --since 5m | grep "watchdog: OK"` returns ~5 lines.
-4. After Commit 3 lands: running `.\scripts\dispatch-decay-heap-trend.ps1 24` produces a time-series of `pending_heap` values across the last 24h.
-5. Subtask 1's investigation produces either a fix (if a real bug) or a documented diagnosis (if a known-transient category). NOT a silenced error.
-6. F8a soak continues uninterrupted — 5 pairs streaming, capture rate stays at 100%, no behavioral changes from any commit.
-7. `docs/STRATEGY/CC_REPORTS/<date>_f-hygiene-2.md` written following PROTOCOL.md format. Include:
-   - The grep output from subtask 1 (sanitized of any sensitive paths/tokens) and the diagnosis category.
-   - Per-commit verification.
-   - The diagnostic-script's first run output (the time series of `pending_heap` values).
+1. `git log --oneline -3` shows ONE new commit, pushed to origin: `docs(strategy): F8a evaluation rerun report + mark NEXT_TASK done`. No code commits.
+2. `docs/STRATEGY/CC_REPORTS/<date>_f8a-evaluation-rerun.md` exists, follows PROTOCOL.md format, contains the verdict (or honest "insufficient data" with updated ETA), and includes the comparison-to-prior table.
+3. The report's verbatim SQL section reproduces the verdict from raw table state — anyone can re-run the SELECTs and get the same numbers.
+4. The dispatch-script output (subtask 3 verification) is referenced or excerpted to confirm `db_errors` durably at 0 post-`742394f` and `pending_heap` still oscillating.
+5. If the recommendation is "F8b" or "F9," it includes a one-line description of what that brief should focus on.
 
 ## Open questions for Cowork (surface in your report only if relevant)
 
-1. **If subtask 1 finds the error category is "psycopg2 reconnect retried successfully,"** the fix is "do nothing, document it." But if it finds something dirtier (e.g., a constraint violation that the miner is silently retrying without resolving), is the fix in scope? My instinct: yes, surgically, if the error site is obvious. If it requires a structural change to the miner's flush, that's out of scope and gets its own brief.
+1. **If 3+ verdict-grade cells exist and the verdict is "fade SUPPORTED,"** F8b's brief will need to reckon with the fact that current gate stack blocks pullback fills (so calibration must come from miner means alone, not realized validations). Worth flagging if the verdict comes up positive.
 
-2. **The watchdog OK log adds ~5 lines/min to the supervisor log volume.** Insignificant compared to the ~50-100 lines/min the supervisor already emits. Worth flagging only if your log-aggregator has cost-per-line concerns.
+2. **If the per-hour rate has dropped vs the prior evaluation** (i.e., even fewer firings than the steady-state ~2.3/hr), that's a tell that the signal got rarer over the soak window. Could reflect market conditions calming, or a structural issue. Worth noting.
 
-3. **The dispatch script's default 24h window** matches the F8a soak cadence. If you want a different default (e.g., 6h to focus on intra-soak trends), say so.
+3. **If the F-hygiene-2.1 fix has produced any non-zero `realized_validation_count`** that's a small but genuine signal — would mean exit-validation is now firing on at least some lineage. Even small numbers are interesting because pre-fix it was structurally near-zero.
 
-4. **Subtask 1's investigation might find that the 13 errors are all from F-hygiene-1's deploy window** (network outage, container restart). If so, the count is frozen and benign — but might recur on the *next* network outage. Worth proactively adding a counter-reset on supervisor boot? Out of scope here, but flag if it surfaces as a real concern.
+4. **48-hour total soak threshold.** If this re-run still finds < 3 verdict-grade cells at horizons ≥ 5s, the strategic discussion is whether `VOL_BREAKOUT_MULT = 2.0` is too aggressive for fade evaluation in *any* reasonable timeframe. Surface explicitly — that's a Cowork decision, not Claude Code's call.
 
 ## Rollback plan
 
-- Each commit is individually revertable. Commit 1 either has no code change (rollback is just removing the diagnosis comment) or has a surgical fix to one error site (revert restores the prior error). Commit 2's revert removes the OK log line. Commit 3's revert removes the diagnostic script — purely additive in `scripts/`.
-- No migrations. No data migrations. No schema changes.
-- No live-placement risk: none of these touch the executor, gates, or any path that interacts with the broker.
+- N/A. No code changes. The CC report is informational; no production impact.
