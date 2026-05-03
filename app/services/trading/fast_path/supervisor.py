@@ -64,6 +64,14 @@ async def _decay_miner_watchdog(
     try:
         while True:
             await asyncio.sleep(WATCHDOG_INTERVAL_S)
+            if not task.done():
+                # F-hygiene-2: positive-confirmation heartbeat. Logged
+                # at INFO so it lands in the same stream as the
+                # supervisor metrics tick (also 60s). One line per
+                # tick makes alive-state observable rather than
+                # inferred-from-silence.
+                logger.info("[fast_path] decay_miner watchdog: OK")
+                continue
             if task.done():
                 try:
                     exc = task.exception()
