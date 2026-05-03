@@ -549,8 +549,16 @@ class FastPathDecayMiner:
         # and alert_fired_at on each row (no FK), so we join on
         # (ticker, alert_type, fired_at == alert_fired_at). Inherited
         # bootstrap entries have no matching alert -> alert_row is
-        # None and we skip validation. The composite is unique to
-        # microsecond precision in practice.
+        # None and we skip validation.
+        #
+        # F-hygiene-2: ORDER BY a.id DESC LIMIT 1 + .first() prevents
+        # MultipleResultsFound when several fast_alerts rows share an
+        # exact (ticker, alert_type, fired_at) triple. That happens
+        # naturally during snapshot-replay catchup, when the F8a
+        # deferred-emit heap drains a burst of entries on one book
+        # emit and they all fire with the same wall-clock fired_at to
+        # microsecond precision. Most-recent-id wins is fine because
+        # the duplicates are functionally identical (same source bar).
         with self._engine.begin() as conn:
             alert_row = conn.execute(text("""
                 SELECT a.ticker, a.alert_type, a.signal_score
@@ -560,7 +568,9 @@ class FastPathDecayMiner:
                  AND a.alert_type = e.alert_type
                  AND a.fired_at = e.alert_fired_at
                 WHERE e.id = :eid
-            """), {"eid": entry_execution_id}).mappings().one_or_none()
+                ORDER BY a.id DESC
+                LIMIT 1
+            """), {"eid": entry_execution_id}).mappings().first()
         if alert_row is None:
             return  # entry wasn't from a tracked alert (e.g. inherited)
 
