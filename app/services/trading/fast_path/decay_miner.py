@@ -679,13 +679,27 @@ class FastPathDecayMiner:
         if best_bid <= 0 or best_ask <= 0:
             self._metrics.obs_dropped_no_book += 1
             return
-        mid = (best_bid + best_ask) / 2.0
 
-        # Forward return (as fraction): direction-aware.
+        # F-hygiene-4.2: use the exit-side price (best_bid for long
+        # close, best_ask for short close), not mid. Realized return
+        # in exit_manager._evaluate_position is computed against
+        # best_bid (long) / best_ask (short) -- the realistic fill
+        # price for the close. Pre-fix the miner used mid, introducing
+        # a systematic half-spread bias between miner forward_return
+        # and realized return: realized = miner_mid_forward -
+        # half_spread/entry_ask. For wide-spread tickers (DOGE ~90 bps
+        # spread → ~45 bps half-spread) this dominates the validation-
+        # residual disagreement (DOGE high h=300 residual was 34 bps).
+        # For tight-spread tickers (BTC ~0 bps) it's negligible.
+        # Aligning miner with exit-side price collapses the bias on
+        # all new observations going forward; existing rows stabilize
+        # via Welford convergence as new obs accumulate.
         if obs.direction == "short":
-            forward_return = (obs.entry_at_alert - mid) / obs.entry_at_alert
+            exit_side_price = best_ask  # short close = buy at ask
+            forward_return = (obs.entry_at_alert - exit_side_price) / obs.entry_at_alert
         else:
-            forward_return = (mid - obs.entry_at_alert) / obs.entry_at_alert
+            exit_side_price = best_bid  # long close = sell at bid
+            forward_return = (exit_side_price - obs.entry_at_alert) / obs.entry_at_alert
 
         self._welford_upsert(
             ticker=obs.ticker,
