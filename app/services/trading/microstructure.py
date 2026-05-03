@@ -17,8 +17,18 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 _DEFAULT_DEPTH_LEVELS = 10
-_DEFAULT_BOOK_HISTORY = 120  # seconds of book snapshots to keep
-_DEFAULT_TRADE_HISTORY = 300  # seconds of trade tape to keep
+# f-leak-2: tightened from 120s → 30s. Only consumer of the book
+# buffer is ``compute_features``, which calls ``buf.latest()`` (one
+# snapshot, age irrelevant) and never touches ``recent()``. 30s of
+# history is plenty headroom for any future debug usage; cuts the
+# per-product BookLevel / BookSnapshot footprint by ~75% at the
+# observed ~80 snapshots/min ingest rate.
+_DEFAULT_BOOK_HISTORY = 30   # seconds of book snapshots to keep
+# f-leak-2: tightened from 300s → 90s. Only consumer is
+# ``compute_features`` with ``trade_window_secs=60.0``; 90s gives
+# enough headroom for the 60s default plus any caller that asks for
+# a slightly wider window. Cuts TapeTrade footprint by ~70%.
+_DEFAULT_TRADE_HISTORY = 90  # seconds of trade tape to keep
 
 
 @dataclass
