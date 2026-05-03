@@ -103,6 +103,11 @@ scripts/dispatch-mount-multirepo-output.txt
 scripts/codebrain-tick-output.txt
 scripts/pat-check-output.txt
 scripts/pat-write-check-output.txt
+scripts/dispatch-decay-heap-trend-output.txt
+scripts/dispatch-stats-trend-output.txt
+scripts/dispatch-postgres-integrity-output.txt
+# F-leak-1.1: rolling docker-stats logs from dispatch-stats-logger.ps1
+scripts/_stats_log/
 
 # pytest scratch dumps captured to repo root during interactive runs
 _pytest_*.txt
