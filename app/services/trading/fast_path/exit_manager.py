@@ -391,6 +391,7 @@ class FastPathExitManager:
                      AND a.alert_type = e.alert_type
                      AND a.fired_at = e.alert_fired_at
                     WHERE e.id = :eid
+                    ORDER BY a.id DESC
                     LIMIT 1
                 """), {"eid": int(entry_execution_id)}).mappings().one_or_none()
         except Exception:
