@@ -640,6 +640,48 @@ def _record_stop_decision(db: Session, trade_id: int, result: StopDecisionResult
     db.add(record)
 
 
+def _sync_bracket_intent_stop_unconditional(db: Session, trade) -> None:
+    """bracket-intent-stop-price-live-sync (2026-05-03) — call the narrow
+    sync writer for every sweep, regardless of whether the stop_engine
+    produced an alert event. Catches moves to ``trade.stop_loss`` made
+    by writers outside the stop_engine path (auto_trader_monitor,
+    pattern_position_monitor, etc.).
+
+    Mode-gated by ``brain_live_brackets_mode != 'off'`` (same gate as
+    the existing ``_maybe_emit_bracket_intent``). Broker-source-gated
+    so paper trades don't flood the cache. Errors are swallowed at
+    debug level — the sync is advisory and a failure should not break
+    the per-trade savepoint.
+    """
+    try:
+        from ...config import settings as _cfg
+
+        mode = getattr(_cfg, "brain_live_brackets_mode", "off") or "off"
+        if mode == "off":
+            return
+        if not getattr(trade, "broker_source", None):
+            return
+        new_stop = getattr(trade, "stop_loss", None)
+        if new_stop is None:
+            return
+
+        from .bracket_intent_writer import sync_bracket_intent_stop_from_trade
+
+        changed, prev = sync_bracket_intent_stop_from_trade(
+            db, int(trade.id), trade_stop_loss=float(new_stop),
+        )
+        if changed:
+            logger.info(
+                "[bracket_intent_writer] sync_stop_price trade=%s ticker=%s "
+                "old=%s new=%s",
+                trade.id, getattr(trade, "ticker", "?"),
+                f"{prev:.4f}" if prev is not None else "NULL",
+                f"{float(new_stop):.4f}",
+            )
+    except Exception:
+        logger.debug("[stop_engine] bracket intent stop_price sync failed", exc_info=True)
+
+
 def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
     """Phase G - single canonical bracket-intent emitter.
 
@@ -894,6 +936,17 @@ def evaluate_all(
                     _record_stop_decision(db, trade.id, result)
                     _apply_stop_to_trade(db, trade, result)
                     _maybe_emit_bracket_intent(db, trade, brain)
+                # bracket-intent-stop-price-live-sync (2026-05-03):
+                # Mirror trade.stop_loss into bracket_intents.stop_price
+                # on EVERY sweep (not just alert sweeps). Other writers
+                # (auto_trader_monitor, pattern_position_monitor, etc.)
+                # also move trade.stop_loss without firing through the
+                # alert path; without this sync the cache stays frozen
+                # at entry-time values and place_missing_stop reads stale.
+                # Idempotent + cheap: a single SELECT + conditional UPDATE,
+                # gated by brain_live_brackets_mode and the writer's
+                # CLOSED / authoritative_* guards.
+                _sync_bracket_intent_stop_unconditional(db, trade)
                 # Flush pending SQL inside the savepoint so per-trade
                 # errors (constraint violations, bad ORM state) surface
                 # here and get rolled back to the savepoint — not at the

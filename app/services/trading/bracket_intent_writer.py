@@ -696,6 +696,76 @@ def sync_broker_stop_order_id_mirror(
     return True, prev_norm
 
 
+def sync_bracket_intent_stop_from_trade(
+    db: Session,
+    trade_id: int,
+    *,
+    trade_stop_loss: float | None,
+) -> tuple[bool, float | None]:
+    """Mirror ``trade.stop_loss`` into the local advisory cache
+    ``trading_bracket_intents.stop_price`` for the matching open intent.
+
+    The local column is **advisory cache**, not authority. Decision-time
+    consumers MUST read the actual source of truth: ``trade.stop_loss``
+    (engine view) or ``BrokerView`` (broker truth). This mirror exists
+    so ``place_missing_stop`` can read the brain's current stop view at
+    placement time without a fresh engine evaluation, and so audit /
+    admin queries see broker-aligned values.
+
+    Behavior:
+      * Returns ``(False, prev)`` when ``trade_stop_loss`` is ``None``
+        or non-positive (writer guard mirrors ``_maybe_emit_bracket_intent``).
+      * Skips ``CLOSED`` and ``authoritative_*``-prefixed states (Phase
+        G.2 frozen-authority contract). Returns ``(False, prev)``.
+      * No-ops when local already matches (within float tolerance). The
+        ``UPDATE`` does not run — ``updated_at`` stays untouched.
+      * Otherwise issues an UPDATE setting ``stop_price`` and
+        ``updated_at``. Does NOT touch ``intent_state`` (state machine
+        is owned by ``transition()``).
+
+    Caller controls commit boundary; this helper does NOT commit.
+    Returns ``(changed, prev_value)``.
+
+    bracket-intent-stop-price-live-sync (2026-05-03).
+    """
+    if trade_stop_loss is None:
+        return False, None
+    try:
+        new_value = float(trade_stop_loss)
+    except (TypeError, ValueError):
+        return False, None
+    if new_value <= 0:
+        return False, None
+
+    row = db.execute(text(
+        "SELECT id, intent_state, stop_price "
+        "FROM trading_bracket_intents WHERE trade_id = :tid"
+    ), {"tid": int(trade_id)}).fetchone()
+    if row is None:
+        return False, None
+
+    intent_id_row = int(row[0])
+    raw_state = (row[1] or "")
+    prev_stop = float(row[2]) if row[2] is not None else None
+
+    coerced = _coerce_state(raw_state)
+    if coerced is IntentState.CLOSED:
+        return False, prev_stop
+    if raw_state.startswith(_AUTHORITATIVE_STATE_PREFIX):
+        return False, prev_stop
+
+    # Idempotent: skip the UPDATE when values match within float tolerance.
+    if prev_stop is not None and abs(prev_stop - new_value) <= 1e-9:
+        return False, prev_stop
+
+    db.execute(text(
+        "UPDATE trading_bracket_intents "
+        "SET stop_price = :v, updated_at = NOW() "
+        "WHERE id = :id"
+    ), {"id": intent_id_row, "v": new_value})
+    return True, prev_stop
+
+
 def mark_auto_reconciled_after_terminal_reject(
     db: Session,
     intent_id: int,
@@ -806,6 +876,7 @@ __all__ = [
     "mark_reconciled",
     "mark_terminal_reject",
     "mode_is_active",
+    "sync_bracket_intent_stop_from_trade",
     "sync_broker_stop_order_id_mirror",
     "transition",
     "upsert_bracket_intent",
