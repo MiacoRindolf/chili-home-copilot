@@ -1,251 +1,222 @@
-# NEXT_TASK: bracket-writer-respect-upside-targets
+# NEXT_TASK: position-identity-design-doc
 
 STATUS: DONE
 
 ## Goal
 
-Stop the bracket writer from silently swapping the operator's upside profit-targets for downside stop-losses. Today's deploy revealed: when `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1`, the writer cancelled 5 covering limit-sells (operator's profit targets at +17% to +200% above entry) to free shares for SELL_STOPs. The shares now have downside protection but no upside take-profit on the broker's books — a strategic shift the operator did not authorize.
+Author a design document — not implementation — that specifies how CHILI moves from today's "Trade row IS everything" model (entry decision + management envelope + broker position all squashed into one ephemeral row) to a three-layer model with persistent broker-authoritative position identity.
 
-This task makes three coordinated changes so the writer respects existing protection, surfaces conflicts to the operator instead of resolving them unilaterally, and offers brain-judged replacement when a re-bracket is structurally needed.
+The output is a single markdown document at `docs/DESIGN/POSITION_IDENTITY.md` that the operator and Cowork can iterate on at the doc level (cheap) before any code lands (expensive). The doc must be specific enough that subsequent NEXT_TASKs (Phase 1 implementation, Phase 2 backfill, etc.) can be written from it without further design conversations.
 
-After deploy:
-1. The writer never again cancels a covering limit-sell on its own. The flag that enabled that behavior is OFF and the code path that uses it is gated by an explicit operator decision.
-2. When a position has a covering limit but no stop, the writer logs a structured conflict and parks the trade in a new pending-decision state. The bracket reconciler emits the conflict on every sweep until the operator chooses.
-3. When the operator chooses to replace (via UI or admin endpoint, both stubs in this task), the writer evaluates each side of the bracket through the brain — current price vs entry, brain's target/stop output, regime context — and only replaces when the new orders are more protective than the existing ones. No forced replacement.
-
-The 5 already-cancelled covering limit-sells from today's deploy are accepted as a one-time operator loss. The writer evaluates each impacted ticker on the next bracket-sweep: if the brain's current target is still above current price and the position is otherwise unprotected on the upside, it queues a replacement target as a pending decision; if the brain says the trade thesis has shifted (e.g., current price has already passed the original target), it skips. Operator confirms each via the pending-decision surface.
+After this task, the conversation moves from "what should the model look like?" to "let's queue Phase 1." That's the bar — the doc exists, it answers the operator's already-stated design questions, it surfaces every remaining decision the operator needs to make BEFORE any code change, and it leaves no ambiguity that would force Phase 1's implementer to invent semantics.
 
 ## Why now
 
-The operator stated explicitly: *"I want them to be managed correctly automatically and properly without bugs by chili."* Today's writer behavior failed that bar — it cancelled their authored upside targets to install downside stops, on its own initiative, without notice. The technical hard truth (Robinhood retail allows only one sell order per share, so true bracket pairs can't co-reserve shares) is real, but the writer was treating it as license to make a strategy decision rather than a fact requiring operator input.
+Today (2026-05-04) shipped four coordinated patches that worked but exposed the architectural ceiling:
 
-The structural one-sell-per-share constraint stays. The fix is at the policy layer above it: the writer surfaces, the operator decides.
+1. **broker-truth-self-heal**'s inverse-reconcile uses a conservative `event_count == 0` check because Trade row IDs are ephemeral. If a future bug auto-closes a Trade row that DOES have fills on its current trade_id, inverse-reconcile refuses to heal — even when the underlying broker position is the same physical position with the same broker truth.
+2. **bracket-writer-respect-upside-targets**'s pending-decision surface lives in `trading_bracket_intents.payload_json` because the bracket_intent FK points at the trade_id, which dies when the trade_id dies. The forward design wants pending decisions keyed on the persistent position, not the ephemeral envelope.
+3. **bracket-emergency-repair-flap-guard** introduced a counter column (mig 223) that became dead code one task later because the path it guarded was retired. The orphan column is a symptom of the same identity problem — workarounds at the trade_id layer instead of fixes at the position layer.
+4. **The 5 cancelled covering limit-sells** today were a strategy decision the writer made on its own. The pending-decision surface fixes that policy gap, but the deeper "operator wants both upside and downside protection" question hits the one-sell-per-share constraint at Robinhood — which is fundamentally about position-level state, not envelope-level state.
 
-## Brain integration (reuse, don't rewrite)
+The operator's framing — *"I just vibe coded this so proper data structure and algorithms refactoring must be done"* — is the right one. Today's patches stopped today's bleeding; this initiative is the structural fix that makes future patches unnecessary.
 
-- `app/services/trading/bracket_writer_g2.py::place_missing_stop` — the writer's primary entry point. The covered-by-existing-sell branch is the one that today silently cancels. After this task, that branch surfaces a pending-decision row instead of cancelling.
-- `app/services/trading/bracket_reconciliation_service.py` — the sweep loop. Emits the new pending-decision discrepancy as part of `event=writer_action ... reason=existing_target_present_no_stop` so the existing audit funnel picks it up.
-- `app/services/trading/stop_engine.compute_initial_bracket` (or whatever the brain's bracket-derivation function is — discover in code) — already returns the brain's stop_price + target_price for a position. The writer reuses this output to evaluate "is the operator's existing limit at or above the brain's target" (preserve) vs "below" (the brain wants tighter; surface as candidate replacement).
-- `trading_bracket_intents.payload_json` — already a JSONB column. Carries the conflict payload (existing limit price/qty, brain's preferred target, current market price, regime) without a schema change. No new columns until Phase 1 of the position-identity refactor.
-- `governance.py` — kill-switch primitive. The writer DOES NOT auto-resolve conflicts; conflicts route to the pending-decision surface. The operator's decision-write API uses the existing admin auth pattern; this task adds the endpoint stub but does not build the UI (that's Phase 7 of the broader initiative).
+The operator has already given five design-question answers (in the prior chat turn, captured below). The brief takes those as load-bearing inputs and writes the doc around them.
+
+## Operator pre-actions (independent of this task)
+
+Two small operator-side housekeeping items are decoupled from the design doc and can happen any time:
+
+1. **Kill switch reset.** Operator chose Path A: reset now. The 9 reopened equity positions have live broker SELL_STOPs (verified at 20:12 UTC); upside management defers to the brain's `stop_engine`. After reset, autotrader resumes new entries. **Action:** `docker compose exec -T broker-sync-worker python -c "from app.services.trading.governance import deactivate_kill_switch; deactivate_kill_switch()"` — or hit whatever existing admin endpoint deactivates the kill switch. If neither path works smoothly, the next NEXT_TASK after the design doc could include a tiny "operator-grade kill switch reset endpoint" as a follow-up.
+
+2. **EKSO/ELTX P/L data backfill.** Trade 1815 (EKSO) and 1816 (ELTX) currently show `exit_price = entry_price, pnl = 0` — the lying-fallback artifact from noon's `emergency_close_all`. Actual broker fills were ELTX `$10.70 × 25` (loss `-$33.00`) and EKSO `$10.76 × 40` (loss `-$38.80`). One-time SQL update if operator wants clean books:
+
+```sql
+UPDATE trading_trades SET exit_price=10.70, pnl=-33.00, exit_reason='broker_stop_filled_outside_chili'
+ WHERE id=1816;
+UPDATE trading_trades SET exit_price=10.76, pnl=-38.80, exit_reason='broker_stop_filled_outside_chili'
+ WHERE id=1815;
+```
+
+Or accept as one-time data scar. Operator's call.
+
+Neither blocks this NEXT_TASK.
+
+## Brain integration / source material the doc must read and cite
+
+- `app/models/trading.py` — the existing `Trade`, `BracketIntent`, `PaperTrade`, `TradingExecutionEvent` ORM models. The doc has to map every column on these to its post-refactor home (decision / envelope / position / unchanged).
+- `app/services/broker_service.py::sync_positions_to_db` — the mirror function. Doc specifies how it changes to write `trading_positions` + emit `position_events` instead of (or in addition to, during the staged migration) writing `trading_trades` directly.
+- `app/services/broker_service.py::get_positions` and the order-fetching helpers — broker-truth source. The position-event stream's source-of-truth for "did this position open / close / change quantity" is broker observation, not local DB writes.
+- `app/services/trading/bracket_reconciliation_service.py` and `bracket_writer_g2.py` — the bracket layer that currently reads from `bracket_intent.trade_id`. Doc specifies how it migrates to read from `bracket_intent.position_id`.
+- The five existing close-reason strings (`broker_reconcile_position_gone`, `phantom_after_terminal_reject`, `emergency_price_monitor_guardrail`, `zombie_reconcile_orphan`, `broker_reconcile_no_exit_price`) and their respective writers — doc must show how each maps to a `position_state` transition reason in the new model. No string left orphaned.
+- `docs/STRATEGY/CURRENT_PLAN.md` — already has the 6-phase rough sketch. The design doc takes that sketch as a starting point but adds full schemas, migration ordering specifics, and phase exit criteria.
+- The yf-breaker, R32 wholesale guard, C2 phantom guard, inverse-reconcile path, bracket flap guard (now-deleted) — the doc has to explain how each existing guard moves to the new model OR retires when the model makes it unnecessary.
 
 ## Path
 
-**Design principle: zero new magic numbers, zero new env-overridable hardcoded defaults, zero new auto-close paths, zero new auto-cancel paths.** Every decision threshold derives from brain output (already computed) or broker state (already observed). If you find yourself typing a literal price-comparison tolerance or a hardcoded list of "viable" conditions, stop and call it back to Cowork.
+**Design principle for the doc itself: every claim about future behavior is grounded in a specific cross-reference to existing code or operator-stated intent.** No "we'll figure it out later" wording. If a question is genuinely open, it goes in the Open Questions section with two-or-three options + Cowork's recommendation, not in the body as ambiguous prose.
 
-### Step 1 — Flip `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` → `0` in compose
+### Step 1 — Read the source
 
-`docker-compose.yml` for the broker-sync-worker service. Single-line change. Comment above the line documenting why: "preserves operator's authored upside profit-targets; bracket writer surfaces conflicts via pending-decision instead of unilaterally cancelling." Operator restarts broker-sync-worker post-deploy to pick up.
+Before writing prose, the executor reads (at minimum):
 
-### Step 2 — Modify `place_missing_stop` covered-by-existing-sell branch
+- All five files in Brain Integration section above
+- `docs/STRATEGY/CURRENT_PLAN.md` — the 6-phase sketch
+- `docs/STRATEGY/COWORK_REVIEWS/2026-05-04_*.md` — today's review files for the architectural pain captured there
+- `docs/STAGING_DATABASE.md`, `docs/PHASE_ROLLBACK_RUNBOOK.md` — protocol docs for migration discipline
 
-In `bracket_writer_g2.py`, find the branch that today reads (paraphrased):
+Cite specific file:line references throughout the doc body when describing existing behavior.
 
-```python
-if held_for_sells == broker_qty:
-    if CANCEL_COVERING_SELL:
-        cancel_covering_sells(...)
-        proceed_to_place_stop(...)
-    else:
-        log_silent_exposure_warning(...)
-        return skip_outcome
+### Step 2 — Write `docs/DESIGN/POSITION_IDENTITY.md` per the structure below
+
+```
+# Design: Position Identity Refactor
+
+## Architectural problem
+  (1-2 page; cite specific 2026-05-04 incidents)
+## Operator-stated design answers (load-bearing inputs)
+  (verbatim quotes from operator + their interpretation)
+## Three-layer model
+  ### Decision layer
+  ### Management envelope layer
+  ### Position layer
+  ### Why three layers, not two — concrete examples of operations each layer owns
+## Event-sourced position state
+  ### Event taxonomy (open / qty_change / close / suspect / corrected)
+  ### State derivation
+  ### Backfill strategy
+## Schema specifics
+  ### `trading_positions` (full DDL — not pseudocode)
+  ### `trading_position_events` (full DDL)
+  ### `trading_management_envelopes` (or whatever the renamed Trade row becomes)
+  ### `trading_decisions` (the entry-intent-immutable table; fields that exist today on Trade row that belong here)
+  ### `trading_execution_events` migration shape (add `position_id` column; backfill plan)
+  ### `trading_bracket_intents` migration shape (FK retarget)
+## How existing tables map (column-by-column)
+  ### Every column on today's `trading_trades` → its new home
+  ### Every column on today's `trading_bracket_intents` → its new home
+  (Tables, not prose.)
+## Migration ordering — 6 phases with explicit exit criteria
+  Each phase: scope, schema changes, code changes, soak duration, exit criteria, rollback plan
+## Compatibility surfaces
+  Reporting queries, dashboards, audit logs that reference the old strings/columns — what stays / what gets deprecated / on what timeline
+## Close-reason mapping table
+  Today's 5 strings → new `position_state.transition_reason` values
+## Phase 7 — autopilot settings UI
+  Just enough sketch to show the data model supports the operator's stated UI requirements
+  (per-broker enable/disable, per-strategy toggles, per-broker trade-kind allowlists)
+## Brain context flow
+  Where does `compute_bracket_intent` plug in? Stop engine? Stop monitor?
+  How does the new model feed brain inputs vs receive brain outputs?
+## What this initiative does NOT change
+  Order placement code, broker auth, TP/SL primitive, etc.
+## Open Questions for operator
+  Each question: framing, two-three options, Cowork's recommendation, what the answer affects
+## Estimated cost (pre-implementation)
+  Per phase: lines of diff, test count, soak window in operator-hours
+## Glossary of new terms
+  position, decision, envelope, position event, transition_reason, etc.
 ```
 
-Replace with:
+The DDL must be writable directly to migration code in Phase 1 — i.e., column types, indexes, FK constraints, NULL semantics, default values, all specified.
 
-```python
-if held_for_sells == broker_qty:
-    # Position is fully reserved by an existing sell order (limit-sell or
-    # similar). One-sell-per-share constraint at Robinhood retail means we
-    # can't co-place a stop. This is operator-decision territory.
-    #
-    # Surface the conflict via the pending-decision surface (Step 3) and
-    # park the intent. The bracket reconciler emits this on every sweep
-    # until the operator resolves; the writer never auto-resolves.
-    record_pending_bracket_decision(
-        db, intent=intent, broker=broker, brain=brain_view,
-        conflict='existing_sell_holds_all_shares',
-    )
-    return outcome(
-        writer='place_missing_stop',
-        ok=False,
-        reason='existing_target_present_no_stop',
-        decision_status='pending_operator',
-    )
-```
+### Step 3 — Cross-check against operator's design answers
 
-The `record_pending_bracket_decision` helper writes a structured row (Step 3). The outcome's `decision_status='pending_operator'` is a new field on the writer-action audit emit so the funnel knows this is awaiting operator input rather than a bug.
+The doc must internally validate against these operator answers (verbatim quotes from the chat):
 
-### Step 3 — Pending-decision surface (data only; UI is Phase 7)
+- **Account granularity:** *"I'm not sure, what can make the more profit without losing quality?"* → Cowork's recommendation: aggregate by `(user_id, broker_source, ticker)` for now. Explain WHY (no quality loss for a single-cash-account-per-broker setup, simpler, easier to refactor in `account_type` enrichment when/if multiple-account-types-per-broker becomes real).
+- **Cross-broker same-ticker:** *"for long trades, just use rh, for scalping just coinbase. it would be nice if you can just create like an autopilot settings page so I can enable/disable there the flags and checkboxes for the auto trading system including enabling and disable kind of trades per broker"* → separate position rows per broker_source (the natural key already includes it). Add Phase 7 sketch showing the autopilot settings page consumes `trading_positions` + a new `autopilot_routing_rules` table.
+- **Snapshot vs event-sourced:** *"event-driven then"* → event-sourced. Snapshot fields (`current_quantity`, `current_avg_price`) on `trading_positions` are derived materializations of the event stream, NOT primary truth. Rebuild from events any time.
+- **Three-layer split:** *"I think separating them is a cleaner approach"* → three layers (decision / envelope / position). Doc justifies WHY (fixed today's "Trade row dies, decision history dies, envelope dies" cascade by separating concerns) and shows what each layer owns concretely.
+- **Mig 223 orphan column:** *"I give you the decision for this basing on your investigation"* → bundle DROP into Phase 1's coordinated migration. Single schema change rather than separate hygiene ticket.
 
-Use `trading_bracket_intents.payload_json` to carry the pending decision. New JSON shape (no schema migration):
+If the doc reads back differently from any of those, surface it as an Open Question — don't quietly diverge.
 
-```json
-{
-  "pending_decision": {
-    "kind": "existing_sell_holds_all_shares",
-    "observed_at": "2026-05-04T20:14:00Z",
-    "broker_state": {
-      "qty": 150.0, "avg_price": 2.815, "held_for_sells": 150.0,
-      "covering_orders": [
-        {"order_id": "...", "type": "limit", "side": "sell",
-         "qty": 150.0, "price": 3.30}
-      ]
-    },
-    "brain_state": {
-      "target_price": 3.2372,
-      "stop_price": 2.2225,
-      "current_price": 2.85,
-      "regime": "..."
-    },
-    "options": [
-      {"choice": "keep_target",
-       "consequence": "no_downside_stop"},
-      {"choice": "replace_with_stop",
-       "consequence": "cancels_existing_limit_sell_and_places_stop_at_brain_price"},
-      {"choice": "convert_to_trailing_stop",
-       "consequence": "cancels_existing_limit_sell_and_places_trailing_stop_per_brain_atr"}
-    ],
-    "operator_choice": null
-  }
-}
-```
+### Step 4 — Surface 2-4 NEW open questions that emerged from the deeper read
 
-The reconciler reads `pending_decision.operator_choice` on each sweep. While `null`, it skips the writer call for this intent and emits a `kind=pending_operator_decision` discrepancy (visible in audit + log).
+Beyond the five operator-answered questions, the source-code read in Step 1 will turn up new design choices the operator hasn't seen yet. Likely candidates:
 
-### Step 4 — Admin endpoint stub for operator decision
+- **Stale event tolerance.** When broker_sync misses a sync cycle (broker auth flap, network blip), how does the event stream record the gap? Best guess vs explicit "unknown" event vs no-write?
+- **Cross-account position aggregation in reporting.** Today's reporting queries don't distinguish accounts; if Phase 1 splits at `(broker_source, ticker)` aggregate, what do dashboards do with the aggregated view?
+- **Backfill atomicity for the `position_id` column on `trading_execution_events`.** Bulk update with FK enforcement at the end? Online-rolling? Some events may have ambiguous mapping (orphaned trade_id) — strategy?
+- **Fast-path subsystem dependency.** Fast-path code in `chili-brain/` and `app/services/trading/fast/` writes to `fast_executions`, `fast_orderbook`, etc. Do those tables migrate to position-keying in this initiative or stay decoupled?
 
-Add `POST /api/admin/bracket-decisions/<bracket_intent_id>` that accepts a JSON body with `choice` (one of the values surfaced in `options`). The endpoint:
+The doc lists these and proposes options. Operator answers them in the review pass.
 
-1. Validates the choice against the current `pending_decision.options` list (rejects unknown choices).
-2. Sets `payload_json.pending_decision.operator_choice` and bumps `updated_at`.
-3. Returns the updated row.
+### Step 5 — Commit
 
-The reconciler picks up the choice on next sweep and routes to the appropriate writer action:
-- `keep_target`: clears `pending_decision`, marks intent as `state=accepted_no_stop`, no broker action.
-- `replace_with_stop`: cancels the listed covering orders, places stop at `brain_state.stop_price`, clears `pending_decision`.
-- `convert_to_trailing_stop`: cancels the listed covering orders, places trailing-stop per the brain's ATR/regime output, clears `pending_decision`.
+Two commits:
 
-The endpoint stub goes in `app/routers/admin.py`. UI surface is **out of scope** — that's the autopilot settings page, Phase 7 of the broader initiative.
+1. `docs(strategy): position-identity design doc — three-layer model, event-sourced, full schema specs` — the design doc itself.
+2. `docs(strategy): position-identity-design-doc CC report + mark NEXT_TASK done` — the standard CC report.
 
-### Step 5 — Today's 5 cancelled limits — viability evaluation, not forced replacement
-
-Per operator: *"Replace them if they're still viable, else don't force it."*
-
-Add a one-shot helper in `bracket_writer_g2.py`: `evaluate_target_replacement(intent, brain_view, broker_view) -> dict | None`. Returns:
-
-- `None` if the brain's target is at-or-below the current market price (target already realized or no longer ahead — not viable).
-- A pending-decision row (Step 3 shape) with `kind="cancelled_limit_replacement_candidate"` if the brain's target is above current price AND above entry price AND the position is unprotected on the upside.
-
-The reconciler runs this once per intent, on the next sweep after this commit deploys, for the 5 trades whose covering limit was cancelled today (1812 AIDX, 1813 CCCC, 1814 CRDL, 1821 TLS, 1822 VFS — identifiable by their 19:14:18-19:14:57 timestamp on intent.last_diff_reason). If the brain says viable, a pending-decision row appears; operator decides via Step 4 endpoint.
-
-No forced replacement, no automatic re-cancel, no surprise broker calls.
-
-### Step 6 — Tests
-
-Add `tests/test_bracket_writer_respect_upside_targets.py`:
-
-- **scenario A: existing limit + missing stop → pending decision, no broker action.** Mock writer with `held_for_sells == broker_qty`. Assert: no `place_stop` call, no `cancel` call, `pending_decision` row written with the three options, audit row emitted with `decision_status='pending_operator'`.
-- **scenario B: operator chooses `keep_target` → intent transitions to accepted_no_stop, no broker action.** Mock the admin endpoint, write the choice. Run reconciler. Assert: no broker call, intent state updated, `pending_decision` cleared.
-- **scenario C: operator chooses `replace_with_stop` → cancel + place sequence runs.** Assert: cancel called once with the listed covering order_id, place_stop called with brain's stop_price, both broker calls verified, `pending_decision` cleared.
-- **scenario D: operator chooses `convert_to_trailing_stop`.** Same shape as C but routes to the trailing-stop placement path.
-- **scenario E: cancelled-limit replacement viability evaluator.** Mock a Trade row with `intent.last_diff_reason='inverse_reconcile_reopen'` and a recently-cancelled limit, brain target ABOVE current price → pending-decision row appears with `kind="cancelled_limit_replacement_candidate"`. Same scenario but brain target BELOW current price → returns None, no pending-decision.
-
-All scenarios use `chili_test`. No live network.
-
-### Step 7 — Documentation
-
-Add a short paragraph to `docs/FAST_PATH_HANDOFF.md` (or wherever the bracket flag inventory lives) documenting:
-
-- The one-sell-per-share constraint at Robinhood retail (architectural fact).
-- Why `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL` defaults to `0` going forward.
-- The pending-decision surface as the operator-input mechanism.
-- Forward pointer to the autopilot-settings UI (Phase 7).
+CC report includes: a copy of the source-material list actually read with citation, the magic-number-audit equivalent for the doc (zero numeric thresholds proposed, all schemas use observable-data-derived values where applicable), and the 2-4 newly-surfaced open questions.
 
 ## Constraints / do not touch
 
-- **No magic numbers.** Brain output (target_price, stop_price, ATR, regime) is the source of every threshold. Current price comes from the existing `fetch_quote` path. No literal tolerance, no hardcoded "viable" thresholds.
-- **No new auto-cancel paths.** The writer NEVER cancels broker orders without an operator-recorded choice. The cancel call appears only in the `replace_with_stop` and `convert_to_trailing_stop` resolution paths, both gated by `operator_choice != null`.
-- **No new auto-place paths.** Same logic for placement — the writer only places when the operator has chosen a resolution that requires placement.
-- **No new env-overridable defaults.** The `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=0` flip in compose is the LAST env-flag change for this surface. Going forward, decisions live in `pending_decision.operator_choice`, not env vars.
-- **Do NOT remove the `place_missing_stop` function** — it's reused by the resolution paths in Step 4. Only the covered-by-existing-sell branch's behavior changes.
-- **Do NOT modify the inverse-reconcile path** from `broker-truth-self-heal`. That ships independently and the new pending-decision logic runs after inverse-reconcile reopens a Trade row.
-- **Do NOT auto-resolve any of today's 5 cancelled limits.** Step 5 is evaluator-only; it surfaces candidates as pending-decision rows. Operator decides each.
-- **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
+- **Doc only.** This task ships ZERO code, ZERO migrations, ZERO tests. The output is markdown.
+- **No magic numbers in the design.** If the doc proposes a threshold (e.g., "stale event tolerance window"), it has to derive from observable system state OR be explicitly flagged as an Open Question for operator decision.
+- **No premature schema commitments.** The DDL in the doc must be specific enough to implement, but Phase 1's actual migration script is a separate task. The doc doesn't prescribe migration ordering inside Phase 1; it prescribes Phase 1's exit criteria.
+- **Cite, don't speculate.** Every "today the system does X" claim must reference a specific file:line in the codebase. Every "the operator wants Y" claim must reference a specific quote or operator-stated intent in `docs/STRATEGY/COWORK_REVIEWS/*.md` or `docs/STRATEGY/CURRENT_PLAN.md`.
+- **No dependencies on the Phase 7 UI being built.** The data model must stand on its own; UI is consumer.
+- **Backwards compatibility plan must be concrete.** Existing reporting queries that grep `exit_reason='broker_reconcile_position_gone'` need a deprecation timeline, not handwaving.
+- **Tests use `_test`-suffixed DB.** Standard PROTOCOL Hard Rule (vacuous for this doc-only task; included because it'll matter for Phase 1).
 - **No `git push --force` to main.** PROTOCOL Hard Rule 4.
-- **No new schema migrations.** Pending-decision data lives in existing `payload_json`. The new column work is Phase 1 of the position-identity refactor (separate initiative).
 
 ## Out of scope
 
-- **Autopilot settings UI** — the page the operator described (per-broker enable/disable, per-strategy toggles, broker-routing rules). That's Phase 7 of the broader initiative; this task only ships the data model + admin endpoint that the UI will eventually consume.
-- **Position-identity refactor** — the three-layer split (decision → envelope → position) is the next initiative-shaped task. This task uses today's Trade-row model as-is.
-- **Replacing existing API admin auth** — the new endpoint reuses existing admin auth patterns. Don't redesign auth here.
-- **Trailing-stop primitive itself** — `convert_to_trailing_stop` resolution path assumes a trailing-stop placement helper exists in the broker layer. If it doesn't yet, surface it as an Open Question in the CC report and stub the resolution path with a clear NOT_IMPLEMENTED return that surfaces to the operator. Don't build trailing-stop placement in this task.
-- **Manual replacement of today's 5 cancelled limits via Cowork-staged script.** Operator declined. The Step 5 evaluator handles "still viable" judgment; no script.
-- **Schema-removal of mig 223's orphan column.** Bundled with Phase 1 of the position-identity refactor per the agreed plan.
+- **Implementation of any phase.** Phase 1 is the next NEXT_TASK after this doc lands and operator+Cowork have iterated.
+- **Operator pre-actions** (kill switch reset, EKSO/ELTX P/L cleanup) — those are decoupled and operator-driven; not part of this brief's success criteria.
+- **Fast-path subsystem refactor.** Surfaced as a NEW open question (Step 4 candidate); but the doc doesn't dictate that fast-path migrates in this initiative. Operator decides on review.
+- **Forex / perps / non-Robinhood-Coinbase venues.** Phase 1 starts with Robinhood + Coinbase (today's pain); generalization to other venues happens after the model proves out. Doc mentions this as future direction; doesn't design for it now.
+- **The autopilot settings UI itself.** Phase 7 sketch in the doc describes the data model the UI will consume; building the UI is a later initiative.
 
 ## Success criteria
 
-1. **Two commits, both pushed:**
-   - `fix(bracket): respect operator upside-targets — pending-decision surface + flag flip`
-   - `docs(strategy): bracket-writer-respect-upside-targets CC report + mark NEXT_TASK done`
-2. **Magic-number audit clean.** CC report enumerates any literal numeric/string-list values added; expected count is zero net new behavioural literals (audit-trail strings and JSON keys excepted).
-3. **All existing tests still pass.** `pytest tests/test_bracket_writer_g2.py tests/test_bracket_reconciliation_service.py tests/test_alerts.py -v`. The covered-by-existing-sell behavior change requires updating any prior scenario that asserted the cancel-and-place sequence — that's expected, not a regression.
-4. **6 new test scenarios (A-E + cancelled-limit evaluator) pass.**
-5. **Live verification (post-deploy):**
-   - `docker compose ps broker-sync-worker` shows the env var `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=0` after `docker compose up -d broker-sync-worker`.
-   - At least one `pending_decision` row appears in `trading_bracket_intents.payload_json` for any of the 9 currently-open equity positions whose covering limit got cancelled today (this would indicate the Step 5 evaluator is correctly identifying replacement candidates).
-   - Zero new `cancelled` covering-limit-sell orders at Robinhood within 30 minutes of deploy.
-6. **Admin endpoint reachable.** `curl -X POST /api/admin/bracket-decisions/<id> -d '{"choice":"keep_target"}'` returns 200 with the updated row JSON. Verify against an actual bracket_intent_id in the running DB.
-7. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_bracket-writer-respect-upside-targets.md`. Include:
-   - Magic-number audit
-   - Pre-deploy and post-deploy state of the 9 reopened equity bracket_intents (`payload_json` contents)
-   - The trailing-stop placement helper status (does it exist? if not, what's the current stub path?)
-   - Whether any CONTRADICTION or pending-decision rows appeared in the 30-min post-deploy window
+1. **`docs/DESIGN/POSITION_IDENTITY.md` exists** with the structure outlined in Step 2 above. Sections all populated, no TODO placeholders.
+2. **Two commits, both pushed:**
+   - `docs(strategy): position-identity design doc — three-layer model, event-sourced, full schema specs`
+   - `docs(strategy): position-identity-design-doc CC report + mark NEXT_TASK done`
+3. **Operator's five design answers** are reflected verbatim or paraphrased-with-attribution in the doc, with rationale.
+4. **2-4 newly-surfaced open questions** at the bottom of the doc, each with options + Cowork-recommended answer.
+5. **Full DDL** for at least three of the new tables (`trading_positions`, `trading_position_events`, `trading_management_envelopes` or its renamed equivalent). Column types, indexes, FK constraints, NULL semantics, default values all specified.
+6. **Column-by-column mapping table** for today's `trading_trades` and `trading_bracket_intents` to their new homes. Every column accounted for.
+7. **6-phase migration plan** with explicit exit criteria per phase. Each phase reads as something Claude Code could execute as a NEXT_TASK without further design.
+8. **Close-reason mapping table** for the 5 existing strings to new `transition_reason` values. No string orphaned.
+9. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_position-identity-design-doc.md` with source-material citation list + new open questions.
 
 ## Rollback plan
 
-- **Code rollback:** `git revert <fix-commit>`. The `pending_decision` JSON keys orphan in any rows that got written; harmless (consumers ignore unknown keys). The flag goes back to whatever was committed before. The endpoint disappears.
-- **Flag-only rollback:** if the new behavior shows a regression but the rest is fine, the operator can flip `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` back without reverting code — the pending-decision surface still works alongside the old auto-cancel. (Not recommended; defeats the purpose.)
-- **Hard-stop:** flip the writer's whole feature flag (`CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=0`) — the bracket writer becomes a no-op. The 9 open equity positions retain their currently-confirmed SELL_STOPs at Robinhood (those are independent of CHILI's writer state); operator manually manages going forward.
-- **No live broker rollback needed.** This task does NOT cancel or place broker orders during deploy.
+- **Code rollback:** `git revert <doc-commit>`. Doc disappears; no live system effect.
+- **No migration to roll back.**
+- **No live broker rollback needed.**
 
-## Verification commands (for the executor + the operator)
+## Verification commands (for the executor)
 
-```powershell
-# Pre-deploy: confirm the 9 SELL_STOPs are still confirmed
-docker compose exec -T broker-sync-worker python /app/scripts/_rh_probe_stops_now.py
+```bash
+# After commits land, doc exists
+ls -la docs/DESIGN/POSITION_IDENTITY.md
 
-# Post-deploy: env var flip confirmed
-docker compose exec -T broker-sync-worker sh -c 'env | grep CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL'
-# Expect: CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=0
+# Word count sanity check (doc should be substantial, not a stub)
+wc -w docs/DESIGN/POSITION_IDENTITY.md
+# Expect: > 4000 words for the structure outlined
 
-# Watch the pending-decision rows appear on next sweep
-docker compose exec -T postgres psql -U chili -d chili -c "
-  SELECT id, ticker, intent_state, last_diff_reason,
-         payload_json->'pending_decision'->>'kind' AS pending_kind,
-         payload_json->'pending_decision'->>'observed_at' AS observed_at,
-         payload_json->'pending_decision'->>'operator_choice' AS choice
-  FROM trading_bracket_intents
-  WHERE trade_id IN (1812,1813,1814,1817,1818,1819,1820,1821,1822)
-  ORDER BY trade_id;
-"
+# Citations sanity check
+grep -c "app/services\|app/models\|docs/STRATEGY" docs/DESIGN/POSITION_IDENTITY.md
+# Expect: > 15 cross-references
 
-# Watch the writer NOT cancel anything new
-docker compose logs broker-sync-worker --since 30m -f | Select-String -Pattern "cancel|pending_decision|existing_target_present_no_stop|kind=pending_operator_decision"
-
-# Tests
-$env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
-pytest tests/test_bracket_writer_respect_upside_targets.py -v
+# Open questions present
+grep -c "## Open Question\|### Open Question" docs/DESIGN/POSITION_IDENTITY.md
+# Expect: at least 2-4
 ```
 
 ## Open questions for Cowork (surface in your CC_REPORT)
 
-1. **Trailing-stop placement helper presence.** Does a function exist today that places a Robinhood trailing-stop sell? If yes, document the entry point. If no, the `convert_to_trailing_stop` resolution path stubs to NOT_IMPLEMENTED and the option doesn't appear in the pending-decision options list (only `keep_target` and `replace_with_stop`). Surface either way.
-2. **Brain's target/stop reuse.** The viability evaluator depends on brain output for current target_price/stop_price for a given (ticker, regime). Confirm the existing brain function (likely `compute_initial_bracket` or similar) returns this in a stable shape; if it doesn't, surface what it does return and how the evaluator should adapt.
-3. **`fetch_quote` blocked tickers.** Some tickers may be in the yf-breaker OPEN state or the Massive/Polygon block list. The viability evaluator needs current price; if `fetch_quote` returns None, defer the evaluation rather than treating it as "not viable" (no signal ≠ negative signal). Confirm this is what your implementation does and surface the count of deferrals if any.
-4. **Admin endpoint auth.** Reusing existing admin auth pattern is the brief's intent, but the precise pattern (cookie? bearer? IP allow?) lives in `app/routers/admin.py`. Document the choice in the CC report so the future autopilot-settings UI knows what to integrate against.
+1. **Fast-path subsystem.** Does it migrate to position-keying in this initiative or stay decoupled? Cowork's lean: stay decoupled for v1, integrate after Phase 4 lands and the model is proven. Surface for operator decision.
+2. **Backfill atomicity.** What's the chosen strategy for backfilling `position_id` on `trading_execution_events`? Cowork's lean: bulk update per-(user, broker_source, ticker) batch with explicit `unmapped` event for orphan trade_ids; FK gets enforced after backfill completes. Surface alternatives.
+3. **Stale event handling.** When a broker_sync cycle misses entirely, the event stream has a gap. Cowork's lean: emit explicit `sync_gap` event covering the missed window so the derivation logic doesn't quietly assume continuity. Operator may want stricter (alert on gap) or looser (best-effort continuity).
+4. **Reporting deprecation timeline.** Existing dashboards grep `exit_reason` strings. New `transition_reason` values are different. Cowork's lean: maintain both columns for one full quarter of soak; add a view that maps old-to-new for legacy queries. Surface alternatives.
 
 ## Forward pointer
 
-After this task ships and the operator confirms the writer is no longer eating their profit targets, the next initiative-shaped step is the position-identity refactor design doc (per `docs/STRATEGY/CURRENT_PLAN.md`). The pending-decision surface in this task becomes part of that refactor's UI scope (Phase 7 of the broader plan).
+After this doc lands and operator+Cowork iterate (review pass + ~1-2 revision cycles, all at doc level), the next NEXT_TASK is Phase 1 implementation: the `trading_positions` table, the event-stream insert path in `broker_sync`, and shadow-mode operation (no readers depend on it yet). The doc's Phase 1 exit criteria become Phase 1's success criteria directly.
