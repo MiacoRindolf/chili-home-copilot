@@ -1,116 +1,68 @@
-# Current Plan: Fast Path Crypto Scalping
+# Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-01, after F5 first paper soak.
+**Last update:** 2026-05-04, after the broker-truth-self-heal review and the EKSO/ELTX investigation.
+
+> **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
+
+> The operator's framing: *"I just vibe coded this so proper data structure and algorithms refactoring must be done for this."* This plan is that refactor.
 
 ## Goal of the initiative
 
-Build a parallel "fast lane" execution subsystem on top of CHILI's existing brain that can autonomously paper-trade Coinbase 1m crypto scalp setups, prove edge with realized P/L data, then graduate to live placement under explicit operator authorization.
+Introduce a **persistent, broker-authoritative position identity** as a first-class concept above Trade rows. After the refactor:
 
-**Edge proof bar:** > 50 round-trip paper exits across multiple sessions with positive total realized P/L and statistically defensible win rate, before live activation is even discussed.
+- A "position" is identified by `(user_id, broker_source, account, ticker)`. It persists across Trade row generations.
+- Every fill recorded in `trading_execution_events` is associated with a position, not just a trade_id. When a Trade row gets recreated for the same physical position, fill history is preserved.
+- The "did this position close legitimately" question is answerable from broker-side fact (positions API + fill events) without depending on which trade_id happens to be the current management envelope.
+- Trade rows become **management envelopes** — short-lived state machines that hold pattern, entry reason, stop/target, etc. for the *currently-active management instance* of a position. They can be closed and reopened without losing history.
+- C2 phantom guard, inverse-reconcile, broker_reconcile_position_gone — all close paths read from position-level state instead of trade_id-level state. Their cross-checks become precise instead of conservative.
 
-## What's shipped (high level)
+**Success criterion for the initiative:** the conservative `event_count == 0` check in inverse-reconcile is replaced by the precise question "is this position closed at the broker AND is there a confirming SELL fill on this position's history?" — and the answer covers all Trade row generations.
 
-- **F1** — Coinbase WS bar ingestion → `fast_snapshots`. (`46b94c2` + `1522417`)
-- **F2** — L2 order book mirror → `fast_orderbook` with imbalance / spread features. (`dda20d2`)
-- **F3** — Momentum scanner → `fast_alerts` (volume_breakout, imbalance, spread_squeeze). (`80d1551`)
-- **F4** — Paper-mode executor + 6 gates + mode interlock. (`1431cb9`)
-- **F4 UI** — Autopilot page real-time paper P/L view. (`f420ea6`)
-- **F4 live** — Real Coinbase placement code wired behind 8 safety belts. (`8f18be5`)
-- **F5** — Exit manager (`exit_manager.py`) + migration 218 `fast_exits` + brain-derived stop/target via `stop_engine.compute_initial_bracket`. **NOT YET COMMITTED as of 2026-05-01.**
+## What's broken architecturally (the audit)
 
-## First paper soak result (F5)
+From today's investigation. Each of these has a workaround in shipped code; the refactor removes the need.
 
-- 3 round trips closed. **0% win rate. -$0.27 total P/L on $75 traded notional.**
-- All 3 exits were DOGE-USD `stop_hit` after ~43 min holding.
-- 0 target_hit, 0 time_stop. 8 positions still open.
-- Pipeline plumbing: ✅ healthy, sub-millisecond decision latency, brain integration captured `brain_json` per trade.
-- Strategy: ❌ holding period and bracket sized for swing, not scalp. Imbalance signal predictive horizon is 1-5 seconds; we're holding 40+ minutes.
+1. **Trade row IDs are reused as the join key for fills.** `trading_execution_events.trade_id` references whichever Trade row was active when the fill happened. When a Trade row gets wrongly closed (one of the auto-close paths) and broker_sync creates a fresh Trade row, the fresh row has no fill history, even though the underlying broker position never changed.
+2. **C2 phantom guard refuses to backfill in this exact scenario.** Today's 11 stuck positions all hit C2 ("position present at broker, no matching filled buy order found in recent history") — the buys WERE recorded, just on dead trade_ids. C2 has no concept of position-level history.
+3. **Inverse-reconcile is conservative because of #1.** The check `event_count == 0` is a workaround for not knowing which fills belong to the *position* vs the current trade_id. If a future bug auto-closes a Trade row that DOES have a recorded buy fill on its current trade_id, inverse-reconcile routes to CONTRADICTION and refuses to heal — even when it should heal.
+4. **broker_reconcile_position_gone, phantom_after_terminal_reject, emergency_price_monitor_guardrail, zombie_reconcile_orphan, broker_reconcile_no_exit_price** — five independent close paths each writing `exit_reason` strings into `trading_trades`. The diversity is hard to reason about. With position-level state, "is this position closed" is a single query against position_state, not a string-matching exercise across five reasons.
+5. **Bracket intents are 1:1 with Trade rows via `trade_id` FK.** Same problem: when a Trade row dies, the bracket_intent attached to it dies. The May-1 broker SELL_STOP placed for trade 1815 (EKSO) is logically for the *position*, not the Trade row — but the bracket_intent FK points at the dead trade_id. When trade 1815 was wrongly closed at noon, intent 223 followed it. Today the EKSO position legitimately closed via that very stop firing — the bracket reconciler had no way to credit the fill to the right management envelope because the envelope was already gone.
+6. **`CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` was load-bearing-by-accident.** Today's deploy revealed: when the bracket writer can't see existing covering limit-sells as part of the position's state, its only way to get a stop placed is to cancel the limit. With proper position state, the writer would know about both the limit-sell and the stop, treat them as a bracket pair on the same position, and not need to cancel one to place the other.
 
-## Open architectural concerns (not yet addressed)
+## Migration plan
 
-From the two-lens evaluation 2026-05-01:
+See `docs/DESIGN/POSITION_IDENTITY.md` § 8 for the authoritative phase plan + per-phase exit criteria. CURRENT_PLAN keeps initiative-level orientation; the design doc is the single source of truth for technical specifics. The 6-phase sketch that lived here was concretised into the design doc on 2026-05-04 and revised on the same day with operator answers (direction-for-shorts schema, PaperTrade in Phase 1, Phase 5 soak compressed to 2 weeks).
 
-**Algo:**
-1. ~~No exit logic~~ → F5 shipped.
-2. **Magic numbers in gates.py and exit_manager.py** (min_score=0.30, max_hold_s=14400, vol_breakout_mult=2.0, imbalance thresholds 0.65/0.35).
-3. ~~No risk frame~~ → F5 wired stop_engine.
-4. ~~Position sizing fixed $25~~ → still pending; deferred to F7.
-5. **No correlation gate.** Could long all 5 crypto pairs at once.
-6. **Pattern miner doesn't see fast lane.** `learning.py` mines equity 1d bars; needs an extension to mine 1m crypto from `fast_snapshots`/`fast_alerts`.
+## Constraints / hard rules
 
-**Dev:**
-1. **1Hz polling** instead of LISTEN/NOTIFY (executor + exit_manager).
-2. ~~`_open_positions` in-memory~~ → resolved by F5 querying via LEFT JOIN fast_exits.
-3. **No portfolio-level concurrency cap** (only per-pair).
-4. ~~No realized P/L schema~~ → F5 shipped fast_exits.
-5. **No per-asyncio-task watchdog.**
-6. **Recency window 60s too wide** for scalp signals.
-7. **Stale `last_error`** in fast_path_status persists.
-8. **Autopilot UI 5s polling** vs. existing /ws/autopilot/live pattern.
+- **No magic numbers anywhere in the refactor.** Every threshold continues to derive from observable system state per the operator's standing principle.
+- **No flag-day migrations.** Each phase has to leave the system in a working state with the previous phases' workarounds still functioning. Refactor lands incrementally, not as a bang.
+- **No live-money behavior change without explicit operator approval.** Phase 1 is read-only. Phase 2 is backfill + alternate index. Phases 3-6 each ship with a feature flag; flag flip is an operator decision per phase.
+- **Backwards-compat with existing close-reason strings.** Reporting code, dashboards, audit queries assume those strings exist. The refactor adds a new authoritative source; it does NOT remove the old one for at least N phases of soak.
+- **Tests use `_test`-suffixed DB.** Standard PROTOCOL Hard Rule.
 
-## Findings — 2026-05-02 (F6 signal-decay miner)
+## Open architectural questions for operator decision
 
-> *This section supersedes parts of the older priority list below. Treat the older list as historical context — F6's empirical answers change which next moves are load-bearing.*
+1. **Account type granularity.** Robinhood has cash/margin/IRA accounts. Coinbase has spot/portfolio. Should `trading_positions` key on account-type (decoupling per-account positions) or aggregate? Choice affects how the existing single-user, single-account model generalizes.
+2. **Crypto positions on Robinhood vs Coinbase.** Same ticker (e.g., BTC-USD) can be held at both. Position identity needs broker_source in the key. Is that already the design intent or do we need an explicit conversation about cross-broker aggregation reporting?
+3. **Snapshot table or event-sourced?** `trading_positions.current_quantity` is a snapshot (overwritten each broker_sync). Alternative: event-sourced `position_events` with current state derived. Snapshot is simpler; event-sourcing is more honest about "this is what the broker said at time T." Recommend snapshot for v1, event-sourcing as future enhancement if needed.
+4. **What does Trade row identity become?** Today a Trade row IS a position management envelope but also the entry-decision unit (pattern, scan_pattern_id, entry_reason, etc.). Refactor splits these conceptually. Should the Trade row stay the entry-decision unit (and a position can have multiple historical Trade rows representing decisions to enter/manage at different times), or do we introduce yet another layer ("trade_decision" → "management_envelope" → "position")? Three-layer is cleaner; two-layer is less churn.
+5. **Migration ordering relative to schema_version 223 orphan column.** That column is unused dead code from the magic-number flap-guard task. Bundle its removal with Phase 1 of this refactor or do separately?
 
-F6's cold-start backfill mined every `fast_alerts` row from the last 7 days against the `fast_orderbook` trajectory at 8 forward-return horizons (1s through 4h). Aggregated by `(ticker, alert_type, score_bucket, horizon_s)` into `fast_signal_decay`. The data is empirical, not theoretical; the conclusions below are facts about the system as it currently exists.
+## Expected output of the next strategy step
 
-### What we now know
+The next NEXT_TASK should NOT be Phase 1 implementation — it should be a **design doc** that answers the five open questions above, sketches the precise schema for `trading_positions`, and proposes the migration plan. Operator reviews; iterations happen at the doc level (cheap) rather than the code level (expensive); only after the design lands do we queue Phase 1 implementation.
 
-1. **`volume_breakout_long` is negatively predictive.**
-   Across 2,004 observations (n=120 bucket rows), mean forward return is **−28.5 bps**. Per-bucket the worst is `SOL-USD med` at mean=−27 bps, upper-95%-CI=−21 bps. **The signal as currently constituted correlates with mean reversion, not breakout continuation, on Coinbase 1m crypto.** This is the load-bearing finding from F5's loss data (DOGE stop-hits) — not bad luck, but exactly what the signal does on average.
-2. **Imbalance signals are too small to clear cost.**
-   Best non-trivial bucket is `BTC-USD imbalance_long med` at mean=+9 bps over 60 obs. At any reasonable trading cost assumption (Coinbase Advanced Trade taker is ~40 bps single-direction; round-trip ~80 bps + spread), no scanner signal currently clears the bar. The brief's default 200 bps threshold blocks every fill — correct outcome of the brief's settings on the data we have.
-3. **Calibrated max-hold is sub-10s, not 4 hours.**
-   Sharpe-best horizon for high-score buckets falls at the 1–5s end of the spectrum. Matches quant-lit consensus on order-book-imbalance predictive horizon. The hardcoded `MAX_HOLD_S_DEFAULT = 4 × 3600` in `exit_manager.py` was three orders of magnitude wrong on the same signals. F6.5 added an execution-latency floor (`CALIB_EXEC_FLOOR_S = 10s`) so calibrated max-hold below ~10s gets floored — anything below that is below round-trip placement latency anyway.
+## What's deferred / parallel
 
-### Edge-proof bar — superseded by empirical answer
-
-The original criterion (top of this file: *"> 50 round-trip paper exits across multiple sessions with positive total realized P/L"*) is **superseded** by the F6 finding. F6 has answered the same question across hundreds of pre-trade alert trajectories without needing to wait for the soak window: **the existing scanner signals do not produce edge that beats trading cost at any reasonable threshold.**
-
-We're not going to reach 50 round trips with positive P/L on these signals. The math says so directly.
-
-### Load-bearing next move: F8 (signal redesign)
-
-F8 — design and prototype new signals — is now the load-bearing next move. The current three signals (`volume_breakout_long`, `imbalance_long`, `imbalance_short`, plus the `spread_squeeze` n=14 sample we can't yet judge) don't have edge. F8 candidates worth exploring:
-
-- A **fade volume_breakout** signal — explicitly trade against the existing signal since it's reliably wrong.
-- **Microstructure signals** that don't decay in 1–5s — order-flow imbalance against trade-flow, queue dynamics on the deeper book, large-print detection.
-- **Cross-pair lead-lag** — BTC moves predict ETH/SOL with measurable lag; encode that as an alert.
-- **Time-of-day / session signals** — most quant lit uses session boundaries; we don't.
-
-All require operator design input — F8 is collaborative, not pure execution.
-
-### F7 (Kelly sizing) deferred
-
-F7 sizes positions for a tradeable signal. F6 has shown we don't have one yet. Sizing a no-edge signal with Kelly produces zero or negative Kelly fractions; it's wasted work. **F7 stays paused until F8 produces a signal with empirical edge.**
-
-### What we don't yet know
-
-- **Whether scalp-credible edge exists on Coinbase 1m crypto data at all.** The signals we tried don't have it. That's not the same as proving no signal does. F8 is the experiment.
-- **Whether the calibrated max-hold floor of 10s is the right number.** Set by execution latency reality (~200-500ms × 10–50× headroom); could be tighter or looser once we observe live placement timing.
-- **Whether `spread_squeeze` would have edge with more data.** Currently n=14, mean +5 bps — promising but statistically inconclusive. Scanner cooldown may be limiting fire rate; out-of-scope for F6.
-
-## Direction for next 3-5 tasks (subject to operator approval)
-
-> *This list is the pre-F6 priority order. F6 + F6.5 have shipped (and superseded #1 above); the remaining items below stay relevant but are reordered behind the new F8 work — see the 2026-05-02 findings section above for the load-bearing next move.*
-
-In order of expected impact:
-
-1. **F6 — Signal half-life mining brain node.** Replaces the hardcoded `max_hold_s=14400` with a per-(pair, alert_type) value derived from observing how long it takes price to mean-revert past entry on `fast_alerts` history. This is the user's "no magic numbers, let chili learn it" principle applied to the most important magic number we have. **Output:** new table `fast_signal_decay`, populated by a learning_cycle_step extension. Exit manager reads from it.
-
-2. **F7-precursor — Position sizing via `position_sizer_model.compute_proposal()`.** Replaces fixed $25 notional with Kelly-fraction sizing using stop distance + ATR. Brain-derived, no magic numbers.
-
-3. **Switch executor + exit_manager from poll to LISTEN/NOTIFY.** Drops decision latency floor from up to 1000ms to <10ms. Pattern lifted from `app/services/trading/price_bus.py`.
-
-4. **Portfolio + correlation gates.** Use `app/services/trading/correlation_budget.py` bucketing. Cap simultaneous opens across all pairs.
-
-5. **Watchdog task in supervisor.** Per-asyncio-task heartbeat; logs WARN if scanner sees no books for 30s while WS reports streaming.
-
-After these five, we'll have realized P/L data over many soaks at proper scalp timeframes — then we can have the "is there edge?" conversation honestly.
+- **Bug 4** (`emergency_close_all` should submit broker SELLs or be retired). No urgency now (no auto-callers); fits within Phase 5 of this refactor naturally — auto-callers are gone, manual usage gets handled via the position-state-transition machinery.
+- **Schema hygiene** (drop migration 223's orphan column). Bundle with Phase 1 if convenient.
+- **Fast-path crypto scalping initiative.** Paused. The fast-path stack writes to the same `trading_execution_events` and (eventually) `trading_trades` tables; building more on the unstable foundation compounds the problem. Resume after Phase 4 lands.
+- **The lying P/L on EKSO trade 1815 ($0 vs actual −$38.80) and ELTX trade 1816 ($0 vs −$33.00).** One-time data backfill. Operator decision whether to clean now or accept as a one-time scar.
 
 ## Out of scope right now
 
-- **Live Coinbase placement.** Wired but gated. Not even a candidate until F1-F8 are stable AND > 50 paper round trips show edge AND operator explicitly authorizes per the contract in `docs/FAST_PATH_HANDOFF.md`.
-- **Adding new alert types.** Three signals (volume_breakout, imbalance, spread_squeeze) is enough surface area to validate the architecture. New signals are F8+.
-- **Web UI improvements beyond the existing autopilot section.** SSE/WebSocket conversion is on the dev-architect list but cosmetic until edge is proven.
+- **Live broker-routing changes.** This refactor is data-model only. Order placement code stays as-is; only the way we *think* about positions changes.
+- **Non-Robinhood/Coinbase venues.** Forex (OANDA), perps (Hyperliquid/dYdX/Kraken Futures) follow the same pattern but Phase 1 starts with the brokers that have today's audit pain. Generalize to other venues once the model is proven.
+- **Dashboards and reporting changes.** Existing reporting queries continue to work via backwards-compat. UI changes can come later.

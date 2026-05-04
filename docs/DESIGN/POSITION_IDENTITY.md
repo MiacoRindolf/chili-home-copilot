@@ -1,8 +1,10 @@
 # Design: Position Identity Refactor
 
-**Status:** draft for operator + Cowork review (2026-05-04). Doc-only at this stage; no code lands until the questions in **§ Open Questions for operator** are answered.
+**Status:** **ready for Phase 1 implementation** (revised 2026-05-04 after operator review).
 
-**Forward pointer:** after this doc is reviewed and revised, the next NEXT_TASK is Phase 1 implementation (the `trading_positions` table + shadow-mode write path in `broker_sync`).
+**Decisions closed:** 2026-05-04 — operator-reviewed § 11.1–11.4 + Phase 5 soak compression + direction-for-shorts schema + PaperTrade inclusion. See § 11 for the decision audit log and § 8 for the implementation-relevant phase plan.
+
+**Forward pointer:** the next NEXT_TASK is `position-identity-phase-1` — implementation of the `trading_positions` table, `trading_position_events` table, shadow-mode write path in `broker_service.sync_positions_to_db`, DROP of mig 223's orphan column, and the backfill script covering BOTH `trading_trades` AND `paper_trades`. Phase 1's exit criteria from § 8.1 below become Phase 1's success criteria directly.
 
 ---
 
@@ -120,10 +122,12 @@ The two-layer model (decision merged into envelope OR position merged into envel
 
 ## 4. Schema-key choices
 
-### 4.1 Account-type granularity
-**Decision (per operator answer #1):** include `account_type VARCHAR(20) NOT NULL DEFAULT 'cash'` in the `trading_positions` natural key from day one. Today's operator runs a single cash-equivalent account per broker; the column defaults to `'cash'` for Robinhood and `'spot'` for Coinbase (resolved at insert via the existing `_compute_trade_snapshot` and ticker-based asset class inference at `app/models/trading.py:151`).
+### 4.1 Account-type granularity + direction
+**Decision (per operator answer #1):** include `account_type VARCHAR(20) NOT NULL DEFAULT 'cash'` in the `trading_positions` natural key from day one. Today's operator runs a single cash-equivalent account per broker; the column defaults to `'cash'` for Robinhood and `'spot'` for Coinbase (resolved at insert via the existing `_compute_trade_snapshot` and ticker-based asset class inference at `app/models/trading.py:151`). Paper-mode positions (per operator answer #7) use `account_type='paper'` in the same `trading_positions` table — paper and live separate by account_type, no separate `trading_paper_positions` table.
 
-**Why include now:** schema migrations to add a new column to a high-cardinality natural-key constraint later are expensive (lock the table, rebuild the unique index). Adding to the schema now with a sensible default costs nothing now and saves a high-blast-radius migration later. The column is forward-compat-only; nothing reads it for routing in Phase 1.
+**Direction in the natural key (per operator answer #6 — *"Yes add data struct for shorts"*):** `direction VARCHAR(10) NOT NULL DEFAULT 'long'` is also part of the natural key. A long 100 AAPL + short 50 AAPL situation is two `trading_positions` rows with two distinct `id`s, not one signed-quantity row. This matches the broker's own representation (Robinhood and Coinbase both report long and short as distinct positions where supported) and avoids signed-arithmetic bugs at every consumer (the stop_engine, the bracket writer, reporting queries, etc.). Today's data is essentially all `direction='long'`; the column defaults clean. Schema is ready for the operator's eventual short trades (perps via Hyperliquid/dYdX/Kraken Futures) without a future ALTER.
+
+**Why include both now:** schema migrations to add a new column to a high-cardinality natural-key constraint later are expensive (lock the table, rebuild the unique index). Adding to the schema now with sensible defaults costs nothing today and saves high-blast-radius migrations later. Both columns are forward-compat-friendly; nothing reads them for routing in Phase 1.
 
 ### 4.2 Cross-broker same-ticker
 **Decision (per operator answer #2):** broker_source is a first-class column in the position natural key. BTC-USD on Robinhood and BTC-USD on Coinbase are two distinct positions with two distinct `id`s. The autopilot routing layer (Phase 7) can layer on top: rules like *"long BTC-USD goes to Robinhood, scalp BTC-USD goes to Coinbase"* read `trading_positions` to decide which broker has an open management envelope.
@@ -147,6 +151,7 @@ The two-layer model (decision merged into envelope OR position merged into envel
 | `closed` | Broker no longer reports the position | `state='closed', last_state_transition_at=now`; snapshot quantity → 0 |
 | `re_opened` | Broker reports a previously-closed position again | `state='open'`; quantity from new observation |
 | `suspect` | broker_sync sees a 0-position response on a non-empty account (R32 wholesale-empty-positions guard) | No state mutation; flag the position for operator review |
+| `sync_gap` | broker_sync missed a cycle entirely (auth flap, network blip, scheduler stall) — emitted with `transition_reason='sync_gap'` covering the gap window | No state mutation; flags the audit trail with explicit "we have no observation for this window" rather than silently assuming continuity. Per § 11.1 Decision B |
 | `corrected` | Manual operator override (admin endpoint) | Sets state explicitly + carries operator note |
 
 **No magic numbers in event taxonomy.** Each event carries `transition_reason VARCHAR(64)` (see § 8 for value mapping). Each event carries the broker observation payload as JSONB (positions endpoint response, fill records) for full auditability without re-fetching.
@@ -177,7 +182,7 @@ The backfill is idempotent: re-running it skips positions already created. See �
 | `id` | `trading_management_envelopes.id` | Renamed table; column same |
 | `user_id` | envelope.user_id + decisions.user_id + positions.user_id | Replicated for query convenience; positions.user_id is authoritative for "who owns this position" |
 | `ticker` | positions.ticker (authoritative); envelope.ticker (denormalized for queries) | Envelope's denormalized ticker MUST equal positions.ticker (FK + assertion in writer) |
-| `direction` | envelope.direction | Position layer is direction-agnostic at the schema level; "short positions" use a separate position row with quantity convention or a `direction` column on positions (open question — see § 11) |
+| `direction` | positions.direction (authoritative; part of natural key) + envelope.direction (denormalized for query convenience; matches today's Trade.direction semantic) | Per operator answer #6 + § 4.1: short positions use separate position rows. Envelope.direction must equal positions.direction (FK + writer assertion) |
 | `entry_price` | envelope.entry_price | Average entry price for THIS envelope; positions.current_avg_price is the running cross-envelope average |
 | `exit_price`, `exit_date`, `exit_reason`, `pnl` | envelope.exit_* | Envelope-scoped exit; position-level transition_reason in `trading_position_events.transition_reason` |
 | `quantity` | envelope.quantity | This envelope's intended size; positions.current_quantity is broker truth |
@@ -218,6 +223,36 @@ Backfill: for every existing event, look up the trade_id's `(user_id, broker_sou
 
 ---
 
+### 6.4 `trading_paper_trades` → split (per operator answer #7)
+
+Paper-mode trades migrate in this initiative, not deferred. Paper-mode positions live in the same `trading_positions` table with `account_type='paper'` (per § 4.1); paper-mode envelopes live in the same `trading_management_envelopes` table; paper-mode decisions live in `trading_decisions`. PaperTrade's narrower column set maps to a subset of the same homes.
+
+Source: `app/models/trading.py:1022-1048` (PaperTrade ORM).
+
+| Today's `trading_paper_trades` column | Post-refactor home | Notes |
+|---|---|---|
+| `id` | `trading_management_envelopes.id` (paper rows in same table; `account_type='paper'` on the joined position distinguishes paper from live) | Schema simpler than Trade — see "paper-specific" notes below |
+| `user_id` | envelope.user_id + decision.user_id + positions.user_id | Same triple-write as live |
+| `scan_pattern_id` | decision.scan_pattern_id | Immutable entry attribution |
+| `ticker` | positions.ticker (authoritative) + envelope.ticker (denormalized) | |
+| `direction` | positions.direction (authoritative; part of natural key) + envelope.direction | Per § 4.1 + § 6.1 row 3 |
+| `entry_price` | envelope.entry_price | |
+| `stop_price`, `target_price` | envelope.stop_loss + envelope.take_profit | PaperTrade's direct stop/target columns map to the engine-managed bracket fields |
+| `quantity` | envelope.quantity (intended) + positions.current_quantity (truth — for paper, simulated truth) | |
+| `status` | envelope.status | Same enum |
+| `entry_date` | decision.entry_date + envelope.created_at | |
+| `exit_date`, `exit_price`, `exit_reason`, `pnl`, `pnl_pct` | envelope.exit_* + position_event.transition_reason | Envelope-scoped exit; structured transition_reason on the position event stream |
+| `signal_json` | decision.indicator_snapshot | Paper's signal JSON is the equivalent of live's indicator_snapshot — it is the immutable point-in-time market context |
+| `created_at` | decision.created_at + envelope.created_at | |
+
+**Paper-specific concerns:**
+- **Simulated fills**: today's PaperTrade has no broker_order_id, no broker_status, no last_broker_sync — it never talks to a real broker. In the new model, `trading_position_events` for paper-mode positions records `transition_reason='paper_fill_simulated'` (or similar) on each fill, with the simulated-fill payload in `broker_payload` for parity with live audit shape. The post-refactor code path for paper fills writes the same event-stream rows; only the source ("simulated" vs "broker_observation") differs.
+- **No TCA columns**: PaperTrade never had `tca_*` columns. Post-refactor envelopes for paper-mode positions leave those NULL.
+- **Account type**: paper rows always carry `account_type='paper'` on positions. The autopilot routing layer (Phase 7) can opt to route a strategy to paper-mode by writing a routing rule that points at `account_type='paper'`.
+
+The Phase 1 backfill script walks BOTH `trading_paper_trades` and `trading_trades` to seed `trading_positions` rows. See § 8.1 for the updated Phase 1 scope.
+
+
 ## 7. Schema specifics — full DDL
 
 ### 7.1 `trading_positions`
@@ -227,8 +262,9 @@ CREATE TABLE trading_positions (
     id              BIGSERIAL PRIMARY KEY,
     user_id         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
     broker_source   VARCHAR(20) NOT NULL,
-    account_type    VARCHAR(20) NOT NULL DEFAULT 'cash',
+    account_type    VARCHAR(20) NOT NULL DEFAULT 'cash',  -- 'cash' | 'spot' | 'paper' | future: 'margin' | 'ira' | 'portfolio'
     ticker          VARCHAR(20) NOT NULL,
+    direction       VARCHAR(10) NOT NULL DEFAULT 'long',   -- 'long' | 'short'  (per § 4.1)
     asset_kind      VARCHAR(20) NULL,            -- 'equity' | 'crypto' | 'option'
     current_quantity         DOUBLE PRECISION NULL,
     current_avg_price        DOUBLE PRECISION NULL,
@@ -240,8 +276,10 @@ CREATE TABLE trading_positions (
     updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
     CONSTRAINT trading_positions_state_check
         CHECK (state IN ('unknown', 'open', 'closed', 'suspect')),
+    CONSTRAINT trading_positions_direction_check
+        CHECK (direction IN ('long', 'short')),
     CONSTRAINT uq_trading_positions_natural_key
-        UNIQUE (user_id, broker_source, account_type, ticker)
+        UNIQUE (user_id, broker_source, account_type, ticker, direction)
 );
 
 CREATE INDEX ix_trading_positions_state_open
@@ -260,7 +298,7 @@ Why the partial index `WHERE state = 'open'`: the dominant query is "what positi
 CREATE TABLE trading_position_events (
     id                BIGSERIAL PRIMARY KEY,
     position_id       BIGINT NOT NULL REFERENCES trading_positions(id) ON DELETE CASCADE,
-    event_type        VARCHAR(20) NOT NULL,        -- opened | qty_change | closed | re_opened | suspect | corrected
+    event_type        VARCHAR(20) NOT NULL,        -- opened | qty_change | closed | re_opened | suspect | sync_gap | corrected
     transition_reason VARCHAR(64) NOT NULL,        -- structured cause; see § 8
     quantity          DOUBLE PRECISION NULL,        -- post-event broker-reported qty (NULL for 'suspect')
     avg_price         DOUBLE PRECISION NULL,
@@ -270,7 +308,7 @@ CREATE TABLE trading_position_events (
     observed_at       TIMESTAMP NOT NULL DEFAULT NOW(),
     recorded_at       TIMESTAMP NOT NULL DEFAULT NOW(),
     CONSTRAINT trading_position_events_event_type_check
-        CHECK (event_type IN ('opened', 'qty_change', 'closed', 're_opened', 'suspect', 'corrected'))
+        CHECK (event_type IN ('opened', 'qty_change', 'closed', 're_opened', 'suspect', 'sync_gap', 'corrected'))
 );
 
 CREATE INDEX ix_position_events_position_observed
@@ -336,17 +374,18 @@ INSERT-only at the application layer (no ORM relationships that allow UPDATE; `v
 Each phase is small enough to ship as a single NEXT_TASK. Each phase's exit criteria are concrete enough that the implementer doesn't need to invent semantics.
 
 ### 8.1 Phase 1 — `trading_positions` table + shadow-mode write
-**Scope:** add `trading_positions` table (DDL § 7.1) + `trading_position_events` table (DDL § 7.2). DROP `trading_bracket_intents.phantom_close_consecutive_zero_qty_sweeps` in the same migration (per operator answer #5).
+**Scope:** add `trading_positions` table (DDL § 7.1) + `trading_position_events` table (DDL § 7.2). DROP `trading_bracket_intents.phantom_close_consecutive_zero_qty_sweeps` in the same migration (per operator answer #5). Per operator answer #7, paper-mode coverage is included from day one — backfill walks BOTH `trading_trades` AND `trading_paper_trades`.
 
-**Code changes:** `broker_service.sync_positions_to_db` writes a `position_event` row for every observed position (event_type=`opened` for first observation, `qty_change` if quantity differs, etc.) and updates the `trading_positions` snapshot. NO READERS depend on the new tables for decisions in this phase.
+**Code changes:** `broker_service.sync_positions_to_db` writes a `position_event` row for every observed live position (event_type=`opened` for first observation, `qty_change` if quantity differs, etc.) and updates the `trading_positions` snapshot. The paper-mode write path in `auto_trader.py`'s paper-mode branch writes equivalent events with `account_type='paper'`. NO READERS depend on the new tables for decisions in this phase.
 
-**Soak duration:** 1 week of broker_sync cycles. Verify the position rows stay in sync with broker truth via an audit query that compares `trading_positions.current_quantity` to the most recent broker-sync snapshot for every active position.
+**Soak duration:** 1 week of broker_sync cycles + paper-mode runs. Verify the position rows stay in sync with broker truth via an audit query that compares `trading_positions.current_quantity` to the most recent broker-sync snapshot for every active position; analogous audit query for paper rows compares against the `trading_paper_trades` open rows.
 
 **Exit criteria:**
-1. Migration applies cleanly on staging + production.
-2. After 1 week soak: zero discrepancies in the audit query for active positions.
-3. Backfill script (`scripts/backfill_position_rows.py`) ran; every distinct `(user_id, broker_source, ticker)` from current `trading_trades` has a corresponding position row.
-4. mig 223 column dropped + verified.
+1. Migration applies cleanly on staging + production. The natural key `UNIQUE(user_id, broker_source, account_type, ticker, direction)` holds with no duplicates from backfill.
+2. After 1 week soak: zero discrepancies in the audit query for active live positions.
+3. Backfill script (`scripts/backfill_position_rows.py`) ran; every distinct `(user_id, broker_source, ticker, direction)` from current `trading_trades` AND `trading_paper_trades` has a corresponding position row (the latter with `account_type='paper'`).
+4. **Paper-mode positions are covered by the audit query at parity with live positions** (no new `trading_paper_trades` row goes un-mirrored to a `trading_positions` row).
+5. mig 223 column dropped + verified.
 
 **Rollback:** revert the migration; the new tables drop; no live system reads them so rollback is purely additive-cleanup.
 
@@ -359,7 +398,7 @@ Each phase is small enough to ship as a single NEXT_TASK. Each phase's exit crit
 
 **Exit criteria:**
 1. 100% of new events have non-NULL position_id.
-2. Backfill complete; quarantine view has fewer than `< some operator-stated threshold>` rows (operator decides — see § 11.2).
+2. Backfill complete using the quarantine-ambiguous + bulk-for-clean-cases strategy (per § 11.2 Decision C). The `trading_execution_events_quarantine` view (one-shot) lists rows with ambiguous trade_id → position_id resolution; operator reviews + clears.
 3. NO READERS use position_id for decisions yet.
 
 **Rollback:** drop the column; reverts to today's trade_id-only state. Position_event stream is unaffected.
@@ -397,12 +436,13 @@ Each phase is small enough to ship as a single NEXT_TASK. Each phase's exit crit
 
 **Code changes:** every site that today sets `Trade.exit_reason` ALSO writes a `trading_position_events` row with the structured transition_reason. Old reporting queries continue to work; new queries use the position-event stream as the authoritative source.
 
-**Soak duration:** 1 quarter (reporting consumers need time to migrate; see § 11.4 Open Question on deprecation timeline).
+**Soak duration:** **2 weeks** (per operator answer #5 — *"shorter, it's tooo long. SHOOORTER"* — compressed from the originally-proposed longer window; reporting consumers in this single-operator setup migrate quickly).
 
 **Exit criteria:**
-1. Every close path writes both the legacy exit_reason AND a position event.
-2. New reporting queries that use transition_reason produce parity-equivalent results to legacy queries that use exit_reason.
-3. Operator-side reporting dashboards confirmed compatible (no broken charts).
+1. Every close path writes both the legacy exit_reason AND a position event (dual-write for the 2-week soak window).
+2. The shim view `legacy_exit_reasons_view` exists and maps `transition_reason` → legacy `exit_reason` strings so unmigrated reporting queries continue to work.
+3. New reporting queries that use transition_reason produce parity-equivalent results to legacy queries that use exit_reason.
+4. Operator-side reporting dashboards confirmed compatible (no broken charts).
 
 **Rollback:** remove the position-event writes from close paths; legacy exit_reason continues as the only source. No data loss (position events are additive).
 
@@ -473,59 +513,30 @@ The autopilot decision-maker (today: `auto_trader.py`) reads `autopilot_routing_
 
 ---
 
-## 11. Open Questions for operator
+## 11. Decisions closed (post-operator-review on 2026-05-04)
 
-These emerged from the source-code read in Step 1 of the brief. Operator answers in the review pass; the doc gets revised.
+The four open questions originally proposed for operator review are all closed. Each subsection records the decision + a one-line rationale; the implementation-relevant detail lives in the body sections cited below (per the "doc is implementation-ready" intent).
 
-### 11.1 Stale event tolerance window
-**Framing:** when `broker_sync` misses a sync cycle (auth flap, network blip), the event stream has a gap. Three options:
+### 11.1 Stale event tolerance — Decision: B (explicit `sync_gap` event)
+Operator answer: *"go per recommendation"*. Explicit gap markers preserve the audit trail without requiring operator intervention on every transient blip; aligns with the "no signal ≠ negative signal" principle from `bracket-writer-respect-upside-targets`. **Lands in §§ 5.1, 7.2** (event taxonomy + DDL CHECK).
 
-- **A — best-guess continuity:** assume the position state didn't change during the gap; no event written for the missed window.
-- **B — explicit `sync_gap` event:** emit a `suspect` event with `transition_reason='sync_gap'` covering the gap; downstream consumers know there's missing data.
-- **C — alert + halt:** any gap > N minutes raises a CRITICAL log + activates the kill switch.
+### 11.2 Backfill atomicity — Decision: C (quarantine ambiguous + bulk for clean cases)
+Operator answer: *"go per recommendation"*. Orphan trade_id → position_id resolution risk is small at today's data volume; operator review of the quarantine view is cheap and prevents silent corruption. **Lands in § 8.2** (Phase 2 exit criteria reference the `trading_execution_events_quarantine` view).
 
-**Cowork's recommendation:** **B**. Explicit gap markers preserve the audit trail without requiring operator intervention on every transient blip. Aligns with the "no signal ≠ negative signal" principle from `bracket-writer-respect-upside-targets`.
+### 11.3 Reporting deprecation timeline — Decision: A + B (dual-write through soak + shim view)
+Operator answer: *"go per recommendation"*. Plus answer #5: shorten Phase 5 soak to **2 weeks** (compressed from the originally-proposed longer window). Legacy `exit_reason` stays for the soak window; new `transition_reason` runs in parallel; a `legacy_exit_reasons_view` maps transition_reason back to legacy strings so unmigrated reporting queries continue working unchanged. **Lands in § 8.5** (Phase 5 exit criteria explicitly reference the dual-write + shim view).
 
-**Affects:** Phase 1's broker_sync code; the `derive_position_state` helper's interpretation of gaps; the audit dashboard.
-
-### 11.2 Backfill atomicity for `trading_execution_events.position_id`
-**Framing:** Phase 2 needs to backfill position_id on every historical event row. Three options:
-
-- **A — single bulk update:** SET position_id = lookup(trade_id, ticker, broker_source) for all rows in one transaction. Risk: locks the table for the duration.
-- **B — online-rolling:** chunked update by id range; each chunk in its own transaction. Slower but no long lock.
-- **C — quarantine ambiguous + bulk for clean cases:** rows where the trade_id has zero matching position_id (orphans) go to a quarantine view; the rest are bulk-updated. Operator reviews the quarantine.
-
-**Cowork's recommendation:** **C**. The orphan count is presumably small (a few hundred at most given today's data volume); operator review of those specifically is cheap and prevents silent corruption. Bulk for clean cases keeps the migration window short.
-
-**Affects:** Phase 2 migration scripting; the quarantine table schema if it's needed.
-
-### 11.3 Reporting deprecation timeline
-**Framing:** existing dashboards grep `exit_reason` strings (the legacy values in § 9). New `transition_reason` values are different. Three options:
-
-- **A — maintain both for one quarter:** legacy exit_reason continues to be written; transition_reason added in parallel. Reporting queries opt into either side.
-- **B — shim view:** create a `legacy_exit_reasons` view that maps transition_reason values back to legacy strings; legacy queries continue working unchanged.
-- **C — hard-cut at Phase 5:** legacy exit_reason removed; reporting queries must update.
-
-**Cowork's recommendation:** **A** with a side of **B** (add the shim view in Phase 5; deprecate the dual-write at the end of Q3).
-
-**Affects:** Phase 5 exit criteria; downstream reporting consumers.
-
-### 11.4 Fast-path subsystem dependency
-**Framing:** fast-path code in `chili-brain/` and `app/services/trading/fast_path/` writes to `fast_executions`, `fast_orderbook`, `fast_alerts`, etc. Two options:
-
-- **A — migrate fast-path to position-keying in this initiative.** Big scope expansion; touches the fast-path team's stack.
-- **B — leave fast-path decoupled in v1, integrate after Phase 4 lands.** Fast-path stack writes to its own tables; doesn't depend on `trading_positions` for decisions; integrates later when the model is proven.
-
-**Cowork's recommendation:** **B**. Fast-path is paper-mode by default and its volumes are large enough that backfill atomicity (§ 11.2) is harder there than for the live trading stack. Integrate after Phase 4 lands and the position-event derivation is battle-tested.
-
-**Affects:** scope boundary of this initiative; whether Phase 7 includes fast-path settings.
+### 11.4 Fast-path subsystem dependency — Decision: B (decoupled in v1, integrate after Phase 4)
+Operator answer: *"go per recommendation"*. Fast-path's `fast_executions`, `fast_orderbook`, `fast_alerts` tables stay decoupled from `trading_positions` in v1. Per operator answer #7, **PaperTrade in the live trading stack (paper-mode rows from `auto_trader.py`) IS in scope** for Phase 1 — distinct from fast-path's separate paper-mode writes. The two should not be conflated. **Lands in § 13** (out-of-scope listing).
 
 ---
 
 ## 12. Brain context flow
 
 ### 12.1 `compute_bracket_intent` — unchanged interface, position-keyed call site
-Brain bracket derivation at `app/services/trading/bracket_intent.py::compute_bracket_intent` takes `BracketIntentInput` and returns target/stop. Today the caller is the bracket writer with envelope-scoped data. Post-refactor: caller takes data from the position layer (qty, avg_price) + decision layer (regime, lifecycle, pattern_win_rate). The brain function itself doesn't change; the input source does.
+Brain bracket derivation at `app/services/trading/bracket_intent.py::compute_bracket_intent` takes `BracketIntentInput` (which already has a `direction` field) and returns target/stop. Today the caller is the bracket writer with envelope-scoped data. Post-refactor: caller takes data from the position layer (qty, avg_price, **direction**) + decision layer (regime, lifecycle, pattern_win_rate). The brain function itself doesn't change; the input source does.
+
+**Long vs short bracket arithmetic** (per operator answer #6 / § 4.1 short-positions support): for `direction='long'`, target_price > entry > stop_price. For `direction='short'`, the inequality flips: stop_price > entry > target_price. The existing `_compute_initial_stop` at `app/services/trading/stop_engine.py:386` already handles this; the engine reads direction from the position row (the natural-key column) once Phase 3 retargets the FK, so there's no signed-arithmetic ambiguity at any call site.
 
 ### 12.2 Stop engine
 `app/services/trading/stop_engine.py::evaluate_all` reads `trading_trades` rows today. Post-refactor: reads `trading_management_envelopes` JOIN `trading_positions WHERE state='open'`. The state derivation ensures we only evaluate envelopes that are currently bound to live positions. Stale envelopes (envelope.status='open' but position.state='closed') get caught and marked.
@@ -544,7 +555,7 @@ The brain's role doesn't change. It reads market state + position state + decisi
 - **Broker auth, session restoration.** `broker_service.is_connected`, `try_restore_session` stay.
 - **TP/SL primitives at the venue.** Robinhood / Coinbase API surfaces are not redesigned.
 - **Pattern engine, scan_patterns, signal generation.** Decisions still flow from the same upstream pipeline.
-- **Fast-path subsystem (per § 11.4 Open Question).**
+- **Fast-path subsystem decoupled in v1** (per § 11.4 Decision B). Note: PaperTrade in the live trading stack (`auto_trader.py` paper paths writing `trading_paper_trades`) IS in scope per § 11 Decision (operator answer #7); fast-path's separate `fast_executions` / `fast_orderbook` / `fast_alerts` tables stay decoupled until Phase 4 lands and the model is proven.
 - **Existing dashboards short-term (per § 11.3 timeline).**
 - **Live-money behavior in Phase 1.** Phase 1 is read-only / shadow-mode.
 
@@ -558,22 +569,27 @@ The brain's role doesn't change. It reads market state + position state + decisi
 - **Management envelope** — the dynamic "how we are managing the broker interaction right now" record. Bound to a position via `position_id`; one envelope binds at a time. New envelope on re-open. Today's `trading_trades` row, with entry-decision fields removed.
 - **Transition reason** — structured value on `trading_position_events`. Replaces the loose `exit_reason` string convention with a constrained vocabulary (§ 9).
 - **Snapshot fields** — `trading_positions.current_quantity`, `current_avg_price`, `state`. Derived from the event stream; rebuildable from events at any time. Not authoritative on their own.
+- **Paper-mode position** — a position where `account_type='paper'` and broker truth is simulated rather than real. Lives in the same `trading_positions` table as live positions; events carry `transition_reason='paper_fill_simulated'` (or analogous) on the simulated-fill path. Per operator answer #7 + § 6.4.
+- **Direction** — `long` or `short` on `trading_positions.direction`. First-class natural-key column (per operator answer #6 + § 4.1) so a long 100 AAPL + short 50 AAPL situation is two distinct position rows. Mirrors broker-side representation.
+- **Sync gap** — explicit `event_type='sync_gap'` event marking a window where `broker_sync` missed a cycle. Per § 11.1 Decision B; preserves the audit trail without manufacturing continuity.
 
 ---
 
-## 15. Estimated cost (pre-implementation)
+## 15. Estimated cost (pre-implementation, post-revision 2026-05-04)
+
+Revised after operator answers: Phase 1 LOC bumps for direction column (~10) + paper-mode coverage in backfill/audit (~80); Phase 5 soak compresses to 2 weeks (per operator answer #5; was originally proposed at a longer window).
 
 | Phase | LOC est | Test count est | Soak | Operator-hours |
 |---|---|---|---|---|
-| 1 | ~600 | ~12 | 1 week | ~3h (review migration + audit query) |
+| 1 | ~700 | ~14 | 1 week | ~4h (review migration + audit query for live + paper) |
 | 2 | ~400 | ~8 | 1 week | ~2h (backfill review + quarantine triage) |
 | 3 | ~700 | ~15 | 2 weeks | ~4h (flag-flip + parity verification) |
 | 4 | ~500 | ~10 | 2 weeks | ~3h (live-incident review window) |
-| 5 | ~400 | ~10 | 1 quarter | ~6h (reporting consumer migration) |
+| 5 | ~400 | ~10 | 2 weeks | ~3h (reporting dashboard migration; shim view consumes most of the lift) |
 | 6 | ~600 | ~12 | 2 weeks | ~3h (writer behavior review) |
-| **Total** | **~3200** | **~67** | **~2.25 quarters** | **~21h** |
+| **Total** | **~3300** | **~69** | **~10 weeks** | **~19h** |
 
-These are doc-time estimates only. Each phase ships with its own NEXT_TASK that re-estimates against actual code state at that point.
+The total soak compresses from ~2.25 quarters (~29 weeks) to ~10 weeks. These are doc-time estimates only. Each phase ships with its own NEXT_TASK that re-estimates against actual code state at that point.
 
 ---
 
