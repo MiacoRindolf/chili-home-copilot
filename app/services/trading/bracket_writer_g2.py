@@ -715,6 +715,36 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
+    # audit-unsupported-crypto-prefilter (2026-05-04) — venue-capability
+    # gate before any broker call. ZEC-USD is the canonical case: an open
+    # Trade row with broker_source='robinhood' but ticker='ZEC-USD' (a
+    # crypto pair Robinhood doesn't list). Without this check, the writer
+    # routes to ``broker_service.place_sell_stop_loss_order``, which calls
+    # ``rh.orders.order(...)`` -> ``get_instruments_by_symbols("ZEC")[0]``
+    # -> ``IndexError: list index out of range`` (no equity instrument).
+    # The traceback storm fires every minute on the open ZEC-USD position.
+    # Static-whitelist filter routes the unsupported case to a clean
+    # SKIPPED audit row instead. Defense-in-depth: the existing post-call
+    # error handling at the autotrader stays in place for any future pair
+    # Robinhood lists that we haven't added to the whitelist yet.
+    _t_upper = (ticker or "").upper()
+    if _t_upper.endswith("-USD"):
+        from .. import broker_service as _bs
+
+        base = _bs._to_crypto_base(ticker)
+        if not _bs.is_robinhood_supported_crypto(base):
+            logger.warning(
+                f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+                "ticker=%s reason=venue_unsupported_crypto base=%s "
+                "(Robinhood does not trade this crypto pair; static whitelist)",
+                bracket_intent_id, ticker, base,
+            )
+            return WriterAction(
+                action="place_missing_stop", ok=False,
+                reason="venue_unsupported_crypto",
+                broker_source=broker_source, ticker=ticker,
+            )
+
     # FIX 55 (2026-05-01) — covered-by-existing-sell pre-flight.
     #
     # ROOT CAUSE of the AIDX/CCCC/CRDL/TLS/VFS/EKSO/PED rejection storm:

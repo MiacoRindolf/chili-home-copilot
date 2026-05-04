@@ -2380,6 +2380,49 @@ def _to_crypto_base(ticker: str) -> str:
     return s
 
 
+# audit-unsupported-crypto-prefilter (2026-05-04) — static whitelist of
+# crypto bases Robinhood actually trades. The intent is a cheap, offline,
+# deterministic prefilter that runs BEFORE any broker call, complementing
+# the older ``_is_crypto_supported_on_robinhood`` quote-probe (which still
+# runs as defense-in-depth and self-heals on Robinhood adding/removing
+# pairs without a list update).
+#
+# Failure mode is "false unsupported" — if Robinhood adds a pair we don't
+# list, we'll false-reject until the list updates. That direction is safer
+# than false-accept, which produces broker tracebacks (the exact problem
+# this prefilter exists to stop).
+#
+# Source of truth: this module. Touch carefully — adding a base routes it
+# through Robinhood's crypto API; removing one bypasses it.
+ROBINHOOD_SUPPORTED_CRYPTO_BASES: frozenset[str] = frozenset({
+    # Fast-path canonical pairs (CHILI_FAST_PATH_PAIRS in docker-compose).
+    # MUST stay in sync with the fast-path baseline; test asserts
+    # this subset is present.
+    "BTC", "ETH", "SOL", "AVAX", "DOGE",
+    # Other Robinhood-listed crypto bases (verified against rh.crypto
+    # holdings as of 2026-05-04). Subset of the broader Coinbase / brain
+    # universe; the brain scans more, only these execute on Robinhood.
+    "ADA", "BCH", "ETC", "LTC", "SHIB", "UNI", "XLM", "XTZ", "AAVE",
+    "COMP", "LINK", "USDC",
+})
+
+
+def is_robinhood_supported_crypto(base: str) -> bool:
+    """Return True iff ``base`` (the bare crypto symbol, e.g. ``BTC``)
+    is on the static Robinhood-supported whitelist.
+
+    Cheap, offline, no broker round-trip. Use as a pre-broker filter
+    before any code path that would invoke Robinhood's crypto endpoints
+    (autotrader, bracket writer, etc.). Falls back to the slower
+    quote-probe (``_is_crypto_supported_on_robinhood``) only when the
+    static list misses — defense-in-depth for new pairs the list
+    hasn't caught up with.
+    """
+    if not base:
+        return False
+    return str(base).strip().upper() in ROBINHOOD_SUPPORTED_CRYPTO_BASES
+
+
 def _is_crypto_supported_on_robinhood(base: str) -> bool:
     """Pre-flight check: does Robinhood actually list this crypto base?
 

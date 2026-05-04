@@ -1046,29 +1046,44 @@ def _execute_broker_buy(
     # check. The audit found 48/24h crypto alerts blocked AFTER the
     # broker call returned ``crypto_not_supported_on_robinhood:<BASE>``
     # (AKT, 1INCH, 2Z, ...). Burns broker quota and produces noisy
-    # blocked rows. The supported-list check already exists in
-    # broker_service._is_crypto_supported_on_robinhood; lift it upstream
-    # of the place_market_order call so unsupported symbols never reach
-    # the broker. Cached 5min by broker_service.get_crypto_quote.
+    # blocked rows.
+    #
+    # audit-unsupported-crypto-prefilter (2026-05-04): two-layer check.
+    # Layer 1 is the static whitelist (cheap, offline, deterministic) —
+    # the dominant path for the steady-state list. Layer 2 is the
+    # existing quote-probe (cached 5min via get_crypto_quote) — kept as
+    # defense-in-depth to self-heal when Robinhood adds a pair that the
+    # static whitelist doesn't yet list. The post-broker-call check
+    # downstream stays in place as third-line defense.
     _ticker = (alert.ticker or "").upper()
     if _ticker.endswith("-USD"):
         try:
-            from ...services.broker_service import _is_crypto_supported_on_robinhood
+            from ...services.broker_service import (
+                is_robinhood_supported_crypto,
+                _is_crypto_supported_on_robinhood,
+            )
             _base = _ticker[:-4]
-            if not _is_crypto_supported_on_robinhood(_base):
+            # Layer 1 (static whitelist) — cheap, fail-fast.
+            unsupported = not is_robinhood_supported_crypto(_base)
+            # Layer 2 (probe) — only when the static layer rejected.
+            # Lets us self-heal on broker-side additions without a code change.
+            if unsupported and _is_crypto_supported_on_robinhood(_base):
+                unsupported = False
+            if unsupported:
+                _reason = f"pre_broker:venue_unsupported_crypto:{_base}"
                 _audit(
                     db,
                     user_id=uid,
                     alert=alert,
                     decision="blocked",
-                    reason=f"broker:crypto_not_supported_on_robinhood:{_base}",
+                    reason=_reason,
                     rule_snapshot=snap,
                     llm_snapshot=llm_snap,
                 )
                 out["skipped"] += 1
                 _autotrader_tick_note(
                     out, kind="blocked",
-                    reason=f"broker:crypto_not_supported_on_robinhood:{_base}",
+                    reason=_reason,
                     alert=alert,
                 )
                 return None
