@@ -148,8 +148,17 @@ def _invoke(db, *, local, broker, decision, sweep_id: str = "test-sweep"):
 
 
 def test_phantom_branch_closes_trade_no_broker_order(db):
-    """Scenario 1: broker_qty == 0 → trade closed, no broker order
-    placed, audit row written, throttle column set."""
+    """Scenario 1: broker_qty == 0 across N consecutive sweeps -> trade
+    closed, no broker order placed, audit row written, throttle column set.
+
+    bracket-emergency-repair-flap-guard (2026-05-04): the close now
+    requires N (default 3) consecutive zero-qty sweeps. We invoke
+    threshold-many times so the assertion contract holds under the
+    flap guard.
+    """
+    from app.services.trading.bracket_reconciliation_service import (
+        EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS as _N,
+    )
     _seed_trade_and_intent(
         db, trade_id=9001, intent_id=99001, ticker="PHTM",
         qty=10.0, stop_price=5.0,
@@ -159,8 +168,10 @@ def test_phantom_branch_closes_trade_no_broker_order(db):
     broker = _broker(position_quantity=0.0, ticker="PHTM")
 
     with _settings_with_flag(True):
-        result = _invoke(db, local=local, broker=broker,
-                         decision=_decision_missing_stop())
+        result = None
+        for _ in range(_N):
+            result = _invoke(db, local=local, broker=broker,
+                             decision=_decision_missing_stop())
 
     assert result is not None
     assert result["writer"] == "emergency_terminal_reject_repair"
@@ -403,3 +414,152 @@ def test_broker_unavailable_skips_silently(db):
         "FROM trading_bracket_intents WHERE id=99007"
     )).first()
     assert row[0] is None
+
+
+# ── bracket-emergency-repair-flap-guard (2026-05-04) -- new scenarios ──
+
+
+def test_single_sweep_zero_qty_does_not_phantom_close(db):
+    """Scenario 8: a SINGLE sweep with broker_qty == 0 must NOT phantom-
+    close. Counter increments to 1, audit row is phantom_close_deferred,
+    trade stays open, intent stays terminal_reject. Closes the regression
+    where a single auth-flap sweep manufactured a phantom close."""
+    _seed_trade_and_intent(
+        db, trade_id=9008, intent_id=99008, ticker="FLAP",
+        qty=10.0, stop_price=5.0,
+    )
+    local = _local(trade_id=9008, intent_id=99008, ticker="FLAP",
+                   qty=10.0, stop_price=5.0)
+    broker = _broker(position_quantity=0.0, ticker="FLAP")
+
+    with _settings_with_flag(True):
+        result = _invoke(db, local=local, broker=broker,
+                         decision=_decision_missing_stop())
+
+    # The new branch returns None, falling through to state_gated_skip.
+    # _invoke_writer_for_decision wraps that into the state_gated_skip
+    # writer dict.
+    assert result is not None
+    assert result["writer"] == "state_gated_skip"
+
+    row = db.execute(text(
+        "SELECT status, exit_reason FROM trading_trades WHERE id=9008"
+    )).first()
+    assert row[0] == "open"
+    assert row[1] is None  # not phantom-closed
+
+    row = db.execute(text(
+        "SELECT intent_state, phantom_close_consecutive_zero_qty_sweeps "
+        "FROM trading_bracket_intents WHERE id=99008"
+    )).first()
+    assert row[0] == "terminal_reject"
+    assert row[1] == 1
+
+
+def test_three_consecutive_zeros_phantom_close(db):
+    """Scenario 9: three consecutive sweeps with broker_qty == 0 DO
+    phantom-close on the third. Mirrors scenario 1's end-state
+    assertion under the new flap-guard contract."""
+    from app.services.trading.bracket_reconciliation_service import (
+        EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS as _N,
+    )
+    _seed_trade_and_intent(
+        db, trade_id=9009, intent_id=99009, ticker="THRC",
+        qty=10.0, stop_price=5.0,
+    )
+    local = _local(trade_id=9009, intent_id=99009, ticker="THRC",
+                   qty=10.0, stop_price=5.0)
+    broker = _broker(position_quantity=0.0, ticker="THRC")
+
+    results: list = []
+    with _settings_with_flag(True):
+        for _ in range(_N):
+            results.append(
+                _invoke(db, local=local, broker=broker,
+                        decision=_decision_missing_stop())
+            )
+
+    # First N-1 are deferred (state_gated_skip wrapper).
+    for r in results[:-1]:
+        assert r is not None
+        assert r["writer"] == "state_gated_skip"
+
+    # Last one phantom-closes.
+    last = results[-1]
+    assert last is not None
+    assert last["writer"] == "emergency_terminal_reject_repair"
+    assert last["ok"] is True
+    assert last["reason"] == "phantom_closed"
+
+    row = db.execute(text(
+        "SELECT status, exit_reason FROM trading_trades WHERE id=9009"
+    )).first()
+    assert row[0] == "closed"
+    assert row[1] == "phantom_after_terminal_reject"
+
+    row = db.execute(text(
+        "SELECT intent_state, phantom_close_consecutive_zero_qty_sweeps "
+        "FROM trading_bracket_intents WHERE id=99009"
+    )).first()
+    assert row[0] == "closed"
+    assert row[1] == _N  # counter NOT reset on phantom-close (sub-branch 3 owns reset)
+
+
+def test_counter_resets_on_positive_broker_qty(db):
+    """Scenario 10: two zero-qty sweeps then a positive-qty sweep then
+    another zero-qty sweep. The positive observation in sub-branch 3
+    must reset the counter to 0; the subsequent zero observation lands
+    at counter == 1, NOT counter == 3 (would have phantom-closed)."""
+    _seed_trade_and_intent(
+        db, trade_id=9010, intent_id=99010, ticker="RSET",
+        qty=10.0, stop_price=5.0,
+    )
+    local = _local(trade_id=9010, intent_id=99010, ticker="RSET",
+                   qty=10.0, stop_price=5.0)
+    broker_zero = _broker(position_quantity=0.0, ticker="RSET")
+    broker_pos = _broker(position_quantity=10.0, ticker="RSET")
+
+    # Stub place_missing_stop so sub-branch 3 reaches its UPDATE
+    # (which resets the counter via _bump_repair_attempt).
+    def _stub_place(db_, **kw):
+        return _StubAction(ok=True, reason="placed")
+
+    with _settings_with_flag(True), \
+         patch("app.services.trading.bracket_writer_g2.place_missing_stop",
+               side_effect=_stub_place):
+        # Two consecutive zero-qty observations -> counter 1, then 2.
+        _invoke(db, local=local, broker=broker_zero,
+                decision=_decision_missing_stop())
+        _invoke(db, local=local, broker=broker_zero,
+                decision=_decision_missing_stop())
+        cur = db.execute(text(
+            "SELECT phantom_close_consecutive_zero_qty_sweeps "
+            "FROM trading_bracket_intents WHERE id=99010"
+        )).scalar()
+        assert cur == 2
+
+        # Positive observation -> sub-branch 3 fires, place_missing_stop
+        # stub succeeds, _bump_repair_attempt resets counter to 0.
+        _invoke(db, local=local, broker=broker_pos,
+                decision=_decision_missing_stop())
+        cur = db.execute(text(
+            "SELECT phantom_close_consecutive_zero_qty_sweeps "
+            "FROM trading_bracket_intents WHERE id=99010"
+        )).scalar()
+        assert cur == 0
+
+        # Next zero observation lands at 1, NOT 3.
+        _invoke(db, local=local, broker=broker_zero,
+                decision=_decision_missing_stop())
+        cur = db.execute(text(
+            "SELECT phantom_close_consecutive_zero_qty_sweeps "
+            "FROM trading_bracket_intents WHERE id=99010"
+        )).scalar()
+        assert cur == 1
+
+    # Trade still open; never phantom-closed.
+    row = db.execute(text(
+        "SELECT status, exit_reason FROM trading_trades WHERE id=9010"
+    )).first()
+    assert row[0] == "open"
+    assert row[1] is None

@@ -65,6 +65,24 @@ EMERGENCY_REPAIR_THROTTLE_SECONDS: float = float(
         str(6 * 3600),
     )
 )
+# bracket-emergency-repair-flap-guard (2026-05-04):
+# Minimum consecutive sweeps observing ``broker.position_quantity == 0``
+# before sub-branch 2 of ``_try_emergency_repair_terminal_reject``
+# phantom-closes the trade locally. Default 3 = ~3 minutes at the 60s
+# bracket-reconciler cadence. Counter persists in
+# ``trading_bracket_intents.phantom_close_consecutive_zero_qty_sweeps``
+# (migration 223) and resets on any non-zero broker_qty observation in
+# sub-branch 3. Closes the regression introduced 2026-05-03 (commit
+# ef50d3f) where a single auth-flap sweep with empty get_positions()
+# manufactured 5 phantom_after_terminal_reject closures (the same
+# failure mode R32 was built to prevent for ``broker_reconcile_position_gone``,
+# now extended to the per-intent emergency-repair path).
+EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS: int = int(
+    _os.environ.get(
+        "CHILI_BRACKET_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS",
+        "3",
+    )
+)
 BRACKET_WATCHDOG = "[bracket_watchdog]"
 
 logger = logging.getLogger(__name__)
@@ -858,8 +876,58 @@ def _try_emergency_repair_terminal_reject(
 
         broker_qty = float(broker.position_quantity)
 
-        # Sub-branch 2: phantom open trade.
+        # Sub-branch 2: phantom open trade (broker reports zero qty).
         if broker_qty <= 0.0:
+            # bracket-emergency-repair-flap-guard (2026-05-04): require
+            # N consecutive sweeps of broker_qty == 0 before phantom-
+            # closing. A single zero observation is treated as a broker
+            # auth-flap (R31/R32 cascade pattern) and deferred. Sub-
+            # branch 3's _bump_repair_attempt resets the counter on any
+            # positive observation, so a transient zero never accumulates
+            # alongside legitimate non-zero readings.
+            new_count = _bump_phantom_close_zero_qty_counter(
+                db, int(local.bracket_intent_id)
+            )
+            if new_count < EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS:
+                logger.warning(
+                    f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR phantom_close "
+                    "DEFERRED trade=%s intent=%s ticker=%s "
+                    "consecutive_zero_sweeps=%d threshold=%d "
+                    "(broker auth-flap protection)",
+                    local.trade_id, local.bracket_intent_id, local.ticker,
+                    new_count,
+                    EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS,
+                )
+                try:
+                    from .bracket_writer_g2 import _g2_event
+                    _g2_event(
+                        db,
+                        trade_id=int(local.trade_id),
+                        bracket_intent_id=int(local.bracket_intent_id),
+                        ticker=str(local.ticker or ""),
+                        broker_source=str(local.broker_source or ""),
+                        event_type="emergency_terminal_reject_repair",
+                        status="phantom_close_deferred",
+                        decision_kind=str(decision.kind),
+                        decision_severity=str(decision.severity),
+                        extra={
+                            "sweep_id": sweep_id,
+                            "broker_qty": broker_qty,
+                            "consecutive_zero_sweeps": new_count,
+                            "threshold": EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS,
+                        },
+                    )
+                except Exception:
+                    logger.warning(
+                        f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR "
+                        "phantom_close_deferred audit emit failed trade=%s",
+                        local.trade_id, exc_info=True,
+                    )
+                # Fall through to state_gated_skip; retry next sweep.
+                return None
+            # Threshold reached -- proceed with the existing phantom-close
+            # logic below. The counter naturally stays at >= threshold;
+            # a future positive-qty observation in sub-branch 3 will reset.
             now_ts = _utc_now_naive()
             try:
                 # Close the trade row + bracket_intent + bump throttle
@@ -925,7 +993,12 @@ def _try_emergency_repair_terminal_reject(
                     status="phantom_close",
                     decision_kind=str(decision.kind),
                     decision_severity=str(decision.severity),
-                    extra={"sweep_id": sweep_id, "broker_qty": broker_qty},
+                    extra={
+                        "sweep_id": sweep_id,
+                        "broker_qty": broker_qty,
+                        "consecutive_zero_sweeps": new_count,
+                        "threshold": EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS,
+                    },
                 )
             except Exception:
                 logger.warning(
@@ -1079,13 +1152,23 @@ def _fetch_last_repair_attempt(db: Session, bracket_intent_id: int):
 
 
 def _bump_repair_attempt(db: Session, bracket_intent_id: int, ts) -> None:
-    """Persist the throttle timestamp. Failures swallow + log so the
-    calling repair attempt isn't aborted by an audit-side issue."""
+    """Persist the throttle timestamp + reset the phantom-close zero-qty
+    counter. Failures swallow + log so the calling repair attempt isn't
+    aborted by an audit-side issue.
+
+    bracket-emergency-repair-flap-guard (2026-05-04): we are only here
+    because sub-branch 3 fired, which means ``broker.position_quantity
+    > 0`` was observed on the current sweep. That is exactly the
+    "exited the zero-qty regime" signal that should reset the
+    consecutive-zero counter. Bundled into the existing UPDATE so
+    sub-branch 3 takes no extra query.
+    """
     try:
         db.execute(
             text(
                 "UPDATE trading_bracket_intents "
                 "SET terminal_reject_repair_last_attempt_at=:ts, "
+                "    phantom_close_consecutive_zero_qty_sweeps=0, "
                 "    updated_at=:ts "
                 "WHERE id=:iid"
             ),
@@ -1101,6 +1184,46 @@ def _bump_repair_attempt(db: Session, bracket_intent_id: int, ts) -> None:
             db.rollback()
         except Exception:
             pass
+
+
+def _bump_phantom_close_zero_qty_counter(
+    db: Session, bracket_intent_id: int
+) -> int:
+    """Increment the consecutive-zero-qty counter for a bracket intent
+    and return the new value. One UPDATE-RETURNING; idempotent.
+
+    Resets to 0 happen in ``_bump_repair_attempt`` (sub-branch 3, called
+    on any positive-qty sweep). On exception, returns 0 — the caller
+    interprets that as "below threshold" and defers, which is the safe
+    direction for the flap guard.
+    """
+    try:
+        row = db.execute(
+            text(
+                "UPDATE trading_bracket_intents "
+                "SET phantom_close_consecutive_zero_qty_sweeps = "
+                "    phantom_close_consecutive_zero_qty_sweeps + 1, "
+                "    updated_at = NOW() "
+                "WHERE id=:iid "
+                "RETURNING phantom_close_consecutive_zero_qty_sweeps"
+            ),
+            {"iid": int(bracket_intent_id)},
+        ).first()
+        db.commit()
+        if row is None:
+            return 0
+        return int(row[0])
+    except Exception:
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR phantom_close "
+            "counter bump failed intent=%s",
+            bracket_intent_id, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
 
 
 def _invoke_writer_for_decision(
