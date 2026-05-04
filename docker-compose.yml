@@ -163,7 +163,12 @@ services:
       resources:
         limits:
           cpus: "4.0"
-          memory: 3G
+          # 2026-05-04 (f-leak-3): bumped 3G -> 5G defensively while the
+          # yfinance Thread-closure leak fix soaks. Allows headroom for
+          # the next leak event (if any) before OOM-restart kicks in.
+          # Revisit after a 24h+ clean window -- if mem_watcher confirms
+          # no leak, drop back to 3G.
+          memory: 5G
         reservations:
           cpus: "1.0"
           memory: 512M
