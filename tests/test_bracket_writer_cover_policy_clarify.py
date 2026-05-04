@@ -115,8 +115,13 @@ def _enable_writer_flag():
 
 
 def test_audit_reason_uses_new_no_stop_coverage_label(db):
-    """Scenario 1: covered-by-existing-sell condition → mark_terminal_reject
-    is called with the renamed reason 'covered_by_existing_sell:no_stop_coverage'."""
+    """Scenario 1 (rewritten 2026-05-04 for bracket-writer-respect-
+    upside-targets): the covered-by-existing-sell branch no longer
+    routes to ``mark_terminal_reject`` with a ``:no_stop_coverage``
+    label. It now writes a structured ``pending_decision`` row and
+    returns ``reason='existing_target_present_no_stop'``. This test
+    asserts the new contract; ``last_diff_reason`` carries the new
+    audit label, and the persisted JSON describes the conflict."""
     _seed_trade_and_intent(
         db, trade_id=7001, intent_id=77001, ticker="TEST",
         qty=10.0, stop_price=5.0,
@@ -126,9 +131,19 @@ def test_audit_reason_uses_new_no_stop_coverage_label(db):
     for p in patches:
         p.start()
     try:
-        with patch(
-            "app.services.broker_service.get_position_held_for_sells",
-            return_value=10.0,  # held_for_sells == broker_qty → covered
+        with (
+            patch(
+                "app.services.broker_service.get_position_held_for_sells",
+                return_value=10.0,  # held_for_sells == broker_qty → covered
+            ),
+            patch(
+                "app.services.broker_service.list_open_sell_orders_for_ticker",
+                return_value=[],
+            ),
+            patch(
+                "app.services.trading.market_data.fetch_quote",
+                return_value={"last_price": 5.5},
+            ),
         ):
             result = place_missing_stop(
                 db,
@@ -145,17 +160,22 @@ def test_audit_reason_uses_new_no_stop_coverage_label(db):
         for p in patches:
             p.stop()
 
-    # WriterAction.reason stays 'covered_by_existing_sell' (scenario 3).
+    # New WriterAction reason.
     assert result.ok is False
-    assert result.reason == "covered_by_existing_sell"
+    assert result.reason == "existing_target_present_no_stop"
 
-    # Persisted row uses the renamed label.
+    # New audit label + intent_state stays at whatever it was (no
+    # mark_terminal_reject call).
     row = db.execute(text(
-        "SELECT intent_state, last_diff_reason "
+        "SELECT intent_state, last_diff_reason, payload_json "
         "FROM trading_bracket_intents WHERE id=77001"
     )).first()
-    assert row[0] == "terminal_reject"
-    assert row[1] == "covered_by_existing_sell:no_stop_coverage"
+    # intent_state remains 'intent' (no terminal_reject transition).
+    assert row[0] == "intent"
+    assert row[1] == "existing_target_present_no_stop"
+    # pending_decision row written.
+    payload = row[2] or {}
+    assert payload.get("pending_decision") is not None
 
 
 def test_old_protected_by_limit_label_not_regenerated(db):
@@ -197,9 +217,10 @@ def test_old_protected_by_limit_label_not_regenerated(db):
 
 
 def test_writer_action_reason_unchanged(db):
-    """Scenario 3: covered-by-sell condition. WriterAction.reason
-    remains 'covered_by_existing_sell' (the writer's *action* description
-    is correct; only the persisted-state label changes)."""
+    """Scenario 3 (rewritten 2026-05-04): covered-by-sell condition
+    now returns ``reason='existing_target_present_no_stop'`` (the
+    pending-decision contract). The prior ``covered_by_existing_sell``
+    reason was retired alongside the auto-cancel branch."""
     _seed_trade_and_intent(
         db, trade_id=7003, intent_id=77003, ticker="TEST",
         qty=20.0, stop_price=4.0,
@@ -209,9 +230,19 @@ def test_writer_action_reason_unchanged(db):
     for p in patches:
         p.start()
     try:
-        with patch(
-            "app.services.broker_service.get_position_held_for_sells",
-            return_value=20.0,
+        with (
+            patch(
+                "app.services.broker_service.get_position_held_for_sells",
+                return_value=20.0,
+            ),
+            patch(
+                "app.services.broker_service.list_open_sell_orders_for_ticker",
+                return_value=[],
+            ),
+            patch(
+                "app.services.trading.market_data.fetch_quote",
+                return_value={"last_price": 5.0},
+            ),
         ):
             result = place_missing_stop(
                 db,
@@ -230,7 +261,7 @@ def test_writer_action_reason_unchanged(db):
 
     assert result.action == "place_missing_stop"
     assert result.ok is False
-    assert result.reason == "covered_by_existing_sell"
+    assert result.reason == "existing_target_present_no_stop"
 
 
 def test_startup_warning_fires_on_silent_exposure_combo(caplog):
