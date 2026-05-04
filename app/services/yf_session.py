@@ -1,16 +1,31 @@
 """Rate-limited yfinance wrapper with in-memory response caching.
 
-Modern yfinance (>=0.2.40) uses curl_cffi internally and rejects injected
-requests-cache sessions.  Instead we rate-limit and cache at the wrapper level:
+Modern yfinance (>=0.2.40) uses curl_cffi internally. Vanilla session
+injection IS still supported on yfinance >=0.2.55 / >=1.3.0 via the
+``session=`` kwarg on ``yf.Ticker(...)`` and ``yf.download(...)`` --
+the older docstring caveat about rejected sessions referred specifically
+to ``requests-cache`` wrapping. We hoist a single module-scope curl_cffi
+session and inject it everywhere; the alternative (per-call default
+session) made yfinance's internal ThreadPoolExecutor / per-call Thread
+spawn pattern leak a Thread closure (~30 KiB Python bookkeeping each)
+for every failed call. f-leak-3 (2026-05-04) closes that leak.
+
+Layered design:
 
 - A sliding-window token bucket gates all Yahoo Finance requests to 12 per 5
   seconds. Pure-Python (``threading.Lock`` + ``collections.deque``) with no
-  background threads — previous ``pyrate_limiter`` implementation spawned a
+  background threads -- previous ``pyrate_limiter`` implementation spawned a
   daemon ``Leaker`` thread that called ``asyncio.run(...)`` on a loop, which
   on Windows leaked ``ProactorEventLoop`` IOCP handles and self-pipe sockets
   into the non-paged kernel pool. Over long sessions this accumulated to
   ``WinError 10055`` socket-pool exhaustion that blocked every subsequent
-  ``socket.connect()`` — including the test suite's psycopg2 DB connections.
+  ``socket.connect()`` -- including the test suite's psycopg2 DB connections.
+- A shared ``curl_cffi.requests.Session`` (or fallback) is injected into
+  every yfinance entry-point so the per-call Thread spawn collapses into a
+  single connection-pooled client.
+- A process-level circuit breaker short-circuits yfinance calls when the
+  upstream is wall-to-wall failing (yahoo egress block, etc.), capping
+  Thread accumulation during outages without per-symbol fanout.
 - An in-memory TTL cache avoids re-fetching recently-seen data.
 - ``get_ticker(symbol)`` is the single entry-point used by all services.
 """
@@ -78,6 +93,141 @@ def acquire() -> None:
             # Cap the sleep so a clock jump or bookkeeping glitch can't
             # stall us forever. The loop retries after the sleep.
             time.sleep(min(wait_s, _RATE_WINDOW_S))
+
+
+# ---------------------------------------------------------------------------
+# Shared module-scope HTTP session (f-leak-3, 2026-05-04)
+#
+# Hoisting a single curl_cffi session and injecting it into every
+# ``yf.Ticker(symbol, session=...)`` + ``yf.download(..., session=...)``
+# call collapses yfinance's per-call Thread spawn into one connection-
+# pooled client. Without this, every failed yfinance call leaked an
+# ``_make_invoke_excepthook.<locals>.invoke_excepthook`` closure -- the
+# mem_watcher tick at 06:19:26 UTC counted 48,014 of these (~1.4 GiB
+# Python overhead) on a single chili process.
+#
+# Fallback chain: curl_cffi (preferred -- yfinance uses it natively when
+# available) -> ``None`` (yfinance picks its default). We do NOT fall back
+# to ``requests.Session`` because that re-introduces the same Thread spawn
+# pattern; the failure mode of ``None`` is "yfinance default", which is at
+# least as good as the pre-fix state.
+# ---------------------------------------------------------------------------
+def _build_shared_session():
+    """Return a curl_cffi session with browser impersonation, or None."""
+    try:
+        from curl_cffi import requests as _cc_requests  # type: ignore
+        # impersonate="chrome" mimics a real browser TLS fingerprint, which
+        # Yahoo's CDN occasionally requires. Default safe; can be overridden
+        # via ``yf_session._SHARED_SESSION = ...`` in tests if needed.
+        return _cc_requests.Session(impersonate="chrome")
+    except Exception:
+        logger.debug(
+            "[yf_session] curl_cffi unavailable; falling back to default session"
+        )
+        return None
+
+
+_SHARED_SESSION = _build_shared_session()
+
+
+# ---------------------------------------------------------------------------
+# Process-level circuit breaker (f-leak-3, 2026-05-04)
+#
+# Tracks consecutive yfinance failures across ALL symbols. When N in a row
+# fail (yahoo egress block, timeout storm, etc.), trip OPEN and short-
+# circuit subsequent calls to the same default the function would return
+# on miss (empty DataFrame / None / {}). After ``HALF_OPEN_TTL_S`` seconds,
+# allow one probe call through; on success close, on failure re-open.
+#
+# Why this matters for the leak: yfinance internally spawns Threads for
+# concurrent fetches. During an outage, the brain hits N tickers/sec, each
+# spawning a Thread that fails-and-leaks. The breaker caps the leak rate
+# at ``THRESHOLD`` Threads per ``HALF_OPEN_TTL_S`` window instead of
+# letting the outage burn one Thread per call.
+#
+# Passive design: state mutates only on success/failure of explicit calls,
+# no background timer thread (PROTOCOL Hard Rule, no new threads).
+# ---------------------------------------------------------------------------
+# Trip OPEN after this many consecutive upstream failures. 10 chosen as a
+# starting seed -- tolerates a brief failure burst from a transient network
+# blip but trips quickly enough that a sustained outage doesn't burn through
+# many Threads. Tuning candidate; surface in CC report Open Questions if
+# soak suggests a different value.
+_BREAKER_CONSECUTIVE_FAILURE_THRESHOLD = 10
+# Stay OPEN for this many seconds, then HALF_OPEN to probe. 60s gives
+# yahoo egress / firewall / DNS time to recover without keeping the
+# breaker tripped unnecessarily long. Tuning candidate.
+_BREAKER_HALF_OPEN_TTL_S = 60.0
+
+_breaker_lock = threading.Lock()
+_breaker_consecutive_failures: int = 0
+_breaker_state: str = "CLOSED"  # "CLOSED" | "OPEN" | "HALF_OPEN"
+_breaker_opened_at: float = 0.0
+
+
+def _reset_breaker_for_tests() -> None:
+    """Reset the breaker. Intended for unit tests only."""
+    global _breaker_consecutive_failures, _breaker_state, _breaker_opened_at
+    with _breaker_lock:
+        _breaker_consecutive_failures = 0
+        _breaker_state = "CLOSED"
+        _breaker_opened_at = 0.0
+
+
+def _breaker_should_short_circuit() -> bool:
+    """Return True iff the breaker is currently OPEN. Cheap, no I/O.
+
+    On TTL expiry, transitions OPEN -> HALF_OPEN and returns False so a
+    single probe call passes through; the next ``_breaker_on_success``
+    closes it, ``_breaker_on_failure`` re-opens for another TTL.
+    """
+    global _breaker_state, _breaker_opened_at
+    with _breaker_lock:
+        if _breaker_state == "CLOSED":
+            return False
+        if _breaker_state == "OPEN":
+            if time.monotonic() - _breaker_opened_at >= _BREAKER_HALF_OPEN_TTL_S:
+                _breaker_state = "HALF_OPEN"
+                logger.info("[yf_breaker] HALF_OPEN: probing")
+                return False
+            return True
+        # HALF_OPEN: let the probe through; outcome handlers below own state.
+        return False
+
+
+def _breaker_on_success() -> None:
+    """Reset failure counter on any successful upstream call. CLOSE the
+    breaker if it was OPEN/HALF_OPEN."""
+    global _breaker_state, _breaker_consecutive_failures
+    with _breaker_lock:
+        prev_state = _breaker_state
+        _breaker_consecutive_failures = 0
+        if prev_state != "CLOSED":
+            _breaker_state = "CLOSED"
+            logger.info("[yf_breaker] CLOSED: success after %s", prev_state)
+
+
+def _breaker_on_failure() -> None:
+    """Increment failure counter; trip OPEN at threshold or on HALF_OPEN
+    probe failure."""
+    global _breaker_state, _breaker_consecutive_failures, _breaker_opened_at
+    with _breaker_lock:
+        _breaker_consecutive_failures += 1
+        should_trip = (
+            _breaker_state == "HALF_OPEN"
+            or (
+                _breaker_state == "CLOSED"
+                and _breaker_consecutive_failures
+                >= _BREAKER_CONSECUTIVE_FAILURE_THRESHOLD
+            )
+        )
+        if should_trip and _breaker_state != "OPEN":
+            logger.warning(
+                "[yf_breaker] OPEN: %s consecutive upstream failures",
+                _breaker_consecutive_failures,
+            )
+            _breaker_state = "OPEN"
+            _breaker_opened_at = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -196,13 +346,16 @@ def _mark_dead(symbol: str, force: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 def get_ticker(symbol: str) -> yf.Ticker:
-    """Return a plain yf.Ticker (no custom session — yfinance manages its own).
+    """Return a yf.Ticker bound to the shared module-scope session.
 
     Rate limiting happens in ``get_history`` / ``get_fast_info`` wrappers.
     For direct ``yf.Ticker`` usage the caller should call ``acquire()`` first.
+
+    f-leak-3 (2026-05-04): the shared session collapses yfinance's
+    per-call Thread spawn pattern. Caller surface unchanged.
     """
     acquire()
-    return yf.Ticker(symbol)
+    return yf.Ticker(symbol, session=_SHARED_SESSION)
 
 
 def get_history(symbol: str, **kwargs) -> Any:
@@ -238,13 +391,21 @@ def get_history(symbol: str, **kwargs) -> Any:
     if cached is not None:
         return cached
 
+    # f-leak-3 (2026-05-04): breaker short-circuit. Cache hits and
+    # _is_dead skips above don't count as either success or failure;
+    # they're independent of upstream health.
+    if _breaker_should_short_circuit():
+        return pd.DataFrame()
+
     acquire()
+    failed = False
     try:
-        t = yf.Ticker(symbol)
+        t = yf.Ticker(symbol, session=_SHARED_SESSION)
         df = t.history(**kwargs)
     except Exception as e:
         logger.warning(f"[yf_session] history({symbol}) failed: {e}")
         df = pd.DataFrame()
+        failed = True
         # Only mark as dead on actual errors, not just empty data
         if "delisted" in str(e).lower() or "no data" in str(e).lower():
             _mark_dead(symbol)
@@ -263,9 +424,18 @@ def get_history(symbol: str, **kwargs) -> Any:
         if _streak >= _EMPTY_THRESHOLD:
             _mark_dead(symbol)
             _reset_empty(symbol)
+        # Empty stock response counts as a breaker failure (upstream
+        # responded but with no data). Crypto-empty is non-signal and
+        # is handled outside this branch, so no breaker tick.
+        failed = True
     elif not df.empty:
         # Reset the streak so a single recovery clears prior empties.
         _reset_empty(symbol)
+
+    if failed:
+        _breaker_on_failure()
+    else:
+        _breaker_on_success()
 
     _cache_set(cache_key, df)
 
@@ -310,9 +480,12 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
     if _is_dead(symbol):
         return None
 
+    if _breaker_should_short_circuit():
+        return None
+
     acquire()
     try:
-        t = yf.Ticker(symbol)
+        t = yf.Ticker(symbol, session=_SHARED_SESSION)
         info = t.fast_info
         result = {
             "last_price": float(info.last_price) if info.last_price else None,
@@ -325,9 +498,11 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
             "year_low": float(info.year_low) if hasattr(info, "year_low") and info.year_low else None,
             "avg_volume": int(info.three_month_average_volume) if hasattr(info, "three_month_average_volume") and info.three_month_average_volume else None,
         }
+        _breaker_on_success()
     except Exception as e:
         logger.warning(f"[yf_session] fast_info({symbol}) failed: {e}")
         result = None
+        _breaker_on_failure()
 
     _cache_set(cache_key, result)
     return result
@@ -453,16 +628,30 @@ def batch_download(
     if not uncached:
         return result
 
+    if _breaker_should_short_circuit():
+        return result
+
     acquire()
     try:
+        # f-leak-3 (2026-05-04): pass the shared session AND set
+        # threads=False. yfinance's download path with threads=True
+        # spawns a ThreadPoolExecutor of N workers; on a yahoo-egress
+        # outage that's N leaked Thread closures per call. The shared
+        # session pools connections; threads=False keeps the call
+        # synchronous on the caller thread.
         df = yf.download(uncached, period=period, interval=interval, group_by="ticker",
-                         threads=True, progress=False)
+                         threads=False, session=_SHARED_SESSION, progress=False)
     except Exception as e:
         logger.warning(f"[yf_session] batch_download failed: {e}")
+        _breaker_on_failure()
         return result
 
     if df.empty:
+        # Empty batch on a non-empty input list signals an upstream
+        # problem -- count as breaker failure.
+        _breaker_on_failure()
         return result
+    _breaker_on_success()
 
     if len(uncached) == 1:
         sym = uncached[0]
@@ -530,12 +719,16 @@ def get_fundamentals(symbol: str) -> dict[str, Any] | None:
     if cached is not None:
         return None if cached == _FUND_EMPTY else cached
 
+    if _breaker_should_short_circuit():
+        return None
+
     acquire()
     try:
-        t = yf.Ticker(symbol)
+        t = yf.Ticker(symbol, session=_SHARED_SESSION)
         info = t.info
         if not info or not info.get("shortName"):
             _cache_set(cache_key, _FUND_EMPTY)
+            _breaker_on_failure()
             return None
 
         result = {
@@ -575,9 +768,11 @@ def get_fundamentals(symbol: str) -> dict[str, Any] | None:
     except Exception as e:
         logger.warning(f"[yf_session] fundamentals({symbol}) failed: {e}")
         _cache_set(cache_key, _FUND_EMPTY)
+        _breaker_on_failure()
         return None
 
     _cache_set(cache_key, result)
+    _breaker_on_success()
     return result
 
 
@@ -591,11 +786,15 @@ def get_ticker_info(symbol: str) -> dict[str, Any] | None:
     if cached is not None:
         return cached
 
+    if _breaker_should_short_circuit():
+        return None
+
     acquire()
     try:
-        t = yf.Ticker(symbol)
+        t = yf.Ticker(symbol, session=_SHARED_SESSION)
         info = t.info
         if not info:
+            _breaker_on_failure()
             return None
 
         name = info.get("shortName") or info.get("longName") or symbol
@@ -617,9 +816,11 @@ def get_ticker_info(symbol: str) -> dict[str, Any] | None:
             "description": desc,
         }
         _cache_set(cache_key, result)
+        _breaker_on_success()
         return result
     except Exception as e:
         logger.debug(f"[yf_session] ticker_info({symbol}) failed: {e}")
+        _breaker_on_failure()
         return None
 
 
@@ -630,10 +831,13 @@ def get_ticker_news(symbol: str, limit: int = 5) -> list[dict[str, Any]]:
     if cached is not None:
         return cached
 
+    if _breaker_should_short_circuit():
+        return []
+
     out: list[dict[str, Any]] = []
     try:
         acquire()
-        t = yf.Ticker(symbol)
+        t = yf.Ticker(symbol, session=_SHARED_SESSION)
         raw = getattr(t, "news", None)
         if callable(raw):
             raw = raw()
@@ -669,8 +873,14 @@ def get_ticker_news(symbol: str, limit: int = 5) -> list[dict[str, Any]]:
                         else:
                             date_str = ""
                     out.append({"title": title, "url": url, "publisher": pub, "date": date_str})
+            _breaker_on_success()
+        else:
+            # No news returned -- treat as a soft failure for breaker
+            # purposes. The DDG fallback below still runs regardless.
+            _breaker_on_failure()
     except Exception as e:
         logger.debug(f"[yf_session] ticker news({symbol}) failed: {e}")
+        _breaker_on_failure()
 
     if not out:
         try:
