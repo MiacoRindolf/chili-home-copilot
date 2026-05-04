@@ -587,6 +587,87 @@ def _apply_intent_mirror_writes(
             intent_id, exc_info=True,
         )
 
+    # bracket-writer-respect-upside-targets (2026-05-04) Step 5:
+    # cancelled-limit replacement viability evaluator. After a position's
+    # covering limit-sell was cancelled (typically by the prior auto-cancel
+    # behavior that this task retired), the position has a SELL_STOP at
+    # the broker but no profit target. The brain may still consider the
+    # original target viable (above current price). One-shot per intent --
+    # gated by "no pending_decision exists yet" + intent_state not in
+    # accepted-states. The helper itself returns None when not viable, so
+    # this is a quiet no-op for positions that don't qualify.
+    _try_cancelled_limit_replacement_eval(
+        db, local=local, broker=broker, decision=decision,
+    )
+
+
+def _try_cancelled_limit_replacement_eval(
+    db: Session,
+    *,
+    local: LocalView,
+    broker: BrokerView,
+    decision: ReconciliationDecision,
+) -> None:
+    """Wedge for the Step 5 viability evaluator. Quiet no-op for any
+    intent that doesn't structurally qualify."""
+    try:
+        if local.bracket_intent_id is None or local.trade_id is None:
+            return
+        if (local.trade_status or "").lower() != "open":
+            return
+        if (local.intent_state or "").lower() in ("closed", "accepted_no_stop"):
+            return
+        if decision.kind != "agree":
+            return
+        # Only fire when the broker has a working stop. The cancelled-
+        # limit replacement candidate is "you have downside coverage
+        # but no upside target" -- broker stop must be alive.
+        from .bracket_reconciler import _is_working_state
+        if not _is_working_state(broker.stop_order_state):
+            return
+        # If broker already has a working target, no candidate to surface.
+        if _is_working_state(broker.target_order_state):
+            return
+        # Skip if a pending_decision is already present.
+        row = db.execute(
+            text(
+                "SELECT payload_json FROM trading_bracket_intents WHERE id=:iid"
+            ),
+            {"iid": int(local.bracket_intent_id)},
+        ).first()
+        if row and row[0] and isinstance(row[0], dict):
+            if row[0].get("pending_decision") is not None:
+                return
+        # Need entry_price + quantity from the trade row.
+        from ...models.trading import Trade as _Trade
+        t = db.get(_Trade, int(local.trade_id))
+        if t is None:
+            return
+        entry = float(t.entry_price or 0.0)
+        if entry <= 0:
+            return
+        qty = float(local.quantity or t.quantity or 0.0)
+        if qty <= 0:
+            return
+
+        from .bracket_writer_g2 import evaluate_target_replacement
+        evaluate_target_replacement(
+            db,
+            bracket_intent_id=int(local.bracket_intent_id),
+            trade_id=int(local.trade_id),
+            ticker=str(local.ticker or ""),
+            broker_source=str(local.broker_source or ""),
+            entry_price=entry,
+            quantity=qty,
+            direction=str(local.direction or "long"),
+            stop_model=getattr(t, "stop_model", None),
+        )
+    except Exception:
+        logger.debug(
+            f"{BRACKET_RECONCILIATION} cancelled_limit_replacement_eval failed "
+            "intent=%s", local.bracket_intent_id, exc_info=True,
+        )
+
 
 # ── Stage 4: log_all (DB writes + intent bumps + ops-log emission) ─────
 
@@ -1045,6 +1126,284 @@ def _bump_repair_attempt(db: Session, bracket_intent_id: int, ts) -> None:
             pass
 
 
+def _resolve_pending_bracket_decision(
+    db: Session,
+    *,
+    local: LocalView,
+    broker: BrokerView,
+    sweep_id: str,
+) -> dict[str, Any] | None:
+    """bracket-writer-respect-upside-targets (2026-05-04) -- route
+    pending-decision rows to the operator's chosen resolution.
+
+    Returns a writer-action dict if a pending_decision was present
+    (resolved or deferred); ``None`` otherwise (no pending_decision, or
+    resolution not applicable -- caller continues normal writer flow).
+
+    No magic numbers. Brain target/stop come from the persisted
+    pending_decision JSON (already computed by the writer when the
+    decision was surfaced); current price from the same JSON. Any
+    threshold tolerances reuse the writer's existing 1e-9 float-equality
+    convention.
+    """
+    try:
+        row = db.execute(
+            text(
+                "SELECT payload_json FROM trading_bracket_intents "
+                "WHERE id = :iid"
+            ),
+            {"iid": int(local.bracket_intent_id)},
+        ).first()
+    except Exception:
+        return None
+    if row is None or row[0] is None:
+        return None
+    payload = row[0]
+    if not isinstance(payload, dict):
+        return None
+    pending = payload.get("pending_decision")
+    if not isinstance(pending, dict):
+        return None
+
+    choice = pending.get("operator_choice")
+    if not choice:
+        # Deferred: operator has not yet chosen. Emit a discrepancy so
+        # the audit funnel surfaces the wait state on every sweep.
+        if _ops_log_enabled():
+            logger.info(
+                format_bracket_reconciliation_ops_line(
+                    event="discrepancy",
+                    mode="authoritative",
+                    sweep_id=sweep_id,
+                    trade_id=local.trade_id,
+                    bracket_intent_id=local.bracket_intent_id,
+                    ticker=local.ticker,
+                    broker_source=local.broker_source,
+                    kind="pending_operator_decision",
+                    severity="warn",
+                )
+            )
+        return {
+            "writer": "pending_decision_deferred",
+            "ok": False,
+            "reason": "awaiting_operator_choice",
+            "new_stop_order_id": None,
+            "qty": None,
+            "stop_price": None,
+        }
+
+    brain_state = pending.get("brain_state") or {}
+    broker_state = pending.get("broker_state") or {}
+
+    if choice == "keep_target":
+        _clear_pending_decision_and_set_state(
+            db, int(local.bracket_intent_id),
+            new_intent_state="reconciled",
+            last_diff_reason="pending_decision_resolved:keep_target",
+        )
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} pending-decision RESOLVED "
+            "trade=%s intent=%s ticker=%s choice=keep_target "
+            "(operator accepted no-downside-stop; no broker action)",
+            local.trade_id, local.bracket_intent_id, local.ticker,
+        )
+        return {
+            "writer": "pending_decision_resolved",
+            "ok": True,
+            "reason": "keep_target",
+            "new_stop_order_id": None,
+            "qty": None,
+            "stop_price": None,
+        }
+
+    if choice == "replace_with_stop":
+        brain_stop = brain_state.get("stop_price")
+        if brain_stop is None or float(brain_stop) <= 0:
+            logger.error(
+                f"{BRACKET_RECONCILIATION} pending-decision replace_with_stop "
+                "BLOCKED trade=%s intent=%s ticker=%s reason=brain_stop_missing "
+                "(operator chose replace but brain target/stop unavailable; "
+                "leaving pending_decision in place for operator to revise)",
+                local.trade_id, local.bracket_intent_id, local.ticker,
+            )
+            return {
+                "writer": "pending_decision_resolved",
+                "ok": False,
+                "reason": "brain_stop_missing",
+                "new_stop_order_id": None,
+                "qty": None,
+                "stop_price": None,
+            }
+        # Cancel covering orders + delegate to place_missing_stop with
+        # brain stop_price. The writer's own covered-by-existing-sell
+        # branch will not fire again because we are about to free the
+        # shares. Use the writer's internal helper sequence here.
+        try:
+            from .. import broker_service as _bs
+            cancelled = _bs.cancel_open_sell_orders_for_ticker(local.ticker)
+        except Exception:
+            cancelled = 0
+            logger.warning(
+                f"{BRACKET_RECONCILIATION} pending-decision replace_with_stop: "
+                "cancel_open_sell_orders failed trade=%s intent=%s ticker=%s",
+                local.trade_id, local.bracket_intent_id, local.ticker,
+                exc_info=True,
+            )
+
+        if cancelled <= 0:
+            # Defensive: no covering orders to cancel. The position must
+            # have moved (filled, manually closed, etc.). Clear the
+            # pending decision and let the next sweep re-classify.
+            _clear_pending_decision_and_set_state(
+                db, int(local.bracket_intent_id),
+                new_intent_state=None,  # do not change intent_state
+                last_diff_reason="pending_decision_resolved:replace_no_orders_to_cancel",
+            )
+            logger.warning(
+                f"{BRACKET_RECONCILIATION} pending-decision replace_with_stop: "
+                "no covering orders found trade=%s intent=%s ticker=%s "
+                "(broker state changed since decision surfaced; clearing "
+                "pending_decision so next sweep re-classifies)",
+                local.trade_id, local.bracket_intent_id, local.ticker,
+            )
+            return {
+                "writer": "pending_decision_resolved",
+                "ok": False,
+                "reason": "replace_no_orders_to_cancel",
+                "new_stop_order_id": None,
+                "qty": None,
+                "stop_price": None,
+            }
+
+        import time as _time
+        _time.sleep(2)  # broker cancel propagation; matches writer convention
+
+        from .bracket_writer_g2 import place_missing_stop
+        action = place_missing_stop(
+            db,
+            trade_id=int(local.trade_id),
+            bracket_intent_id=int(local.bracket_intent_id),
+            ticker=str(local.ticker or ""),
+            broker_source=str(local.broker_source or ""),
+            decision=ReconciliationDecision(
+                kind="missing_stop", severity="warn", delta_payload={},
+            ),
+            local_quantity=float(broker_state.get("qty") or local.quantity or 0.0),
+            stop_price=float(brain_stop),
+        )
+        _clear_pending_decision_and_set_state(
+            db, int(local.bracket_intent_id),
+            new_intent_state=None,
+            last_diff_reason="pending_decision_resolved:replace_with_stop",
+        )
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} pending-decision RESOLVED "
+            "trade=%s intent=%s ticker=%s choice=replace_with_stop "
+            "cancelled=%d new_stop_ok=%s reason=%s",
+            local.trade_id, local.bracket_intent_id, local.ticker,
+            cancelled, action.ok, action.reason,
+        )
+        return {
+            "writer": "pending_decision_resolved",
+            "ok": bool(action.ok),
+            "reason": str(action.reason or "replace_with_stop"),
+            "new_stop_order_id": action.new_stop_order_id,
+            "qty": action.new_stop_qty,
+            "stop_price": action.new_stop_price,
+        }
+
+    if choice == "convert_to_trailing_stop":
+        # No broker-side trailing-stop placement helper exists. Leave the
+        # pending_decision in place and surface NOT_IMPLEMENTED so the
+        # operator can pick a different option.
+        logger.error(
+            f"{BRACKET_RECONCILIATION} pending-decision convert_to_trailing_stop "
+            "NOT_IMPLEMENTED trade=%s intent=%s ticker=%s "
+            "(no broker trailing-stop helper available; operator should "
+            "choose replace_with_stop or keep_target instead)",
+            local.trade_id, local.bracket_intent_id, local.ticker,
+        )
+        return {
+            "writer": "pending_decision_resolved",
+            "ok": False,
+            "reason": "convert_to_trailing_stop_not_implemented",
+            "new_stop_order_id": None,
+            "qty": None,
+            "stop_price": None,
+        }
+
+    # Unknown choice -- the admin endpoint validates against the options
+    # list, but if a stale row was hand-edited, we surface and leave it.
+    logger.error(
+        f"{BRACKET_RECONCILIATION} pending-decision UNKNOWN_CHOICE "
+        "trade=%s intent=%s ticker=%s choice=%s",
+        local.trade_id, local.bracket_intent_id, local.ticker, choice,
+    )
+    return {
+        "writer": "pending_decision_resolved",
+        "ok": False,
+        "reason": f"unknown_choice:{choice}",
+        "new_stop_order_id": None,
+        "qty": None,
+        "stop_price": None,
+    }
+
+
+def _clear_pending_decision_and_set_state(
+    db: Session,
+    bracket_intent_id: int,
+    *,
+    new_intent_state: str | None,
+    last_diff_reason: str,
+) -> None:
+    """Remove the ``pending_decision`` key from payload_json and update
+    ``last_diff_reason`` (and optionally ``intent_state``). One UPDATE.
+    """
+    try:
+        if new_intent_state is not None:
+            db.execute(
+                text(
+                    "UPDATE trading_bracket_intents "
+                    "SET payload_json = "
+                    "      COALESCE(payload_json, '{}'::jsonb) - 'pending_decision', "
+                    "    intent_state = :state, "
+                    "    last_diff_reason = :reason, "
+                    "    updated_at = NOW() "
+                    "WHERE id = :iid"
+                ),
+                {
+                    "iid": int(bracket_intent_id),
+                    "state": new_intent_state,
+                    "reason": last_diff_reason,
+                },
+            )
+        else:
+            db.execute(
+                text(
+                    "UPDATE trading_bracket_intents "
+                    "SET payload_json = "
+                    "      COALESCE(payload_json, '{}'::jsonb) - 'pending_decision', "
+                    "    last_diff_reason = :reason, "
+                    "    updated_at = NOW() "
+                    "WHERE id = :iid"
+                ),
+                {
+                    "iid": int(bracket_intent_id),
+                    "reason": last_diff_reason,
+                },
+            )
+        db.commit()
+    except Exception:
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} clear pending_decision failed intent=%s",
+            bracket_intent_id, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _invoke_writer_for_decision(
     db: Session,
     *,
@@ -1075,6 +1434,28 @@ def _invoke_writer_for_decision(
         return None
     if (local.broker_source or "").lower() != "robinhood":
         return None
+
+    # bracket-writer-respect-upside-targets (2026-05-04): pending-decision
+    # routing. If the writer's covered-by-existing-sell branch previously
+    # surfaced a conflict, the operator's choice (recorded via
+    # POST /api/admin/bracket-decisions/<id>) is in
+    # ``payload_json.pending_decision.operator_choice``. Resolve it here
+    # before the normal writer path runs.
+    #
+    #   * ``operator_choice is None`` -> defer; no writer call this sweep.
+    #     Emit a discrepancy so the audit funnel sees the deferral.
+    #   * ``keep_target`` -> clear pending_decision, mark accepted_no_stop,
+    #     no broker action.
+    #   * ``replace_with_stop`` -> cancel covering orders + place stop at
+    #     brain stop_price + clear pending_decision.
+    #   * ``convert_to_trailing_stop`` -> NOT_IMPLEMENTED (no helper); log,
+    #     leave pending_decision in place for operator to pick a different
+    #     option.
+    pending_resolution = _resolve_pending_bracket_decision(
+        db, local=local, broker=broker, sweep_id=sweep_id,
+    )
+    if pending_resolution is not None:
+        return pending_resolution
 
     # Phase 3.3 (2026-05-01): gate on the intent's persistent state. If
     # the intent has been parked at terminal_reject (broker repeatedly

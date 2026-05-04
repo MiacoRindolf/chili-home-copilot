@@ -97,6 +97,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -628,6 +629,250 @@ def resize_stop_for_partial_fill(
     )
 
 
+# bracket-writer-respect-upside-targets (2026-05-04) — pending-decision
+# helpers. The covered-by-existing-sell branch of place_missing_stop now
+# routes here instead of unilaterally cancelling the operator's covering
+# limit-sells. Operator decides via POST /api/admin/bracket-decisions/<id>.
+#
+# No magic numbers: every threshold is brain output (target_price/
+# stop_price from compute_bracket_intent) or broker observation
+# (held_for_sells, broker_qty, current price via fetch_quote). The options
+# list is constructed dynamically -- the trailing-stop choice is omitted
+# entirely when no broker-side helper exists (currently the case).
+
+
+def _has_trailing_stop_placement_helper() -> bool:
+    """Returns True iff a venue-side helper exists to place a Robinhood
+    trailing-stop sell. The pending-decision options list omits
+    'convert_to_trailing_stop' when this returns False."""
+    # Probe pattern: look for a callable named ``place_trailing_stop_*``
+    # in broker_service. Discovery on 2026-05-04 found none; surface any
+    # future addition automatically.
+    try:
+        from .. import broker_service as _bs
+        for name in dir(_bs):
+            n = name.lower()
+            if n.startswith("place_trailing") and callable(getattr(_bs, name, None)):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def record_pending_bracket_decision(
+    db: Session,
+    *,
+    bracket_intent_id: int,
+    trade_id: int,
+    ticker: str,
+    broker_source: str,
+    broker_qty: float,
+    held_for_sells: float,
+    covering_orders: list[dict[str, Any]],
+    brain_target_price: float | None,
+    brain_stop_price: float | None,
+    current_price: float | None,
+    regime: str | None,
+    kind: str = "existing_sell_holds_all_shares",
+) -> dict[str, Any]:
+    """Write a structured pending_decision row into
+    ``trading_bracket_intents.payload_json``. The reconciler reads
+    ``payload_json.pending_decision.operator_choice`` on each sweep and
+    routes to the appropriate resolution path (keep_target /
+    replace_with_stop / convert_to_trailing_stop) once non-null.
+
+    Returns the pending_decision dict that was persisted (for caller
+    audit-trail use). The dict contains an ``options`` list naming the
+    resolutions available given current broker capabilities; the
+    trailing-stop option is included only if a placement helper exists
+    in the broker service.
+
+    Caller controls the surrounding transaction; this helper commits.
+    """
+    from datetime import datetime, timezone
+
+    options: list[dict[str, str]] = [
+        {
+            "choice": "keep_target",
+            "consequence": "no_downside_stop",
+        },
+        {
+            "choice": "replace_with_stop",
+            "consequence": "cancels_existing_limit_sell_and_places_stop_at_brain_price",
+        },
+    ]
+    if _has_trailing_stop_placement_helper():
+        options.append({
+            "choice": "convert_to_trailing_stop",
+            "consequence": "cancels_existing_limit_sell_and_places_trailing_stop_per_brain_atr",
+        })
+
+    pending = {
+        "kind": kind,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "broker_state": {
+            "qty": float(broker_qty),
+            "held_for_sells": float(held_for_sells),
+            "covering_orders": covering_orders,
+        },
+        "brain_state": {
+            "target_price": brain_target_price,
+            "stop_price": brain_stop_price,
+            "current_price": current_price,
+            "regime": regime,
+        },
+        "options": options,
+        "operator_choice": None,
+    }
+
+    # Merge into existing payload_json (preserve any other keys).
+    db.execute(
+        text(
+            "UPDATE trading_bracket_intents "
+            "SET payload_json = COALESCE(payload_json, '{}'::jsonb) "
+            "                || jsonb_build_object('pending_decision', "
+            "                    CAST(:pending AS JSONB)), "
+            "    last_diff_reason = 'existing_target_present_no_stop', "
+            "    updated_at = NOW() "
+            "WHERE id = :iid"
+        ),
+        {"iid": int(bracket_intent_id), "pending": _json_dumps(pending)},
+    )
+    db.commit()
+
+    logger.warning(
+        f"{BRACKET_WRITER_G2} place_missing_stop PENDING-DECISION intent=%s "
+        "ticker=%s kind=%s covering_orders=%d (operator decision required; "
+        "writer will not cancel covering sell unilaterally)",
+        bracket_intent_id, ticker, kind, len(covering_orders),
+    )
+    return pending
+
+
+def evaluate_target_replacement(
+    db: Session,
+    *,
+    bracket_intent_id: int,
+    trade_id: int,
+    ticker: str,
+    broker_source: str,
+    entry_price: float,
+    quantity: float,
+    direction: str = "long",
+    stop_model: str | None = None,
+) -> dict[str, Any] | None:
+    """Step 5 of bracket-writer-respect-upside-targets (2026-05-04).
+
+    For a position whose covering limit-sell was cancelled (typically
+    by the prior 19:14 deploy that this task retired), evaluate whether
+    the brain still considers the original profit-target viable.
+
+    Returns ``None`` when:
+      * brain target is at-or-below current price (target already
+        realized OR no longer ahead -- not viable; do not surface)
+      * brain target is at-or-below entry price (would be a downward
+        move, not a profit target)
+      * ``fetch_quote`` returns None (no signal -> defer; no signal is
+        not negative signal)
+      * brain bracket computation fails
+
+    Returns a pending-decision dict (already persisted to payload_json)
+    with ``kind='cancelled_limit_replacement_candidate'`` when the brain
+    says the target is still ahead. The operator chooses via the admin
+    endpoint.
+
+    No magic numbers: brain output is the source of the threshold;
+    current price comes from fetch_quote; entry_price from the Trade
+    row. The "viable" decision is exact-equality / strict-inequality
+    against those values, no tolerance literal.
+    """
+    # Brain bracket compute
+    try:
+        from .bracket_intent import BracketIntentInput, compute_bracket_intent
+        bi_in = BracketIntentInput(
+            ticker=ticker,
+            direction=(direction or "long").lower(),
+            entry_price=float(entry_price or 0.0),
+            quantity=float(quantity or 0.0),
+            atr=None,
+            stop_model=stop_model,
+            pattern_id=None,
+            lifecycle_stage=None,
+            regime="cautious",
+            pattern_win_rate=None,
+            pattern_name=None,
+        )
+        bi_res = compute_bracket_intent(bi_in)
+    except Exception:
+        logger.debug(
+            f"{BRACKET_WRITER_G2} evaluate_target_replacement brain compute "
+            "failed intent=%s ticker=%s",
+            bracket_intent_id, ticker, exc_info=True,
+        )
+        return None
+    brain_target = bi_res.target_price
+    brain_stop = bi_res.stop_price
+    if brain_target is None or float(brain_target) <= 0:
+        return None
+
+    # Current price (defer on no-signal)
+    try:
+        from .market_data import fetch_quote
+        q = fetch_quote(ticker)
+    except Exception:
+        q = None
+    if q is None:
+        return None
+    current_price = q.get("last_price")
+    if current_price is None:
+        return None
+    try:
+        cp = float(current_price)
+    except (TypeError, ValueError):
+        return None
+    if cp <= 0:
+        return None
+
+    # Viability checks: target must be above current AND above entry.
+    if float(brain_target) <= cp:
+        return None
+    if float(brain_target) <= float(entry_price or 0.0):
+        return None
+
+    # Surface the candidate.
+    return record_pending_bracket_decision(
+        db,
+        bracket_intent_id=int(bracket_intent_id),
+        trade_id=int(trade_id),
+        ticker=ticker,
+        broker_source=broker_source,
+        broker_qty=float(quantity),
+        held_for_sells=0.0,  # the original limit was already cancelled
+        covering_orders=[],
+        brain_target_price=float(brain_target),
+        brain_stop_price=float(brain_stop) if brain_stop else None,
+        current_price=cp,
+        regime="cautious",
+        kind="cancelled_limit_replacement_candidate",
+    )
+
+
+def _json_dumps(value: Any) -> str:
+    """Local JSON helper that handles datetime + Decimal cleanly."""
+    import json
+    from datetime import datetime, date
+    from decimal import Decimal
+
+    def _default(o):
+        if isinstance(o, (datetime, date)):
+            return o.isoformat()
+        if isinstance(o, Decimal):
+            return float(o)
+        raise TypeError(f"not serialisable: {type(o)}")
+
+    return json.dumps(value, default=_default, separators=(",", ":"))
+
+
 def place_missing_stop(
     db: Session,
     *,
@@ -814,124 +1059,114 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
-    # FIX 57 (2026-05-01) + 2026-05-03 revision — covered-by-existing-sell handling.
+    # FIX 57 (2026-05-01) + 2026-05-03 + 2026-05-04 revision -- covered-
+    # by-existing-sell handling.
     #
     # When every share is already committed to an existing sell order
-    # (held_for_sells >= broker_qty), a SELL_STOP placement gets rejected
-    # with "Not enough shares to sell."
+    # (held_for_sells >= broker_qty), a SELL_STOP placement is rejected
+    # by Robinhood retail with "Not enough shares to sell" because of
+    # the one-sell-per-share constraint at the venue.
     #
-    # DEFAULT POLICY (2026-05-01): SKIP placement. The covering sell
-    # order is typically a take-profit limit the user (or chili at an
-    # earlier round) deliberately placed. Cancelling it to free shares
-    # for a stop destroys the upside lock-in.
+    # bracket-writer-respect-upside-targets (2026-05-04): the writer
+    # NO LONGER decides this unilaterally. The 2026-05-04 19:14 deploy
+    # demonstrated the cost of auto-cancelling: 5 operator-authored
+    # covering limit-sells (profit targets at +17% to +200% above entry
+    # on AIDX/CCCC/CRDL/TLS/VFS) were cancelled to free shares for
+    # SELL_STOPs, a strategy shift the operator did not authorize.
     #
-    # **The position is NOT protected on the downside in this state.**
-    # A limit-sell at a higher price than current does not trigger if
-    # price falls. The DEFAULT preserves the upside-lock signal at the
-    # cost of downside coverage; the policy is a deliberate trade-off,
-    # not a safety guarantee.
+    # New policy: the writer SURFACES the conflict via a structured
+    # pending_decision row in trading_bracket_intents.payload_json and
+    # parks the intent. The operator chooses keep_target /
+    # replace_with_stop / convert_to_trailing_stop via the admin
+    # endpoint POST /api/admin/bracket-decisions/<id>. The reconciler
+    # reads operator_choice on each subsequent sweep and routes to the
+    # corresponding resolution path. Until a choice is recorded, no
+    # broker action is taken.
     #
-    # OPT-IN POLICY: set ``CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1``
-    # to flip the trade-off — cancel the covering order, sleep 2s for
-    # the cancel to propagate, then place the SELL_STOP. Use this when
-    # downside protection is more important than upside lock-in for the
-    # position class you're trading.
+    # The CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL env var is now
+    # forced to 0 in compose; the auto-cancel branch is gone. Going
+    # forward, this is the single decision point.
     if (
         broker_qty is not None
         and held_for_sells is not None
         and held_for_sells >= broker_qty - 1e-9  # tolerance for float compare
     ):
-        cancel_covering = bool(
-            getattr(settings, "chili_bracket_writer_cancel_covering_sell", False)
-        )
-        if not cancel_covering:
-            logger.info(
-                f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
-                "ticker=%s reason=covered_by_existing_sell broker_qty=%s "
-                "held_for_sells=%s (existing sell preserved; set "
-                "CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1 to override)",
-                bracket_intent_id, ticker, broker_qty, held_for_sells,
-            )
-            # Persist the skip so the reconciler doesn't re-classify as
-            # missing_stop next sweep. The row is in the "limit covers
-            # position, no stop placed" state — limit-only coverage, NO
-            # downside stop. Treat as terminal_reject with a specific
-            # reason; operator can flip CHILI_BRACKET_WRITER_CANCEL_
-            # COVERING_SELL + transition back to intent to switch from
-            # upside-lock to downside-protection.
-            try:
-                from .bracket_intent_writer import mark_terminal_reject as _mtr
-                _mtr(
-                    db, int(bracket_intent_id),
-                    reason="covered_by_existing_sell:no_stop_coverage",
-                )
-            except Exception:
-                logger.debug(
-                    f"{BRACKET_WRITER_G2} mark_terminal_reject persist failed",
-                    exc_info=True,
-                )
-            return WriterAction(
-                action="place_missing_stop", ok=False,
-                reason="covered_by_existing_sell",
-                broker_source=broker_source, ticker=ticker,
-            )
-        logger.warning(
-            f"{BRACKET_WRITER_G2} place_missing_stop intent=%s ticker=%s "
-            "covered_by_existing_sell broker_qty=%s held_for_sells=%s — "
-            "cancelling covering sell order(s) before placing stop",
-            bracket_intent_id, ticker, broker_qty, held_for_sells,
-        )
+        # Gather broker-side covering orders for the pending_decision JSON.
         try:
             from .. import broker_service as _bs
-
-            cancelled = _bs.cancel_open_sell_orders_for_ticker(ticker)
-        except Exception as exc:
-            logger.warning(
-                f"{BRACKET_WRITER_G2} cancel_open_sell_orders raised "
-                "intent=%s ticker=%s: %s",
-                bracket_intent_id, ticker, exc,
+            covering_orders = _bs.list_open_sell_orders_for_ticker(ticker)
+        except Exception:
+            logger.debug(
+                f"{BRACKET_WRITER_G2} list_open_sell_orders_for_ticker failed "
+                "intent=%s ticker=%s", bracket_intent_id, ticker, exc_info=True,
             )
-            cancelled = 0
+            covering_orders = []
 
-        if cancelled <= 0:
-            # Cancel didn't run or didn't find any open orders — bail rather
-            # than trying to place against a position we can't free. Arm
-            # the 5-min post-place cooldown so the next sweep tries again
-            # rather than thrashing.
-            logger.warning(
-                f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
-                "ticker=%s reason=cancel_zero_orders (no covering orders "
-                "found despite held_for_sells == broker_qty)",
-                bracket_intent_id, ticker,
-            )
-            _arm_post_place_cooldown(bracket_intent_id)
-            return WriterAction(
-                action="place_missing_stop", ok=False,
-                reason="cancel_zero_orders",
-                broker_source=broker_source, ticker=ticker,
+        # Brain target/stop for the JSON. The viability evaluator (Step 5)
+        # uses the same brain output; any decision the operator makes
+        # consumes these values.
+        brain_target = None
+        brain_stop = None
+        regime = None
+        try:
+            from .bracket_intent import BracketIntentInput, compute_bracket_intent
+            from ...models.trading import Trade as _Trade
+            t = db.get(_Trade, int(trade_id))
+            if t is not None:
+                bi_in = BracketIntentInput(
+                    ticker=ticker,
+                    direction=(t.direction or "long").lower(),
+                    entry_price=float(t.entry_price or 0.0),
+                    quantity=float(local_quantity or 0.0),
+                    atr=None,
+                    stop_model=t.stop_model,
+                    pattern_id=getattr(t, "scan_pattern_id", None),
+                    lifecycle_stage=None,
+                    regime="cautious",
+                    pattern_win_rate=None,
+                    pattern_name=None,
+                )
+                bi_res = compute_bracket_intent(bi_in)
+                brain_target = bi_res.target_price
+                brain_stop = bi_res.stop_price
+                regime = "cautious"
+        except Exception:
+            logger.debug(
+                f"{BRACKET_WRITER_G2} brain bracket compute failed intent=%s "
+                "ticker=%s", bracket_intent_id, ticker, exc_info=True,
             )
 
-        # Give Robinhood a moment to propagate the cancel before we ask it
-        # to place a new order on the same shares. resize_stop_for_partial_fill
-        # uses an inline cancel + place sequence too; the broker confirms
-        # cancels in ~1-2s in practice. Treat slower-than-2s as an
-        # exception rather than the norm.
-        time.sleep(2)
-        logger.info(
-            f"{BRACKET_WRITER_G2} place_missing_stop intent=%s ticker=%s "
-            "cancelled %s covering sell order(s); proceeding to place stop",
-            bracket_intent_id, ticker, cancelled,
+        # Current price from existing fetch_quote path. None is acceptable
+        # (the JSON carries None and the reconciler can defer evaluation).
+        current_price = None
+        try:
+            from .market_data import fetch_quote
+            q = fetch_quote(ticker)
+            if q is not None:
+                current_price = q.get("last_price")
+        except Exception:
+            current_price = None
+
+        record_pending_bracket_decision(
+            db,
+            bracket_intent_id=int(bracket_intent_id),
+            trade_id=int(trade_id),
+            ticker=ticker,
+            broker_source=broker_source,
+            broker_qty=float(broker_qty),
+            held_for_sells=float(held_for_sells),
+            covering_orders=covering_orders,
+            brain_target_price=brain_target,
+            brain_stop_price=brain_stop,
+            current_price=current_price,
+            regime=regime,
+            kind="existing_sell_holds_all_shares",
         )
-        # Reset the local held_for_sells value: we just cancelled every
-        # open sell order for this ticker, so the held bucket is empty.
-        # Without this, the capping logic below would compute
-        # ``available = broker_qty - held_for_sells = 0`` from the stale
-        # pre-cancel value and the writer would attempt a 0-share
-        # placement (caught by the broker as "invalid quantity"). The
-        # broker's positions snapshot needs ~1s longer than our sleep to
-        # update, so re-querying isn't reliable; trusting our own cancel
-        # outcome is.
-        held_for_sells = 0.0
+        return WriterAction(
+            action="place_missing_stop", ok=False,
+            reason="existing_target_present_no_stop",
+            broker_source=broker_source, ticker=ticker,
+        )
 
     # Cap at the available bucket if it's known and below local_quantity.
     if broker_qty is not None and held_for_sells is not None:

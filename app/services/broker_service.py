@@ -1058,6 +1058,60 @@ def get_positions() -> list[dict[str, Any]]:
         return []
 
 
+def list_open_sell_orders_for_ticker(ticker: str) -> list[dict[str, Any]]:
+    """Return open SELL orders for *ticker* WITHOUT cancelling.
+
+    bracket-writer-respect-upside-targets (2026-05-04): the writer's
+    pending-decision surface needs to expose the covering orders to the
+    operator so they can decide keep-vs-replace. Mirrors
+    ``cancel_open_sell_orders_for_ticker``'s iteration shape but takes
+    no action.
+
+    Each row in the returned list carries the broker fields the
+    pending-decision JSON consumes: ``order_id``, ``type``,
+    ``side``, ``quantity``, ``price``, ``stop_price``. Best-effort --
+    individual instrument-lookup failures are skipped silently.
+    Returns an empty list if the broker session is down.
+    """
+    if not is_connected():
+        return []
+    sym = (ticker or "").upper().strip()
+    if not sym:
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        import robin_stocks.robinhood as rh
+
+        all_open = rh.orders.get_all_open_stock_orders() or []
+        for o in all_open:
+            try:
+                if (o.get("side") or "").lower() != "sell":
+                    continue
+                instr_url = o.get("instrument")
+                inst = rh.helper.request_get(instr_url) if instr_url else {}
+                p_sym = ((inst or {}).get("symbol") or "").upper().strip()
+                if p_sym != sym:
+                    continue
+                order_id = o.get("id")
+                if not order_id:
+                    continue
+                out.append({
+                    "order_id": str(order_id),
+                    "type": o.get("type"),
+                    "side": "sell",
+                    "quantity": _safe_float(o.get("quantity")),
+                    "price": _safe_float(o.get("price")),
+                    "stop_price": _safe_float(o.get("stop_price")),
+                })
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.warning(
+            "[broker] list_open_sell_orders_for_ticker(%s) failed: %s", sym, exc,
+        )
+    return out
+
+
 def cancel_open_sell_orders_for_ticker(ticker: str) -> int:
     """Cancel every open SELL order for *ticker*. Returns the count cancelled.
 

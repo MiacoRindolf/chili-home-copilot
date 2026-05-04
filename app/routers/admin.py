@@ -100,6 +100,114 @@ def api_admin_logs(ctx=Depends(require_paired), limit: int = 200):
 
 
 # ---------------------------------------------------------------------------
+# Bracket pending-decision admin endpoint (bracket-writer-respect-upside-targets, 2026-05-04)
+# ---------------------------------------------------------------------------
+#
+# Operator-input mechanism for pending bracket decisions surfaced by the
+# bracket writer's covered-by-existing-sell branch. The writer persists a
+# pending_decision row into trading_bracket_intents.payload_json with an
+# options list (keep_target / replace_with_stop / [convert_to_trailing_stop
+# if helper exists]). The reconciler sees operator_choice on next sweep
+# and routes to the corresponding resolution path.
+#
+# Request body shape:
+#   {"choice": "keep_target" | "replace_with_stop" | "convert_to_trailing_stop"}
+#
+# Response: 200 with the updated bracket_intent JSON (subset). 4xx on
+# unknown intent_id, 4xx on choice not in current options list.
+#
+# This is the data-only stub. UI (autopilot settings page) is Phase 7 of
+# the broader initiative; not in this task.
+
+@router.post("/api/admin/bracket-decisions/{bracket_intent_id}")
+async def api_admin_bracket_decision(
+    bracket_intent_id: int,
+    request: Request,
+    ctx=Depends(require_paired),
+):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+    db: Session = ctx["db"]
+
+    from sqlalchemy import text as _sql_text
+    import json as _json
+
+    # Async body read so FastAPI's running loop isn't violated.
+    try:
+        body_bytes = await request.body()
+    except Exception:
+        body_bytes = b""
+    try:
+        body = _json.loads(body_bytes.decode("utf-8") or "{}")
+    except Exception:
+        body = {}
+
+    choice = (body.get("choice") or "").strip()
+    if not choice:
+        return JSONResponse(
+            {"ok": False, "error": "missing_choice"}, status_code=400,
+        )
+
+    row = db.execute(_sql_text(
+        "SELECT id, trade_id, ticker, intent_state, payload_json "
+        "FROM trading_bracket_intents WHERE id = :iid"
+    ), {"iid": int(bracket_intent_id)}).first()
+    if row is None:
+        return JSONResponse(
+            {"ok": False, "error": "intent_not_found"}, status_code=404,
+        )
+
+    payload = row[4] if row[4] is not None else {}
+    pending = payload.get("pending_decision") if isinstance(payload, dict) else None
+    if not isinstance(pending, dict):
+        return JSONResponse(
+            {"ok": False, "error": "no_pending_decision"}, status_code=400,
+        )
+
+    valid_choices = {
+        opt.get("choice") for opt in (pending.get("options") or [])
+        if isinstance(opt, dict)
+    }
+    if choice not in valid_choices:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "invalid_choice",
+                "valid_choices": sorted(valid_choices),
+            },
+            status_code=400,
+        )
+
+    db.execute(_sql_text(
+        "UPDATE trading_bracket_intents "
+        "SET payload_json = jsonb_set("
+        "  COALESCE(payload_json, '{}'::jsonb), "
+        "  '{pending_decision,operator_choice}', "
+        "  to_jsonb(CAST(:choice AS TEXT))"
+        "), "
+        "updated_at = NOW() "
+        "WHERE id = :iid"
+    ), {"iid": int(bracket_intent_id), "choice": choice})
+    db.commit()
+
+    updated = db.execute(_sql_text(
+        "SELECT id, trade_id, ticker, intent_state, payload_json, updated_at "
+        "FROM trading_bracket_intents WHERE id = :iid"
+    ), {"iid": int(bracket_intent_id)}).first()
+
+    return JSONResponse({
+        "ok": True,
+        "intent_id": int(updated[0]),
+        "trade_id": int(updated[1]) if updated[1] is not None else None,
+        "ticker": updated[2],
+        "intent_state": updated[3],
+        "pending_decision": (updated[4] or {}).get("pending_decision"),
+        "updated_at": updated[5].isoformat() if updated[5] else None,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Bracket cover-policy snapshot (bracket-writer-cover-policy-clarify, 2026-05-03)
 # ---------------------------------------------------------------------------
 #

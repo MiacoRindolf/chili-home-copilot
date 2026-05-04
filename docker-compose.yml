@@ -620,6 +620,20 @@ services:
       # no broker calls. Default OFF; flipped here after CC report
       # acknowledged the structural gap.
       - CHILI_BRACKET_INTENT_MIRROR_ENABLED=1
+      # 2026-05-04 bracket-writer-respect-upside-targets: forced back to 0.
+      # On the prior task's 2026-05-04 19:14 deploy this was hot and the
+      # writer cancelled 5 operator-authored covering limit-sells (profit
+      # targets at +17% to +200% above entry on AIDX/CCCC/CRDL/TLS/VFS)
+      # to free shares for SELL_STOPs. The operator did not authorize the
+      # strategy shift; the writer was treating the one-sell-per-share
+      # constraint as license to make policy decisions rather than a fact
+      # requiring operator input. Going forward the writer surfaces the
+      # conflict as a pending-decision row in trading_bracket_intents.
+      # payload_json instead of unilaterally cancelling. Operator decides
+      # via POST /api/admin/bracket-decisions/<id>. This env var should
+      # NOT be flipped to 1 again -- the pending-decision surface is the
+      # single decision point going forward.
+      - CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=0
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
