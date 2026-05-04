@@ -1,344 +1,251 @@
-# NEXT_TASK: broker-truth-self-heal
+# NEXT_TASK: bracket-writer-respect-upside-targets
 
 STATUS: DONE
 
 ## Goal
 
-Make CHILI symmetric: today the system has multiple paths to mark a Trade row closed automatically (`broker_reconcile_position_gone`, `phantom_after_terminal_reject`, `emergency_price_monitor_guardrail`, `zombie_reconcile_orphan`) but **zero paths to un-mark a Trade row closed when the broker subsequently proves the position still exists.** The operator should never need to run an SQL script to reconcile broker truth into the database. The system should observe, cross-check, and self-heal.
+Stop the bracket writer from silently swapping the operator's upside profit-targets for downside stop-losses. Today's deploy revealed: when `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1`, the writer cancelled 5 covering limit-sells (operator's profit targets at +17% to +200% above entry) to free shares for SELL_STOPs. The shares now have downside protection but no upside take-profit on the broker's books — a strategic shift the operator did not authorize.
 
-This task ships four coordinated changes:
+This task makes three coordinated changes so the writer respects existing protection, surfaces conflicts to the operator instead of resolving them unilaterally, and offers brain-judged replacement when a re-bracket is structurally needed.
 
-1. **Retire `_try_emergency_repair_terminal_reject` sub-branch 2.** The path is a hazard with no benefit — `broker_reconcile_position_gone` (with R32 protection) already owns the "broker says position gone" close path. Sub-branch 2 was a redundant, less-protected alternative. Delete it.
+After deploy:
+1. The writer never again cancels a covering limit-sell on its own. The flag that enabled that behavior is OFF and the code path that uses it is gated by an explicit operator decision.
+2. When a position has a covering limit but no stop, the writer logs a structured conflict and parks the trade in a new pending-decision state. The bracket reconciler emits the conflict on every sweep until the operator chooses.
+3. When the operator chooses to replace (via UI or admin endpoint, both stubs in this task), the writer evaluates each side of the bracket through the brain — current price vs entry, brain's target/stop output, regime context — and only replaces when the new orders are more protective than the existing ones. No forced replacement.
 
-2. **Retire automated `emergency_close_all` callers.** When the system is disconnected or detects emergency conditions, the correct response is **freeze** (activate kill switch, refuse new entries, leave existing trades for the operator to manage), not **auto-liquidate** (especially when the auto-liquidate doesn't even submit broker orders — Bug 4). Replace `alerts.py:1232` with a freeze call. `emergency_close_all` stays in the module for explicit operator invocation only, with Bugs 2+3 fixed inside.
-
-3. **Add inverse-reconcile in `broker_sync`.** When the broker reports a position for a (user, broker_source, ticker) and the most recent Trade row for that key is `status='closed'` AND has no SELL fill on record in `trading_execution_events`, the close was bookkeeping-only — re-open the row. Match qty and avg_price as a sanity cross-check. Single rule, no magic numbers, no allow-lists of close reasons.
-
-4. **Fix the residual lies in the now-operator-only `emergency_close_all`.** Bug 2: `exit_price = entry_price` fallback → set NULL. Bug 3: `activate_kill_switch` non-idempotent → guard.
-
-After deploy, the 11 broker-vs-DB mismatched positions from today self-heal on the first broker_sync cycle. No script. No human SQL. The system observes broker truth and corrects itself.
+The 5 already-cancelled covering limit-sells from today's deploy are accepted as a one-time operator loss. The writer evaluates each impacted ticker on the next bracket-sweep: if the brain's current target is still above current price and the position is otherwise unprotected on the upside, it queues a replacement target as a pending decision; if the brain says the trade thesis has shifted (e.g., current price has already passed the original target), it skips. Operator confirms each via the pending-decision surface.
 
 ## Why now
 
-Today (2026-05-04) two automated close paths fired for the first time ever and produced 11 unmanaged Robinhood positions whose Trade rows are wrongly marked closed in DB. The shipped flap guard prevents the *next* sub-branch-2 cascade; it does NOT undo today's, and it doesn't address the noon `emergency_close_all` trigger or the structural one-way-reconciliation gap.
+The operator stated explicitly: *"I want them to be managed correctly automatically and properly without bugs by chili."* Today's writer behavior failed that bar — it cancelled their authored upside targets to install downside stops, on its own initiative, without notice. The technical hard truth (Robinhood retail allows only one sell order per share, so true bracket pairs can't co-reserve shares) is real, but the writer was treating it as license to make a strategy decision rather than a fact requiring operator input.
 
-The operator's stated principle: **CHILI must be smart and adaptive, not constant-and-static.** Every threshold should be derived from observable data; every potentially-destructive action should cross-check existing system state before firing. Today's 11-position lockup is a direct consequence of that principle being violated in three places (sub-branch 2's single-sample close, the static 10-min disconnect timer, the missing inverse-reconcile path).
-
-The 11 stuck positions are real-money exposure right now. The inverse-reconcile design above is what shrinks that exposure window from "until operator runs script" to "until next 2-min broker_sync cycle."
+The structural one-sell-per-share constraint stays. The fix is at the policy layer above it: the writer surfaces, the operator decides.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `app/services/broker_service.py::sync_positions_to_db` (R32 lives here, lines ~1473-1515) — the inverse-reconcile lives in the same function. The R32 wholesale guard already runs first; if it refuses (broker returned `[]`), the inverse-reconcile doesn't run. Otherwise: for each broker position, look up the most recent Trade row, decide reopen-vs-create-vs-no-op.
-- `trading_execution_events` — the single source of truth for "did a fill happen." The inverse-reconcile's only cross-check is "is there a SELL fill row for this trade_id." No new schema, no new state.
-- `app/services/trading/governance.py::activate_kill_switch` — the freeze primitive. Idempotency guard goes in here as the Bug 3 fix; the freeze call from `alerts.py` reuses the same primitive.
-- `app/services/trading/alerts.py::run_price_monitor` lines 1222-1242 — the call site that currently invokes `emergency_close_all`. Replace with `activate_kill_switch(reason=f"price_monitor_freeze: {emergency_reason}")` + early return. No more auto-liquidation from this surface.
-- The C2 guard in `sync_positions_to_db` — keep. C2 still protects against backfilling Trade rows for positions that have NO history at all in CHILI (genuinely-new positions the system didn't open). The inverse-reconcile path runs BEFORE C2 reaches its refusal, handling the "we did open this, but our record was wrongly closed" case. C2 only reaches the refusal branch when there's no historical record whatsoever.
+- `app/services/trading/bracket_writer_g2.py::place_missing_stop` — the writer's primary entry point. The covered-by-existing-sell branch is the one that today silently cancels. After this task, that branch surfaces a pending-decision row instead of cancelling.
+- `app/services/trading/bracket_reconciliation_service.py` — the sweep loop. Emits the new pending-decision discrepancy as part of `event=writer_action ... reason=existing_target_present_no_stop` so the existing audit funnel picks it up.
+- `app/services/trading/stop_engine.compute_initial_bracket` (or whatever the brain's bracket-derivation function is — discover in code) — already returns the brain's stop_price + target_price for a position. The writer reuses this output to evaluate "is the operator's existing limit at or above the brain's target" (preserve) vs "below" (the brain wants tighter; surface as candidate replacement).
+- `trading_bracket_intents.payload_json` — already a JSONB column. Carries the conflict payload (existing limit price/qty, brain's preferred target, current market price, regime) without a schema change. No new columns until Phase 1 of the position-identity refactor.
+- `governance.py` — kill-switch primitive. The writer DOES NOT auto-resolve conflicts; conflicts route to the pending-decision surface. The operator's decision-write API uses the existing admin auth pattern; this task adds the endpoint stub but does not build the UI (that's Phase 7 of the broader initiative).
 
 ## Path
 
-**Design principle: zero new magic numbers, zero new env-overridable hardcoded defaults, zero new auto-close paths.** Decisions derived from observable system state or binary cross-checks against existing data. If you find yourself typing a literal threshold or a frozen list of strings, stop and call it back to Cowork.
+**Design principle: zero new magic numbers, zero new env-overridable hardcoded defaults, zero new auto-close paths, zero new auto-cancel paths.** Every decision threshold derives from brain output (already computed) or broker state (already observed). If you find yourself typing a literal price-comparison tolerance or a hardcoded list of "viable" conditions, stop and call it back to Cowork.
 
-### Step 1 — Retire sub-branch 2 of `_try_emergency_repair_terminal_reject`
+### Step 1 — Flip `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` → `0` in compose
 
-In `app/services/trading/bracket_reconciliation_service.py` around line 862-943, **delete** the entire `if broker_qty <= 0.0:` block (sub-branch 2). The function should only have sub-branches 1 (broker unavailable → fall through) and 3 (real exposure → place stop). When `broker_qty == 0`, fall through to the existing `state_gated_skip` outcome — the parent `broker_reconcile_position_gone` path (which has R32 protection at the wholesale layer) already owns this case.
+`docker-compose.yml` for the broker-sync-worker service. Single-line change. Comment above the line documenting why: "preserves operator's authored upside profit-targets; bracket writer surfaces conflicts via pending-decision instead of unilaterally cancelling." Operator restarts broker-sync-worker post-deploy to pick up.
 
-The flap guard introduced in `f917c02` (today's commit) becomes dead code after this deletion. **Delete it too** — the helper `_bump_phantom_close_zero_qty_counter`, the constant `EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS`, the env var `CHILI_BRACKET_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS`, the sub-branch-3 counter reset.
+### Step 2 — Modify `place_missing_stop` covered-by-existing-sell branch
 
-Migration 223's column `phantom_close_consecutive_zero_qty_sweeps` is now orphan. Leave it in place (don't write a drop-column migration in this task — schema-removal is a separate hygiene ticket). It will sit at 0 forever.
-
-Update `tests/test_bracket_emergency_terminal_reject_repair.py`: scenarios 1 (existing phantom-close), 8 (single-sweep deferral), 9 (three-sweep close), 10 (counter reset) all assume sub-branch 2 exists. Replace them with **one** new scenario: "broker_qty == 0 falls through to state_gated_skip" — assert no trade-row mutation, no audit emission, return None. Existing scenarios 2-7 (broker unavailable, real-exposure variants) stay unchanged.
-
-### Step 2 — Replace `emergency_close_all` auto-call with freeze
-
-In `app/services/trading/alerts.py:1230-1236`, replace:
+In `bracket_writer_g2.py`, find the branch that today reads (paraphrased):
 
 ```python
-if action == "emergency_close_all":
-    out = emergency_close_all(db, user_id, reason="price_monitor_guardrail")
-    results["emergency_action"] = "emergency_close_all"
-    results["emergency_result"] = out
-    logger.critical("[alerts] Emergency liquidation executed from price monitor: %s", out)
-    return results
+if held_for_sells == broker_qty:
+    if CANCEL_COVERING_SELL:
+        cancel_covering_sells(...)
+        proceed_to_place_stop(...)
+    else:
+        log_silent_exposure_warning(...)
+        return skip_outcome
 ```
 
-with:
+Replace with:
 
 ```python
-if action == "emergency_close_all":
-    # Disconnect / drawdown-critical detected. Correct response is FREEZE,
-    # not auto-liquidate: when disconnected we have no price data to
-    # responsibly liquidate at, and emergency_close_all does not submit
-    # broker orders anyway (it only updates DB rows). Freeze = activate
-    # kill switch (no new entries) and leave existing trades for operator
-    # decision. Operator can still call emergency_close_all manually if
-    # they actually want to liquidate.
-    from .governance import activate_kill_switch
-    activate_kill_switch(
-        reason=f"price_monitor_freeze: {emergency.get('disconnected') and 'disconnected' or 'drawdown_critical'}"
+if held_for_sells == broker_qty:
+    # Position is fully reserved by an existing sell order (limit-sell or
+    # similar). One-sell-per-share constraint at Robinhood retail means we
+    # can't co-place a stop. This is operator-decision territory.
+    #
+    # Surface the conflict via the pending-decision surface (Step 3) and
+    # park the intent. The bracket reconciler emits this on every sweep
+    # until the operator resolves; the writer never auto-resolves.
+    record_pending_bracket_decision(
+        db, intent=intent, broker=broker, brain=brain_view,
+        conflict='existing_sell_holds_all_shares',
     )
-    results["emergency_action"] = "freeze"
-    results["emergency_freeze_reason"] = emergency
-    logger.critical(
-        "[alerts] Price monitor FREEZE: %s. Kill switch activated; existing "
-        "trades left for operator. emergency_close_all NOT called automatically.",
-        emergency,
+    return outcome(
+        writer='place_missing_stop',
+        ok=False,
+        reason='existing_target_present_no_stop',
+        decision_status='pending_operator',
     )
-    return results
 ```
 
-The `partial_reduce` branch (line 1237) — same treatment. Drawdown-warning is also a "freeze + tell the operator" event, not an automated partial close. Replace `partial_reduce_exposure` call with the same kill-switch activation + log.
+The `record_pending_bracket_decision` helper writes a structured row (Step 3). The outcome's `decision_status='pending_operator'` is a new field on the writer-action audit emit so the funnel knows this is awaiting operator input rather than a bug.
 
-`emergency_close_all` and `partial_reduce_exposure` STAY in `emergency_liquidation.py`. Operator can call them explicitly via the manual broker UI or admin route. Removing them entirely is out of scope for this task.
+### Step 3 — Pending-decision surface (data only; UI is Phase 7)
 
-### Step 3 — Fix Bugs 2 and 3 inside the now-manual emergency_close_all
+Use `trading_bracket_intents.payload_json` to carry the pending decision. New JSON shape (no schema migration):
 
-In `emergency_liquidation.py:88` and the parallel paper line ~65:
-
-```python
-# BEFORE
-price = float(q["price"]) if q and q.get("price") else t.entry_price
-
-# AFTER
-price = float(q["price"]) if q and q.get("price") else None
+```json
+{
+  "pending_decision": {
+    "kind": "existing_sell_holds_all_shares",
+    "observed_at": "2026-05-04T20:14:00Z",
+    "broker_state": {
+      "qty": 150.0, "avg_price": 2.815, "held_for_sells": 150.0,
+      "covering_orders": [
+        {"order_id": "...", "type": "limit", "side": "sell",
+         "qty": 150.0, "price": 3.30}
+      ]
+    },
+    "brain_state": {
+      "target_price": 3.2372,
+      "stop_price": 2.2225,
+      "current_price": 2.85,
+      "regime": "..."
+    },
+    "options": [
+      {"choice": "keep_target",
+       "consequence": "no_downside_stop"},
+      {"choice": "replace_with_stop",
+       "consequence": "cancels_existing_limit_sell_and_places_stop_at_brain_price"},
+      {"choice": "convert_to_trailing_stop",
+       "consequence": "cancels_existing_limit_sell_and_places_trailing_stop_per_brain_atr"}
+    ],
+    "operator_choice": null
+  }
+}
 ```
 
-When price is None: set `t.exit_price = None`, `t.exit_reason = f"emergency_{reason}:no_quote"`, do NOT compute pnl (leave NULL). Operator/audit can see "we exited but don't have a clean exit price" instead of being lied to with `exit_price == entry_price` and `pnl == 0`.
+The reconciler reads `pending_decision.operator_choice` on each sweep. While `null`, it skips the writer call for this intent and emits a `kind=pending_operator_decision` discrepancy (visible in audit + log).
 
-Same for the paper branch around line 65.
+### Step 4 — Admin endpoint stub for operator decision
 
-In `governance.py::activate_kill_switch` line 31:
+Add `POST /api/admin/bracket-decisions/<bracket_intent_id>` that accepts a JSON body with `choice` (one of the values surfaced in `options`). The endpoint:
 
-```python
-def activate_kill_switch(reason: str = "manual") -> None:
-    """Immediately halt all trading activity. Persists to DB."""
-    global _kill_switch, _kill_switch_reason
-    with _kill_switch_lock:
-        if _kill_switch and _kill_switch_reason == reason:
-            # Already active with same reason — idempotent no-op.
-            return
-        _kill_switch = True
-        _kill_switch_reason = reason
-    _persist_kill_switch_state(True, reason)
-    logger.critical("[governance] KILL SWITCH ACTIVATED: %s", reason)
-```
+1. Validates the choice against the current `pending_decision.options` list (rejects unknown choices).
+2. Sets `payload_json.pending_decision.operator_choice` and bumps `updated_at`.
+3. Returns the updated row.
 
-The reason-comparison guards against same-reason re-arming (the noisy 5-min cron re-fire pattern observed today). A different reason still writes — that's a state change worth recording.
+The reconciler picks up the choice on next sweep and routes to the appropriate writer action:
+- `keep_target`: clears `pending_decision`, marks intent as `state=accepted_no_stop`, no broker action.
+- `replace_with_stop`: cancels the listed covering orders, places stop at `brain_state.stop_price`, clears `pending_decision`.
+- `convert_to_trailing_stop`: cancels the listed covering orders, places trailing-stop per the brain's ATR/regime output, clears `pending_decision`.
 
-### Step 4 — Inverse-reconcile in `sync_positions_to_db`
+The endpoint stub goes in `app/routers/admin.py`. UI surface is **out of scope** — that's the autopilot settings page, Phase 7 of the broader initiative.
 
-In `broker_service.py::sync_positions_to_db`, after the existing R32 wholesale guard (the `if not rh_tickers:` block) and inside the existing per-position loop, add a new branch BEFORE the C2 phantom guard:
+### Step 5 — Today's 5 cancelled limits — viability evaluation, not forced replacement
 
-```python
-# Inverse-reconcile: broker shows this position alive. Look for the
-# most recent Trade row for this (user_id, broker_source, ticker).
-# If it's `status='closed'` and there is NO SELL fill in
-# trading_execution_events for that trade_id, the close was a
-# bookkeeping lie (one of the automated close paths fired without an
-# actual broker exit). Re-open the existing row instead of creating a
-# fresh one (preserves entry_reason, pattern, scan_pattern_id, and the
-# bracket_intent FK chain).
-most_recent = (
-    db.query(Trade)
-    .filter(
-        Trade.user_id == user_id,
-        Trade.broker_source == "robinhood",
-        Trade.ticker == bp.ticker,
-    )
-    .order_by(Trade.entry_date.desc())
-    .first()
-)
-if most_recent is not None and most_recent.status == "closed":
-    sell_fill_count = (
-        db.query(TradingExecutionEvent)
-        .filter(
-            TradingExecutionEvent.trade_id == most_recent.id,
-            TradingExecutionEvent.event_type == "fill",
-            # SELL semantics — exact column / value depends on the
-            # event-recording convention. Discover via probe; comment
-            # the discovered shape here. The point is: count ANY SELL
-            # fill on this trade_id.
-            ...sell-side filter...,
-        )
-        .count()
-    )
-    qty_match = abs(most_recent.quantity - float(bp.quantity)) < 1e-9
-    price_match = abs(most_recent.entry_price - float(bp.avg_price)) < 1e-9 \
-                  if most_recent.entry_price and bp.avg_price else False
+Per operator: *"Replace them if they're still viable, else don't force it."*
 
-    if sell_fill_count == 0 and qty_match and price_match:
-        # The close was bookkeeping-only AND the broker still holds the
-        # exact same position. Re-open.
-        most_recent.status = "open"
-        most_recent.exit_date = None
-        most_recent.exit_price = None
-        most_recent.exit_reason = None
-        most_recent.pnl = None
-        # Re-arm the bracket_intent so the writer picks it back up.
-        db.execute(text(
-            "UPDATE trading_bracket_intents "
-            "SET intent_state='intent', last_diff_reason='inverse_reconcile_reopen', "
-            "    updated_at=NOW() "
-            "WHERE trade_id=:tid AND intent_state IN ('closed','reconciled','terminal_reject')"
-        ), {"tid": most_recent.id})
-        # Audit row.
-        # _record_event(..., event_type='inverse_reconcile_reopen', ...)
-        logger.warning(
-            "[broker_sync] INVERSE RECONCILE: re-opened trade_id=%d ticker=%s "
-            "(prior exit_reason=%s, no SELL fill on record, broker qty/price match)",
-            most_recent.id, bp.ticker, most_recent.exit_reason or "<unset>",
-        )
-        reopened_count += 1
-        continue  # Don't fall through to the create/update path.
+Add a one-shot helper in `bracket_writer_g2.py`: `evaluate_target_replacement(intent, brain_view, broker_view) -> dict | None`. Returns:
 
-    if sell_fill_count > 0:
-        # SELL fill exists for this trade_id but broker says position is
-        # alive. That's a contradiction — log it loudly. Don't reopen
-        # (the SELL fill is authoritative for "this trade closed"); don't
-        # create a new row (broker truth says position alive). Operator
-        # decision territory.
-        logger.error(
-            "[broker_sync] CONTRADICTION: trade_id=%d ticker=%s shows %d SELL "
-            "fill(s) yet broker still reports position qty=%s avg=%s. NOT "
-            "auto-reconciling. Operator review required.",
-            most_recent.id, bp.ticker, sell_fill_count, bp.quantity, bp.avg_price,
-        )
-        continue
+- `None` if the brain's target is at-or-below the current market price (target already realized or no longer ahead — not viable).
+- A pending-decision row (Step 3 shape) with `kind="cancelled_limit_replacement_candidate"` if the brain's target is above current price AND above entry price AND the position is unprotected on the upside.
 
-    if not (qty_match and price_match):
-        # No SELL fill, but qty/price don't match — the broker position
-        # isn't the same one our closed Trade row tracked. Fall through
-        # to existing create-new-row path (gated by C2 phantom guard).
-        pass
+The reconciler runs this once per intent, on the next sweep after this commit deploys, for the 5 trades whose covering limit was cancelled today (1812 AIDX, 1813 CCCC, 1814 CRDL, 1821 TLS, 1822 VFS — identifiable by their 19:14:18-19:14:57 timestamp on intent.last_diff_reason). If the brain says viable, a pending-decision row appears; operator decides via Step 4 endpoint.
 
-# ... existing C2 guard + create-new-row logic continues here ...
-```
+No forced replacement, no automatic re-cancel, no surprise broker calls.
 
-This is the entire mechanism. The cross-check is binary (sell_fill_count == 0). The qty/price match is exact-equality (no fuzzy threshold). No frozen reason-list. No N-sweep counter. No env override. Single rule, single source of truth.
+### Step 6 — Tests
 
-### Step 5 — Tests
+Add `tests/test_bracket_writer_respect_upside_targets.py`:
 
-Add to `tests/test_broker_sync_inverse_reconcile.py` (new file):
+- **scenario A: existing limit + missing stop → pending decision, no broker action.** Mock writer with `held_for_sells == broker_qty`. Assert: no `place_stop` call, no `cancel` call, `pending_decision` row written with the three options, audit row emitted with `decision_status='pending_operator'`.
+- **scenario B: operator chooses `keep_target` → intent transitions to accepted_no_stop, no broker action.** Mock the admin endpoint, write the choice. Run reconciler. Assert: no broker call, intent state updated, `pending_decision` cleared.
+- **scenario C: operator chooses `replace_with_stop` → cancel + place sequence runs.** Assert: cancel called once with the listed covering order_id, place_stop called with brain's stop_price, both broker calls verified, `pending_decision` cleared.
+- **scenario D: operator chooses `convert_to_trailing_stop`.** Same shape as C but routes to the trailing-stop placement path.
+- **scenario E: cancelled-limit replacement viability evaluator.** Mock a Trade row with `intent.last_diff_reason='inverse_reconcile_reopen'` and a recently-cancelled limit, brain target ABOVE current price → pending-decision row appears with `kind="cancelled_limit_replacement_candidate"`. Same scenario but brain target BELOW current price → returns None, no pending-decision.
 
-- **scenario A: bookkeeping-only close + matching broker position → reopen.** Insert closed Trade row with `exit_reason='emergency_price_monitor_guardrail'`, no SELL fill in execution_events, broker reports qty/avg_price match. Run `sync_positions_to_db`. Assert: trade row `status='open'`, exit_* cleared, bracket_intent re-armed, audit row written.
-- **scenario B: real SELL-fill close + broker still reports position → contradiction log, no mutation.** Insert closed Trade row with `exit_reason='target'`, INSERT a SELL fill in execution_events for that trade_id, broker reports qty/avg_price match. Run sync. Assert: trade row unchanged (still closed), error log emitted with the word "CONTRADICTION", no new row created.
-- **scenario C: bookkeeping-only close + qty/price MISMATCH → fall through to C2.** Closed Trade row, no SELL fill, but broker qty differs. Run sync. Assert: existing Trade row unchanged, fall through to C2's existing behavior (which refuses or creates a new row depending on whether buy fill exists).
-- **scenario D: no historical Trade row → C2 governs.** Broker shows position with no matching Trade row in DB. Assert: existing C2 behavior (refuses if no buy fill).
+All scenarios use `chili_test`. No live network.
 
-For the alerts.py freeze fix: add a scenario in `tests/test_alerts_price_monitor_freeze.py`:
+### Step 7 — Documentation
 
-- **scenario E: emergency condition triggers freeze, not liquidation.** Force `check_emergency_conditions` to return `recommended_action='emergency_close_all'`. Run `run_price_monitor`. Assert: `emergency_close_all` was NOT called (mock + assert no_call), kill switch IS active, no Trade row mutations, result dict contains `emergency_action='freeze'`.
+Add a short paragraph to `docs/FAST_PATH_HANDOFF.md` (or wherever the bracket flag inventory lives) documenting:
 
-For Bug 2 / Bug 3 / sub-branch-2 deletion: extend `tests/test_bracket_emergency_terminal_reject_repair.py` (replace scenarios 1, 8, 9, 10 per Step 1) and add a small `tests/test_emergency_liquidation_no_quote.py` that covers the NULL exit_price path.
-
-All tests use `chili_test`. No live network.
-
-### Step 6 — Live verification
-
-After deploy, the 11 stuck positions from today should self-heal on the next broker_sync cycle (every 2 min during market hours). Verification:
-
-```sql
--- Pre-deploy: 11 closed rows for the broker-live tickers
-SELECT id, ticker, status, exit_reason, exit_date FROM trading_trades
-WHERE ticker IN ('TLS','GEO','AIDX','CRDL','ELTX','CCCC','JOB','PED','IMTX','EKSO','VFS')
-  AND status='closed' AND exit_date >= '2026-05-04 09:00:00'
-ORDER BY exit_date;
--- expect: 11 rows
-
--- Post-deploy (after one broker_sync cycle):
--- expect: same 11 ids but status='open', exit_date IS NULL, exit_reason IS NULL
-```
-
-Plus the new log lines: `[broker_sync] INVERSE RECONCILE: re-opened trade_id=...` should appear 11 times in broker-sync-worker logs within ~2 minutes of deploy.
-
-If any of the 11 do NOT self-heal, inspect for SELL fills in `trading_execution_events` (which would route them to the contradiction branch) or qty/price mismatches.
+- The one-sell-per-share constraint at Robinhood retail (architectural fact).
+- Why `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL` defaults to `0` going forward.
+- The pending-decision surface as the operator-input mechanism.
+- Forward pointer to the autopilot-settings UI (Phase 7).
 
 ## Constraints / do not touch
 
-- **No magic numbers anywhere.** Operator's explicit principle: constant and static decisions are hazards. The brief specifies cross-checks (binary fill-existence, exact qty/price match) and removes the existing magic number from today's commit. Anything else is a violation.
-- **No new env-overridable hardcoded defaults.** The previous task's `CHILI_BRACKET_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS=3` env was a dressed-up magic number. Don't repeat the pattern.
-- **No new auto-close paths.** The whole point of this task is reducing the number of automated close paths from N to N-2. Adding even one more (e.g., "auto-close if mismatch persists for X cycles") defeats the goal.
-- **Do NOT remove `emergency_close_all` or `partial_reduce_exposure` from the module.** Operator can still call them manually. Only remove the AUTOMATED callers.
-- **Do NOT modify R32.** The wholesale guard at the top of `sync_positions_to_db` stays as-is. The new inverse-reconcile runs INSIDE the same function but only when R32 has already let the response through (i.e., broker returned at least one position).
-- **Do NOT modify the existing `broker_reconcile_position_gone` close path.** That path already has R32 protection. After Step 1's deletion of sub-branch 2, that path becomes the ONLY automated way a Trade row gets closed by reconcile machinery — and it's well-guarded.
+- **No magic numbers.** Brain output (target_price, stop_price, ATR, regime) is the source of every threshold. Current price comes from the existing `fetch_quote` path. No literal tolerance, no hardcoded "viable" thresholds.
+- **No new auto-cancel paths.** The writer NEVER cancels broker orders without an operator-recorded choice. The cancel call appears only in the `replace_with_stop` and `convert_to_trailing_stop` resolution paths, both gated by `operator_choice != null`.
+- **No new auto-place paths.** Same logic for placement — the writer only places when the operator has chosen a resolution that requires placement.
+- **No new env-overridable defaults.** The `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=0` flip in compose is the LAST env-flag change for this surface. Going forward, decisions live in `pending_decision.operator_choice`, not env vars.
+- **Do NOT remove the `place_missing_stop` function** — it's reused by the resolution paths in Step 4. Only the covered-by-existing-sell branch's behavior changes.
+- **Do NOT modify the inverse-reconcile path** from `broker-truth-self-heal`. That ships independently and the new pending-decision logic runs after inverse-reconcile reopens a Trade row.
+- **Do NOT auto-resolve any of today's 5 cancelled limits.** Step 5 is evaluator-only; it surfaces candidates as pending-decision rows. Operator decides each.
 - **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
 - **No `git push --force` to main.** PROTOCOL Hard Rule 4.
-- **No new migrations** unless something genuinely requires schema. Inverse-reconcile reads from existing tables; freeze writes use existing kill-switch primitives. If you find yourself reaching for a migration, stop and call it back.
+- **No new schema migrations.** Pending-decision data lives in existing `payload_json`. The new column work is Phase 1 of the position-identity refactor (separate initiative).
 
 ## Out of scope
 
-- **Position-identity refactor.** The architectural fix for "Trade row IDs are ephemeral, broker positions are persistent" is a much larger initiative. Inverse-reconcile is the pragmatic patch that makes the existing model self-heal; the proper fix is a separate brief that introduces a position-identity layer above Trade rows. Ack the gap, defer.
-- **`emergency_close_all` actually submitting broker orders (Bug 4 proper fix).** Now that automated callers are gone, the urgency drops. Whether `emergency_close_all` should EVER auto-liquidate (vs always freeze) is a strategic decision for a later brief. For now: it stays a manual-only operator tool with the lying-exit-price fixed.
-- **Dropping migration 223's orphan column.** Schema hygiene; do in a follow-up batch.
-- **The unauthorized `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` activation from yesterday's deploy.** Operationally significant but orthogonal to this task. Operator should decide separately whether to keep it hot or revert. Surface in CC report's Open Questions.
-- **Renaming `phantom_after_terminal_reject` to clarify post-flap semantics.** Cosmetic; defer.
+- **Autopilot settings UI** — the page the operator described (per-broker enable/disable, per-strategy toggles, broker-routing rules). That's Phase 7 of the broader initiative; this task only ships the data model + admin endpoint that the UI will eventually consume.
+- **Position-identity refactor** — the three-layer split (decision → envelope → position) is the next initiative-shaped task. This task uses today's Trade-row model as-is.
+- **Replacing existing API admin auth** — the new endpoint reuses existing admin auth patterns. Don't redesign auth here.
+- **Trailing-stop primitive itself** — `convert_to_trailing_stop` resolution path assumes a trailing-stop placement helper exists in the broker layer. If it doesn't yet, surface it as an Open Question in the CC report and stub the resolution path with a clear NOT_IMPLEMENTED return that surfaces to the operator. Don't build trailing-stop placement in this task.
+- **Manual replacement of today's 5 cancelled limits via Cowork-staged script.** Operator declined. The Step 5 evaluator handles "still viable" judgment; no script.
+- **Schema-removal of mig 223's orphan column.** Bundled with Phase 1 of the position-identity refactor per the agreed plan.
 
 ## Success criteria
 
 1. **Two commits, both pushed:**
-   - `fix(reconcile): broker-truth self-heal — retire sub-branch 2, replace auto-liquidate with freeze, add inverse-reconcile`
-   - `docs(strategy): broker-truth-self-heal CC report + mark NEXT_TASK done`
-2. **Magic-number audit clean.** CC_REPORT must include a subsection enumerating any literal numeric or string-list values added in this commit. Expected: zero new literals beyond exception messages and log strings. If any literal slips in, justify it with derivation from observable system state.
-3. **All existing tests still pass.** `pytest tests/test_bracket_emergency_terminal_reject_repair.py tests/test_alerts.py tests/test_broker_service.py tests/test_governance.py tests/test_emergency_liquidation.py -v`. The sub-branch-2 deletion will require updating prior scenarios (1, 8, 9, 10) — that's expected, not a regression.
-4. **New tests pass.** Scenarios A-E above, all green.
-5. **Live self-heal observed.** Within 5 minutes of deploy, all 11 stuck positions (1812 AIDX, 1813 CCCC, 1814 CRDL, 1815 EKSO, 1816 ELTX, 1817 GEO, 1818 IMTX, 1819 JOB, 1820 PED, 1821 TLS, 1822 VFS) re-open via the inverse-reconcile path. Capture the log lines and the post-deploy `SELECT` result in the CC_REPORT.
-6. **Kill switch resets cleanly.** After the inverse-reconcile re-opens the 11 trades, the operator may want the kill switch deactivated to resume autotrader entries. The brief does NOT auto-deactivate the kill switch — that's an operator decision. Surface it in the CC_REPORT as an Open Question for the operator.
-7. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_broker-truth-self-heal.md`. Include:
-   - Magic-number audit subsection
-   - Pre-deploy and post-deploy `SELECT` results for the 11 stuck positions
-   - Log lines from the inverse-reconcile path firing
-   - Any contradictions surfaced (scenario B's error log) — none expected today, but log them if any appear
-   - The unauthorized `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` flag flagged as an Open Question
+   - `fix(bracket): respect operator upside-targets — pending-decision surface + flag flip`
+   - `docs(strategy): bracket-writer-respect-upside-targets CC report + mark NEXT_TASK done`
+2. **Magic-number audit clean.** CC report enumerates any literal numeric/string-list values added; expected count is zero net new behavioural literals (audit-trail strings and JSON keys excepted).
+3. **All existing tests still pass.** `pytest tests/test_bracket_writer_g2.py tests/test_bracket_reconciliation_service.py tests/test_alerts.py -v`. The covered-by-existing-sell behavior change requires updating any prior scenario that asserted the cancel-and-place sequence — that's expected, not a regression.
+4. **6 new test scenarios (A-E + cancelled-limit evaluator) pass.**
+5. **Live verification (post-deploy):**
+   - `docker compose ps broker-sync-worker` shows the env var `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=0` after `docker compose up -d broker-sync-worker`.
+   - At least one `pending_decision` row appears in `trading_bracket_intents.payload_json` for any of the 9 currently-open equity positions whose covering limit got cancelled today (this would indicate the Step 5 evaluator is correctly identifying replacement candidates).
+   - Zero new `cancelled` covering-limit-sell orders at Robinhood within 30 minutes of deploy.
+6. **Admin endpoint reachable.** `curl -X POST /api/admin/bracket-decisions/<id> -d '{"choice":"keep_target"}'` returns 200 with the updated row JSON. Verify against an actual bracket_intent_id in the running DB.
+7. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_bracket-writer-respect-upside-targets.md`. Include:
+   - Magic-number audit
+   - Pre-deploy and post-deploy state of the 9 reopened equity bracket_intents (`payload_json` contents)
+   - The trailing-stop placement helper status (does it exist? if not, what's the current stub path?)
+   - Whether any CONTRADICTION or pending-decision rows appeared in the 30-min post-deploy window
 
 ## Rollback plan
 
-- **Code rollback**: `git revert <fix-commit>`. The 11 self-healed trades stay open (the rollback doesn't re-close them — that's correct behavior, the broker really does hold the positions). Future broker_sync cycles fall back to the C2-guarded path; no inverse-reconcile fires; no auto-freeze. Revert to pre-fix automated-emergency-liquidate behavior. Side effect: the noon Monday landmine reactivates for next Monday — operator must redeploy or accept the landmine.
-- **No migration to roll back.**
-- **Flag-based partial rollback**: not applicable — there are no new flags in this task. The previous task's `CHILI_BRACKET_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS` env is now dead code; ignored.
-- **Hard-stop**: if inverse-reconcile fires unexpectedly on positions that should NOT have been re-opened (e.g., a SELL fill exists but the SELL-side detection logic missed it), revert immediately and inspect. The contradiction-log branch (scenario B) is the safety belt that catches this — if it doesn't catch the case, the SELL-side detection is wrong and needs a deeper look before re-deploy.
+- **Code rollback:** `git revert <fix-commit>`. The `pending_decision` JSON keys orphan in any rows that got written; harmless (consumers ignore unknown keys). The flag goes back to whatever was committed before. The endpoint disappears.
+- **Flag-only rollback:** if the new behavior shows a regression but the rest is fine, the operator can flip `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` back without reverting code — the pending-decision surface still works alongside the old auto-cancel. (Not recommended; defeats the purpose.)
+- **Hard-stop:** flip the writer's whole feature flag (`CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP=0`) — the bracket writer becomes a no-op. The 9 open equity positions retain their currently-confirmed SELL_STOPs at Robinhood (those are independent of CHILI's writer state); operator manually manages going forward.
+- **No live broker rollback needed.** This task does NOT cancel or place broker orders during deploy.
 
 ## Verification commands (for the executor + the operator)
 
 ```powershell
-# Pre-deploy snapshot
+# Pre-deploy: confirm the 9 SELL_STOPs are still confirmed
+docker compose exec -T broker-sync-worker python /app/scripts/_rh_probe_stops_now.py
+
+# Post-deploy: env var flip confirmed
+docker compose exec -T broker-sync-worker sh -c 'env | grep CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL'
+# Expect: CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=0
+
+# Watch the pending-decision rows appear on next sweep
 docker compose exec -T postgres psql -U chili -d chili -c "
-  SELECT id, ticker, status, exit_reason, exit_date FROM trading_trades
-  WHERE ticker IN ('TLS','GEO','AIDX','CRDL','ELTX','CCCC','JOB','PED','IMTX','EKSO','VFS')
-    AND exit_date >= '2026-05-04 09:00:00'
-  ORDER BY ticker, exit_date;
+  SELECT id, ticker, intent_state, last_diff_reason,
+         payload_json->'pending_decision'->>'kind' AS pending_kind,
+         payload_json->'pending_decision'->>'observed_at' AS observed_at,
+         payload_json->'pending_decision'->>'operator_choice' AS choice
+  FROM trading_bracket_intents
+  WHERE trade_id IN (1812,1813,1814,1817,1818,1819,1820,1821,1822)
+  ORDER BY trade_id;
 "
 
-# Deploy (after commits land)
-docker compose up -d broker-sync-worker scheduler-worker chili
-
-# Watch inverse-reconcile fire
-docker compose logs broker-sync-worker --since 5m -f | Select-String "INVERSE RECONCILE|CONTRADICTION"
-
-# Post-deploy verification (run after first broker_sync cycle, ~2 min)
-docker compose exec -T postgres psql -U chili -d chili -c "
-  SELECT id, ticker, status, exit_reason, exit_date FROM trading_trades
-  WHERE id IN (1812,1813,1814,1815,1816,1817,1818,1819,1820,1821,1822)
-  ORDER BY id;
-"
-# Expect: all 11 with status='open', exit_date IS NULL, exit_reason IS NULL
-
-# Confirm kill switch state (should still be active from noon — operator decides reset)
-docker compose exec -T postgres psql -U chili -d chili -c "
-  SELECT * FROM trading_risk_state ORDER BY id DESC LIMIT 1;
-"
+# Watch the writer NOT cancel anything new
+docker compose logs broker-sync-worker --since 30m -f | Select-String -Pattern "cancel|pending_decision|existing_target_present_no_stop|kind=pending_operator_decision"
 
 # Tests
 $env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
-pytest tests/test_bracket_emergency_terminal_reject_repair.py `
-       tests/test_broker_sync_inverse_reconcile.py `
-       tests/test_alerts_price_monitor_freeze.py `
-       tests/test_emergency_liquidation_no_quote.py `
-       tests/test_governance.py -v
+pytest tests/test_bracket_writer_respect_upside_targets.py -v
 ```
 
 ## Open questions for Cowork (surface in your CC_REPORT)
 
-1. **SELL-side fill detection in `trading_execution_events`.** The schema has columns `event_type`, `status`, and `payload_json` but no explicit `side` column. Probe the table to see how SELL fills are distinguished from BUY fills (likely in `payload_json.side` or via the bracket_intent_id linkage). Document the discovered shape in the report so future readers know the contract.
-2. **Qty / price exact-match tolerance.** The brief specifies `abs(...) < 1e-9` (effectively exact). If real broker responses show floating-point imprecision (e.g., 0.000000001 drift on crypto avg_price), surface the observed values and propose a tolerance derived from broker-reported precision (NOT a magic number — derive from the broker's rounding granularity).
-3. **Kill switch state after self-heal.** The 11 trades re-open via inverse-reconcile, but the kill switch is still active from noon's `emergency_close_all` cascade. Should the inverse-reconcile path also reset the kill switch? My read: **NO** — kill switch is operator-driven recovery; auto-resetting it bypasses operator awareness. Surface for explicit decision.
-4. **Contradiction handling.** If scenario B (SELL fill exists + broker says position alive) ever fires in production, what's the operator playbook? My read: log the contradiction, alert via existing critical-log surface, and pause inverse-reconcile for that ticker until operator clears it. The current brief just logs and continues — surface if you think a stronger response is warranted.
-5. **Unauthorized `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` activation** from yesterday's deploy. Still hot. Independent of this task. Surface so the operator can decide separately whether to keep it or revert.
+1. **Trailing-stop placement helper presence.** Does a function exist today that places a Robinhood trailing-stop sell? If yes, document the entry point. If no, the `convert_to_trailing_stop` resolution path stubs to NOT_IMPLEMENTED and the option doesn't appear in the pending-decision options list (only `keep_target` and `replace_with_stop`). Surface either way.
+2. **Brain's target/stop reuse.** The viability evaluator depends on brain output for current target_price/stop_price for a given (ticker, regime). Confirm the existing brain function (likely `compute_initial_bracket` or similar) returns this in a stable shape; if it doesn't, surface what it does return and how the evaluator should adapt.
+3. **`fetch_quote` blocked tickers.** Some tickers may be in the yf-breaker OPEN state or the Massive/Polygon block list. The viability evaluator needs current price; if `fetch_quote` returns None, defer the evaluation rather than treating it as "not viable" (no signal ≠ negative signal). Confirm this is what your implementation does and surface the count of deferrals if any.
+4. **Admin endpoint auth.** Reusing existing admin auth pattern is the brief's intent, but the precise pattern (cookie? bearer? IP allow?) lives in `app/routers/admin.py`. Document the choice in the CC report so the future autopilot-settings UI knows what to integrate against.
+
+## Forward pointer
+
+After this task ships and the operator confirms the writer is no longer eating their profit targets, the next initiative-shaped step is the position-identity refactor design doc (per `docs/STRATEGY/CURRENT_PLAN.md`). The pending-decision surface in this task becomes part of that refactor's UI scope (Phase 7 of the broader plan).
