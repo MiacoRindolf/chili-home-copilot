@@ -66,6 +66,19 @@ if not _under_pytest:
         import logging as _logging
         _logging.getLogger(__name__).warning("[db_watchdog] failed to start", exc_info=True)
 
+    # bracket-writer-cover-policy-clarify (2026-05-03): emit a WARNING
+    # if the silent-exposure flag combination is set. See module
+    # docstring on bracket_writer_g2 and the CC_REPORT for context.
+    try:
+        from .services.trading.bracket_writer_g2 import warn_if_silent_exposure
+        warn_if_silent_exposure()
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            "[bracket_writer] silent-exposure warning probe failed",
+            exc_info=True,
+        )
+
 # Builtin pattern seeding queries scan_patterns; can block if another process holds locks.
 # Tests truncate app tables per case; callers that need ScanPattern rows insert them.
 if not _under_pytest:

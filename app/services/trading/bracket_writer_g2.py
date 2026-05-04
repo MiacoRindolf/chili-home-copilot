@@ -252,6 +252,44 @@ def _place_missing_stop_enabled() -> bool:
     return bool(getattr(settings, "chili_bracket_writer_g2_place_missing_stop", False))
 
 
+# bracket-writer-cover-policy-clarify (2026-05-03) — startup-time
+# warning emitted when the silent-exposure flag combination is in
+# effect. Called from every process that may exercise the writer:
+# the FastAPI app boot path and the broker-sync-worker entrypoint.
+# Emits exactly one WARNING line per process; safe to call multiple
+# times (idempotent — separate calls just re-emit).
+
+def warn_if_silent_exposure(*, log: "logging.Logger | None" = None) -> bool:
+    """Emit a WARNING when emergency-repair is ON and cancel-covering-sell
+    is OFF — the combination that produces "rejection storm avoided,
+    downside still uncovered" without any operator-visible signal at
+    decision time.
+
+    Returns True when the warning was emitted, False when the combo is
+    not active (so callers can also use this as a probe).
+
+    The warning is informational, not a misconfiguration: both flag
+    values are operator choices. The function does NOT escalate to
+    ERROR or fail startup. Override via the corresponding env vars.
+    """
+    target_log = log or logger
+    repair_on = bool(getattr(settings, "chili_bracket_missing_stop_repair_enabled", False))
+    cancel_on = bool(getattr(settings, "chili_bracket_writer_cancel_covering_sell", False))
+    if not (repair_on and not cancel_on):
+        return False
+    target_log.warning(
+        f"{BRACKET_WRITER_G2} SILENT-EXPOSURE COMBO ACTIVE: "
+        "CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=1 AND "
+        "CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=0. Positions where "
+        "held_for_sells == broker_qty (covered by an existing limit-sell "
+        "only) will be skipped by the emergency-repair path and remain "
+        "WITHOUT downside protection. Set "
+        "CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1 to enable cancel-"
+        "and-place-stop behavior, or accept the upside-lock default."
+    )
+    return True
+
+
 # The writer only handles Robinhood equities in this scaffold (see
 # module docstring). Guarding explicitly means a change that adds
 # Coinbase later can't accidentally trip on a stale Robinhood code path.
@@ -691,9 +729,19 @@ def place_missing_stop(
     # only checks total qty, not ``available_to_sell = qty - held_for_sells``.
     # FIX 52 (terminal-reject cooldown) absorbed the storm but still let
     # one placement through per restart. FIX 55 catches the case at the
-    # source: if all shares are already covered by an existing sell order,
-    # the position is protected — skip placement entirely. The existing
-    # limit IS the exit; we don't need to add a stop on top of it.
+    # source: if all shares are already committed to an existing limit-
+    # sell (typically a take-profit), placing a SELL_STOP on top would
+    # require canceling the limit (since the broker rejects placements
+    # when ``held_for_sells == quantity``). The default policy preserves
+    # the limit and skips the stop.
+    #
+    # **THIS IS NOT DOWNSIDE PROTECTION.** A take-profit limit at a
+    # higher price than current does nothing if price falls. The
+    # trade-off is deliberate: upside lock-in vs downside protection.
+    # Operators who want downside protection set
+    # ``CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1`` to flip the policy:
+    # cancel the limit, place the stop. See operator runbook in
+    # docs/STRATEGY/CC_REPORTS/2026-05-03_bracket-writer-cover-policy-clarify.md.
     adapter = adapter_factory(broker_source)
     try:
         # Direct broker_service call (cleaner than adapter.get_positions
@@ -736,23 +784,28 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
-    # FIX 57 (2026-05-01) + 2026-05-01 revision — covered-by-existing-sell handling.
+    # FIX 57 (2026-05-01) + 2026-05-03 revision — covered-by-existing-sell handling.
     #
     # When every share is already committed to an existing sell order
     # (held_for_sells >= broker_qty), a SELL_STOP placement gets rejected
     # with "Not enough shares to sell."
     #
-    # DEFAULT POLICY (2026-05-01): SKIP placement. The covering sell order
-    # is typically a take-profit limit the user (or chili at an earlier
-    # round) deliberately placed. Cancelling it to free shares for a stop
-    # destroys the upside lock-in. The position is still protected — by
-    # the existing limit-sell, just at a different price level.
+    # DEFAULT POLICY (2026-05-01): SKIP placement. The covering sell
+    # order is typically a take-profit limit the user (or chili at an
+    # earlier round) deliberately placed. Cancelling it to free shares
+    # for a stop destroys the upside lock-in.
+    #
+    # **The position is NOT protected on the downside in this state.**
+    # A limit-sell at a higher price than current does not trigger if
+    # price falls. The DEFAULT preserves the upside-lock signal at the
+    # cost of downside coverage; the policy is a deliberate trade-off,
+    # not a safety guarantee.
     #
     # OPT-IN POLICY: set ``CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1``
-    # to revive the original behavior — cancel the covering order, sleep
-    # 2s for the cancel to propagate, then place the SELL_STOP. Use this
-    # when downside protection is more important than upside lock-in for
-    # the position class you're trading.
+    # to flip the trade-off — cancel the covering order, sleep 2s for
+    # the cancel to propagate, then place the SELL_STOP. Use this when
+    # downside protection is more important than upside lock-in for the
+    # position class you're trading.
     if (
         broker_qty is not None
         and held_for_sells is not None
@@ -770,15 +823,17 @@ def place_missing_stop(
                 bracket_intent_id, ticker, broker_qty, held_for_sells,
             )
             # Persist the skip so the reconciler doesn't re-classify as
-            # missing_stop next sweep — the position IS protected, just by
-            # the existing sell. Treat this as terminal_reject with a
-            # specific reason; operator can flip the env var + transition
-            # back to intent if they change their mind.
+            # missing_stop next sweep. The row is in the "limit covers
+            # position, no stop placed" state — limit-only coverage, NO
+            # downside stop. Treat as terminal_reject with a specific
+            # reason; operator can flip CHILI_BRACKET_WRITER_CANCEL_
+            # COVERING_SELL + transition back to intent to switch from
+            # upside-lock to downside-protection.
             try:
                 from .bracket_intent_writer import mark_terminal_reject as _mtr
                 _mtr(
                     db, int(bracket_intent_id),
-                    reason="covered_by_existing_sell:protected_by_limit",
+                    reason="covered_by_existing_sell:no_stop_coverage",
                 )
             except Exception:
                 logger.debug(

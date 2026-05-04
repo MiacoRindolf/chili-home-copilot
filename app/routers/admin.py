@@ -100,6 +100,80 @@ def api_admin_logs(ctx=Depends(require_paired), limit: int = 200):
 
 
 # ---------------------------------------------------------------------------
+# Bracket cover-policy snapshot (bracket-writer-cover-policy-clarify, 2026-05-03)
+# ---------------------------------------------------------------------------
+#
+# Read-only snapshot of intent rows that hit the writer's
+# ``covered_by_existing_sell`` branch — i.e. open positions where the
+# broker has working sell coverage but no stop-typed order. With the
+# DEFAULT writer policy these rows are NOT downside-protected; the
+# limit-sell only locks upside. Operator endpoint to scan exposure at
+# a glance.
+
+@router.get("/api/admin/bracket/cover-policy-snapshot")
+def api_admin_bracket_cover_policy_snapshot(ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+    db: Session = ctx["db"]
+    from sqlalchemy import text as _sql_text
+    from datetime import datetime, timezone
+    from ..config import settings as _settings
+
+    rows = db.execute(_sql_text(
+        "SELECT bi.id AS intent_id, bi.trade_id, t.ticker, "
+        "       bi.intent_state, bi.last_diff_reason, "
+        "       bi.stop_price, bi.quantity AS local_qty, "
+        "       bi.broker_stop_order_id, t.status AS trade_status, "
+        "       bi.updated_at "
+        "FROM trading_bracket_intents bi "
+        "JOIN trading_trades t ON t.id = bi.trade_id "
+        "WHERE bi.last_diff_reason LIKE 'covered_by_existing_sell%' "
+        "  AND t.status = 'open' "
+        "ORDER BY bi.updated_at DESC NULLS LAST"
+    )).fetchall()
+
+    flags = {
+        "chili_bracket_missing_stop_repair_enabled": bool(
+            getattr(_settings, "chili_bracket_missing_stop_repair_enabled", False)
+        ),
+        "chili_bracket_writer_cancel_covering_sell": bool(
+            getattr(_settings, "chili_bracket_writer_cancel_covering_sell", False)
+        ),
+        "chili_bracket_intent_mirror_enabled": bool(
+            getattr(_settings, "chili_bracket_intent_mirror_enabled", False)
+        ),
+    }
+
+    advisory = (
+        "no downside protection; broker has limit-sell only — set "
+        "CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1 for cancel-and-place-stop"
+    )
+
+    return JSONResponse({
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        "flags": flags,
+        "row_count": len(rows),
+        "rows": [
+            {
+                "intent_id": int(r[0]),
+                "trade_id": int(r[1]) if r[1] is not None else None,
+                "ticker": r[2],
+                "intent_state": r[3],
+                "last_diff_reason": r[4],
+                "stop_price_local": float(r[5]) if r[5] is not None else None,
+                "local_qty": float(r[6]) if r[6] is not None else None,
+                "broker_stop_order_id": r[7],
+                "trade_status": r[8],
+                "updated_at": r[9].isoformat() if r[9] is not None else None,
+                "advisory": advisory,
+            }
+            for r in rows
+        ],
+    })
+
+
+# ---------------------------------------------------------------------------
 # User Management
 # ---------------------------------------------------------------------------
 

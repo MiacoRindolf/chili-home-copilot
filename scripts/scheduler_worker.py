@@ -70,6 +70,17 @@ def main() -> None:
     except Exception as _e:
         logger.warning("[scheduler_worker] Kill switch restore failed: %s", _e)
 
+    # bracket-writer-cover-policy-clarify (2026-05-03): emit a WARNING
+    # if the silent-exposure flag combination is set. The broker-sync-
+    # worker is the process that actually exercises the writer's
+    # covered_by_existing_sell branch, so this warning is operationally
+    # most relevant here.
+    try:
+        from app.services.trading.bracket_writer_g2 import warn_if_silent_exposure
+        warn_if_silent_exposure(log=logger)
+    except Exception as _e:
+        logger.debug("[scheduler_worker] silent-exposure warning probe failed: %s", _e)
+
     start_scheduler()
     logger.info("[scheduler_worker] Started (CHILI_SCHEDULER_ROLE=%s)", os.environ.get("CHILI_SCHEDULER_ROLE"))
 
