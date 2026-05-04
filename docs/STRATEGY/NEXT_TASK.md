@@ -1,222 +1,204 @@
-# NEXT_TASK: position-identity-design-doc
+# NEXT_TASK: position-identity-design-doc-revision
 
 STATUS: DONE
 
 ## Goal
 
-Author a design document — not implementation — that specifies how CHILI moves from today's "Trade row IS everything" model (entry decision + management envelope + broker position all squashed into one ephemeral row) to a three-layer model with persistent broker-authoritative position identity.
+Apply the operator's seven answers to `docs/DESIGN/POSITION_IDENTITY.md` so the doc moves from "draft for review" to "ready for Phase 1 implementation." This is a doc-revision pass, not a redesign — the body and the structure stand; the open questions get closed and a few small additions land.
 
-The output is a single markdown document at `docs/DESIGN/POSITION_IDENTITY.md` that the operator and Cowork can iterate on at the doc level (cheap) before any code lands (expensive). The doc must be specific enough that subsequent NEXT_TASKs (Phase 1 implementation, Phase 2 backfill, etc.) can be written from it without further design conversations.
-
-After this task, the conversation moves from "what should the model look like?" to "let's queue Phase 1." That's the bar — the doc exists, it answers the operator's already-stated design questions, it surfaces every remaining decision the operator needs to make BEFORE any code change, and it leaves no ambiguity that would force Phase 1's implementer to invent semantics.
+After this task, the next NEXT_TASK is `position-identity-phase-1` — actual code.
 
 ## Why now
 
-Today (2026-05-04) shipped four coordinated patches that worked but exposed the architectural ceiling:
+Operator answered all 4 doc-internal open questions plus 3 review-pass items in a single chat turn. Closing the loop at the doc level (where iteration is cheap) is the agreed path. Phase 1's implementer should read the revised doc as the single source of truth — no chat-only knowledge to translate.
 
-1. **broker-truth-self-heal**'s inverse-reconcile uses a conservative `event_count == 0` check because Trade row IDs are ephemeral. If a future bug auto-closes a Trade row that DOES have fills on its current trade_id, inverse-reconcile refuses to heal — even when the underlying broker position is the same physical position with the same broker truth.
-2. **bracket-writer-respect-upside-targets**'s pending-decision surface lives in `trading_bracket_intents.payload_json` because the bracket_intent FK points at the trade_id, which dies when the trade_id dies. The forward design wants pending decisions keyed on the persistent position, not the ephemeral envelope.
-3. **bracket-emergency-repair-flap-guard** introduced a counter column (mig 223) that became dead code one task later because the path it guarded was retired. The orphan column is a symptom of the same identity problem — workarounds at the trade_id layer instead of fixes at the position layer.
-4. **The 5 cancelled covering limit-sells** today were a strategy decision the writer made on its own. The pending-decision surface fixes that policy gap, but the deeper "operator wants both upside and downside protection" question hits the one-sell-per-share constraint at Robinhood — which is fundamentally about position-level state, not envelope-level state.
+## Operator's 7 answers — verbatim, with what each one closes
 
-The operator's framing — *"I just vibe coded this so proper data structure and algorithms refactoring must be done"* — is the right one. Today's patches stopped today's bleeding; this initiative is the structural fix that makes future patches unnecessary.
-
-The operator has already given five design-question answers (in the prior chat turn, captured below). The brief takes those as load-bearing inputs and writes the doc around them.
-
-## Operator pre-actions (independent of this task)
-
-Two small operator-side housekeeping items are decoupled from the design doc and can happen any time:
-
-1. **Kill switch reset.** Operator chose Path A: reset now. The 9 reopened equity positions have live broker SELL_STOPs (verified at 20:12 UTC); upside management defers to the brain's `stop_engine`. After reset, autotrader resumes new entries. **Action:** `docker compose exec -T broker-sync-worker python -c "from app.services.trading.governance import deactivate_kill_switch; deactivate_kill_switch()"` — or hit whatever existing admin endpoint deactivates the kill switch. If neither path works smoothly, the next NEXT_TASK after the design doc could include a tiny "operator-grade kill switch reset endpoint" as a follow-up.
-
-2. **EKSO/ELTX P/L data backfill.** Trade 1815 (EKSO) and 1816 (ELTX) currently show `exit_price = entry_price, pnl = 0` — the lying-fallback artifact from noon's `emergency_close_all`. Actual broker fills were ELTX `$10.70 × 25` (loss `-$33.00`) and EKSO `$10.76 × 40` (loss `-$38.80`). One-time SQL update if operator wants clean books:
-
-```sql
-UPDATE trading_trades SET exit_price=10.70, pnl=-33.00, exit_reason='broker_stop_filled_outside_chili'
- WHERE id=1816;
-UPDATE trading_trades SET exit_price=10.76, pnl=-38.80, exit_reason='broker_stop_filled_outside_chili'
- WHERE id=1815;
-```
-
-Or accept as one-time data scar. Operator's call.
-
-Neither blocks this NEXT_TASK.
-
-## Brain integration / source material the doc must read and cite
-
-- `app/models/trading.py` — the existing `Trade`, `BracketIntent`, `PaperTrade`, `TradingExecutionEvent` ORM models. The doc has to map every column on these to its post-refactor home (decision / envelope / position / unchanged).
-- `app/services/broker_service.py::sync_positions_to_db` — the mirror function. Doc specifies how it changes to write `trading_positions` + emit `position_events` instead of (or in addition to, during the staged migration) writing `trading_trades` directly.
-- `app/services/broker_service.py::get_positions` and the order-fetching helpers — broker-truth source. The position-event stream's source-of-truth for "did this position open / close / change quantity" is broker observation, not local DB writes.
-- `app/services/trading/bracket_reconciliation_service.py` and `bracket_writer_g2.py` — the bracket layer that currently reads from `bracket_intent.trade_id`. Doc specifies how it migrates to read from `bracket_intent.position_id`.
-- The five existing close-reason strings (`broker_reconcile_position_gone`, `phantom_after_terminal_reject`, `emergency_price_monitor_guardrail`, `zombie_reconcile_orphan`, `broker_reconcile_no_exit_price`) and their respective writers — doc must show how each maps to a `position_state` transition reason in the new model. No string left orphaned.
-- `docs/STRATEGY/CURRENT_PLAN.md` — already has the 6-phase rough sketch. The design doc takes that sketch as a starting point but adds full schemas, migration ordering specifics, and phase exit criteria.
-- The yf-breaker, R32 wholesale guard, C2 phantom guard, inverse-reconcile path, bracket flap guard (now-deleted) — the doc has to explain how each existing guard moves to the new model OR retires when the model makes it unnecessary.
+| # | Operator answer | Closes |
+|---|---|---|
+| 1 | "go per recommendation" | § 11.1 stale event tolerance → **Option B** (explicit `sync_gap` event) |
+| 2 | "go per recommendation" | § 11.2 backfill atomicity → **Option C** (quarantine ambiguous + bulk for clean cases) |
+| 3 | "go per recommendation" | § 11.3 reporting deprecation timeline → **A + B** (dual-write through soak + shim view) |
+| 4 | "go per recommendation" | § 11.4 fast-path dependency → **Option B** (decoupled in v1, integrate after Phase 4) |
+| 5 | *"shorter, it's tooo long. SHOOORTER"* | Phase 5 soak compresses; total initiative time drops |
+| 6 | *"Yes add data struct for shorts"* | Direction handling promoted to a first-class schema concern |
+| 7 | *"include"* | PaperTrade migrates in this initiative, not deferred |
 
 ## Path
 
-**Design principle for the doc itself: every claim about future behavior is grounded in a specific cross-reference to existing code or operator-stated intent.** No "we'll figure it out later" wording. If a question is genuinely open, it goes in the Open Questions section with two-or-three options + Cowork's recommendation, not in the body as ambiguous prose.
+### Step 1 — Close § 11.1 — § 11.4 with operator answers
 
-### Step 1 — Read the source
+For each of § 11.1, § 11.2, § 11.3, § 11.4:
 
-Before writing prose, the executor reads (at minimum):
+- Replace the multi-option framing with a single subsection titled `Decision: <Option>`.
+- Move the resulting design choice into the body of the doc where it applies (e.g., § 5.1 event taxonomy adds `sync_gap` semantics; § 8.2 Phase 2 exit criteria reference the quarantine view; § 8.5 Phase 5 specifies dual-write + shim view; § 13 captures fast-path as decoupled-v1).
+- The § 11 section itself shrinks to a single subsection per answered question with the heading `Decision (closed YYYY-MM-DD): <Option>` and a one-line rationale. Keeps the audit trail of what was decided when, without leaving open-question prose hanging in a "ready for implementation" doc.
 
-- All five files in Brain Integration section above
-- `docs/STRATEGY/CURRENT_PLAN.md` — the 6-phase sketch
-- `docs/STRATEGY/COWORK_REVIEWS/2026-05-04_*.md` — today's review files for the architectural pain captured there
-- `docs/STAGING_DATABASE.md`, `docs/PHASE_ROLLBACK_RUNBOOK.md` — protocol docs for migration discipline
+### Step 2 — Compress Phase 5 soak duration
 
-Cite specific file:line references throughout the doc body when describing existing behavior.
+Operator's signal: *"shorter, it's tooo long. SHOOORTER"* — 1 quarter is overkill for a solo-dev reporting surface. New target: **2 weeks**.
 
-### Step 2 — Write `docs/DESIGN/POSITION_IDENTITY.md` per the structure below
+Apply across the doc:
 
+- § 8.5 Phase 5 — soak duration `1 quarter` → `2 weeks`. Update exit criteria's "1 quarter of dual-write" language to "2 weeks of dual-write."
+- § 15 cost estimate table — Phase 5 soak `1 quarter` → `2 weeks`. Recompute the totals row.
+- Anywhere else the doc references "quarter" or "Q3" as a Phase 5 marker — replace with the 2-week target.
+
+The total initiative soak drops from ~2.25 quarters to roughly 9 weeks across all phases. Operator review: confirm this matches the "shorter" intent or signal-back if even-shorter is wanted.
+
+### Step 3 — Add direction handling for shorts
+
+Operator's signal: *"Yes add data struct for shorts"* — direction becomes a first-class schema concern, not an open question.
+
+Apply:
+
+- **Natural key change**: `trading_positions` natural key adds `direction VARCHAR(10) NOT NULL DEFAULT 'long'`. New unique constraint: `UNIQUE(user_id, broker_source, account_type, ticker, direction)`.
+- **DDL § 7.1**: add the `direction` column with the existing `Trade.direction` semantic (`'long'` / `'short'`); CHECK constraint `CHECK (direction IN ('long', 'short'))`.
+- **§ 4.1 narrative**: explain the choice — separate position rows per direction means a long 100 AAPL + short 50 AAPL situation is two positions with two `id`s, not one signed-quantity row. This matches the broker's own representation (Robinhood and Coinbase both report long and short as distinct positions where supported) and avoids signed-arithmetic bugs at every consumer.
+- **§ 6.1 mapping**: row for today's `Trade.direction` resolves to `position.direction` (the natural-key column) + `envelope.direction` (denormalized for queries, matches today's Trade.direction).
+- **§ 11 (formerly Open Questions)**: the in-line note at § 6.1 row 3 about short positions resolves; remove the "open question" mention.
+- **Brain context flow § 12**: confirm `compute_bracket_intent` accepts direction; the brain function signature already takes `direction`, so no contract change. Add a one-line note that long/short bracket logic differs (stop above entry for short; below for long) and the engine reads direction from the position row.
+
+Today's data is essentially all `direction='long'`; the column with default `'long'` migrates cleanly. The schema is ready for the operator's eventual short trades (perps via Hyperliquid/dYdX/Kraken Futures) without a future ALTER.
+
+### Step 4 — Include PaperTrade in Phase 1 scope
+
+Operator's signal: *"include"* — PaperTrade is part of this initiative, not a future-phase deferral.
+
+Apply:
+
+- **§ 4.1 account_type narrative**: paper-mode positions get `account_type='paper'` in the same `trading_positions` table. Paper and live separate by account_type; no separate "trading_paper_positions" table.
+- **NEW § 6.4 — `paper_trades` column-by-column mapping**: same shape as § 6.1 (Trade → split). Map every column on today's `paper_trades` ORM (`app/models/trading.py:1022+`) to its post-refactor home. Most columns mirror Trade's mapping; flag any paper-specific columns that need a paper-only home.
+- **§ 8.1 Phase 1 scope**: backfill includes paper trades. Backfill script walks `paper_trades` AND `trading_trades` to seed `trading_positions` rows.
+- **§ 8.1 Phase 1 exit criteria**: add row "paper-mode positions covered by the audit query at parity with live positions."
+- **§ 11.4 fast-path decision (now closed)**: reaffirm fast-path stays decoupled despite paper-mode inclusion. Paper-mode in the LIVE trading stack (PaperTrade rows from `auto_trader.py` paper paths) IS in scope; fast-path's `fast_executions` etc. are separate and stay decoupled.
+- **Glossary § 14**: add `paper-mode position` as an entry — a position where `account_type='paper'` and broker truth is simulated rather than real.
+
+### Step 5 — Update § 11 to reflect closed status
+
+The § 11 section's purpose was "open questions for operator." All four are now closed. New § 11 shape:
+
+```markdown
+## 11. Decisions closed (post-operator-review on YYYY-MM-DD)
+
+### 11.1 Stale event tolerance — Decision: B (explicit sync_gap event)
+[one-line rationale]
+
+### 11.2 Backfill atomicity — Decision: C (quarantine ambiguous + bulk for clean cases)
+[one-line rationale]
+
+### 11.3 Reporting deprecation timeline — Decision: A + B (dual-write through soak + shim view)
+[one-line rationale + new soak duration]
+
+### 11.4 Fast-path dependency — Decision: B (decoupled in v1, integrate after Phase 4)
+[one-line rationale]
 ```
-# Design: Position Identity Refactor
 
-## Architectural problem
-  (1-2 page; cite specific 2026-05-04 incidents)
-## Operator-stated design answers (load-bearing inputs)
-  (verbatim quotes from operator + their interpretation)
-## Three-layer model
-  ### Decision layer
-  ### Management envelope layer
-  ### Position layer
-  ### Why three layers, not two — concrete examples of operations each layer owns
-## Event-sourced position state
-  ### Event taxonomy (open / qty_change / close / suspect / corrected)
-  ### State derivation
-  ### Backfill strategy
-## Schema specifics
-  ### `trading_positions` (full DDL — not pseudocode)
-  ### `trading_position_events` (full DDL)
-  ### `trading_management_envelopes` (or whatever the renamed Trade row becomes)
-  ### `trading_decisions` (the entry-intent-immutable table; fields that exist today on Trade row that belong here)
-  ### `trading_execution_events` migration shape (add `position_id` column; backfill plan)
-  ### `trading_bracket_intents` migration shape (FK retarget)
-## How existing tables map (column-by-column)
-  ### Every column on today's `trading_trades` → its new home
-  ### Every column on today's `trading_bracket_intents` → its new home
-  (Tables, not prose.)
-## Migration ordering — 6 phases with explicit exit criteria
-  Each phase: scope, schema changes, code changes, soak duration, exit criteria, rollback plan
-## Compatibility surfaces
-  Reporting queries, dashboards, audit logs that reference the old strings/columns — what stays / what gets deprecated / on what timeline
-## Close-reason mapping table
-  Today's 5 strings → new `position_state.transition_reason` values
-## Phase 7 — autopilot settings UI
-  Just enough sketch to show the data model supports the operator's stated UI requirements
-  (per-broker enable/disable, per-strategy toggles, per-broker trade-kind allowlists)
-## Brain context flow
-  Where does `compute_bracket_intent` plug in? Stop engine? Stop monitor?
-  How does the new model feed brain inputs vs receive brain outputs?
-## What this initiative does NOT change
-  Order placement code, broker auth, TP/SL primitive, etc.
-## Open Questions for operator
-  Each question: framing, two-three options, Cowork's recommendation, what the answer affects
-## Estimated cost (pre-implementation)
-  Per phase: lines of diff, test count, soak window in operator-hours
-## Glossary of new terms
-  position, decision, envelope, position event, transition_reason, etc.
+The decisions go into the implementation-relevant body sections (per Step 1); § 11 is the audit log of what was decided when.
+
+### Step 6 — Update § 15 cost estimate
+
+Per Step 2 (Phase 5 soak) AND Step 4 (PaperTrade in Phase 1 scope) AND Step 3 (direction column in natural key):
+
+- Phase 1 LOC estimate increases slightly (~50-100 LOC for paper-mode coverage in backfill + audit queries; ~10 LOC for direction column).
+- Phase 5 soak drops from `1 quarter` to `2 weeks`.
+- Total soak drops accordingly.
+- Recompute the totals row.
+
+### Step 7 — Update CURRENT_PLAN.md
+
+Replace the 6-phase sketch in `docs/STRATEGY/CURRENT_PLAN.md` with a forward pointer:
+
+```markdown
+## Migration plan
+
+See `docs/DESIGN/POSITION_IDENTITY.md` § 8 for the authoritative phase plan + per-phase exit criteria. CURRENT_PLAN keeps initiative-level orientation; the design doc is the single source of truth for technical specifics.
 ```
 
-The DDL must be writable directly to migration code in Phase 1 — i.e., column types, indexes, FK constraints, NULL semantics, default values, all specified.
+The Open architectural concerns + 2026-05-02 findings sections of CURRENT_PLAN can stay as initiative context; only the migration sketch gets replaced.
 
-### Step 3 — Cross-check against operator's design answers
+### Step 8 — Add `Decisions closed` to the doc's frontmatter
 
-The doc must internally validate against these operator answers (verbatim quotes from the chat):
+Top of the doc, after the Status line, add:
 
-- **Account granularity:** *"I'm not sure, what can make the more profit without losing quality?"* → Cowork's recommendation: aggregate by `(user_id, broker_source, ticker)` for now. Explain WHY (no quality loss for a single-cash-account-per-broker setup, simpler, easier to refactor in `account_type` enrichment when/if multiple-account-types-per-broker becomes real).
-- **Cross-broker same-ticker:** *"for long trades, just use rh, for scalping just coinbase. it would be nice if you can just create like an autopilot settings page so I can enable/disable there the flags and checkboxes for the auto trading system including enabling and disable kind of trades per broker"* → separate position rows per broker_source (the natural key already includes it). Add Phase 7 sketch showing the autopilot settings page consumes `trading_positions` + a new `autopilot_routing_rules` table.
-- **Snapshot vs event-sourced:** *"event-driven then"* → event-sourced. Snapshot fields (`current_quantity`, `current_avg_price`) on `trading_positions` are derived materializations of the event stream, NOT primary truth. Rebuild from events any time.
-- **Three-layer split:** *"I think separating them is a cleaner approach"* → three layers (decision / envelope / position). Doc justifies WHY (fixed today's "Trade row dies, decision history dies, envelope dies" cascade by separating concerns) and shows what each layer owns concretely.
-- **Mig 223 orphan column:** *"I give you the decision for this basing on your investigation"* → bundle DROP into Phase 1's coordinated migration. Single schema change rather than separate hygiene ticket.
+```markdown
+**Decisions closed:** 2026-05-04 — operator-reviewed § 11.1–11.4 + Phase 5 soak compression + direction-for-shorts schema + PaperTrade inclusion. See § 11 for the decision audit log and § 8 for the implementation-relevant phase plan.
+```
 
-If the doc reads back differently from any of those, surface it as an Open Question — don't quietly diverge.
-
-### Step 4 — Surface 2-4 NEW open questions that emerged from the deeper read
-
-Beyond the five operator-answered questions, the source-code read in Step 1 will turn up new design choices the operator hasn't seen yet. Likely candidates:
-
-- **Stale event tolerance.** When broker_sync misses a sync cycle (broker auth flap, network blip), how does the event stream record the gap? Best guess vs explicit "unknown" event vs no-write?
-- **Cross-account position aggregation in reporting.** Today's reporting queries don't distinguish accounts; if Phase 1 splits at `(broker_source, ticker)` aggregate, what do dashboards do with the aggregated view?
-- **Backfill atomicity for the `position_id` column on `trading_execution_events`.** Bulk update with FK enforcement at the end? Online-rolling? Some events may have ambiguous mapping (orphaned trade_id) — strategy?
-- **Fast-path subsystem dependency.** Fast-path code in `chili-brain/` and `app/services/trading/fast/` writes to `fast_executions`, `fast_orderbook`, etc. Do those tables migrate to position-keying in this initiative or stay decoupled?
-
-The doc lists these and proposes options. Operator answers them in the review pass.
-
-### Step 5 — Commit
-
-Two commits:
-
-1. `docs(strategy): position-identity design doc — three-layer model, event-sourced, full schema specs` — the design doc itself.
-2. `docs(strategy): position-identity-design-doc CC report + mark NEXT_TASK done` — the standard CC report.
-
-CC report includes: a copy of the source-material list actually read with citation, the magic-number-audit equivalent for the doc (zero numeric thresholds proposed, all schemas use observable-data-derived values where applicable), and the 2-4 newly-surfaced open questions.
+Signals to anyone reading the doc cold that the open questions are closed; the doc is implementation-ready.
 
 ## Constraints / do not touch
 
-- **Doc only.** This task ships ZERO code, ZERO migrations, ZERO tests. The output is markdown.
-- **No magic numbers in the design.** If the doc proposes a threshold (e.g., "stale event tolerance window"), it has to derive from observable system state OR be explicitly flagged as an Open Question for operator decision.
-- **No premature schema commitments.** The DDL in the doc must be specific enough to implement, but Phase 1's actual migration script is a separate task. The doc doesn't prescribe migration ordering inside Phase 1; it prescribes Phase 1's exit criteria.
-- **Cite, don't speculate.** Every "today the system does X" claim must reference a specific file:line in the codebase. Every "the operator wants Y" claim must reference a specific quote or operator-stated intent in `docs/STRATEGY/COWORK_REVIEWS/*.md` or `docs/STRATEGY/CURRENT_PLAN.md`.
-- **No dependencies on the Phase 7 UI being built.** The data model must stand on its own; UI is consumer.
-- **Backwards compatibility plan must be concrete.** Existing reporting queries that grep `exit_reason='broker_reconcile_position_gone'` need a deprecation timeline, not handwaving.
-- **Tests use `_test`-suffixed DB.** Standard PROTOCOL Hard Rule (vacuous for this doc-only task; included because it'll matter for Phase 1).
-- **No `git push --force` to main.** PROTOCOL Hard Rule 4.
+- **No new design decisions.** This is an answer-application pass. If the executor finds a question that genuinely needs a new decision (not implied by the 7 answers), surface it in the CC report rather than answering it.
+- **No code changes.** Doc-only.
+- **No schema migrations.** Doc-only.
+- **Keep the existing doc structure.** Section numbering (§ 1, § 2, etc.) stays. Body text stays where it is unless an answer requires moving it.
+- **Cite, don't speculate.** Every "operator stated X" claim references the chat turn or this brief verbatim.
+- **No magic numbers introduced** by the revision (the existing magic-number-equivalent audit in CC report stays clean).
+- **PROTOCOL Hard Rules apply** (no `git push --force`, no force-push to main, etc.).
 
 ## Out of scope
 
-- **Implementation of any phase.** Phase 1 is the next NEXT_TASK after this doc lands and operator+Cowork have iterated.
-- **Operator pre-actions** (kill switch reset, EKSO/ELTX P/L cleanup) — those are decoupled and operator-driven; not part of this brief's success criteria.
-- **Fast-path subsystem refactor.** Surfaced as a NEW open question (Step 4 candidate); but the doc doesn't dictate that fast-path migrates in this initiative. Operator decides on review.
-- **Forex / perps / non-Robinhood-Coinbase venues.** Phase 1 starts with Robinhood + Coinbase (today's pain); generalization to other venues happens after the model proves out. Doc mentions this as future direction; doesn't design for it now.
-- **The autopilot settings UI itself.** Phase 7 sketch in the doc describes the data model the UI will consume; building the UI is a later initiative.
+- **Phase 1 implementation.** That's the next NEXT_TASK after this revision lands.
+- **Operator pre-actions** (kill switch reset, EKSO/ELTX P/L cleanup) — operator-driven, decoupled.
+- **Reviewing the doc's body claims for correctness.** The body was reviewed in the prior CC + COWORK_REVIEW pass. This task only applies the 7 answers; it doesn't re-litigate other content.
+- **Phase 6 multi-leg-order language tightening** (called out in the prior COWORK_REVIEW). Worth doing but not part of this brief; queue as a follow-up doc revision if the operator wants it before Phase 6.
 
 ## Success criteria
 
-1. **`docs/DESIGN/POSITION_IDENTITY.md` exists** with the structure outlined in Step 2 above. Sections all populated, no TODO placeholders.
-2. **Two commits, both pushed:**
-   - `docs(strategy): position-identity design doc — three-layer model, event-sourced, full schema specs`
-   - `docs(strategy): position-identity-design-doc CC report + mark NEXT_TASK done`
-3. **Operator's five design answers** are reflected verbatim or paraphrased-with-attribution in the doc, with rationale.
-4. **2-4 newly-surfaced open questions** at the bottom of the doc, each with options + Cowork-recommended answer.
-5. **Full DDL** for at least three of the new tables (`trading_positions`, `trading_position_events`, `trading_management_envelopes` or its renamed equivalent). Column types, indexes, FK constraints, NULL semantics, default values all specified.
-6. **Column-by-column mapping table** for today's `trading_trades` and `trading_bracket_intents` to their new homes. Every column accounted for.
-7. **6-phase migration plan** with explicit exit criteria per phase. Each phase reads as something Claude Code could execute as a NEXT_TASK without further design.
-8. **Close-reason mapping table** for the 5 existing strings to new `transition_reason` values. No string orphaned.
-9. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_position-identity-design-doc.md` with source-material citation list + new open questions.
+1. **Two commits, both pushed:**
+   - `docs(strategy): position-identity design doc revision — close 4 open questions + direction-for-shorts + PaperTrade scope + Phase 5 soak compression`
+   - `docs(strategy): position-identity-design-doc-revision CC report + mark NEXT_TASK done`
+2. **Doc revision applied.** The revised `docs/DESIGN/POSITION_IDENTITY.md` shows:
+   - § 11 reshaped to "Decisions closed" with the 4 answers
+   - § 4.1 + § 7.1 DDL include `direction` in natural key
+   - § 6.4 NEW section maps `paper_trades` columns
+   - § 8.1 Phase 1 scope includes PaperTrade backfill + audit
+   - § 8.5 Phase 5 soak says `2 weeks` (not 1 quarter)
+   - § 15 totals recomputed
+   - Frontmatter notes `Decisions closed: 2026-05-04`
+3. **CURRENT_PLAN.md updated** with the forward-pointer to the design doc § 8.
+4. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_position-identity-design-doc-revision.md` per PROTOCOL format. Include: a diff-summary of what changed in the doc, any new ambiguity surfaced (none expected), the new total soak duration vs the prior estimate.
+5. **Word-count sanity check**: revised doc is roughly 6000-6500 words (prior was 5834; revisions add ~200-500 words for direction handling + PaperTrade + Decision sections).
 
 ## Rollback plan
 
-- **Code rollback:** `git revert <doc-commit>`. Doc disappears; no live system effect.
+- **Code rollback**: `git revert <revision-commit>`. Reverts to the prior doc + CURRENT_PLAN. The decisions become open questions again, and Phase 1 has to re-answer them.
 - **No migration to roll back.**
 - **No live broker rollback needed.**
 
 ## Verification commands (for the executor)
 
 ```bash
-# After commits land, doc exists
-ls -la docs/DESIGN/POSITION_IDENTITY.md
+# After commits land, doc revision applied
+grep -c "Decisions closed" docs/DESIGN/POSITION_IDENTITY.md
+# Expect: at least 1
 
-# Word count sanity check (doc should be substantial, not a stub)
+grep -c "direction" docs/DESIGN/POSITION_IDENTITY.md
+# Expect: > 5 mentions (was minimal before)
+
+grep -c "paper_trades\|paper-mode" docs/DESIGN/POSITION_IDENTITY.md
+# Expect: > 5 mentions
+
+grep -c "2 weeks" docs/DESIGN/POSITION_IDENTITY.md
+# Expect: > 1 (Phase 5 + the recomputed total)
+
+grep -c "1 quarter" docs/DESIGN/POSITION_IDENTITY.md
+# Expect: 0 (the prior reference is replaced)
+
+grep "See \`docs/DESIGN/POSITION_IDENTITY.md\`" docs/STRATEGY/CURRENT_PLAN.md
+# Expect: 1 hit (the forward pointer)
+
 wc -w docs/DESIGN/POSITION_IDENTITY.md
-# Expect: > 4000 words for the structure outlined
-
-# Citations sanity check
-grep -c "app/services\|app/models\|docs/STRATEGY" docs/DESIGN/POSITION_IDENTITY.md
-# Expect: > 15 cross-references
-
-# Open questions present
-grep -c "## Open Question\|### Open Question" docs/DESIGN/POSITION_IDENTITY.md
-# Expect: at least 2-4
+# Expect: roughly 6000-6500
 ```
 
-## Open questions for Cowork (surface in your CC_REPORT)
+## Open questions for Cowork (surface in your CC_REPORT only if relevant)
 
-1. **Fast-path subsystem.** Does it migrate to position-keying in this initiative or stay decoupled? Cowork's lean: stay decoupled for v1, integrate after Phase 4 lands and the model is proven. Surface for operator decision.
-2. **Backfill atomicity.** What's the chosen strategy for backfilling `position_id` on `trading_execution_events`? Cowork's lean: bulk update per-(user, broker_source, ticker) batch with explicit `unmapped` event for orphan trade_ids; FK gets enforced after backfill completes. Surface alternatives.
-3. **Stale event handling.** When a broker_sync cycle misses entirely, the event stream has a gap. Cowork's lean: emit explicit `sync_gap` event covering the missed window so the derivation logic doesn't quietly assume continuity. Operator may want stricter (alert on gap) or looser (best-effort continuity).
-4. **Reporting deprecation timeline.** Existing dashboards grep `exit_reason` strings. New `transition_reason` values are different. Cowork's lean: maintain both columns for one full quarter of soak; add a view that maps old-to-new for legacy queries. Surface alternatives.
+1. **PaperTrade-specific columns.** Some columns on today's `paper_trades` ORM may not have direct analogs on `trading_trades` (e.g., paper-only simulation hooks, fake-fill semantics). The CC report should list any paper-specific column that doesn't fit the three-layer split cleanly, with the executor's proposed home.
+2. **Direction column on envelope vs decision.** The brief's § 6.1 update says envelope.direction is denormalized for queries. If the executor finds a stronger reason to put direction ONLY on position (not envelope), surface and recommend.
+3. **The Phase 6 multi-leg-order language** (called out in the prior review) is explicitly OUT of scope for this revision. If the executor finds the language is broken in a way that affects the Phase 5/6 boundary, surface it; otherwise leave for a follow-up.
 
 ## Forward pointer
 
-After this doc lands and operator+Cowork iterate (review pass + ~1-2 revision cycles, all at doc level), the next NEXT_TASK is Phase 1 implementation: the `trading_positions` table, the event-stream insert path in `broker_sync`, and shadow-mode operation (no readers depend on it yet). The doc's Phase 1 exit criteria become Phase 1's success criteria directly.
+After this revision lands, the next NEXT_TASK is **`position-identity-phase-1`** — actual implementation of the `trading_positions` table, the `trading_position_events` table, the shadow-mode write path in `broker_service.sync_positions_to_db`, the DROP of mig 223's orphan column, and the backfill script that covers BOTH `trading_trades` and `paper_trades`. Phase 1's exit criteria from the revised § 8.1 become Phase 1's success criteria directly.
