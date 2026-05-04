@@ -1,196 +1,314 @@
-# NEXT_TASK: audit-unsupported-crypto-prefilter
+# NEXT_TASK: f-leak-3
 
 STATUS: DONE
 
 ## Goal
 
-Stop CHILI from sending unsupported crypto symbols into Robinhood's order endpoints. Add a venue-capability prefilter that runs BEFORE the broker call so unsupported tickers (ZEC-USD, GNO, AKT, 2Z, GLM, 1INCH, TRAC, and any future drift) are deterministically rejected with a clean reason instead of producing broker-side rejection storms, `list index out of range` tracebacks, and broker-account notifications.
+Stop the chili main app's Thread-closure memory leak at the source — yfinance.
+Three deliverables:
 
-Success means:
+1. **Surgical fix in `app/services/yf_session.py`**: hoist a single curl_cffi
+   (or fallback) HTTP session to module scope so yfinance's internal
+   ThreadPoolExecutor / per-call Thread spawn pattern stops creating a fresh
+   Thread per failed call. Paired with a circuit breaker that short-circuits
+   to None / empty after N consecutive failures so repeated yfinance outages
+   don't keep accumulating closures during the failure window.
+2. **Defensive memory-cap bump** in `docker-compose.yml`: chili `memory: 3G` → `memory: 5G`
+   so the next leak event (if the surgical fix is incomplete) has more
+   headroom before OOM-restart.
+3. **Live verification via mem_watcher**: post-fix `_make_invoke_excepthook.<locals>.invoke_excepthook`
+   survivor-count growth rate must drop to ≤ 1/10 of pre-fix (≤ 5/min vs the
+   observed ~50/min) over a 30-min observation window.
 
-1. **Robinhood-supported-crypto registry** — a single source of truth for which crypto symbols Robinhood actually trades. Either a static curated list, a cached `get_instruments_by_symbols(<base>)` probe, or both. This is the data the prefilter reads.
-2. **Pre-broker-call filter at the autotrader funnel.** `auto_trader.py:1047-1075` currently catches `crypto_not_supported_on_robinhood:<BASE>` returning from `broker_service.py:2433/2515` AFTER the broker round-trip and surfaces it as a `blocked` reason. Move the check upstream so the broker call is never made for unsupported symbols.
-3. **Same filter at `place_missing_stop` entry.** The bracket reconciler's writer currently attempts equity stop-loss placement for ZEC-USD (a crypto ticker) and triggers `list index out of range` from `robin_stocks.orders.order` because there's no equity instrument record. Filter at the writer's entry too.
-4. **Audit-row coverage.** Every prefilter rejection writes a `trading_autotrader_runs` row with a stable reason like `pre_broker:venue_unsupported_crypto:<BASE>`, so the funnel-accounting query the audit team runs continues to see these decisions instead of having them disappear before the audit boundary.
-5. **Live verification.** Post-deploy log probe shows zero new `place_missing_stop SKIPPED ... reason=robinhood_no_instrument_for_<crypto>`-class tracebacks for at least one full sweep cycle.
+Success means the `top_qualnames` line in `mem_watcher` ticks no longer shows
+`_make_invoke_excepthook` as the top survivor, AND the per-tick delta of
+that qualname trends toward zero over the post-fix window.
 
-This task ships **prefilter + tests**, not a code-clarity/diagnostic task. Deliverable: `docs/STRATEGY/CC_REPORTS/<date>_audit-unsupported-crypto-prefilter.md`.
+This task ships **the actual leak fix**, not another diagnostic. f-leak-1
+landed host containment + the stats logger; f-leak-2 lifted mem_watcher into
+chili and tightened the OrderBookBuffer (defense-in-depth, not the root
+cause). f-leak-3 closes out the leak the operator's been seeing across all
+3 sessions.
 
 ## Why now
 
-The 2026-05-03 audit flagged this as HIGH #4 with concrete numbers: ~127 `crypto_not_supported_on_robinhood:<BASE>` blocks + 44+3 broker-error rows in the last 24h. My reevaluation promoted it above audit's HIGH #2 (venue-truth wiring). It then sat in queue while we worked through the bracket-intent chain.
+The triggering event has finally reproduced with full mem_watcher
+instrumentation. Direct evidence as of 2026-05-04 06:19:26 UTC:
 
-Live evidence accumulated during the chain:
-
-- The `bracket-intent-stop-price-live-sync` CC report (Side-channel observation) captured 4+ recurring tracebacks at 1-minute cadence: `place_sell_stop_loss_order for ZEC: list index out of range` from `robin_stocks.orders.order` calling `get_instruments_by_symbols("ZEC", info='url')[0]` on an empty list. Root cause: ZEC-USD is crypto, the writer routes it through Robinhood's equity stop-loss API, equity API has no `ZEC` instrument.
-- Predates 2026-05-03 22:01 sweep restart — pre-existing, not caused by any of today's changes.
-
-The trace storm is the live cost of not having the prefilter. It also blocks meaningful operational signal: every minute the broker-sync-worker logs are noise about ZEC-USD instead of signal about anything else.
-
-`f8b-verification-soak-3` (preserved at `docs/STRATEGY/QUEUED/`) remains gated on or after 2026-05-04 16:30 UTC. Today's task does not affect it.
-
-## Step 1 — Pick the registry shape
-
-Two viable approaches; CC's choice based on what the codebase already has:
-
-### Option A — static curated whitelist
-
-A module-level constant in (probably) `app/services/broker_service.py` or a sibling. List of base symbols Robinhood supports for crypto trading. Membership check is O(1).
-
-**Pros:** dead simple, no broker calls at filter time, deterministic. **Cons:** must be maintained — Robinhood adds/removes pairs over time, drift will surface as new false rejects (which is the safer failure mode than false accepts).
-
-### Option B — cached broker probe
-
-`get_robinhood_crypto_supported(symbol) -> bool` that runs `robin_stocks.crypto.get_crypto_info(symbol)` (or equivalent) and caches results with a TTL (~24h is fine; Robinhood doesn't add pairs hourly). On cache miss, query; on cache hit, return cached.
-
-**Pros:** self-updating; no manual list maintenance. **Cons:** broker round-trip on cache miss; failure mode if broker probe itself fails needs explicit handling (default to "supported" = unsafe, or "unsupported" = false negatives).
-
-### Recommendation
-
-**Option A** for the first version. Robinhood's supported crypto list is small (~20 pairs) and changes slowly. Adding an option-B layer later is a tiny refactor. Failure mode is "false unsupported" which is the safer direction. The list lives in code review where future drift is visible.
-
-If CC discovers a broker_service helper that already maintains a Robinhood crypto symbol list (e.g., for some other path), prefer reusing it over creating a new list.
-
-## Step 2 — Wire the prefilter at three entry points
-
-### 2a — `auto_trader.py` autotrader funnel
-
-Before the broker call at `auto_trader.py` near lines 1064/1071. Currently the flow is roughly:
-
-```python
-order = broker_service.place_crypto_buy(ticker, ...)
-if order.get("error", "").startswith("crypto_not_supported_on_robinhood:"):
-    base = ...
-    return AutoTraderRun(decision="blocked", reason=f"broker:crypto_not_supported_on_robinhood:{base}")
+```
+vm_rss=2552MB threads=61 py_objects=2471601
+top_qualnames=[
+  ('_make_invoke_excepthook.<locals>.invoke_excepthook', 48014),  # ← the leak
+  ('MemoizedSlots.__getattr__.<locals>.oneshot.<locals>.memo', 2779),
+  ...
+]
+top_delta_since_last=[
+  ('ReferenceType', '+383'),
+  ('TapeTrade', '+300'),
+  ('coroutine', '+193'),
+  ('list', '+172'),
+  ('cell', '+154'),
+]
 ```
 
-Replace with:
+48,014 leaked Thread closures × ~30 KiB Python-side bookkeeping ≈ ~1.4 GiB
+of pure thread overhead. RSS climbed 1057 MiB → 2660 MiB in 6 hours
+(~270 MiB/h) per `scripts/_stats_log/`. Matches the pre-WSL2-cap symptom
+f-leak-1 was responding to.
 
-```python
-base = _extract_base(ticker)
-if not is_robinhood_supported_crypto(base):
-    return AutoTraderRun(
-        decision="blocked",
-        reason=f"pre_broker:venue_unsupported_crypto:{base}",
-    )
-order = broker_service.place_crypto_buy(ticker, ...)
-# (existing post-call error handling stays as defense-in-depth)
-```
+Root-cause hypothesis (high confidence): chili's logs show wall-to-wall
+yfinance failures — hundreds of `Errno 7 Failed to connect to query1.finance.yahoo.com`
+and `possibly delisted; no price data found` per minute. Saved memory entry
+`project_regime_classifier_yfinance_block.md` confirms yfinance is host-
+egress-blocked for many symbols. Each failed `yf.Ticker(symbol).history()`
+or `yf.download(...)` call spawns Threads under the hood (curl_cffi /
+threadpool worker), and on connection failure the Thread isn't joined; the
+closure survives. ~50 leaked Threads/min matches the observed RSS slope.
 
-Keep the post-call check as defense-in-depth — if Robinhood adds/removes a pair without our list updating, the broker still tells us; we just won't make as many calls in the steady state.
+Side-effect proof point: 5 idle-in-tx warnings on chili-app for
+`momentum_symbol_viability` queries (300-600s held, db_watchdog
+auto-killing at 600s). Connections opened by yfinance-related code paths
+aren't being closed because the wrapping Thread itself is the leak.
 
-### 2b — `bracket_writer_g2.place_missing_stop` entry
-
-At the top of the function, before any broker call:
-
-```python
-if _is_crypto(ticker) and broker_source.lower() == "robinhood":
-    base = _extract_base(ticker)
-    if not is_robinhood_supported_crypto(base):
-        logger.warning(
-            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
-            "ticker=%s reason=venue_unsupported_crypto base=%s",
-            bracket_intent_id, ticker, base,
-        )
-        return WriterAction(
-            action="place_missing_stop",
-            ok=False,
-            reason="venue_unsupported_crypto",
-            broker_source=broker_source,
-            ticker=ticker,
-        )
-```
-
-This is the line that closes the ZEC-USD traceback storm.
-
-### 2c — `coinbase_service.py` (if applicable)
-
-If the same broker-routing-mismatch pattern can occur for Coinbase (e.g., a Coinbase-only ticker reaches a Robinhood writer), add the symmetric check. The filter direction depends on which broker should own which assets. If Coinbase is the catch-all for crypto and Robinhood is opt-in supported list, the filter is "Robinhood + crypto + not on whitelist → reject."
-
-If CC's diagnosis shows Coinbase isn't routing crypto through Robinhood's equity API anywhere, skip 2c.
-
-## Step 3 — Audit emission
-
-For 2a (autotrader), the existing AutoTraderRun row write covers it — just use the new `pre_broker:venue_unsupported_crypto:<BASE>` reason string.
-
-For 2b (writer), the WriterAction return is observed by `bracket_reconciliation_service._invoke_writer_for_decision` and surfaces in `[bracket_reconciliation_ops]` lines. No new audit table, no new column.
-
-For consistency across the funnel, the prefilter rejection should be recognizable downstream. The reason string convention is `pre_broker:` prefix (autotrader) and the `venue_unsupported_crypto` token in both. Funnel-accounting queries can pattern-match either form.
-
-## Step 4 — Tests
-
-Add `tests/test_unsupported_crypto_prefilter.py` covering:
-
-1. **Whitelist contains BTC-USD, ETH-USD, etc.** — sanity check the registry is populated.
-2. **`is_robinhood_supported_crypto("ZEC")` returns False.** Stable test data (we know ZEC isn't supported).
-3. **`is_robinhood_supported_crypto("BTC")` returns True.** Stable test data.
-4. **autotrader prefilter blocks ZEC-USD before broker call.** Mock `broker_service.place_crypto_buy` to raise if called; assert it's not called; assert AutoTraderRun reason matches `pre_broker:venue_unsupported_crypto:ZEC`.
-5. **autotrader allows BTC-USD through to broker.** Mock broker; assert it IS called.
-6. **`place_missing_stop` skips ZEC-USD.** Seed bracket_intent with ZEC ticker, robinhood broker_source. Mock the equity stop-loss API to raise `IndexError` if called. Assert it's not called. Assert WriterAction reason='venue_unsupported_crypto'.
-7. **`place_missing_stop` proceeds for AAPL (equity).** Negative-case: stock ticker isn't filtered.
-8. **Static-list maintenance hint test.** A test that asserts the whitelist contains a stable subset (BTC/ETH/SOL/AVAX/DOGE — the fast-path pairs). Catches accidental list erosion.
-9. **No regression on prior bracket tests.** Run `test_bracket_*` suite; assert all pass.
-
-All tests use `chili_test`.
-
-## Step 5 — Deploy + verify
-
-1. Land the code on a clean commit. `verify-migration-ids.ps1` (no schema change expected).
-2. **Run the new tests + the bracket regression suite. Report results in the CC_REPORT.**
-3. Pre-deploy log probe (capture in CC_REPORT):
-   ```bash
-   docker compose logs broker-sync-worker --since 1h | grep -E "ZEC|crypto_not_supported_on_robinhood|list index out of range" | head -50
-   ```
-   Expected: traceback storm visible, ~1/min for ZEC-USD plus other unsupported crypto blocks if any are firing.
-4. Restart `broker-sync-worker` (use `docker compose restart broker-sync-worker` to NOT pick up the operator's pending `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` flag — same discipline as the prior CC). Verify pickup of new code.
-5. Wait one full sweep cycle (~2 minutes). Capture log lines: `[bracket_writer_g2] place_missing_stop SKIPPED intent=<> ticker=ZEC-USD reason=venue_unsupported_crypto`.
-6. Post-deploy log probe (same query as step 3). Expected: zero new `list index out of range` tracebacks; clean SKIPPED log lines instead.
-7. SQL probe: count `trading_autotrader_runs` rows with the new `pre_broker:venue_unsupported_crypto:%` reason in the next 24h. Compare against the audit's prior 24h count of ~127 broker-error rejects. Expected: similar order of magnitude, but now flowing through the pre-broker path.
+f-leak-2's CC report Open Question #4 explicitly named "An endpoint that
+loads large structures per-request without bounds" as a candidate. This is
+that — not an endpoint, but the yfinance fallback chain on the hot path.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `broker_service.py` — existing crypto routing functions live here. Add `is_robinhood_supported_crypto(base)` alongside the existing helpers; use whatever symbol-normalization helper already exists (don't duplicate).
-- `auto_trader.py` — existing AutoTraderRun shape and audit-row write. Just use the new reason string.
-- `bracket_writer_g2.py` — existing WriterAction shape. Just add the early-return at the top of `place_missing_stop`.
-- The fast-path pairs `BTC-USD, ETH-USD, SOL-USD, AVAX-USD, DOGE-USD` are already canonical in `docker-compose.yml` for the fast-data-worker. Use them as the seed list for the test (#8) and as the must-include-baseline for the whitelist.
+- `app/services/yf_session.py` — the central wrapper. **All** yfinance
+  callers route through `get_history`, `get_fast_info`, `batch_download`,
+  `get_fundamentals`, `get_ticker_info`, `get_ticker_news`, and `get_ticker`.
+  Surgical fix lives here; no caller-side changes needed.
+- Existing `_is_dead` / `_mark_dead` negative cache (yf_session.py:166-191)
+  already short-circuits known-bad tickers. Circuit breaker layers cleanly
+  on top: a separate "consecutive upstream failures" counter that trips at
+  the **process** level, not per-ticker, so a yahoo-egress outage doesn't
+  burn N requests × M tickers worth of Threads before each ticker's
+  per-symbol negative cache catches up.
+- `app/services/diagnostics/mem_watcher.py` — committed in f-leak-2
+  (`d11fb5a`). Run continuously in chili at 60s cadence. Use its
+  `top_qualnames` + `top_delta_since_last` as the verification signal.
+  **Do NOT add a new diagnostic; reuse this.**
+- `scripts/dispatch-stats-logger.ps1` — already running per f-leak-1.
+  RSS time-series will corroborate object-count verdict.
+- Existing rate-limiter (`acquire()` in yf_session.py:56-80, deque + lock,
+  no background threads). The previous pyrate_limiter implementation
+  spawned a `Leaker` thread that leaked IOCP handles on Windows; the
+  current implementation is intentionally thread-free. **The fix must not
+  reintroduce a background thread** in the rate-limiter or anywhere else.
+
+## Path
+
+Recommended path is **A + C combined** per the operator's guidance.
+
+### Step A — module-scope HTTP session
+
+Hoist a single `curl_cffi.requests.Session` (or, if curl_cffi rejects
+injection per the existing yf_session.py docstring, an `httpx.Client` or a
+plain `requests.Session`) to module scope in `app/services/yf_session.py`.
+Reuse it across all yfinance calls so the per-call Thread spawn pattern
+collapses into a single connection-pooled client.
+
+**Caveat surfaced from existing code**: yf_session.py:1-16 docstring
+explicitly says modern yfinance (≥0.2.40) "uses curl_cffi internally and
+**rejects injected requests-cache sessions**." That comment refers to
+`requests-cache`, not a vanilla curl_cffi Session — vanilla session
+injection IS still supported as of yfinance 0.2.55+ via the `session=`
+kwarg on `yf.Ticker(symbol, session=...)`. Verify via local probe before
+landing the fix; if injection fails, fall back to the alternate inside
+Step A.2 below.
+
+**Step A.1 — preferred path**: shared `curl_cffi.requests.Session` injected
+via `yf.Ticker(symbol, session=_SHARED_SESSION)`. Wire it into every
+construction site in yf_session.py (search the file for `yf.Ticker(`).
+For `yf.download(...)` (line 458), pass `session=_SHARED_SESSION` if the
+kwarg is supported on that version, else **set `threads=False`** to disable
+the internal ThreadPoolExecutor for the download call.
+
+**Step A.2 — fallback**: if injection on `yf.Ticker` fails or destabilizes,
+keep `yf.Ticker` on its default session, but set `yf.download(..., threads=False)`
+unconditionally. That alone collapses the largest Thread-spawn site.
+Combine with Step C below for the multiplier.
+
+### Step C — process-level circuit breaker
+
+Add a small breaker module inside `yf_session.py` (or a sibling
+`yf_breaker.py`) that:
+
+- Tracks consecutive failures across **all** yfinance calls (not per-symbol).
+- On the Nth consecutive failure (start with N=10), trips OPEN.
+- While OPEN, every yf_session entry-point returns the same default the
+  call returns on miss today — `pd.DataFrame()` for history, `None` for
+  fast_info, `{}` for batch_download, etc. — **without making the upstream
+  call**.
+- Half-opens after a TTL (start with 60s). One probe call passes through;
+  on success, breaker closes; on failure, breaker re-opens for another
+  TTL.
+- Counts "failure" as `_handle_yf_error`-class outcomes: connection
+  errors, timeouts, "delisted" / "no data" exceptions, empty DataFrames
+  on stocks (crypto-empty already handled separately). Does NOT count
+  cache hits or `_is_dead` short-circuits as either success or failure.
+- Logs `[yf_breaker] OPEN: N consecutive upstream failures` on trip,
+  `[yf_breaker] HALF_OPEN: probing` on half-open, `[yf_breaker] CLOSED`
+  on success-after-trip.
+
+**No magic numbers as defaults.** N=10 and TTL=60s are sensible starting
+seeds, but they should be `_BREAKER_CONSECUTIVE_FAILURE_THRESHOLD` and
+`_BREAKER_HALF_OPEN_TTL_S` module constants with one-line comments
+explaining their derivation. Per PROTOCOL Hard Rule #3, surface them as
+"future tuning candidates" in the CC_REPORT's Open Questions if you have
+empirical signal during the verification window that suggests they should
+move.
+
+### Step B — defensive memory cap bump
+
+In `docker-compose.yml`, the chili service definition at lines 162-169
+currently has `memory: 3G`. Bump to `memory: 5G`. Add a single comment
+above the limit:
+
+```yaml
+        limits:
+          cpus: "4.0"
+          # 2026-05-04 (f-leak-3): bumped 3G → 5G defensively while the
+          # yfinance Thread-closure leak fix soaks. Allows headroom for
+          # the next leak event (if any) before OOM-restart kicks in.
+          # Revisit after a 24h+ clean window — if mem_watcher confirms
+          # no leak, drop back to 3G.
+          memory: 5G
+```
+
+This is a no-restart-required change for the existing chili container
+**until** the operator runs `docker compose up -d chili`. The fix commit
+flow: land all three commits, then `docker compose up -d chili` to pick
+up both the yf_session.py change AND the new memory limit in a single
+restart.
 
 ## Constraints / do not touch
 
-- **Do not modify the live-fast-path safety belts.** PROTOCOL Hard Rule 1.
-- **Do not flip `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL` or any operator-controlled flag.** That's a separate operator decision.
-- **Do not use `docker compose up -d --force-recreate`** for the worker restart — `docker compose restart` only, to avoid picking up env-var changes that aren't part of this task.
-- **Do not change the post-broker-call error handling.** The new prefilter is additive — keep the existing `crypto_not_supported_on_robinhood:` post-call check as defense-in-depth.
-- **No magic numbers.** No new thresholds.
+- **Default mode stays paper.** Compose default `CHILI_FAST_PATH_MODE=paper`. Do not flip.
+- **All 8 fast-path live-placement safety belts intact.** PROTOCOL Hard Rule 1.
+- **No threshold tuning, no strategy-code changes.** This task is plumbing only.
+- **No fast-data-worker restart.** F8a verification soak runs there.
+  `docker compose up -d chili` only.
+- **No migrations, no schema changes.**
+- **No new background threads.** The rate-limiter is intentionally
+  thread-free (per yf_session.py:1-16 docstring's `WinError 10055` history).
+  Do not reintroduce one. The circuit breaker should be a passive counter
+  inside the existing call paths, not a watchdog timer.
+- **Do not refactor yf_session.py's caller surface.** Public functions
+  (`get_history`, `get_fast_info`, `batch_download`, `get_fundamentals`,
+  `get_ticker_info`, `get_ticker_news`, `get_ticker`) keep the same
+  signatures and return shapes. Caller code is not touched.
 - **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
+- **No `git push --force` to main.** PROTOCOL Hard Rule 4.
 
 ## Out of scope
 
-- Coinbase-side venue capability filtering. Out of scope unless CC's diagnosis surfaces the same pattern.
-- Investigating WHY ZEC-USD ended up routed through Robinhood's equity stop-loss API in the first place (probable cause: trade was opened from a path that didn't propagate `broker_source` correctly, OR ZEC-USD was originally on Coinbase and got mis-mirrored). Out of scope; the prefilter is the symptom-fix.
-- Removing ZEC-USD from `trading_trades` if it's an orphan. The position exists at the broker; CHILI should mirror it correctly, not delete it.
-- The `trading_stop_decisions` coverage gap surfaced in the prior task. Belongs to a separate follow-up.
-- `target_price` symmetric mirror sync from prior task's Open Q #2. Same deferral.
+- Replacing yfinance with an alternate provider. The egress-block for
+  yahoo is partial (some tickers work) and the brain has a fallback chain
+  (Massive → Polygon → yfinance → CoinGecko). This task fixes how
+  yfinance-failure leaks Threads; it does NOT remove yfinance from the
+  chain.
+- The pyrate_limiter regression. Already fixed by the current sliding-
+  window deque (yf_session.py:42-80).
+- Investigating the scheduler-worker's parallel `_make_invoke_excepthook`
+  symptom (f-leak-1 noted +14/min growth in scheduler). Different process,
+  different code paths; needs its own brief if it doesn't drop in
+  parallel after this fix.
+- The `MemoizedSlots.oneshot.memo` survivors at 2779 (still flat-stable
+  per f-leak-2 evidence). Cleanup candidate, not a leak.
+- The `idle-in-tx` warnings for `momentum_symbol_viability`. Expected to
+  resolve as a side-effect of fixing the underlying Thread leak. If they
+  persist post-fix, follow-up brief.
+- Scheduled task `f8b-verification-soak-2-trigger` at 2026-05-04 16:30 UTC.
+  Independent of f-leak-3. Do not touch its scheduling.
 
 ## Success criteria
 
-1. New helper `is_robinhood_supported_crypto(base)` exists, has the fast-path pairs in the whitelist, returns False for ZEC.
-2. Prefilter wired at `auto_trader.py` (pre-broker) and `bracket_writer_g2.py:place_missing_stop` (writer entry).
-3. All 9 new tests pass against `chili_test`. Existing bracket tests (32 total: emergency-repair 7 + stale-label-cleanup 9 + cover-policy-clarify 8 + stop-price-live-sync 8) still pass.
-4. Post-deploy log probe shows zero new `list index out of range` tracebacks for at least one full sweep cycle. CC_REPORT shows pre/post diff.
-5. CC_REPORT written at `docs/STRATEGY/CC_REPORTS/<date>_audit-unsupported-crypto-prefilter.md` per PROTOCOL format. One commit (or tight series), pushed.
-
-## Open questions for Cowork (surface in your report only if relevant)
-
-1. **Static list vs cached probe** — surface the choice and the reasoning. If CC discovers a pre-existing Robinhood crypto symbol list elsewhere in the codebase, surface that too.
-2. **List membership for the audit's flagged symbols** — surface concrete True/False for each of GNO, AKT, 2Z, GLM, 1INCH, TRAC, ZEC, BTC, ETH, SOL, AVAX, DOGE. If any are surprising (e.g., 1INCH actually IS supported on Robinhood), the audit's classification was wrong on that ticker and the prefilter would let it through.
-3. **Coinbase-routing check** — surface whether the diagnosis found any Coinbase-only ticker reaching a Robinhood writer. If yes, the symmetric Step 2c filter is in scope; if no, skip cleanly.
-4. **Reason-string format** — I proposed `pre_broker:venue_unsupported_crypto:<BASE>` for autotrader and `venue_unsupported_crypto` for the writer. Surface if the codebase has a canonical reason-string format that fits better.
+1. **Object-count verdict (the primary signal)**:
+   `_make_invoke_excepthook.<locals>.invoke_excepthook` survivor count over
+   a 30-min post-fix observation window grows at ≤ 5/min (≤ 1/10 of the
+   observed ~50/min pre-fix rate). Capture pre-fix and post-fix mem_watcher
+   ticks side-by-side in the CC_REPORT.
+2. **RSS verdict (the corroborating signal)**: chili RSS slope drops below
+   ~30 MiB/h over the same 30-min window (~1/9 of the observed 270 MiB/h
+   pre-fix rate). Use `dispatch-stats-trend.ps1 1` to read.
+3. **Circuit-breaker verdict**: at least one `[yf_breaker] OPEN` log line
+   visible in the post-fix window (because yfinance is still
+   egress-blocked, the breaker should trip almost immediately). One
+   `[yf_breaker] CLOSED` line at half-open success would be ideal but isn't
+   required for sign-off.
+4. **All existing tests pass**: `pytest tests/test_market_data.py
+   tests/test_market_data_dead_cache_fallback.py tests/test_provider_selection.py
+   tests/test_trading.py -v` against `chili_test`. No regression.
+5. **Three commits, all pushed**:
+   - `chore(compose): bump chili memory limit 3G→5G (f-leak-3)`
+   - `fix(yf-session): hoist module-scope session + circuit breaker (f-leak-3)`
+   - `docs(strategy): F-leak-3 CC report + mark NEXT_TASK done`
+6. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_f-leak-3.md`
+   per PROTOCOL format. Include pre-fix and post-fix mem_watcher tick
+   excerpts inline.
 
 ## Rollback plan
 
-- **Code rollback**: `git revert <commit>`. Prefilter becomes a no-op; broker-side rejections resume; ZEC-USD traceback storm returns. The post-broker-call defense-in-depth path keeps catching the rejection, just at higher cost than the prefilter.
-- **No persisted-data rollback needed.** Rows already written with `pre_broker:venue_unsupported_crypto:%` reason stay valid — opaque audit text.
-- **No live-broker rollback needed** — this task makes broker calls only via the writer path, and the prefilter REDUCES broker calls. Removing it can't make the broker side worse.
-- **No schema rollback needed** — schema unchanged.
+- **Code rollback**: `git revert <fix-commit>` reverts the yf_session.py
+  changes; the breaker disappears, the shared session disappears, the per-
+  call Thread spawn returns. No state-side rollback needed (the breaker
+  has no DB representation).
+- **Compose rollback**: `git revert <compose-commit>` returns chili to
+  3G. `docker compose up -d chili` to pick up. WSL2 cap (32G applied per
+  f-leak-1.2) absorbs any in-flight slope.
+- **Partial rollback**: Path A is the riskier half (touches yf.Ticker
+  construction sites). If post-deploy soak shows yfinance calls are now
+  failing in a new way (e.g., session mismatch), revert ONLY Path A's
+  diff, keep Path C's circuit breaker — the breaker alone caps the leak
+  rate even without the shared session, just less efficiently.
+- **No live-broker rollback needed**. This task does not initiate any
+  broker calls.
+- **No migration rollback needed**. No schema change.
 
-This task makes no broker mutations on its own. The prefilter only PREVENTS broker calls; it doesn't initiate any.
+## Verification commands (for the executor + the operator)
+
+```powershell
+# Pre-fix capture (one tick)
+docker compose logs chili --since 5m | Select-String "mem_watcher"
+
+# Run the fix:
+# 1. Edit yf_session.py + docker-compose.yml + write CC_REPORT
+# 2. Commit (3 commits per success criterion 5)
+# 3. Restart chili to pick up:
+docker compose up -d chili
+
+# Post-fix observation window (run for 30 minutes)
+docker compose logs chili --since 30m -f | Select-String "mem_watcher|yf_breaker"
+
+# Post-fix RSS trend
+.\scripts\dispatch-stats-trend.ps1 1
+type scripts\dispatch-stats-trend-output.txt
+
+# Tests
+$env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
+pytest tests/test_market_data.py tests/test_market_data_dead_cache_fallback.py `
+       tests/test_provider_selection.py tests/test_trading.py -v
+```
+
+## Open questions for Cowork (surface in your CC_REPORT only if relevant)
+
+1. **Curl_cffi session injection compatibility** — if `yf.Ticker(symbol, session=_SHARED_SESSION)`
+   raises or destabilizes on the installed yfinance version, surface the
+   error and confirm Path A.2 (set `threads=False` only) was used instead.
+2. **Breaker thresholds** — N=10 consecutive failures and TTL=60s are
+   seed values, not derived. If the post-fix soak suggests they should move
+   (e.g., breaker oscillates rapidly between open/half-open), surface
+   concrete suggested values with reasoning, but **do not change them
+   inside this task** — that's a tuning task for a follow-up.
+3. **Scheduler-worker parallel symptom** — does scheduler's
+   `_make_invoke_excepthook` survivor count drop in parallel after the
+   chili fix lands? If yes, scheduler's own learning-cycle is hitting
+   yfinance through the same path; one fix covers both. If no, it's a
+   separate leak in a different code path and needs its own brief.
+4. **`idle-in-tx` resolution** — does the `momentum_symbol_viability`
+   long-running query symptom (5 warnings observed pre-fix) clear after
+   the Thread fix? Expected yes (Thread holds the connection → fix Thread
+   leak → connection closes), but worth confirming.
