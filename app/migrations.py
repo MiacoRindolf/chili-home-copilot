@@ -14668,6 +14668,39 @@ def _migration_220_fast_signal_decay(conn) -> None:
     conn.commit()
 
 
+def _migration_223_bracket_intent_phantom_close_consecutive_zero_qty_counter(conn) -> None:
+    """bracket-emergency-repair-flap-guard (2026-05-04).
+
+    Adds ``phantom_close_consecutive_zero_qty_sweeps INTEGER NOT NULL
+    DEFAULT 0`` to ``trading_bracket_intents``. The new column is the
+    backing store for the flap guard inserted into sub-branch 2 of
+    ``_try_emergency_repair_terminal_reject``: the phantom-close path
+    now requires N consecutive sweeps observing ``broker.position_qty
+    == 0`` before marking the trade closed locally, instead of acting
+    on a single sample.
+
+    Why a counter (not just a "last_zero_observed_at" timestamp like
+    222): we want to count consecutive zeros, where any non-zero
+    observation resets the count to 0. A timestamp can't represent
+    "this is the Nth in a streak" without an additional counter. One
+    INTEGER column is the cheapest representation.
+
+    Idempotent. Existing rows initialise to 0 (meaning "no zero-qty
+    observed yet"). The reconciler resets to 0 in sub-branch 3 (any
+    positive broker_qty observation) and bumps in sub-branch 2 (zero
+    broker_qty observation).
+    """
+    inspector = sa_inspect(conn)
+    cols = {c["name"] for c in inspector.get_columns("trading_bracket_intents")}
+    if "phantom_close_consecutive_zero_qty_sweeps" not in cols:
+        conn.execute(text(
+            "ALTER TABLE trading_bracket_intents "
+            "ADD COLUMN phantom_close_consecutive_zero_qty_sweeps "
+            "INTEGER NOT NULL DEFAULT 0"
+        ))
+    conn.commit()
+
+
 def _migration_222_bracket_intent_terminal_reject_repair_throttle(conn) -> None:
     """audit-missing-stop-emergency-repair (2026-05-03).
 
@@ -15156,6 +15189,8 @@ MIGRATIONS = [
     ("221_fast_path_notify_triggers", _migration_221_fast_path_notify_triggers),
     ("222_bracket_intent_terminal_reject_repair_throttle",
      _migration_222_bracket_intent_terminal_reject_repair_throttle),
+    ("223_bracket_intent_phantom_close_consecutive_zero_qty_counter",
+     _migration_223_bracket_intent_phantom_close_consecutive_zero_qty_counter),
 ]
 
 
