@@ -1371,6 +1371,7 @@ def _resolve_close_exit_price(ticker: str) -> float | None:
 
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Robinhood positions into local Trade model."""
+    from sqlalchemy import text
     from ..models.trading import Trade
     from .trading.management_scope import MANAGEMENT_SCOPE_BROKER_SYNC
     from .trading.runtime_surface_state import upsert_runtime_surface_state
@@ -1387,7 +1388,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     crypto = get_crypto_positions()
     all_positions = dedupe_positions_by_ticker(positions + crypto)
 
-    created = updated = closed = 0
+    created = updated = closed = reopened = 0
 
     rh_tickers = set()
     for pos in all_positions:
@@ -1442,6 +1443,106 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 existing.indicator_snapshot = _compute_trade_snapshot(ticker, avg_price)
             updated += 1
         else:
+            # broker-truth-self-heal (2026-05-04): inverse-reconcile.
+            # Broker reports this position is alive. If the most recent
+            # local Trade row for (user, robinhood, ticker) is closed AND
+            # has zero execution-event history (i.e. no broker activity
+            # was ever recorded against it), the close was bookkeeping-
+            # only -- one of the automated close paths (the now-retired
+            # phantom_after_terminal_reject, the freeze-replaced
+            # emergency_price_monitor_guardrail, an old
+            # broker_reconcile_position_gone before R32) flipped the
+            # status without an actual broker exit. Re-open the existing
+            # row instead of creating a fresh one (preserves entry_reason,
+            # pattern, scan_pattern_id, and the bracket_intent FK chain).
+            #
+            # Cross-checks (ALL must hold):
+            #   * status='closed' on the most-recent row
+            #   * zero rows in trading_execution_events for that trade_id
+            #     (any execution event signals real broker activity --
+            #     stricter than "no SELL fill" because there is no SELL
+            #     discriminator on the events table; safer in the
+            #     contradiction direction)
+            #   * exact qty match (1e-9 tolerance)
+            #   * exact entry_price vs broker avg_price match (1e-9)
+            #
+            # If all hold: re-open + re-arm bracket_intent + audit log.
+            # If execution_events count > 0 OR qty/price mismatch:
+            # contradiction or different-position -- fall through to GGG
+            # revive / C2 phantom guard, which handle their own cases.
+            most_recent = (
+                db.query(Trade)
+                .filter(
+                    Trade.user_id == user_id,
+                    Trade.ticker == ticker,
+                    Trade.broker_source == "robinhood",
+                )
+                .order_by(Trade.entry_date.desc())
+                .first()
+            )
+            if most_recent is not None and most_recent.status == "closed":
+                event_count = db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM trading_execution_events "
+                        "WHERE trade_id = :tid"
+                    ),
+                    {"tid": int(most_recent.id)},
+                ).scalar() or 0
+                qty_match = abs(
+                    float(most_recent.quantity or 0) - float(qty or 0)
+                ) < 1e-9
+                price_match = (
+                    most_recent.entry_price is not None
+                    and avg_price is not None
+                    and abs(
+                        float(most_recent.entry_price) - float(avg_price)
+                    ) < 1e-9
+                )
+                if int(event_count) == 0 and qty_match and price_match:
+                    prior_exit_reason = most_recent.exit_reason or "<unset>"
+                    most_recent.status = "open"
+                    most_recent.exit_date = None
+                    most_recent.exit_price = None
+                    most_recent.exit_reason = None
+                    if hasattr(most_recent, "pnl"):
+                        most_recent.pnl = None
+                    if hasattr(most_recent, "pnl_pct"):
+                        most_recent.pnl_pct = None
+                    most_recent.last_broker_sync = datetime.utcnow()
+                    db.execute(
+                        text(
+                            "UPDATE trading_bracket_intents "
+                            "SET intent_state='intent', "
+                            "    last_diff_reason='inverse_reconcile_reopen', "
+                            "    updated_at=NOW() "
+                            "WHERE trade_id=:tid "
+                            "  AND intent_state IN ('closed','reconciled','terminal_reject')"
+                        ),
+                        {"tid": int(most_recent.id)},
+                    )
+                    logger.warning(
+                        "[broker_sync] INVERSE RECONCILE: re-opened "
+                        "trade_id=%d ticker=%s qty=%s avg=%s "
+                        "(prior exit_reason=%s, no execution_events on record, "
+                        "broker qty/price match)",
+                        most_recent.id, ticker, qty, avg_price,
+                        prior_exit_reason,
+                    )
+                    reopened += 1
+                    continue
+                if int(event_count) > 0:
+                    logger.error(
+                        "[broker_sync] CONTRADICTION: trade_id=%d ticker=%s "
+                        "status=closed has %d execution_events on record yet "
+                        "broker still reports position qty=%s avg=%s. NOT "
+                        "auto-reconciling. Operator review required.",
+                        most_recent.id, ticker, int(event_count), qty, avg_price,
+                    )
+                    continue
+                # event_count == 0 but qty/price mismatch -- the broker
+                # position differs from the closed Trade's recorded
+                # values. Likely a different position (re-bought after
+                # exit, partial fill, etc.); fall through to GGG/C2.
             # GGG -- broker_sync crypto dedup. Before creating a brand-new
             # broker_sync row, look for a recent (last 24h) trade on the
             # SAME ticker+broker that may have been stamped "rejected"
@@ -1645,6 +1746,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 "created": created,
                 "updated": updated,
                 "closed": 0,
+                "reopened": reopened,
                 "skipped_reason": "empty_broker_positions_with_open_local_trades",
             }
 
@@ -1800,6 +1902,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         "created": created,
         "updated": updated,
         "closed": closed,
+        "reopened": reopened,
         "deduped": cleanup["cancelled"],
         "_live_tickers": rh_tickers,
     }

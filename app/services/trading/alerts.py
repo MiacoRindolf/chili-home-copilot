@@ -1219,25 +1219,50 @@ def run_price_monitor(db: Session, user_id: int | None) -> dict[str, Any]:
     }
 
     # 0. Emergency guardrail: evaluate catastrophic drawdown/disconnect first.
+    #
+    # broker-truth-self-heal (2026-05-04): when the guardrail fires we now
+    # FREEZE (activate the kill switch -- block new entries, leave existing
+    # trades for operator decision) rather than auto-liquidate. Two reasons:
+    #   1. emergency_close_all does not submit broker SELL orders -- it only
+    #      flips DB rows. Auto-liquidate without broker fills produces lying
+    #      DB state (rows marked closed while broker still holds positions),
+    #      which is the failure mode that locked 6 equity trades on the
+    #      noon 2026-05-04 cycle.
+    #   2. When the guardrail trips on disconnected broker, by definition
+    #      we have no price data; "responsible" liquidation isn't possible.
+    #      Freezing preserves operator agency.
+    # The functions ``emergency_close_all`` and ``partial_reduce_exposure``
+    # remain in ``emergency_liquidation.py`` for explicit operator invocation
+    # (admin route / manual call). Only the AUTOMATED callers from this
+    # surface have been retired.
     try:
-        from .emergency_liquidation import (
-            check_emergency_conditions,
-            emergency_close_all,
-            partial_reduce_exposure,
-        )
+        from .emergency_liquidation import check_emergency_conditions
+        from .governance import activate_kill_switch
 
         emergency = check_emergency_conditions(db, user_id)
         action = emergency.get("recommended_action")
         if action == "emergency_close_all":
-            out = emergency_close_all(db, user_id, reason="price_monitor_guardrail")
-            results["emergency_action"] = "emergency_close_all"
-            results["emergency_result"] = out
-            logger.critical("[alerts] Emergency liquidation executed from price monitor: %s", out)
+            freeze_kind = "disconnected" if emergency.get("disconnected") else "drawdown_critical"
+            activate_kill_switch(reason=f"price_monitor_freeze:{freeze_kind}")
+            results["emergency_action"] = "freeze"
+            results["emergency_freeze_reason"] = emergency
+            logger.critical(
+                "[alerts] Price monitor FREEZE: %s. Kill switch activated; "
+                "existing trades left for operator. emergency_close_all NOT "
+                "called automatically.",
+                emergency,
+            )
             return results
         if action == "partial_reduce":
-            out = partial_reduce_exposure(db, user_id, reason="price_monitor_drawdown_warning")
-            results["emergency_action"] = "partial_reduce"
-            results["emergency_result"] = out
+            activate_kill_switch(reason="price_monitor_freeze:drawdown_warning")
+            results["emergency_action"] = "freeze"
+            results["emergency_freeze_reason"] = emergency
+            logger.warning(
+                "[alerts] Price monitor FREEZE (drawdown_warning): %s. Kill "
+                "switch activated; partial_reduce_exposure NOT called "
+                "automatically.",
+                emergency,
+            )
     except Exception:
         logger.warning("[alerts] emergency guardrail check failed", exc_info=True)
 

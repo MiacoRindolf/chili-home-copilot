@@ -29,9 +29,18 @@ _kill_switch_lock = threading.Lock()
 
 
 def activate_kill_switch(reason: str = "manual") -> None:
-    """Immediately halt all trading activity. Persists to DB."""
+    """Immediately halt all trading activity. Persists to DB.
+
+    broker-truth-self-heal (2026-05-04): idempotent on same reason. The
+    prior implementation re-armed (and re-emitted the CRITICAL log) on
+    every call, which produced a 5-min flood of identical kill-switch
+    activations from the price-monitor guardrail. Same-reason calls now
+    no-op; a different reason still writes (state change worth recording).
+    """
     global _kill_switch, _kill_switch_reason
     with _kill_switch_lock:
+        if _kill_switch and _kill_switch_reason == reason:
+            return
         _kill_switch = True
         _kill_switch_reason = reason
     _persist_kill_switch_state(True, reason)

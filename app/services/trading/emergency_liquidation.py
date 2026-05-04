@@ -61,18 +61,28 @@ def emergency_close_all(
 
     for pt in open_paper:
         try:
+            # broker-truth-self-heal (2026-05-04): when fetch_quote fails,
+            # set exit_price=None + suffix the reason instead of falling
+            # back to entry_price (which silently wrote a fake $0 P/L into
+            # the DB). NULL is honest: we exited but don't have a clean
+            # exit price; leave pnl NULL too.
             q = fetch_quote(pt.ticker)
-            price = float(q["price"]) if q and q.get("price") else pt.entry_price
+            price = float(q["price"]) if q and q.get("price") else None
             pt.status = "closed"
             pt.exit_date = datetime.utcnow()
             pt.exit_price = price
-            pt.exit_reason = f"emergency_{reason}"
-            if pt.direction == "long":
-                pt.pnl = round((price - pt.entry_price) * pt.quantity, 2)
-                pt.pnl_pct = round((price - pt.entry_price) / pt.entry_price * 100, 2)
+            if price is None:
+                pt.exit_reason = f"emergency_{reason}:no_quote"
+                pt.pnl = None
+                pt.pnl_pct = None
             else:
-                pt.pnl = round((pt.entry_price - price) * pt.quantity, 2)
-                pt.pnl_pct = round((pt.entry_price - price) / pt.entry_price * 100, 2)
+                pt.exit_reason = f"emergency_{reason}"
+                if pt.direction == "long":
+                    pt.pnl = round((price - pt.entry_price) * pt.quantity, 2)
+                    pt.pnl_pct = round((price - pt.entry_price) / pt.entry_price * 100, 2)
+                else:
+                    pt.pnl = round((pt.entry_price - price) * pt.quantity, 2)
+                    pt.pnl_pct = round((pt.entry_price - price) / pt.entry_price * 100, 2)
             closed_paper += 1
         except Exception as e:
             errors.append(f"Paper {pt.ticker}: {e}")
@@ -84,14 +94,24 @@ def emergency_close_all(
 
     for t in open_live:
         try:
+            # broker-truth-self-heal (2026-05-04): same NULL-on-no-quote
+            # treatment as the paper branch. The prior fallback to
+            # t.entry_price wrote exit_price == entry_price into the DB
+            # (the lying-PnL pattern observed on 6 trades during the
+            # 2026-05-04 12:00 UTC mass-exit).
             q = fetch_quote(t.ticker)
-            price = float(q["price"]) if q and q.get("price") else t.entry_price
+            price = float(q["price"]) if q and q.get("price") else None
             t.status = "closed"
             t.exit_date = datetime.utcnow()
             t.exit_price = price
-            t.exit_reason = f"emergency_{reason}"
-            if hasattr(t, "pnl"):
-                t.pnl = round((price - t.entry_price) * (t.quantity or 1), 2)
+            if price is None:
+                t.exit_reason = f"emergency_{reason}:no_quote"
+                if hasattr(t, "pnl"):
+                    t.pnl = None
+            else:
+                t.exit_reason = f"emergency_{reason}"
+                if hasattr(t, "pnl"):
+                    t.pnl = round((price - t.entry_price) * (t.quantity or 1), 2)
             closed_live += 1
         except Exception as e:
             errors.append(f"Live {t.ticker}: {e}")
