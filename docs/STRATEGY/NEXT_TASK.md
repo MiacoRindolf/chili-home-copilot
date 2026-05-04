@@ -1,205 +1,344 @@
-# NEXT_TASK: bracket-emergency-repair-flap-guard
+# NEXT_TASK: broker-truth-self-heal
 
 STATUS: DONE
 
 ## Goal
 
-Harden sub-branch 2 of `_try_emergency_repair_terminal_reject` in `app/services/trading/bracket_reconciliation_service.py` so that a single-sweep `broker_qty == 0` reading does NOT immediately mark the trade closed. Require N consecutive sweeps of `broker_qty == 0` before the phantom-close fires, mirroring the R32 confirmation pattern that already protects `broker_reconcile_position_gone`.
+Make CHILI symmetric: today the system has multiple paths to mark a Trade row closed automatically (`broker_reconcile_position_gone`, `phantom_after_terminal_reject`, `emergency_price_monitor_guardrail`, `zombie_reconcile_orphan`) but **zero paths to un-mark a Trade row closed when the broker subsequently proves the position still exists.** The operator should never need to run an SQL script to reconcile broker truth into the database. The system should observe, cross-check, and self-heal.
 
-Success means: today's failure mode (broker auth-flap → empty `get_positions()` for one cycle → 5 trades auto-closed locally while the broker still holds them) is structurally prevented by a counter that resets on the first sweep that observes `broker_qty > 0`.
+This task ships four coordinated changes:
 
-This task ships **the smallest commit** that closes the recent regression introduced by `ef50d3f` (2026-05-03). It does NOT touch the older landmines surfaced in the same audit (`emergency_close_all` no-broker-order, `is_disconnected` weekend gap, lying `exit_price`, redundant kill-switch arming) — those are separate briefs.
+1. **Retire `_try_emergency_repair_terminal_reject` sub-branch 2.** The path is a hazard with no benefit — `broker_reconcile_position_gone` (with R32 protection) already owns the "broker says position gone" close path. Sub-branch 2 was a redundant, less-protected alternative. Delete it.
+
+2. **Retire automated `emergency_close_all` callers.** When the system is disconnected or detects emergency conditions, the correct response is **freeze** (activate kill switch, refuse new entries, leave existing trades for the operator to manage), not **auto-liquidate** (especially when the auto-liquidate doesn't even submit broker orders — Bug 4). Replace `alerts.py:1232` with a freeze call. `emergency_close_all` stays in the module for explicit operator invocation only, with Bugs 2+3 fixed inside.
+
+3. **Add inverse-reconcile in `broker_sync`.** When the broker reports a position for a (user, broker_source, ticker) and the most recent Trade row for that key is `status='closed'` AND has no SELL fill on record in `trading_execution_events`, the close was bookkeeping-only — re-open the row. Match qty and avg_price as a sanity cross-check. Single rule, no magic numbers, no allow-lists of close reasons.
+
+4. **Fix the residual lies in the now-operator-only `emergency_close_all`.** Bug 2: `exit_price = entry_price` fallback → set NULL. Bug 3: `activate_kill_switch` non-idempotent → guard.
+
+After deploy, the 11 broker-vs-DB mismatched positions from today self-heal on the first broker_sync cycle. No script. No human SQL. The system observes broker truth and corrects itself.
 
 ## Why now
 
-The `phantom_after_terminal_reject` exit_reason was used for the **first time ever** today (2026-05-04 09:44 UTC). DB evidence:
+Today (2026-05-04) two automated close paths fired for the first time ever and produced 11 unmanaged Robinhood positions whose Trade rows are wrongly marked closed in DB. The shipped flap guard prevents the *next* sub-branch-2 cascade; it does NOT undo today's, and it doesn't address the noon `emergency_close_all` trigger or the structural one-way-reconciliation gap.
 
-```
-exit_reason                       | n | first_seen
-phantom_after_terminal_reject     | 5 | 2026-05-04 09:44:50
-```
+The operator's stated principle: **CHILI must be smart and adaptive, not constant-and-static.** Every threshold should be derived from observable data; every potentially-destructive action should cross-check existing system state before firing. Today's 11-position lockup is a direct consequence of that principle being violated in three places (sub-branch 2's single-sample close, the static 10-min disconnect timer, the missing inverse-reconcile path).
 
-All 5 closures (trades 1812 AIDX / 1813 CCCC / 1814 CRDL / 1821 TLS / 1822 VFS) fired in the **same sweep** within 370ms of each other — a single-sweep cascade, not five independent decisions over time. broker_sync at 12:46 UTC and 13:14 UTC shows those exact tickers in `_live_tickers`, meaning the broker still holds them. The `broker_qty=0` reading at 09:44 was a transient flap, not ground truth.
-
-This is the **same failure mode** R32 (`539e1c2`) was built to prevent. R32 inserted multi-sweep confirmation into `broker_reconcile_position_gone` because an empty `get_positions()` from Robinhood was wiping out 3+ live positions per cascade. R32 hardens THAT close path. The May 3 commit `ef50d3f` introduced a **new** close path (`_try_emergency_repair_terminal_reject` sub-branch 2) that reads `broker.position_quantity` directly and acts on a single sample. R32's protection does not extend to it.
-
-Today's blast radius: 5 unmanaged equity positions on Robinhood (live exposure ≥ ~$2K notional combined; TLS qty=100 alone is ~$440 at $4.40), all marked closed in CHILI's DB. Until the operator manually reconciles, CHILI's stop engine and bracket writer cannot manage exits for them. The next R31/R32-style cascade will produce more of the same.
+The 11 stuck positions are real-money exposure right now. The inverse-reconcile design above is what shrinks that exposure window from "until operator runs script" to "until next 2-min broker_sync cycle."
 
 ## Brain integration (reuse, don't rewrite)
 
-- `app/services/trading/bracket_reconciliation_service.py:842-943` — the existing `_try_emergency_repair_terminal_reject` function. The fix is an additive guard inside sub-branch 2 (the `if broker_qty <= 0.0:` block at line 862), NOT a rewrite of the function or sub-branches 1/3.
-- `app/services/broker_service.py:1473-...` — the **R32 wholesale guard** (commit `539e1c2`). R32 is a binary cross-check ("`get_positions()` returned [] while local has open trades → refuse"); it uses NO numeric threshold. The fix here MUST mirror R32's semantic at the per-position layer with the same shape: positive confirmation, not magic-number waiting.
-- `_g2_event(...)` at `bracket_writer_g2._g2_event` — the existing audit emitter. Reuse it for the new `status="phantom_close_deferred"` event so funnel accounting picks it up alongside `phantom_close` / `success` / `rejection_relock`.
-- `BrokerView` (parameter type already passed into `_try_emergency_repair_terminal_reject`) — already carries the broker-side response. Extend it (or read from `broker._raw_positions` if available) to expose "did the response include any OTHER positions?" Do not invent a new broker call.
-- `trading_execution_events` — already records every fill the system has ever seen, indexed by `(trade_id, recorded_at)`. The "did this position close legitimately via SELL fill?" cross-check reads from here; no new write path, no new schema.
+- `app/services/broker_service.py::sync_positions_to_db` (R32 lives here, lines ~1473-1515) — the inverse-reconcile lives in the same function. The R32 wholesale guard already runs first; if it refuses (broker returned `[]`), the inverse-reconcile doesn't run. Otherwise: for each broker position, look up the most recent Trade row, decide reopen-vs-create-vs-no-op.
+- `trading_execution_events` — the single source of truth for "did a fill happen." The inverse-reconcile's only cross-check is "is there a SELL fill row for this trade_id." No new schema, no new state.
+- `app/services/trading/governance.py::activate_kill_switch` — the freeze primitive. Idempotency guard goes in here as the Bug 3 fix; the freeze call from `alerts.py` reuses the same primitive.
+- `app/services/trading/alerts.py::run_price_monitor` lines 1222-1242 — the call site that currently invokes `emergency_close_all`. Replace with `activate_kill_switch(reason=f"price_monitor_freeze: {emergency_reason}")` + early return. No more auto-liquidation from this surface.
+- The C2 guard in `sync_positions_to_db` — keep. C2 still protects against backfilling Trade rows for positions that have NO history at all in CHILI (genuinely-new positions the system didn't open). The inverse-reconcile path runs BEFORE C2 reaches its refusal, handling the "we did open this, but our record was wrongly closed" case. C2 only reaches the refusal branch when there's no historical record whatsoever.
 
 ## Path
 
-**Design principle: NO numeric thresholds.** This task does NOT introduce a "wait N sweeps" counter. The recent regression came from a 1-sample decision; the fix must be a positive confirmation, not a longer waiting period that's still vulnerable to a longer flap. Mirror R32 in shape, not in surface area.
+**Design principle: zero new magic numbers, zero new env-overridable hardcoded defaults, zero new auto-close paths.** Decisions derived from observable system state or binary cross-checks against existing data. If you find yourself typing a literal threshold or a frozen list of strings, stop and call it back to Cowork.
 
-### Step 1 — locate cross-check sources (no schema change required)
+### Step 1 — Retire sub-branch 2 of `_try_emergency_repair_terminal_reject`
 
-The phantom-close path needs TWO positive confirmations before firing, both readable from data the system already has:
+In `app/services/trading/bracket_reconciliation_service.py` around line 862-943, **delete** the entire `if broker_qty <= 0.0:` block (sub-branch 2). The function should only have sub-branches 1 (broker unavailable → fall through) and 3 (real exposure → place stop). When `broker_qty == 0`, fall through to the existing `state_gated_skip` outcome — the parent `broker_reconcile_position_gone` path (which has R32 protection at the wholesale layer) already owns this case.
 
-1. **Wholesale-response liveness.** `BrokerView` must expose whether the broker's `get_positions()` response that produced the `position_quantity = 0` reading was itself non-empty (i.e., included at least one position OTHER than this ticker). An empty response means R32 should already have refused at the wholesale layer; if it didn't (e.g., R32 not yet armed for this venue, or the call took a different code path), this guard catches it. A response with other positions = the broker is responsive AND can see SOMETHING but not this ticker = stronger evidence for "actually gone."
+The flap guard introduced in `f917c02` (today's commit) becomes dead code after this deletion. **Delete it too** — the helper `_bump_phantom_close_zero_qty_counter`, the constant `EMERGENCY_REPAIR_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS`, the env var `CHILI_BRACKET_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS`, the sub-branch-3 counter reset.
 
-2. **Fill-explained absence.** `trading_execution_events` for this `trade_id` may already contain a SELL fill that explains why the position is gone. If a recent SELL fill is on the books, the position SHOULD close — but via the standard reconcile path tied to that fill, NOT via the phantom-close path. The phantom path is for "no fill exists, position vanished." If a fill exists, defer and let the standard path own the close.
+Migration 223's column `phantom_close_consecutive_zero_qty_sweeps` is now orphan. Leave it in place (don't write a drop-column migration in this task — schema-removal is a separate hygiene ticket). It will sit at 0 forever.
 
-If `BrokerView` does not currently surface (1), extend it inside this commit. Search for `class BrokerView` in `bracket_reconciler.py` and add a single field (e.g. `peer_position_count: int` — count of positions in the broker response excluding this ticker, populated at the same point `position_quantity` is). No new SQL, no new schema.
+Update `tests/test_bracket_emergency_terminal_reject_repair.py`: scenarios 1 (existing phantom-close), 8 (single-sweep deferral), 9 (three-sweep close), 10 (counter reset) all assume sub-branch 2 exists. Replace them with **one** new scenario: "broker_qty == 0 falls through to state_gated_skip" — assert no trade-row mutation, no audit emission, return None. Existing scenarios 2-7 (broker unavailable, real-exposure variants) stay unchanged.
 
-### Step 2 — sub-branch 2 logic (positive confirmation, no counters)
+### Step 2 — Replace `emergency_close_all` auto-call with freeze
 
-Replace the `if broker_qty <= 0.0:` block at line 862 with:
+In `app/services/trading/alerts.py:1230-1236`, replace:
 
 ```python
-if broker_qty <= 0.0:
-    # Per-position zero is a confirmed close ONLY when both positive
-    # confirmations hold:
-    #   (a) the broker's get_positions() response was non-empty for
-    #       OTHER tickers (R32 mirror at per-position layer -- proves
-    #       the response is live, not a flap or partial-list response).
-    #   (b) no SELL fill on record for this trade_id that already
-    #       explains the position vanishing (if there is one, the
-    #       standard reconcile path owns the close; this path is
-    #       only for unexplained position absence).
-    # If either fails, defer and let the next sweep re-evaluate. No
-    # numeric threshold -- the deferral is until the broker view
-    # actually proves the close, not until N arbitrary sweeps elapse.
-
-    deferral_reason = _evaluate_phantom_close_confirmations(
-        db, broker=broker, local=local
-    )
-    if deferral_reason is not None:
-        logger.warning(
-            f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR phantom_close DEFERRED "
-            "trade=%s intent=%s ticker=%s reason=%s",
-            local.trade_id, local.bracket_intent_id, local.ticker,
-            deferral_reason,
-        )
-        try:
-            from .bracket_writer_g2 import _g2_event
-            _g2_event(
-                db,
-                trade_id=int(local.trade_id),
-                bracket_intent_id=int(local.bracket_intent_id),
-                ticker=str(local.ticker or ""),
-                broker_source=str(local.broker_source or ""),
-                event_type="emergency_terminal_reject_repair",
-                status="phantom_close_deferred",
-                decision_kind=str(decision.kind),
-                decision_severity=str(decision.severity),
-                extra={
-                    "sweep_id": sweep_id,
-                    "broker_qty": broker_qty,
-                    "deferral_reason": deferral_reason,
-                },
-            )
-        except Exception:
-            logger.warning(
-                f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR phantom_close_deferred "
-                "audit emit failed trade=%s", local.trade_id, exc_info=True,
-            )
-        return None  # fall through to state_gated_skip; retry next sweep
-
-    # Both confirmations hold. Proceed with the existing phantom-close
-    # logic (UPDATE trading_trades, UPDATE trading_bracket_intents,
-    # audit, return) -- unchanged from current code.
-    ...existing block from line 863 onward, unchanged...
+if action == "emergency_close_all":
+    out = emergency_close_all(db, user_id, reason="price_monitor_guardrail")
+    results["emergency_action"] = "emergency_close_all"
+    results["emergency_result"] = out
+    logger.critical("[alerts] Emergency liquidation executed from price monitor: %s", out)
+    return results
 ```
 
-Helper `_evaluate_phantom_close_confirmations(db, *, broker, local) -> str | None` returns `None` when both confirmations hold (proceed with close), or a short string (`"empty_broker_response"`, `"recent_sell_fill_exists"`, `"broker_view_lacks_peer_count"`) explaining why we're deferring.
+with:
 
-Add the helper near `_fetch_last_repair_attempt`. Each confirmation check is one query against existing tables — no new SQL surface, no new state. The `recent_sell_fill_exists` check has NO time window: it asks "is there ANY SELL fill row in `trading_execution_events` for this `trade_id`?" Bracket intents have a finite lifespan (closed-trade intents are pruned), so an existing SELL fill for an open-trade's intent unambiguously explains the absence.
+```python
+if action == "emergency_close_all":
+    # Disconnect / drawdown-critical detected. Correct response is FREEZE,
+    # not auto-liquidate: when disconnected we have no price data to
+    # responsibly liquidate at, and emergency_close_all does not submit
+    # broker orders anyway (it only updates DB rows). Freeze = activate
+    # kill switch (no new entries) and leave existing trades for operator
+    # decision. Operator can still call emergency_close_all manually if
+    # they actually want to liquidate.
+    from .governance import activate_kill_switch
+    activate_kill_switch(
+        reason=f"price_monitor_freeze: {emergency.get('disconnected') and 'disconnected' or 'drawdown_critical'}"
+    )
+    results["emergency_action"] = "freeze"
+    results["emergency_freeze_reason"] = emergency
+    logger.critical(
+        "[alerts] Price monitor FREEZE: %s. Kill switch activated; existing "
+        "trades left for operator. emergency_close_all NOT called automatically.",
+        emergency,
+    )
+    return results
+```
 
-### Step 3 — sub-branch 3 unchanged
+The `partial_reduce` branch (line 1237) — same treatment. Drawdown-warning is also a "freeze + tell the operator" event, not an automated partial close. Replace `partial_reduce_exposure` call with the same kill-switch activation + log.
 
-Sub-branch 3 (the `broker_qty > 0` block) stays exactly as it is. There is no counter to reset because there is no counter.
+`emergency_close_all` and `partial_reduce_exposure` STAY in `emergency_liquidation.py`. Operator can call them explicitly via the manual broker UI or admin route. Removing them entirely is out of scope for this task.
 
-### Step 4 — regression test
+### Step 3 — Fix Bugs 2 and 3 inside the now-manual emergency_close_all
 
-Add to `tests/test_bracket_emergency_terminal_reject_repair.py` (file exists, ef50d3f shipped 7 scenarios there):
+In `emergency_liquidation.py:88` and the parallel paper line ~65:
 
-- **scenario 8: zero qty + empty broker response → defer.** Set up a bracket_intent at `terminal_reject` + open trade. Broker reports `position_quantity=0` AND `peer_position_count=0` (the wholesale-empty case R32 should have caught upstream). Sweep → assert trade still `status='open'`, intent `intent_state='terminal_reject'`, audit row `status='phantom_close_deferred'` with `deferral_reason='empty_broker_response'`. NO `phantom_close` audit row.
-- **scenario 9: zero qty + non-empty broker response + no SELL fill → close.** Broker reports `position_quantity=0` for this ticker but `peer_position_count >= 1` (other positions visible). No `trading_execution_events` row for this `trade_id` with a SELL fill. Sweep → assert trade `status='closed'` with `exit_reason='phantom_after_terminal_reject'`, audit row `status='phantom_close'`. This is the legitimate phantom-close case ef50d3f intended.
-- **scenario 10: zero qty + recent SELL fill → defer.** Insert a `trading_execution_events` row for this `trade_id` with `event_type='fill'` and SELL semantics. Broker reports `position_quantity=0`, `peer_position_count >= 1`. Sweep → assert trade still `status='open'` (the standard reconcile path will own the close, not this path), audit row `status='phantom_close_deferred'` with `deferral_reason='recent_sell_fill_exists'`.
+```python
+# BEFORE
+price = float(q["price"]) if q and q.get("price") else t.entry_price
 
-All three scenarios use `chili_test`. No live network. No magic numbers.
+# AFTER
+price = float(q["price"]) if q and q.get("price") else None
+```
+
+When price is None: set `t.exit_price = None`, `t.exit_reason = f"emergency_{reason}:no_quote"`, do NOT compute pnl (leave NULL). Operator/audit can see "we exited but don't have a clean exit price" instead of being lied to with `exit_price == entry_price` and `pnl == 0`.
+
+Same for the paper branch around line 65.
+
+In `governance.py::activate_kill_switch` line 31:
+
+```python
+def activate_kill_switch(reason: str = "manual") -> None:
+    """Immediately halt all trading activity. Persists to DB."""
+    global _kill_switch, _kill_switch_reason
+    with _kill_switch_lock:
+        if _kill_switch and _kill_switch_reason == reason:
+            # Already active with same reason — idempotent no-op.
+            return
+        _kill_switch = True
+        _kill_switch_reason = reason
+    _persist_kill_switch_state(True, reason)
+    logger.critical("[governance] KILL SWITCH ACTIVATED: %s", reason)
+```
+
+The reason-comparison guards against same-reason re-arming (the noisy 5-min cron re-fire pattern observed today). A different reason still writes — that's a state change worth recording.
+
+### Step 4 — Inverse-reconcile in `sync_positions_to_db`
+
+In `broker_service.py::sync_positions_to_db`, after the existing R32 wholesale guard (the `if not rh_tickers:` block) and inside the existing per-position loop, add a new branch BEFORE the C2 phantom guard:
+
+```python
+# Inverse-reconcile: broker shows this position alive. Look for the
+# most recent Trade row for this (user_id, broker_source, ticker).
+# If it's `status='closed'` and there is NO SELL fill in
+# trading_execution_events for that trade_id, the close was a
+# bookkeeping lie (one of the automated close paths fired without an
+# actual broker exit). Re-open the existing row instead of creating a
+# fresh one (preserves entry_reason, pattern, scan_pattern_id, and the
+# bracket_intent FK chain).
+most_recent = (
+    db.query(Trade)
+    .filter(
+        Trade.user_id == user_id,
+        Trade.broker_source == "robinhood",
+        Trade.ticker == bp.ticker,
+    )
+    .order_by(Trade.entry_date.desc())
+    .first()
+)
+if most_recent is not None and most_recent.status == "closed":
+    sell_fill_count = (
+        db.query(TradingExecutionEvent)
+        .filter(
+            TradingExecutionEvent.trade_id == most_recent.id,
+            TradingExecutionEvent.event_type == "fill",
+            # SELL semantics — exact column / value depends on the
+            # event-recording convention. Discover via probe; comment
+            # the discovered shape here. The point is: count ANY SELL
+            # fill on this trade_id.
+            ...sell-side filter...,
+        )
+        .count()
+    )
+    qty_match = abs(most_recent.quantity - float(bp.quantity)) < 1e-9
+    price_match = abs(most_recent.entry_price - float(bp.avg_price)) < 1e-9 \
+                  if most_recent.entry_price and bp.avg_price else False
+
+    if sell_fill_count == 0 and qty_match and price_match:
+        # The close was bookkeeping-only AND the broker still holds the
+        # exact same position. Re-open.
+        most_recent.status = "open"
+        most_recent.exit_date = None
+        most_recent.exit_price = None
+        most_recent.exit_reason = None
+        most_recent.pnl = None
+        # Re-arm the bracket_intent so the writer picks it back up.
+        db.execute(text(
+            "UPDATE trading_bracket_intents "
+            "SET intent_state='intent', last_diff_reason='inverse_reconcile_reopen', "
+            "    updated_at=NOW() "
+            "WHERE trade_id=:tid AND intent_state IN ('closed','reconciled','terminal_reject')"
+        ), {"tid": most_recent.id})
+        # Audit row.
+        # _record_event(..., event_type='inverse_reconcile_reopen', ...)
+        logger.warning(
+            "[broker_sync] INVERSE RECONCILE: re-opened trade_id=%d ticker=%s "
+            "(prior exit_reason=%s, no SELL fill on record, broker qty/price match)",
+            most_recent.id, bp.ticker, most_recent.exit_reason or "<unset>",
+        )
+        reopened_count += 1
+        continue  # Don't fall through to the create/update path.
+
+    if sell_fill_count > 0:
+        # SELL fill exists for this trade_id but broker says position is
+        # alive. That's a contradiction — log it loudly. Don't reopen
+        # (the SELL fill is authoritative for "this trade closed"); don't
+        # create a new row (broker truth says position alive). Operator
+        # decision territory.
+        logger.error(
+            "[broker_sync] CONTRADICTION: trade_id=%d ticker=%s shows %d SELL "
+            "fill(s) yet broker still reports position qty=%s avg=%s. NOT "
+            "auto-reconciling. Operator review required.",
+            most_recent.id, bp.ticker, sell_fill_count, bp.quantity, bp.avg_price,
+        )
+        continue
+
+    if not (qty_match and price_match):
+        # No SELL fill, but qty/price don't match — the broker position
+        # isn't the same one our closed Trade row tracked. Fall through
+        # to existing create-new-row path (gated by C2 phantom guard).
+        pass
+
+# ... existing C2 guard + create-new-row logic continues here ...
+```
+
+This is the entire mechanism. The cross-check is binary (sell_fill_count == 0). The qty/price match is exact-equality (no fuzzy threshold). No frozen reason-list. No N-sweep counter. No env override. Single rule, single source of truth.
+
+### Step 5 — Tests
+
+Add to `tests/test_broker_sync_inverse_reconcile.py` (new file):
+
+- **scenario A: bookkeeping-only close + matching broker position → reopen.** Insert closed Trade row with `exit_reason='emergency_price_monitor_guardrail'`, no SELL fill in execution_events, broker reports qty/avg_price match. Run `sync_positions_to_db`. Assert: trade row `status='open'`, exit_* cleared, bracket_intent re-armed, audit row written.
+- **scenario B: real SELL-fill close + broker still reports position → contradiction log, no mutation.** Insert closed Trade row with `exit_reason='target'`, INSERT a SELL fill in execution_events for that trade_id, broker reports qty/avg_price match. Run sync. Assert: trade row unchanged (still closed), error log emitted with the word "CONTRADICTION", no new row created.
+- **scenario C: bookkeeping-only close + qty/price MISMATCH → fall through to C2.** Closed Trade row, no SELL fill, but broker qty differs. Run sync. Assert: existing Trade row unchanged, fall through to C2's existing behavior (which refuses or creates a new row depending on whether buy fill exists).
+- **scenario D: no historical Trade row → C2 governs.** Broker shows position with no matching Trade row in DB. Assert: existing C2 behavior (refuses if no buy fill).
+
+For the alerts.py freeze fix: add a scenario in `tests/test_alerts_price_monitor_freeze.py`:
+
+- **scenario E: emergency condition triggers freeze, not liquidation.** Force `check_emergency_conditions` to return `recommended_action='emergency_close_all'`. Run `run_price_monitor`. Assert: `emergency_close_all` was NOT called (mock + assert no_call), kill switch IS active, no Trade row mutations, result dict contains `emergency_action='freeze'`.
+
+For Bug 2 / Bug 3 / sub-branch-2 deletion: extend `tests/test_bracket_emergency_terminal_reject_repair.py` (replace scenarios 1, 8, 9, 10 per Step 1) and add a small `tests/test_emergency_liquidation_no_quote.py` that covers the NULL exit_price path.
+
+All tests use `chili_test`. No live network.
+
+### Step 6 — Live verification
+
+After deploy, the 11 stuck positions from today should self-heal on the next broker_sync cycle (every 2 min during market hours). Verification:
+
+```sql
+-- Pre-deploy: 11 closed rows for the broker-live tickers
+SELECT id, ticker, status, exit_reason, exit_date FROM trading_trades
+WHERE ticker IN ('TLS','GEO','AIDX','CRDL','ELTX','CCCC','JOB','PED','IMTX','EKSO','VFS')
+  AND status='closed' AND exit_date >= '2026-05-04 09:00:00'
+ORDER BY exit_date;
+-- expect: 11 rows
+
+-- Post-deploy (after one broker_sync cycle):
+-- expect: same 11 ids but status='open', exit_date IS NULL, exit_reason IS NULL
+```
+
+Plus the new log lines: `[broker_sync] INVERSE RECONCILE: re-opened trade_id=...` should appear 11 times in broker-sync-worker logs within ~2 minutes of deploy.
+
+If any of the 11 do NOT self-heal, inspect for SELL fills in `trading_execution_events` (which would route them to the contradiction branch) or qty/price mismatches.
 
 ## Constraints / do not touch
 
-- **Sub-branches 1 and 3 are off-limits.** The fix is inside sub-branch 2 only. Sub-branch 1 (broker unavailable) and sub-branch 3 (real exposure → place stop) are correct and have shipped tests.
-- **Do NOT modify `emergency_liquidation.py`.** The `is_disconnected()` weekend gap, the `exit_price=entry_price` fallback, and the redundant `activate_kill_switch` are real bugs but they are **separate tickets**. Bundling them here defeats the audit trail and inflates blast radius.
-- **Do NOT modify `emergency_close_all`.** The "function marks DB closed without submitting broker SELL" finding is a separate, larger ticket — needs operator decision on whether emergency_close_all should ever run again as-is or be replaced.
-- **Default flag stays ON.** `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=1` per `343e185` — do not flip it OFF as part of this task. The fix should make the flag-on path safe; flag-off is a separate operator decision.
-- **No live broker calls.** This task is DB-schema + reconciler logic + tests. No `place_order`, no `cancel_order`.
+- **No magic numbers anywhere.** Operator's explicit principle: constant and static decisions are hazards. The brief specifies cross-checks (binary fill-existence, exact qty/price match) and removes the existing magic number from today's commit. Anything else is a violation.
+- **No new env-overridable hardcoded defaults.** The previous task's `CHILI_BRACKET_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS=3` env was a dressed-up magic number. Don't repeat the pattern.
+- **No new auto-close paths.** The whole point of this task is reducing the number of automated close paths from N to N-2. Adding even one more (e.g., "auto-close if mismatch persists for X cycles") defeats the goal.
+- **Do NOT remove `emergency_close_all` or `partial_reduce_exposure` from the module.** Operator can still call them manually. Only remove the AUTOMATED callers.
+- **Do NOT modify R32.** The wholesale guard at the top of `sync_positions_to_db` stays as-is. The new inverse-reconcile runs INSIDE the same function but only when R32 has already let the response through (i.e., broker returned at least one position).
+- **Do NOT modify the existing `broker_reconcile_position_gone` close path.** That path already has R32 protection. After Step 1's deletion of sub-branch 2, that path becomes the ONLY automated way a Trade row gets closed by reconcile machinery — and it's well-guarded.
 - **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
 - **No `git push --force` to main.** PROTOCOL Hard Rule 4.
-- **Migration ID 223 only.** Do not reuse 220-222. Verify with `scripts/verify-migration-ids.ps1` before commit.
-- **Do not refactor the `_try_emergency_repair_terminal_reject` function shape.** Same parameters, same return-value contract.
+- **No new migrations** unless something genuinely requires schema. Inverse-reconcile reads from existing tables; freeze writes use existing kill-switch primitives. If you find yourself reaching for a migration, stop and call it back.
 
 ## Out of scope
 
-- **Operator-side reconciliation of the 11 broker-vs-DB mismatched positions.** That's a manual action (see "Operator pre-action" below). Do not auto-reopen Trade rows from inside this task.
-- **Bugs 1-3 from the 2026-05-04 audit** (weekend-gap, lying exit_price, redundant kill-switch). Separate tickets.
-- **Bug 4 from the 2026-05-04 audit** (`emergency_close_all` does not submit broker orders). Separate ticket — the largest of the four because the fix is non-trivial (do we submit SELLs? do we refuse to mark closed without a broker confirmation? does the function get retired entirely?). Operator decision required.
-- **The 8 crypto positions broker_sync C2-protects against backfilling.** Separate, larger investigation — likely needs the buy-fill audit trail to be reconstructed or the C2 guard to be relaxed under specific conditions. Not blocking this task.
-- **Renaming `phantom_after_terminal_reject` to clarify what actually happened.** The label is misleading (it suggests the position is gone when it may just be a flap), but renaming an `exit_reason` value used in 5 DB rows is risk for zero engineering payoff — defer until those 5 rows are reconciled.
-
-## Operator pre-action (BEFORE running `claude` for this task)
-
-The 11 broker-vs-DB-mismatched positions need to be reconciled before this fix deploys. The fix prevents the **next** cascade; it does NOT undo today's. If the operator deploys this without reconciling, the 11 positions stay unmanaged at the broker.
-
-Two options:
-
-**A. Reconcile DB to broker truth.** Inspect `scripts/dispatch-reopen-equity-trades-DRY-RUN-output.txt` (already generated). If the SQL looks right, copy that script to `scripts/dispatch-reopen-equity-trades-COMMIT.ps1` and execute. Re-opens 11 Trade rows, re-arms 11 bracket_intents, resets the kill switch row. Then verify with another broker_sync cycle.
-
-**B. Manually flatten at Robinhood.** Sell the 11 positions via the Robinhood UI. Then leave the kill switch on until the fix is deployed.
-
-Operator's call. Do not let Claude Code make this decision.
+- **Position-identity refactor.** The architectural fix for "Trade row IDs are ephemeral, broker positions are persistent" is a much larger initiative. Inverse-reconcile is the pragmatic patch that makes the existing model self-heal; the proper fix is a separate brief that introduces a position-identity layer above Trade rows. Ack the gap, defer.
+- **`emergency_close_all` actually submitting broker orders (Bug 4 proper fix).** Now that automated callers are gone, the urgency drops. Whether `emergency_close_all` should EVER auto-liquidate (vs always freeze) is a strategic decision for a later brief. For now: it stays a manual-only operator tool with the lying-exit-price fixed.
+- **Dropping migration 223's orphan column.** Schema hygiene; do in a follow-up batch.
+- **The unauthorized `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` activation from yesterday's deploy.** Operationally significant but orthogonal to this task. Operator should decide separately whether to keep it hot or revert. Surface in CC report's Open Questions.
+- **Renaming `phantom_after_terminal_reject` to clarify post-flap semantics.** Cosmetic; defer.
 
 ## Success criteria
 
 1. **Two commits, both pushed:**
-   - `fix(bracket): positive-confirmation guard on emergency-repair phantom-close path`
-   - `docs(strategy): bracket-emergency-repair-flap-guard CC report + mark NEXT_TASK done`
-2. **All 7 prior scenarios in `tests/test_bracket_emergency_terminal_reject_repair.py` still pass** against `chili_test`.
-3. **3 new scenarios (8, 9, 10) added and pass.**
-4. **No new schema migration.** This task is logic-only. If you find yourself reaching for a new column to track flap state, stop and re-read the design principle — the fix is positive confirmation from existing data, not new state.
-5. **No magic numbers introduced.** The CC_REPORT must include a "magic number audit" subsection explicitly stating: any literal numeric values added to `bracket_reconciliation_service.py` in this commit, with their derivation. Expected answer: zero new literals — `BrokerView` field counts are observed, fill-existence is a binary check.
-6. **Live verification (post-deploy)**: at least one `[bracket_reconciliation] EMERGENCY-REPAIR phantom_close DEFERRED` log line in broker-sync-worker within 30 minutes of deploy. (The 11 mismatched positions, if not yet reconciled, will produce these on every sweep until either operator reconciles or broker stops reporting them.)
-7. **No new `phantom_after_terminal_reject` rows in `trading_trades`** during the same 30-minute window. Inspect with `SELECT id, ticker, exit_date FROM trading_trades WHERE exit_reason='phantom_after_terminal_reject' ORDER BY exit_date DESC LIMIT 5;` — the most recent should still be the May 4 09:44 batch.
-8. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_bracket-emergency-repair-flap-guard.md` per PROTOCOL format. Include:
-   - The magic-number audit (success criterion 5)
-   - Snippet of the new `phantom_close_deferred` audit row from the live system
-   - Pre-fix and post-fix counts of `phantom_after_terminal_reject` rows
-   - Any deferral_reason distribution observed during the 30-min window (confirms which confirmation is firing in the wild)
+   - `fix(reconcile): broker-truth self-heal — retire sub-branch 2, replace auto-liquidate with freeze, add inverse-reconcile`
+   - `docs(strategy): broker-truth-self-heal CC report + mark NEXT_TASK done`
+2. **Magic-number audit clean.** CC_REPORT must include a subsection enumerating any literal numeric or string-list values added in this commit. Expected: zero new literals beyond exception messages and log strings. If any literal slips in, justify it with derivation from observable system state.
+3. **All existing tests still pass.** `pytest tests/test_bracket_emergency_terminal_reject_repair.py tests/test_alerts.py tests/test_broker_service.py tests/test_governance.py tests/test_emergency_liquidation.py -v`. The sub-branch-2 deletion will require updating prior scenarios (1, 8, 9, 10) — that's expected, not a regression.
+4. **New tests pass.** Scenarios A-E above, all green.
+5. **Live self-heal observed.** Within 5 minutes of deploy, all 11 stuck positions (1812 AIDX, 1813 CCCC, 1814 CRDL, 1815 EKSO, 1816 ELTX, 1817 GEO, 1818 IMTX, 1819 JOB, 1820 PED, 1821 TLS, 1822 VFS) re-open via the inverse-reconcile path. Capture the log lines and the post-deploy `SELECT` result in the CC_REPORT.
+6. **Kill switch resets cleanly.** After the inverse-reconcile re-opens the 11 trades, the operator may want the kill switch deactivated to resume autotrader entries. The brief does NOT auto-deactivate the kill switch — that's an operator decision. Surface it in the CC_REPORT as an Open Question for the operator.
+7. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-04_broker-truth-self-heal.md`. Include:
+   - Magic-number audit subsection
+   - Pre-deploy and post-deploy `SELECT` results for the 11 stuck positions
+   - Log lines from the inverse-reconcile path firing
+   - Any contradictions surfaced (scenario B's error log) — none expected today, but log them if any appear
+   - The unauthorized `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` flag flagged as an Open Question
 
 ## Rollback plan
 
-- **Code rollback**: `git revert <fix-commit>` reverts the reconciler change. No schema, no state damage.
-- **No migration to roll back.** This task adds none.
-- **Hard-stop rollback**: flip `CHILI_BRACKET_MISSING_STOP_REPAIR_ENABLED=0` in `docker-compose.yml` and `docker compose up -d broker-sync-worker`. Disables the entire emergency-repair branch. Reverts to pre-`ef50d3f` behavior (terminal_reject parks at `state_gated_skip` indefinitely). Operator-only decision — sacrifices the legitimate sub-branch 3 stop placement to halt sub-branch 2.
+- **Code rollback**: `git revert <fix-commit>`. The 11 self-healed trades stay open (the rollback doesn't re-close them — that's correct behavior, the broker really does hold the positions). Future broker_sync cycles fall back to the C2-guarded path; no inverse-reconcile fires; no auto-freeze. Revert to pre-fix automated-emergency-liquidate behavior. Side effect: the noon Monday landmine reactivates for next Monday — operator must redeploy or accept the landmine.
+- **No migration to roll back.**
+- **Flag-based partial rollback**: not applicable — there are no new flags in this task. The previous task's `CHILI_BRACKET_PHANTOM_CLOSE_MIN_CONSECUTIVE_ZERO_SWEEPS` env is now dead code; ignored.
+- **Hard-stop**: if inverse-reconcile fires unexpectedly on positions that should NOT have been re-opened (e.g., a SELL fill exists but the SELL-side detection logic missed it), revert immediately and inspect. The contradiction-log branch (scenario B) is the safety belt that catches this — if it doesn't catch the case, the SELL-side detection is wrong and needs a deeper look before re-deploy.
 
 ## Verification commands (for the executor + the operator)
 
 ```powershell
-# After commits land, restart the worker that owns bracket reconciliation:
-docker compose up -d broker-sync-worker
+# Pre-deploy snapshot
+docker compose exec -T postgres psql -U chili -d chili -c "
+  SELECT id, ticker, status, exit_reason, exit_date FROM trading_trades
+  WHERE ticker IN ('TLS','GEO','AIDX','CRDL','ELTX','CCCC','JOB','PED','IMTX','EKSO','VFS')
+    AND exit_date >= '2026-05-04 09:00:00'
+  ORDER BY ticker, exit_date;
+"
 
-# Watch the new deferred logs appear:
-docker compose logs broker-sync-worker --since 5m -f | Select-String "EMERGENCY-REPAIR phantom_close DEFERRED|phantom_close_deferred"
+# Deploy (after commits land)
+docker compose up -d broker-sync-worker scheduler-worker chili
 
-# Confirm no NEW phantom closures during 30-min soak:
-docker compose exec -T postgres psql -U chili -d chili -c "SELECT id, ticker, exit_reason, exit_date FROM trading_trades WHERE exit_reason='phantom_after_terminal_reject' ORDER BY exit_date DESC LIMIT 10;"
+# Watch inverse-reconcile fire
+docker compose logs broker-sync-worker --since 5m -f | Select-String "INVERSE RECONCILE|CONTRADICTION"
 
-# Run regression tests:
+# Post-deploy verification (run after first broker_sync cycle, ~2 min)
+docker compose exec -T postgres psql -U chili -d chili -c "
+  SELECT id, ticker, status, exit_reason, exit_date FROM trading_trades
+  WHERE id IN (1812,1813,1814,1815,1816,1817,1818,1819,1820,1821,1822)
+  ORDER BY id;
+"
+# Expect: all 11 with status='open', exit_date IS NULL, exit_reason IS NULL
+
+# Confirm kill switch state (should still be active from noon — operator decides reset)
+docker compose exec -T postgres psql -U chili -d chili -c "
+  SELECT * FROM trading_risk_state ORDER BY id DESC LIMIT 1;
+"
+
+# Tests
 $env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
-pytest tests/test_bracket_emergency_terminal_reject_repair.py -v
+pytest tests/test_bracket_emergency_terminal_reject_repair.py `
+       tests/test_broker_sync_inverse_reconcile.py `
+       tests/test_alerts_price_monitor_freeze.py `
+       tests/test_emergency_liquidation_no_quote.py `
+       tests/test_governance.py -v
 ```
 
-## Open questions for Cowork (surface in your CC_REPORT only if relevant)
+## Open questions for Cowork (surface in your CC_REPORT)
 
-1. **`BrokerView.peer_position_count` plumbing.** If `BrokerView` doesn't already get the full broker response and you need to extend the data path that populates it, surface where the cleanest extension point is. Don't invent new broker calls — the data is in the same `get_positions()` response that already produced `position_quantity`.
-2. **Fill-existence cross-check semantics.** "Any SELL fill in `trading_execution_events` for this `trade_id`" — confirm there's no edge case where a partial-SELL fill exists but the position legitimately remains open with reduced quantity. If there is, surface and refine the cross-check (e.g., compare cumulative-filled-qty vs original local qty before deferring).
-3. **Coverage interaction with the C2 phantom guard.** broker_sync's C2 guard refuses to backfill Trade rows for broker positions without matching buy fills. The 11 equity positions in today's audit have no buy fills in `trading_execution_events`. If your fill-existence check reads from the same table and the equity positions had no buy fills recorded, what does the SELL-fill check find? Surface the answer — this may interact with whether the cross-check is sufficient on its own.
-4. **Whether the deferral should ever expire.** Today's design defers indefinitely until both confirmations hold. If the broker is permanently broken and never returns peer positions, the intent stays parked. That's the SAME failure mode as pre-`ef50d3f` (state_gated_skip), so it's a known-acceptable steady state — but surface if you observe an intent stuck deferring for >24h, that's signal for a different brief.
+1. **SELL-side fill detection in `trading_execution_events`.** The schema has columns `event_type`, `status`, and `payload_json` but no explicit `side` column. Probe the table to see how SELL fills are distinguished from BUY fills (likely in `payload_json.side` or via the bracket_intent_id linkage). Document the discovered shape in the report so future readers know the contract.
+2. **Qty / price exact-match tolerance.** The brief specifies `abs(...) < 1e-9` (effectively exact). If real broker responses show floating-point imprecision (e.g., 0.000000001 drift on crypto avg_price), surface the observed values and propose a tolerance derived from broker-reported precision (NOT a magic number — derive from the broker's rounding granularity).
+3. **Kill switch state after self-heal.** The 11 trades re-open via inverse-reconcile, but the kill switch is still active from noon's `emergency_close_all` cascade. Should the inverse-reconcile path also reset the kill switch? My read: **NO** — kill switch is operator-driven recovery; auto-resetting it bypasses operator awareness. Surface for explicit decision.
+4. **Contradiction handling.** If scenario B (SELL fill exists + broker says position alive) ever fires in production, what's the operator playbook? My read: log the contradiction, alert via existing critical-log surface, and pause inverse-reconcile for that ticker until operator clears it. The current brief just logs and continues — surface if you think a stronger response is warranted.
+5. **Unauthorized `CHILI_BRACKET_WRITER_CANCEL_COVERING_SELL=1` activation** from yesterday's deploy. Still hot. Independent of this task. Surface so the operator can decide separately whether to keep it or revert.
