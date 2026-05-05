@@ -1020,8 +1020,16 @@ def _maybe_run_brain_work_batch() -> None:
 # Floor: never let more than this many seconds pass between cycles, even
 # without explicit signals — guards against slow drift in tables that
 # haven't yet emitted events on every change.
+#
+# f-kill-legacy-learning-cycle (2026-05-05): default raised from 4h to 1y.
+# The legacy cycle is gated off via CHILI_BRAIN_LEGACY_CYCLE_ENABLED, so the
+# safety floor is moot when the cycle is disabled. If the operator re-enables
+# the cycle for emergency rollback, set
+# ``CHILI_BRAIN_RECONCILE_MAX_INTERVAL_S=14400`` (4h) explicitly to restore
+# the floor. A 1y default means "effectively never" while keeping the env
+# var as the override knob.
 _RECONCILE_PASS_MAX_INTERVAL_S = int(os.environ.get(
-    "CHILI_BRAIN_RECONCILE_MAX_INTERVAL_S", str(4 * 3600)
+    "CHILI_BRAIN_RECONCILE_MAX_INTERVAL_S", str(365 * 24 * 3600)
 ))
 
 # In-memory watermark of the last completed reconcile pass. Survives only
@@ -1052,7 +1060,16 @@ def _should_skip_reconcile_pass(status: "BrainWorkerStatus") -> tuple[bool, str]
     now = time.time()
 
     if _LAST_RECONCILE_PASS_AT is None:
-        return False, "cold_start_first_cycle"
+        # f-kill-legacy-learning-cycle (2026-05-05): cold start no longer
+        # auto-triggers a cycle. Pre-fix this returned ``False`` ("don't
+        # skip"), forcing every brain-worker restart to attempt a
+        # 60-140 minute reconcile pass that crashed 100% of the time over
+        # the prior 24h (61% silent TCP drops, 28% transaction-rolled-back).
+        # Initialise the watermark to "now" so the safety-floor branch
+        # below can take over naturally if the cycle is re-enabled via
+        # CHILI_BRAIN_LEGACY_CYCLE_ENABLED=1.
+        _LAST_RECONCILE_PASS_AT = now
+        return True, "cold_start_no_auto_trigger"
 
     elapsed = now - _LAST_RECONCILE_PASS_AT
     if elapsed >= _RECONCILE_PASS_MAX_INTERVAL_S:
@@ -1139,7 +1156,30 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
         # pass into a brain_work_event handler under app/services/trading/
         # brain_work/ — at which point this gate becomes "always skip" and
         # this whole block goes away. This is the bridge.
-        skip_cycle, skip_reason = _should_skip_reconcile_pass(status)
+        #
+        # f-kill-legacy-learning-cycle (2026-05-05): added the kill switch
+        # below. The legacy cycle has been crashing 100% of the time over
+        # the last 24h (61% silent TCP drops, 28% transaction-rolled-back)
+        # and silently swallowing every downstream learning step. Default
+        # disabled. Set CHILI_BRAIN_LEGACY_CYCLE_ENABLED=1 to re-engage
+        # the cycle path for emergency rollback. Phase 2 event handlers
+        # (mine, cpcv_gate, promote, demote, regime_ledger -- all five
+        # already shipped per dispatcher.py:272-321) handle the bulk of
+        # the work the cycle used to do; the remaining cycle-only steps
+        # are inventoried in docs/STRATEGY/PHASE2_HANDLER_BACKLOG.md.
+        legacy_cycle_enabled = (
+            os.environ.get("CHILI_BRAIN_LEGACY_CYCLE_ENABLED", "0").lower()
+            in ("1", "true", "yes")
+        )
+        if not legacy_cycle_enabled:
+            logger.info(
+                "[brain] legacy run_learning_cycle DISABLED via "
+                "CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0. Phase 2 handlers run "
+                "instead. Set =1 to re-enable for emergency rollback."
+            )
+            skip_cycle, skip_reason = True, "legacy_cycle_disabled"
+        else:
+            skip_cycle, skip_reason = _should_skip_reconcile_pass(status)
         cycle_stats: dict = {}
 
         if skip_cycle:
