@@ -349,6 +349,68 @@ def check_paper_exits(
     return {"checked": len(open_trades), "closed": closed, "trailing_updated": trailing_updated}
 
 
+def place_partial_close(
+    db: Session,
+    trade: PaperTrade,
+    fraction: float,
+    *,
+    current_price: float | None = None,
+) -> dict[str, Any]:
+    """Submit a partial close on a paper position at ``fraction`` of size.
+
+    Reduces ``trade.quantity`` by ``fraction`` of the current quantity,
+    populates the four ``partial_taken_*`` bookkeeping columns (migration
+    226), and commits. Slippage applied on the fill price the same way
+    full closes do (``_apply_slippage``). The remaining position keeps
+    running for trail / target / BOS / time-decay; the partial-taken bit
+    prevents the same trade from re-firing.
+
+    Returns ``{"ok": True, "quantity": qty_closed, "price": fill_price}``
+    on success, ``{"ok": False, "error": reason}`` on validation failure
+    or quote miss. NEVER raises into the caller (consistent with other
+    paper helpers).
+
+    Live (Trade ORM) partial closes are intentionally NOT supported here:
+    they need a separate fast-path safety-belt review per the brief and
+    are out of scope. ``broker_service.place_sell_order`` already accepts
+    a partial qty if/when that wiring lands.
+    """
+    if not isinstance(trade, PaperTrade):
+        return {"ok": False, "error": "live_partial_not_yet_supported"}
+    if getattr(trade, "partial_taken", False):
+        return {"ok": False, "error": "already_partialed"}
+    if not (0.0 < fraction < 1.0):
+        return {"ok": False, "error": f"invalid_fraction:{fraction}"}
+
+    qty_to_close = float(trade.quantity) * float(fraction)
+    if qty_to_close <= 0:
+        return {"ok": False, "error": f"computed_qty_non_positive:{qty_to_close}"}
+
+    if current_price is None:
+        from .market_data import fetch_quote
+        q = fetch_quote(trade.ticker)
+        if not q or not q.get("price"):
+            return {"ok": False, "error": "no_quote"}
+        current_price = float(q["price"])
+
+    fill_price = _apply_slippage(float(current_price), trade.direction, is_entry=False)
+
+    trade.quantity = float(trade.quantity) - qty_to_close
+    trade.partial_taken = True
+    trade.partial_taken_at = datetime.utcnow()
+    trade.partial_taken_qty = qty_to_close
+    trade.partial_taken_price = fill_price
+    db.add(trade)
+    db.commit()
+
+    logger.info(
+        "[paper] Partial close %s %s qty=%.4f @ %.4f (frac=%.2f, remaining=%.4f)",
+        trade.direction, trade.ticker,
+        qty_to_close, fill_price, fraction, trade.quantity,
+    )
+    return {"ok": True, "quantity": qty_to_close, "price": fill_price}
+
+
 def _close_paper_trade(pt: PaperTrade, exit_price: float, reason: str) -> None:
     """Close a paper trade with P&L calculation."""
     pt.status = "closed"

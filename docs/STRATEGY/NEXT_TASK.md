@@ -1,349 +1,492 @@
-# NEXT_TASK: f-exit-parity-persist
+# NEXT_TASK: f-partial-profit-wire-up
 
 STATUS: DONE
 
 ## Goal
 
-Make the exit-engine parity logger actually produce evidence. Today it logs
-to stdout in shadow mode but persists nothing useful to
-`trading_exit_parity_log` — the table has **0 rows total across all sources,
-all time** despite millions of decisions evaluated. That blocks the eventual
-cutover to `brain_exit_engine_mode=authoritative` because we have no
-persisted data to base the decision on.
+Make partial-profit-taking at 1R actually work. Today the canonical
+exit evaluator emits `EXIT_ACTION_PARTIAL` correctly when configured
+for it, but **no consumer in the codebase acts on the action** — it
+falls through to "hold" because `run_exit_engine` and the live broker
+adapters only handle "exit_X" terminal actions.
 
-This task ships **three plumbing fixes plus a methodology hardening** so
-that 24-48h post-deploy we can run the verdict query
-(`scripts/dispatch-exit-parity-verdict.ps1`) and get a real answer to "are
-canonical and legacy producing equivalent close decisions and equivalent
-realized P/L?"
+Legacy live's `partial_profit_eligible` flag (`live_exit_engine.py:99-103`)
+was always aspirational — set but never read by any consumer. So the
+feature has been "implemented in canonical" but completely inert in
+production.
 
-This task does NOT flip the authoritative mode. That stays a separate,
-explicit operator decision once data exists.
+This task wires the missing consumer: when the canonical evaluator
+emits `action="partial"`, submit a partial broker close (default 50%
+of position size), record the partial fill, mark `partial_taken=True`
+on the trade so it doesn't re-fire, and emit a `[partial_profit_ops]`
+audit log line.
+
+After this ships, partial-profit-taking is a real operational primitive
+that pattern-level config (`exit_config.partial_at_1r`) can opt into,
+and the brain can learn from realized partial-vs-full exits.
+
+This task does NOT enable `partial_at_1r=True` on any pattern by
+default. The opt-in stays per-pattern, decided by the operator or by
+a future brain-learner.
 
 ## Why now
 
-Today's parity audit (this conversation) revealed:
+You said "yes I want it" when I explained today that the partial-at-1R
+feature is half-built — eligibility detection lives in legacy, action
+emission lives in canonical, and the broker-side handler that would
+turn the action into a real partial close is missing.
 
-1. **Backtest path drops parity rows on the floor.**
-   `app/services/backtest_service.py:1446-1462` appends every parity record
-   to `strategy._parity_sink`, a Python list attribute on the strategy
-   instance. **Nothing else in the codebase reads it** (one reference,
-   zero consumers per `Grep`). When the FractionalBacktest run finishes,
-   the strategy instance is garbage-collected and the list with it.
-2. **Live path uses `db.flush()` not `db.commit()`.**
-   `app/services/trading/live_exit_engine.py:354-355` does
-   `db.add(row); db.flush()` — flush sends to server-side state but
-   doesn't commit. If the calling session ends without `commit()` (e.g.,
-   the parent caller's exception path doesn't commit), the row rolls back.
-3. **`agree_bool` is computed differently on backtest vs live rows.**
-   - Backtest (`backtest_service.py:1439-1442`):
-     ```python
-     agree = (legacy_action == canonical_action) or (
-         legacy_action != "hold" and canonical_action != "hold"
-     )
-     ```
-     "Both engines decided to close" passes regardless of label.
-   - Live (`live_exit_engine.py:329`): strict label equality.
+The operational case for partial-profit-taking:
 
-   Mixing both definitions in the same column means any aggregate over
-   `agree_bool` is methodologically unsound.
-4. **Two real concerns from the rule-by-rule audit** (separate doc:
-   add as `docs/STRATEGY/CC_REPORTS/<date>_f-exit-parity-persist.md`
-   "Audit summary" section):
-   - `trail_monotonic=False` in `build_config_backtest` is a deliberate
-     parity choice; cutover decision needs to call out whether the
-     monotonicity guard turns on at flip time or later.
-   - `_resolve_trailing_atr_mult` brain learner is currently writing to
-     a StrategyParameter that feeds nothing because canonical's
-     `build_config_live` sets `trail_atr_mult=None`. Cutover prep should
-     decide whether to wire it into `build_config_live`.
+- **Locks in some realized P/L when the position has earned 1R.** The
+  remaining position keeps running for trail/target/BOS while the
+  taken half is no longer at risk of giving back.
+- **Reduces drawdown variance.** A trade that partials at 1R then
+  trails out flat realizes +0.5R; a trade that doesn't partial and
+  trails out flat realizes 0R. The partial reduces variance without
+  much expected-value cost.
+- **Matches what professional discretionary traders do.** "Take half
+  off at 1R" is one of the most common position-management primitives
+  in trading literature; the brain should be able to test it.
 
-Without persistence, we can't quantify any of the above. Fix the plumbing
-first, decide on the substantive concerns once data exists.
+Without the consumer, `partial_at_1r=True` on a pattern would mean
+"emit a partial action and have it silently ignored." That's worse
+than not having the feature, because it gives the false impression
+the brain is partialing when it isn't. **Wiring the consumer is what
+turns the feature from aspirational to operational.**
 
 ## Brain integration / source material
 
-- `app/services/trading/exit_evaluator.py` — canonical evaluator. Pure;
-  do not import adapters into it.
-- `app/services/trading/live_exit_engine.py:252-380` — live shadow hook,
-  parity row write at line 354-355, ops-log emission at 357-380.
-- `app/services/backtest_service.py:1370-1495` — backtest shadow hook,
-  sink append at 1446-1462, ops-log emission at 1464-1495.
-- `app/models/trading.py:1715-1752` — `ExitParityLog` ORM. Note all
-  required fields and indexes already exist; no migration needed.
-- `app/trading_brain/infrastructure/exit_engine_ops_log.py` —
-  `format_exit_engine_ops_line` (used; correct as-is, don't touch).
-- `scripts/dispatch-exit-parity-verdict.ps1` — verdict query that will
-  run against the data this task produces.
-- `app/config.py` — `brain_exit_engine_mode`, `brain_exit_engine_parity_sample_pct`,
-  `brain_exit_engine_ops_log_enabled` settings already defined.
+- `app/services/trading/exit_evaluator.py:357-369` — canonical's
+  `EXIT_ACTION_PARTIAL` emission. Already correct; do NOT modify.
+- `app/services/trading/exit_evaluator.py:411` — `build_config_live`
+  reads `partial_at_1r` from the exit_config dict. Already correct.
+- `app/services/trading/live_exit_engine.py:99-103` — legacy's dead
+  `partial_profit_eligible` flag. **Delete** as part of this task
+  since the canonical action replaces it. (Confirmed via Grep:
+  flag is set in 1 place, read in 0 places.)
+- `app/services/trading/live_exit_engine.py:217-249` —
+  `run_exit_engine` consumer loop. **The consumer wiring lives here.**
+- `app/services/broker_service.py` — find the existing
+  `place_partial_close` / `partial_close` function if any; if not,
+  use the existing `place_sell` / `place_market_sell` and pass the
+  partial quantity. Search first.
+- `app/models/trading.py` — `Trade` and `PaperTrade` ORMs. Need to
+  add `partial_taken` (boolean) + `partial_taken_at` (timestamp) +
+  `partial_taken_qty` (float) + `partial_taken_price` (float). Also
+  add a `partial_taken` field to the canonical `PositionState`
+  dataclass at `exit_evaluator.py:99-117`. **Already exists** at line
+  116 (`partial_taken: bool = False`). The brain just needs to
+  carry it forward via `updated_state` (it already does).
+- `app/services/trading/auto_trader.py` — if it reads
+  `partial_profit_eligible` anywhere (it shouldn't, but verify),
+  remove the dead read.
+- `docs/PHASE_ROLLBACK_RUNBOOK.md` — Phase rollback shape.
 
 ## Path
 
-### Step 1 — Drain `_parity_sink` to DB at backtest-run completion
+### Step 1 — Migration `_migration_NNN_partial_taken_columns`
 
-`backtest_service.py` already attaches `_parity_sink` (a list) to the
-strategy instance. Add a single drain point at the end of
-`FractionalBacktest.run` (or wherever the strategy lifecycle ends — find
-the most appropriate hook by reading the file):
-
-```python
-# Phase B fix: persist accumulated parity rows. NEVER raises; failures
-# log + continue. The legacy decision has already happened; this is
-# bookkeeping only.
-sink = getattr(strategy, "_parity_sink", None) or []
-if sink:
-    try:
-        from ..models.trading import ExitParityLog
-        rows = [
-            ExitParityLog(
-                source=r["source"],
-                position_id=r.get("position_id"),
-                scan_pattern_id=r.get("scan_pattern_id"),
-                ticker=r.get("ticker") or "",
-                bar_ts=None,
-                legacy_action=r["legacy_action"],
-                legacy_exit_price=r.get("legacy_exit_price"),
-                canonical_action=r["canonical_action"],
-                canonical_exit_price=r.get("canonical_exit_price"),
-                pnl_diff_pct=None,  # computed in Step 4 if both prices present
-                agree_bool=bool(r["agree_bool"]),
-                mode=r["mode"],
-                config_hash=r["config_hash"],
-                provenance_json={
-                    "reason_code": r.get("reason_code"),
-                    "bar_idx": r.get("bar_idx"),
-                },
-            )
-            for r in sink
-        ]
-        db.bulk_save_objects(rows)
-        db.commit()
-        logger.info(
-            "[exit_parity] persisted %d backtest parity rows", len(rows)
-        )
-    except Exception as e:
-        logger.warning("[exit_parity] sink drain failed: %s", e)
-        try:
-            db.rollback()
-        except Exception:
-            pass
-```
-
-`bulk_save_objects` is fine here — these rows are append-only audit data,
-no relationships to update. **Find the actual `db` Session in scope** —
-it likely comes from the brain-worker's batch context. If the strategy
-doesn't already see the session, the sink drain should happen at the
-backtest call site, not inside the strategy.
-
-### Step 2 — Replace `db.flush()` with explicit commit in the live path
-
-`app/services/trading/live_exit_engine.py:354-355`:
-
-```python
-db.add(row)
-db.flush()
-```
-
-Change to:
-
-```python
-db.add(row)
-db.commit()
-```
-
-**Caveat**: if the caller has a wider transaction in flight,
-`commit()` here will close their transaction too. Read the call site
-(`compute_live_exit_levels` consumers — `run_exit_engine` etc.) to
-verify this is safe. If not, the alternative is a fresh nested session:
-
-```python
-from ...db import SessionLocal  # adjust import to project's pattern
-with SessionLocal() as parity_db:
-    parity_db.add(row)
-    parity_db.commit()
-```
-
-Pick whichever doesn't disturb the caller's transaction. Surface the
-choice in the CC report.
-
-### Step 3 — Add a strict-label parity column
-
-Don't fix the existing `agree_bool` semantic — that's already in the DB
-and changing it retroactively would invalidate prior analysis. Instead,
-add a **new** column `agree_strict_bool` that's always strict label
-equality, and populate it in BOTH paths:
-
-```python
-# In both backtest_service.py and live_exit_engine.py:
-agree_strict = (legacy_action == canonical_action)
-# ... add to row construction:
-agree_strict_bool=bool(agree_strict),
-```
-
-Migration `_migration_225_exit_parity_strict_agree`:
+Add the persistence columns to both Trade and PaperTrade tables. Use
+the next sequential migration ID at execution time (likely 226 if
+f-exit-parity-persist's 225 just shipped).
 
 ```sql
-ALTER TABLE trading_exit_parity_log
-    ADD COLUMN IF NOT EXISTS agree_strict_bool BOOLEAN NULL;
-CREATE INDEX IF NOT EXISTS ix_exit_parity_strict_agree_created
-    ON trading_exit_parity_log (agree_strict_bool, created_at);
+ALTER TABLE trading_trades
+    ADD COLUMN IF NOT EXISTS partial_taken         BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS partial_taken_at      TIMESTAMP NULL,
+    ADD COLUMN IF NOT EXISTS partial_taken_qty     DOUBLE PRECISION NULL,
+    ADD COLUMN IF NOT EXISTS partial_taken_price   DOUBLE PRECISION NULL;
+
+ALTER TABLE paper_trades
+    ADD COLUMN IF NOT EXISTS partial_taken         BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS partial_taken_at      TIMESTAMP NULL,
+    ADD COLUMN IF NOT EXISTS partial_taken_qty     DOUBLE PRECISION NULL,
+    ADD COLUMN IF NOT EXISTS partial_taken_price   DOUBLE PRECISION NULL;
+
+CREATE INDEX IF NOT EXISTS ix_trading_trades_partial_taken
+    ON trading_trades (partial_taken)
+    WHERE partial_taken = TRUE;
+CREATE INDEX IF NOT EXISTS ix_paper_trades_partial_taken
+    ON paper_trades (partial_taken)
+    WHERE partial_taken = TRUE;
 ```
 
-NULL on existing rows is fine — they pre-date the strict definition.
-Future verdict queries can filter `WHERE agree_strict_bool IS NOT NULL`
-to restrict to consistently-defined rows.
+Idempotent (`IF NOT EXISTS`). The partial indexes are sparse — most
+positions never partial, so a partial index on `WHERE partial_taken
+= TRUE` keeps the index small.
 
-### Step 4 — Fill `pnl_diff_pct` when both engines emitted an exit_price
+Verify migration ID with `.\scripts\verify-migration-ids.ps1`.
 
-Both `live_exit_engine.py` and `backtest_service.py` row construction
-currently leave `pnl_diff_pct=None`. Compute it at row creation when both
-prices are present:
+### Step 2 — Update ORMs
+
+In `app/models/trading.py`, add the four new fields to both `Trade`
+(near line 39-188) and `PaperTrade` (near line 1022-1048):
 
 ```python
-if (
-    row.canonical_exit_price is not None
-    and row.legacy_exit_price is not None
-    and row.legacy_exit_price > 0
-):
-    row.pnl_diff_pct = float(
-        (row.canonical_exit_price - row.legacy_exit_price)
-        / row.legacy_exit_price
-        * 100.0
-    )
+partial_taken: bool = Column(Boolean, nullable=False, default=False)
+partial_taken_at: Optional[datetime] = Column(DateTime, nullable=True)
+partial_taken_qty: Optional[float] = Column(Float, nullable=True)
+partial_taken_price: Optional[float] = Column(Float, nullable=True)
 ```
 
-Direction-aware sign: if shorts ever appear, negate for short positions.
-For now, long-only is the only case both legacies handle — comment that
-in the code.
+Match column ordering to the migration. The default value at the ORM
+layer is required because new code may construct `Trade(...)` without
+explicitly passing it.
 
-### Step 5 — Smoke verification
+### Step 3 — Determine partial-close fraction
+
+The partial fraction (e.g., 50%, 33%, 25%) should be configurable per
+pattern, not hardcoded. Decide where it lives:
+
+- **Option A: New pattern-level field** `partial_close_fraction` on
+  `ScanPattern` — most flexible, requires another migration.
+- **Option B: Read from `exit_config.partial_close_fraction`** — uses
+  the existing JSONB exit_config, no new column.
+- **Option C: Hardcode 0.5 (50%) at first**, surface as a follow-up if
+  the brain shows the fraction matters.
+
+**Recommendation: Option B.** The exit_config dict already houses
+related parameters (`partial_at_1r`, `bos_buffer_pct`, etc.). Add
+`partial_close_fraction` as another key with default 0.5:
+
+```python
+# In _load_exit_config in live_exit_engine.py, add to defaults:
+"partial_close_fraction": 0.5,
+```
+
+Caller reads it from the config alongside `partial_at_1r`.
+
+### Step 4 — Wire the consumer in `run_exit_engine`
+
+In `app/services/trading/live_exit_engine.py:217-249`, the consumer
+loop currently filters `result["action"] != "hold"` and treats every
+non-hold action as a terminal close. **This is the bug for partial:**
+"partial" is non-hold but non-terminal.
+
+Refactor:
+
+```python
+def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
+    """Evaluate all open positions through the exit engine. Returns action recommendations."""
+    from .market_data import fetch_quote
+
+    open_paper = db.query(PaperTrade).filter(PaperTrade.status == "open")
+    if user_id is not None:
+        open_paper = open_paper.filter(PaperTrade.user_id == user_id)
+    positions = open_paper.all()
+
+    results = []
+    partial_actions = []   # NEW
+    terminal_actions = []  # NEW
+    for pos in positions:
+        try:
+            q = fetch_quote(pos.ticker)
+            if not q or not q.get("price"):
+                continue
+            price = float(q["price"])
+            exit_rec = compute_live_exit_levels(db, pos, price)
+            exit_rec["ticker"] = pos.ticker
+            exit_rec["position_id"] = pos.id
+            exit_rec["current_price"] = price
+            results.append(exit_rec)
+            action = exit_rec.get("action", "hold")
+            if action == "partial":
+                partial_actions.append(exit_rec)  # NEW: separate bucket
+            elif action != "hold":
+                terminal_actions.append(exit_rec)
+        except Exception as e:
+            logger.debug("[exit_engine] Error evaluating %s: %s", pos.ticker, e)
+
+    logger.info(
+        "[exit_engine] Evaluated %d positions: %d terminal + %d partial actions recommended",
+        len(results), len(terminal_actions), len(partial_actions),
+    )
+
+    return {
+        "ok": True,
+        "evaluated": len(results),
+        "actions": terminal_actions,                # backward-compat: "actions" still means terminal
+        "partial_actions": partial_actions,         # NEW: separate key for partial
+        "all": results,
+    }
+```
+
+The downstream consumer of `run_exit_engine`'s return dict (whoever
+calls it for paper-mode auto-management) needs to handle
+`partial_actions` separately from `actions`. Search and update those
+call sites.
+
+### Step 5 — Add the canonical partial path to `compute_live_exit_levels`
+
+Today, `compute_live_exit_levels` only emits `result["action"]` for
+hard stop / hard target / BOS / time decay. The canonical evaluator
+inside `_phase_b_shadow_parity` correctly emits `partial`, but in
+shadow mode the canonical decision doesn't influence `result`.
+
+For the consumer wiring to work, **`compute_live_exit_levels` must
+emit `result["action"] = "partial"`** when partial-at-1R fires AND
+the position hasn't already partialed. The cleanest path:
+
+```python
+# Replace the dead partial_profit_eligible block at lines 99-103:
+#   if risk > 0 and exit_cfg.get("partial_at_1r", False):
+#       r_move = ...
+#       if r_move >= 1.0:
+#           result["partial_profit_eligible"] = True
+#           result["r_multiple"] = round(r_move, 2)
+# With:
+
+if (
+    risk > 0
+    and exit_cfg.get("partial_at_1r", False)
+    and not getattr(trade, "partial_taken", False)
+    and result["action"] == "hold"  # don't override a real terminal exit
+):
+    r_move = (current_price - entry) / risk if is_long else (entry - current_price) / risk
+    if r_move >= 1.0:
+        result["action"] = "partial"
+        result["exit_price"] = current_price
+        result["r_multiple"] = round(r_move, 2)
+        result["partial_close_fraction"] = float(exit_cfg.get("partial_close_fraction", 0.5))
+```
+
+Priority discipline: partial fires only when the position would
+otherwise hold. If a hard stop / hard target / BOS / time decay would
+fire on the same bar, those terminal closes take precedence — partial
+is suppressed because the whole position is closing anyway.
+
+### Step 6 — Wire the broker-side partial close
+
+Search broker_service.py for an existing partial-close primitive.
+Likely candidates:
+
+- `broker_service.place_market_sell(ticker, quantity)` —
+  generic market sell; pass the partial quantity.
+- `broker_service.place_crypto_sell(ticker, quantity)` — crypto
+  variant.
+- `broker_service.place_partial_close(...)` — if it exists, use it.
+
+If only a "close entire position" primitive exists, create
+`place_partial_close(trade, fraction)`:
+
+```python
+def place_partial_close(trade: Trade | PaperTrade, fraction: float) -> dict[str, Any]:
+    """Submit a partial sell for `fraction` of the position's quantity.
+
+    Updates partial_taken bookkeeping on success. Failure modes log + return
+    {"error": "..."} dict; never raises into the caller (consistent with
+    other broker_service helpers).
+    """
+    if trade.partial_taken:
+        return {"error": "already_partialed"}
+    if not (0.0 < fraction < 1.0):
+        return {"error": f"invalid_fraction:{fraction}"}
+
+    qty = trade.quantity * fraction
+    # ... route to the right broker per trade.broker_source ...
+    # ... record partial_taken_qty, partial_taken_price, partial_taken_at on success ...
+```
+
+For paper-mode positions, the partial close updates the PaperTrade's
+quantity and credits the partial proceeds to the paper-balance ledger.
+
+### Step 7 — Auto-trader integration
+
+Find the consumer of `run_exit_engine` in the autotrader / paper-runner
+path. Add handling of `partial_actions`:
+
+```python
+exit_result = run_exit_engine(db)
+for partial_rec in exit_result.get("partial_actions", []):
+    pos = db.query(PaperTrade).get(partial_rec["position_id"])
+    if pos is None or pos.partial_taken:
+        continue
+    fraction = float(partial_rec.get("partial_close_fraction", 0.5))
+    outcome = broker_service.place_partial_close(pos, fraction)
+    if outcome.get("ok"):
+        logger.info(
+            "[partial_profit_ops] position_id=%s ticker=%s "
+            "fraction=%.2f r_multiple=%s qty=%.4f price=%.4f",
+            pos.id, pos.ticker, fraction,
+            partial_rec.get("r_multiple"),
+            outcome.get("quantity"), outcome.get("price"),
+        )
+    else:
+        logger.warning(
+            "[partial_profit_ops] FAILED position_id=%s reason=%s",
+            pos.id, outcome.get("error"),
+        )
+
+for terminal_rec in exit_result.get("actions", []):
+    # existing terminal-close handling stays unchanged
+    ...
+```
+
+The `[partial_profit_ops]` log prefix matches the project's existing
+conventions for ops log lines (`[exit_engine_ops]`,
+`[bracket_writer_g2]`, etc.).
+
+### Step 8 — Tests
+
+Add `tests/test_partial_profit_wire_up.py`:
+
+1. ✅ `compute_live_exit_levels` returns `action="partial"` when:
+   `partial_at_1r=True`, position has reached 1R, `partial_taken=False`,
+   and no terminal exit would fire.
+2. ✅ `compute_live_exit_levels` returns `action="hold"` (not partial)
+   when `partial_at_1r=False`.
+3. ✅ `compute_live_exit_levels` returns the terminal action (not
+   partial) when both partial AND a terminal rule would fire on the
+   same bar.
+4. ✅ `compute_live_exit_levels` returns `action="hold"` (not partial
+   re-fire) when `partial_taken=True`.
+5. ✅ `run_exit_engine` separates partial actions from terminal actions
+   in the return dict.
+6. ✅ `place_partial_close` updates `partial_taken=True`, populates
+   the four bookkeeping fields, and reduces position quantity by the
+   fraction.
+7. ✅ `place_partial_close` returns `{"error": "already_partialed"}`
+   when called on a trade with `partial_taken=True`.
+8. ✅ `place_partial_close` returns
+   `{"error": "invalid_fraction:..."}` for fraction outside (0, 1).
+9. ✅ Auto-trader integration: synthetic 1R-hit paper trade flows
+   through the full path and ends up with `partial_taken=True` and a
+   reduced quantity.
+10. ✅ The existing `partial_profit_eligible` removal does not break
+    any existing test (search for tests that asserted that key).
+
+### Step 9 — Smoke verification
 
 After deploy:
 
-1. Trigger a brain-worker FractionalBacktest cycle (it runs every 5s
-   anyway, but `docker compose restart brain-worker` to pick up the new
-   code).
-2. Wait one full backtest pass (~minutes for 25 tickers).
-3. SQL probe:
+1. Find or create a paper trade where `partial_at_1r=True` (set on
+   one of the patterns explicitly for the smoke):
    ```sql
-   SELECT source, COUNT(*) FROM trading_exit_parity_log GROUP BY source;
+   UPDATE scan_patterns
+       SET exit_config = jsonb_set(
+           coalesce(exit_config, '{}'::jsonb),
+           '{partial_at_1r}', 'true'::jsonb
+       )
+       WHERE id = <chosen_pattern_id>;
    ```
-   Expect: backtest rows >> 0. If still 0, the sink drain didn't fire
-   — debug.
-4. Re-run `.\scripts\dispatch-exit-parity-verdict.ps1`. All 6 sections
-   should now have meaningful rows.
-5. Trigger a live exit decision (open paper position, wait for one bar,
-   manually trigger `run_exit_engine`). Verify a `source=live` row
-   appears.
-
-### Step 6 — Audit summary in the CC report
-
-The CC report at `docs/STRATEGY/CC_REPORTS/<date>_f-exit-parity-persist.md`
-should include the rule-by-rule audit findings from this conversation,
-specifically:
-
-- The trail_monotonicity cutover question (legacy backtest's
-  `trail_monotonic=False` is intentional parity; cutover decision needs
-  to specify whether to flip monotonic at the same time).
-- The `_resolve_trailing_atr_mult` brain-learner status (currently
-  feeding a parameter that affects nothing because legacy live's trail
-  doesn't close; cutover prep must decide whether to wire it into
-  `build_config_live` if trail-close gets enabled live).
-- The time-decay unit mismatch (legacy live uses days; canonical reads
-  bars_held; adapter passes days as bars_held; both legacies share the
-  bug at intraday timeframes).
-- `partial_profit_eligible` informational flag is dead (no consumers).
-  No migration risk.
-- The dual `agree_bool` definitions explanation, and how
-  `agree_strict_bool` from Step 3 fixes it.
+2. Wait for a position on that pattern to reach 1R.
+3. Verify in logs: `[partial_profit_ops] position_id=... fraction=0.50 ...`
+4. Confirm via SQL:
+   ```sql
+   SELECT id, ticker, quantity, partial_taken, partial_taken_qty,
+          partial_taken_price, partial_taken_at
+   FROM paper_trades WHERE partial_taken = TRUE LIMIT 5;
+   ```
+   Expect: at least one row with all four fields populated.
+5. Confirm the position keeps running — `status='open'`, partial_taken
+   trade should NOT re-emit `action="partial"` on subsequent bars.
 
 ## Constraints / do not touch
 
-- **Do not flip `brain_exit_engine_mode`.** Stays at `shadow`. Cutover is
-  an explicit operator decision once 24-48h of data exists.
-- **Do not change canonical evaluator semantics.** No edits to
-  `exit_evaluator.py` — that file is the source of truth.
-- **Do not modify the legacy decision paths.** This task is purely
-  additive — better persistence, new strict column. The legacy
-  trades-decide flow stays untouched.
-- **Do not touch the live-fast-path safety belts.** PROTOCOL Hard Rule 1.
-- **No threshold tuning, no strategy-code changes.** This is plumbing.
+- **Default mode stays paper.** No live placement. Partial-close in
+  paper mode = paper-ledger update. Live-mode partial close lives
+  behind the existing 8 fast-path safety belts (PROTOCOL Hard Rule 1).
+- **Do not enable `partial_at_1r=True` on any pattern by default.**
+  Opt-in stays per-pattern. The smoke verification step above sets
+  it on ONE pattern manually for testing; revert before close.
+- **Do not modify the canonical evaluator.** `exit_evaluator.py` is
+  source of truth and already does the right thing. This task wires
+  the missing consumer, not the producer.
+- **Do not change the priority order.** Canonical's
+  stop > target > BOS > time_decay > trail > partial priority is
+  correct. Partial is non-terminal and only fires when nothing
+  terminal would.
 - **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
-- Migration ID 225 (verify last is 224). Run
-  `.\scripts\verify-migration-ids.ps1` ahead of merge.
+- **Migration ID** = next sequential at execution time. Verify with
+  `.\scripts\verify-migration-ids.ps1`.
 
 ## Out of scope
 
-- Flipping `brain_exit_engine_mode=authoritative`. Separate task once
-  this task's data accumulates and the verdict query says it's safe.
-- Wiring the StrategyParameter resolver into `build_config_live`.
-  That's only relevant if cutover also enables trail-close in live, and
-  that's a follow-up phase.
-- Fixing the time-decay unit mismatch. Real bug but pre-existing in
-  legacy — not a parity concern. Separate brief if it becomes
-  operationally painful.
-- The `trail_monotonic` cutover decision. Surface in the CC report;
-  decide at cutover time, not in this task.
+- Brain-learner that decides which patterns benefit from
+  `partial_at_1r=True`. Once partial fires for real and the brain
+  has realized partial-vs-full data, a separate brief can wire
+  pattern-level adaptive selection.
+- Multiple partials per trade (e.g., 33% at 1R then 33% at 2R).
+  Single partial is enough surface area for the first version. Add
+  if and when the data shows it's worth it.
+- The time-decay unit-mismatch fix (queued separately at
+  `docs/STRATEGY/QUEUED/f-time-decay-unit-fix.md`).
+- The sophisticated parity metric (queued at
+  `docs/STRATEGY/QUEUED/f-exit-parity-metric-v2.md`).
+- Live-mode (real broker) partial closes. The wiring should work
+  for live too, but the smoke and tests should stay in paper. Live
+  activation needs the existing fast-path safety-belt review.
 
 ## Success criteria
 
-1. **Migration 225 lands cleanly.** `verify-migration-ids.ps1` passes.
-   Schema check confirms the new column.
-2. **Backtest sink drain works.** After one brain-worker FractionalBacktest
-   cycle post-deploy, `SELECT COUNT(*) FROM trading_exit_parity_log
-   WHERE source='backtest'` returns > 1000.
-3. **Live commit works.** After one live exit-engine evaluation
-   post-deploy, `SELECT COUNT(*) FROM trading_exit_parity_log
-   WHERE source='live'` returns >= 1.
-4. **`agree_strict_bool` populated** on every new row from both paths.
-   `SELECT COUNT(*) FROM trading_exit_parity_log
-   WHERE agree_strict_bool IS NOT NULL` returns > 0.
-5. **`pnl_diff_pct` populated** on rows where both prices are present.
-   No NULL `pnl_diff_pct` when both exit_prices are non-null and
-   legacy_exit_price > 0.
-6. **Verdict query produces meaningful output**
-   (`scripts/dispatch-exit-parity-verdict.ps1` shows non-empty result
-   sets in all 6 sections).
-7. **Existing tests pass.** Run the bracket-related test suite + any
-   exit-engine-specific tests against `chili_test`.
-8. **CC report at `docs/STRATEGY/CC_REPORTS/<date>_f-exit-parity-persist.md`**
-   per PROTOCOL format, including the rule-by-rule audit summary in
-   Step 6.
+1. **Migration lands cleanly.** `verify-migration-ids.ps1` passes.
+   Schema check confirms the four new columns on both tables.
+2. **`compute_live_exit_levels` emits `action="partial"`** under the
+   four conditions (partial_at_1r=True, 1R reached, not yet
+   partialed, no terminal exit pending) — verified by tests.
+3. **`run_exit_engine`** returns separate `actions` (terminal) and
+   `partial_actions` (non-terminal) buckets.
+4. **`place_partial_close`** updates `partial_taken` and the three
+   bookkeeping fields atomically.
+5. **Auto-trader handles `partial_actions`** and emits
+   `[partial_profit_ops]` log lines.
+6. **All 10 new tests pass + existing exit-engine tests still pass**
+   against `chili_test`.
+7. **Smoke verification** shows at least one real partial fire in
+   paper mode with all bookkeeping populated.
+8. **CC report** at
+   `docs/STRATEGY/CC_REPORTS/<date>_f-partial-profit-wire-up.md` per
+   PROTOCOL format. Include the smoke output inline.
 
 ## Rollback plan
 
-- **Code rollback**: `git revert` of the fix commits returns the parity
-  logger to its current "logging into the void" state. No data loss
-  beyond what wasn't being captured anyway.
-- **Migration rollback**: `agree_strict_bool` is NULL-able — dropping
-  the column is a one-line ALTER if needed:
+- **Code rollback**: `git revert` the consumer-wiring commits.
+  `compute_live_exit_levels` reverts to never emitting `partial`,
+  `run_exit_engine` reverts to one-bucket return, the dead
+  `partial_profit_eligible` flag stays gone but harmless. No
+  partial-close attempts are made.
+- **Data rollback**: existing positions with `partial_taken=TRUE`
+  stay correctly marked — they really did partial. The four
+  bookkeeping fields keep their values for audit. If the broker
+  rolls back the partial fill on its side (unlikely), reconcile
+  via existing broker-sync; not a code-rollback concern.
+- **Migration rollback**:
   ```sql
-  ALTER TABLE trading_exit_parity_log DROP COLUMN agree_strict_bool;
+  ALTER TABLE trading_trades
+      DROP COLUMN partial_taken,
+      DROP COLUMN partial_taken_at,
+      DROP COLUMN partial_taken_qty,
+      DROP COLUMN partial_taken_price;
+  ALTER TABLE paper_trades
+      DROP COLUMN partial_taken,
+      DROP COLUMN partial_taken_at,
+      DROP COLUMN partial_taken_qty,
+      DROP COLUMN partial_taken_price;
   ```
   Per PHASE_ROLLBACK_RUNBOOK.
-- **No live-broker rollback** — task makes no broker calls.
 
 ## Open questions for Cowork (surface in CC report only if relevant)
 
-1. **Live commit semantics** (Step 2 caveat). If `db.commit()` in
-   `_phase_b_shadow_parity` would prematurely close the caller's
-   transaction, surface and use the nested-session approach. Either
-   choice is fine; just pick one explicitly.
-2. **Backtest sink drain location.** If the strategy instance doesn't
-   have a session in scope, the drain might need to live at the
-   `FractionalBacktest.run` caller. Surface the chosen call site.
-3. **Time-decay unit bug** — surface as a watch item if any 1m/1h/intraday
-   exits are observed in the post-fix data. Should not happen given
-   current usage patterns but worth flagging if it does.
-4. **Verdict thresholds for cutover** — once data exists, what's the
-   right "OK to flip" criterion? Suggested defaults:
-   - `agree_strict_pct >= 99.0%` over 24h on both `source=live` AND
-     `source=backtest`
-   - `total_pnl_diff_pct` mean within ±0.5% (essentially zero)
-   - `pnl_diff_pct` stddev < 1.0 (tight distribution around zero)
-   - At least 1000 live-source rows AND 100,000 backtest-source rows
-
-   Actual thresholds belong in the cutover task brief, not this one.
-   But surface if the post-fix data already meets them — that
-   accelerates the cutover decision.
+1. **`partial_close_fraction` location** — Option B (in
+   `exit_config` JSONB) is recommended, but if the codebase has
+   established a different config-knob pattern for trade-level
+   parameters, surface the alternative. Goal is single source of
+   truth — don't create a parallel config surface.
+2. **Existing `place_partial_close` or equivalent** — surface
+   whether a pre-existing broker primitive for partial closes
+   exists. If yes, use it; if no, document the new helper.
+3. **Auto-trader call site** — surface where `run_exit_engine`'s
+   output is currently consumed, and confirm the partial_actions
+   bucket is handled in the right place (likely the paper-runner
+   loop in scheduler-worker).
+4. **Live-mode safety review** — does enabling
+   `partial_at_1r` on a live-mode pattern require a separate
+   safety-belt review? My read: no — partial close is a SELL action
+   on an open position, which is allowed under existing belts.
+   Surface for explicit confirmation.
+5. **Single-fire enforcement** — currently `partial_taken` is a
+   bool, not a counter. If a pattern ever wanted multiple partials
+   (33% at 1R + 33% at 2R), the schema needs a counter or a
+   separate `trading_partial_fills` table. Out of scope here, but
+   surface if the data suggests it's worth doing.

@@ -301,10 +301,43 @@ def _run_paper_trade_check_job():
             # Also run the live exit engine for pattern-based exit recommendations
             try:
                 from .trading.live_exit_engine import run_exit_engine
+                from .trading.paper_trading import place_partial_close
+                from ..models.trading import PaperTrade as _PT
                 exit_results = run_exit_engine(db)
                 exits = exit_results.get("actions", [])
                 if exits:
                     logger.info("[scheduler] Live exit engine: %d recommendations", len(exits))
+                # Partial-profit consumer (migration 226 wiring). The
+                # canonical evaluator emits ``action="partial"`` when a
+                # position has reached 1R, hasn't already partialed, and
+                # no terminal exit would fire. ``run_exit_engine`` routes
+                # those into a separate bucket so terminal-close logic
+                # stays unchanged.
+                for partial_rec in exit_results.get("partial_actions", []):
+                    pos_id = partial_rec.get("position_id")
+                    if pos_id is None:
+                        continue
+                    pos = db.query(_PT).get(pos_id)
+                    if pos is None or pos.partial_taken:
+                        continue
+                    fraction = float(partial_rec.get("partial_close_fraction", 0.5))
+                    outcome = place_partial_close(
+                        db, pos, fraction,
+                        current_price=partial_rec.get("current_price"),
+                    )
+                    if outcome.get("ok"):
+                        logger.info(
+                            "[partial_profit_ops] position_id=%s ticker=%s "
+                            "fraction=%.2f r_multiple=%s qty=%.4f price=%.4f",
+                            pos.id, pos.ticker, fraction,
+                            partial_rec.get("r_multiple"),
+                            outcome.get("quantity"), outcome.get("price"),
+                        )
+                    else:
+                        logger.warning(
+                            "[partial_profit_ops] FAILED position_id=%s ticker=%s reason=%s",
+                            pos.id, pos.ticker, outcome.get("error"),
+                        )
             except Exception:
                 logger.debug("[scheduler] live_exit_engine error", exc_info=True)
         finally:

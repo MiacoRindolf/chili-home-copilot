@@ -96,12 +96,6 @@ def compute_live_exit_levels(
             result["action"] = "exit_target"
             result["exit_price"] = target
 
-    if risk > 0 and exit_cfg.get("partial_at_1r", False):
-        r_move = (current_price - entry) / risk if is_long else (entry - current_price) / risk
-        if r_move >= 1.0:
-            result["partial_profit_eligible"] = True
-            result["r_multiple"] = round(r_move, 2)
-
     max_bars = exit_cfg.get("max_bars")
     if max_bars and trade.entry_date:
         days_held = (datetime.utcnow() - trade.entry_date).days
@@ -125,6 +119,28 @@ def compute_live_exit_levels(
                     result["exit_price"] = current_price
         except Exception:
             pass
+
+    # Partial-profit emission (migration 226 wired this up). Priority
+    # discipline: partial only fires when no terminal exit would, so the
+    # action is checked AFTER stop/target/time_decay/BOS have had their
+    # chance. ``partial_taken`` gates re-fire (single partial per trade).
+    # The legacy ``partial_profit_eligible`` flag was dead (zero readers
+    # confirmed via grep); replaced with an actual ``action="partial"``
+    # that ``run_exit_engine`` routes into the partial_actions bucket.
+    if (
+        risk > 0
+        and exit_cfg.get("partial_at_1r", False)
+        and not getattr(trade, "partial_taken", False)
+        and result["action"] == "hold"
+    ):
+        r_move = (current_price - entry) / risk if is_long else (entry - current_price) / risk
+        if r_move >= 1.0:
+            result["action"] = "partial"
+            result["exit_price"] = current_price
+            result["r_multiple"] = round(r_move, 2)
+            result["partial_close_fraction"] = float(
+                exit_cfg.get("partial_close_fraction", 0.5)
+            )
 
     _phase_b_shadow_parity(
         db=db,
@@ -201,6 +217,11 @@ def _load_exit_config(db: Session, scan_pattern_id: int | None) -> dict:
         "use_bos": True,
         "bos_buffer_pct": 0.5,
         "partial_at_1r": False,
+        # Fraction of position to close on the partial fire. 0.5 = "take
+        # half off at 1R, let the rest run". Pattern can override via
+        # ``exit_config.partial_close_fraction``. Bounds [0, 1] enforced
+        # at place_partial_close call time (the consumer).
+        "partial_close_fraction": 0.5,
     }
     if not scan_pattern_id:
         return defaults
@@ -238,13 +259,26 @@ def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
         except Exception as e:
             logger.debug("[exit_engine] Error evaluating %s: %s", pos.ticker, e)
 
-    actions = [r for r in results if r.get("action") != "hold"]
-    logger.info("[exit_engine] Evaluated %d positions: %d actions recommended", len(results), len(actions))
+    # Split non-hold actions into terminal vs partial buckets. The
+    # ``actions`` key keeps the legacy meaning (terminal closes only) so
+    # existing consumers don't change behaviour. ``partial_actions`` is
+    # a new bucket the auto-trader / paper-runner consumes separately to
+    # call ``place_partial_close`` without closing the whole position.
+    terminal_actions = [
+        r for r in results
+        if r.get("action") not in ("hold", "partial")
+    ]
+    partial_actions = [r for r in results if r.get("action") == "partial"]
+    logger.info(
+        "[exit_engine] Evaluated %d positions: %d terminal + %d partial actions recommended",
+        len(results), len(terminal_actions), len(partial_actions),
+    )
 
     return {
         "ok": True,
         "evaluated": len(results),
-        "actions": actions,
+        "actions": terminal_actions,
+        "partial_actions": partial_actions,
         "all": results,
     }
 

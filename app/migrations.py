@@ -14764,6 +14764,54 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_226_partial_taken_columns(conn) -> None:
+    """f-partial-profit-wire-up (2026-05-05).
+
+    Adds persistence for partial-profit-taking at 1R:
+      * ``partial_taken``       (bool not null default false)
+      * ``partial_taken_at``    (timestamp)
+      * ``partial_taken_qty``   (double precision)
+      * ``partial_taken_price`` (double precision)
+
+    Applied to both ``trading_trades`` (live) and
+    ``trading_paper_trades`` (paper). Sparse partial indexes on
+    ``WHERE partial_taken = TRUE`` keep the indexes small (most
+    positions never partial).
+
+    Also widens ``trading_paper_trades.quantity`` from INTEGER to
+    DOUBLE PRECISION so a fractional partial is representable. Live
+    ``trading_trades.quantity`` is already DOUBLE PRECISION (Float).
+    All existing consumers use ``quantity`` multiplicatively
+    (P/L, commission) -- no ``range()`` or int-specific code paths
+    were found by Grep, so the widening is safe.
+
+    Idempotent: ``ADD COLUMN IF NOT EXISTS``,
+    ``ALTER COLUMN ... TYPE`` is idempotent if already DOUBLE PRECISION,
+    ``CREATE INDEX IF NOT EXISTS``.
+    """
+    for table in ("trading_trades", "trading_paper_trades"):
+        conn.execute(text(f"""
+            ALTER TABLE {table}
+                ADD COLUMN IF NOT EXISTS partial_taken         BOOLEAN NOT NULL DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS partial_taken_at      TIMESTAMP NULL,
+                ADD COLUMN IF NOT EXISTS partial_taken_qty     DOUBLE PRECISION NULL,
+                ADD COLUMN IF NOT EXISTS partial_taken_price   DOUBLE PRECISION NULL
+        """))
+        conn.execute(text(f"""
+            CREATE INDEX IF NOT EXISTS ix_{table}_partial_taken
+                ON {table} (partial_taken)
+                WHERE partial_taken = TRUE
+        """))
+
+    # Widen paper_trades.quantity to float so fractional partials work.
+    # Live ``trading_trades.quantity`` is already DOUBLE PRECISION.
+    conn.execute(text("""
+        ALTER TABLE trading_paper_trades
+            ALTER COLUMN quantity TYPE DOUBLE PRECISION
+    """))
+    conn.commit()
+
+
 def _migration_225_exit_parity_strict_agree(conn) -> None:
     """f-exit-parity-persist (2026-05-05).
 
@@ -15320,6 +15368,8 @@ MIGRATIONS = [
      _migration_224_position_identity_phase_1),
     ("225_exit_parity_strict_agree",
      _migration_225_exit_parity_strict_agree),
+    ("226_partial_taken_columns",
+     _migration_226_partial_taken_columns),
 ]
 
 

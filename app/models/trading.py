@@ -107,6 +107,15 @@ class Trade(Base):
     # Explicit asset class. Auto-derived by before_insert hook below from
     # ticker shape + indicator_snapshot. See migration 192 for the backfill rules.
     asset_kind: Optional[str] = Column(String(20), nullable=True, index=True)
+    # Migration 226: partial-profit-taking at 1R bookkeeping. ``partial_taken``
+    # gates re-fire (single partial per trade); the three timestamped columns
+    # are audit-only. Original ``quantity`` is reduced by the partial fraction
+    # at fill time, so reconstructing pre-partial size is
+    # ``quantity + partial_taken_qty``.
+    partial_taken: bool = Column(Boolean, nullable=False, default=False)
+    partial_taken_at: Optional[datetime] = Column(DateTime, nullable=True)
+    partial_taken_qty: Optional[float] = Column(Float, nullable=True)
+    partial_taken_price: Optional[float] = Column(Float, nullable=True)
 
     # Anomaly guards (incident 2026-04-19: Massive provider outage caused 66 crypto rows
     # to land with entry_price=0 because quote-fetch failed silently and writes proceeded).
@@ -987,7 +996,9 @@ class PaperTrade(Base):
     entry_price: float = Column(Float, nullable=False)
     stop_price: Optional[float] = Column(Float, nullable=True)
     target_price: Optional[float] = Column(Float, nullable=True)
-    quantity: int = Column(Integer, nullable=False, default=1)
+    # Migration 226: widened from Integer -> Float so a fractional partial
+    # at 1R is representable on the typical ``quantity=1`` paper position.
+    quantity: float = Column(Float, nullable=False, default=1.0)
     status: str = Column(String(16), nullable=False, default="open")  # open, closed, expired
     entry_date: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     exit_date: Optional[datetime] = Column(DateTime, nullable=True)
@@ -996,6 +1007,13 @@ class PaperTrade(Base):
     pnl: Optional[float] = Column(Float, nullable=True)
     pnl_pct: Optional[float] = Column(Float, nullable=True)
     signal_json: Optional[dict] = Column(JSONB, nullable=True)
+    # Migration 226: partial-profit-taking at 1R. Same shape as on Trade
+    # above. Single partial per paper trade; reconstruct pre-partial size
+    # as ``quantity + partial_taken_qty``.
+    partial_taken: bool = Column(Boolean, nullable=False, default=False)
+    partial_taken_at: Optional[datetime] = Column(DateTime, nullable=True)
+    partial_taken_qty: Optional[float] = Column(Float, nullable=True)
+    partial_taken_price: Optional[float] = Column(Float, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
