@@ -27,6 +27,51 @@ from ...models.trading import PaperTrade, ScanPattern, Trade
 logger = logging.getLogger(__name__)
 
 
+def _compute_bars_held(db: Session, trade: PaperTrade | Trade) -> int:
+    """Bars elapsed since ``trade.entry_date``, sized to the position's
+    pattern timeframe.
+
+    Migration 227 fix: pre-fix the legacy time-decay path computed
+    ``(now - entry_date).days`` regardless of timeframe, so a 1m position
+    only "ages" by 1 bar after a full day instead of 1440. Survey at
+    fix time: 181 × 1m, 116 × 5m, 84 × 15m, 170 × 1h, 74 × 4h, 144 × 1d
+    -- 625 of 769 patterns silently affected.
+
+    Falls back to ``"1d"`` when:
+      * the position has no associated ScanPattern (orphan / direct-entry);
+      * the pattern's timeframe value is missing or unknown to
+        ``timeframe_utils._TIMEFRAME_SECONDS`` (logged WARNING).
+
+    The fallback preserves legacy semantics for the orphan case so this
+    fix is forward-only -- existing time-decay decisions on 1d positions
+    keep their pre-fix behaviour.
+    """
+    from .timeframe_utils import timeframe_to_seconds
+
+    if not trade.entry_date:
+        return 0
+    tf = "1d"
+    sp_id = getattr(trade, "scan_pattern_id", None)
+    if sp_id:
+        try:
+            pat = db.query(ScanPattern).filter(ScanPattern.id == sp_id).first()
+            if pat and pat.timeframe:
+                tf = pat.timeframe
+        except Exception:
+            pass
+    try:
+        tf_seconds = timeframe_to_seconds(tf)
+    except ValueError:
+        logger.warning(
+            "[exit_engine] Unknown timeframe %r for trade_id=%s; "
+            "defaulting to 1d. Add to timeframe_utils._TIMEFRAME_SECONDS.",
+            tf, getattr(trade, "id", None),
+        )
+        tf_seconds = 86400
+    elapsed_s = (datetime.utcnow() - trade.entry_date).total_seconds()
+    return max(0, int(elapsed_s // tf_seconds))
+
+
 def compute_live_exit_levels(
     db: Session,
     trade: PaperTrade | Trade,
@@ -98,11 +143,16 @@ def compute_live_exit_levels(
 
     max_bars = exit_cfg.get("max_bars")
     if max_bars and trade.entry_date:
-        days_held = (datetime.utcnow() - trade.entry_date).days
-        if days_held >= max_bars and result["action"] == "hold":
+        # Migration 227: bars-held is computed unit-aware via the
+        # position's pattern timeframe. Pre-fix this was wall-clock
+        # ``.days``, which silently broke time-decay on every non-1d
+        # pattern (181 1m + 116 5m + 84 15m + 170 1h + 74 4h patterns
+        # in production survey).
+        bars_held = _compute_bars_held(db, trade)
+        if bars_held >= max_bars and result["action"] == "hold":
             result["action"] = "exit_time_decay"
             result["exit_price"] = current_price
-            result["days_held"] = days_held
+            result["bars_held"] = bars_held
 
     swing_low_val: float | None = None
     if atr and exit_cfg.get("use_bos", True):
@@ -327,12 +377,14 @@ def _phase_b_shadow_parity(
         stop = float(trade.stop_price) if trade.stop_price else entry * (0.97 if is_long else 1.03)
         target = getattr(trade, "target_price", None)
         target_f = float(target) if target else None
-        bars_held = 0
-        if trade.entry_date:
-            try:
-                bars_held = max(0, (datetime.utcnow() - trade.entry_date).days)
-            except Exception:
-                bars_held = 0
+        # Migration 227: keep legacy and canonical adapters in sync via the
+        # same unit-aware bars-held helper. Pre-fix this branch read
+        # ``.days``, identical to the legacy bug above; canonical inherited
+        # the wrong unit through this adapter.
+        try:
+            bars_held = _compute_bars_held(db, trade)
+        except Exception:
+            bars_held = 0
 
         state = ev.PositionState(
             direction="long" if is_long else "short",

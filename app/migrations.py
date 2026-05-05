@@ -14764,6 +14764,52 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_227_scan_patterns_timeframe_check(conn) -> None:
+    """f-time-decay-unit-fix (2026-05-05).
+
+    Defensive CHECK constraint on ``scan_patterns.timeframe`` so the DB
+    only stores values present in
+    ``app.services.trading.timeframe_utils._TIMEFRAME_SECONDS``.
+
+    Pre-deploy survey of production ``chili``:
+
+        '1m'  : 181
+        '1h'  : 170
+        '1d'  : 144
+        '5m'  : 116
+        '15m' :  84
+        '4h'  :  74
+        ----
+        Total : 769  (625 of which are non-1d -- silently affected by
+                       the wall-clock ``.days`` time-decay bug fixed in
+                       this same task)
+
+    All survey values are already in the allowed list; no cleanup
+    required. ``30m``, ``2h``, ``1w`` are kept in the allowed list for
+    forward use but absent from production today.
+
+    Idempotent via ``DO $$ ... pg_constraint`` existence check.
+    """
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'scan_patterns_timeframe_check'
+            ) THEN
+                ALTER TABLE scan_patterns
+                    ADD CONSTRAINT scan_patterns_timeframe_check
+                    CHECK (timeframe IN (
+                        '1m', '5m', '15m', '30m',
+                        '1h', '2h', '4h',
+                        '1d', '1w'
+                    ));
+            END IF;
+        END $$;
+    """))
+    conn.commit()
+
+
 def _migration_226_partial_taken_columns(conn) -> None:
     """f-partial-profit-wire-up (2026-05-05).
 
@@ -15370,6 +15416,8 @@ MIGRATIONS = [
      _migration_225_exit_parity_strict_agree),
     ("226_partial_taken_columns",
      _migration_226_partial_taken_columns),
+    ("227_scan_patterns_timeframe_check",
+     _migration_227_scan_patterns_timeframe_check),
 ]
 
 

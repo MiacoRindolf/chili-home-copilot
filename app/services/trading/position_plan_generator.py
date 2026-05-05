@@ -182,7 +182,20 @@ def _build_position_context(
         alert = alerts_by_id.get(trade.related_alert_id) if trade.related_alert_id else None
         dec = latest_decisions.get(trade.id)
 
-        days_held = (datetime.utcnow() - trade.entry_date).days if trade.entry_date else None
+        # Migration 227: bars-held is unit-aware via the pattern's
+        # timeframe. Pre-fix this was wall-clock ``.days``, which lied
+        # by 24x at 1h, 1440x at 1m -- the LLM saw a 5-minute scalper as
+        # "0 days held" indefinitely. Falls back to 1d for orphan trades.
+        bars_held = None
+        if trade.entry_date:
+            tf = (pat.timeframe if pat and pat.timeframe else "1d")
+            try:
+                from .timeframe_utils import timeframe_to_seconds
+                tf_s = timeframe_to_seconds(tf)
+            except ValueError:
+                tf_s = 86400
+            elapsed_s = (datetime.utcnow() - trade.entry_date).total_seconds()
+            bars_held = max(0, int(elapsed_s // tf_s))
 
         pos = {
             "trade_id": trade.id,
@@ -195,7 +208,7 @@ def _build_position_context(
             "stop_loss": float(trade.stop_loss) if trade.stop_loss else None,
             "take_profit": float(trade.take_profit) if trade.take_profit else None,
             "entry_date": trade.entry_date.isoformat() if trade.entry_date else None,
-            "days_held": days_held,
+            "bars_held": bars_held,
             "sector": trade.sector,
             "trade_type": trade.trade_type,
             "notes": (trade.notes or "")[:200],
