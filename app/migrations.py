@@ -14668,6 +14668,102 @@ def _migration_220_fast_signal_decay(conn) -> None:
     conn.commit()
 
 
+def _migration_224_position_identity_phase_1(conn) -> None:
+    """position-identity-phase-1 (2026-05-04).
+
+    Per docs/DESIGN/POSITION_IDENTITY.md § 7.1, § 7.2, § 8.1.
+
+    Creates the position layer in shadow mode:
+      * ``trading_positions`` -- broker-authoritative position identity,
+        keyed by (user_id, broker_source, account_type, ticker, direction).
+      * ``trading_position_events`` -- append-only event stream that
+        is the truth for position state derivation (snapshot fields on
+        trading_positions are derived materializations).
+
+    Bundled cleanup: DROP COLUMN
+    ``trading_bracket_intents.phantom_close_consecutive_zero_qty_sweeps``
+    (mig 223 orphan; the path that wrote it was retired in
+    broker-truth-self-heal). Same migration to keep schema-cleanup
+    correlated with the schema introduction this initiative starts.
+
+    Idempotent: CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS,
+    DROP COLUMN IF EXISTS. Re-running on environments that already
+    have the schema is a no-op.
+
+    NO READERS depend on these tables in Phase 1. The bracket
+    reconciler, stop engine, bracket writer, inverse-reconcile, and
+    every decision-making code path continue to read trading_trades.
+    Phase 4 swaps the inverse-reconcile reader; Phase 3 swaps bracket
+    intent FKs; Phases 5-6 follow.
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS trading_positions (
+            id              BIGSERIAL PRIMARY KEY,
+            user_id         INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+            broker_source   VARCHAR(20) NOT NULL,
+            account_type    VARCHAR(20) NOT NULL DEFAULT 'cash',
+            ticker          VARCHAR(20) NOT NULL,
+            direction       VARCHAR(10) NOT NULL DEFAULT 'long',
+            asset_kind      VARCHAR(20) NULL,
+            current_quantity         DOUBLE PRECISION NULL,
+            current_avg_price        DOUBLE PRECISION NULL,
+            state                    VARCHAR(20) NOT NULL DEFAULT 'unknown',
+            current_envelope_id      BIGINT NULL REFERENCES trading_trades(id) ON DELETE SET NULL,
+            last_observed_at         TIMESTAMP NULL,
+            last_state_transition_at TIMESTAMP NULL,
+            created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT trading_positions_state_check
+                CHECK (state IN ('unknown', 'open', 'closed', 'suspect')),
+            CONSTRAINT trading_positions_direction_check
+                CHECK (direction IN ('long', 'short')),
+            CONSTRAINT uq_trading_positions_natural_key
+                UNIQUE (user_id, broker_source, account_type, ticker, direction)
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_trading_positions_state_open
+            ON trading_positions (broker_source, ticker)
+            WHERE state = 'open'
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_trading_positions_user_broker
+            ON trading_positions (user_id, broker_source)
+    """))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS trading_position_events (
+            id                BIGSERIAL PRIMARY KEY,
+            position_id       BIGINT NOT NULL REFERENCES trading_positions(id) ON DELETE CASCADE,
+            event_type        VARCHAR(20) NOT NULL,
+            transition_reason VARCHAR(64) NOT NULL,
+            quantity          DOUBLE PRECISION NULL,
+            avg_price         DOUBLE PRECISION NULL,
+            broker_payload    JSONB NULL,
+            envelope_id       BIGINT NULL REFERENCES trading_trades(id) ON DELETE SET NULL,
+            observed_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+            recorded_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT trading_position_events_event_type_check
+                CHECK (event_type IN ('opened', 'qty_change', 'closed', 're_opened', 'suspect', 'sync_gap', 'corrected'))
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_position_events_position_observed
+            ON trading_position_events (position_id, observed_at DESC)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_position_events_event_type_observed
+            ON trading_position_events (event_type, observed_at DESC)
+    """))
+
+    # Drop mig 223 orphan column (idempotent).
+    conn.execute(text("""
+        ALTER TABLE trading_bracket_intents
+            DROP COLUMN IF EXISTS phantom_close_consecutive_zero_qty_sweeps
+    """))
+    conn.commit()
+
+
 def _migration_223_bracket_intent_phantom_close_consecutive_zero_qty_counter(conn) -> None:
     """bracket-emergency-repair-flap-guard (2026-05-04).
 
@@ -15191,6 +15287,8 @@ MIGRATIONS = [
      _migration_222_bracket_intent_terminal_reject_repair_throttle),
     ("223_bracket_intent_phantom_close_consecutive_zero_qty_counter",
      _migration_223_bracket_intent_phantom_close_consecutive_zero_qty_counter),
+    ("224_position_identity_phase_1",
+     _migration_224_position_identity_phase_1),
 ]
 
 
