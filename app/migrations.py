@@ -14764,6 +14764,35 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_225_exit_parity_strict_agree(conn) -> None:
+    """f-exit-parity-persist (2026-05-05).
+
+    Adds ``agree_strict_bool`` to ``trading_exit_parity_log``. Necessary
+    because the live and backtest paths compute ``agree_bool`` with
+    different definitions:
+      * live  -- strict label equality (``legacy_action == canonical_action``)
+      * backtest -- looser "both engines closed" (any-exit-vs-any-exit)
+
+    Mixing definitions in one column makes any aggregate over
+    ``agree_bool`` methodologically unsound. The new column is always
+    strict label equality and gets populated on both paths going forward.
+    Existing rows pre-date the column and stay NULL; verdict queries
+    should filter ``WHERE agree_strict_bool IS NOT NULL`` to restrict to
+    consistently-defined data.
+
+    Idempotent: ADD COLUMN IF NOT EXISTS / CREATE INDEX IF NOT EXISTS.
+    """
+    conn.execute(text("""
+        ALTER TABLE trading_exit_parity_log
+            ADD COLUMN IF NOT EXISTS agree_strict_bool BOOLEAN NULL
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_exit_parity_strict_agree_created
+            ON trading_exit_parity_log (agree_strict_bool, created_at)
+    """))
+    conn.commit()
+
+
 def _migration_223_bracket_intent_phantom_close_consecutive_zero_qty_counter(conn) -> None:
     """bracket-emergency-repair-flap-guard (2026-05-04).
 
@@ -15289,6 +15318,8 @@ MIGRATIONS = [
      _migration_223_bracket_intent_phantom_close_consecutive_zero_qty_counter),
     ("224_position_identity_phase_1",
      _migration_224_position_identity_phase_1),
+    ("225_exit_parity_strict_agree",
+     _migration_225_exit_parity_strict_agree),
 ]
 
 

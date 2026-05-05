@@ -1684,6 +1684,11 @@ class ExitParityLog(Base):
         Index("ix_exit_parity_ticker_created", "ticker", "created_at"),
         Index("ix_exit_parity_mode_created", "mode", "created_at"),
         Index("ix_exit_parity_agree_created", "agree_bool", "created_at"),
+        Index(
+            "ix_exit_parity_strict_agree_created",
+            "agree_strict_bool",
+            "created_at",
+        ),
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -1698,6 +1703,11 @@ class ExitParityLog(Base):
     canonical_exit_price: Optional[float] = Column(Float, nullable=True)
     pnl_diff_pct: Optional[float] = Column(Float, nullable=True)
     agree_bool: bool = Column(Boolean, nullable=False, default=False)
+    # Migration 225: strict label equality. NULL on rows that pre-date the
+    # column. Verdict queries that need a methodologically consistent
+    # definition across backtest + live should filter on this and
+    # ``agree_strict_bool IS NOT NULL``.
+    agree_strict_bool: Optional[bool] = Column(Boolean, nullable=True)
     mode: str = Column(String(16), nullable=False)
     config_hash: Optional[str] = Column(String(64), nullable=True)
     provenance_json: Optional[dict] = Column(JSONB, nullable=True)

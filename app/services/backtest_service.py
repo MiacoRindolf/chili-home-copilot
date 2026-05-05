@@ -1441,6 +1441,10 @@ def _phase_b_bt_shadow_parity(
             # "agree on close/no-close"; label mismatch is tracked separately.
             legacy_action != "hold" and canonical_action != "hold"
         )
+        # Strict label equality lives in its own column so verdict queries
+        # have a methodologically consistent definition across backtest and
+        # live rows. The loose ``agree`` above stays for backwards-compat.
+        agree_strict = (legacy_action == canonical_action)
         config_hash = cfg.config_hash()
 
         sink = getattr(strategy, "_parity_sink", None)
@@ -1455,6 +1459,7 @@ def _phase_b_bt_shadow_parity(
                 "canonical_action": canonical_action,
                 "canonical_exit_price": decision.exit_price,
                 "agree_bool": bool(agree),
+                "agree_strict_bool": bool(agree_strict),
                 "mode": mode,
                 "config_hash": config_hash,
                 "reason_code": decision.reason_code,
@@ -1493,6 +1498,82 @@ def _phase_b_bt_shadow_parity(
                 logger.info(line)
     except Exception as exc:
         logger.debug("[exit_engine_bt] shadow parity failed: %s", exc)
+
+
+def _drain_backtest_parity_sink(strat_cls: type, ticker: str) -> None:
+    """Persist accumulated backtest parity rows into ``trading_exit_parity_log``.
+
+    Drains ``strat_cls._parity_sink`` (populated by ``_phase_b_bt_shadow_parity``
+    during ``DynamicPatternStrategy.next()``) into the DB via a fresh
+    ``SessionLocal`` so the parity write never touches the caller's
+    transaction. Append-only audit data; ``bulk_save_objects`` is fine.
+
+    Failures log + continue: the legacy decision has already happened and
+    the backtest result is unaffected. A broken parity drain MUST NOT
+    break a backtest.
+    """
+    sink = list(getattr(strat_cls, "_parity_sink", None) or [])
+    if not sink:
+        return
+    try:
+        from ..db import SessionLocal
+        from ..models.trading import ExitParityLog
+
+        rows: list[ExitParityLog] = []
+        for r in sink:
+            legacy_xp = r.get("legacy_exit_price")
+            canonical_xp = r.get("canonical_exit_price")
+            pnl_diff_pct = None
+            # Long-only sign convention: positive = canonical exited higher
+            # than legacy (better for longs). DynamicPatternStrategy is
+            # long-only today; if shorts are added, negate for short rows.
+            if (
+                legacy_xp is not None
+                and canonical_xp is not None
+                and float(legacy_xp) > 0
+            ):
+                pnl_diff_pct = float(
+                    (float(canonical_xp) - float(legacy_xp))
+                    / float(legacy_xp)
+                    * 100.0
+                )
+            rows.append(
+                ExitParityLog(
+                    source=r["source"],
+                    position_id=r.get("position_id"),
+                    scan_pattern_id=r.get("scan_pattern_id"),
+                    ticker=r.get("ticker") or "",
+                    bar_ts=None,
+                    legacy_action=r["legacy_action"],
+                    legacy_exit_price=legacy_xp,
+                    canonical_action=r["canonical_action"],
+                    canonical_exit_price=canonical_xp,
+                    pnl_diff_pct=pnl_diff_pct,
+                    agree_bool=bool(r["agree_bool"]),
+                    agree_strict_bool=bool(r.get("agree_strict_bool"))
+                    if r.get("agree_strict_bool") is not None
+                    else None,
+                    mode=r["mode"],
+                    config_hash=r["config_hash"],
+                    provenance_json={
+                        "reason_code": r.get("reason_code"),
+                        "bar_idx": r.get("bar_idx"),
+                    },
+                )
+            )
+
+        with SessionLocal() as parity_db:
+            parity_db.bulk_save_objects(rows)
+            parity_db.commit()
+        logger.info(
+            "[exit_parity] persisted %d backtest parity rows ticker=%s",
+            len(rows), ticker,
+        )
+    except Exception as e:
+        logger.warning(
+            "[exit_parity] backtest sink drain failed ticker=%s: %s",
+            ticker, e,
+        )
 
 
 def _extract_pattern_indicators(
@@ -1799,6 +1880,13 @@ def _run_dynamic_pattern_slice(
         "_swing_low_array": swing_lows,
         "_explicit_bos_buffer": explicit_bos_buffer,
         "_explicit_bos_grace": explicit_bos_grace,
+        # Phase B: identifiers + sink for the parity hook in `next()`.
+        # Without these the sink branch in `_phase_b_bt_shadow_parity` is a
+        # silent no-op (was the cause of `trading_exit_parity_log` being
+        # empty across all backtest runs). Fresh list per type() call.
+        "_ticker": ticker,
+        "_scan_pattern_id": scan_pattern_id,
+        "_parity_sink": [],
     })
 
     bt = FractionalBacktest(
@@ -1826,6 +1914,8 @@ def _run_dynamic_pattern_slice(
             ticker, _e,
         )
         return {"ok": False, "error": f"backtest_budget_exceeded:{ticker}"}
+
+    _drain_backtest_parity_sink(strat_cls, ticker)
 
     equity_data: list[dict[str, Any]] = []
     if include_charts:

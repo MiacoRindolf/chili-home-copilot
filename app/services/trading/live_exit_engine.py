@@ -327,20 +327,43 @@ def _phase_b_shadow_parity(
         legacy_action = str(legacy_result.get("action") or "hold")
         canonical_action = decision.action
         agree = (legacy_action == canonical_action)
+        # Live's existing ``agree`` is already strict label equality, so
+        # ``agree_strict_bool`` mirrors ``agree_bool`` for live rows. The
+        # column exists so verdict queries can apply a single definition
+        # across live and backtest sources (backtest's ``agree_bool`` is
+        # the looser "both engines closed" definition).
+        agree_strict = (legacy_action == canonical_action)
         config_hash = cfg.config_hash()
 
-        row = ExitParityLog(
+        legacy_xp = legacy_result.get("exit_price")
+        canonical_xp = decision.exit_price
+        pnl_diff_pct: float | None = None
+        # Long-only sign convention. ``compute_live_exit_levels`` is
+        # long-only today; if shorts are added later, negate for short rows.
+        if (
+            legacy_xp is not None
+            and canonical_xp is not None
+            and float(legacy_xp) > 0
+        ):
+            pnl_diff_pct = float(
+                (float(canonical_xp) - float(legacy_xp))
+                / float(legacy_xp)
+                * 100.0
+            )
+
+        row_kwargs = dict(
             source="live",
             position_id=int(getattr(trade, "id", 0) or 0) or None,
             scan_pattern_id=getattr(trade, "scan_pattern_id", None),
             ticker=str(trade.ticker),
             bar_ts=None,
             legacy_action=legacy_action,
-            legacy_exit_price=legacy_result.get("exit_price"),
+            legacy_exit_price=legacy_xp,
             canonical_action=canonical_action,
-            canonical_exit_price=decision.exit_price,
-            pnl_diff_pct=None,
+            canonical_exit_price=canonical_xp,
+            pnl_diff_pct=pnl_diff_pct,
             agree_bool=bool(agree),
+            agree_strict_bool=bool(agree_strict),
             mode=mode,
             config_hash=config_hash,
             provenance_json={
@@ -351,14 +374,24 @@ def _phase_b_shadow_parity(
                 "reason_code": decision.reason_code,
             },
         )
-        db.add(row)
-        db.flush()
+
+        # Use a fresh SessionLocal so the parity write commits independently
+        # of the caller's transaction. The caller chain (trading_scheduler ->
+        # _run_paper_trade_check_job) wraps ``check_paper_exits`` writes in
+        # the same db, and a ``db.commit()`` here would prematurely flush
+        # those. ``db.flush()`` (the previous behaviour) sends to server
+        # state but rolls back if the caller never commits -- which is why
+        # 0 live parity rows ever landed.
+        from ...db import SessionLocal as _SL
+        with _SL() as parity_db:
+            parity_db.add(ExitParityLog(**row_kwargs))
+            parity_db.commit()
 
         if ops_log_enabled:
             line = format_exit_engine_ops_line(
                 mode=mode,
                 source="live",
-                position_id=row.position_id,
+                position_id=row_kwargs["position_id"],
                 ticker=str(trade.ticker),
                 legacy_action=legacy_action,
                 canonical_action=canonical_action,
