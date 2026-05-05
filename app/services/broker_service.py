@@ -1423,6 +1423,314 @@ def _resolve_close_exit_price(ticker: str) -> float | None:
     return None
 
 
+# ── position-identity-phase-1 (2026-05-04) shadow-mode helpers ────────
+#
+# Per docs/DESIGN/POSITION_IDENTITY.md § 8.1: the position layer ships
+# in shadow mode -- broker_sync writes to trading_positions /
+# trading_position_events alongside today's trading_trades writes; NO
+# READERS depend on the new tables for decisions in Phase 1. Failures
+# in this code path log + continue; they NEVER raise to the surrounding
+# sync_positions_to_db loop (the additive-shadow contract).
+#
+# Sync-gap detection threshold: 2 × the broker_sync cron interval.
+# The broker_sync cron is configured at trading_scheduler.py:3317 with
+# ``minute="*/2"`` -> 120 seconds between cycles. The 2× multiplier is
+# the next-cycle-plus-tolerance derivation from design doc § 11.1
+# Decision B. If the operator changes the broker_sync cron in
+# trading_scheduler.py, this constant must move in lockstep -- comment
+# above the source-of-truth and a test guard catch divergence.
+_BROKER_SYNC_CRON_INTERVAL_SECONDS = 120
+_SYNC_GAP_TOLERANCE_MULTIPLIER = 2
+_SYNC_GAP_THRESHOLD_SECONDS = (
+    _BROKER_SYNC_CRON_INTERVAL_SECONDS * _SYNC_GAP_TOLERANCE_MULTIPLIER
+)
+
+
+def _resolve_account_type_for_position(broker_source: str, ticker: str) -> str:
+    """Resolve account_type for a broker-observed position.
+
+    Phase 1 returns 'cash' for all live broker observations -- the
+    operator runs a single cash-equivalent account per broker today.
+    The autopilot routing layer (Phase 7) refines per-account-type
+    rules later. The column exists in the schema for forward-compat
+    only.
+    """
+    return "cash"
+
+
+def _resolve_direction_for_position(broker_payload: Any) -> str:
+    """Resolve direction for a broker-observed position. Robinhood
+    retail does not surface short positions in get_positions(); all
+    observations default to 'long'. Future perps venues
+    (Hyperliquid/dYdX/Kraken Futures) will signal short via the
+    payload shape; that integration adds a per-broker resolver.
+    """
+    return "long"
+
+
+def _infer_asset_kind_for_position(ticker: str) -> str | None:
+    """Mirror the auto-derivation logic at app/models/trading.py:151
+    for trade.asset_kind. Returns 'crypto' for -USD tickers, 'equity'
+    otherwise. Position layer keeps this for query convenience; not
+    authoritative."""
+    t = (ticker or "").upper().strip()
+    if not t:
+        return None
+    if t.endswith("-USD"):
+        return "crypto"
+    return "equity"
+
+
+def _phase1_record_position_observation(
+    db: Session,
+    *,
+    user_id: int | None,
+    broker_source: str,
+    account_type: str,
+    ticker: str,
+    direction: str,
+    asset_kind: str | None,
+    broker_qty: float,
+    broker_avg: float | None,
+    broker_payload: Any | None,
+) -> None:
+    """Phase 1 shadow-mode write. Idempotent. Never raises -- caller's
+    try/except wraps; failures inside log at debug.
+
+    Per design doc § 8.1, on a single broker observation:
+      1. Look up existing trading_positions row by natural key.
+      2. If not found: INSERT + write 'opened' event.
+      3. If found and state='closed': flip to 'open' + write 're_opened' event.
+      4. If found and qty differs from snapshot: write 'qty_change' event.
+      5. If found and identical: bump last_observed_at only (no event).
+    Sync-gap detection (per § 11.1 Decision B): if the prior event for
+    this position was older than _SYNC_GAP_THRESHOLD_SECONDS, write a
+    'sync_gap' event BEFORE the current observation event.
+    """
+    from datetime import datetime, timedelta
+    import json as _json
+
+    payload_json = None
+    if broker_payload is not None:
+        try:
+            payload_json = _json.dumps(broker_payload, default=str)
+        except Exception:
+            payload_json = None
+
+    # 1. Look up existing position row.
+    row = db.execute(
+        text(
+            "SELECT id, state, current_quantity, current_avg_price, last_observed_at "
+            "FROM trading_positions "
+            "WHERE COALESCE(user_id, -1) = COALESCE(:uid, -1) "
+            "  AND broker_source = :bs "
+            "  AND account_type = :at "
+            "  AND ticker = :tk "
+            "  AND direction = :dir"
+        ),
+        {
+            "uid": user_id, "bs": broker_source, "at": account_type,
+            "tk": ticker, "dir": direction,
+        },
+    ).first()
+
+    now = datetime.utcnow()
+
+    if row is None:
+        # 2. INSERT + opened event.
+        new_id = db.execute(
+            text(
+                "INSERT INTO trading_positions ("
+                "  user_id, broker_source, account_type, ticker, direction, "
+                "  asset_kind, current_quantity, current_avg_price, state, "
+                "  last_observed_at, last_state_transition_at "
+                ") VALUES ("
+                "  :uid, :bs, :at, :tk, :dir, "
+                "  :ak, :q, :avg, 'open', :now, :now"
+                ") RETURNING id"
+            ),
+            {
+                "uid": user_id, "bs": broker_source, "at": account_type,
+                "tk": ticker, "dir": direction, "ak": asset_kind,
+                "q": broker_qty, "avg": broker_avg, "now": now,
+            },
+        ).scalar_one()
+        db.execute(
+            text(
+                "INSERT INTO trading_position_events ("
+                "  position_id, event_type, transition_reason, quantity, "
+                "  avg_price, broker_payload, observed_at "
+                ") VALUES ("
+                "  :pid, 'opened', 'broker_sync_first_observation', :q, "
+                "  :avg, CAST(:p AS JSONB), :now"
+                ")"
+            ),
+            {
+                "pid": int(new_id), "q": broker_qty, "avg": broker_avg,
+                "p": payload_json, "now": now,
+            },
+        )
+        db.commit()
+        return
+
+    pos_id = int(row[0])
+    prev_state = row[1] or "unknown"
+    prev_qty = row[2]
+    prev_observed = row[4]
+
+    # Sync-gap detection: if last_observed_at is older than the threshold,
+    # emit a sync_gap event capturing the missed window.
+    if prev_observed is not None:
+        gap_seconds = (now - prev_observed).total_seconds()
+        if gap_seconds > _SYNC_GAP_THRESHOLD_SECONDS:
+            db.execute(
+                text(
+                    "INSERT INTO trading_position_events ("
+                    "  position_id, event_type, transition_reason, "
+                    "  observed_at "
+                    ") VALUES ("
+                    "  :pid, 'sync_gap', 'sync_gap', :now"
+                    ")"
+                ),
+                {"pid": pos_id, "now": prev_observed + timedelta(
+                    seconds=_BROKER_SYNC_CRON_INTERVAL_SECONDS,
+                )},
+            )
+
+    # 3. re_opened from closed.
+    if prev_state == "closed":
+        db.execute(
+            text(
+                "UPDATE trading_positions "
+                "SET state='open', current_quantity=:q, current_avg_price=:avg, "
+                "    asset_kind=COALESCE(asset_kind, :ak), "
+                "    last_observed_at=:now, last_state_transition_at=:now, "
+                "    updated_at=:now "
+                "WHERE id=:pid"
+            ),
+            {"pid": pos_id, "q": broker_qty, "avg": broker_avg,
+             "ak": asset_kind, "now": now},
+        )
+        db.execute(
+            text(
+                "INSERT INTO trading_position_events ("
+                "  position_id, event_type, transition_reason, quantity, "
+                "  avg_price, broker_payload, observed_at "
+                ") VALUES ("
+                "  :pid, 're_opened', 'broker_sync_position_reappeared', :q, "
+                "  :avg, CAST(:p AS JSONB), :now"
+                ")"
+            ),
+            {"pid": pos_id, "q": broker_qty, "avg": broker_avg,
+             "p": payload_json, "now": now},
+        )
+        db.commit()
+        return
+
+    # 4. qty_change.
+    qty_diff = (
+        prev_qty is None
+        or abs(float(prev_qty or 0) - float(broker_qty or 0)) > 1e-9
+    )
+    if qty_diff:
+        db.execute(
+            text(
+                "UPDATE trading_positions "
+                "SET current_quantity=:q, current_avg_price=:avg, "
+                "    asset_kind=COALESCE(asset_kind, :ak), "
+                "    last_observed_at=:now, updated_at=:now "
+                "WHERE id=:pid"
+            ),
+            {"pid": pos_id, "q": broker_qty, "avg": broker_avg,
+             "ak": asset_kind, "now": now},
+        )
+        db.execute(
+            text(
+                "INSERT INTO trading_position_events ("
+                "  position_id, event_type, transition_reason, quantity, "
+                "  avg_price, broker_payload, observed_at "
+                ") VALUES ("
+                "  :pid, 'qty_change', 'broker_sync_qty_observation', :q, "
+                "  :avg, CAST(:p AS JSONB), :now"
+                ")"
+            ),
+            {"pid": pos_id, "q": broker_qty, "avg": broker_avg,
+             "p": payload_json, "now": now},
+        )
+        db.commit()
+        return
+
+    # 5. Identical -- bump last_observed_at only, no event.
+    db.execute(
+        text(
+            "UPDATE trading_positions SET last_observed_at=:now, "
+            "updated_at=:now WHERE id=:pid"
+        ),
+        {"pid": pos_id, "now": now},
+    )
+    db.commit()
+
+
+def _phase1_close_dropped_positions(
+    db: Session,
+    *,
+    user_id: int | None,
+    broker_source: str,
+    observed_tickers: set[str],
+) -> None:
+    """Phase 1 shadow-mode close-detection. Per design doc § 8.1: for
+    each position currently state='open' whose ticker is NOT in this
+    cycle's observed_tickers, write 'closed' event + flip state.
+
+    Scoped by (user_id, broker_source) so a Robinhood broker_sync cycle
+    doesn't touch Coinbase positions and vice-versa. Idempotent.
+    Never raises -- caller's try/except wraps.
+    """
+    from datetime import datetime
+    if not observed_tickers:
+        # All-empty broker response is the R32 case; caller decides
+        # whether to mass-close. Phase 1 mirrors that decision: when
+        # observed_tickers is empty, do not close-drop here either.
+        return
+    now = datetime.utcnow()
+    rows = db.execute(
+        text(
+            "SELECT id, ticker FROM trading_positions "
+            "WHERE COALESCE(user_id, -1) = COALESCE(:uid, -1) "
+            "  AND broker_source = :bs "
+            "  AND state = 'open'"
+        ),
+        {"uid": user_id, "bs": broker_source},
+    ).fetchall()
+    for row in rows:
+        pos_id = int(row[0])
+        ticker = row[1]
+        if ticker in observed_tickers:
+            continue
+        # Broker dropped this position. Close it in shadow mode.
+        db.execute(
+            text(
+                "UPDATE trading_positions "
+                "SET state='closed', current_quantity=0, "
+                "    last_state_transition_at=:now, updated_at=:now "
+                "WHERE id=:pid"
+            ),
+            {"pid": pos_id, "now": now},
+        )
+        db.execute(
+            text(
+                "INSERT INTO trading_position_events ("
+                "  position_id, event_type, transition_reason, quantity, "
+                "  observed_at "
+                ") VALUES ("
+                "  :pid, 'closed', 'broker_sync_position_gone', 0, :now"
+                ")"
+            ),
+            {"pid": pos_id, "now": now},
+        )
+    db.commit()
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Robinhood positions into local Trade model."""
     from sqlalchemy import text
@@ -1475,6 +1783,29 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             )
             continue
         avg_price = _ap
+
+        # position-identity-phase-1 (2026-05-04): shadow-mode write to
+        # the position layer. Additive; NEVER raises to this loop;
+        # NO READERS depend on these tables for decisions in Phase 1.
+        # Per docs/DESIGN/POSITION_IDENTITY.md § 8.1.
+        try:
+            _phase1_record_position_observation(
+                db,
+                user_id=user_id,
+                broker_source="robinhood",
+                account_type=_resolve_account_type_for_position("robinhood", ticker),
+                ticker=ticker,
+                direction=_resolve_direction_for_position(pos),
+                asset_kind=_infer_asset_kind_for_position(ticker),
+                broker_qty=float(qty),
+                broker_avg=float(avg_price) if avg_price else None,
+                broker_payload=pos,
+            )
+        except Exception:
+            logger.warning(
+                "[phase1_position_event] write failed for %s; shadow-mode continues",
+                ticker, exc_info=True,
+            )
 
         existing = (
             db.query(Trade)
@@ -1803,6 +2134,25 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 "reopened": reopened,
                 "skipped_reason": "empty_broker_positions_with_open_local_trades",
             }
+
+    # position-identity-phase-1 (2026-05-04): close-detection in shadow
+    # mode. For each trading_positions row currently state='open' for
+    # this (user, broker) where the ticker is NOT in this cycle's
+    # broker response, write a 'closed' event + flip state. Mirrors
+    # the existing stale-trade close path below; runs additively in
+    # shadow mode. Never raises; failures log + continue.
+    try:
+        _phase1_close_dropped_positions(
+            db,
+            user_id=user_id,
+            broker_source="robinhood",
+            observed_tickers=rh_tickers,
+        )
+    except Exception:
+        logger.warning(
+            "[phase1_position_event] close-detection failed; shadow-mode continues",
+            exc_info=True,
+        )
 
     stale = (
         db.query(Trade)
