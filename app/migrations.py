@@ -14764,6 +14764,62 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_228_pattern_evidence_corrections(conn) -> None:
+    """f-evidence-canonical-writer (2026-05-05).
+
+    Audit table for every invocation of
+    ``learning.update_pattern_stats_from_closed_trades`` (the load-bearing
+    writer of ``ScanPattern.{win_rate, avg_return_pct, trade_count}``).
+    Each cycle writes one row per pattern processed -- even when no
+    fields change (``correction_reason='no_change'``) -- so the audit
+    is complete enough to reverse-migrate.
+
+    Pre-fix the writer aggregated raw realized
+    ``Trade.exit_price - entry_price`` without any time-decay
+    correctness check; positions held past their pattern's intended
+    ``max_bars`` (= 81% of patterns per the f-time-decay-unit-fix
+    survey) leaked their too-late exit prices into evidence. Post-fix,
+    the writer applies counterfactual exit prices for overheld trades
+    and records before/after here.
+
+    Idempotent: ``CREATE TABLE IF NOT EXISTS``,
+    ``CREATE INDEX IF NOT EXISTS``.
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS pattern_evidence_corrections (
+            id                                BIGSERIAL PRIMARY KEY,
+            scan_pattern_id                   INTEGER NOT NULL
+                REFERENCES scan_patterns(id) ON DELETE CASCADE,
+            cycle_run_id                      UUID NOT NULL,
+            before_win_rate                   DOUBLE PRECISION NULL,
+            after_win_rate                    DOUBLE PRECISION NULL,
+            before_avg_return_pct             DOUBLE PRECISION NULL,
+            after_avg_return_pct              DOUBLE PRECISION NULL,
+            before_trade_count                INTEGER NULL,
+            after_trade_count                 INTEGER NULL,
+            closed_trades_considered          INTEGER NOT NULL,
+            overheld_trade_count              INTEGER NOT NULL,
+            counterfactual_applied_count      INTEGER NOT NULL,
+            counterfactual_unavailable_count  INTEGER NOT NULL,
+            correction_reason                 VARCHAR(64) NOT NULL,
+            created_at                        TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_pattern_evidence_corrections_pattern_created
+            ON pattern_evidence_corrections (scan_pattern_id, created_at DESC)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_pattern_evidence_corrections_cycle
+            ON pattern_evidence_corrections (cycle_run_id)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_pattern_evidence_corrections_reason_created
+            ON pattern_evidence_corrections (correction_reason, created_at DESC)
+    """))
+    conn.commit()
+
+
 def _migration_227_scan_patterns_timeframe_check(conn) -> None:
     """f-time-decay-unit-fix (2026-05-05).
 
@@ -15418,6 +15474,8 @@ MIGRATIONS = [
      _migration_226_partial_taken_columns),
     ("227_scan_patterns_timeframe_check",
      _migration_227_scan_patterns_timeframe_check),
+    ("228_pattern_evidence_corrections",
+     _migration_228_pattern_evidence_corrections),
 ]
 
 

@@ -19,7 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship, validates
 
 from ..db import Base
@@ -1730,6 +1730,59 @@ class ExitParityLog(Base):
     config_hash: Optional[str] = Column(String(64), nullable=True)
     provenance_json: Optional[dict] = Column(JSONB, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternEvidenceCorrection(Base):
+    """Migration 228: per-cycle audit of canonical-aware corrections to
+    ``ScanPattern.{win_rate, avg_return_pct, trade_count}``.
+
+    One row per pattern processed per ``run_learning_cycle`` invocation,
+    even when the pattern's stats didn't change
+    (``correction_reason='no_change'``). The before/after columns make
+    every correction reverse-migratable; ``cycle_run_id`` groups all
+    rows from a single cycle so an entire pass can be unwound atomically.
+
+    ``correction_reason`` enum:
+      * ``first_run_backfill`` -- this is the first time the audit table
+        has seen this pattern (table was empty at cycle start).
+      * ``periodic_recompute`` -- a normal cycle whose recomputation
+        changed at least one stat.
+      * ``no_change`` -- recomputation produced identical values.
+      * ``coverage_too_thin`` -- the OHLCV gap for overheld trades was
+        large enough (>50% of overheld trades had no counterfactual
+        data) that applying the correction would have biased the
+        sample. ScanPattern fields were NOT updated for this row.
+    """
+
+    __tablename__ = "pattern_evidence_corrections"
+    __table_args__ = (
+        Index("ix_pattern_evidence_corrections_pattern_created",
+              "scan_pattern_id", "created_at"),
+        Index("ix_pattern_evidence_corrections_cycle", "cycle_run_id"),
+        Index("ix_pattern_evidence_corrections_reason_created",
+              "correction_reason", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    scan_pattern_id: int = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    cycle_run_id = Column(UUID(as_uuid=True), nullable=False)
+    before_win_rate: Optional[float] = Column(Float, nullable=True)
+    after_win_rate: Optional[float] = Column(Float, nullable=True)
+    before_avg_return_pct: Optional[float] = Column(Float, nullable=True)
+    after_avg_return_pct: Optional[float] = Column(Float, nullable=True)
+    before_trade_count: Optional[int] = Column(Integer, nullable=True)
+    after_trade_count: Optional[int] = Column(Integer, nullable=True)
+    closed_trades_considered: int = Column(Integer, nullable=False)
+    overheld_trade_count: int = Column(Integer, nullable=False)
+    counterfactual_applied_count: int = Column(Integer, nullable=False)
+    counterfactual_unavailable_count: int = Column(Integer, nullable=False)
+    correction_reason: str = Column(String(64), nullable=False)
+    created_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False,
+    )
 
 
 class EconomicLedgerEvent(Base):

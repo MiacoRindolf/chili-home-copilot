@@ -4796,100 +4796,249 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
 # ── Closed-Trade → ScanPattern Feedback ────────────────────────────────
 
 def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Aggregate win/loss/return from closed trades and update their linked ScanPattern.
+    """Aggregate canonical-corrected win/loss/return from closed trades
+    and update their linked ScanPattern.
 
-    Only considers trades closed in the last 180 days that have a ``scan_pattern_id``.
-    Uses exponential blending so new data gradually outweighs stale stats.
+    Replaces the legacy realized-only aggregation with a counterfactual-
+    aware computation for trades that held past their pattern's intended
+    ``max_bars``. Each invocation also writes one
+    ``pattern_evidence_corrections`` audit row per pattern processed,
+    capturing before/after values and the counterfactual-coverage gap.
+
+    Only considers trades closed in the last 180 days that have a
+    ``scan_pattern_id`` (legacy semantic; preserve to avoid behaviour
+    drift in this fix).
+
+    Migration 228 (f-evidence-canonical-writer) introduced this shape;
+    pre-fix the function aggregated raw ``Trade.exit_price`` directly
+    with no time-decay correctness check. Per the f-time-decay-unit-fix
+    survey 81% of patterns trade on non-1d timeframes whose positions
+    silently held past ``max_bars`` -- their too-late exit prices were
+    leaking into evidence. This writer is now canonical-aware.
     """
+    import uuid
+    from collections import defaultdict
     from ...models.trading import ScanPattern, Trade
+    from .evidence_correction import (
+        compute_trade_correction, aggregate_pattern_stats,
+    )
+
+    cycle_run_id = uuid.uuid4()
+    backfill_mode = _evidence_correction_first_run(db)
 
     cutoff = datetime.utcnow() - timedelta(days=180)
     try:
         closed_q = (
             db.query(
                 Trade.scan_pattern_id,
-                Trade.pnl,
+                Trade.id,
                 Trade.entry_price,
                 Trade.exit_price,
+                Trade.entry_date,
+                Trade.exit_date,
+                Trade.direction,
+                Trade.ticker,
+                Trade.pnl,
             )
             .filter(
                 Trade.status == "closed",
                 Trade.scan_pattern_id.isnot(None),
+                Trade.entry_date.isnot(None),
+                Trade.exit_date.isnot(None),
                 Trade.exit_date >= cutoff,
             )
         )
         if user_id is not None:
             closed_q = closed_q.filter(Trade.user_id == user_id)
         closed = closed_q.all()
-    except Exception:
-        return {"patterns_updated": 0}
+    except Exception as e:
+        logger.warning("[evidence_correction] closed-trade query failed: %s", e)
+        return {"patterns_updated": 0, "error": str(e)}
 
-    if not closed:
-        return {"patterns_updated": 0, "note": "no closed trades with pattern linkage"}
-
-    from collections import defaultdict
-
-    buckets: dict[int, list[dict]] = defaultdict(list)
+    buckets: dict[int, list] = defaultdict(list)
     for row in closed:
-        if row.scan_pattern_id is None:
-            continue
-        ret_pct = 0.0
-        if row.entry_price and row.exit_price and row.entry_price > 0:
-            ret_pct = (row.exit_price - row.entry_price) / row.entry_price * 100
-        buckets[row.scan_pattern_id].append({
-            "win": (row.pnl or 0) > 0,
-            "return_pct": ret_pct,
-        })
+        buckets[row.scan_pattern_id].append(row)
 
     updated = 0
-    for pattern_id, trades in buckets.items():
-        if len(trades) < 2:
-            continue
-        pattern = db.get(ScanPattern, pattern_id)
-        if not pattern:
-            continue
-        if (
-            user_id is not None
-            and pattern.user_id is not None
-            and pattern.user_id != user_id
-        ):
-            continue
+    for pattern_id, trade_rows in buckets.items():
+        try:
+            pattern = db.get(ScanPattern, pattern_id)
+            if pattern is None:
+                continue
+            if (
+                user_id is not None
+                and pattern.user_id is not None
+                and pattern.user_id != user_id
+            ):
+                continue
 
-        wins = sum(1 for t in trades if t["win"])
-        n = len(trades)
-        if n <= 0:
-            continue
-        new_wr = wins / n
-        new_ret = sum(t["return_pct"] for t in trades) / n
+            tf = pattern.timeframe or "1d"
+            max_bars = _evidence_correction_resolve_max_bars(pattern)
 
-        # Old values for log only — explicit None check (no `or` falsy default).
-        old_wr = pattern.win_rate if pattern.win_rate is not None else float("nan")
-        old_ret = pattern.avg_return_pct if pattern.avg_return_pct is not None else float("nan")
+            corrections = []
+            for trade_row in trade_rows:
+                # Skip rows missing pricing data; they would have been
+                # ret_pct=0 in the legacy code -- but here we'd rather
+                # exclude them than feed garbage into the aggregation.
+                if (
+                    trade_row.entry_price is None
+                    or trade_row.exit_price is None
+                    or trade_row.entry_price <= 0
+                ):
+                    continue
+                try:
+                    corr = compute_trade_correction(
+                        entry_price=float(trade_row.entry_price),
+                        exit_price=float(trade_row.exit_price),
+                        entry_date=trade_row.entry_date,
+                        close_date=trade_row.exit_date,
+                        direction=trade_row.direction or "long",
+                        ticker=trade_row.ticker,
+                        pattern_timeframe=tf,
+                        max_bars=max_bars,
+                    )
+                    corrections.append(corr)
+                except Exception as e:
+                    logger.debug(
+                        "[evidence_correction] trade %s correction failed: %s",
+                        trade_row.id, e,
+                    )
 
-        # Raw realized — no EWMA blend (operator preference 2026-04-28).
-        if math.isfinite(new_wr) and 0.0 <= new_wr <= 1.0:
-            pattern.win_rate = round(new_wr, 4)
-        if math.isfinite(new_ret):
-            pattern.avg_return_pct = round(new_ret, 2)
-        actual_trade_count = db.query(func.count(Trade.id)).filter(
-            Trade.scan_pattern_id == pattern.id
-        ).scalar() or 0
-        pattern.trade_count = actual_trade_count
-        pattern.updated_at = datetime.utcnow()
-        updated += 1
+            stats = aggregate_pattern_stats(corrections)
+            _evidence_correction_persist(
+                db, pattern, stats, cycle_run_id, backfill_mode,
+            )
+            updated += 1
+        except Exception as e:
+            logger.warning(
+                "[evidence_correction] pattern %s correction failed: %s",
+                pattern_id, e,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
-        logger.info(
-            "[learning] Trade feedback → ScanPattern '%s' (id=%d): "
-            "wr=%.1f%% (was %s), avg_ret=%.2f%% (was %s), n=%d",
-            pattern.name, pattern.id,
-            (pattern.win_rate or 0.0) * 100,
-            f"{old_wr * 100:.1f}%" if math.isfinite(old_wr) else "n/a",
-            (pattern.avg_return_pct or 0.0),
-            f"{old_ret:.2f}" if math.isfinite(old_ret) else "n/a",
-            actual_trade_count,
+    return {
+        "patterns_updated": updated,
+        "trades_processed": len(closed),
+        "cycle_run_id": str(cycle_run_id),
+    }
+
+
+def _evidence_correction_first_run(db: Session) -> bool:
+    """Return True iff ``pattern_evidence_corrections`` is empty."""
+    try:
+        from sqlalchemy import text as _text
+        row = db.execute(
+            _text("SELECT 1 FROM pattern_evidence_corrections LIMIT 1")
+        ).first()
+        return row is None
+    except Exception:
+        return False
+
+
+def _evidence_correction_resolve_max_bars(pattern: Any) -> int:
+    """Read ``max_bars`` from ``pattern.exit_config``; fall back to the
+    engine default of 20 (matches ``_load_exit_config`` defaults)."""
+    try:
+        cfg = pattern.exit_config or {}
+        if isinstance(cfg, str):
+            import json
+            cfg = json.loads(cfg)
+        v = cfg.get("max_bars")
+        if v is not None:
+            return int(v)
+    except Exception:
+        pass
+    return 20
+
+
+def _evidence_correction_persist(
+    db: Session,
+    pattern: Any,
+    stats: Any,  # PatternStats from evidence_correction
+    cycle_run_id: Any,
+    backfill_mode: bool,
+) -> None:
+    """Atomic write: ScanPattern field update (if changed and coverage
+    gate passed) + one ``pattern_evidence_corrections`` audit row per
+    pattern per cycle.
+    """
+    from ...models.trading import (
+        PatternEvidenceCorrection, Trade,
+    )
+
+    before_wr = pattern.win_rate
+    before_avg = pattern.avg_return_pct
+    before_n = pattern.trade_count
+
+    after_wr = round(stats.win_rate, 4)
+    after_avg = round(stats.avg_return_pct, 2)
+
+    actual_trade_count = (
+        db.query(func.count(Trade.id))
+        .filter(Trade.scan_pattern_id == pattern.id)
+        .scalar() or 0
+    )
+    after_n = int(actual_trade_count)
+
+    # Coverage gate: when more than half of the overheld trades had no
+    # counterfactual data, the corrected stats are biased. Don't apply
+    # the update; the audit row records ``coverage_too_thin`` and the
+    # before-values are restored to "after" so the audit row reflects
+    # what actually happened to the row (no change).
+    coverage_too_thin = False
+    if stats.overheld_n > 0:
+        cf_unavail_share = (
+            stats.counterfactual_unavailable_n / stats.overheld_n
         )
+        if cf_unavail_share > 0.5:
+            coverage_too_thin = True
+            after_wr = before_wr
+            after_avg = before_avg
+            after_n = before_n
 
-    return {"patterns_updated": updated, "trades_processed": len(closed)}
+    changed = (
+        before_wr != after_wr
+        or before_avg != after_avg
+        or before_n != after_n
+    )
+
+    if coverage_too_thin:
+        audit_reason = "coverage_too_thin"
+    elif backfill_mode:
+        audit_reason = "first_run_backfill"
+    elif changed:
+        audit_reason = "periodic_recompute"
+    else:
+        audit_reason = "no_change"
+
+    if changed and not coverage_too_thin:
+        if math.isfinite(stats.win_rate) and 0.0 <= stats.win_rate <= 1.0:
+            pattern.win_rate = after_wr
+        if math.isfinite(stats.avg_return_pct):
+            pattern.avg_return_pct = after_avg
+        pattern.trade_count = after_n
+        pattern.updated_at = datetime.utcnow()
+
+    audit_row = PatternEvidenceCorrection(
+        scan_pattern_id=pattern.id,
+        cycle_run_id=cycle_run_id,
+        before_win_rate=before_wr,
+        after_win_rate=after_wr,
+        before_avg_return_pct=before_avg,
+        after_avg_return_pct=after_avg,
+        before_trade_count=before_n,
+        after_trade_count=after_n,
+        closed_trades_considered=stats.n,
+        overheld_trade_count=stats.overheld_n,
+        counterfactual_applied_count=stats.counterfactual_applied_n,
+        counterfactual_unavailable_count=stats.counterfactual_unavailable_n,
+        correction_reason=audit_reason,
+    )
+    db.add(audit_row)
+    db.commit()
 
 
 # ── Pattern Monitor Decision Learning ────────────────────────────────
