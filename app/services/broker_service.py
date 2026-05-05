@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
