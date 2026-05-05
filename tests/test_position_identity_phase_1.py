@@ -49,9 +49,10 @@ def _seed_paper_trade(db, *, trade_id: int, ticker: str, direction: str = "long"
                       entry: float = 5.0) -> None:
     db.execute(text("""
         INSERT INTO trading_paper_trades (
-            id, ticker, direction, quantity, entry_price, status, entry_date
+            id, ticker, direction, quantity, entry_price, status,
+            entry_date, created_at
         ) VALUES (
-            :id, :ticker, :dir, :qty, :entry, :status, NOW()
+            :id, :ticker, :dir, :qty, :entry, :status, NOW(), NOW()
         ) ON CONFLICT (id) DO NOTHING
     """), {
         "id": trade_id, "ticker": ticker, "dir": direction, "qty": qty,
