@@ -1599,6 +1599,27 @@ def _run_stale_promoted_sweep_job():
     run_scheduler_job_guarded("stale_promoted_sweep", _work)
 
 
+def _run_pg_stat_snapshot_job():
+    """f-add-pg-stat-snapshot-logger (2026-05-06): 5-minute snapshot of
+    pg_stat_activity. Forensic trail for the next leak."""
+    from ..db import SessionLocal
+    from .trading.cron_jobs.pg_stat_snapshot import run_pg_stat_snapshot
+
+    def _work() -> None:
+        with SessionLocal() as db:
+            try:
+                result = run_pg_stat_snapshot(db)
+                logger.debug(
+                    "[scheduler] pg_stat_snapshot result: %s", result,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[scheduler] pg_stat_snapshot failed: %s", e,
+                )
+
+    run_scheduler_job_guarded("pg_stat_snapshot", _work)
+
+
 def _run_validate_evolve_job():
     """f-handler-validate-evolve (2026-05-06): 6-hourly hypothesis-
     weight evolution. Wraps the legacy run_learning_cycle's
@@ -3468,6 +3489,19 @@ def start_scheduler():
                     trigger=CronTrigger(hour="*/6", minute=15),
                     id="validate_evolve",
                     name="Hypothesis-weight evolution (every 6h at :15)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # f-add-pg-stat-snapshot-logger (2026-05-06): 5-minute
+                # forensic snapshot of pg_stat_activity to
+                # scripts/_pg_stat_log/<iso>.txt. Trail for the next
+                # leak so it can be diagnosed retrospectively.
+                _scheduler.add_job(
+                    _run_pg_stat_snapshot_job,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="pg_stat_snapshot",
+                    name="pg_stat_activity forensic snapshot (every 5min)",
                     replace_existing=True,
                     max_instances=1,
                 )
