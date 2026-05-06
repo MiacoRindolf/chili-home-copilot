@@ -1011,6 +1011,77 @@ def _maybe_run_brain_work_batch() -> None:
         db.close()
 
 
+# f-handler-load-verification (2026-05-05): startup self-check that every
+# brain_work handler module imports cleanly + exposes its handle_* callable.
+# Replaces the silent regression class that bit pattern_stats earlier today
+# (5 of 6 handlers had broken `from ....db import SessionLocal` for 6 days
+# undetected because the dispatcher's try/except swallowed the failure).
+# Crashes brain-worker on startup with a clear multi-line error if any
+# handler fails to load -- better than dispatching to a no-op handler.
+_HANDLER_MODULES_EXPECTED: dict[str, list[str]] = {
+    "app.services.trading.brain_work.handlers.mine":
+        ["handle_market_snapshots_batch"],
+    "app.services.trading.brain_work.handlers.cpcv_gate":
+        ["handle_backtest_completed"],
+    "app.services.trading.brain_work.handlers.promote":
+        ["handle_pattern_eligible_promotion"],
+    "app.services.trading.brain_work.handlers.demote":
+        ["handle_trade_closed"],
+    "app.services.trading.brain_work.handlers.regime_ledger":
+        ["handle_trade_closed_for_ledger"],
+    "app.services.trading.brain_work.handlers.pattern_stats":
+        ["handle_paper_trade_closed",
+         "handle_live_trade_closed",
+         "handle_broker_fill_closed"],
+}
+
+
+def _verify_handler_modules(
+    expected: dict[str, list[str]] | None = None,
+) -> None:
+    """Startup verification: every handler module must import cleanly and
+    expose its expected ``handle_*`` callables.
+
+    Failed handlers crash brain-worker on startup with a clear
+    multi-line error so the operator sees the regression immediately.
+
+    The ``expected`` parameter is for tests; production callers pass
+    nothing and the module-level ``_HANDLER_MODULES_EXPECTED`` map is
+    used.
+    """
+    import importlib
+
+    expected = expected if expected is not None else _HANDLER_MODULES_EXPECTED
+    failures: list[str] = []
+    for mod_name, callable_names in expected.items():
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception as e:
+            failures.append(
+                f"  IMPORT-FAIL {mod_name}: {type(e).__name__}: {e}"
+            )
+            continue
+        for callable_name in callable_names:
+            if not callable(getattr(mod, callable_name, None)):
+                failures.append(
+                    f"  MISSING-CALLABLE {mod_name}.{callable_name}"
+                )
+    if failures:
+        msg = (
+            "[handler_verify] STARTUP CHECK FAILED -- brain-worker would "
+            "dispatch to broken handlers. Fix before re-running.\n"
+            + "\n".join(failures)
+        )
+        logger.error(msg)
+        raise SystemExit(msg)
+    logger.info(
+        "[handler_verify] OK %d/%d handlers loaded cleanly: %s",
+        len(expected),
+        len(expected),
+        ", ".join(sorted(m.rsplit(".", 1)[1] for m in expected)),
+    )
+
+
 # FIX 31 (deep audit 2026-04-28): conditional gate for the legacy reconcile
 # pass. The cycle was running every iteration regardless of work, holding a
 # single PG session for ~13–34 minutes and getting killed by `server closed
@@ -1610,6 +1681,16 @@ def main():
     logger.info(f"[brain] Cycle interval: {args.interval} minutes")
     if log_brain_io_profile:
         log_brain_io_profile(logger)
+
+    # f-handler-load-verification (2026-05-05): import every brain_work
+    # handler module + assert each callable is present BEFORE entering the
+    # work loop. This prevents the regression class that bit pattern_stats
+    # earlier today (6-day silent ModuleNotFoundError on a relative-import
+    # depth bug; 5 of 6 handlers had been silently broken since FIX 36-39).
+    # Failure here is SystemExit, not warning -- a brain-worker that
+    # dispatches to broken handlers is worse than one that doesn't start.
+    if os.environ.get("CHILI_PYTEST", "").strip() not in ("1", "true", "yes"):
+        _verify_handler_modules()
 
     status.status = "running"
     status.save()
