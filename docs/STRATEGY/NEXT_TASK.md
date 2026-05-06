@@ -1,6 +1,6 @@
 # NEXT_TASK: f-crypto-exit-monitor-pattern-exit-now-test
 
-STATUS: PENDING
+STATUS: DONE
 
 **Promoted from `docs/STRATEGY/QUEUED/f-crypto-exit-monitor-pattern-exit-now-test.md` on 2026-05-06 17:10 UTC. The previous DONE task (`f-options-exit-monitor-pattern-exit-now-audit`) shipped fully — see `docs/STRATEGY/CC_REPORTS/2026-05-06_f-options-exit-monitor-pattern-exit-now-audit.md` and `docs/STRATEGY/COWORK_REVIEWS/2026-05-06_f-options-exit-monitor-pattern-exit-now-audit.md` for the closeout.**
 
