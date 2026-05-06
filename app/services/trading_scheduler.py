@@ -3031,6 +3031,58 @@ def _check_breakout_outcomes():
             f"[scheduler] Breakout outcome check: {len(pending)} pending, "
             f"{updated} updated, {closed} closed"
         )
+
+        # f-handler-breakout-outcomes (2026-05-06): emit one event per
+        # newly-resolved alert so the breakout_outcomes handler can
+        # update pattern evidence from accumulated outcomes (secondary-
+        # evidence path for patterns with no closed trades yet).
+        # Per-alert try/except so a broken emit can't poison the rest
+        # of the resolution sweep.
+        try:
+            from .trading.brain_work.emitters import (
+                emit_breakout_alert_resolved_outcome,
+            )
+            for alert in pending:
+                if alert.outcome and alert.outcome != "pending":
+                    try:
+                        emit_breakout_alert_resolved_outcome(
+                            db,
+                            alert_id=int(alert.id),
+                            scan_pattern_id=getattr(alert, "scan_pattern_id", None),
+                            ticker=(alert.ticker or "").upper(),
+                            outcome=alert.outcome,
+                            user_id=getattr(alert, "user_id", None),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[scheduler] emit_breakout_alert_resolved failed "
+                            "alert_id=%s", alert.id, exc_info=True,
+                        )
+            for alert in stale:
+                try:
+                    emit_breakout_alert_resolved_outcome(
+                        db,
+                        alert_id=int(alert.id),
+                        scan_pattern_id=getattr(alert, "scan_pattern_id", None),
+                        ticker=(alert.ticker or "").upper(),
+                        outcome="expired",
+                        user_id=getattr(alert, "user_id", None),
+                    )
+                except Exception:
+                    logger.debug(
+                        "[scheduler] emit_breakout_alert_resolved (stale) "
+                        "failed alert_id=%s", alert.id, exc_info=True,
+                    )
+            db.commit()
+        except Exception:
+            logger.debug(
+                "[scheduler] breakout-resolved emit batch failed",
+                exc_info=True,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"[scheduler] Breakout outcome check failed: {e}")
     finally:

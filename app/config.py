@@ -1961,6 +1961,12 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_ENABLED"),
     )
+    # f-handler-breakout-outcomes (Phase 2 #7, 2026-05-06): event-driven
+    # pattern-evidence update from BreakoutAlert outcomes (secondary
+    # path for patterns with no closed trades). Subscribes to
+    # ``breakout_alert_resolved``. Modest cap; alerts resolve on the
+    # breakout-outcome-check sweep (default every few minutes).
+    brain_work_breakout_outcomes_batch_size: int = 4
     chili_autotrader_user_id: int | None = Field(
         default=None,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_USER_ID"),

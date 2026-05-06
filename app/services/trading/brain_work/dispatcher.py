@@ -222,6 +222,13 @@ def _dispatch_limits(
         if max_trade_close is not None
         else getattr(settings, "brain_work_trade_close_batch_size", 16)
     )
+    # f-handler-breakout-outcomes (2026-05-06): breakout_alert_resolved
+    # event drives the secondary-evidence path. Modest cap; alerts
+    # resolve on the breakout-outcome-check sweep (default every few
+    # minutes), so a small batch per dispatch round suffices.
+    bo = int(
+        getattr(settings, "brain_work_breakout_outcomes_batch_size", 4)
+    )
     return [
         ("execution_feedback_digest", max(0, ex)),
         ("market_snapshots_batch", max(0, mn)),
@@ -231,6 +238,7 @@ def _dispatch_limits(
         ("live_trade_closed", max(0, tc)),
         ("paper_trade_closed", max(0, tc)),
         ("broker_fill_closed", max(0, tc)),
+        ("breakout_alert_resolved", max(0, bo)),
     ]
 
 
@@ -346,6 +354,14 @@ def run_brain_work_dispatch_round(
                         raise demote_err
                     if demote_err is not None:
                         raise demote_err
+                elif event_type == "breakout_alert_resolved":
+                    # f-handler-breakout-outcomes (2026-05-06): aggregate
+                    # alert outcomes into pattern evidence (secondary path
+                    # for patterns with no closed trades).
+                    from .handlers.breakout_outcomes import (
+                        handle_breakout_alert_resolved,
+                    )
+                    handle_breakout_alert_resolved(db, ev, user_id)
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
                 mark_work_done(db, int(ev.id))
