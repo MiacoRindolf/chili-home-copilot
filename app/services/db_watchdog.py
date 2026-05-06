@@ -124,11 +124,36 @@ def _poll_once() -> tuple[int, int]:
                     r.pid, app or "<none>", dur_s, effective_kill, r.q,
                 )
                 try:
-                    sess.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": r.pid})
+                    # f-fix-db-watchdog-kill-action (2026-05-05): surface the
+                    # ``pg_terminate_backend`` return value. False means we
+                    # lack ``pg_signal_backend`` permission OR the pid is
+                    # already gone -- either way it's actionable for the
+                    # operator to know we tried-but-failed vs succeeded.
+                    res = sess.execute(
+                        text("SELECT pg_terminate_backend(:pid) AS ok"),
+                        {"pid": r.pid},
+                    ).fetchone()
                     sess.commit()
-                    killed += 1
+                    ok = bool(res and res.ok)
+                    if ok:
+                        killed += 1
+                        logger.warning(
+                            "[db_watchdog] KILLED pid=%s app=%s held=%ds",
+                            r.pid, app or "<none>", dur_s,
+                        )
+                    else:
+                        logger.error(
+                            "[db_watchdog] KILL-FAILED pid=%s app=%s held=%ds "
+                            "(pg_terminate_backend returned FALSE -- check "
+                            "pg_signal_backend permission for current_user OR "
+                            "pid may have already terminated)",
+                            r.pid, app or "<none>", dur_s,
+                        )
                 except Exception as e:
-                    logger.warning("[db_watchdog] pg_terminate_backend(%s) failed: %s", r.pid, e)
+                    logger.error(
+                        "[db_watchdog] KILL-EXCEPTION pid=%s app=%s held=%ds err=%s",
+                        r.pid, app or "<none>", dur_s, e,
+                    )
                     sess.rollback()
             else:
                 logger.warning(
