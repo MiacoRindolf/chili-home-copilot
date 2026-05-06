@@ -1,147 +1,150 @@
-# NEXT_TASK: f-options-exit-monitor-pattern-exit-now-audit
+# NEXT_TASK: f-crypto-exit-monitor-pattern-exit-now-test
 
-STATUS: DONE
+STATUS: PENDING
 
-**Promoted from `docs/STRATEGY/QUEUED/f-options-exit-monitor-pattern-exit-now-audit.md` on 2026-05-06 16:45 UTC. The previous DONE task (`f-overnight-jumbo-2026-05-06`) shipped fully — see `docs/STRATEGY/CC_REPORTS/2026-05-06_f-overnight-jumbo-2026-05-06.md` and `docs/STRATEGY/COWORK_REVIEWS/2026-05-06_f-overnight-jumbo-2026-05-06.md` for the closeout.**
+**Promoted from `docs/STRATEGY/QUEUED/f-crypto-exit-monitor-pattern-exit-now-test.md` on 2026-05-06 17:10 UTC. The previous DONE task (`f-options-exit-monitor-pattern-exit-now-audit`) shipped fully — see `docs/STRATEGY/CC_REPORTS/2026-05-06_f-options-exit-monitor-pattern-exit-now-audit.md` and `docs/STRATEGY/COWORK_REVIEWS/2026-05-06_f-options-exit-monitor-pattern-exit-now-audit.md` for the closeout.**
 
-**Why this is next**: a live-debug session on 2026-05-06 fixed the same architectural gap in `crypto/exit_monitor.py` (held TRUMP-USD trade 1829 for ~20h on stale `exit_now` recommendations). Pre-brief grep confirmed the IDENTICAL gap exists in `options/exit_monitor.py` — zero matches for `PatternMonitorDecision`. Options positions are theta-decaying, so the cost of leaving this un-fixed is higher than the crypto case was.
+**Why this is next**: today's live-debug fix in `crypto/exit_monitor.py` shipped without a unit test (live-debug urgency). Then `f-options-exit-monitor-pattern-exit-now-audit` factored the helpers into `_exit_monitor_common.py` and added 8 tests for OPTIONS — but per-case crypto coverage is still missing. Closing this gap means all three exit lanes have parity test coverage AND the original crypto-fix regression class is pinned.
+
+**Updated since the QUEUED draft was written**: the helpers live in `app/services/trading/_exit_monitor_common.py` (not the local `crypto/exit_monitor.py`). The freshness constant is `MONITOR_EXIT_NOW_MAX_AGE_HOURS` (no `_CRYPTO_` prefix). The local private aliases in `crypto/exit_monitor.py` (`_latest_monitor_decisions_by_trade`, `_fresh_monitor_exit_meta`, `_CRYPTO_MONITOR_EXIT_NOW_MAX_AGE_HOURS`) still exist as re-exports for backwards compatibility — tests can import either the public shared name OR the local alias and assert they resolve to the same callable.
 
 ## Goal
 
-Audit `app/services/trading/options/exit_monitor.py::run_options_exit_pass` for the same architectural gap that crypto carried until 2026-05-06: missing consumption of `trading_pattern_monitor_decisions.action='exit_now'`. If confirmed (highly likely — pre-brief grep already shows `PatternMonitorDecision` is not imported anywhere in the options package), wire it in following the equity-lane shape and the crypto fix from 2026-05-06.
+Add unit-test coverage for the pattern-monitor `exit_now` branch wired into `crypto/exit_monitor.run_crypto_exit_pass` on 2026-05-06. The existing equity-lane test suite (`tests/test_auto_trader_monitor.py:338-454`) is the model — three scenarios already proven there should be ported to crypto: closes on fresh `exit_now`, latest `hold` supersedes older `exit_now`, exit older than freshness window does NOT trigger. Plus two crypto-specific cases (price-trigger-on-tie, implausible-quote-wins).
+
+The new test file should be `tests/test_crypto_exit_monitor_pattern_exit_now.py` so it sits alongside existing crypto tests rather than getting buried in a generic file.
 
 ## Why now
 
-1. **Same risk shape as the crypto bug.** Pre-brief grep:
+1. **Regression risk.** `crypto/exit_monitor.py` already got touched once today (the options-audit task migrated the helpers to the shared module). Without a regression test pinning the live behaviour, the next refactor could silently lose the pattern-monitor branch.
+2. **Lane parity.** Equity has 3+ tests for the monitor-decision branch (`test_auto_trader_monitor.py:338-454`). Options has 5 cases + 3 source-text guards (`tests/test_options_exit_monitor_pattern_exit_now.py`, shipped 2026-05-06). Crypto has zero. Closing the gap brings all three lanes to parity.
+3. **Low surface area.** The functions involved (`latest_monitor_decisions_by_trade`, `fresh_monitor_exit_meta` in the shared module; `should_exit` setting at `run_crypto_exit_pass`) are already isolated and easy to mock. The equity tests + the just-shipped options tests demonstrate two valid mocking patterns.
+4. **Protocol hygiene.** The CC report at `docs/STRATEGY/CC_REPORTS/2026-05-06_f-crypto-exit-monitor-pattern-exit-now.md` flagged the test gap explicitly. Closing it keeps the trail honest.
 
-   ```
-   $ rg -l 'PatternMonitorDecision|monitor_decision|exit_now|_fresh_monitor' app/services/trading/options/
-   (no matches)
-   ```
+## Test cases (mirror the equity lane)
 
-   That is the exact signature crypto had before the 2026-05-06 fix: a parallel exit lane that reads `Trade.stop_loss/take_profit` (or, for options, `_evaluate_exit_triggers` over premium / DTE) but ignores the LLM/pattern-monitor's "thesis dead" advisory. Any open option position with a fresh `pattern_monitor_decisions.action='exit_now'` that hasn't simultaneously crossed the stop / TP / DTE thresholds will silently sit untouched the same way TRUMP-USD did.
+### Case 1 — closes on fresh `exit_now` (price between stop and target)
 
-2. **Options positions are time-sensitive.** Unlike spot crypto, options decay on the clock. A "thesis dead" recommendation that the lane ignores costs theta every cycle, not just opportunity. This is more expensive to ignore than the crypto case was.
+Modeled on `test_monitor_closes_on_latest_pattern_exit_now_decision` in `tests/test_auto_trader_monitor.py:338-420`.
 
-3. **Refactor opportunity.** With three lanes (equity, crypto, options) about to share the same `_latest_monitor_decisions_by_trade` + `_fresh_monitor_exit_meta` helpers, factor them into a shared module rather than triplicating. Suggested: `app/services/trading/_exit_monitor_common.py`. The equity and crypto copies already drift in subtle ways (the crypto copy uses `_CRYPTO_MONITOR_EXIT_NOW_MAX_AGE_HOURS` mirroring the equity `_MONITOR_EXIT_NOW_MAX_AGE_HOURS`); a shared module prevents future drift.
+Setup:
+- Open Trade row, ticker `TRUMP-USD` (or any `-USD` to satisfy `_is_crypto_trade`), entry=$10, qty=5, stop_loss=$9, take_profit=$14, status=open, broker_source="robinhood".
+- Insert a `PatternMonitorDecision(trade_id=t.id, action='exit_now', created_at=now, ...)`.
+- Mock `_current_crypto_price(t.ticker)` to return `$10.40` (above stop, below target — so price triggers don't fire).
+- Mock `broker_service.get_crypto_positions()` to return `[{"ticker": "TRUMP-USD", "quantity": 5.0}]` so the qty-clamp passes.
+- Mock `broker_service.place_crypto_sell_order` to return `{"ok": True, "raw": {"id": "test-oid-1"}}`.
 
-## Phase 1 — Confirm the gap (READ-ONLY)
+Assert:
+- `run_crypto_exit_pass(db).get("closed")` == 1.
+- After refresh, `t.pending_exit_order_id == "test-oid-1"`, `t.pending_exit_reason == "pattern_exit_now"` (canonical literal — protect against truncation regressions), `t.pending_exit_status == "submitted"`, `t.pending_exit_requested_at is not None`.
+- `broker_service.place_crypto_sell_order` called exactly once with `ticker=t.ticker, quantity=5.0, order_type="market"`.
 
-Phase 1.1 — verify no monitor consultation exists. Concretely re-grep:
+### Case 2 — latest `hold` supersedes older `exit_now`
 
+Modeled on `test_monitor_uses_latest_pattern_decision_not_stale_exit_now` (auto_trader_monitor tests, ~line 423).
+
+Setup:
+- Open Trade as Case 1, price $10.40.
+- Insert TWO `PatternMonitorDecision` rows: older one with `action='exit_now'` at `now - 2h`, newer one with `action='hold'` at `now - 5min`.
+- Mock the same as Case 1.
+
+Assert:
+- `run_crypto_exit_pass(db).get("closed")` == 0.
+- `t.pending_exit_order_id` remains None.
+- `broker_service.place_crypto_sell_order` not called.
+- (`fresh_monitor_exit_meta` should return None for the latest — `hold`, not `exit_now`.)
+
+### Case 3 — `exit_now` older than freshness window does NOT trigger
+
+Setup:
+- Open Trade as Case 1, price $10.40.
+- Insert a `PatternMonitorDecision(action='exit_now', created_at=now - 100h)` — beyond the shared 96h `MONITOR_EXIT_NOW_MAX_AGE_HOURS`.
+- Mock the same as Case 1.
+
+Assert:
+- `run_crypto_exit_pass(db).get("closed")` == 0.
+- `t.pending_exit_order_id` remains None.
+
+### Case 4 — price triggers still fire even when `exit_now` is also fresh
+
+Modeled to protect the "stop/target wins on tie" comment in the patch. This validates the ordering — the price-trigger branch resolves first; the `exit_now` consultation only runs when `should_exit=False`.
+
+Setup:
+- Open Trade as Case 1 BUT price=$8.50 (below stop=$9).
+- Insert `PatternMonitorDecision(action='exit_now')` fresh.
+- Mock the same as Case 1.
+
+Assert:
+- `t.pending_exit_reason` is the price-trigger reason string (truncated; starts with `stop_loss_hit`), NOT `pattern_exit_now`.
+- The exit fired exactly once (no double-counting).
+- (This case protects against future refactors that might accidentally invert the order or short-circuit.)
+
+### Case 5 — implausible-quote guard still wins over `exit_now`
+
+Setup:
+- Open Trade as Case 1 BUT mock `_current_crypto_price` to return `$0.0003` (entry $10, ratio 0.00003 — below the 0.1x threshold).
+- Insert `PatternMonitorDecision(action='exit_now')` fresh.
+
+Assert:
+- `run_crypto_exit_pass(db).get("closed")` == 0.
+- `t.pending_exit_order_id` remains None.
+- (The implausible-quote guard short-circuits inside `_evaluate_exit_triggers` returning `should_exit=False, reason="no_trigger:implausible_quote"`. The new monitor-consultation branch then kicks in but should ALSO be guarded — see Open Question #1.)
+
+### Case 6 (NEW) — refactor regression: crypto local alias resolves to shared callable
+
+Source-text guard mirroring the options test file's pattern at `tests/test_options_exit_monitor_pattern_exit_now.py::test_three_lanes_import_shared_helper`. Specifically:
+
+```python
+from app.services.trading.crypto import exit_monitor as crypto_exit
+from app.services.trading import _exit_monitor_common as common
+
+assert crypto_exit._latest_monitor_decisions_by_trade is common.latest_monitor_decisions_by_trade
+assert crypto_exit._fresh_monitor_exit_meta is common.fresh_monitor_exit_meta
 ```
-rg 'PatternMonitorDecision|_latest_monitor_decisions|_fresh_monitor_exit_meta|exit_now' \
-   app/services/trading/options/
-```
 
-Expected: zero matches. If matches found, brief halts and CC reports what's there — maybe a partial implementation exists.
+This catches the next time someone re-introduces a local copy.
 
-Phase 1.2 — check production for surfaced cases. Run a one-shot psycopg2 query (no need for a dispatch script — small enough to inline in the CC report):
+## Open question — surface to Cowork before shipping
 
-```sql
-SELECT pmd.id, pmd.trade_id, t.ticker, pmd.action, pmd.created_at, t.entry_date, t.status,
-       t.pending_exit_order_id, t.exit_date
-FROM trading_pattern_monitor_decisions pmd
-JOIN trading_trades t ON t.id = pmd.trade_id
-WHERE pmd.action = 'exit_now'
-  AND t.status = 'open'
-  AND (t.indicator_snapshot::text ILIKE '%option%' OR t.tags::text ILIKE '%option%')
-  AND pmd.created_at >= NOW() - INTERVAL '7 days'
-ORDER BY pmd.created_at DESC;
-```
+**Implausible-quote vs exit_now ordering.** Re-reading the patched code, when `_evaluate_exit_triggers` returns `should_exit=False, reason="no_trigger:implausible_quote ..."`, the `if not should_exit:` branch THEN consults `fresh_monitor_exit_meta`. If a fresh `exit_now` exists, the code currently sets `should_exit=True, reason="pattern_exit_now"` — meaning a fresh LLM advisory could OVERRIDE the implausible-quote refusal. That's almost certainly wrong: if the price feed is poisoned, the LLM is reading a different (clean) feed than the exit-engine, and acting on the LLM's recommendation while the exit-engine doesn't trust its own price is a different kind of foot-gun than acting on the bad price directly.
 
-(Adjust the `is_option_trade` predicate to match the actual classifier in `autopilot_scope.py`.) Goal: count how many open option positions have a stale `exit_now` recommendation right now. The number is the operational cost of the gap. If non-zero, the operator may want to manually close them after the fix lands but before the next monitor cycle catches up.
+Case 5 currently asserts `closed == 0`, which means the test EXPECTS the implausible-quote guard to win. If today's code doesn't behave that way, this test will fail and surface a real bug. CC should run Case 5 first; if it fails, escalate to Cowork before changing the test to match (i.e., don't "fix the test"; fix the code or escalate).
 
-## Phase 2 — Refactor: shared exit-monitor common module
+## What NOT to test
 
-`app/services/trading/_exit_monitor_common.py` (new file). Move the two helpers from `auto_trader_monitor.py` (lines 149-191):
+- Don't re-test the qty-clamp logic (FIX A-5b) — that's already covered in existing crypto exit tests.
+- Don't re-test the implausible-quote guard's threshold values — covered in `_evaluate_exit_triggers` tests.
+- Don't add property-based tests; the cases above are exhaustive enough for this branch.
+- Don't refactor `_latest_monitor_decisions_by_trade` / `_fresh_monitor_exit_meta` — already done in `f-options-exit-monitor-pattern-exit-now-audit`. The shared module exists at `app/services/trading/_exit_monitor_common.py`.
 
-- `_MONITOR_EXIT_NOW_MAX_AGE_HOURS` constant.
-- `latest_monitor_decisions_by_trade(db, trade_ids)` — public name (drop the leading underscore so callers across packages can import it cleanly).
-- `fresh_monitor_exit_meta(decision)` — same.
+## Mocking pattern
 
-In each consumer:
-- `auto_trader_monitor.py`: replace local helpers with `from ._exit_monitor_common import latest_monitor_decisions_by_trade, fresh_monitor_exit_meta, MONITOR_EXIT_NOW_MAX_AGE_HOURS`. Keep behavior identical.
-- `crypto/exit_monitor.py`: replace the local helpers (added 2026-05-06 in `f-crypto-exit-monitor-pattern-exit-now`) with the same import. Drop `_CRYPTO_MONITOR_EXIT_NOW_MAX_AGE_HOURS` since the shared constant is sufficient.
-- `options/exit_monitor.py`: import the shared helpers (this is the new consumer).
+Use the equity-lane test file as the template (`tests/test_auto_trader_monitor.py:338+`). Key mocks:
+- `app.services.trading.crypto.exit_monitor._current_crypto_price` (NOT `market_data.fetch_quote` — the function calls `_current_crypto_price` directly).
+- `app.services.broker_service.get_crypto_positions`.
+- `app.services.broker_service.place_crypto_sell_order`.
+- `app.services.trading.governance.is_kill_switch_active` (return False).
+- `app.config.settings.chili_autotrader_crypto_exit_monitor_enabled = True`.
+- `app.config.settings.chili_autotrader_user_id = u.id` AND `brain_default_user_id = u.id`.
 
-Acceptance: existing equity tests at `tests/test_auto_trader_monitor.py:338-454` continue to pass without modification. The refactor is behavior-preserving for equity and crypto.
-
-## Phase 3 — Wire the options lane
-
-In `options/exit_monitor.py::run_options_exit_pass`:
-
-1. After the `candidates = [t for t in open_trades if _is_option_trade(t)]` line (~line 263), batch-load:
-   ```python
-   latest_monitor_decisions = latest_monitor_decisions_by_trade(
-       db, [int(t.id) for t in candidates]
-   )
-   ```
-
-2. Inside the loop, after `_evaluate_exit_triggers` returns (~line 320 area, after the existing trigger-string handling), add the parity branch:
-   ```python
-   monitor_exit_meta = None
-   if not trigger:
-       monitor_exit_meta = fresh_monitor_exit_meta(
-           latest_monitor_decisions.get(int(t.id))
-       )
-       if monitor_exit_meta is not None:
-           trigger = "pattern_exit_now"
-   if not trigger:
-       continue
-   ```
-
-3. The success log line should carry the audit detail when monitor-driven, mirroring the crypto pattern:
-   ```python
-   if monitor_exit_meta is not None:
-       logger.info(
-           "[options_exit] CLOSED trade#%s contract=%s reason=%s "
-           "monitor_decision_id=%s monitor_src=%s monitor_age_h=%s monitor_price=%s",
-           t.id, contract.get("id"), trigger,
-           monitor_exit_meta.get("decision_id"),
-           monitor_exit_meta.get("decision_source"),
-           monitor_exit_meta.get("decision_age_hours"),
-           monitor_exit_meta.get("decision_price"),
-       )
-   ```
-
-4. The `pending_exit_reason` column on the option Trade row should be set to canonical `"pattern_exit_now"` (no truncation, no audit-detail concatenation) — same rule as crypto: audit metadata goes in the log line, not the 50-char column.
-
-5. Stop-on-tie ordering: existing price/DTE/premium triggers WIN over `exit_now`. The monitor consultation only runs when `_evaluate_exit_triggers` returns None. (Cheaper to evaluate; price/DTE reasons carry stronger semantics for postmortems than "LLM said so.")
-
-## Phase 4 — Test coverage
-
-New file `tests/test_options_exit_monitor_pattern_exit_now.py`. Mirror the five cases from `f-crypto-exit-monitor-pattern-exit-now-test` (still queued):
-
-1. Fresh `exit_now` + premium/DTE/stop in safe range → exit fires with `reason="pattern_exit_now"`.
-2. Latest `hold` after older `exit_now` → no exit.
-3. `exit_now` older than 96h → no exit.
-4. Both DTE-trigger and `exit_now` fresh → DTE-trigger wins (`reason="options_dte_proximity"` or whatever the existing literal is).
-5. Implausible mark/bid → no exit even with fresh `exit_now`. (Confirm options has the equivalent of crypto's implausible-quote guard; if not, this is a side finding worth flagging.)
-
-Plus: ONE refactor regression test asserting the equity / crypto / options lanes all import the same `latest_monitor_decisions_by_trade` symbol from `_exit_monitor_common.py`. This catches the next time someone re-introduces a local copy.
-
-## Phase 5 — Postmortem note
-
-Add a brief paragraph to `docs/STRATEGY/CC_REPORTS/2026-05-06_f-crypto-exit-monitor-pattern-exit-now.md`'s "Related queued work" section noting that this brief landed and how the broader pattern (asset-class-split exit lanes losing the LLM advisory) was systematically fixed across all three lanes. Optional but useful for future audits.
-
-## Open questions
-
-1. **Does the option Trade row use the same `pending_exit_*` columns as equity/crypto?** The schema check via `psql \d trading_trades` is in CC's job; if options uses a different column shape (e.g., contract-id instead of order-id), the fix needs to set the right fields. Pre-brief reading suggests the columns are uniform — `pending_exit_order_id` etc. — but worth confirming before assuming.
-2. **Is there a separate freshness window appropriate for options?** Equity/crypto use 96h. Options theta-decay says a 96h-old recommendation may be stale even if the LLM hasn't re-evaluated. Consider tightening to 24h or 12h for the options lane only — but only if there's a specific signal saying so. Default to 96h for parity unless data argues otherwise. (If the operator has an opinion here, ask before shipping.)
-3. **Does any existing options test mock `PatternMonitorDecision` already?** If so, this brief doubles as test coverage for that path — flag and reuse.
-
-## Out of scope
-
-- Adding `PatternMonitorDecision` writers for options (assumes the brain already writes them — verify via Phase 1.2 query). If the brain writes equity-only, that's a separate and larger brief: `f-options-pattern-monitor-coverage`.
-- Changing the freshness window for equity / crypto.
-- Adding monitor-decision consultation to non-exit lanes (entry, sizing, etc.).
+Use the `db` fixture from `tests/conftest.py` (truncates per test). Trade and PatternMonitorDecision are real ORM rows committed to the test DB; only the broker / quote / governance calls are mocked.
 
 ## Acceptance bar
 
-- Phase 1.2 query result included in CC report — N option positions with stale `exit_now`.
-- Phase 2 refactor: equity + crypto tests pass unmodified after the shared module lands.
-- Phase 3 fix: `options/exit_monitor.py` imports the shared helpers and wires the parity branch.
-- Phase 4 tests: 5 cases + 1 refactor regression test, all passing.
-- ZERO behavior change for equity / crypto (verified by existing test suites).
-- Postmortem note appended to the 2026-05-06 CC report.
+- 6 test cases passing (5 case tests + 1 source-guard).
+- Each test runs in <0.5s (no network, no real broker calls). Whole file <3s.
+- If Case 5 surfaces a real bug (implausible-quote losing to exit_now), CC writes a CC_REPORT entry flagging this and escalates to Cowork rather than silently muting the test.
+- Equity regression suite (`tests/test_auto_trader_monitor.py::*monitor_decision*`) and options regression suite (`tests/test_options_exit_monitor_pattern_exit_now.py`) BOTH still pass unmodified — this brief should not change behaviour anywhere.
+
+## Out of scope
+
+- Refactoring `_latest_monitor_decisions_by_trade` / `_fresh_monitor_exit_meta` into a shared module. **Already done.**
+- Adding integration tests against a live Robinhood sandbox.
+- Testing `pending_exit_status` transitions post-fill (broker_sync's domain).
+- Dropping the private-name re-export aliases in `crypto/exit_monitor.py`. That's a separate cleanup brief if/when the operator confirms no external consumers.
+
+## Operator-side after CC ships
+
+- Push the resulting commit alongside the prior 11 unpushed commits.
+- Run `pytest tests/test_crypto_exit_monitor_pattern_exit_now.py -v` once on the host to confirm.
+- If Case 5 surfaced the implausible-quote-vs-exit_now ordering bug, decide between (a) tightening the crypto code so the implausible-quote guard always wins, or (b) explicitly documenting that a fresh exit_now overrides on the theory that the LLM is reading a clean quote and we should trust it. My (Cowork) preference is (a): refuse to act when the price feed disagrees with itself, regardless of LLM input.
