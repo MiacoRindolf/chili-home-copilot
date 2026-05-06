@@ -1,16 +1,30 @@
+# QUEUED TASK: f-fix-implausible-quote-vs-exit_now-ordering (PROMOTED)
+
+**Promoted to `docs/STRATEGY/NEXT_TASK.md` on 2026-05-06 17:55 UTC after Case 5 of `f-crypto-exit-monitor-pattern-exit-now-test` confirmed the ordering bug is real.**
+
+The full brief content now lives in `NEXT_TASK.md`. This file is preserved as a placeholder so the queue history stays linkable; do not edit. If the brief is ever re-queued, restore the body from `docs/STRATEGY/CC_REPORTS/<date>_f-fix-implausible-quote-vs-exit_now-ordering.md` once it ships, or from git history.
+
+---
+
+The original body below is preserved verbatim for reference.
+
+# QUEUED TASK: f-fix-implausible-quote-vs-exit_now-ordering
+
+**Surfaced by Case 5 of `f-crypto-exit-monitor-pattern-exit-now-test` on 2026-05-06. The test (xfail-pinned, strict mode) asserts the implausible-quote guard wins over a fresh `exit_now` advisory; today's code lets the LLM advisory override the refusal. Brief Open Question explicitly named this as the next promotion. Operator hasn't asked yet — promote when the daemon-dispatched docs commit lands and Cowork-side cleanup is done.**
+
+The body below is the complete brief.
+
+---
+
 # NEXT_TASK: f-fix-implausible-quote-vs-exit_now-ordering
 
 STATUS: PENDING
-
-**Promoted from `docs/STRATEGY/QUEUED/f-fix-implausible-quote-vs-exit_now-ordering.md` on 2026-05-06 17:55 UTC. The previous DONE task (`f-crypto-exit-monitor-pattern-exit-now-test`) shipped 6 cases — 4 PASS, 1 alias-guard PASS, 1 xfail(strict=True) — see `docs/STRATEGY/CC_REPORTS/2026-05-06_f-crypto-exit-monitor-pattern-exit-now-test.md` and `docs/STRATEGY/COWORK_REVIEWS/2026-05-06_f-crypto-exit-monitor-pattern-exit-now-test.md`.**
-
-**Why this is next**: Case 5 of that test brief surfaced a real ordering bug. When `_evaluate_exit_triggers` returns `(False, "no_trigger:implausible_quote ...")`, the next branch in `run_crypto_exit_pass` consults `fresh_monitor_exit_meta` UNCONDITIONALLY — meaning a fresh `exit_now` advisory overrides the implausible-quote refusal and the engine sells from a quote it just refused to trust. Real exposure given the `$0.0003` TRUMP-USD storm. Fix is small (~5 lines) but the audit + test removal matters more.
 
 ## Goal
 
 Tighten `app/services/trading/crypto/exit_monitor.py::run_crypto_exit_pass` so the implausible-quote refusal from `_evaluate_exit_triggers` cannot be overridden by a fresh `pattern_monitor_decisions.action='exit_now'`. When the lane refuses to act on its own price feed, no advisory should be allowed to drag it into selling from a quote it just disowned. Per the no-hardcoded-fallback rule, the lane abstains rather than picking between two contradictory inputs.
 
-The fix is small (~5 lines) but the audit + verification matters more: confirm the same shape doesn't live in the equity lane, then unmark Case 5 from xfail so it locks the new behaviour.
+The fix is small (~2-3 lines) but the audit + verification matters more: confirm the same shape doesn't live in the equity lane, then unmark Case 5 from xfail so it locks the new behaviour.
 
 ## Background — what Case 5 surfaced
 
@@ -35,12 +49,10 @@ The bug location is in `crypto/exit_monitor.py::run_crypto_exit_pass`. After `_e
 Confirm the same shape doesn't live in equity / options before scoping the fix:
 
 **Equity (`app/services/trading/auto_trader_monitor.py:tick_auto_trader_monitor`):** read lines 337-410. Quote fetched via `adapter.get_quote_price(t.ticker)` with `_quote_price(t.ticker)` fallback. `if not px or px <= 0: continue` skips on no-quote. Then:
-
 ```
 hit_stop = stop > 0 and px <= stop
 hit_target = tgt > 0 and px >= tgt
 ```
-
 **Pre-brief assessment**: equity has NO implausible-quote refusal that the monitor consultation could override. The shape is "skip if no quote, else raw price compare." A bogus quote like `$0.0003` for an equity at entry $50 would trigger `hit_stop=True` and force-sell at the bad price — that's a DIFFERENT vulnerability (no guard at all) but NOT the same ordering bug. Verify by code-reading; if confirmed, equity is out of scope for THIS brief but worth a separate `f-equity-lane-implausible-quote-guard` brief later.
 
 **Options (`app/services/trading/options/exit_monitor.py:run_options_exit_pass`):** quote refusal is `bid<=0 AND mark<=0` → `summary["skipped_no_quote"] += 1; continue`. The `continue` short-circuits before ANY exit logic, monitor or otherwise. So a poisoned quote in options doesn't even reach the monitor consultation branch. ✓ Out of scope.
@@ -107,7 +119,7 @@ Modify `tests/test_crypto_exit_monitor_pattern_exit_now.py`:
 
 3. **Add a Case 5b**: `should_exit=False, reason="no_trigger"` (no refusal, just no signal) + fresh `exit_now`. Assert `closed == 1` with `pending_exit_reason="pattern_exit_now"` — confirms the fix doesn't regress the normal "LLM-only exit" path.
 
-Acceptance: 8 tests in this file, all pass. The xfail marker is gone. Equity + options regression suites unchanged.
+Acceptance: 7 tests in this file, all pass. The xfail marker is gone. Equity + options regression suites unchanged.
 
 ## Phase 3 — Verify deployment
 
@@ -135,7 +147,7 @@ If TRUMP-USD's $0.0003 storm is still active, the verification window is short �
 
 - Phase 0 audit confirmed: equity has different shape (no guard), options has different shape (skip-on-no-quote). Crypto-only fix.
 - Phase 1 fix shipped: ~5-line gate before the `fresh_monitor_exit_meta` consultation, plus inline comment explaining the no-hardcoded-fallback rationale.
-- Phase 2 tests: 8 tests in `tests/test_crypto_exit_monitor_pattern_exit_now.py` (was 5 case + 1 source-guard + 1 xfail; becomes 5 case + 1 source-guard + 1 evaluate-triggers-prefix + 1 case-5b regression; the xfail flips to PASS via marker removal). All pass.
+- Phase 2 tests: 7 cases passing in `tests/test_crypto_exit_monitor_pattern_exit_now.py` (was 5 case + 1 source-guard + 1 xfail; becomes 5 case + 1 source-guard + 1 evaluate-triggers-prefix + 1 case-5b regression). xfail marker removed.
 - Equity test suite (`tests/test_auto_trader_monitor.py`) and options suite (`tests/test_options_exit_monitor_pattern_exit_now.py`) BOTH still pass unmodified.
 - After deploy: no `pattern_exit_now` exits fire on the same cycle as a `DATA_IMPLAUSIBLE` row for the same ticker.
 
