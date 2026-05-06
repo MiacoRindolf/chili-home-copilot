@@ -340,6 +340,47 @@ def run_brain_work_dispatch_round(
                             "%s demote handler failed ev_id=%s: %s — proceeding to regime_ledger",
                             LOG_PREFIX, ev.id, _de,
                         )
+                    # f-handler-live-drift + f-handler-execution-robustness
+                    # (2026-05-06, Phase 6 of f-overnight-jumbo): both
+                    # subscribe to trade-close events; both swallow their
+                    # own exceptions. Run BOTH after demote so the EV-gate
+                    # has already run; drift / robustness are independent
+                    # observability, not lifecycle gates.
+                    try:
+                        from .handlers.live_drift import (
+                            handle_paper_trade_closed as _ld_paper,
+                            handle_live_trade_closed as _ld_live,
+                            handle_broker_fill_closed as _ld_broker,
+                        )
+                        if event_type == "paper_trade_closed":
+                            _ld_paper(db, ev, user_id)
+                        elif event_type == "live_trade_closed":
+                            _ld_live(db, ev, user_id)
+                        else:
+                            _ld_broker(db, ev, user_id)
+                    except Exception as _ld_err:
+                        logger.warning(
+                            "%s live_drift handler failed ev_id=%s: %s",
+                            LOG_PREFIX, ev.id, _ld_err,
+                        )
+                    try:
+                        from .handlers.execution_robustness import (
+                            handle_paper_trade_closed as _er_paper,
+                            handle_live_trade_closed as _er_live,
+                            handle_broker_fill_closed as _er_broker,
+                        )
+                        if event_type == "paper_trade_closed":
+                            _er_paper(db, ev, user_id)
+                        elif event_type == "live_trade_closed":
+                            _er_live(db, ev, user_id)
+                        else:
+                            _er_broker(db, ev, user_id)
+                    except Exception as _er_err:
+                        logger.warning(
+                            "%s execution_robustness handler failed ev_id=%s: %s",
+                            LOG_PREFIX, ev.id, _er_err,
+                        )
+
                     try:
                         from .handlers.regime_ledger import handle_trade_closed_for_ledger
                         handle_trade_closed_for_ledger(db, ev, user_id)

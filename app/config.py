@@ -1967,6 +1967,14 @@ class Settings(BaseSettings):
     # ``breakout_alert_resolved``. Modest cap; alerts resolve on the
     # breakout-outcome-check sweep (default every few minutes).
     brain_work_breakout_outcomes_batch_size: int = 4
+
+    # f-handler-live-drift + f-handler-execution-robustness (Phase 2
+    # #8/#9, 2026-05-06): trade-close-driven observability. Both share
+    # the trade-close batch size with demote/regime_ledger via
+    # brain_work_trade_close_batch_size; these settings are reserved
+    # for future per-handler throttling if drift/robustness become hot.
+    brain_work_live_drift_batch_size: int = 2
+    brain_work_execution_robustness_batch_size: int = 2
     chili_autotrader_user_id: int | None = Field(
         default=None,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_USER_ID"),
