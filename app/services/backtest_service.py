@@ -1906,6 +1906,24 @@ def _run_dynamic_pattern_slice(
         run_with_walltime_budget as _bt_run_budget,
         BacktestBudgetExceeded as _BTBudgetExceeded,
     )
+    # f-leak-4 phase 3 (2026-05-06): break the back-references on the
+    # strat_cls so even if the third-party FractionalBacktest library
+    # retains a reference to the bt object (and through it the strategy
+    # instance + class), the heavy data is freed. The class attrs we
+    # injected via ``type()`` -- _indicator_arrays / _atr_array /
+    # _swing_low_array (full series) and _parity_sink (list of dicts) --
+    # are the BookLevel / NumpyBlock pandas allocations the mem_watcher
+    # caught accumulating at ~9 backtests/sec. Cleanup runs on EVERY exit
+    # path (success, budget-exceeded, exception); never let it raise.
+    def _cleanup_strat_cls() -> None:
+        try:
+            strat_cls._parity_sink = []
+            strat_cls._indicator_arrays = {}
+            strat_cls._atr_array = []
+            strat_cls._swing_low_array = []
+        except Exception:
+            pass
+
     try:
         stats = _bt_run_budget(bt, label=f"dynpat:{ticker}")
     except _BTBudgetExceeded as _e:
@@ -1913,9 +1931,11 @@ def _run_dynamic_pattern_slice(
             "[backtest_service] dynpat backtest aborted on budget for ticker=%s: %s",
             ticker, _e,
         )
+        _cleanup_strat_cls()
         return {"ok": False, "error": f"backtest_budget_exceeded:{ticker}"}
 
     _drain_backtest_parity_sink(strat_cls, ticker)
+    _cleanup_strat_cls()
 
     equity_data: list[dict[str, Any]] = []
     if include_charts:
