@@ -1,564 +1,567 @@
-# NEXT_TASK: f-add-paper-shadow-mode
+# NEXT_TASK: f-leak-4
 
 STATUS: DONE
 
 ## Goal
 
-Add an **opt-in paper-shadow mode** to `auto_trader.py` so every live
-trade decision ALSO creates a parallel paper trade. After this ships:
+Fix three independent memory leaks identified in mem_watcher data
+post-deploy. Each phase is small and isolated; after this ships,
+the post-deploy memory profile should hold steady at:
 
-- Each BreakoutAlert that produces a live `placed`, `blocked`, or
-  `skipped` decision ALSO produces a paper-trade row tagged
-  `autotrader_v1_paper_shadow`, attributed to the original alert.
-- Paper-shadow trades open at the alert's `current_price` (no broker
-  slippage, no partial fills, no rejections) — measures the
-  strategy's "ideal execution" P/L in real time.
-- Pattern_stats handler (today's f-handler-pattern-stats) sees the
-  paper-shadow closes too, but aggregates them under a separate
-  attribution so live-vs-shadow can be compared per pattern.
-- New SQL probe surfaces "live-vs-shadow P/L delta per alert" — the
-  canonical execution-alpha-drag metric.
+- scheduler-worker < 500 MB stable (currently growing 9-15k
+  ReferenceType weakrefs per 5min tick, climbing toward 3 GB)
+- chili main app < 600 MB stable (currently +63 MB/min slope; 3.7 GB/hr
+  if sustained)
+- brain-worker < 800 MB stable (currently churning 9 backtests/sec;
+  BookLevel/NumpyBlock pandas allocations not GC'd cleanly)
 
-This is **opt-in via flag** (`chili_autotrader_paper_shadow_enabled`,
-default `False`). Operator can flip it on without code changes; live
-trading behavior is identical when the flag is off. **Default off
-ships safely.**
+f-leak-3 (yfinance Thread-closure leak) is verifiably HOLDING —
+`invoke_excepthook` count 0 across all three containers, yf-breaker
+state CLOSED. **The new leak signature is different.** Three distinct
+shapes, each in code that landed THIS WEEK during the exit-engine /
+brain-correctness chain. Surgical fix per shape.
 
 ## Why now
 
-Today's chain of fixes proved the brain's event-driven architecture
-is structurally sound but **paper-mode-as-canary is not currently
-available** because paper and live are mutually-exclusive modes
-(`auto_trader.py:632`). The operator runs in live mode; paper never
-fires.
+Operator captured pre/post-restart mem_watcher data after today's
+deploy:
 
-Paper-shadow-alongside-live solves five real algo-trader use cases:
+```
+SCHEDULER-WORKER (heaviest leak):
+  Pre-restart 08:01:   vm_rss=3035MB  py_objects=820k  ReferenceType=191k
+  Post-restart 08:09:  vm_rss=200MB   py_objects=283k
+  → Pre-restart growth: ReferenceType +9k-15k per 5min tick
 
-1. **Execution-quality measurement.** Compare live realized P/L
-   (slippage-affected) vs paper-shadow P/L (idealized fill) per
-   alert → quantify execution-alpha-drag in basis points. Today
-   measured indirectly via `execution_audit.py`; this gives a
-   per-alert delta.
+CHILI MAIN APP:
+  Pre-restart 08:07:   vm_rss=1433MB  threads=72(!)  py_objects=834k
+  Post-restart 08:09:  vm_rss=400MB   py_objects=686k
+  +1min later:         vm_rss=463MB (+63MB!) py_objects=730k (+44k)
+  → 63 MB/min sustained = 3.7 GB/hr
 
-2. **Pure-strategy pattern evidence.** Today's canonical-aware writer
-   (`update_pattern_stats_from_closed_trades`, mig 228) aggregates
-   from realized live closes — contaminated by slippage, broker
-   rejections, scale-in/out timing. Paper-shadow evidence is
-   pure-strategy. The realized-EV gate could read either; pure is
-   strictly more informative for pattern judgment.
+BRAIN-WORKER:
+  fast_backtest_loop tick: completed=1362 errors=0 elapsed=145.9s
+  → ~9 backtests/sec; each FractionalBacktest allocates BookLevel /
+    NumpyBlock pandas structures
+```
 
-3. **Brain learning surface.** Today the brain learns only from
-   realized live trades — at current placement rate of ~0.14% of
-   AutoTraderRun decisions, that's near-zero data. Paper-shadow
-   makes 100% of decisions produce evidence regardless of broker
-   availability or position-size limits. **More than 700× more
-   training data per day.**
+f-leak-3 holding (good): `invoke_excepthook` 0/0/0; yf-breaker CLOSED.
+**f-leak-4 is a separate, multi-source leak.** The fastest probable
+root cause is the SessionLocal sites added today (commits f87e62a,
+e2a974e). If any of them does `db = SessionLocal()` then `db.add()`
+without `with` or explicit `try/finally db.close()`, the ORM
+identity-map weakrefs accumulate forever — exactly the
+ReferenceType pattern.
 
-4. **Backtest-realism validation in real time.** Backtests use
-   idealized fills. Live uses real fills. Paper-shadow uses
-   real-time prices but idealized fills — **same as backtest**.
-   If backtest projections match paper-shadow P/L, the backtest is
-   realistic. If they diverge, the backtest math is broken (and
-   today's pattern promotion decisions are based on fiction).
+This blocks the day's push: 14 commits worth of architectural
+correctness shouldn't ship to remote while a leak shipped from those
+commits is actively eroding host memory.
 
-5. **Failure-mode visibility / opportunity cost.** When live fails
-   (broker rejection, no order_id), today nothing is recorded as
-   "this alert WOULD have made $N if executed." Paper-shadow
-   captures the unrealized opportunity. Critical when live
-   placement rate is low (as it is right now).
+## Phase ordering and stop-on-blocker policy
 
-Three of five (#1, #2, #4) are load-bearing for the trading system's
-correctness, not nice-to-haves. #3 unblocks the brain learning that
-otherwise stays starved at the current placement rate. #5 gives
-operator visibility when troubleshooting why live isn't placing.
+**Sequence (highest probability of mechanical fix first):**
 
-## Scope boundary
+1. **Phase 1 — SessionLocal context-manager audit** (~30 min)
+   Audit the three new SessionLocal sites. If any uses bare
+   `db = SessionLocal()` without context manager, fix in place.
+   This is the highest-probability cause of the scheduler-worker
+   ReferenceType leak.
 
-**In scope:**
-- Migration `_migration_NNN_paper_shadow_attribution` — add
-  `trading_paper_trades.paper_shadow_of_alert_id` (nullable FK to
-  `breakout_alerts.id`) + index.
-- `chili_autotrader_paper_shadow_enabled: bool = False` config flag.
-- `auto_trader.py`: after each live decision (placed / blocked /
-  skipped), ALSO call `open_paper_trade(..., paper_shadow_of_alert_id=...)`
-  when flag is on. Always-on within the live branch — independent of
-  live success.
-- `paper_trading.open_paper_trade`: accept new kwarg
-  `paper_shadow_of_alert_id`, persist on the row.
-- Pattern_stats handler **must NOT double-count** when aggregating
-  closed trades. Filter `paper_shadow_of_alert_id IS NOT NULL` out
-  of evidence aggregation by default; surface as a deferred follow-up
-  whether to prefer-shadow vs prefer-live for evidence purposes.
-- New SQL probe at
-  `scripts/dispatch-paper-shadow-execution-delta.ps1` that reports
-  per-alert live-vs-shadow P/L delta (the "execution-alpha-drag" metric).
-- Tests covering opt-in toggle, parallel-row creation, attribution
-  column, double-count filter.
+2. **Phase 2 — FastAPI middleware request-retention probe** (~60 min)
+   Diagnostic-then-fix for chili's per-request closure leak. Find
+   what's holding `request_response.<locals>.app` /
+   `get_request_handler.<locals>.app` references.
 
-**Out of scope:**
-- Auto-promote paper-shadow to authoritative for the realized-EV
-  gate. That's a separate strategic decision; surface as
-  `f-prefer-shadow-evidence` if/when the data shows shadow is
-  cleaner.
-- Live ↔ shadow exit-time syncing. Shadow runs its OWN exit logic
-  via the existing paper exit-engine. Live closes when it closes;
-  shadow closes when it closes. The comparison is realized P/L,
-  not bar-for-bar replay.
-- UI / dashboard for execution-alpha-drag. Defer to follow-up brief
-  `f-paper-shadow-dashboard` once data accumulates.
-- Modifying live trading behavior in any way. Live path is
-  unchanged; shadow is purely additive.
-- Modifying the canonical evaluator (`exit_evaluator.py`).
-- Modifying the realized-EV gate or promotion gate.
-- Live-mode partial closes — separate concern from paper-shadow.
+3. **Phase 3 — FractionalBacktest strategy-instance cleanup** (~45 min)
+   Verify FractionalBacktest tearsdown its strategy instance +
+   DataFrames after each run. The `_parity_sink` from f-exit-parity-persist
+   is a candidate retention site (drains at end-of-run, but the empty
+   list stays attached).
 
-## Brain integration / source material
+**Stop-on-blocker policy:** Each phase commits independently. If a
+phase doesn't reproduce the leak in the diagnostic step, commit a
+"verified non-issue" note in the CC report and skip to the next.
+Don't deadlock waiting on operator input.
 
-- `app/services/trading/auto_trader.py:625-1565` — the entry-side
-  decision logic. Live branch at 1370+; paper branch at 1517+. The
-  shadow hook lands inside the live branch, after each terminal
-  decision (placed / blocked / skipped).
-- `app/services/trading/auto_trader.py:632` — `live = bool(runtime.get("live_orders_effective"))`.
-  Shadow only fires when `live=True`. When `live=False`, paper is
-  already opening directly; shadow would be redundant.
-- `app/services/trading/paper_trading.py::open_paper_trade` — extend
-  the signature.
-- `app/models/trading.py::PaperTrade` — add the new column to ORM
-  matching the migration.
-- `app/services/trading/learning.py:4798` —
-  `update_pattern_stats_from_closed_trades`. Add the
-  `paper_shadow_of_alert_id IS NULL` filter to the closed-trade
-  query so shadow rows don't double-count.
-- `app/config.py` — add `chili_autotrader_paper_shadow_enabled: bool = False`.
-- `docs/STRATEGY/PHASE2_HANDLER_BACKLOG.md` — note that this brief
-  generates new paper-trade traffic that the existing pattern_stats
-  / demote / regime_ledger handlers will consume.
+**Goal**: ship as many fixes as possible. Acceptable floor: at least
+Phase 1 ships (highest-probability surgical fix). After all phases,
+operator deploys + verifies via mem_watcher trend, then pushes the
+14-commit backlog.
+
+---
+
+# Phase 1 — SessionLocal context-manager audit
+
+## Goal
+
+Three SessionLocal sites added in today's commits. Audit each. If
+any leaks weakrefs by skipping context-manager / explicit close,
+fix in place.
+
+## Source material
+
+Three suspect sites (per the operator's diagnosis):
+
+1. **`app/services/broker_service.py`** — Phase 1 shadow-mode write
+   helpers from commit `e2a974e` (position-identity-phase-1). Find
+   the SessionLocal calls in `sync_positions_to_db` (~line 1372).
+
+2. **`app/services/trading/live_exit_engine.py::_phase_b_shadow_parity`**
+   — commit `f87e62a` (f-exit-parity-persist). The function does
+   `db.add(row); db.commit()` per the f-exit-parity-persist brief's
+   Step 2.
+
+3. **`app/services/trading/backtest_service.py::_drain_backtest_parity_sink`**
+   — commit `f87e62a`. Drains `_parity_sink` to ExitParityLog at
+   backtest-run completion.
+
+For each site, check whether `SessionLocal()` is wrapped in:
+- ✅ `with SessionLocal() as db:` (correct — auto-closes)
+- ✅ `try:` ... `finally: db.close()` (correct — explicit close)
+- ❌ Bare `db = SessionLocal()` ... `db.commit()` ... `(no close)` (LEAKS)
 
 ## Path
 
-### Step 0 — Pre-execution audit (DO BEFORE ANY CODE CHANGE)
+### Step 1.1 — Audit each site
 
-The codebase contains a **dormant placeholder** for "paper shadow book"
-that was added with intent but never wired:
+Read each function. Identify the SessionLocal lifecycle. Document
+findings in the CC report's per-phase section.
 
-- `ScanPattern.paper_book_json` (`app/models/trading.py:865-868`) —
-  JSONB column, default `{}`, comment "paper shadow book". As of
-  brief-write time, **zero readers, zero writers** in the codebase.
-- `brain_paper_book_on_promotion: bool = False`
-  (`app/config.py:2616-2617`) — flag with comment "When a pattern is
-  promoted, initialize paper_book_json for optional shadow tracking".
-  As of brief-write time, **zero readers** of this flag.
+### Step 1.2 — Fix any leakers
 
-This brief implements paper-shadow with a **better-shaped per-trade
-schema** (FK column on `trading_paper_trades`) instead of the
-placeholder's per-pattern JSONB aggregate. The per-trade design fits
-the event-driven handler chain we just built; the JSONB design
-doesn't.
+For any site found to use bare SessionLocal without close:
 
-**Confirm the placeholder is still unused before proceeding.** Run:
+**Pattern A — convert to context manager (preferred):**
 
-```bash
-# Both should return zero reader/writer matches
-grep -rn "paper_book_json" app/ scripts/ \
-    | grep -v "models/trading.py" \
-    | grep -v "migrations.py" \
-    | grep -v "schema definition only"
+```python
+# OLD (leaks weakrefs)
+db = SessionLocal()
+db.add(row)
+db.commit()
 
-grep -rn "brain_paper_book_on_promotion" app/ scripts/ \
-    | grep -v "config.py"
+# NEW
+with SessionLocal() as db:
+    db.add(row)
+    db.commit()
 ```
 
-**Decision tree:**
-- **Both grep returns zero matches**: placeholder is dormant.
-  **Proceed to Step 1** with the per-trade design as specified.
-- **Either grep returns matches**: someone wired the placeholder
-  between brief-write and execution. **Surface in CC report and
-  STOP** — re-evaluate whether to ship the per-trade design alongside
-  the now-active per-pattern JSONB or reconcile the two designs.
+**Pattern B — explicit close (when context manager doesn't fit):**
 
-Document the audit result in the CC report's "Pre-execution audit"
-section. The placeholder schema column + dead flag are NOT removed
-in this brief — that's a separate cleanup brief
-(`f-cleanup-paper-book-json-placeholder`) once paper-shadow has
-been operationally proven (≥1 week of clean shadow data with the
-new design). Premature cleanup risks a flailing rollback if the
-new design fails.
+```python
+db = SessionLocal()
+try:
+    db.add(row)
+    db.commit()
+finally:
+    db.close()
+```
 
-### Step 1 — Migration `_migration_NNN_paper_shadow_attribution`
+Either is acceptable. Pattern A is preferred per Python idiom.
+
+### Step 1.3 — Tests
+
+Per fixed site, add a test:
+
+```python
+# tests/test_<module>_session_lifecycle.py
+
+def test_<function>_does_not_leak_session(...):
+    """Verify SessionLocal opened in <function> closes after return."""
+    import gc, weakref
+    from app.db import SessionLocal
+    sessions_before = sum(1 for o in gc.get_objects()
+                           if type(o).__name__ == 'Session')
+    <call the function>
+    gc.collect()
+    sessions_after = sum(1 for o in gc.get_objects()
+                          if type(o).__name__ == 'Session')
+    assert sessions_after <= sessions_before, \
+        f"Session leak: {sessions_before} → {sessions_after}"
+```
+
+### Step 1.4 — Smoke verification
+
+Operator-side, post-deploy:
 
 ```sql
-ALTER TABLE trading_paper_trades
-    ADD COLUMN IF NOT EXISTS paper_shadow_of_alert_id INTEGER NULL
-        REFERENCES breakout_alerts(id) ON DELETE SET NULL;
-
--- Sparse partial index — most paper trades won't be shadow trades.
-CREATE INDEX IF NOT EXISTS ix_trading_paper_trades_paper_shadow_alert
-    ON trading_paper_trades (paper_shadow_of_alert_id)
-    WHERE paper_shadow_of_alert_id IS NOT NULL;
+SELECT application_name, state, COUNT(*) AS n
+FROM pg_stat_activity
+WHERE application_name LIKE 'chili%'
+GROUP BY application_name, state
+ORDER BY application_name, state;
 ```
 
-Migration ID = next sequential at execution time. Verify with
-`scripts/verify-migration-ids.ps1`.
-
-### Step 2 — ORM update
-
-In `app/models/trading.py::PaperTrade`, add:
-
-```python
-paper_shadow_of_alert_id: Optional[int] = Column(
-    Integer, ForeignKey("breakout_alerts.id"), nullable=True
-)
-```
-
-Place near other foreign keys; match column ordering to the migration.
-
-### Step 3 — Extend `open_paper_trade`
-
-In `app/services/trading/paper_trading.py`, extend the `open_paper_trade`
-signature:
-
-```python
-def open_paper_trade(
-    db: Session,
-    user_id: int,
-    ticker: str,
-    entry_price: float,
-    *,
-    scan_pattern_id: int | None = None,
-    stop_price: float | None = None,
-    target_price: float | None = None,
-    direction: str = "long",
-    quantity: int = 1,
-    signal_json: dict | None = None,
-    paper_shadow_of_alert_id: int | None = None,  # NEW
-) -> PaperTrade | None:
-    ...
-```
-
-Persist `paper_shadow_of_alert_id` on the new PaperTrade row when
-provided.
-
-### Step 4 — Wire shadow into auto_trader live branch
-
-In `app/services/trading/auto_trader.py`, after each terminal decision
-in the live branch, add the shadow hook. Locate the three terminal
-points in the live branch (lines ~1407, ~1428, plus the placed-success
-branch ending at ~1515):
-
-```python
-# Helper: open the paper-shadow trade. Always-on within the live
-# branch (regardless of live success/failure). Gated on
-# chili_autotrader_paper_shadow_enabled. Failures swallowed at this
-# boundary — shadow must never break the live decision flow.
-def _maybe_open_paper_shadow(
-    db: Session, *, uid: int, alert: Any, qty: int, px: float, snap: dict,
-) -> None:
-    if not getattr(settings, "chili_autotrader_paper_shadow_enabled", False):
-        return
-    try:
-        from .paper_trading import open_paper_trade
-        sig = {
-            "auto_trader_v1": True,
-            "breakout_alert_id": int(alert.id),
-            "paper_shadow": True,
-            "shadow_of_alert_id": int(alert.id),
-            "projected": snap.get("projected_profit_pct"),
-        }
-        open_paper_trade(
-            db, uid, alert.ticker, px,
-            scan_pattern_id=alert.scan_pattern_id,
-            stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
-            target_price=float(alert.target_price) if alert.target_price is not None else None,
-            direction="long",
-            quantity=max(1, int(qty)),
-            signal_json=sig,
-            paper_shadow_of_alert_id=int(alert.id),
-        )
-        logger.info(
-            "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s qty=%s px=%s opened",
-            alert.id, alert.scan_pattern_id, alert.ticker, qty, px,
-        )
-    except Exception:
-        logger.debug(
-            "[autotrader_paper_shadow] open failed for alert_id=%s",
-            getattr(alert, "id", None), exc_info=True,
-        )
-```
-
-Then call it AFTER:
-1. Each `_audit(... decision="blocked", ...)` in the live branch
-2. Each `_audit(... decision="skipped", ...)` in the live branch
-3. The successful `_audit(... decision="placed", reason="ok", ...)`
-   at line ~1503
-
-The "after" placement matters: the live decision and its audit row
-land first, the shadow opens second. If shadow fails, the live
-decision is intact.
-
-**Do NOT** call this from the paper branch (lines 1517+). When
-`live=False`, the paper branch is already creating paper trades
-directly — shadow would create duplicates.
-
-### Step 5 — Filter shadow rows out of evidence aggregation
-
-In `app/services/trading/learning.py::update_pattern_stats_from_closed_trades`,
-the closed-trade query (around line 4830) currently aggregates ALL
-closed trades. Add a filter to exclude shadow rows from default
-evidence:
-
-```python
-closed_q = db.query(...).filter(
-    Trade.status == "closed",
-    Trade.scan_pattern_id.isnot(None),
-    Trade.exit_date.isnot(None),
-    Trade.entry_date.isnot(None),
-    # NEW: exclude paper-shadow rows from evidence aggregation by
-    # default. Shadow rows are kept for execution-alpha-drag
-    # measurement (separate query); they're not the canonical
-    # realized P/L for pattern evidence.
-)
-# When extending to PaperTrade in the union, add:
-# PaperTrade.paper_shadow_of_alert_id.is_(None)
-```
-
-The current function reads from `Trade` (not PaperTrade) per the audit;
-verify the filter actually applies to the union the function uses.
-
-### Step 6 — Config setting
-
-In `app/config.py`:
-
-```python
-chili_autotrader_paper_shadow_enabled: bool = False
-```
-
-Default `False`. Comment inline: "When True, every autotrader live
-decision ALSO opens a paper-shadow trade tagged
-`paper_shadow_of_alert_id`. Used to measure execution-alpha-drag,
-provide pure-strategy pattern evidence, and unstarve brain learning
-during low-live-placement-rate periods. Default off; opt-in only."
-
-### Step 7 — Execution-alpha-drag SQL probe
-
-`scripts/dispatch-paper-shadow-execution-delta.ps1`:
-
-```sql
--- Per-alert live-vs-shadow P/L delta. Positive = shadow did better
--- (slippage hurt live execution). Negative = shadow did worse
--- (entry price drift in operator's favor). Magnitude in basis points.
-WITH pairs AS (
-    SELECT
-        pt.paper_shadow_of_alert_id AS alert_id,
-        pt.id AS shadow_id,
-        pt.scan_pattern_id,
-        pt.ticker,
-        pt.entry_date AS shadow_entry,
-        pt.exit_date AS shadow_exit,
-        pt.exit_price AS shadow_exit_price,
-        pt.entry_price AS shadow_entry_price,
-        pt.pnl AS shadow_pnl,
-        t.id AS live_id,
-        t.exit_price AS live_exit_price,
-        t.entry_price AS live_entry_price,
-        t.pnl AS live_pnl,
-        t.exit_reason AS live_exit_reason
-    FROM trading_paper_trades pt
-    LEFT JOIN trading_trades t
-        ON t.related_alert_id = pt.paper_shadow_of_alert_id
-       AND t.broker_source = 'robinhood'
-       AND t.management_scope = 'auto_trader_v1'
-    WHERE pt.paper_shadow_of_alert_id IS NOT NULL
-      AND pt.status = 'closed'
-      AND pt.exit_date >= NOW() - INTERVAL '7 days'
-)
-SELECT
-    p.alert_id,
-    p.scan_pattern_id,
-    p.ticker,
-    p.shadow_pnl,
-    p.live_pnl,
-    (COALESCE(p.shadow_pnl,0) - COALESCE(p.live_pnl,0))
-        / NULLIF(p.shadow_entry_price, 0) * 10000.0 AS delta_bps,
-    p.live_exit_reason
-FROM pairs p
-ORDER BY ABS(COALESCE(p.shadow_pnl,0) - COALESCE(p.live_pnl,0)) DESC
-LIMIT 30;
-```
-
-Plus aggregate stats (count of paired closes, mean delta_bps, stddev,
-t-statistic on bias) to give the operator a one-shot read on
-whether execution drag is significant at 95% CI.
-
-### Step 8 — Tests
-
-`tests/test_paper_shadow_mode.py`:
-
-1. ✅ Flag off (default): live decision creates Trade row; **no
-   PaperTrade row created.**
-2. ✅ Flag on, live placed: live decision creates Trade row AND
-   parallel PaperTrade row tagged `paper_shadow_of_alert_id`.
-3. ✅ Flag on, live blocked: no Trade row, but PaperTrade-shadow
-   IS still created (captures opportunity-cost).
-4. ✅ Flag on, live skipped (e.g., PDT gate): no Trade row, but
-   PaperTrade-shadow IS still created.
-5. ✅ Flag on, paper mode (`live=False`): NO shadow created. The
-   paper branch already runs; shadow would duplicate.
-6. ✅ Shadow row carries `paper_shadow_of_alert_id` matching the
-   alert that triggered it.
-7. ✅ `update_pattern_stats_from_closed_trades` filters shadow rows
-   out of evidence aggregation. Synthetic pattern with 5 normal
-   closes + 5 shadow closes computes win_rate from the 5 normal,
-   not 10 mixed.
-8. ✅ Shadow open failure does not break the live decision flow
-   (mock `open_paper_trade` to raise; live Trade still committed).
-
-### Step 9 — Smoke verification
-
-After deploy with `chili_autotrader_paper_shadow_enabled=true`:
-
-1. Wait for next AutoTraderRun (every 1 min via scheduler-worker).
-2. Check parallel rows:
-   ```sql
-   SELECT
-       (SELECT COUNT(*) FROM trading_trades
-        WHERE management_scope = 'auto_trader_v1'
-          AND entry_date >= NOW() - INTERVAL '15 minutes') AS live_n,
-       (SELECT COUNT(*) FROM trading_paper_trades
-        WHERE paper_shadow_of_alert_id IS NOT NULL
-          AND entry_date >= NOW() - INTERVAL '15 minutes') AS shadow_n;
-   ```
-   Expected: `shadow_n >= live_n + (skipped/blocked count)`. Every
-   live decision should have a shadow.
-3. Run the execution-alpha-drag probe (Step 7). With <30 minutes of
-   data, the t-statistic will be unreliable but the per-alert table
-   should populate.
-4. Watch `[autotrader_paper_shadow]` log lines for any errors.
-
-## Constraints / do not touch
-
-- **Default mode stays paper.** Top-level operator default unchanged.
-  Only the SHADOW addition is opt-in.
-- **All 8 fast-path safety belts intact.** PROTOCOL Hard Rule 1.
-- **Do not modify live trading behavior.** Shadow is purely additive
-  alongside live; live path is unchanged.
-- **Do not modify the canonical evaluator** (`exit_evaluator.py`).
-- **Do not modify the realized-EV gate or promotion gate.** Auto-
-  demote falls out for free if shadow is later promoted to
-  authoritative; that decision is a separate brief.
-- **Do not modify any of the 6 existing brain_work handlers.** The
-  pattern_stats / demote / regime_ledger handlers will see shadow
-  paper-trade-closed events; they'll process them. The filter at
-  Step 5 is in `update_pattern_stats_from_closed_trades`, not in
-  the handler itself.
-- **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
-- **Migration ID** = next sequential. Verify with
-  `verify-migration-ids.ps1`.
-- **No `git push --force`.** PROTOCOL Hard Rule 4.
-- **The flag default is `False`.** Shipping must not change current
-  trading behavior. Operator opts in explicitly.
-
-## Out of scope
-
-- Auto-promoting shadow evidence to be the canonical pattern-evidence
-  source. Separate strategic decision; queue
-  `f-prefer-shadow-evidence` for follow-up if data shows shadow is
-  cleaner.
-- UI / dashboard for execution-alpha-drag. Follow-up brief
-  `f-paper-shadow-dashboard`.
-- Live ↔ shadow exit-time syncing. Shadow runs its own exit logic.
-- Modifying which exit reasons close shadow trades. They follow the
-  existing paper exit-engine.
-- Position-size sync between live and shadow (e.g., if live partials
-  out, shadow should partial out). Not in scope; shadow runs
-  independent.
-- Backtest-shadow comparison (a third axis). Not in scope.
-- LLM-context (`position_plan_generator`) updates to surface
-  paper_shadow attribution. Out of scope.
+Expected: idle counts stay flat over 30 min; idle-in-tx stays at 0
+after each tick completes.
 
 ## Success criteria
 
-1. **Migration lands cleanly.** `verify-migration-ids.ps1` passes.
-   Schema check confirms the new column + sparse index.
-2. **`chili_autotrader_paper_shadow_enabled: bool = False`** added
-   to `app/config.py` with documented default.
-3. **`open_paper_trade` extended** with the new kwarg, persists
-   correctly.
-4. **Auto_trader live branch hooks the shadow** at all three
-   terminal decision points (placed / blocked / skipped). Calls are
-   try/except wrapped.
-5. **Pattern_stats filter excludes shadow rows** from default
-   evidence aggregation.
-6. **All 8 new tests pass + existing tests still pass** against
-   `chili_test`.
-7. **Execution-alpha-drag SQL probe** at
-   `scripts/dispatch-paper-shadow-execution-delta.ps1` exists and
-   produces correct output on a synthetic test dataset.
-8. **CC report** at
-   `docs/STRATEGY/CC_REPORTS/<date>_f-add-paper-shadow-mode.md` per
-   PROTOCOL format. Include a per-test result + flag-off / flag-on
-   smoke comparison inline.
+- Each of 3 sites has a documented audit verdict
+  (correct / leaking / fixed).
+- Per-site test guards the lifecycle going forward.
+- Smoke shows scheduler-worker `pg_stat_activity` rows stable.
+
+## Commit message
+
+`fix(session-leak): close ORM session lifecycle in 3 new shadow-write sites (f-leak-4 phase 1)`
+
+---
+
+# Phase 2 — FastAPI middleware request-retention probe
+
+## Goal
+
+Chili main app is leaking 63 MB/min. mem_watcher's top qualnames:
+
+```
+request_response.<locals>.app = 1279
+get_request_handler.<locals>.app = 1275
+set_model_mocks.<locals>.attempt_rebuild_fn.<locals>.handler = 1488
+```
+
+These are per-request closures. Their counts grow proportional to
+HTTP request volume. Either a middleware retains references to
+handler closures across requests, OR pydantic's model-rebuild path
+retains rebuilds.
+
+## Source material
+
+- `app/main.py` — FastAPI app + middleware setup. Find every
+  `app.add_middleware(...)` call.
+- `app/routers/` — every route module. Pydantic `BaseModel` definitions
+  in request/response shape.
+- `set_model_mocks` is from pydantic v2's deferred-validation path.
+  Used when models reference each other lazily and need rebuild.
+
+## Path
+
+### Step 2.1 — Diagnostic: list every middleware
+
+```python
+# Inspect app.user_middleware (the registered middleware list)
+docker compose exec chili python -c "
+from app.main import app
+for mw in app.user_middleware:
+    print(f'{mw.cls.__module__}.{mw.cls.__name__}')
+"
+```
+
+Each entry is a candidate retention site. Read the `dispatch` method
+of each. Look for:
+- Stores request / response in `self` or a global
+- Caches keyed on something request-bound
+- Logs that retain request metadata
+
+### Step 2.2 — Diagnostic: count references to a recent request closure
+
+```python
+# Trigger 100 requests, then check closure counts.
+# Operator-side via curl or via the Autopilot UI's natural traffic.
+# Check before + after:
+docker compose exec chili python -c "
+import sys
+mods = sys.modules
+counts = {}
+for name, mod in mods.items():
+    for attr in dir(mod):
+        try:
+            obj = getattr(mod, attr, None)
+            qn = getattr(obj, '__qualname__', '')
+            if 'request_response' in qn or 'get_request_handler' in qn:
+                counts[qn] = counts.get(qn, 0) + 1
+        except Exception:
+            pass
+print(counts)
+"
+```
+
+If counts grow with request volume, it's a real leak. If they stay
+flat, the closures are short-lived and the leak is elsewhere.
+
+### Step 2.3 — Fix candidates
+
+If a middleware is found to retain references:
+
+- **Replace store-in-self with store-in-state**: middleware-instance
+  state shouldn't hold per-request data. Use `request.state` for
+  per-request storage that's released with the request.
+- **Replace LRU caches keyed on request**: rekey on something
+  immutable (URL path, user_id) instead of the request object.
+
+For pydantic `set_model_mocks`: if model rebuild is firing per
+request, find the model with deferred validation and either eagerly
+rebuild at import time (`Model.model_rebuild()`) or restructure the
+field to not need lazy rebuild.
+
+### Step 2.4 — Tests
+
+If a fix is identified, add a test that:
+- Triggers N requests against a synthetic test client
+- Asserts closure count post-N stays within N+constant of pre-N
+- Specifically: not N×constant (which would indicate per-request
+  retention)
+
+### Step 2.5 — Smoke verification
+
+```python
+# After deploy + 5 min of traffic, check chili mem_watcher logs:
+docker compose logs chili --since 5m | Select-String "mem_watcher" |
+    Select-String "request_response|get_request_handler"
+```
+
+Expected: closure count grows initially (cold start) then plateaus.
+NOT: monotonic growth proportional to time/requests.
+
+## Success criteria
+
+- Middleware audit produces a concrete list of candidate retainers.
+- Either a fix lands or the diagnostic confirms middleware is clean
+  and surfaces the actual cause.
+- Smoke shows chili memory slope drops materially below 63 MB/min.
+
+## Commit message
+
+`fix(fastapi-leak): release per-request closures (f-leak-4 phase 2)`
+
+OR if no fix lands:
+
+`docs(audit): chili-app per-request closure investigation (f-leak-4 phase 2)`
+
+---
+
+# Phase 3 — FractionalBacktest strategy-instance cleanup
+
+## Goal
+
+`fast_backtest_loop` runs ~9 backtests/sec. Each instantiates a
+DynamicPatternStrategy + pandas DataFrames (BookLevel, NumpyBlock).
+If even a small fraction don't get GC'd between runs, the cumulative
+memory pressure is hundreds of MB/hr.
+
+f-exit-parity-persist's `_parity_sink` (drained at run completion)
+is a candidate retention site: the sink is a list attached to the
+strategy instance. After drain, the sink is empty, but the strategy
+instance + its DataFrames are still referenced by whatever holds the
+strategy.
+
+## Source material
+
+- `app/services/backtest_service.py::_drain_backtest_parity_sink` —
+  added in commit `f87e62a` (f-exit-parity-persist).
+- `app/services/backtest_service.py::DynamicPatternStrategy` — the
+  legacy backtest path's strategy class.
+- `scripts/brain_worker.py::_run_fast_backtest_independent_loop` —
+  the FIX 34 independent loop that runs backtests at 9/sec.
+- The mem_watcher tick's `top_delta_since_last`: previously caught
+  `BookLevel +944` in one tick — that's the smoking gun for pandas
+  retention.
+
+## Path
+
+### Step 3.1 — Diagnostic: where is the strategy instance referenced?
+
+After a backtest completes, what holds a reference to the
+DynamicPatternStrategy instance?
+
+Run a quick diagnostic with `gc.get_referrers`:
+
+```python
+docker compose exec brain-worker python -c "
+import gc
+from app.services.backtest_service import DynamicPatternStrategy
+instances = [o for o in gc.get_objects() if isinstance(o, DynamicPatternStrategy)]
+print(f'Live DynamicPatternStrategy instances: {len(instances)}')
+if instances:
+    refs = gc.get_referrers(instances[0])
+    print(f'Referrers of first instance: {len(refs)}')
+    for r in refs[:5]:
+        print(f'  {type(r).__name__}: {repr(r)[:100]}')
+"
+```
+
+If `len(instances) > N` where N is the expected concurrent runs (~1
+per worker thread), there's accumulation. Trace the referrers to
+find the holder.
+
+### Step 3.2 — Likely root causes
+
+Three candidates, in order of probability:
+
+**(a) The `_parity_sink` is set in `__init__` and never reset.**
+  Even after drain, the sink list stays attached. Fix: set
+  `strategy._parity_sink = None` (or `del`) after drain in
+  `_drain_backtest_parity_sink`.
+
+**(b) The fast_backtest_loop holds a reference to the last N
+  strategy instances in some bookkeeping list.** Check
+  `_run_fast_backtest_independent_loop` for bookkeeping that
+  retains strategy references.
+
+**(c) pandas DataFrame views**: if strategy stores a slice / view of
+  the parent OHLCV DataFrame, the parent stays alive as long as the
+  view exists. Fix: ensure strategy holds copies (`.copy()`) of any
+  data it needs to outlive the parent, OR explicitly del the parent
+  after the strategy finishes.
+
+### Step 3.3 — Fix
+
+Per Step 3.2's diagnosis:
+
+**For (a)** — in `backtest_service.py::_drain_backtest_parity_sink`:
+
+```python
+# After successful drain:
+strategy._parity_sink = None
+```
+
+This breaks the back-reference; the strategy can now be GC'd when
+the run-loop releases its reference.
+
+**For (b)** — in `brain_worker.py::_run_fast_backtest_independent_loop`:
+
+If a `recent_runs` / `last_strategies` list exists, cap it at N and
+explicitly drop older entries.
+
+**For (c)** — in `DynamicPatternStrategy.__init__` or the harness:
+
+If pandas views are retained, force `.copy()` on the data passed in
+so the parent is freeable.
+
+### Step 3.4 — Tests
+
+```python
+# tests/test_fast_backtest_loop_cleanup.py
+
+def test_fast_backtest_does_not_retain_strategy_instances():
+    """Verify each fast_backtest tick releases its strategy instance."""
+    import gc
+    from app.services.backtest_service import DynamicPatternStrategy
+
+    before = sum(1 for o in gc.get_objects()
+                  if isinstance(o, DynamicPatternStrategy))
+    # Run 10 backtests via the harness
+    for _ in range(10):
+        run_one_fast_backtest_tick()  # synthetic
+    gc.collect()
+    after = sum(1 for o in gc.get_objects()
+                 if isinstance(o, DynamicPatternStrategy))
+    # Allow ≤ 2 lingering (e.g., one currently running + 1 pool slot)
+    assert after - before <= 2, \
+        f"DynamicPatternStrategy leak: {before} → {after}"
+```
+
+### Step 3.5 — Smoke verification
+
+```python
+# Trigger 100 fast_backtest ticks, observe mem_watcher BookLevel /
+# NumpyBlock counts:
+docker compose logs brain-worker --since 5m | Select-String "mem_watcher" |
+    Select-String "BookLevel|NumpyBlock|DynamicPatternStrategy"
+```
+
+Expected: BookLevel + NumpyBlock counts plateau within a tick,
+not monotonic growth.
+
+## Success criteria
+
+- Diagnostic confirms or rules out each of the 3 candidate causes.
+- Identified leak source has a 1-line surgical fix.
+- Tests pin the lifecycle going forward.
+- Smoke shows brain-worker memory slope flattens during a fast_backtest run.
+
+## Commit message
+
+`fix(fast-backtest-leak): release strategy instance after parity drain (f-leak-4 phase 3)`
+
+OR if no leak found:
+
+`docs(audit): fast-backtest cleanup investigation, no leak found (f-leak-4 phase 3)`
+
+---
+
+# Combined CC report
+
+After all phases, write `docs/STRATEGY/CC_REPORTS/<date>_f-leak-4.md`
+covering:
+
+- Per-phase status (SHIPPED / VERIFIED-NON-ISSUE / BLOCKED)
+- Per-phase audit findings + commit hash
+- Cross-phase observations (any of the three leaks share a root cause?)
+- Smoke verification: post-deploy mem_watcher tick comparison vs
+  pre-fix.
+
+## Constraints / do not touch (cross-phase)
+
+- **Default mode stays paper.** Live placement default unchanged.
+- **All 8 fast-path safety belts intact.** PROTOCOL Hard Rule 1.
+- **Do not modify run_learning_cycle re-enable.** Stays gated off.
+- **Do not modify any of the 6 brain_work handlers.** They're verified
+  clean.
+- **Do not modify the canonical evaluator** (`exit_evaluator.py`).
+- **Do not modify the realized-EV gate** (`realized_ev_gate.py`).
+- **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
+- **No migrations.** Pure code-side leak fix.
+- **No `git push --force`.** PROTOCOL Hard Rule 4.
+- **One commit per phase.** Atomic recoverability.
+- **If a phase has no leak**, document the negative finding cleanly
+  and move to the next.
+
+## Out of scope
+
+- Auto-promote shadow → authoritative for the realized-EV gate.
+- Live ↔ shadow exit-time syncing.
+- UI / dashboard for execution-alpha-drag.
+- Backtest ↔ shadow comparison.
+- The PED bracket-writer bug (operator flagged separately).
+- Any other follow-up brief from prior reviews.
+
+## Success criteria (cross-phase)
+
+1. **At least Phase 1 ships** (highest-probability surgical fix).
+   Aspirational: all 3 phases ship.
+2. **Each phase commits independently.**
+3. **Combined CC report covers all 3 phases honestly** (SHIPPED /
+   VERIFIED-NON-ISSUE / BLOCKED + reasoning).
+4. **Post-fix mem_watcher slopes drop materially:**
+   - scheduler-worker ReferenceType growth: ≤ 1k per 5min tick
+     (currently 9-15k)
+   - chili memory slope: ≤ 10 MB/min (currently 63 MB/min)
+   - brain-worker BookLevel count: plateaus per tick
+5. **No regression** on existing tests.
 
 ## Rollback plan
 
-- **Flag rollback (no code change)**: set
-  `chili_autotrader_paper_shadow_enabled=false` in compose.yml or
-  env. Shadow path becomes inert; live behavior unchanged.
-- **Code rollback**: `git revert` the implementation commit. Shadow
-  hooks disappear, ORM column stays (harmless), migration stays
-  (idempotent).
-- **Migration rollback**: drop column if needed:
-  ```sql
-  ALTER TABLE trading_paper_trades
-      DROP COLUMN paper_shadow_of_alert_id;
-  ```
-  Existing shadow rows lose their attribution but stay queryable
-  by `signal_json->>'paper_shadow' = 'true'`.
-- **No live-broker rollback needed** — task adds NO broker calls.
-- **Existing shadow rows are preserved across rollbacks** — the
-  ROW data stays; the FK column may go but the rows don't.
+- Per-phase commits → `git revert <phase-commit>` rolls back just that
+  phase.
+- No data, no schema, no migration changes — all rollbacks are pure
+  code.
+- f-leak-3 stays in place regardless (not modified by this brief).
 
 ## Open questions for Cowork (surface in CC report only if relevant)
 
-1. **Pattern_stats filter behavior**: shadow rows excluded by default.
-   If post-deploy analysis suggests shadow is cleaner evidence, the
-   follow-up `f-prefer-shadow-evidence` brief flips the filter logic
-   (prefer shadow over live for evidence aggregation; live becomes
-   the secondary). Surface a recommendation after first 24h of
-   shadow data accumulates.
+1. **Cross-phase root cause** — could the three leaks share a single
+   underlying cause (e.g., a session lifecycle pattern that affects
+   multiple paths)? If yes, surface and suggest a unified fix.
 
-2. **Shadow open failure handling** — current design: swallow + log
-   at DEBUG. If the operator wants louder failure visibility (e.g.,
-   ERROR level when shadow fails), surface the choice. My read: DEBUG
-   is right because shadow is "additive observability"; a failed
-   shadow is a missed measurement, not a trading error. But surface
-   for explicit confirmation.
+2. **6pm job cluster** — operator noted that `pattern_regime_perf_daily`
+   (23:00 UTC), `pattern_regime_killswitch_daily` (23:05),
+   `learning_cycle` (22:30), `brain_market_snapshots` (22:19) are
+   evening heavy-lifters that "likely accelerate all three leak
+   surfaces during their run window." If the diagnostic captures
+   data during one of those windows, the leak slope numbers above
+   will be 2-5× higher. Surface honestly.
 
-3. **Delta-bps computation in the SQL probe** uses `shadow_entry_price`
-   as the denominator. Strictly correct would be position-size-weighted
-   (delta_dollars / position_dollars). With single-quantity paper
-   trades the simple form is fine; surface if real position sizing
-   makes the simple form misleading.
+3. **Push-blocking** — the day's 14 commits should NOT be pushed
+   until f-leak-4 ships and verifies. Surface explicitly: f-leak-4
+   gates the push.
 
-4. **First-deploy backfill** — when the flag is first flipped on,
-   shadow trades only start opening from that moment forward. There's
-   no historical backfill (would require fictional price data per
-   past alert). Acceptable per the use case (forward-looking
-   measurement), but surface explicitly.
+4. **Threshold for "verified non-issue"** — if Phase 2 or 3 finds no
+   reproducible leak in the diagnostic window, what's the
+   confidence threshold for declaring it not-an-issue? Recommend:
+   if 30+ min of post-restart traffic shows no closure / instance
+   accumulation, declare non-issue and move on. Surface in the
+   report.
 
-5. **Correlation of shadow exit to live exit** — by design, shadow
-   runs its own exit logic. So shadow may close at a different time
-   than the live trade does. The "live-vs-shadow P/L delta" is over
-   different holding periods. Strictly correct measurement requires
-   matching close times; today's design measures overall P/L with
-   different holding periods. Surface as a watch item; if the data
-   shows wide hold-period divergence, the dashboard brief should
-   show both raw delta and time-aligned delta.
-
-6. **Paper-shadow capacity** — paper has its own "open positions"
-   accounting. If shadow opens N positions per minute, the paper
-   open-positions count grows fast. The pattern_position_monitor
-   that currently runs every 5 min already handles paper-mode
-   exits; it'll handle shadow too. But if shadow opens more
-   positions than live does (because shadow doesn't have broker
-   rejections), surface if the paper exit-engine becomes a
-   bottleneck.
+5. **Other recently-shipped SessionLocal sites** — if Phase 1 finds
+   one of the three suspects is leaking, audit ALL SessionLocal
+   sites added in the last 7 days for the same pattern. The leak
+   class might extend beyond the three documented suspects.
