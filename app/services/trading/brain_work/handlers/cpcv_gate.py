@@ -42,9 +42,12 @@ _MIN_TRADES_FOR_GATE = 30
 
 def handle_backtest_completed(db: "Session", ev, user_id: int | None) -> None:
     """Run CPCV gate for the pattern that just finished backtesting."""
-    from ....db import SessionLocal
-    from ....models.trading import PatternTradeRow as _PTR
-    from ....models.trading import ScanPattern
+    # f-handler-pattern-stats audit (2026-05-05): absolute imports.
+    # ``....db`` / ``....models`` resolved to nonexistent
+    # ``app.services.{db,models}``.
+    from app.db import SessionLocal
+    from app.models.trading import PatternTradeRow as _PTR
+    from app.models.trading import ScanPattern
     from ...mining_validation import check_promotion_ready
     from ...promotion_gate import (
         cpcv_eval_to_scan_pattern_fields,

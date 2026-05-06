@@ -33,6 +33,7 @@ backlog below.
 | Promotion finalize | `handlers/promote.py` (FIX 38) | `pattern_eligible_promotion` |
 | Live-pattern depromotion sweep | `handlers/demote.py` (FIX 39) | `live_trade_closed`, `paper_trade_closed`, `broker_fill_closed` |
 | Pattern × regime ledger rebuild | `handlers/regime_ledger.py` (FIX 39) | same trade-close events |
+| `update_pattern_stats_from_closed_trades` (Step 11 closed-trade → ScanPattern feedback) | `handlers/pattern_stats.py` (`f-handler-pattern-stats`, 2026-05-05) | same trade-close events; dispatched **before** demote so the EV gate sees corrected evidence |
 
 Note: `handlers/demote.py` replaces the per-cycle sweep with a per-close
 re-check. After the cycle is gated off, depromotion is per-close only.
@@ -46,7 +47,7 @@ Sorted by operator impact. Top of list = highest impact while uncovered.
 
 | Cycle step | Legacy location | Impact while uncovered | Suggested follow-up brief |
 |---|---|---|---|
-| `update_pattern_stats_from_closed_trades` (closed-trade → ScanPattern feedback) | `learning.py:4798` (called from cycle Step 11) | **High.** This is the canonical-aware writer just shipped in `f-evidence-canonical-writer` (mig 228). Until a handler subscribes to trade-close events and runs it, the corrected `win_rate` / `avg_return_pct` / `trade_count` fields stay frozen at their pre-correction values. The realized-EV gate consumes those fields — it'll continue making decisions on stale evidence. Pattern-evidence drift is the most visible consequence of this brief. | `f-handler-pattern-stats` (subscribes to `live_trade_closed` / `paper_trade_closed` / `broker_fill_closed`, calls `update_pattern_stats_from_closed_trades` for the affected pattern's user) |
+| Live-trade-closed emitter coverage | `stop_engine.py:1057`, `robinhood_exit_execution.py:394`, `emergency_liquidation.py:104`, broker_sync close paths | **Medium-high.** Surfaced by the f-handler-pattern-stats audit (2026-05-05): `on_live_trade_closed` is currently called only from `portfolio.py:185`. Live closes via stop-engine, broker-exec, emergency-liquidation, and broker_sync bypass it -- the new pattern_stats / demote / regime_ledger handlers won't fire for those closes. Paper path is intact. | `f-fix-live-trade-closed-emitter` |
 | `learn_from_breakout_outcomes` | `learning.py:4635`, called from cycle Step 11 | **High.** Updates patterns based on whether breakout *alerts* succeeded — the secondary signal for patterns with no closed trades yet. New patterns without trades won't accumulate evidence; first-time-seen patterns stay at default confidence. | `f-handler-breakout-outcomes` (subscribes to `breakout_alert_resolved` if it exists, otherwise on a periodic timer event) |
 | `validate_and_evolve` (hypothesis testing + weight evolution) | `learning.py:Step 10` (cycle line ~9700) | **Medium-high.** Evolves the hypothesis weights that drive scoring. Stale weights mean the brain doesn't react to recent regime changes in feature predictiveness. Decay is gradual (operator-tunable EMA), so a few-day pause is tolerable. | `f-handler-validate-evolve` |
 | `live_drift_refresh` | `live_drift.py::run_live_drift_refresh` (cycle depromote step) | **Medium-high.** Detects when promoted patterns' live behaviour drifts from backtest expectations. Without it, drift goes undetected until manually checked. | `f-handler-live-drift` (could subscribe to trade-close events and recompute drift for the affected pattern) |
@@ -68,14 +69,14 @@ Sorted by operator impact. Top of list = highest impact while uncovered.
 
 ## Coverage summary
 
-- **Cycle steps covered by event handlers**: 6 of ~22 (mine, bt_queue, cpcv_gate, promote, demote, regime_ledger).
-- **Cycle steps in this backlog (uncovered)**: 18 distinct steps, plus the secondary-miners group.
-- **Highest priority** for Phase 2: `f-handler-pattern-stats` because today's `f-evidence-canonical-writer` depends on it firing — without it, the canonical-aware corrections this session shipped are dead code.
+- **Cycle steps covered by event handlers**: 7 of ~22 (mine, bt_queue, cpcv_gate, promote, demote, regime_ledger, **pattern_stats** as of 2026-05-05).
+- **Cycle steps in this backlog (uncovered)**: 17 distinct steps, plus the secondary-miners group, plus the live-trade-closed emitter coverage gap surfaced by the pattern-stats audit.
+- **New highest priority** for Phase 2: `f-fix-live-trade-closed-emitter` because the just-shipped pattern_stats (and the existing demote / regime_ledger) handlers are wired correctly but only fire for paper closes + the one live close path that goes through `portfolio.py`. Closing the live emitter gap unblocks the entire trade-close fanout for live trading.
 
 ## Sequencing recommendation
 
-1. **`f-handler-pattern-stats`** — completes the f-evidence-canonical-writer chain. Fastest win.
-2. **`f-handler-breakout-outcomes`** — covers patterns with no closed trades yet (the secondary-evidence path).
+1. **`f-fix-live-trade-closed-emitter`** — wire `on_live_trade_closed` into `stop_engine`, `robinhood_exit_execution`, `emergency_liquidation`, and broker_sync close paths. Without this, the trade-close handler chain (pattern_stats + demote + regime_ledger) only fires for paper closes.
+2. **`f-handler-breakout-outcomes`** — covers patterns with no closed trades yet (secondary-evidence path).
 3. **`f-handler-validate-evolve`** — keeps weight evolution moving so the brain reacts to regime changes.
 4. **`f-handler-live-drift` + `f-handler-execution-robustness`** — drift / execution-quality monitoring for live patterns. Both trade-close-driven; can probably bundle.
 5. Everything else in the order in the table above.

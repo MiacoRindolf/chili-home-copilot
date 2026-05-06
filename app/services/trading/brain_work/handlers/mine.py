@@ -42,8 +42,12 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
     the snapshots batch refreshed the universe, so re-mining the universe
     is the correct response.
     """
-    from ....config import settings
-    from ....db import SessionLocal
+    # f-handler-pattern-stats audit (2026-05-05) found the original
+    # ``....config`` / ``....db`` resolved to ``app.services.{config,db}``
+    # (4 dots = up 3 packages, lands on ``app.services``) -- both modules
+    # don't exist there. Absolute imports are unambiguous.
+    from app.config import settings
+    from app.db import SessionLocal
     from ..ledger import enqueue_outcome_event  # noqa: F401  (planned: emit pattern_added)
     from ...learning import mine_patterns
 

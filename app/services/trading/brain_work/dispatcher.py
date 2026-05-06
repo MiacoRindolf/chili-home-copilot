@@ -290,9 +290,38 @@ def run_brain_work_dispatch_round(
                     handle_pattern_eligible_promotion(db, ev, user_id)
                 elif event_type in ("live_trade_closed", "paper_trade_closed", "broker_fill_closed"):
                     # FIX 39 (Phase 2 #4+#5, 2026-04-29): trade-close fanout.
-                    # Each event is dispatched to BOTH demote + regime_ledger
+                    # Each event is dispatched to demote + regime_ledger
                     # handlers. If demote raises, we still try regime_ledger
                     # so a broken handler doesn't poison the other.
+                    #
+                    # f-handler-pattern-stats (2026-05-05, Phase 2 #6): added
+                    # pattern_stats as a THIRD subscriber, dispatched FIRST
+                    # in the chain so demote re-evaluates the realized-EV
+                    # gate against canonical-corrected evidence rather than
+                    # stale pre-correction stats. pattern_stats swallows its
+                    # own exceptions internally; this branch doesn't gate
+                    # on it.
+                    try:
+                        from .handlers.pattern_stats import (
+                            handle_paper_trade_closed,
+                            handle_live_trade_closed,
+                            handle_broker_fill_closed,
+                        )
+                        if event_type == "paper_trade_closed":
+                            handle_paper_trade_closed(db, ev, user_id)
+                        elif event_type == "live_trade_closed":
+                            handle_live_trade_closed(db, ev, user_id)
+                        else:
+                            handle_broker_fill_closed(db, ev, user_id)
+                    except Exception as _ps:
+                        # pattern_stats handler is defensive; if it raises
+                        # at the import boundary, log + continue so demote
+                        # still runs.
+                        logger.warning(
+                            "%s pattern_stats handler failed ev_id=%s: %s "
+                            "— proceeding to demote with stale evidence",
+                            LOG_PREFIX, ev.id, _ps,
+                        )
                     demote_err: Exception | None = None
                     try:
                         from .handlers.demote import handle_trade_closed

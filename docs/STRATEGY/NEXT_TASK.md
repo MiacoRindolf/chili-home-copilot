@@ -1,430 +1,463 @@
-# NEXT_TASK: f-kill-legacy-learning-cycle
+# NEXT_TASK: f-handler-pattern-stats
 
 STATUS: DONE
 
 ## Goal
 
-Eliminate `run_learning_cycle` as a load-bearing path in brain-worker.
-The function and its 20+ in-process steps are LEGACY ARCHITECTURE
-that was supposed to be replaced by the event-driven brain_work_events
-handler migration (Phase 2). Per saved memory, only handler #1 (mine,
-FIX 36) shipped on 2026-04-29; handlers #2-5 (cpcv_gate, promote,
-demote, regime_ledger) stalled and the legacy cycle has been the
-fallback ever since.
+Wire `update_pattern_stats_from_closed_trades`
+(`app/services/trading/learning.py:4798`) into a new event handler
+`app/services/trading/brain_work/handlers/pattern_stats.py` that
+subscribes to trade-close events. After this ships:
 
-The legacy cycle has been catastrophically degraded for at least 24
-hours: **0 of 18 cycles in the last 24h completed cleanly** (61%
-silent TCP drops, 28% transaction-rolled-back, 0% clean). The cycle
-holds a single PG session for 60-140 minutes per attempt, gets killed
-by Docker NAT during long idles, and has been silently disabling every
-downstream learning step including `update_pattern_stats_from_closed_trades`
-(today's f-evidence-canonical-writer, which has therefore not fired
-even once post-deploy).
+- Every paper / live / broker trade close fires the canonical-aware
+  evidence recompute for that user's affected pattern.
+- `pattern_evidence_corrections` audit-table populates per close
+  (one row per pattern processed).
+- The realized-EV gate auto-demotes patterns whose corrected stats
+  fail the gate (existing behaviour, no new code).
+- Today's f-evidence-canonical-writer fix transitions from
+  "shipped but inert" to **operationally real**.
 
-This task ships the **immediate stop-the-bleeding** half of the
-architectural cleanup:
-
-1. Disable the legacy cycle invocation entirely in brain-worker.
-2. Remove the cold-start carve-out so restarts don't trigger a cycle.
-3. Audit which work-types are now uncovered (i.e., done by the cycle
-   but not yet by event handlers) and surface them as a concrete
-   migration backlog for Phase 2.
-4. The brain becomes purely event-driven for what's covered; uncovered
-   work-types are documented as "deferred until handler ships" with
-   a short table of impact.
-
-After this lands: brain-worker no longer crashes, downstream steps
-that ARE event-handled (mine via handler #1, fast_backtest via FIX 34,
-broker-sync via its own loop, scheduler jobs) keep running clean.
-Steps that AREN'T yet handled (cpcv_gate, promote, demote,
-regime_ledger, closed-trade pattern feedback aka
-`update_pattern_stats_from_closed_trades`) stop running until their
-handlers ship in Phase 2 follow-up briefs.
-
-This is a deliberate trade: **temporary loss of some learning steps
-in exchange for an actually-running brain-worker with no DB-drop
-cascade.** The current state (cycle attempts work for 60-140 min,
-crashes, retries, repeats) means none of those steps reliably run
-anyway — disabling them just makes the silent failure honest.
+This is the **smallest possible brief that completes the
+canonical-writer chain**. The function it wraps is already
+production-ready (mig 228, 14/14 tests passing). The handler is a
+thin event-driven shim.
 
 ## Why now
 
-You said "cycles were legacy logic" and asked me to clean and fix
-this as an algo trader. The diagnostic confirms the architecture is
-in a half-migrated state:
+Today's `f-kill-legacy-learning-cycle` brief gated off the only path
+that called `update_pattern_stats_from_closed_trades` (it was step
+11 of `run_learning_cycle`, which is now disabled). Without this
+handler, the canonical-writer fix is dead code:
 
-| Architecture component | Status |
-|---|---|
-| FIX 31 cycle gate | shipped — but doesn't gate cold start or the 4h safety floor |
-| Handler #1 (mine via FIX 36) | shipped 2026-04-29 |
-| Handler #2 (cpcv_gate) | pending |
-| Handler #3 (promote) | pending |
-| Handler #4 (demote) | pending |
-| Handler #5 (regime_ledger) | pending |
-| `run_learning_cycle` deletion | pending — was supposed to follow handler #5 |
-| Cold-start carve-out removal | pending |
+- The function is correct, tested, deployed
+- The audit table exists and is empty
+- No caller invokes it
 
-Per `scripts/brain_worker.py:1054`:
-```python
-if _LAST_RECONCILE_PASS_AT is None:
-    return False, "cold_start_first_cycle"
-```
-**Every brain-worker restart triggers a cycle.** And per line 1058:
-```python
-if elapsed >= _RECONCILE_PASS_MAX_INTERVAL_S:
-    return False, f"safety_floor_elapsed_s={int(elapsed)}"
-```
-**Every 4 hours (default), a cycle is forced** even if no work
-signals exist.
+The post-deploy smoke from `f-kill-legacy-learning-cycle` confirmed
+brain-worker stability (488 MB memory, zero connection drops, zero
+`learning_cycle_end` events) but ALSO surfaced that
+`brain_work_events` had zero rows in 30 min — partly because nothing
+emitted close events during that window, and partly because no
+handler was waiting for them.
 
-So even with the FIX 31 gate, the cycle runs at minimum every 4h +
-every restart. Today's deploy of f-evidence-canonical-writer caused a
-restart, which forced a cycle, which crashed at the 62-minute mark
-on a TCP drop, which is why
-`update_pattern_stats_from_closed_trades` (called at step 11 of the
-cycle) never fired.
-
-**Algo-trader framing**: the legacy cycle is dead code on life
-support. Every minute it runs is a minute of compute spent on a path
-that crashes 100% of the time. Every cycle attempt holds a session
-that contributes to the brain-worker's idle-in-tx population. Every
-restart gives it another chance to lock up. **Pull the plug.**
+This brief closes the loop. After it ships:
+- Closed trades emit events (already wired via
+  `paper_trading.py:240 → execution_hooks.py:30 → emitters.py:107`)
+- Handler claims the event, calls the canonical-writer function,
+  one audit row written
+- Pattern evidence becomes self-correcting per-close, in the
+  intended event-driven cadence
 
 ## Scope boundary
 
-**In scope (Phase 1 — this brief):**
-- Disable cycle invocation: kill switch at the call site, default
-  off, env-flag to re-enable for emergency rollback.
-- Remove the cold-start carve-out in `_should_skip_reconcile_pass`.
-- Set the `_RECONCILE_PASS_MAX_INTERVAL_S` default to a sentinel
-  (e.g., 0 or a very large number) that effectively disables the
-  safety floor.
-- Survey current event-handler coverage in `app/services/trading/`
-  for `brain_work_events` consumers, identify which step-types are
-  handled vs. not.
-- Document the uncovered work backlog in
-  `docs/STRATEGY/PHASE2_HANDLER_BACKLOG.md` with one row per
-  uncovered step + impact assessment.
-- Smoke verification: brain-worker runs for 30+ minutes post-deploy
-  with zero `learning_cycle_end` events.
+**In scope:**
+- New module `app/services/trading/brain_work/handlers/pattern_stats.py`.
+- Wire the handler into `dispatcher.py`'s dispatch loop alongside the
+  existing 5 handlers.
+- Pre-execution audit: confirm `paper_trade_closed` /
+  `live_trade_closed` / `broker_fill_closed` events ARE firing in
+  recent history. If audit shows zero events in last 24h despite
+  closed trades existing, surface the wiring break and STOP — do not
+  ship a handler that depends on emitter that's broken.
+- Tests for the handler logic.
+- Smoke verification: synthetic close fires the handler, audit row
+  appears.
 
-**Out of scope (Phase 2 — separate briefs):**
-- Shipping handler #2 (cpcv_gate). Separate brief
-  `f-handler-cpcv-gate`.
-- Shipping handler #3 (promote). Separate brief
-  `f-handler-promote`.
-- Shipping handler #4 (demote). Separate brief `f-handler-demote`.
-- Shipping handler #5 (regime_ledger). Separate brief
-  `f-handler-regime-ledger`.
-- Wiring `update_pattern_stats_from_closed_trades` into an event
-  handler. Separate brief `f-handler-pattern-stats` (depends on
-  closed-trade event emission already firing — verify in the audit).
-- Deleting `run_learning_cycle` source code from
-  `app/services/trading/learning.py`. Separate cleanup brief once
-  handlers #2-5 + pattern-stats handler all ship.
-- Modifying `realized_ev_gate.py` or `promotion_gate.py`. They stay
-  as-is; their inputs come from event handlers downstream.
-- DB-stability config (TCP keepalives, pool_pre_ping). Out of scope
-  here because the cycle disable removes the long-idle-transaction
-  pattern that triggers the drops. If post-deploy data shows other
-  long-running queries dropping connections, that becomes a
-  separate brief; for now the cycle disable is sufficient.
+**Out of scope:**
+- Modifying `update_pattern_stats_from_closed_trades` itself. It's
+  already production-ready.
+- Modifying the canonical evaluator
+  (`exit_evaluator.py`).
+- Modifying any other handler. The 5 existing Phase 2 handlers stay
+  as they are.
+- Modifying the realized-EV gate or promotion gate. Inputs come from
+  this handler; auto-demote falls out for free.
+- Re-enabling `run_learning_cycle`. Stays gated off via
+  `CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0`.
+- Other cycle-replacement handlers
+  (`f-handler-breakout-outcomes`, `f-handler-validate-evolve`, etc.).
+  Separate briefs from `PHASE2_HANDLER_BACKLOG.md`.
+- Position-side timeframe column (Trade/PaperTrade.timeframe).
+  Existing `scan_pattern_id → ScanPattern.timeframe` lookup
+  inherited from f-time-decay-unit-fix.
+- LLM-context (`position_plan_generator`) pattern-evidence path.
+  Reads ScanPattern fields; benefits transparently once handler
+  fires.
 
 ## Brain integration / source material
 
-- `scripts/brain_worker.py:1014-1105` — FIX 31 gate logic
-  (`_should_skip_reconcile_pass`). The carve-out at line 1054 and
-  safety floor at line 1058 are the two paths that force the cycle.
-- `scripts/brain_worker.py:1107` (`_run_lean_cycle_loop`) — the loop
-  that calls the gate + cycle. The kill switch lands here.
-- `scripts/brain_worker.py:803` (`run_learning_cycle`) — the brain-worker
-  wrapper that invokes the legacy cycle. **Do not delete in this brief.**
-  Just stop calling it.
-- `app/services/trading/learning.py:run_learning_cycle` — the legacy
-  cycle itself. **Do not delete in this brief.** Stays callable for
-  emergency rollback.
-- `app/services/trading/learning.py:9582` — the call to
-  `update_pattern_stats_from_closed_trades`. This step is INSIDE the
-  cycle. After this brief lands, the call site is unreachable in
-  normal operation. The function itself stays for the future
-  `f-handler-pattern-stats` brief.
-- `app/services/trading/learning_cycle_architecture.py` — if it
-  exists per the .cursor/plans, it documents the cycle's step
-  graph. Read it to enumerate which steps still need event-handler
-  coverage.
-- `scripts/brain_worker.py` — search for `brain_work_events`,
-  `_dispatch_work`, `handler_` to find the existing event-driven
-  surface. Use this to build the coverage audit.
-- Saved memory `reference_phase2_event_handlers.md` — the original
-  Phase 2 plan from 2026-04-29.
-- Saved memory `reference_fix31_is_a_bridge.md` — the explicit
-  framing that FIX 31 is a bridge, not a replacement.
+- `app/services/trading/brain_work/handlers/mine.py` — model for
+  the handler shape (FIX 36, 2026-04-29). Read first.
+- `app/services/trading/brain_work/handlers/demote.py` and
+  `regime_ledger.py` — handlers that ALREADY subscribe to
+  `paper/live/broker_*_closed` events. Same subscription pattern;
+  pattern-stats is a third subscriber to the same events.
+- `app/services/trading/brain_work/dispatcher.py:272-321` — the
+  dispatch loop. New event-type dispatch branch lands here.
+- `app/services/trading/brain_work/emitters.py:94-130` —
+  `emit_paper_trade_closed_outcome` etc. Emitter exists. Verified.
+- `app/services/trading/brain_work/execution_hooks.py:27-50` —
+  `on_paper_trade_closed` (the function paper_trading.py calls
+  inline). Calls the emitter. Verified.
+- `app/services/trading/paper_trading.py:240-245` —
+  `_paper_close_ledger` calls `on_paper_trade_closed` from inside
+  the close transaction. Verified.
+- `app/services/trading/learning.py:4798` —
+  `update_pattern_stats_from_closed_trades`. Function the handler
+  calls. Already production-ready (mig 228, 14 tests passing).
+- `app/config.py` — handler batch-size config pattern. Add
+  `brain_work_pattern_stats_batch_size` alongside the other
+  `brain_work_*_batch_size` settings.
+- `docs/STRATEGY/PHASE2_HANDLER_BACKLOG.md` — top-of-list entry is
+  this handler. Mark it shipped after this brief lands.
 
 ## Path
 
-### Step 1 — Kill switch on the cycle invocation
+### Step 0 — Pre-execution audit (DO BEFORE ANY CODE CHANGE)
 
-In `scripts/brain_worker.py:_run_lean_cycle_loop`, gate the
-`run_learning_cycle()` call behind a settings flag. New env var
-`CHILI_BRAIN_LEGACY_CYCLE_ENABLED` (default `0` / disabled):
+The smoke window from `f-kill-legacy-learning-cycle` showed zero
+`brain_work_events` activity. Two possibilities:
+
+1. Quiet 30-min window with no paper / live / broker trade closes.
+2. Wiring break — close events aren't being emitted even when trades
+   close.
+
+Confirm which. Run:
+
+```sql
+-- Recent paper closes in last 24h
+SELECT COUNT(*) AS paper_closes_24h
+FROM trading_paper_trades
+WHERE status = 'closed' AND exit_date >= NOW() - INTERVAL '24 hours';
+
+-- Recent live closes in last 24h
+SELECT COUNT(*) AS live_closes_24h
+FROM trading_trades
+WHERE status = 'closed' AND exit_date >= NOW() - INTERVAL '24 hours';
+
+-- Close events in brain_work_events in last 24h
+SELECT event_type, COUNT(*) AS n
+FROM brain_work_events
+WHERE event_type IN ('paper_trade_closed', 'live_trade_closed', 'broker_fill_closed')
+  AND created_at >= NOW() - INTERVAL '24 hours'
+GROUP BY event_type;
+```
+
+**Decision tree:**
+- **If close counts > 0 AND event counts > 0 (in roughly equal
+  ratios)**: emitter is working, the smoke window was just quiet.
+  **Proceed to Step 1.**
+- **If close counts > 0 AND event counts == 0**: emitter wiring is
+  broken. Trace `paper_trading.py:240 → execution_hooks.py:30 →
+  emitters.py:107` to find the break. **Surface in CC report and
+  STOP — fix the emitter before shipping the handler.**
+- **If close counts == 0**: no trades have closed in 24h. Brain has
+  been hibernating. Confirm with:
+  ```sql
+  SELECT COUNT(*) FROM trading_paper_trades WHERE status = 'open';
+  ```
+  If open positions exist but none have closed, that's a separate
+  question (likely time-decay or stop-hit not firing — but the new
+  time-decay-unit-fix means time_decay should fire for non-1d
+  positions soon). **Proceed to Step 1 anyway — the handler is
+  correct regardless of current event volume.**
+
+Surface findings in the CC report's "Pre-execution audit" section.
+
+### Step 1 — New handler module
+
+Create `app/services/trading/brain_work/handlers/pattern_stats.py`
+following the shape of `demote.py` (which subscribes to the same
+events):
 
 ```python
-# In _run_lean_cycle_loop, around the existing skip_cycle check:
+"""Phase 2 handler: pattern-evidence recompute on trade close.
 
-legacy_cycle_enabled = (
-    os.environ.get("CHILI_BRAIN_LEGACY_CYCLE_ENABLED", "0").lower()
-    in ("1", "true", "yes")
-)
+Subscribes to ``paper_trade_closed`` / ``live_trade_closed`` /
+``broker_fill_closed``. For each event, calls
+``update_pattern_stats_from_closed_trades`` for the closed trade's
+user. The function is the canonical-aware writer (mig 228) — it
+re-derives ``ScanPattern.{win_rate, avg_return_pct, trade_count}``
+using counterfactual exit prices for trades that held past their
+intended ``max_bars``.
 
-if not legacy_cycle_enabled:
-    logger.info(
-        "[brain] legacy run_learning_cycle DISABLED via "
-        "CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0. Phase 2 handlers run "
-        "instead. Set =1 to re-enable for emergency rollback."
-    )
-    skip_cycle, skip_reason = True, "legacy_cycle_disabled"
-else:
-    skip_cycle, skip_reason = _should_skip_reconcile_pass(status)
+Design rules:
+- Per-event, NOT per-trade-affected. The function buckets all of a
+  user's recent closed trades by pattern internally, so calling it
+  once per close-event handles all patterns the close affected.
+- Idempotent: the function writes a ``correction_reason='no_change'``
+  audit row when the recompute matches existing stats. Repeated
+  invocations don't produce drift.
+- Failures swallowed at the handler boundary so a broken pattern's
+  recompute can't poison subsequent events.
+- Coverage gate (>50% counterfactual-unavailable) is enforced inside
+  the function; handler doesn't second-guess.
+"""
+from __future__ import annotations
+import logging
+from typing import Any
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+def handle_paper_trade_closed(db: Session, ev: Any, user_id: int | None) -> None:
+    """Handler entry for paper_trade_closed events."""
+    _run_pattern_stats_recompute(db, ev, user_id, source="paper")
+
+
+def handle_live_trade_closed(db: Session, ev: Any, user_id: int | None) -> None:
+    """Handler entry for live_trade_closed events."""
+    _run_pattern_stats_recompute(db, ev, user_id, source="live")
+
+
+def handle_broker_fill_closed(db: Session, ev: Any, user_id: int | None) -> None:
+    """Handler entry for broker_fill_closed events."""
+    _run_pattern_stats_recompute(db, ev, user_id, source="broker")
+
+
+def _run_pattern_stats_recompute(
+    db: Session, ev: Any, user_id: int | None, *, source: str,
+) -> None:
+    from ...learning import update_pattern_stats_from_closed_trades
+    try:
+        result = update_pattern_stats_from_closed_trades(db, user_id)
+        logger.info(
+            "[handler:pattern_stats] source=%s event_id=%s user_id=%s "
+            "patterns_updated=%d cycle_run_id=%s",
+            source, getattr(ev, "id", None), user_id,
+            int(result.get("patterns_updated", 0)),
+            result.get("cycle_run_id"),
+        )
+    except Exception as e:
+        logger.exception(
+            "[handler:pattern_stats] source=%s event_id=%s failed: %s",
+            source, getattr(ev, "id", None), e,
+        )
 ```
 
-The flag stays as the emergency rollback switch. If Phase 2 handlers
-turn out to be insufficient and we need to fall back, flipping the
-env var re-enables the cycle without a code change.
+The handler is intentionally thin. All the work is in
+`update_pattern_stats_from_closed_trades`. Three entry points
+because three different event types subscribe to the same logic.
 
-**No code deletion in this brief.** Just gate the invocation.
+### Step 2 — Wire into dispatcher
 
-### Step 2 — Remove the cold-start carve-out
+In `app/services/trading/brain_work/dispatcher.py`, find the
+`_dispatch_limits` dict (around line 272 per saved memory) and the
+event-type dispatch branches. **The three close events
+(`paper_trade_closed`, `live_trade_closed`, `broker_fill_closed`)
+are ALREADY dispatched** to `demote.py` and `regime_ledger.py`.
+This brief adds `pattern_stats` as a THIRD subscriber to each.
 
-In `_should_skip_reconcile_pass`, change line 1054-1055:
+Pattern: each event-type's dispatch branch already calls multiple
+handlers in sequence. Add a third call:
 
 ```python
-if _LAST_RECONCILE_PASS_AT is None:
-    return False, "cold_start_first_cycle"
+# In the paper_trade_closed branch:
+from .handlers import demote, regime_ledger, pattern_stats  # add pattern_stats
+
+# Existing handler calls stay; add:
+pattern_stats.handle_paper_trade_closed(db, ev, user_id)
+
+# Same pattern for live_trade_closed and broker_fill_closed branches.
 ```
 
-To:
+Read `dispatcher.py:272-321` to find the exact insertion points.
+
+### Step 3 — Config setting
+
+In `app/config.py`, add the batch-size setting alongside the existing
+`brain_work_*_batch_size` settings:
 
 ```python
-if _LAST_RECONCILE_PASS_AT is None:
-    # Cold start: do NOT auto-trigger a cycle. The legacy cycle is
-    # disabled by default; restarts no longer force a 60-140 minute
-    # crash-prone reconcile pass. If the cycle is re-enabled via
-    # CHILI_BRAIN_LEGACY_CYCLE_ENABLED=1, the safety-floor elapsed
-    # check below fires the first cycle naturally after MAX_INTERVAL_S.
-    _LAST_RECONCILE_PASS_AT = time.time()  # initialize as if just ran
-    return True, "cold_start_no_auto_trigger"
+brain_work_pattern_stats_batch_size: int = 4
 ```
 
-This is defensive even when the kill switch (Step 1) is already
-gating: belt-and-suspenders so the cycle never runs as a side effect
-of a cold start.
+Default `4` because the recompute function does heavy work
+(potentially fetching OHLCV for counterfactual exits per overheld
+trade). Lower batch size keeps the dispatch round responsive.
 
-### Step 3 — Disable the safety floor by default
+### Step 4 — Tests
 
-In the env default at line 1023:
+`tests/test_handler_pattern_stats.py`:
 
-```python
-# OLD: 4-hour safety floor
-_RECONCILE_PASS_MAX_INTERVAL_S = int(os.environ.get(
-    "CHILI_BRAIN_RECONCILE_MAX_INTERVAL_S", str(4 * 3600)
-))
+1. ✅ `handle_paper_trade_closed` calls
+   `update_pattern_stats_from_closed_trades` with the event's
+   user_id.
+2. ✅ `handle_live_trade_closed` same pattern.
+3. ✅ `handle_broker_fill_closed` same pattern.
+4. ✅ Handler swallows exceptions (a deliberately-broken stub
+   `update_pattern_stats_from_closed_trades` raises; handler logs +
+   continues).
+5. ✅ Integration: synthetic paper close → `_paper_close_ledger`
+   call → emitter → event in queue → dispatch → handler →
+   `pattern_evidence_corrections` row appears.
+6. ✅ Idempotence: calling the handler twice on the same event
+   produces matching audit rows (second invocation results in
+   `correction_reason='no_change'` per the function's existing
+   idempotence test).
+7. ✅ Existing exit-evaluator + parity tests still pass (regression
+   guard).
 
-# NEW: effectively disabled (1 year). Operator can re-enable a
-# meaningful safety floor by explicitly setting the env var.
-_RECONCILE_PASS_MAX_INTERVAL_S = int(os.environ.get(
-    "CHILI_BRAIN_RECONCILE_MAX_INTERVAL_S", str(365 * 24 * 3600)
-))
-```
-
-Comment the new value with: "Default disabled. The legacy cycle is
-gated off via CHILI_BRAIN_LEGACY_CYCLE_ENABLED. This safety-floor
-default of 1 year is effectively never. If the operator re-enables
-the cycle, set CHILI_BRAIN_RECONCILE_MAX_INTERVAL_S to a real value
-like 14400 (4h)."
-
-### Step 4 — Survey event-handler coverage
-
-This step produces the Phase 2 backlog document. It's pure read-only
-analysis; output is a Markdown table.
-
-Audit `scripts/brain_worker.py` and `app/services/trading/` for:
-
-1. **`brain_work_event` types currently emitted** (search for
-   `brain_work_event` insertions, look at the `event_type` column
-   distribution in DB).
-2. **Handler functions that consume them** (search for the dispatch
-   loop and the handler registry).
-3. **Step types in `run_learning_cycle` that are NOT yet covered**
-   by any handler.
-
-Output the table at `docs/STRATEGY/PHASE2_HANDLER_BACKLOG.md`:
-
-```markdown
-# Phase 2 Handler Migration Backlog
-
-Inventory of legacy `run_learning_cycle` steps and their event-handler
-coverage status. Generated by f-kill-legacy-learning-cycle.
-
-| Step / Work-type | Legacy location | Handler status | Impact while uncovered |
-|---|---|---|---|
-| mine | learning.py:... | ✅ shipped FIX 36 | none — covered |
-| cpcv_gate | learning.py:... | ⏸ pending | promotion gate stops re-evaluating |
-| promote | learning.py:... | ⏸ pending | new patterns can't auto-promote |
-| demote | learning.py:... | ⏸ pending | failing patterns aren't auto-demoted |
-| regime_ledger | learning.py:... | ⏸ pending | regime classification stale |
-| update_pattern_stats_from_closed_trades | learning.py:4798 | ⏸ pending | f-evidence-canonical-writer can't fire |
-| ... | ... | ... | ... |
-```
-
-The executor populates this from the actual codebase. Each row's
-"Impact while uncovered" is the operator-facing description of what
-breaks until the handler ships.
-
-### Step 5 — Smoke verification
+### Step 5 — Smoke verification (deferred to deploy)
 
 After deploy:
 
-1. Restart brain-worker: `docker compose restart brain-worker`
-2. Watch logs for 30 minutes:
+1. Restart brain-worker:
+   `docker compose restart brain-worker`
+2. Wait for next paper trade close (or trigger one manually for
+   smoke) and watch logs:
    ```powershell
-   docker compose logs brain-worker --since 30m | Select-String "run_learning_cycle|reconcile_pass_completed|legacy_cycle_disabled"
+   docker compose logs brain-worker --since 5m |
+     Select-String "handler:pattern_stats|paper_trade_closed"
    ```
-   Expected: `legacy_cycle_disabled` line on every loop iteration;
-   zero `learning_cycle_end` events; zero
-   `psycopg2.OperationalError: server closed the connection` events.
-3. SQL probe:
+   Expected: a `[handler:pattern_stats] source=paper event_id=...
+   patterns_updated=N` line per close.
+3. Confirm audit row landed:
    ```sql
-   SELECT COUNT(*) FROM pg_stat_activity
-    WHERE application_name = 'chili-brain-worker'
-      AND state = 'idle in transaction'
-      AND state_change < NOW() - INTERVAL '5 minutes';
+   SELECT correction_reason, COUNT(*), MAX(created_at) AS most_recent
+   FROM pattern_evidence_corrections
+   WHERE created_at >= NOW() - INTERVAL '10 minutes'
+   GROUP BY correction_reason ORDER BY MAX(created_at) DESC;
    ```
-   Expected: 0 (no long idle-in-tx holds because no long-running
-   cycle).
-4. Brain-worker memory + CPU:
-   ```powershell
-   docker stats --no-stream chili-home-copilot-brain-worker-1
+   Expected: `first_run_backfill` rows on the first invocation per
+   pattern, then `periodic_recompute` or `no_change` on subsequent.
+4. Confirm `brain_work_events` shows the close event was
+   processed:
+   ```sql
+   SELECT event_type, status, COUNT(*) FROM brain_work_events
+   WHERE event_type LIKE '%trade_closed%'
+     AND updated_at >= NOW() - INTERVAL '10 minutes'
+   GROUP BY event_type, status;
    ```
-   Expected: dramatically lower CPU and memory than during cycle
-   runs. Steady-state should be under 1 GiB.
-5. Confirm event-driven path still functioning:
-   - mining still happens (handler #1 fires on new candidate
-     observations)
-   - fast_backtest queue still drains (FIX 34's independent loop)
-   - broker-sync continues (separate worker)
+   Expected: `status='done'` rows on the close events.
+5. Confirm realized-EV gate still functioning (one-shot probe to
+   verify auto-demote: pick a pattern in the audit table whose
+   `after_avg_return_pct < 0` and verify `lifecycle_stage` flipped):
+   ```sql
+   SELECT sp.id, sp.lifecycle_stage, sp.win_rate, sp.avg_return_pct
+   FROM scan_patterns sp
+   WHERE sp.id IN (
+       SELECT scan_pattern_id FROM pattern_evidence_corrections
+       WHERE after_avg_return_pct < 0
+         AND created_at >= NOW() - INTERVAL '10 minutes'
+   );
+   ```
+   Expected: any pattern with negative after_avg_return_pct should
+   have `lifecycle_stage='challenged'` or `'demoted'`.
 
 ## Constraints / do not touch
 
 - **Default mode stays paper.** No live placement enable.
 - **All 8 fast-path safety belts intact.** PROTOCOL Hard Rule 1.
-- **Do not delete `run_learning_cycle` source code.** This brief
-  disables invocation only. The function stays callable for
-  emergency rollback via `CHILI_BRAIN_LEGACY_CYCLE_ENABLED=1`.
-- **Do not delete `update_pattern_stats_from_closed_trades`.** It's
-  the canonical-aware writer just shipped; it'll be re-wired into
-  an event handler in `f-handler-pattern-stats` (Phase 2 brief).
-- **Do not modify event handler #1 (mine / FIX 36).** It works.
-- **Do not modify FIX 34's independent fast_backtest loop.** It works.
-- **Do not modify scheduler-worker's APScheduler jobs.** They are
-  already event/cron-driven, not part of `run_learning_cycle`.
-- **No threshold tuning.** This brief disables a path; doesn't tune
-  thresholds.
-- **No migrations.** Pure config + 30 lines of brain_worker.py.
-- **No `git push --force`.** PROTOCOL Hard Rule 4.
-- **The PHASE2_HANDLER_BACKLOG.md should not list speculative work.**
-  Only document steps that ACTUALLY exist in `run_learning_cycle`
-  today, with their concrete location.
+- **Do not modify `update_pattern_stats_from_closed_trades`.** It's
+  the canonical-aware writer and stays as-is.
+- **Do not modify any of the 5 existing Phase 2 handlers.** This
+  brief adds a 6th alongside them.
+- **Do not re-enable the legacy cycle.** It stays gated off via
+  `CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0`.
+- **Do not modify the realized-EV gate or promotion gate.** Auto-
+  demote falls out for free.
+- **Do not modify the dispatcher's batch-size logic** beyond
+  adding the new key in `_dispatch_limits`.
+- **No threshold tuning.** Default batch size of 4 is documented
+  inline; operator overrides via env var if needed.
+- **No migrations.** Schema change isn't required.
+- **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
+- **Pre-execution audit (Step 0) is REQUIRED.** If close-event
+  emitters are broken, this brief STOPS and surfaces the break.
+  Do not ship a handler whose subscription is never delivered.
 
 ## Out of scope
 
-- Shipping any handler. Phase 2 briefs.
-- Deleting `run_learning_cycle` source. Final cleanup brief.
-- DB connection pool / TCP keepalive config changes. The cycle
-  disable removes the long-idle pattern that triggers the drops; if
-  other long-running queries surface drops, separate brief.
-- Pattern-evidence backfill via the now-disabled cycle path. The
-  data we already have is what we have until f-handler-pattern-stats
-  ships.
-- Re-running pattern-aware backtests. Separate concern.
-- LLM-context (`position_plan_generator`) pattern-evidence path.
-- Live-mode partials. Still queued separately.
+- Backtest-derived evidence correction. Different surface, separate
+  brief gated on `f-exit-parity-metric-v2` cutover.
+- Per-trade audit granularity. Pattern-level audit is sufficient.
+- Other handlers from `PHASE2_HANDLER_BACKLOG.md`.
+- Notifying the operator on per-pattern demotion. Audit table is
+  the alert surface.
+- `position_plan_generator.py` LLM-context path.
+- `f-cron-stale-promoted` (sweep-mode demote gap). Separate brief.
 
 ## Success criteria
 
-1. **Brain-worker runs 30+ minutes post-deploy with zero
-   `learning_cycle_end` events** in its logs. Verified via the
-   smoke step.
-2. **Zero `psycopg2.OperationalError: server closed the connection`
-   events** in brain-worker logs over the 30-min window. The
-   absence of long-running cycles eliminates the trigger.
-3. **`legacy_cycle_disabled` log line emitted on every loop
-   iteration**, confirming the kill switch is active.
-4. **Idle-in-transaction holds drop to zero** for the brain-worker
-   application_name (within 5 minutes post-deploy).
-5. **Brain-worker memory + CPU drop materially.** Steady-state
-   under 1 GiB and under 50% of one core.
-6. **`docs/STRATEGY/PHASE2_HANDLER_BACKLOG.md` exists** with at
-   least 5 rows (one per known-pending handler) and accurate
-   `Impact while uncovered` text per row.
-7. **Existing event-driven paths still working post-deploy**:
-   - Handler #1 (mine) firing on new patterns (verify via
-     brain_work_events DB query)
-   - FIX 34 fast_backtest loop draining queue
-   - Broker-sync still running
+1. **`pattern_stats.py` exists** with the three `handle_*` entry
+   points and the shared `_run_pattern_stats_recompute` helper.
+2. **Dispatcher wires the handler** to all three close-event types
+   alongside `demote.py` and `regime_ledger.py`.
+3. **`brain_work_pattern_stats_batch_size`** config setting added
+   with documented default.
+4. **All 7 new tests pass + existing parity tests still pass**
+   against `chili_test`.
+5. **Pre-execution audit step results documented in CC report**
+   — confirms emitter wiring is firing OR surfaces the break.
+6. **Smoke verification passes** (or honestly notes "no closes
+   during deploy window — verify on next close" if applicable).
+7. **`PHASE2_HANDLER_BACKLOG.md` updated**: mark the
+   `update_pattern_stats_from_closed_trades` row as ✅ shipped,
+   reference this brief.
 8. **CC report** at
-   `docs/STRATEGY/CC_REPORTS/<date>_f-kill-legacy-learning-cycle.md`
-   per PROTOCOL format. Include the post-deploy memory + log
-   snapshot inline as the verification artifact.
+   `docs/STRATEGY/CC_REPORTS/<date>_f-handler-pattern-stats.md`
+   per PROTOCOL format.
 
 ## Rollback plan
 
-- **Emergency rollback (no code change)**: set
-  `CHILI_BRAIN_LEGACY_CYCLE_ENABLED=1` in the brain-worker env (or
-  docker-compose.yml), restart brain-worker. The legacy cycle path
-  re-engages exactly as before. Use this if Phase 2 handler gaps
-  turn out to break something operator-critical.
-- **Partial rollback (re-enable safety floor)**: set
-  `CHILI_BRAIN_RECONCILE_MAX_INTERVAL_S=14400` to bring the 4h
-  floor back. Combined with the kill switch, this lets you
-  schedule occasional cycles while keeping cold-start free.
-- **Full code rollback**: `git revert` the implementation commit.
-  Behavior reverts to "cycle on every cold start + every 4h."
-- **No data loss** — this brief touches no schema, no row data, no
-  migrations.
+- **Code rollback**: `git revert` the implementation commit. The
+  dispatcher reverts to dispatching only to `demote.py` and
+  `regime_ledger.py`. No handler subscription on
+  `pattern_stats`. `pattern_evidence_corrections` table stays as
+  it was; existing rows preserved.
+- **No data rollback** — the function writes audit rows via
+  existing schema; no schema changes in this brief.
+- **No live-broker rollback** — task is read-only on closed trades,
+  no broker calls.
 
 ## Open questions for Cowork (surface in CC report only if relevant)
 
-1. **The PHASE2_HANDLER_BACKLOG inventory** — surface the actual
-   uncovered step list and per-step impact. Some steps may be
-   harmless to skip (e.g., dead-ticker decay; runs once a day,
-   minor); others are critical (e.g., promote/demote; live
-   patterns get stale). Surface the prioritization for Phase 2
-   sequencing.
+1. **Pre-execution audit results** — what do `paper_closes_24h`,
+   `live_closes_24h`, and `event_counts` look like? If counts
+   diverge (closes > events), surface as a wiring break that
+   needs separate investigation BEFORE shipping the handler.
 
-2. **`update_pattern_stats_from_closed_trades` impact** —
-   confirm in the backlog that pattern evidence will be frozen
-   until `f-handler-pattern-stats` ships. The data we have is the
-   data we have. This is a known trade-off the algo-trader
-   framing accepts: temporary evidence-staleness is preferable
-   to a brain-worker that crashes 100% of the time.
+2. **The 10-minute idle-in-tx leaker observed in the cycle-kill
+   smoke** — pid 60252 holding `SELECT scan_patterns ...` for 624s.
+   That wasn't from the cycle (cycle gated off). Could the new
+   handler exacerbate it (more queries against `scan_patterns`)?
+   Surface if post-deploy data shows the count rising. The
+   `update_pattern_stats_from_closed_trades` function does query
+   `scan_patterns` to read `timeframe` per overheld trade — if a
+   batch processes many overheld trades, that's many short reads.
+   Each should be quick and committed; the leaker is something
+   else.
 
-3. **Other long-running queries** — once the cycle is disabled,
-   are there any OTHER processes still holding 60+ minute
-   transactions? If yes (probably the
-   `momentum_symbol_viability` queries flagged in earlier
-   diagnostics), they may also need the same DB-stability
-   treatment. Surface in the backlog.
+3. **Backtest_completed events** — section 5b of the cycle-kill
+   smoke showed 784 backtest-source parity rows in 5 min, but
+   `brain_work_events` had zero `backtest_completed` events. That's
+   a SEPARATE wiring concern (FIX 34's independent loop bypasses
+   the event path) and out of scope here, but worth flagging:
+   `cpcv_gate.py` (handler #2) subscribes to `backtest_completed`,
+   so if those events aren't firing, CPCV gate isn't running.
+   Surface for a future `f-fix-backtest-completed-emitter` brief.
 
-4. **Phase 2 sequencing recommendation** — based on the backlog,
-   which handler is most operator-impactful to ship first?
-   Likely candidates: (a) `f-handler-pattern-stats` (because
-   today's evidence-canonical-writer depends on it), or (b)
-   `f-handler-cpcv-gate + f-handler-demote` (because pattern
-   lifecycle staleness has live trading implications). Surface
-   recommendation; the operator decides.
+4. **First-cycle backfill timing** — the first time this handler
+   fires post-deploy, the closed trade's user has all their
+   recent (180-day) closed trades evaluated. That could be slow
+   if the user has hundreds of closed trades. Mitigation: the
+   batch_size of 4 limits concurrent dispatch; each handler call
+   is its own short transaction. If first-fire takes >30s in
+   practice, surface and consider lowering batch_size further or
+   adding pagination inside the function.
 
-5. **The 1-year safety-floor default** — that's effectively
-   "off." If the operator wants a meaningful safety floor (e.g.,
-   24h) once Phase 2 handlers ship, they can set the env var.
-   For now, defaulting to "off" is correct because the cycle
-   itself is off.
+5. **Demote and pattern-stats both fire on the same event** —
+   `demote.py` re-evaluates promotion lifecycle on close; this
+   handler corrects the evidence inputs the gate reads. Order
+   matters: if pattern-stats fires FIRST (correcting the
+   evidence), then demote runs the gate against the corrected
+   evidence. If demote fires first, it reads stale evidence.
+   The dispatcher's branch order determines this. **Verify the
+   intended order in the dispatch branch and document explicitly.**
+   Recommended: pattern-stats BEFORE demote, so demote sees
+   corrected stats. If the dispatcher dispatches concurrently
+   instead of sequentially, this becomes a synchronization
+   question — surface honestly.

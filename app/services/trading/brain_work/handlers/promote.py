@@ -37,8 +37,11 @@ LOG_PREFIX = "[brain_work:promote]"
 
 def handle_pattern_eligible_promotion(db: "Session", ev, user_id: int | None) -> None:
     """Finalize promotion for a pattern that passed CPCV gate."""
-    from ....db import SessionLocal
-    from ....models.trading import ScanPattern
+    # f-handler-pattern-stats audit (2026-05-05): absolute imports.
+    # ``....db`` / ``....models`` resolved to nonexistent
+    # ``app.services.{db,models}``.
+    from app.db import SessionLocal
+    from app.models.trading import ScanPattern
     from ..promotion_surface import emit_promotion_surface_change
 
     payload = ev.payload if isinstance(ev.payload, dict) else {}

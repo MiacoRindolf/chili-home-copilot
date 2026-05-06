@@ -35,8 +35,10 @@ _LAST_REBUILD_AT: float = 0.0
 def handle_trade_closed_for_ledger(db: "Session", ev, user_id: int | None) -> None:
     """Rebuild pattern_regime_ledger when a trade closes (throttled)."""
     global _LAST_REBUILD_AT
-    from ....db import SessionLocal
-    from ...pattern_regime_ledger import build_ledger
+    # f-handler-pattern-stats audit (2026-05-05): absolute imports.
+    # ``....db`` resolved to nonexistent ``app.services.db``.
+    from app.db import SessionLocal
+    from app.services.trading.pattern_regime_ledger import build_ledger
 
     now = time.time()
     if (now - _LAST_REBUILD_AT) < _REBUILD_THROTTLE_S:

@@ -446,6 +446,16 @@ class Settings(BaseSettings):
     # per 60s). Both subscribe to live/paper/broker_fill close events.
     brain_work_trade_close_batch_size: int = 16
 
+    # f-handler-pattern-stats (Phase 2 #6, 2026-05-05): event-driven recompute
+    # of ScanPattern.{win_rate, avg_return_pct, trade_count} on trade close.
+    # Subscribes to the same three close events as demote + regime_ledger;
+    # the dispatcher fans out via ``brain_work_trade_close_batch_size`` above
+    # (no separate dispatch slot). This setting is reserved for a future
+    # per-handler throttle if the recompute (which can fetch OHLCV for
+    # counterfactual exits per overheld trade) ever becomes a hot spot --
+    # right now it's documentation of the intended per-handler cap.
+    brain_work_pattern_stats_batch_size: int = 4
+
     # FIX 42 (2026-04-29): Coinbase OHLCV fallback for crypto. Triggered
     # when Massive is exhausted (circuit breaker OPEN, all variants dead).
     # Uses Coinbase's public /products/{pid}/candles endpoint — same product

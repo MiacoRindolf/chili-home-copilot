@@ -38,8 +38,10 @@ def handle_trade_closed(db: "Session", ev, user_id: int | None) -> None:
     EV gate explicitly blocks. Conservative single-trade-can't-demote design
     is enforced by the EV gate's own min-trades floor.
     """
-    from ....db import SessionLocal
-    from ....models.trading import ScanPattern
+    # f-handler-pattern-stats audit (2026-05-05): absolute imports.
+    # ``....db`` resolved to ``app.services.db`` (doesn't exist).
+    from app.db import SessionLocal
+    from app.models.trading import ScanPattern
     from ..promotion_surface import emit_promotion_surface_change
 
     payload = ev.payload if isinstance(ev.payload, dict) else {}
