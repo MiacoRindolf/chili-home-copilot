@@ -1950,6 +1950,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_ENABLED"),
     )
+    # f-add-paper-shadow-mode (2026-05-06): when True, every autotrader
+    # live decision (placed / blocked / skipped) ALSO opens a paper-shadow
+    # trade tagged with ``paper_shadow_of_alert_id``. Used to measure
+    # execution-alpha-drag, provide pure-strategy pattern evidence, and
+    # unstarve brain learning during low-live-placement-rate periods.
+    # Default off; opt-in only. No effect when live=False (the paper
+    # branch already creates non-shadow paper trades directly).
+    chili_autotrader_paper_shadow_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_ENABLED"),
+    )
     chili_autotrader_user_id: int | None = Field(
         default=None,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_USER_ID"),

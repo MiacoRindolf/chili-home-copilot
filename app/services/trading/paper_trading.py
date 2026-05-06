@@ -116,6 +116,7 @@ def open_paper_trade(
     direction: str = "long",
     quantity: int = 100,
     signal_json: dict | None = None,
+    paper_shadow_of_alert_id: int | None = None,
 ) -> PaperTrade | None:
     """Open a simulated paper trade with ATR-based adaptive levels."""
     open_count = db.query(PaperTrade).filter(
@@ -175,6 +176,7 @@ def open_paper_trade(
         status="open",
         entry_date=datetime.utcnow(),
         signal_json=meta,
+        paper_shadow_of_alert_id=paper_shadow_of_alert_id,
     )
     db.add(pt)
     db.flush()

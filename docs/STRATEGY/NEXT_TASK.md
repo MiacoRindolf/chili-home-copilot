@@ -1,664 +1,564 @@
-# NEXT_TASK: f-overnight-cleanup
+# NEXT_TASK: f-add-paper-shadow-mode
 
 STATUS: DONE
 
 ## Goal
 
-Six discrete fixes / diagnostics, executed sequentially in one session.
-Operator is going offline; CC runs through all phases autonomously,
-commits per phase, ships ONE combined CC report at the end. Each phase
-is independent — if one blocks, surface honestly and skip to the next.
-**Goal is forward progress on as many phases as possible, not perfect
-completion of all six.**
+Add an **opt-in paper-shadow mode** to `auto_trader.py` so every live
+trade decision ALSO creates a parallel paper trade. After this ships:
 
-After this lands, the brain has:
-- Startup verification that handlers actually load (prevents another
-  6-day silent regression of the import-bug class)
-- A connection-pool leak closed at its source (the
-  `momentum_symbol_viability` viability check)
-- A clear diagnosis of why paper-trading has zero rows ever
-- Live-trade close events emitting from all 5 close-sites (currently
-  only 1 of 5)
-- Backtest completion events emitting from FIX 34's independent loop
-- DB watchdog actually killing long idle-in-tx (currently it warns
-  but doesn't kill — paper tiger)
+- Each BreakoutAlert that produces a live `placed`, `blocked`, or
+  `skipped` decision ALSO produces a paper-trade row tagged
+  `autotrader_v1_paper_shadow`, attributed to the original alert.
+- Paper-shadow trades open at the alert's `current_price` (no broker
+  slippage, no partial fills, no rejections) — measures the
+  strategy's "ideal execution" P/L in real time.
+- Pattern_stats handler (today's f-handler-pattern-stats) sees the
+  paper-shadow closes too, but aggregates them under a separate
+  attribution so live-vs-shadow can be compared per pattern.
+- New SQL probe surfaces "live-vs-shadow P/L delta per alert" — the
+  canonical execution-alpha-drag metric.
+
+This is **opt-in via flag** (`chili_autotrader_paper_shadow_enabled`,
+default `False`). Operator can flip it on without code changes; live
+trading behavior is identical when the flag is off. **Default off
+ships safely.**
 
 ## Why now
 
-You're going out and want forward progress on the architectural
-follow-ups today's deep diagnostic surfaced. Each phase is small and
-independent. Running them in sequence as one CC session preserves
-algo-trader-architect priority order without stalling on operator
-approval between briefs.
+Today's chain of fixes proved the brain's event-driven architecture
+is structurally sound but **paper-mode-as-canary is not currently
+available** because paper and live are mutually-exclusive modes
+(`auto_trader.py:632`). The operator runs in live mode; paper never
+fires.
 
-## Phase ordering and stop-on-blocker policy
+Paper-shadow-alongside-live solves five real algo-trader use cases:
 
-**Sequence (smallest → largest impact):**
-1. `f-handler-load-verification` (~30 min, hygiene)
-2. `f-fix-momentum-viability-tx-leak` (~45 min, leak fix)
-3. `f-diagnose-paper-runner-output-gap` (~60 min, pure diagnostic)
-4. `f-fix-live-trade-closed-emitter` (~90 min, multi-site fix)
-5. `f-fix-backtest-completed-emitter` (~45 min, single-site fix)
-6. `f-fix-db-watchdog-kill-action` (~30 min, fix-or-confirm)
+1. **Execution-quality measurement.** Compare live realized P/L
+   (slippage-affected) vs paper-shadow P/L (idealized fill) per
+   alert → quantify execution-alpha-drag in basis points. Today
+   measured indirectly via `execution_audit.py`; this gives a
+   per-alert delta.
 
-**Stop-on-blocker policy:** If a phase has a hard blocker (e.g., needs
-operator authorization, encounters a frozen contract, requires a
-schema change that wasn't anticipated), commit progress, surface the
-blocker in the CC report's per-phase section, **skip to the next
-phase**. Don't deadlock waiting on operator input.
+2. **Pure-strategy pattern evidence.** Today's canonical-aware writer
+   (`update_pattern_stats_from_closed_trades`, mig 228) aggregates
+   from realized live closes — contaminated by slippage, broker
+   rejections, scale-in/out timing. Paper-shadow evidence is
+   pure-strategy. The realized-EV gate could read either; pure is
+   strictly more informative for pattern judgment.
 
-**Commit boundaries:** ONE commit per phase. Each commit message
-references the phase slug (`<phase>-<short-summary>`). If a phase
-ships nothing, no commit; just an entry in the CC report.
+3. **Brain learning surface.** Today the brain learns only from
+   realized live trades — at current placement rate of ~0.14% of
+   AutoTraderRun decisions, that's near-zero data. Paper-shadow
+   makes 100% of decisions produce evidence regardless of broker
+   availability or position-size limits. **More than 700× more
+   training data per day.**
 
-**Migrations**: assume each phase can claim the next sequential
-migration ID at execution time. Run
-`scripts/verify-migration-ids.ps1` before each migration commit.
+4. **Backtest-realism validation in real time.** Backtests use
+   idealized fills. Live uses real fills. Paper-shadow uses
+   real-time prices but idealized fills — **same as backtest**.
+   If backtest projections match paper-shadow P/L, the backtest is
+   realistic. If they diverge, the backtest math is broken (and
+   today's pattern promotion decisions are based on fiction).
 
----
+5. **Failure-mode visibility / opportunity cost.** When live fails
+   (broker rejection, no order_id), today nothing is recorded as
+   "this alert WOULD have made $N if executed." Paper-shadow
+   captures the unrealized opportunity. Critical when live
+   placement rate is low (as it is right now).
 
-# Phase 1 — f-handler-load-verification
+Three of five (#1, #2, #4) are load-bearing for the trading system's
+correctness, not nice-to-haves. #3 unblocks the brain learning that
+otherwise stays starved at the current placement rate. #5 gives
+operator visibility when troubleshooting why live isn't placing.
 
-## Goal
+## Scope boundary
 
-Add a startup-time check that imports all 6 brain_work handler modules
-and asserts each has its `handle_*` callable. Logs `[handler_verify]
-OK 6/6` on success or fails loud on FAIL with a clear list of which
-handlers are broken. Prevents the kind of 6-day silent
-`ModuleNotFoundError` regression that today's
-`f-handler-pattern-stats` brief uncovered.
+**In scope:**
+- Migration `_migration_NNN_paper_shadow_attribution` — add
+  `trading_paper_trades.paper_shadow_of_alert_id` (nullable FK to
+  `breakout_alerts.id`) + index.
+- `chili_autotrader_paper_shadow_enabled: bool = False` config flag.
+- `auto_trader.py`: after each live decision (placed / blocked /
+  skipped), ALSO call `open_paper_trade(..., paper_shadow_of_alert_id=...)`
+  when flag is on. Always-on within the live branch — independent of
+  live success.
+- `paper_trading.open_paper_trade`: accept new kwarg
+  `paper_shadow_of_alert_id`, persist on the row.
+- Pattern_stats handler **must NOT double-count** when aggregating
+  closed trades. Filter `paper_shadow_of_alert_id IS NOT NULL` out
+  of evidence aggregation by default; surface as a deferred follow-up
+  whether to prefer-shadow vs prefer-live for evidence purposes.
+- New SQL probe at
+  `scripts/dispatch-paper-shadow-execution-delta.ps1` that reports
+  per-alert live-vs-shadow P/L delta (the "execution-alpha-drag" metric).
+- Tests covering opt-in toggle, parallel-row creation, attribution
+  column, double-count filter.
 
-## Source material
+**Out of scope:**
+- Auto-promote paper-shadow to authoritative for the realized-EV
+  gate. That's a separate strategic decision; surface as
+  `f-prefer-shadow-evidence` if/when the data shows shadow is
+  cleaner.
+- Live ↔ shadow exit-time syncing. Shadow runs its OWN exit logic
+  via the existing paper exit-engine. Live closes when it closes;
+  shadow closes when it closes. The comparison is realized P/L,
+  not bar-for-bar replay.
+- UI / dashboard for execution-alpha-drag. Defer to follow-up brief
+  `f-paper-shadow-dashboard` once data accumulates.
+- Modifying live trading behavior in any way. Live path is
+  unchanged; shadow is purely additive.
+- Modifying the canonical evaluator (`exit_evaluator.py`).
+- Modifying the realized-EV gate or promotion gate.
+- Live-mode partial closes — separate concern from paper-shadow.
 
-- `scripts/brain_worker.py` — the worker entry point. Verification
-  runs at startup, before the main loop.
-- `app/services/trading/brain_work/handlers/{mine, cpcv_gate, promote,
-  demote, regime_ledger, pattern_stats}.py` — the 6 handlers.
-- `app/services/trading/brain_work/dispatcher.py:272-321` — the
-  dispatch branches that call each handler's `handle_*`.
+## Brain integration / source material
+
+- `app/services/trading/auto_trader.py:625-1565` — the entry-side
+  decision logic. Live branch at 1370+; paper branch at 1517+. The
+  shadow hook lands inside the live branch, after each terminal
+  decision (placed / blocked / skipped).
+- `app/services/trading/auto_trader.py:632` — `live = bool(runtime.get("live_orders_effective"))`.
+  Shadow only fires when `live=True`. When `live=False`, paper is
+  already opening directly; shadow would be redundant.
+- `app/services/trading/paper_trading.py::open_paper_trade` — extend
+  the signature.
+- `app/models/trading.py::PaperTrade` — add the new column to ORM
+  matching the migration.
+- `app/services/trading/learning.py:4798` —
+  `update_pattern_stats_from_closed_trades`. Add the
+  `paper_shadow_of_alert_id IS NULL` filter to the closed-trade
+  query so shadow rows don't double-count.
+- `app/config.py` — add `chili_autotrader_paper_shadow_enabled: bool = False`.
+- `docs/STRATEGY/PHASE2_HANDLER_BACKLOG.md` — note that this brief
+  generates new paper-trade traffic that the existing pattern_stats
+  / demote / regime_ledger handlers will consume.
 
 ## Path
 
-In `scripts/brain_worker.py`, near the top of `main()` after logger
-setup but before any work loop starts, add:
+### Step 0 — Pre-execution audit (DO BEFORE ANY CODE CHANGE)
+
+The codebase contains a **dormant placeholder** for "paper shadow book"
+that was added with intent but never wired:
+
+- `ScanPattern.paper_book_json` (`app/models/trading.py:865-868`) —
+  JSONB column, default `{}`, comment "paper shadow book". As of
+  brief-write time, **zero readers, zero writers** in the codebase.
+- `brain_paper_book_on_promotion: bool = False`
+  (`app/config.py:2616-2617`) — flag with comment "When a pattern is
+  promoted, initialize paper_book_json for optional shadow tracking".
+  As of brief-write time, **zero readers** of this flag.
+
+This brief implements paper-shadow with a **better-shaped per-trade
+schema** (FK column on `trading_paper_trades`) instead of the
+placeholder's per-pattern JSONB aggregate. The per-trade design fits
+the event-driven handler chain we just built; the JSONB design
+doesn't.
+
+**Confirm the placeholder is still unused before proceeding.** Run:
+
+```bash
+# Both should return zero reader/writer matches
+grep -rn "paper_book_json" app/ scripts/ \
+    | grep -v "models/trading.py" \
+    | grep -v "migrations.py" \
+    | grep -v "schema definition only"
+
+grep -rn "brain_paper_book_on_promotion" app/ scripts/ \
+    | grep -v "config.py"
+```
+
+**Decision tree:**
+- **Both grep returns zero matches**: placeholder is dormant.
+  **Proceed to Step 1** with the per-trade design as specified.
+- **Either grep returns matches**: someone wired the placeholder
+  between brief-write and execution. **Surface in CC report and
+  STOP** — re-evaluate whether to ship the per-trade design alongside
+  the now-active per-pattern JSONB or reconcile the two designs.
+
+Document the audit result in the CC report's "Pre-execution audit"
+section. The placeholder schema column + dead flag are NOT removed
+in this brief — that's a separate cleanup brief
+(`f-cleanup-paper-book-json-placeholder`) once paper-shadow has
+been operationally proven (≥1 week of clean shadow data with the
+new design). Premature cleanup risks a flailing rollback if the
+new design fails.
+
+### Step 1 — Migration `_migration_NNN_paper_shadow_attribution`
+
+```sql
+ALTER TABLE trading_paper_trades
+    ADD COLUMN IF NOT EXISTS paper_shadow_of_alert_id INTEGER NULL
+        REFERENCES breakout_alerts(id) ON DELETE SET NULL;
+
+-- Sparse partial index — most paper trades won't be shadow trades.
+CREATE INDEX IF NOT EXISTS ix_trading_paper_trades_paper_shadow_alert
+    ON trading_paper_trades (paper_shadow_of_alert_id)
+    WHERE paper_shadow_of_alert_id IS NOT NULL;
+```
+
+Migration ID = next sequential at execution time. Verify with
+`scripts/verify-migration-ids.ps1`.
+
+### Step 2 — ORM update
+
+In `app/models/trading.py::PaperTrade`, add:
 
 ```python
-def _verify_handler_modules() -> None:
-    """Startup verification: every handler module must import cleanly
-    and expose at least one `handle_*` callable.
+paper_shadow_of_alert_id: Optional[int] = Column(
+    Integer, ForeignKey("breakout_alerts.id"), nullable=True
+)
+```
 
-    Failed handlers crash brain-worker on startup with a clear
-    multi-line error. Better than a 6-day silent ModuleNotFoundError
-    regression where the dispatcher's try/except swallows the failure.
-    """
-    import importlib
-    expected = {
-        "app.services.trading.brain_work.handlers.mine":
-            ["handle_market_snapshots_batch"],
-        "app.services.trading.brain_work.handlers.cpcv_gate":
-            ["handle_backtest_completed"],
-        "app.services.trading.brain_work.handlers.promote":
-            ["handle_pattern_eligible_promotion"],
-        "app.services.trading.brain_work.handlers.demote":
-            ["handle_paper_trade_closed",
-             "handle_live_trade_closed",
-             "handle_broker_fill_closed"],
-        "app.services.trading.brain_work.handlers.regime_ledger":
-            ["handle_paper_trade_closed",
-             "handle_live_trade_closed",
-             "handle_broker_fill_closed"],
-        "app.services.trading.brain_work.handlers.pattern_stats":
-            ["handle_paper_trade_closed",
-             "handle_live_trade_closed",
-             "handle_broker_fill_closed"],
-    }
-    failures: list[str] = []
-    for mod_name, callables in expected.items():
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception as e:
-            failures.append(f"  IMPORT-FAIL {mod_name}: {type(e).__name__}: {e}")
-            continue
-        for callable_name in callables:
-            if not callable(getattr(mod, callable_name, None)):
-                failures.append(f"  MISSING-CALLABLE {mod_name}.{callable_name}")
-    if failures:
-        msg = (
-            "[handler_verify] STARTUP CHECK FAILED — brain-worker "
-            "would dispatch to broken handlers. Fix before re-running.\n"
-            + "\n".join(failures)
+Place near other foreign keys; match column ordering to the migration.
+
+### Step 3 — Extend `open_paper_trade`
+
+In `app/services/trading/paper_trading.py`, extend the `open_paper_trade`
+signature:
+
+```python
+def open_paper_trade(
+    db: Session,
+    user_id: int,
+    ticker: str,
+    entry_price: float,
+    *,
+    scan_pattern_id: int | None = None,
+    stop_price: float | None = None,
+    target_price: float | None = None,
+    direction: str = "long",
+    quantity: int = 1,
+    signal_json: dict | None = None,
+    paper_shadow_of_alert_id: int | None = None,  # NEW
+) -> PaperTrade | None:
+    ...
+```
+
+Persist `paper_shadow_of_alert_id` on the new PaperTrade row when
+provided.
+
+### Step 4 — Wire shadow into auto_trader live branch
+
+In `app/services/trading/auto_trader.py`, after each terminal decision
+in the live branch, add the shadow hook. Locate the three terminal
+points in the live branch (lines ~1407, ~1428, plus the placed-success
+branch ending at ~1515):
+
+```python
+# Helper: open the paper-shadow trade. Always-on within the live
+# branch (regardless of live success/failure). Gated on
+# chili_autotrader_paper_shadow_enabled. Failures swallowed at this
+# boundary — shadow must never break the live decision flow.
+def _maybe_open_paper_shadow(
+    db: Session, *, uid: int, alert: Any, qty: int, px: float, snap: dict,
+) -> None:
+    if not getattr(settings, "chili_autotrader_paper_shadow_enabled", False):
+        return
+    try:
+        from .paper_trading import open_paper_trade
+        sig = {
+            "auto_trader_v1": True,
+            "breakout_alert_id": int(alert.id),
+            "paper_shadow": True,
+            "shadow_of_alert_id": int(alert.id),
+            "projected": snap.get("projected_profit_pct"),
+        }
+        open_paper_trade(
+            db, uid, alert.ticker, px,
+            scan_pattern_id=alert.scan_pattern_id,
+            stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
+            target_price=float(alert.target_price) if alert.target_price is not None else None,
+            direction="long",
+            quantity=max(1, int(qty)),
+            signal_json=sig,
+            paper_shadow_of_alert_id=int(alert.id),
         )
-        logger.error(msg)
-        raise SystemExit(msg)
-    logger.info(
-        "[handler_verify] OK 6/6 handlers loaded cleanly: %s",
-        ", ".join(sorted(m.rsplit(".", 1)[1] for m in expected)),
-    )
+        logger.info(
+            "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s qty=%s px=%s opened",
+            alert.id, alert.scan_pattern_id, alert.ticker, qty, px,
+        )
+    except Exception:
+        logger.debug(
+            "[autotrader_paper_shadow] open failed for alert_id=%s",
+            getattr(alert, "id", None), exc_info=True,
+        )
 ```
 
-Call `_verify_handler_modules()` from `main()` before the worker enters
-its loop. Failure = `SystemExit`, so brain-worker dies fast with the
-operator-readable error.
-
-Verify the call is gated so it doesn't run during pytest (check
-existing patterns; `os.environ.get("CHILI_PYTEST")` per CLAUDE.md).
-
-## Tests
-
-`tests/test_handler_load_verification.py`:
-
-1. ✅ Happy path: all 6 modules import + all expected callables
-   present → no failures.
-2. ✅ Synthetic missing-callable: monkeypatch one module to lack a
-   callable → `SystemExit` with that callable named in the error.
-3. ✅ Synthetic import error: monkeypatch one module's spec to raise
-   ImportError on import → `SystemExit` with "IMPORT-FAIL" prefix.
-4. ✅ Pytest gating: when `CHILI_PYTEST=1`, the function is a no-op
-   (or skipped at the call site) so unit tests don't trigger.
-
-## Success criteria
-
-- `_verify_handler_modules()` exists in `scripts/brain_worker.py`.
-- Called from `main()` before work loop.
-- 4/4 tests pass.
-- Smoke: brain-worker starts cleanly, log shows
-  `[handler_verify] OK 6/6 handlers loaded cleanly: ...`.
-
-## Commit message
-
-`fix(brain-worker): handler-load verification on startup (f-handler-load-verification)`
-
----
-
-# Phase 2 — f-fix-momentum-viability-tx-leak
-
-## Goal
-
-Close the connection-pool leak that's been spawning 9-12 simultaneous
-idle-in-tx sessions on the `momentum_symbol_viability` query for at
-least 12 hours (per today's deep diagnostic). Sessions held times
-growing past 600s without commit. Same SQLAlchemy session-lifecycle
-bug class as f-leak-3 (yfinance Thread leak from 2026-05-04).
-
-## Source material
-
-- `app/services/trading/momentum_symbol_viability.py` (or wherever the
-  viability check lives — locate via grep).
-- The query pattern surfaced in today's deep diagnostic A2b:
-  `SELECT momentum_symbol_viability.id AS momentum_symbol_viability_id, ...`
-- Existing pattern of session lifecycle in
-  `app/services/trading/brain_work/handlers/demote.py` (correct usage).
-- Memory: `reference_fleak3_yf_thread_leak_fix.md` (similar lifecycle
-  pattern fix).
-
-## Path
-
-1. Grep for `momentum_symbol_viability` to find the read site(s).
-2. Identify the function that runs the SELECT and trace its session
-   lifecycle. Most likely cause:
-   - Function uses a passed-in or globally-cached session
-   - Runs the SELECT, returns the result
-   - Caller never commits/closes; session sits in idle-in-tx
-3. Fix:
-   - **Preferred**: replace bare `session.execute()` with
-     `with SessionLocal() as session: ... ; session.commit()` block.
-     Self-contained; transaction always closes.
-   - **Alternate**: if the function is intentionally short-lived,
-     ensure caller wraps in `try/finally: session.close()`.
-4. **Do NOT** add new transactions or change semantics. The function
-   is a pure read; commit-on-exit is correctness, not behavior change.
-5. Verify: post-fix, the query should appear in `pg_stat_activity`
-   only briefly; no idle-in-tx accumulation.
-
-## Tests
-
-`tests/test_momentum_viability_tx_lifecycle.py`:
-
-1. ✅ Calling the viability function does not leave an open
-   transaction afterwards. Probe via
-   `db.connection().info.get("transaction_started")` or equivalent
-   SQLAlchemy introspection.
-2. ✅ The viability function returns the same data post-fix as
-   pre-fix (regression guard against accidental semantic change).
-3. ✅ Multiple concurrent calls produce zero accumulated idle-in-tx
-   sessions over a 30-second window (synthetic, with mocked DB).
-
-## Success criteria
-
-- Viability function uses a self-contained transaction.
-- Tests pass.
-- Smoke: post-deploy, query
-  `SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction'
-  AND query LIKE '%momentum_symbol_viability%'` returns 0 within 5
-  minutes of a viability check.
-
-## Commit message
-
-`fix(momentum-viability): close session-lifecycle leak (f-fix-momentum-viability-tx-leak)`
-
----
-
-# Phase 3 — f-diagnose-paper-runner-output-gap
-
-## Goal
-
-Pure diagnostic. Find why `trading_paper_trades` has 0 rows total
-despite `CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1` and the paper-runner
-job firing every minute (`Momentum paper runner: ticked 2 session(s)`).
-
-**No code fix in this phase.** Output is a written analysis at
-`docs/AUDITS/<date>_paper-runner-output-gap.md` plus an updated entry
-in `PHASE2_HANDLER_BACKLOG.md` referencing the eventual fix brief.
-
-## Source material
-
-- `app/services/trading_scheduler.py` — find the
-  `momentum_paper_runner_batch` APScheduler job definition.
-- The job calls something that's supposed to insert into
-  `trading_paper_trades`. Trace the chain.
-- `app/services/trading/momentum/` (or wherever the paper-runner
-  logic lives — locate via grep on `momentum_paper_runner`).
-
-## Path
-
-The diagnostic should answer these questions in order:
-
-1. **What does the paper-runner-batch job actually call?** Read the
-   job definition. Is it calling a function that's supposed to insert
-   trades, or only updating session state?
-
-2. **What does "ticked 2 session(s)" mean?** Find the log line in
-   the source. Sessions of what — paper-runner sessions? Are these
-   distinct from `trading_paper_trades`?
-
-3. **Is there a separate "paper sessions" concept in the schema?**
-   Check for tables like `momentum_paper_sessions`,
-   `paper_run_sessions`, etc. Is paper-runner inserting there
-   instead of into `trading_paper_trades`?
-
-4. **Is paper-runner gated on something that's currently false?**
-   E.g., requires a "live session" object that's never created;
-   requires user_id matching that doesn't exist; requires market
-   hours / weekend that's blocking.
-
-5. **Were there ever paper trades in this DB historically?** Check
-   `trading_paper_trades` count (we know it's 0 now). Check git log
-   on the paper-runner code for when it last changed semantically —
-   maybe the wiring was broken at some specific commit.
-
-6. **What's the relationship between "paper-runner ticked N
-   sessions" and `trading_paper_trades` row creation?** Map the
-   call graph. Is there a missing INSERT site? A swallowed exception?
-   A silent skip?
-
-Each question's answer goes in the output doc with file:line citations
-and supporting query results.
-
-## Output deliverable
-
-`docs/AUDITS/<date>_paper-runner-output-gap.md` containing:
-
-- Executive summary: 2-3 paragraph algo-trader-architect read on what's
-  broken
-- Per-question section with finding + supporting evidence
-- Root cause (or "still unknown, here's what to investigate next")
-- Suggested fix brief slug (e.g., `f-fix-paper-runner-X`) if root
-  cause identified
-
-Plus update `docs/STRATEGY/PHASE2_HANDLER_BACKLOG.md` to reference the
-audit doc + queued fix brief.
-
-## Tests
-
-No new tests. Pure analysis.
-
-## Success criteria
-
-- Audit doc exists with executive summary + 6 question sections + root
-  cause statement.
-- `PHASE2_HANDLER_BACKLOG.md` references the audit doc.
-- If root cause IS identified, a follow-up brief slug is named.
-
-## Commit message
-
-`docs(audit): paper-runner output gap diagnostic (f-diagnose-paper-runner-output-gap)`
-
----
-
-# Phase 4 — f-fix-live-trade-closed-emitter
-
-## Goal
-
-Close the live-trade-close emitter coverage gap surfaced in today's
-`f-handler-pattern-stats` audit. Currently `on_live_trade_closed` is
-called from exactly one site (`portfolio.py:185`); 4 of 5 close-sites
-bypass the emitter entirely:
-
-- `app/services/trading/stop_engine.py:1057` (stop hits)
-- `app/services/trading/robinhood_exit_execution.py:394` (broker exit fills)
-- `app/services/trading/emergency_liquidation.py:104` (emergency liquidations)
-- broker_sync (find the close-site in `broker_service.py` or wherever
-  it sets `Trade.status='closed'`)
-
-After this fix, every live-trade close emits `live_trade_closed` event,
-which feeds demote / regime_ledger / pattern_stats handlers.
-
-## Source material
-
-- `app/services/trading/brain_work/execution_hooks.py:on_live_trade_closed`
-  — the function to call. Already implemented.
-- `app/services/trading/portfolio.py:185` — the existing call site.
-  Use as model for the call shape.
-- The 4 bypass sites listed above.
-
-## Path
-
-For each of the 4 bypass sites:
-
-1. Locate the exact line where `Trade.status='closed'` is set (or
-   where the close transaction is committed).
-2. Add `on_live_trade_closed(db, trade)` immediately AFTER the close
-   in the same transaction (mirror of `_paper_close_ledger` pattern
-   in `paper_trading.py:240-245`).
-3. Wrap in try/except so emitter failure can't break the close
-   transaction:
-   ```python
-   try:
-       from .brain_work.execution_hooks import on_live_trade_closed
-       on_live_trade_closed(db, trade)
-   except Exception:
-       logger.debug("[exec_hooks] on_live_trade_closed failed", exc_info=True)
-   ```
-4. Repeat for all 4 sites.
-
-For broker_sync specifically: find the actual close site, not just
-where status is read. Likely in `app/services/broker_service.py`'s
-sync path. May need to grep for `Trade.status='closed'` or
-`trade.status='closed'` to find all assignment sites.
-
-## Tests
-
-`tests/test_live_trade_close_emitter_coverage.py`:
-
-1. ✅ Stop-engine close path: synthetic stop hit on a Trade →
-   `brain_work_events` has a new `live_trade_closed` row for that
-   trade.
-2. ✅ Robinhood exit-execution path: same shape.
-3. ✅ Emergency liquidation path: same shape.
-4. ✅ Broker-sync close path: same shape.
-5. ✅ Existing portfolio.py path still works (regression guard).
-6. ✅ Emitter failure does not break the close transaction (mock
-   the emitter to raise; trade still closes).
-
-## Success criteria
-
-- 4 new call sites added, all wrapped in try/except.
-- 6/6 tests pass.
-- Smoke: post-deploy, a live trade closing via any of the 4 bypass
-  paths produces a `live_trade_closed` event in
-  `brain_work_events`.
-
-## Commit message
-
-`fix(live-trade-emitter): cover stop/exit/emergency/broker-sync close paths (f-fix-live-trade-closed-emitter)`
-
----
-
-# Phase 5 — f-fix-backtest-completed-emitter
-
-## Goal
-
-When FIX 34's independent fast_backtest loop completes a backtest,
-emit a `backtest_completed` event so `cpcv_gate.py` (handler #2) can
-fire. Currently the independent loop bypasses the event path
-entirely — backtests run, parity rows accumulate (45k+ over a few
-hours), but `cpcv_gate.py` never gets called.
-
-## Source material
-
-- `scripts/brain_worker.py:_run_fast_backtest_independent_loop` (or
-  similar name — locate via grep on FIX 34 / fast_backtest)
-- `app/services/trading/brain_work/emitters.py:emit_backtest_completed_outcome`
-  (or similar). Find the existing emitter for completion events.
-- `app/services/trading/brain_work/handlers/cpcv_gate.py` — handler
-  that subscribes to `backtest_completed`.
-
-## Path
-
-1. In the fast_backtest independent loop, find the completion site
-   (where one backtest run finishes its bar loop and produces its
-   summary row).
-2. Add the emit call immediately after, in the same DB session:
-   ```python
-   from app.services.trading.brain_work.emitters import (
-       emit_backtest_completed_outcome,
-   )
-   try:
-       emit_backtest_completed_outcome(
-           db,
-           scan_pattern_id=int(pattern_id),
-           # ... other required fields per the emitter's signature ...
-       )
-   except Exception:
-       logger.warning("[fast_backtest] emit_backtest_completed failed",
-                      exc_info=True)
-   ```
-3. Run `verify-migration-ids.ps1` (no migration in this phase, but
-   habit).
-
-If the emitter doesn't exist yet, create it in `emitters.py` with
-the same shape as `emit_paper_trade_closed_outcome`. Match the
-payload structure cpcv_gate's handler expects.
-
-## Tests
-
-`tests/test_backtest_completed_emitter.py`:
-
-1. ✅ Synthetic backtest completion → `brain_work_events` has a
-   `backtest_completed` row with the right pattern_id and payload.
-2. ✅ Emitter failure does not break the backtest (the bar loop
-   continues, summary row still written).
-3. ✅ cpcv_gate handler can consume the emitted event end-to-end
-   (integration test if feasible; else surface as deferred).
-
-## Success criteria
-
-- Emit call added at the completion site.
-- 2-3 tests pass.
-- Smoke: post-deploy, after one fast_backtest completes,
-  `brain_work_events` has a `backtest_completed` row with `status=done`
-  (after cpcv_gate processes it).
-
-## Commit message
-
-`fix(fast-backtest-emitter): emit backtest_completed events (f-fix-backtest-completed-emitter)`
-
----
-
-# Phase 6 — f-fix-db-watchdog-kill-action
-
-## Goal
-
-Confirm or fix the `db_watchdog` kill behaviour. Today's diagnostic
-showed db_watchdog warns at 120s, claims kill at 600s, but actual
-held times grow to 624s, 921s, 482s, 542s — past the kill threshold
-without being killed.
-
-Two possibilities:
-1. The kill action is implemented but failing silently (no
-   `pg_terminate_backend()` permission, exception swallowed,
-   wrong PID, etc.)
-2. The kill action is not implemented at all (only warning is)
-
-Read the source, determine which, ship the fix.
-
-## Source material
-
-- `app/services/db_watchdog.py` — locate first via grep.
-- The warn-log lines: `[db_watchdog] idle-in-tx pid=N app=X held for Ys (warn threshold 120, kill at 600)`
-
-## Path
-
-1. Read `db_watchdog.py` end-to-end.
-2. Find the kill code path. Is it implemented? Does it call
-   `pg_terminate_backend()`?
-3. If NOT implemented: add it. Use SQL like:
+Then call it AFTER:
+1. Each `_audit(... decision="blocked", ...)` in the live branch
+2. Each `_audit(... decision="skipped", ...)` in the live branch
+3. The successful `_audit(... decision="placed", reason="ok", ...)`
+   at line ~1503
+
+The "after" placement matters: the live decision and its audit row
+land first, the shadow opens second. If shadow fails, the live
+decision is intact.
+
+**Do NOT** call this from the paper branch (lines 1517+). When
+`live=False`, the paper branch is already creating paper trades
+directly — shadow would create duplicates.
+
+### Step 5 — Filter shadow rows out of evidence aggregation
+
+In `app/services/trading/learning.py::update_pattern_stats_from_closed_trades`,
+the closed-trade query (around line 4830) currently aggregates ALL
+closed trades. Add a filter to exclude shadow rows from default
+evidence:
+
+```python
+closed_q = db.query(...).filter(
+    Trade.status == "closed",
+    Trade.scan_pattern_id.isnot(None),
+    Trade.exit_date.isnot(None),
+    Trade.entry_date.isnot(None),
+    # NEW: exclude paper-shadow rows from evidence aggregation by
+    # default. Shadow rows are kept for execution-alpha-drag
+    # measurement (separate query); they're not the canonical
+    # realized P/L for pattern evidence.
+)
+# When extending to PaperTrade in the union, add:
+# PaperTrade.paper_shadow_of_alert_id.is_(None)
+```
+
+The current function reads from `Trade` (not PaperTrade) per the audit;
+verify the filter actually applies to the union the function uses.
+
+### Step 6 — Config setting
+
+In `app/config.py`:
+
+```python
+chili_autotrader_paper_shadow_enabled: bool = False
+```
+
+Default `False`. Comment inline: "When True, every autotrader live
+decision ALSO opens a paper-shadow trade tagged
+`paper_shadow_of_alert_id`. Used to measure execution-alpha-drag,
+provide pure-strategy pattern evidence, and unstarve brain learning
+during low-live-placement-rate periods. Default off; opt-in only."
+
+### Step 7 — Execution-alpha-drag SQL probe
+
+`scripts/dispatch-paper-shadow-execution-delta.ps1`:
+
+```sql
+-- Per-alert live-vs-shadow P/L delta. Positive = shadow did better
+-- (slippage hurt live execution). Negative = shadow did worse
+-- (entry price drift in operator's favor). Magnitude in basis points.
+WITH pairs AS (
+    SELECT
+        pt.paper_shadow_of_alert_id AS alert_id,
+        pt.id AS shadow_id,
+        pt.scan_pattern_id,
+        pt.ticker,
+        pt.entry_date AS shadow_entry,
+        pt.exit_date AS shadow_exit,
+        pt.exit_price AS shadow_exit_price,
+        pt.entry_price AS shadow_entry_price,
+        pt.pnl AS shadow_pnl,
+        t.id AS live_id,
+        t.exit_price AS live_exit_price,
+        t.entry_price AS live_entry_price,
+        t.pnl AS live_pnl,
+        t.exit_reason AS live_exit_reason
+    FROM trading_paper_trades pt
+    LEFT JOIN trading_trades t
+        ON t.related_alert_id = pt.paper_shadow_of_alert_id
+       AND t.broker_source = 'robinhood'
+       AND t.management_scope = 'auto_trader_v1'
+    WHERE pt.paper_shadow_of_alert_id IS NOT NULL
+      AND pt.status = 'closed'
+      AND pt.exit_date >= NOW() - INTERVAL '7 days'
+)
+SELECT
+    p.alert_id,
+    p.scan_pattern_id,
+    p.ticker,
+    p.shadow_pnl,
+    p.live_pnl,
+    (COALESCE(p.shadow_pnl,0) - COALESCE(p.live_pnl,0))
+        / NULLIF(p.shadow_entry_price, 0) * 10000.0 AS delta_bps,
+    p.live_exit_reason
+FROM pairs p
+ORDER BY ABS(COALESCE(p.shadow_pnl,0) - COALESCE(p.live_pnl,0)) DESC
+LIMIT 30;
+```
+
+Plus aggregate stats (count of paired closes, mean delta_bps, stddev,
+t-statistic on bias) to give the operator a one-shot read on
+whether execution drag is significant at 95% CI.
+
+### Step 8 — Tests
+
+`tests/test_paper_shadow_mode.py`:
+
+1. ✅ Flag off (default): live decision creates Trade row; **no
+   PaperTrade row created.**
+2. ✅ Flag on, live placed: live decision creates Trade row AND
+   parallel PaperTrade row tagged `paper_shadow_of_alert_id`.
+3. ✅ Flag on, live blocked: no Trade row, but PaperTrade-shadow
+   IS still created (captures opportunity-cost).
+4. ✅ Flag on, live skipped (e.g., PDT gate): no Trade row, but
+   PaperTrade-shadow IS still created.
+5. ✅ Flag on, paper mode (`live=False`): NO shadow created. The
+   paper branch already runs; shadow would duplicate.
+6. ✅ Shadow row carries `paper_shadow_of_alert_id` matching the
+   alert that triggered it.
+7. ✅ `update_pattern_stats_from_closed_trades` filters shadow rows
+   out of evidence aggregation. Synthetic pattern with 5 normal
+   closes + 5 shadow closes computes win_rate from the 5 normal,
+   not 10 mixed.
+8. ✅ Shadow open failure does not break the live decision flow
+   (mock `open_paper_trade` to raise; live Trade still committed).
+
+### Step 9 — Smoke verification
+
+After deploy with `chili_autotrader_paper_shadow_enabled=true`:
+
+1. Wait for next AutoTraderRun (every 1 min via scheduler-worker).
+2. Check parallel rows:
    ```sql
-   SELECT pg_terminate_backend(:pid)
+   SELECT
+       (SELECT COUNT(*) FROM trading_trades
+        WHERE management_scope = 'auto_trader_v1'
+          AND entry_date >= NOW() - INTERVAL '15 minutes') AS live_n,
+       (SELECT COUNT(*) FROM trading_paper_trades
+        WHERE paper_shadow_of_alert_id IS NOT NULL
+          AND entry_date >= NOW() - INTERVAL '15 minutes') AS shadow_n;
    ```
-   guarded by:
-   - `held_s > 600`
-   - `application_name LIKE 'chili%'` (don't kill foreign apps)
-   - `state = 'idle in transaction'` (don't kill active queries)
-4. If implemented but silently failing: add `logger.error()` on the
-   exception path so the failure is visible.
-5. Either way: log clearly when a kill IS executed:
-   ```
-   [db_watchdog] KILLED idle-in-tx pid=N app=X held=Ys query=<excerpt>
-   ```
-6. Verify the watchdog's PG user has `pg_signal_backend` permission
-   (or is a superuser). If not, this needs a postgres-side grant —
-   surface as a separate operator-action item.
+   Expected: `shadow_n >= live_n + (skipped/blocked count)`. Every
+   live decision should have a shadow.
+3. Run the execution-alpha-drag probe (Step 7). With <30 minutes of
+   data, the t-statistic will be unreliable but the per-alert table
+   should populate.
+4. Watch `[autotrader_paper_shadow]` log lines for any errors.
 
-## Tests
+## Constraints / do not touch
 
-`tests/test_db_watchdog_kill.py`:
+- **Default mode stays paper.** Top-level operator default unchanged.
+  Only the SHADOW addition is opt-in.
+- **All 8 fast-path safety belts intact.** PROTOCOL Hard Rule 1.
+- **Do not modify live trading behavior.** Shadow is purely additive
+  alongside live; live path is unchanged.
+- **Do not modify the canonical evaluator** (`exit_evaluator.py`).
+- **Do not modify the realized-EV gate or promotion gate.** Auto-
+  demote falls out for free if shadow is later promoted to
+  authoritative; that decision is a separate brief.
+- **Do not modify any of the 6 existing brain_work handlers.** The
+  pattern_stats / demote / regime_ledger handlers will see shadow
+  paper-trade-closed events; they'll process them. The filter at
+  Step 5 is in `update_pattern_stats_from_closed_trades`, not in
+  the handler itself.
+- **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
+- **Migration ID** = next sequential. Verify with
+  `verify-migration-ids.ps1`.
+- **No `git push --force`.** PROTOCOL Hard Rule 4.
+- **The flag default is `False`.** Shipping must not change current
+  trading behavior. Operator opts in explicitly.
 
-1. ✅ Synthetic 700s held idle-in-tx session triggers a `KILLED`
-   log line.
-2. ✅ Kill respects the application_name filter (foreign apps not
-   killed).
-3. ✅ Kill respects the state filter (active queries not killed).
-4. ✅ Permission failure (mock `pg_terminate_backend` to return
-   FALSE) logs ERROR but doesn't crash the watchdog loop.
+## Out of scope
+
+- Auto-promoting shadow evidence to be the canonical pattern-evidence
+  source. Separate strategic decision; queue
+  `f-prefer-shadow-evidence` for follow-up if data shows shadow is
+  cleaner.
+- UI / dashboard for execution-alpha-drag. Follow-up brief
+  `f-paper-shadow-dashboard`.
+- Live ↔ shadow exit-time syncing. Shadow runs its own exit logic.
+- Modifying which exit reasons close shadow trades. They follow the
+  existing paper exit-engine.
+- Position-size sync between live and shadow (e.g., if live partials
+  out, shadow should partial out). Not in scope; shadow runs
+  independent.
+- Backtest-shadow comparison (a third axis). Not in scope.
+- LLM-context (`position_plan_generator`) updates to surface
+  paper_shadow attribution. Out of scope.
 
 ## Success criteria
 
-- Kill action confirmed implemented (and fixed if broken).
-- Tests pass.
-- Smoke: post-deploy, observe logs for `[db_watchdog] KILLED` lines
-  on the next viability-check leak (Phase 2 should also help).
-
-## Commit message
-
-`fix(db-watchdog): make kill action actually kill (f-fix-db-watchdog-kill-action)`
-
----
-
-# Combined CC Report
-
-After all phases complete (or are blocked), write ONE CC report at
-`docs/STRATEGY/CC_REPORTS/<date>_f-overnight-cleanup.md` covering all
-six phases. Structure:
-
-```markdown
-# CC_REPORT: f-overnight-cleanup
-
-## What shipped (per phase)
-
-### Phase 1 — f-handler-load-verification
-- Status: SHIPPED / BLOCKED / SKIPPED
-- Commit: <hash>
-- Files: <count>
-- Tests: <pass/total>
-- Key finding: ...
-
-### Phase 2 — f-fix-momentum-viability-tx-leak
-- ... same shape ...
-
-(repeat for all 6 phases)
-
-## Cross-phase observations
-(things that turned up in multiple phases or that affect cowork's mental model)
-
-## Surprises / deviations
-(per-phase or cross-cutting)
-
-## Open questions for Cowork
-(per-phase or cross-cutting)
-
-## What needs operator action
-(things only the operator can do — e.g., grant pg_signal_backend role)
-```
-
-## Constraints / do not touch (cross-phase)
-
-- **Default mode stays paper.** No live-placement enable.
-- **All 8 fast-path safety belts intact.** PROTOCOL Hard Rule 1.
-- **Do not re-enable `run_learning_cycle`.** Stays gated off via
-  `CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0`.
-- **Do not modify the canonical evaluator** (`exit_evaluator.py`).
-- **Do not modify the realized-EV gate** (`realized_ev_gate.py`).
-- **Do not modify any of the 5 existing Phase 2 handlers** unless
-  the import-bug-class issue surfaces in another file (in which
-  case fix it the same way as today's pattern_stats brief).
-- **Tests use `_test`-suffixed DB.** PROTOCOL Hard Rule 5.
-- **Migration IDs**: each phase claims the next sequential at
-  execution time. Verify with `verify-migration-ids.ps1`.
-- **No `git push --force`.** PROTOCOL Hard Rule 4.
-- **One commit per phase.** Atomic recoverability.
-- **If a phase is blocked, commit progress so far + skip to next.**
-  Don't deadlock waiting on operator input. Surface blocker in CC
-  report.
-
-## Out of scope (cross-phase)
-
-- The `run_learning_cycle` source code deletion. Final cleanup brief.
-- Other handlers from `PHASE2_HANDLER_BACKLOG.md` not listed above.
-- DB-stability config (TCP keepalives, pool_pre_ping). The cycle
-  disable + Phase 2 leak fix should obviate.
-- Position-side timeframe column (Trade/PaperTrade.timeframe).
-- LLM-context (`position_plan_generator`) pattern-evidence path.
-- `f-cron-stale-promoted` (sweep-mode demote gap).
-- Backtest-derived evidence correction.
-
-## Success criteria (cross-phase)
-
-1. **As many phases as possible are SHIPPED.** Target: 5/6. Acceptable
-   floor: 3/6 if multiple hard blockers surface.
-2. **Each shipped phase has its commit + tests pass.**
-3. **Combined CC report covers all 6 phases honestly** (SHIPPED /
-   BLOCKED / SKIPPED + reasoning).
-4. **Operator-action items surfaced clearly** (e.g., postgres role
-   grants needed).
-5. **`PHASE2_HANDLER_BACKLOG.md` updated** with status per phase.
-6. **Brain-worker still functional** post-each-commit (the load-
-   verification from Phase 1 catches if any phase accidentally breaks
-   a handler import).
+1. **Migration lands cleanly.** `verify-migration-ids.ps1` passes.
+   Schema check confirms the new column + sparse index.
+2. **`chili_autotrader_paper_shadow_enabled: bool = False`** added
+   to `app/config.py` with documented default.
+3. **`open_paper_trade` extended** with the new kwarg, persists
+   correctly.
+4. **Auto_trader live branch hooks the shadow** at all three
+   terminal decision points (placed / blocked / skipped). Calls are
+   try/except wrapped.
+5. **Pattern_stats filter excludes shadow rows** from default
+   evidence aggregation.
+6. **All 8 new tests pass + existing tests still pass** against
+   `chili_test`.
+7. **Execution-alpha-drag SQL probe** at
+   `scripts/dispatch-paper-shadow-execution-delta.ps1` exists and
+   produces correct output on a synthetic test dataset.
+8. **CC report** at
+   `docs/STRATEGY/CC_REPORTS/<date>_f-add-paper-shadow-mode.md` per
+   PROTOCOL format. Include a per-test result + flag-off / flag-on
+   smoke comparison inline.
 
 ## Rollback plan
 
-- Per-phase: each is an independent commit. `git revert <phase-N-commit>`
-  rolls back just that phase.
-- Cross-phase: if multiple phases need rollback, revert in reverse
-  order (Phase 6 first, Phase 1 last).
-- No data rollback — phases don't introduce schema or data mutations
-  that aren't already covered by individual rollback plans.
-- `CHILI_BRAIN_LEGACY_CYCLE_ENABLED` stays `0` regardless of
-  rollbacks.
+- **Flag rollback (no code change)**: set
+  `chili_autotrader_paper_shadow_enabled=false` in compose.yml or
+  env. Shadow path becomes inert; live behavior unchanged.
+- **Code rollback**: `git revert` the implementation commit. Shadow
+  hooks disappear, ORM column stays (harmless), migration stays
+  (idempotent).
+- **Migration rollback**: drop column if needed:
+  ```sql
+  ALTER TABLE trading_paper_trades
+      DROP COLUMN paper_shadow_of_alert_id;
+  ```
+  Existing shadow rows lose their attribution but stay queryable
+  by `signal_json->>'paper_shadow' = 'true'`.
+- **No live-broker rollback needed** — task adds NO broker calls.
+- **Existing shadow rows are preserved across rollbacks** — the
+  ROW data stays; the FK column may go but the rows don't.
 
-## Open questions / what to surface in CC report
+## Open questions for Cowork (surface in CC report only if relevant)
 
-For each phase, the report should answer:
+1. **Pattern_stats filter behavior**: shadow rows excluded by default.
+   If post-deploy analysis suggests shadow is cleaner evidence, the
+   follow-up `f-prefer-shadow-evidence` brief flips the filter logic
+   (prefer shadow over live for evidence aggregation; live becomes
+   the secondary). Surface a recommendation after first 24h of
+   shadow data accumulates.
 
-1. **Phase 1**: were any of the 6 handlers found to have OTHER bugs
-   beyond import (e.g., missing callable, wrong signature)?
-2. **Phase 2**: was the fix surgical (one function), or did the leak
-   originate from multiple call sites? What's the actual lifetime
-   pattern of the function?
-3. **Phase 3**: ROOT CAUSE for paper-runner output gap. If unknown,
-   what's the next step?
-4. **Phase 4**: confirm 4 bypass sites were all real and accessible,
-   not abstracted behind layers that complicated the fix.
-5. **Phase 5**: did the emitter exist already, or did this phase
-   create it? What was the missing payload field, if any?
-6. **Phase 6**: was the watchdog's kill code missing entirely, or
-   broken? Did the postgres-side `pg_signal_backend` permission
-   need to be granted?
+2. **Shadow open failure handling** — current design: swallow + log
+   at DEBUG. If the operator wants louder failure visibility (e.g.,
+   ERROR level when shadow fails), surface the choice. My read: DEBUG
+   is right because shadow is "additive observability"; a failed
+   shadow is a missed measurement, not a trading error. But surface
+   for explicit confirmation.
 
-Cross-phase:
-- Did any phase encounter a frozen contract that required Cowork
-  authorization? Surface explicitly.
-- Did any phase reveal another silent regression (like today's 6-day
-  handler-import bug)? If yes, that's the next-priority Cowork
-  follow-up.
+3. **Delta-bps computation in the SQL probe** uses `shadow_entry_price`
+   as the denominator. Strictly correct would be position-size-weighted
+   (delta_dollars / position_dollars). With single-quantity paper
+   trades the simple form is fine; surface if real position sizing
+   makes the simple form misleading.
+
+4. **First-deploy backfill** — when the flag is first flipped on,
+   shadow trades only start opening from that moment forward. There's
+   no historical backfill (would require fictional price data per
+   past alert). Acceptable per the use case (forward-looking
+   measurement), but surface explicitly.
+
+5. **Correlation of shadow exit to live exit** — by design, shadow
+   runs its own exit logic. So shadow may close at a different time
+   than the live trade does. The "live-vs-shadow P/L delta" is over
+   different holding periods. Strictly correct measurement requires
+   matching close times; today's design measures overall P/L with
+   different holding periods. Surface as a watch item; if the data
+   shows wide hold-period divergence, the dashboard brief should
+   show both raw delta and time-aligned delta.
+
+6. **Paper-shadow capacity** — paper has its own "open positions"
+   accounting. If shadow opens N positions per minute, the paper
+   open-positions count grows fast. The pattern_position_monitor
+   that currently runs every 5 min already handles paper-mode
+   exits; it'll handle shadow too. But if shadow opens more
+   positions than live does (because shadow doesn't have broker
+   rejections), surface if the paper exit-engine becomes a
+   bottleneck.

@@ -4828,6 +4828,17 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
 
     cutoff = datetime.utcnow() - timedelta(days=180)
     try:
+        # f-add-paper-shadow-mode (2026-05-06): this function reads ONLY
+        # the live ``Trade`` table; ``PaperTrade`` (which is where
+        # ``paper_shadow_of_alert_id`` lives) is not unioned in today.
+        # If a future extension adds ``PaperTrade`` rows to the closed
+        # bucket, it MUST filter
+        # ``PaperTrade.paper_shadow_of_alert_id.is_(None)`` to exclude
+        # shadow trades from the canonical realized-EV evidence -- shadow
+        # P/L is idealized-fill (no slippage), not realized. The
+        # execution-alpha-drag SQL probe at
+        # ``scripts/dispatch-paper-shadow-execution-delta.ps1`` is the
+        # right place to consume shadow rows; not the EV gate.
         closed_q = (
             db.query(
                 Trade.scan_pattern_id,

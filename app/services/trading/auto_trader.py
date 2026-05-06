@@ -199,6 +199,63 @@ def _resolve_user_id() -> Optional[int]:
     )
 
 
+def _maybe_open_paper_shadow(
+    db: Session,
+    *,
+    uid: int | None,
+    alert: BreakoutAlert,
+    qty: int,
+    px: float,
+    snap: dict[str, Any],
+    decision: str,
+) -> None:
+    """f-add-paper-shadow-mode (2026-05-06): always-on within the live
+    branch when ``chili_autotrader_paper_shadow_enabled`` is True. Opens
+    a paper trade in parallel with each live decision so we have
+    matched live-vs-shadow pairs for execution-alpha-drag analysis,
+    pure-strategy pattern evidence, and brain learning during low-
+    live-placement-rate periods.
+
+    Idempotent at the (user_id, ticker, pattern_id) tuple via the
+    existing dedupe in ``open_paper_trade``. Failures swallowed at this
+    boundary -- shadow must never break the live decision flow.
+    """
+    if not getattr(settings, "chili_autotrader_paper_shadow_enabled", False):
+        return
+    if uid is None:
+        return
+    try:
+        from .paper_trading import open_paper_trade
+        sig = {
+            "auto_trader_v1": True,
+            "breakout_alert_id": int(alert.id),
+            "paper_shadow": True,
+            "shadow_of_alert_id": int(alert.id),
+            "shadow_decision": decision,
+            "projected": snap.get("projected_profit_pct"),
+        }
+        open_paper_trade(
+            db, uid, alert.ticker, px,
+            scan_pattern_id=alert.scan_pattern_id,
+            stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
+            target_price=float(alert.target_price) if alert.target_price is not None else None,
+            direction="long",
+            quantity=max(1, int(qty)),
+            signal_json=sig,
+            paper_shadow_of_alert_id=int(alert.id),
+        )
+        logger.info(
+            "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
+            "qty=%s px=%s decision=%s opened",
+            alert.id, alert.scan_pattern_id, alert.ticker, qty, px, decision,
+        )
+    except Exception:
+        logger.debug(
+            "[autotrader_paper_shadow] open failed alert_id=%s decision=%s",
+            getattr(alert, "id", None), decision, exc_info=True,
+        )
+
+
 def _audit(
     db: Session,
     *,
@@ -1402,6 +1459,10 @@ def _execute_new_entry(
                 out, kind="blocked",
                 reason=f"pdt_guard:{_pdt_result.reason}", alert=alert,
             )
+            _maybe_open_paper_shadow(
+                db, uid=uid, alert=alert, qty=qty, px=px,
+                snap=snap, decision="blocked_pdt",
+            )
             return
 
         res = _execute_broker_buy(
@@ -1437,6 +1498,10 @@ def _execute_new_entry(
             _autotrader_tick_note(
                 out, kind="blocked",
                 reason="broker:place_no_order_id", alert=alert,
+            )
+            _maybe_open_paper_shadow(
+                db, uid=uid, alert=alert, qty=qty, px=px,
+                snap=snap, decision="blocked_no_order_id",
             )
             return
         raw = res.get("raw") or {}
@@ -1512,6 +1577,10 @@ def _execute_new_entry(
         )
         out["placed"] += 1
         _autotrader_tick_note(out, kind="placed", reason="live_robinhood", alert=alert)
+        _maybe_open_paper_shadow(
+            db, uid=uid, alert=alert, qty=qty, px=px,
+            snap=snap, decision="placed",
+        )
         return
 
     # Paper

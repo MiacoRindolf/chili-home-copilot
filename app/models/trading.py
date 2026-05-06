@@ -1007,6 +1007,15 @@ class PaperTrade(Base):
     pnl: Optional[float] = Column(Float, nullable=True)
     pnl_pct: Optional[float] = Column(Float, nullable=True)
     signal_json: Optional[dict] = Column(JSONB, nullable=True)
+    # Migration 229: paper-shadow attribution. When the row was created by
+    # auto_trader's opt-in shadow hook (``chili_autotrader_paper_shadow_enabled``),
+    # this FK points at the originating BreakoutAlert. Used by the
+    # execution-alpha-drag SQL probe to pair shadow rows with their
+    # corresponding live Trade rows (joined via Trade.related_alert_id).
+    # NULL on every non-shadow paper trade (the default).
+    paper_shadow_of_alert_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_breakout_alerts.id"), nullable=True,
+    )
     # Migration 226: partial-profit-taking at 1R. Same shape as on Trade
     # above. Single partial per paper trade; reconstruct pre-partial size
     # as ``quantity + partial_taken_qty``.

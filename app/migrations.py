@@ -14764,6 +14764,39 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_229_paper_shadow_attribution(conn) -> None:
+    """f-add-paper-shadow-mode (2026-05-06).
+
+    Adds ``trading_paper_trades.paper_shadow_of_alert_id`` -- a nullable
+    FK to ``trading_breakout_alerts.id`` -- so paper-shadow trades
+    (opt-in via ``chili_autotrader_paper_shadow_enabled``) carry their
+    originating alert. Sparse partial index covers the
+    ``paper_shadow_of_alert_id IS NOT NULL`` query path used by the
+    execution-alpha-drag SQL probe; most paper trades won't be shadow
+    trades (the auto_trader paper branch creates non-shadow rows when
+    live=False) so the partial index stays small.
+
+    This is orthogonal to the existing ``ScanPattern.paper_book_json``
+    column which the ``shadow_testing.py`` A/B framework uses for
+    pattern-level test metadata. Both can coexist; per-trade FK +
+    per-pattern JSONB answer different questions.
+
+    Idempotent: ``ADD COLUMN IF NOT EXISTS`` + ``CREATE INDEX IF NOT
+    EXISTS``.
+    """
+    conn.execute(text("""
+        ALTER TABLE trading_paper_trades
+            ADD COLUMN IF NOT EXISTS paper_shadow_of_alert_id INTEGER NULL
+                REFERENCES trading_breakout_alerts(id) ON DELETE SET NULL
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_trading_paper_trades_paper_shadow_alert
+            ON trading_paper_trades (paper_shadow_of_alert_id)
+            WHERE paper_shadow_of_alert_id IS NOT NULL
+    """))
+    conn.commit()
+
+
 def _migration_228_pattern_evidence_corrections(conn) -> None:
     """f-evidence-canonical-writer (2026-05-05).
 
@@ -15476,6 +15509,8 @@ MIGRATIONS = [
      _migration_227_scan_patterns_timeframe_check),
     ("228_pattern_evidence_corrections",
      _migration_228_pattern_evidence_corrections),
+    ("229_paper_shadow_attribution",
+     _migration_229_paper_shadow_attribution),
 ]
 
 
