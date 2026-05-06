@@ -1031,23 +1031,10 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
             "Final ``log_learning_event`` + idle status",
         ),
         steps=(
-            CycleStepDef(
-                sid="cycle_report",
-                label="Generating cycle AI report",
-                code_ref="learning_cycle_report.generate_and_store_cycle_report",
-                runner_phase="cycle_ai_report",
-                description=(
-                    "Produces a markdown deep-dive of the cycle and persists it for the UI "
-                    "and audit trail."
-                ),
-                remarks=(
-                    "What: LLM synthesis of the cycle into stored markdown.\n\n"
-                    "Where: ``generate_and_store_cycle_report(db, user_id, report)``.\n\n"
-                    "Why: Auditability and operator read of what the machine did this cycle."
-                ),
-                inputs=("Full ``report`` dict", "Model/template settings"),
-                outputs=("``report['cycle_ai_report_id']``", "Markdown persisted in DB"),
-            ),
+            # f-cleanup-cycle-report (2026-05-06): cycle_report step
+            # dropped. learning_cycle_report.py was deleted alongside
+            # because the cycle is gated off and the function had only
+            # one caller (the cycle itself).
             CycleStepDef(
                 sid="depromote",
                 label="Live vs research depromotion",

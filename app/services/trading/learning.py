@@ -9886,32 +9886,14 @@ def run_learning_cycle(
             f"{report.get('proposals_generated', 0)} generated",
         )
 
-        # Cycle AI report (deep study) — synthesize cycle into stored markdown
+        # f-cleanup-cycle-report (2026-05-06): cycle AI report removed.
+        # generate_and_store_cycle_report and the entire
+        # learning_cycle_report.py module are dead code now that
+        # run_learning_cycle is gated off via
+        # CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0 (f-kill-legacy-learning-cycle).
+        # Surrounding _bump_node / _step_time / _finish_lc_step calls
+        # also dropped -- nothing to step-log when the step does nothing.
         report["cycle_ai_report_id"] = None
-        if not _shutting_down.is_set():
-            step_start = time.time()
-            # graph-node: c_control/cycle_report
-            apply_learning_cycle_step_status(_learning_status, "c_control", "cycle_report")
-            report["elapsed_s_pre_report"] = round(time.time() - start, 1)
-            try:
-                from .learning_cycle_report import generate_and_store_cycle_report
-
-                rid = generate_and_store_cycle_report(db, user_id, report)
-                report["cycle_ai_report_id"] = rid
-            except Exception as e:
-                logger.warning("[trading] Cycle AI report failed: %s", e)
-            _bump_node("c_control")
-            _step_time(
-                "cycle_ai_report",
-                step_start,
-                f"id={report.get('cycle_ai_report_id')}" if report.get("cycle_ai_report_id") else "failed",
-            )
-            _finish_lc_step(
-                "c_control",
-                "cycle_report",
-                step_start,
-                f"id={report.get('cycle_ai_report_id')}" if report.get("cycle_ai_report_id") else "failed",
-            )
 
         # Live vs research depromotion (optional)
         if not _shutting_down.is_set():
