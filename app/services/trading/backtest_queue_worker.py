@@ -193,6 +193,30 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 f"{win_rate * 100:.0f}%wr) — priority was {pattern.backtest_priority}",
                 related_insight_id=insight.id,
             )
+        # f-fix-backtest-completed-emitter (2026-05-05): emit so
+        # cpcv_gate handler runs the CPCV promotion gate. Pre-fix the
+        # FIX 34 loop bypassed the event path entirely. Per-call
+        # try/except so a broken emit can't block the backtest return.
+        try:
+            from .brain_work.emitters import emit_backtest_completed_outcome
+            emit_backtest_completed_outcome(
+                db,
+                scan_pattern_id=int(pattern.id),
+                user_id=user_id,
+                backtests_run=int(backtests_run),
+                win_rate=win_rate,
+                avg_return=avg_return,
+            )
+            db.commit()
+        except Exception:
+            logger.warning(
+                "[backtest_queue] emit_backtest_completed failed pattern_id=%s",
+                pattern.id, exc_info=True,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
         return (backtests_run, 1)
     except Exception as e:
         logger.warning("[backtest_queue] Failed to backtest pattern %s: %s", pattern_id, e)

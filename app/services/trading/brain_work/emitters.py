@@ -171,6 +171,51 @@ def emit_broker_fill_closed_outcome(
     )
 
 
+def emit_backtest_completed_outcome(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    user_id: int | None = None,
+    backtests_run: int = 0,
+    win_rate: float | None = None,
+    avg_return: float | None = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> int | None:
+    """f-fix-backtest-completed-emitter (2026-05-05): emit when FIX 34's
+    independent fast_backtest loop finishes a pattern's backtest.
+
+    Subscribed by ``handlers/cpcv_gate.py::handle_backtest_completed``,
+    which runs the CPCV promotion gate and sets ``lifecycle_stage``.
+    Pre-fix, FIX 34's loop bypassed the event path entirely -- backtests
+    ran (45k+ parity rows / 5min observed in the cycle-kill smoke), but
+    cpcv_gate never got called.
+
+    Dedup is per pattern_id + a coarse minute bucket so rapid-fire
+    queue churn on the same pattern doesn't flood the event ledger
+    (cpcv_gate is idempotent at the run-level so a missed dup is
+    harmless).
+    """
+    from datetime import datetime
+
+    bucket = datetime.utcnow().strftime("%Y%m%d%H%M")
+    dedupe_key = f"bt_completed:{int(scan_pattern_id)}:{bucket}"
+    payload: dict[str, Any] = {
+        "scan_pattern_id": int(scan_pattern_id),
+        "user_id": user_id,
+        "backtests_run": int(backtests_run),
+        "win_rate": win_rate,
+        "avg_return": avg_return,
+    }
+    if extra:
+        payload.update(extra)
+    return enqueue_outcome_event(
+        db,
+        event_type="backtest_completed",
+        dedupe_key=dedupe_key,
+        payload=payload,
+    )
+
+
 def emit_execution_quality_updated_outcome(
     db: Session,
     *,
