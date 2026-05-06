@@ -83,7 +83,20 @@ def _poll_once() -> tuple[int, int]:
     # BRAIN_WORKER_KILL_SEC (default 1800s = 30min). Backtest children
     # (multiprocess workers) also get the longer threshold because
     # their backtests can run for many minutes.
-    bw_kill_sec = _env_int("CHILI_DB_WATCHDOG_BRAIN_WORKER_KILL_SEC", 1800)
+    # f-tighten-db-watchdog-brain-worker-exemption (2026-05-06):
+    # default lowered 1800s -> 600s. The 1800s exemption was added by
+    # FIX 32 (deep audit 2026-04-28) to allow legacy run_learning_cycle's
+    # 13-34 minute reconcile pass to hold its session. Cycle is gated
+    # off via CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0
+    # (f-kill-legacy-learning-cycle, 2026-05-05) so the long-leash
+    # exemption is no longer justified -- brain-worker should respect
+    # the standard 600s threshold like every other app.
+    #
+    # If a future code path needs the long leash back, add a per-query
+    # carve-out (e.g., a marker comment in the SQL the watchdog
+    # recognises) rather than a per-app one. Operator can also restore
+    # the legacy 1800s via env var if needed for emergency rollback.
+    bw_kill_sec = _env_int("CHILI_DB_WATCHDOG_BRAIN_WORKER_KILL_SEC", 600)
 
     warned = 0
     killed = 0
