@@ -1574,6 +1574,31 @@ def _run_weekly_review_job():
     run_scheduler_job_guarded("weekly_review", _work)
 
 
+def _run_stale_promoted_sweep_job():
+    """f-cron-stale-promoted (2026-05-06): weekly sweep that
+    re-evaluates the realized-EV gate on promoted patterns whose
+    trades have stopped firing entirely. Catches the gap left by the
+    per-trade-close demote handler (which only fires on active
+    patterns)."""
+    from ..db import SessionLocal
+    from .trading.cron_jobs.stale_promoted_sweep import run_stale_promoted_sweep
+
+    def _work() -> None:
+        logger.info("[scheduler] Starting stale-promoted-pattern sweep")
+        with SessionLocal() as db:
+            try:
+                result = run_stale_promoted_sweep(db)
+                logger.info(
+                    "[scheduler] stale_promoted_sweep result: %s", result,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[scheduler] stale_promoted_sweep failed: %s", e,
+                )
+
+    run_scheduler_job_guarded("stale_promoted_sweep", _work)
+
+
 def _run_broker_sync_job():
     """Sync Robinhood + Coinbase orders and positions for the session owner.
 
@@ -3389,6 +3414,22 @@ def start_scheduler():
                     trigger=CronTrigger(day_of_week="sun", hour=18, minute=0),
                     id="weekly_review",
                     name="Weekly performance review",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # f-cron-stale-promoted (2026-05-06): weekly sweep of
+                # promoted patterns whose trades have stopped firing.
+                # The per-trade-close demote handler covers the active
+                # case; this catches the stale-promoted gap that was
+                # previously handled by the legacy run_learning_cycle's
+                # depromotion step (now gated off via
+                # CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0).
+                _scheduler.add_job(
+                    _run_stale_promoted_sweep_job,
+                    trigger=CronTrigger(day_of_week="sun", hour=2, minute=0),
+                    id="stale_promoted_sweep",
+                    name="Weekly stale-promoted-pattern sweep (Sun 2am UTC)",
                     replace_existing=True,
                     max_instances=1,
                 )
