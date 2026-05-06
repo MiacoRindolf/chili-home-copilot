@@ -1060,6 +1060,19 @@ def _try_auto_execute_stop(
             trade.exit_reason = alert.get("event", "auto_stop")
             db.add(trade)
             db.flush()
+            # f-fix-live-trade-closed-emitter (2026-05-05): emit the
+            # live_trade_closed event so the Phase 2 handler chain
+            # (pattern_stats + demote + regime_ledger) can fire on
+            # this stop-driven close. Pre-fix, only portfolio.py
+            # emitted; stop_engine bypassed it silently.
+            try:
+                from .brain_work.execution_hooks import on_live_trade_closed
+                on_live_trade_closed(db, trade, source="stop_engine")
+            except Exception:
+                _log.debug(
+                    "[stop_engine] on_live_trade_closed failed for trade %s",
+                    trade_id, exc_info=True,
+                )
     except Exception:
         _log.warning("[stop_engine] auto-exec failed for trade %s", trade_id, exc_info=True)
 

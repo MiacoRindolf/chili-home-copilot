@@ -118,6 +118,23 @@ def emergency_close_all(
 
     db.commit()
 
+    # f-fix-live-trade-closed-emitter (2026-05-05): emit
+    # live_trade_closed for each emergency-closed trade so the Phase 2
+    # handler chain (pattern_stats + demote + regime_ledger) can react
+    # to the mass-exit. Per-trade try/except so a broken emit doesn't
+    # block the whole liquidation report.
+    for t in open_live:
+        try:
+            if (t.status or "").lower() != "closed":
+                continue
+            from .brain_work.execution_hooks import on_live_trade_closed
+            on_live_trade_closed(db, t, source="emergency_liquidation")
+        except Exception:
+            logger.debug(
+                "[EMERGENCY] on_live_trade_closed failed for trade=%s",
+                getattr(t, "id", None), exc_info=True,
+            )
+
     logger.critical(
         "[EMERGENCY] Liquidated %d paper + %d live trades. Reason: %s. Errors: %d",
         closed_paper, closed_live, reason, len(errors),

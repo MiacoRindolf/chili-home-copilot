@@ -423,6 +423,17 @@ def _finalize_filled_exit(
         )
     db.add(trade)
     db.commit()
+    # f-fix-live-trade-closed-emitter (2026-05-05): emit live_trade_closed
+    # so the Phase 2 handler chain (pattern_stats + demote +
+    # regime_ledger) fires on this Robinhood-broker-fill close.
+    try:
+        from .brain_work.execution_hooks import on_live_trade_closed
+        on_live_trade_closed(db, trade, source="robinhood_exit_execution")
+    except Exception:
+        logger.debug(
+            "[rh_exit] on_live_trade_closed failed for trade=%s",
+            getattr(trade, "id", None), exc_info=True,
+        )
     try:
         from .auto_trader_position_overrides import clear_position_overrides
 
