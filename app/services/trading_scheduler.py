@@ -1599,6 +1599,31 @@ def _run_stale_promoted_sweep_job():
     run_scheduler_job_guarded("stale_promoted_sweep", _work)
 
 
+def _run_validate_evolve_job():
+    """f-handler-validate-evolve (2026-05-06): 6-hourly hypothesis-
+    weight evolution. Wraps the legacy run_learning_cycle's
+    validate_and_evolve step. Cron not event-handler because the
+    function mines 500 tickers of OHLCV per run -- heavy, broad-market
+    work."""
+    from ..db import SessionLocal
+    from .trading.cron_jobs.validate_evolve import run_validate_evolve
+
+    def _work() -> None:
+        logger.info("[scheduler] Starting validate_and_evolve cycle")
+        with SessionLocal() as db:
+            try:
+                result = run_validate_evolve(db, user_id=None)
+                logger.info(
+                    "[scheduler] validate_evolve result: %s", result,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[scheduler] validate_evolve failed: %s", e,
+                )
+
+    run_scheduler_job_guarded("validate_evolve", _work)
+
+
 def _run_broker_sync_job():
     """Sync Robinhood + Coinbase orders and positions for the session owner.
 
@@ -3430,6 +3455,19 @@ def start_scheduler():
                     trigger=CronTrigger(day_of_week="sun", hour=2, minute=0),
                     id="stale_promoted_sweep",
                     name="Weekly stale-promoted-pattern sweep (Sun 2am UTC)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # f-handler-validate-evolve (2026-05-06): 6-hourly
+                # hypothesis-weight evolution. Wraps the legacy cycle's
+                # validate_and_evolve step. Cron not handler because
+                # the function mines 500 tickers of OHLCV per run.
+                _scheduler.add_job(
+                    _run_validate_evolve_job,
+                    trigger=CronTrigger(hour="*/6", minute=15),
+                    id="validate_evolve",
+                    name="Hypothesis-weight evolution (every 6h at :15)",
                     replace_existing=True,
                     max_instances=1,
                 )
