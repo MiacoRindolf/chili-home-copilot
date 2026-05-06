@@ -649,6 +649,56 @@ def _run_deferred_startup() -> None:
         _log.exception("[startup] Deferred startup failed")
 
 
+def _eager_pydantic_model_rebuild() -> int:
+    """f-leak-4 phase 2 (2026-05-06): force pydantic to resolve every
+    BaseModel's forward-refs at startup so the per-request
+    ``set_model_mocks.<locals>.attempt_rebuild_fn.<locals>.handler``
+    closure path doesn't fire during request handling.
+
+    The chili main app was leaking +63 MB/min (3.7 GB/hr) per
+    mem_watcher; the top retained closure (count 1488) was pydantic v2's
+    deferred-validation rebuild path. Static analysis ruled out app
+    middleware as the retainer (only 2 stdlib middlewares registered).
+    Without runtime profiling to pinpoint which model has unresolved
+    forward-refs, the safe blanket fix is to rebuild every model once at
+    startup -- minor one-time cost, eliminates the leak class.
+
+    Returns the count of models actually rebuilt for log visibility.
+    Failures are swallowed per-model: a single broken model can't break
+    startup.
+    """
+    import importlib
+    import pkgutil
+    from pydantic import BaseModel
+
+    rebuilt = 0
+    for pkg_name in ("app.schemas", "app.models"):
+        try:
+            pkg = importlib.import_module(pkg_name)
+        except Exception:
+            continue
+        # Walk every submodule so deferred-import models are loaded.
+        for _, modname, _ in pkgutil.iter_modules(pkg.__path__, prefix=f"{pkg_name}."):
+            try:
+                importlib.import_module(modname)
+            except Exception:
+                continue
+        # Now scan every BaseModel subclass exposed under the package.
+        for sub_name in dir(pkg):
+            try:
+                obj = getattr(pkg, sub_name, None)
+            except Exception:
+                continue
+            if isinstance(obj, type) and issubclass(obj, BaseModel) and obj is not BaseModel:
+                try:
+                    obj.model_rebuild()
+                    rebuilt += 1
+                except Exception:
+                    # A single broken model must not break startup.
+                    continue
+    return rebuilt
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import threading
@@ -658,6 +708,17 @@ async def lifespan(app: FastAPI):
         load_model()
     except Exception:
         pass
+    # f-leak-4 phase 2 (2026-05-06): eager pydantic model rebuild. Stops
+    # the per-request set_model_mocks closure path from firing.
+    try:
+        n_rebuilt = _eager_pydantic_model_rebuild()
+        logging.getLogger("chili.startup").info(
+            "[startup] eager pydantic model_rebuild ran on %d models", n_rebuilt,
+        )
+    except Exception:
+        logging.getLogger("chili.startup").debug(
+            "[startup] eager model_rebuild failed (non-fatal)", exc_info=True,
+        )
     # Defer heavy DB + scheduler startup so lifespan yields immediately; uvicorn
     # binds the socket only after yield (see uvicorn.server.Server.startup).
     # Broker restore runs inside _run_deferred_startup (not here) so Robinhood login
