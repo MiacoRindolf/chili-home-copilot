@@ -34,6 +34,12 @@ backlog below.
 | Live-pattern depromotion sweep | `handlers/demote.py` (FIX 39) | `live_trade_closed`, `paper_trade_closed`, `broker_fill_closed` |
 | Pattern × regime ledger rebuild | `handlers/regime_ledger.py` (FIX 39) | same trade-close events |
 | `update_pattern_stats_from_closed_trades` (Step 11 closed-trade → ScanPattern feedback) | `handlers/pattern_stats.py` (`f-handler-pattern-stats`, 2026-05-05) | same trade-close events; dispatched **before** demote so the EV gate sees corrected evidence |
+| Live-trade-closed emitter coverage (stop_engine / robinhood_exit_execution / emergency_liquidation / broker_sync close paths) | wired in `f-fix-live-trade-closed-emitter` (commit `3c49e91`, 2026-05-06) | `live_trade_closed` now fires from all four close paths, not just `portfolio.py:185` |
+| `learn_from_breakout_outcomes` | `handlers/breakout_outcomes.py` (`f-overnight-jumbo` Phase 3, 2026-05-06) | timer-based event (`breakout_alert_resolved`) |
+| `live_drift_refresh` | `handlers/live_drift.py` (`f-overnight-jumbo` Phase 6, 2026-05-06) | trade-close events |
+| `execution_robustness_refresh` | `handlers/execution_robustness.py` (`f-overnight-jumbo` Phase 6, 2026-05-06) | trade-close events |
+| `validate_and_evolve` | `cron_jobs/validate_evolve.py` (`f-overnight-jumbo` Phase 5, 2026-05-06) | timer cron (6h cadence) |
+| Live-pattern depromotion **sweep mode** (stale-promoted patterns with no recent trades) | `cron_jobs/stale_promoted_sweep.py` (`f-overnight-jumbo` Phase 4, 2026-05-06) | timer cron (weekly Sunday 02:00 UTC) |
 
 Note: `handlers/demote.py` replaces the per-cycle sweep with a per-close
 re-check. After the cycle is gated off, depromotion is per-close only.
@@ -47,12 +53,7 @@ Sorted by operator impact. Top of list = highest impact while uncovered.
 
 | Cycle step | Legacy location | Impact while uncovered | Suggested follow-up brief |
 |---|---|---|---|
-| Live-trade-closed emitter coverage | `stop_engine.py:1057`, `robinhood_exit_execution.py:394`, `emergency_liquidation.py:104`, broker_sync close paths | **Medium-high.** Surfaced by the f-handler-pattern-stats audit (2026-05-05): `on_live_trade_closed` is currently called only from `portfolio.py:185`. Live closes via stop-engine, broker-exec, emergency-liquidation, and broker_sync bypass it -- the new pattern_stats / demote / regime_ledger handlers won't fire for those closes. Paper path is intact. | `f-fix-live-trade-closed-emitter` |
-| auto_trader paper fallback on live-broker failure | `auto_trader.py:1407-1517` | **Medium.** Diagnostic in `docs/AUDITS/2026-05-05_paper-runner-output-gap.md` (Phase 3 of f-overnight-cleanup) found: when `live_orders_effective=True` and the live broker call fails (e.g., Robinhood crypto endpoint returns no order_id), auto_trader records `decision=blocked` and returns -- it does NOT fall through to paper. Result: `trading_paper_trades` has 0 rows ever despite 700 AutoTraderRun rows / 24h. Either a code change (fall through to paper on broker failure) or an operator flip (`chili_autotrader_live_enabled=false`) gets the table populating. | `f-fix-autotrader-paper-fallback` |
-| `learn_from_breakout_outcomes` | `learning.py:4635`, called from cycle Step 11 | **High.** Updates patterns based on whether breakout *alerts* succeeded — the secondary signal for patterns with no closed trades yet. New patterns without trades won't accumulate evidence; first-time-seen patterns stay at default confidence. | `f-handler-breakout-outcomes` (subscribes to `breakout_alert_resolved` if it exists, otherwise on a periodic timer event) |
-| `validate_and_evolve` (hypothesis testing + weight evolution) | `learning.py:Step 10` (cycle line ~9700) | **Medium-high.** Evolves the hypothesis weights that drive scoring. Stale weights mean the brain doesn't react to recent regime changes in feature predictiveness. Decay is gradual (operator-tunable EMA), so a few-day pause is tolerable. | `f-handler-validate-evolve` |
-| `live_drift_refresh` | `live_drift.py::run_live_drift_refresh` (cycle depromote step) | **Medium-high.** Detects when promoted patterns' live behaviour drifts from backtest expectations. Without it, drift goes undetected until manually checked. | `f-handler-live-drift` (could subscribe to trade-close events and recompute drift for the affected pattern) |
-| `execution_robustness_refresh` | `execution_robustness.py::run_execution_robustness_refresh` | **Medium-high.** Tracks whether live executions meet expected slippage/cost profiles. Detects venue-side regressions. | `f-handler-execution-robustness` (trade-close-driven) |
+| auto_trader paper fallback on live-broker failure | `auto_trader.py:1407-1517` | **Medium.** Diagnostic in `docs/AUDITS/2026-05-05_paper-runner-output-gap.md` (Phase 3 of f-overnight-cleanup) found: when `live_orders_effective=True` and the live broker call fails (e.g., Robinhood crypto endpoint returns no order_id), auto_trader records `decision=blocked` and returns -- it does NOT fall through to paper. Result: `trading_paper_trades` has 0 rows ever despite 700 AutoTraderRun rows / 24h. Either a code change (fall through to paper on broker failure) or an operator flip (`chili_autotrader_live_enabled=false`) gets the table populating. **Note (2026-05-06)**: live and paper are mutually-exclusive modes per `auto_trader.py:632` — a true "fallback" requires explicit design rather than a one-line patch. Operator decision pending. | `f-fix-autotrader-paper-fallback` |
 | `_run_pattern_engine_cycle` (pattern engine: discover, test, evolve) | `learning.py` ~9845 | **Medium.** Generates new pattern hypotheses + tests them. Different from `mine.py` handler (which reacts to OHLCV batches) — this is the higher-level discover/test/evolve loop. Without it, the brain doesn't discover new pattern shapes. | `f-handler-pattern-engine` |
 | `learn_from_monitor_decisions` | `learning.py:5044` (called from cycle Step 11) | **Medium.** Aggregates pattern-monitor decision outcomes (`was_beneficial`) and nudges adaptive weight keys. Decisions still get logged; the *learning* from them stops. | `f-handler-monitor-learning` |
 | `evolve_pattern_strategies` (variants: fork/compare/promote) | `learning.py:Step 9` (~9676) | **Medium.** Spawns variant patterns from successful baselines. Without it, no new variants get created; the population stays static. The CPCV/promote handlers only act on existing patterns. | `f-handler-evolve-variants` |
@@ -62,35 +63,50 @@ Sorted by operator impact. Top of list = highest impact while uncovered.
 | `check_signal_events` | `journal.py::check_signal_events` (cycle Step 21) | **Low.** Detects narrative signal events. UI/research surface, no live-trading impact. | `f-handler-signal-events` (timer-based) |
 | `pattern_ml.train` (meta-learner training) | `learning.py:Step 22` (~9814) | **Low-medium.** Re-trains the pattern meta-learner. Until it ships, the meta-learner stays at last-trained weights. Decisions still flow through it; just frozen. | `f-handler-ml-train` (timer-based, hourly is plenty) |
 | `generate_strategy_proposals` | `alerts.py::generate_strategy_proposals` (cycle line ~9863) | **Low.** Generates strategy-proposal rows for the operator UI. Not a trading input. | `f-handler-proposals` (timer-based) |
-| `generate_and_store_cycle_report` | `learning_cycle_report.py::generate_and_store_cycle_report` | **Low.** AI-synthesised cycle report (markdown). UI artifact only. | `f-handler-cycle-report` — or simply **drop** in a follow-up cleanup brief; the cycle being gated off makes a "cycle report" a non-sequitur. |
+| ~~`generate_and_store_cycle_report`~~ | ~~`learning_cycle_report.py::generate_and_store_cycle_report`~~ | **DROPPED 2026-05-06** (`f-overnight-jumbo` Phase 8). The cycle being gated off made a "cycle report" a non-sequitur. Source file deleted; no replacement handler. | DROPPED |
 | `backfill_future_returns` + `backfill_predicted_scores` | `learning.py:Step 3` (~9540) | **Low-medium.** Fills in `Trade.future_return_pct` and prediction scores for closed trades. Without it, future-return analysis (research only) goes stale. | `f-handler-backfill` (trade-close-driven) |
 | Dead-ticker cleanup (D1 in cycle) | `learning.py:9575` (`_find_dead_tickers`) | **Low.** Auto-excludes tickers with 3+ consecutive fetch failures. Without it, dead tickers keep getting fetched and the brain wastes a few seconds on each. | `f-handler-dead-tickers` (timer-based, daily) |
-| Live-pattern depromotion **sweep mode** | `learning.py::run_live_pattern_depromotion` (cycle depromote step) | **Low (only if no trades close).** The per-trade-close demote handler covers the common case. The sweep used to catch patterns whose trades had stopped firing entirely (frozen at promoted, not getting checked). Without it, a stalled pattern keeps its `promoted` lifecycle until trades resume or the operator intervenes. | `f-handler-stale-promoted` (timer-based, weekly is plenty — patterns that haven't traded in a week aren't moving the needle anyway) |
 | Secondary miners (intraday breakout, fakeout, position-sizing feedback, inter-alert, adaptive timeframe, signal-synergy) | `learning_cycle_steps.run_secondary_miners_phase` | **Variable.** Each secondary miner has its own impact profile. Some (intraday-breakout, position-sizing) feed live decisions; others (signal-synergy, fakeout) are research-only. Catalogue + per-miner brief in Phase 3 once primary handlers stabilize. | One brief per secondary miner once Phase 2 primaries settle |
 
 ## Coverage summary
 
-- **Cycle steps covered by event handlers**: 7 of ~22 (mine, bt_queue, cpcv_gate, promote, demote, regime_ledger, **pattern_stats** as of 2026-05-05).
-- **Cycle steps in this backlog (uncovered)**: 17 distinct steps, plus the secondary-miners group, plus the live-trade-closed emitter coverage gap surfaced by the pattern-stats audit.
-- **New highest priority** for Phase 2: `f-fix-live-trade-closed-emitter` because the just-shipped pattern_stats (and the existing demote / regime_ledger) handlers are wired correctly but only fire for paper closes + the one live close path that goes through `portfolio.py`. Closing the live emitter gap unblocks the entire trade-close fanout for live trading.
+- **Cycle steps covered by event handlers + cron jobs**: 13 of ~22 (mine, bt_queue, cpcv_gate, promote, demote, regime_ledger, pattern_stats, live-trade-closed emitter coverage, breakout_outcomes, live_drift, execution_robustness, validate_evolve cron, stale-promoted-sweep cron) as of 2026-05-06.
+- **Cycle steps still in backlog (uncovered)**: 9 distinct steps + the secondary-miners group + the auto_trader paper-fallback design decision.
+- **DROPPED**: `generate_and_store_cycle_report` (cycle is gated off; report was a non-sequitur).
 
-## Sequencing recommendation
+## Sequencing recommendation (post-jumbo)
 
-1. **`f-fix-live-trade-closed-emitter`** — wire `on_live_trade_closed` into `stop_engine`, `robinhood_exit_execution`, `emergency_liquidation`, and broker_sync close paths. Without this, the trade-close handler chain (pattern_stats + demote + regime_ledger) only fires for paper closes.
-2. **`f-handler-breakout-outcomes`** — covers patterns with no closed trades yet (secondary-evidence path).
-3. **`f-handler-validate-evolve`** — keeps weight evolution moving so the brain reacts to regime changes.
-4. **`f-handler-live-drift` + `f-handler-execution-robustness`** — drift / execution-quality monitoring for live patterns. Both trade-close-driven; can probably bundle.
-5. Everything else in the order in the table above.
+The high-impact work from the original sequencing all shipped during `f-overnight-jumbo-2026-05-06`. Remaining backlog is medium-low impact:
+
+1. **`f-fix-autotrader-paper-fallback`** — operator design decision pending; live and paper are mutually-exclusive modes today, so a true fallback requires an architectural choice rather than a code patch.
+2. **`f-handler-pattern-engine`** — generates new pattern hypotheses (medium impact). The brain doesn't discover new pattern shapes until this ships. Different from `mine.py` (which reacts to OHLCV batches).
+3. **`f-handler-monitor-learning`** — aggregates pattern-monitor decision outcomes; without it, learning from monitor decisions stops (decisions still log).
+4. **`f-handler-evolve-variants`** — spawns variant patterns from baselines; without it, the population stays static.
+5. **`f-handler-confidence-decay`**, **`f-handler-active-seek`**, **`f-handler-journal`**, **`f-handler-signal-events`**, **`f-handler-ml-train`**, **`f-handler-proposals`**, **`f-handler-backfill`**, **`f-handler-dead-tickers`** — low-impact timer-based handlers; can be bundled into one or two batch briefs.
+6. Secondary miners: per-miner brief in Phase 3 once the medium-impact items above settle.
 
 ## Acceptance criteria for Phase 2 closure
 
 This backlog is closed (and `run_learning_cycle` source can be deleted in
 a follow-up cleanup brief) when:
 
-- All 18 backlog rows have shipped or been explicitly retired.
+- All remaining backlog rows have shipped or been explicitly retired.
 - Two consecutive weeks of brain-worker uptime with `legacy_cycle_disabled`
   on every iteration and zero operator-impact tickets traceable to
   uncovered steps.
-- The "sweep mode" cases (live_depromotion sweep, dead-tickers, etc.)
-  have either timer-based handlers or a documented reason why the
-  per-trigger event handler is sufficient.
+- The "sweep mode" cases (live_depromotion sweep — DONE via
+  `cron_jobs/stale_promoted_sweep.py`; dead-tickers — pending) have
+  either timer-based handlers or a documented reason why the per-trigger
+  event handler is sufficient.
+
+## Shipped log
+
+| Date | What | Brief / commit |
+|---|---|---|
+| 2026-04-29 | mine, cpcv_gate, promote, demote, regime_ledger | FIX 36-39 |
+| 2026-05-05 | pattern_stats (#6 handler) | `f-handler-pattern-stats` |
+| 2026-05-05 | Legacy cycle gated off | `f-kill-legacy-learning-cycle` (`CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0`) |
+| 2026-05-06 | Live-trade-closed emitter coverage (4 close paths wired) | `f-fix-live-trade-closed-emitter` (commit `3c49e91`) |
+| 2026-05-06 | breakout_outcomes (#7), live_drift (#8), execution_robustness (#9) handlers | `f-overnight-jumbo` Phase 3, Phase 6 |
+| 2026-05-06 | stale-promoted-sweep + validate_evolve cron jobs | `f-overnight-jumbo` Phase 4, Phase 5 |
+| 2026-05-06 | cycle_report DROPPED (file deletion) | `f-overnight-jumbo` Phase 8 |

@@ -262,6 +262,22 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
     )
     candidates = [t for t in open_trades if _is_option_trade(t)]
 
+    # f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
+    # parity with equity + crypto. The pattern-monitor (LLM advisory)
+    # may have flipped a position to "thesis dead" via
+    # PatternMonitorDecision.action='exit_now'. Without this batch-
+    # load the options lane silently sat on stale advisories the same
+    # way crypto did until 2026-05-06 (TRUMP-USD trade 1829, ~20h
+    # held). The shared module enforces ONE freshness window across
+    # all three lanes (96h).
+    from .._exit_monitor_common import (
+        latest_monitor_decisions_by_trade,
+        fresh_monitor_exit_meta,
+    )
+    latest_monitor_decisions = latest_monitor_decisions_by_trade(
+        db, [int(t.id) for t in candidates]
+    )
+
     for t in candidates:
         summary["checked"] += 1
         meta = _opt_meta(t)
@@ -318,6 +334,20 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             stop_pct=stop_pct,
             tp_pct=tp_pct,
         )
+        # f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
+        # if no premium / DTE / stop trigger fired, consult the
+        # pattern-monitor's latest advisory. Stop-on-tie ordering
+        # matters: native triggers (price/DTE/premium) WIN over
+        # exit_now because they carry stronger semantics for the
+        # postmortem ("stop hit at $X" vs "LLM said so"). exit_now
+        # is the fallback when the position would otherwise drift.
+        monitor_exit_meta: Optional[dict[str, Any]] = None
+        if not reason:
+            monitor_exit_meta = fresh_monitor_exit_meta(
+                latest_monitor_decisions.get(int(t.id))
+            )
+            if monitor_exit_meta is not None:
+                reason = "pattern_exit_now"
         if not reason:
             continue
         summary["triggered"] += 1
@@ -393,11 +423,31 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             })
             db.commit()
             summary["closed"] += 1
-            logger.info(
-                "[options_exit_monitor] trade=%s closed reason=%s premium_now=%s "
-                "entry=%s order_id=%s",
-                t.id, reason, current_premium, entry_premium, res.get("order_id"),
-            )
+            if monitor_exit_meta is not None:
+                # f-options-exit-monitor-pattern-exit-now-audit
+                # (2026-05-06): monitor-driven exits log the audit
+                # metadata (decision_id / source / age / price) so the
+                # postmortem trail is complete. The pending_exit_reason
+                # column stays canonical "pattern_exit_now" -- audit
+                # detail belongs in the log line, not the 50-char field.
+                logger.info(
+                    "[options_exit_monitor] trade=%s closed reason=%s "
+                    "premium_now=%s entry=%s order_id=%s "
+                    "monitor_decision_id=%s monitor_src=%s "
+                    "monitor_age_h=%s monitor_price=%s",
+                    t.id, reason, current_premium, entry_premium,
+                    res.get("order_id"),
+                    monitor_exit_meta.get("decision_id"),
+                    monitor_exit_meta.get("decision_source"),
+                    monitor_exit_meta.get("decision_age_hours"),
+                    monitor_exit_meta.get("decision_price"),
+                )
+            else:
+                logger.info(
+                    "[options_exit_monitor] trade=%s closed reason=%s premium_now=%s "
+                    "entry=%s order_id=%s",
+                    t.id, reason, current_premium, entry_premium, res.get("order_id"),
+                )
         except Exception:
             summary["errors"] += 1
             logger.exception(

@@ -34,9 +34,22 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from ....config import settings
-from ....models.trading import Trade
+from ....models.trading import PatternMonitorDecision, Trade
 
 logger = logging.getLogger(__name__)
+
+# f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
+# the freshness window + the monitor-decision helpers moved to the
+# shared ``_exit_monitor_common`` module. Local re-exports preserved
+# for backwards compatibility (any external caller that imported the
+# private names keeps working). The previous
+# ``_CRYPTO_MONITOR_EXIT_NOW_MAX_AGE_HOURS`` is retired; the shared
+# ``MONITOR_EXIT_NOW_MAX_AGE_HOURS`` is the single source of truth.
+from .._exit_monitor_common import (
+    MONITOR_EXIT_NOW_MAX_AGE_HOURS as _CRYPTO_MONITOR_EXIT_NOW_MAX_AGE_HOURS,
+    latest_monitor_decisions_by_trade as _latest_monitor_decisions_by_trade,
+    fresh_monitor_exit_meta as _fresh_monitor_exit_meta,
+)
 
 
 def _is_crypto_ticker(ticker: str) -> bool:
@@ -168,6 +181,18 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
     crypto_rows = [t for t in open_rows if _is_crypto_trade(t)]
     out["candidate_pool"] = len(crypto_rows)
 
+    # Parity with the equity exit lane (auto_trader_monitor.py:413-453): the
+    # pattern monitor's latest `exit_now` recommendation is itself an exit
+    # trigger, even when price has not hit stop or target. Without this lookup
+    # the crypto lane held positions for ~20h after the LLM/pattern monitor
+    # had recommended exit -- TRUMP-USD trade 1829 was the surfaced case
+    # (recommendations from 2026-05-05 20:40 onward, never executed). The
+    # equity lane reads the same table and acts on it; crypto must mirror.
+    latest_monitor_decisions = _latest_monitor_decisions_by_trade(
+        db,
+        [int(t.id) for t in crypto_rows],
+    )
+
     for t in crypto_rows:
         out["checked"] += 1
         # Already submitted exit -- defer
@@ -188,6 +213,21 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             px=px, entry=entry, stop=stop, target=target,
             direction=(t.direction or "long"),
         )
+        # Pattern-monitor exit_now branch -- only consulted when price triggers
+        # have not fired, so stop/target wins on tie (cheaper to evaluate, and
+        # those reasons carry stronger semantics for postmortems). The canonical
+        # `pending_exit_reason` value is "pattern_exit_now" to match the equity
+        # lane (auto_trader_monitor.py:453); the decision-id audit detail goes
+        # in the structured log line rather than being truncated into the 50-char
+        # reason column.
+        monitor_exit_meta: Optional[dict[str, Any]] = None
+        if not should_exit:
+            monitor_exit_meta = _fresh_monitor_exit_meta(
+                latest_monitor_decisions.get(int(t.id))
+            )
+            if monitor_exit_meta is not None:
+                should_exit = True
+                reason = "pattern_exit_now"
         if not should_exit:
             continue
 
@@ -273,10 +313,22 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             db.add(t)
             db.commit()
             out["closed"] += 1
-            logger.info(
-                "[crypto_exit] CLOSED trade#%s ticker=%s qty=%s reason=%s order_id=%s",
-                t.id, t.ticker, qty, reason, order_id,
-            )
+            if monitor_exit_meta is not None:
+                logger.info(
+                    "[crypto_exit] CLOSED trade#%s ticker=%s qty=%s reason=%s "
+                    "order_id=%s monitor_decision_id=%s monitor_src=%s "
+                    "monitor_age_h=%s monitor_price=%s",
+                    t.id, t.ticker, qty, reason, order_id,
+                    monitor_exit_meta.get("decision_id"),
+                    monitor_exit_meta.get("decision_source"),
+                    monitor_exit_meta.get("decision_age_hours"),
+                    monitor_exit_meta.get("decision_price"),
+                )
+            else:
+                logger.info(
+                    "[crypto_exit] CLOSED trade#%s ticker=%s qty=%s reason=%s order_id=%s",
+                    t.id, t.ticker, qty, reason, order_id,
+                )
         except Exception as e:
             logger.exception("[crypto_exit] unexpected failure for trade#%s: %s", t.id, e)
             out["errors"].append(f"exception:{t.ticker}:{str(e)[:80]}")

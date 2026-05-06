@@ -27,9 +27,16 @@ from ...config import settings
 from .autopilot_scope import live_autopilot_trade_filter
 
 logger = logging.getLogger(__name__)
-# Carry fresh EXIT_NOW recommendations across a normal weekend / long-holiday
-# gap so Friday evening decisions can still execute on the next regular session.
-_MONITOR_EXIT_NOW_MAX_AGE_HOURS = 96.0
+# f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
+# the freshness window + the two helpers below have moved to the shared
+# `_exit_monitor_common` module. Local re-exports preserved for
+# backwards compatibility (any external caller / test that imported
+# `_MONITOR_EXIT_NOW_MAX_AGE_HOURS` keeps working).
+from ._exit_monitor_common import (
+    MONITOR_EXIT_NOW_MAX_AGE_HOURS as _MONITOR_EXIT_NOW_MAX_AGE_HOURS,
+    latest_monitor_decisions_by_trade as _latest_monitor_decisions_by_trade,
+    fresh_monitor_exit_meta as _fresh_monitor_exit_meta,
+)
 
 
 def _quote_price(ticker: str) -> float | None:
@@ -146,49 +153,11 @@ def _coerce_pct(v: Any) -> float | None:
         return None
 
 
-def _latest_monitor_decisions_by_trade(
-    db: Session,
-    trade_ids: list[int],
-) -> dict[int, PatternMonitorDecision]:
-    """Latest PatternMonitorDecision per trade.
-
-    Execution should follow the newest advisory state only. If a prior
-    ``exit_now`` has since been superseded by ``hold``, the live monitor must
-    not keep selling from the stale recommendation.
-    """
-    if not trade_ids:
-        return {}
-    rows = (
-        db.query(PatternMonitorDecision)
-        .filter(PatternMonitorDecision.trade_id.in_(trade_ids))
-        .order_by(PatternMonitorDecision.created_at.desc())
-        .all()
-    )
-    latest: dict[int, PatternMonitorDecision] = {}
-    for row in rows:
-        latest.setdefault(int(row.trade_id), row)
-    return latest
-
-
-def _fresh_monitor_exit_meta(
-    decision: PatternMonitorDecision | None,
-) -> dict[str, Any] | None:
-    """Audit metadata when the latest monitor decision still means exit."""
-    if decision is None or (decision.action or "").lower() != "exit_now":
-        return None
-    age_h = (datetime.utcnow() - decision.created_at).total_seconds() / 3600.0
-    if age_h > _MONITOR_EXIT_NOW_MAX_AGE_HOURS:
-        return None
-    return {
-        "decision_id": int(decision.id),
-        "decision_source": decision.decision_source,
-        "decision_age_hours": round(age_h, 3),
-        "decision_price": (
-            float(decision.price_at_decision)
-            if decision.price_at_decision is not None
-            else None
-        ),
-    }
+# f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
+# the previous local definitions of _latest_monitor_decisions_by_trade
+# and _fresh_monitor_exit_meta moved to ._exit_monitor_common. The
+# public names are re-exported above for backwards compatibility with
+# existing tests and any external imports.
 
 
 def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
