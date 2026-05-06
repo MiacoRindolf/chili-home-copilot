@@ -702,6 +702,12 @@ services:
       - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
       - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
       - BRAIN_RISK_MAX_AVG_CORRELATION=0.85
+      # f-add-paper-shadow-mode (mig 229, 2026-05-06): enable per-trade
+      # paper-shadow alongside live for execution-alpha-drag measurement.
+      # Every live decision (placed/blocked_pdt/blocked_no_order_id) ALSO
+      # opens a PaperTrade tagged paper_shadow_of_alert_id. Default off
+      # in app/config.py; flip to 1 here for the production canary run.
+      - CHILI_AUTOTRADER_PAPER_SHADOW_ENABLED=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
