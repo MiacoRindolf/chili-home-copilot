@@ -2798,6 +2798,28 @@ def place_sell_stop_loss_order(
             extended_hours_override=extended_hours_override,
         )
 
+        # f-bracket-writer-stop-construction-fix (2026-05-06): normalize
+        # the stop_price to the venue's tick size BEFORE submission. Today's
+        # PED rejection cascade (45+ retries / hour, all "Limit order
+        # requested, but no price provided.") was traced back to either
+        # (a) the broker rejecting an invalid 4-decimal stop_price with a
+        # misleading limit-order error, or (b) something in the body
+        # construction. Step 1 of the fix surfaces the actual on-wire body
+        # via INFO-level pre-submit + WARNING-level full-diagnostic on
+        # rejection. tick_normalizer.normalize_price already aligns to NMS
+        # Rule 612 (equity >= $1 → 2 decimals), so the PED 13.6275 → 13.63
+        # rounding lands here. Computing once outside the retry closure so
+        # the same value gets logged + sent.
+        normalized_stop = normalize_price(
+            trigger_price, ticker, asset_class="equity",
+        )
+        if normalized_stop != trigger_price:
+            logger.info(
+                "[broker] stop_price rounded to broker tick: "
+                "ticker=%s %s -> %s",
+                ticker, trigger_price, normalized_stop,
+            )
+
         def _do_stop_sell():
             # robin_stocks rh.orders.order(...) DERIVES order type internally
             # from which prices are set:
@@ -2810,6 +2832,13 @@ def place_sell_stop_loss_order(
             # explicit kwargs, but rh.orders.order rejects those with
             # TypeError. Pass just stopPrice + side='sell' to land a real
             # stop-loss-market order.
+            logger.info(
+                "[broker] SELL_STOP submitting: ticker=%s qty=%s "
+                "stopPrice=%s tif=gtc extended=%s market_hours=%s",
+                ticker, quantity, normalized_stop,
+                session_kwargs["extendedHours"],
+                session_kwargs["market_hours"],
+            )
             return rh.orders.order(
                 symbol=ticker,
                 quantity=quantity,
@@ -2818,7 +2847,7 @@ def place_sell_stop_loss_order(
                 # the smoking-gun for the 2026-05-01 incident. CCCC 2.5898 →
                 # 2.59 was getting flagged invalid by Robinhood post-acceptance.
                 # tick_normalizer aligns to the venue's actual rule.
-                stopPrice=normalize_price(trigger_price, ticker, asset_class="equity"),
+                stopPrice=normalized_stop,
                 timeInForce="gtc",
                 extendedHours=session_kwargs["extendedHours"],
                 market_hours=session_kwargs["market_hours"],
@@ -2840,6 +2869,20 @@ def place_sell_stop_loss_order(
                 logger.error(
                     f"[broker] SELL_STOP rejected (no order_id): {ticker} "
                     f"x{quantity} trigger={trigger_price} response={result}"
+                )
+                # f-bracket-writer-stop-construction-fix: full-diagnostic
+                # log so the operator can see the on-wire body when RH
+                # returns a misleading error. Includes the normalized
+                # stop_price (the value actually sent), all session flags,
+                # and the full response body (truncated to 1000 chars).
+                logger.warning(
+                    "[broker] SELL_STOP rejected (full diagnostic): "
+                    "ticker=%s qty=%s trigger_in=%s normalized_stop=%s "
+                    "tif=gtc extended=%s market_hours=%s response=%s",
+                    ticker, quantity, trigger_price, normalized_stop,
+                    session_kwargs["extendedHours"],
+                    session_kwargs["market_hours"],
+                    str(result)[:1000],
                 )
                 return {"ok": False, "error": str(error_msg)[:500], "raw": result}
             logger.info(
