@@ -1,6 +1,6 @@
 # NEXT_TASK: f-exit-parity-metric-v2
 
-STATUS: PENDING
+STATUS: DONE
 
 **Promoted from `docs/STRATEGY/QUEUED/f-exit-parity-metric-v2.md` on 2026-05-07 12:30 UTC after the prior thread shipped `f-trump-usd-poisoned-quote-source-audit` (closing the six-cycle implausible-quote chain). See `docs/STRATEGY/CC_REPORTS/2026-05-07_f-trump-usd-poisoned-quote-source-audit.md` and `docs/STRATEGY/COWORK_REVIEWS/2026-05-07_f-trump-usd-poisoned-quote-source-audit.md` for the closeout.**
 
