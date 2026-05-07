@@ -1,2 +1,30 @@
 # Shell scripts must use LF so Docker/Linux entrypoints work on Windows checkouts.
 *.sh text eol=lf
+
+# Line endings: store as LF in git, convert to platform-native on checkout.
+# Closes the 1,720-file CRLF mount-artifact noise that comes from the
+# Windows host (CRLF on disk) vs git's LF-internal view. Without this,
+# every file shows as modified in `git status` on the Linux workspace
+# mount, even though no content has changed.
+* text=auto eol=lf
+
+# Shell scripts must stay LF even on Windows checkouts (bash + Docker
+# CMD interpretation requires it).
+*.bash text eol=lf
+
+# PowerShell scripts on Windows are fine with CRLF; let git auto-detect.
+*.ps1 text
+
+# Binary types — never normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary
+*.db binary
+*.sqlite binary
