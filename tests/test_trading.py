@@ -162,50 +162,59 @@ class TestTradingModels:
 
 class TestWatchlistService:
     def test_add_to_watchlist(self, db):
-        item = ts.add_to_watchlist(db, user_id=1, ticker="AAPL")
+        uid = _seed_user(db, "watchlist_add_u")
+        item = ts.add_to_watchlist(db, user_id=uid, ticker="AAPL")
         assert item.ticker == "AAPL"
-        assert item.user_id == 1
+        assert item.user_id == uid
 
     def test_add_duplicate_returns_existing(self, db):
-        item1 = ts.add_to_watchlist(db, user_id=1, ticker="AAPL")
-        item2 = ts.add_to_watchlist(db, user_id=1, ticker="AAPL")
+        uid = _seed_user(db, "watchlist_dup_u")
+        item1 = ts.add_to_watchlist(db, user_id=uid, ticker="AAPL")
+        item2 = ts.add_to_watchlist(db, user_id=uid, ticker="AAPL")
         assert item1.id == item2.id
 
     def test_add_normalizes_ticker(self, db):
-        item = ts.add_to_watchlist(db, user_id=1, ticker="aapl")
+        uid = _seed_user(db, "watchlist_norm_u")
+        item = ts.add_to_watchlist(db, user_id=uid, ticker="aapl")
         assert item.ticker == "AAPL"
 
     def test_get_watchlist(self, db):
-        ts.add_to_watchlist(db, user_id=1, ticker="AAPL")
-        ts.add_to_watchlist(db, user_id=1, ticker="TSLA")
-        items = ts.get_watchlist(db, user_id=1)
+        uid = _seed_user(db, "watchlist_get_u")
+        ts.add_to_watchlist(db, user_id=uid, ticker="AAPL")
+        ts.add_to_watchlist(db, user_id=uid, ticker="TSLA")
+        items = ts.get_watchlist(db, user_id=uid)
         assert len(items) == 2
         tickers = {i.ticker for i in items}
         assert "AAPL" in tickers
         assert "TSLA" in tickers
 
     def test_remove_from_watchlist(self, db):
-        ts.add_to_watchlist(db, user_id=1, ticker="AAPL")
-        removed = ts.remove_from_watchlist(db, user_id=1, ticker="AAPL")
+        uid = _seed_user(db, "watchlist_remove_u")
+        ts.add_to_watchlist(db, user_id=uid, ticker="AAPL")
+        removed = ts.remove_from_watchlist(db, user_id=uid, ticker="AAPL")
         assert removed is True
-        items = ts.get_watchlist(db, user_id=1)
+        items = ts.get_watchlist(db, user_id=uid)
         assert len(items) == 0
 
     def test_remove_nonexistent_returns_false(self, db):
-        removed = ts.remove_from_watchlist(db, user_id=1, ticker="NOPE")
+        uid = _seed_user(db, "watchlist_remove_none_u")
+        removed = ts.remove_from_watchlist(db, user_id=uid, ticker="NOPE")
         assert removed is False
 
     def test_watchlist_isolation_per_user(self, db):
-        ts.add_to_watchlist(db, user_id=1, ticker="AAPL")
-        ts.add_to_watchlist(db, user_id=2, ticker="TSLA")
-        assert len(ts.get_watchlist(db, user_id=1)) == 1
-        assert len(ts.get_watchlist(db, user_id=2)) == 1
+        uid_a = _seed_user(db, "watchlist_iso_a_u")
+        uid_b = _seed_user(db, "watchlist_iso_b_u")
+        ts.add_to_watchlist(db, user_id=uid_a, ticker="AAPL")
+        ts.add_to_watchlist(db, user_id=uid_b, ticker="TSLA")
+        assert len(ts.get_watchlist(db, user_id=uid_a)) == 1
+        assert len(ts.get_watchlist(db, user_id=uid_b)) == 1
 
 
 class TestTradeService:
     def test_create_trade(self, db):
+        uid = _seed_user(db, "trade_create_u")
         trade = ts.create_trade(
-            db, user_id=1,
+            db, user_id=uid,
             ticker="AAPL", direction="long",
             entry_price=150.0, quantity=10,
         )
@@ -214,64 +223,74 @@ class TestTradeService:
         assert trade.ticker == "AAPL"
 
     def test_close_trade_long_profit(self, db):
+        uid = _seed_user(db, "trade_close_long_profit_u")
         trade = ts.create_trade(
-            db, user_id=1,
+            db, user_id=uid,
             ticker="AAPL", direction="long",
             entry_price=100.0, quantity=10,
         )
-        closed = ts.close_trade(db, trade.id, user_id=1, exit_price=120.0)
+        closed = ts.close_trade(db, trade.id, user_id=uid, exit_price=120.0)
         assert closed is not None
         assert closed.status == "closed"
         assert closed.pnl == pytest.approx(200.0, abs=0.01)
 
     def test_close_trade_long_loss(self, db):
+        uid = _seed_user(db, "trade_close_long_loss_u")
         trade = ts.create_trade(
-            db, user_id=1,
+            db, user_id=uid,
             ticker="AAPL", direction="long",
             entry_price=100.0, quantity=10,
         )
-        closed = ts.close_trade(db, trade.id, user_id=1, exit_price=90.0)
+        closed = ts.close_trade(db, trade.id, user_id=uid, exit_price=90.0)
         assert closed.pnl == pytest.approx(-100.0, abs=0.01)
 
     def test_close_trade_short_profit(self, db):
+        uid = _seed_user(db, "trade_close_short_profit_u")
         trade = ts.create_trade(
-            db, user_id=1,
+            db, user_id=uid,
             ticker="AAPL", direction="short",
             entry_price=100.0, quantity=10,
         )
-        closed = ts.close_trade(db, trade.id, user_id=1, exit_price=80.0)
+        closed = ts.close_trade(db, trade.id, user_id=uid, exit_price=80.0)
         assert closed.pnl == pytest.approx(200.0, abs=0.01)
 
     def test_close_already_closed_returns_none(self, db):
+        uid = _seed_user(db, "trade_already_closed_u")
         trade = ts.create_trade(
-            db, user_id=1, ticker="AAPL", direction="long",
+            db, user_id=uid, ticker="AAPL", direction="long",
             entry_price=100.0, quantity=10,
         )
-        ts.close_trade(db, trade.id, user_id=1, exit_price=120.0)
-        result = ts.close_trade(db, trade.id, user_id=1, exit_price=130.0)
+        ts.close_trade(db, trade.id, user_id=uid, exit_price=120.0)
+        result = ts.close_trade(db, trade.id, user_id=uid, exit_price=130.0)
         assert result is None
 
     def test_close_wrong_user_returns_none(self, db):
+        uid = _seed_user(db, "trade_wrong_user_u")
         trade = ts.create_trade(
-            db, user_id=1, ticker="AAPL", direction="long",
+            db, user_id=uid, ticker="AAPL", direction="long",
             entry_price=100.0, quantity=10,
         )
+        # 999 stays as-is: a deliberately nonexistent uid sentinel for the
+        # "wrong user can't close someone else's trade" guard. close_trade
+        # does a SELECT first; no FK insert happens.
         result = ts.close_trade(db, trade.id, user_id=999, exit_price=120.0)
         assert result is None
 
     def test_get_trades_all(self, db):
-        ts.create_trade(db, user_id=1, ticker="AAPL", direction="long", entry_price=100.0, quantity=1)
-        ts.create_trade(db, user_id=1, ticker="TSLA", direction="long", entry_price=200.0, quantity=1)
-        trades = ts.get_trades(db, user_id=1)
+        uid = _seed_user(db, "trade_get_all_u")
+        ts.create_trade(db, user_id=uid, ticker="AAPL", direction="long", entry_price=100.0, quantity=1)
+        ts.create_trade(db, user_id=uid, ticker="TSLA", direction="long", entry_price=200.0, quantity=1)
+        trades = ts.get_trades(db, user_id=uid)
         assert len(trades) == 2
 
     def test_get_trades_by_status(self, db):
-        t = ts.create_trade(db, user_id=1, ticker="AAPL", direction="long", entry_price=100.0, quantity=1)
-        ts.close_trade(db, t.id, user_id=1, exit_price=110.0)
-        ts.create_trade(db, user_id=1, ticker="TSLA", direction="long", entry_price=200.0, quantity=1)
+        uid = _seed_user(db, "trade_get_status_u")
+        t = ts.create_trade(db, user_id=uid, ticker="AAPL", direction="long", entry_price=100.0, quantity=1)
+        ts.close_trade(db, t.id, user_id=uid, exit_price=110.0)
+        ts.create_trade(db, user_id=uid, ticker="TSLA", direction="long", entry_price=200.0, quantity=1)
 
-        open_trades = ts.get_trades(db, user_id=1, status="open")
-        closed_trades = ts.get_trades(db, user_id=1, status="closed")
+        open_trades = ts.get_trades(db, user_id=uid, status="open")
+        closed_trades = ts.get_trades(db, user_id=uid, status="closed")
         assert len(open_trades) == 1
         assert open_trades[0].ticker == "TSLA"
         assert len(closed_trades) == 1
@@ -280,44 +299,51 @@ class TestTradeService:
 
 class TestJournalService:
     def test_add_journal_entry(self, db):
-        entry = ts.add_journal_entry(db, user_id=1, content="Market analysis")
+        uid = _seed_user(db, "journal_add_u")
+        entry = ts.add_journal_entry(db, user_id=uid, content="Market analysis")
         assert entry.id is not None
         assert entry.content == "Market analysis"
 
     def test_add_journal_linked_to_trade(self, db):
+        uid = _seed_user(db, "journal_linked_u")
         trade = ts.create_trade(
-            db, user_id=1, ticker="AAPL", direction="long",
+            db, user_id=uid, ticker="AAPL", direction="long",
             entry_price=100.0, quantity=1,
         )
-        entry = ts.add_journal_entry(db, user_id=1, content="Entry note", trade_id=trade.id)
+        entry = ts.add_journal_entry(db, user_id=uid, content="Entry note", trade_id=trade.id)
         assert entry.trade_id == trade.id
 
     def test_get_journal(self, db):
-        ts.add_journal_entry(db, user_id=1, content="Note 1")
-        ts.add_journal_entry(db, user_id=1, content="Note 2")
-        entries = ts.get_journal(db, user_id=1)
+        uid = _seed_user(db, "journal_get_u")
+        ts.add_journal_entry(db, user_id=uid, content="Note 1")
+        ts.add_journal_entry(db, user_id=uid, content="Note 2")
+        entries = ts.get_journal(db, user_id=uid)
         assert len(entries) == 2
 
     def test_journal_isolation_per_user(self, db):
-        ts.add_journal_entry(db, user_id=1, content="User 1 note")
-        ts.add_journal_entry(db, user_id=2, content="User 2 note")
-        assert len(ts.get_journal(db, user_id=1)) == 1
-        assert len(ts.get_journal(db, user_id=2)) == 1
+        uid_a = _seed_user(db, "journal_iso_a_u")
+        uid_b = _seed_user(db, "journal_iso_b_u")
+        ts.add_journal_entry(db, user_id=uid_a, content="User A note")
+        ts.add_journal_entry(db, user_id=uid_b, content="User B note")
+        assert len(ts.get_journal(db, user_id=uid_a)) == 1
+        assert len(ts.get_journal(db, user_id=uid_b)) == 1
 
 
 class TestTradeStats:
     def test_empty_stats(self, db):
-        stats = ts.get_trade_stats(db, user_id=1)
+        uid = _seed_user(db, "stats_empty_u")
+        stats = ts.get_trade_stats(db, user_id=uid)
         assert stats["total_trades"] == 0
 
     def test_stats_with_closed_trades(self, db):
-        t1 = ts.create_trade(db, user_id=1, ticker="AAPL", direction="long", entry_price=100.0, quantity=10)
-        ts.close_trade(db, t1.id, user_id=1, exit_price=120.0)
+        uid = _seed_user(db, "stats_closed_u")
+        t1 = ts.create_trade(db, user_id=uid, ticker="AAPL", direction="long", entry_price=100.0, quantity=10)
+        ts.close_trade(db, t1.id, user_id=uid, exit_price=120.0)
 
-        t2 = ts.create_trade(db, user_id=1, ticker="TSLA", direction="long", entry_price=200.0, quantity=5)
-        ts.close_trade(db, t2.id, user_id=1, exit_price=180.0)
+        t2 = ts.create_trade(db, user_id=uid, ticker="TSLA", direction="long", entry_price=200.0, quantity=5)
+        ts.close_trade(db, t2.id, user_id=uid, exit_price=180.0)
 
-        stats = ts.get_trade_stats(db, user_id=1)
+        stats = ts.get_trade_stats(db, user_id=uid)
         assert stats["total_trades"] == 2
 
 
