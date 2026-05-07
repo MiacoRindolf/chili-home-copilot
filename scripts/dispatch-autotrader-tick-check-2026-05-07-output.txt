@@ -1,0 +1,61 @@
+﻿# autotrader tick check 2026-05-07T12:04:55.3114630-07:00
+
+## Autotrader runs since 18:57 (post-recreate)
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+psycopg2.errors.UndefinedColumn: column "result" does not exist
+LINE 4:     COUNT(*) FILTER (WHERE result::text LIKE '%parse_failed%...
+                                   ^
+System.Management.Automation.RemoteException
+
+## Most recent autotrader_runs overall (any time)
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+psycopg2.errors.UndefinedColumn: column "result" does not exist
+LINE 2:   SELECT id, ticker, created_at, LEFT(result::text, 200)
+                                              ^
+System.Management.Automation.RemoteException
+
+## Recent stock pattern_imminent alerts (last 30min)
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+psycopg2.errors.UndefinedColumn: column "kind" does not exist
+LINE 2:   SELECT id, ticker, kind, fired_at
+                             ^
+HINT:  Perhaps you meant to reference the column "trading_alerts.id".
+System.Management.Automation.RemoteException
+
+## autotrader-worker last 30 log lines
+2026-05-07 19:03:45,378 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:03:45,378 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:03:55 UTC)" executed successfully
+2026-05-07 19:03:55,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:05 UTC)" (scheduled at 2026-05-07 19:03:55.295885+00:00)
+2026-05-07 19:03:55,380 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:03:55,381 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:05 UTC)" executed successfully
+2026-05-07 19:04:00,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:04:30 UTC)" (scheduled at 2026-05-07 19:04:00.296073+00:00)
+2026-05-07 19:04:02,732 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:04:30 UTC)" executed successfully
+2026-05-07 19:04:05,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:15 UTC)" (scheduled at 2026-05-07 19:04:05.295885+00:00)
+2026-05-07 19:04:05,382 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:04:05,383 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:15 UTC)" executed successfully
+2026-05-07 19:04:15,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:25 UTC)" (scheduled at 2026-05-07 19:04:15.295885+00:00)
+2026-05-07 19:04:15,391 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:04:15,392 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:25 UTC)" executed successfully
+2026-05-07 19:04:25,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:35 UTC)" (scheduled at 2026-05-07 19:04:25.295885+00:00)
+2026-05-07 19:04:25,399 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:04:25,400 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:35 UTC)" executed successfully
+2026-05-07 19:04:30,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:05:00 UTC)" (scheduled at 2026-05-07 19:04:30.296073+00:00)
+2026-05-07 19:04:30,297 [INFO] apscheduler.executors.default: Running job "Memory watcher (every 300s, in-process) (trigger: interval[0:05:00], next run at: 2026-05-07 19:09:30 UTC)" (scheduled at 2026-05-07 19:04:30.296196+00:00)
+2026-05-07 19:04:30,606 [INFO] app.services.diagnostics.mem_watcher: [mem_watcher] vm_rss=213MB vm_size=836MB threads=9 py_objects=269769 top_abs=[('tuple', 44024), ('function', 37211), ('dict', 31365), ('list', 15488), ('set', 11257), ('ReferenceType', 10534)] top_delta_since_last=[('BinaryExpression', '+7', 'now=296'), ('cell', '+3', 'now=9540'), ('_anonymous_label', '+3', 'now=153'), ('Statement', '+3', 'now=18'), ('BindParameter', '+3', 'now=172')] top_qualnames=[('MemoizedSlots.__getattr__.<locals>.oneshot.<locals>.memo', 2206), ('_ModuleMarker.add_class.<locals>.<lambda>', 483), ('datetime.utcnow', 220), ('Visitable._generate_compiler_dispatch.<locals>._compiler_dispatch', 200), ('WeakSequence.__init__.<locals>._remove', 174)]
+2026-05-07 19:04:30,608 [INFO] apscheduler.executors.default: Job "Memory watcher (every 300s, in-process) (trigger: interval[0:05:00], next run at: 2026-05-07 19:09:30 UTC)" executed successfully
+2026-05-07 19:04:31,613 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:05:00 UTC)" executed successfully
+2026-05-07 19:04:35,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:45 UTC)" (scheduled at 2026-05-07 19:04:35.295885+00:00)
+2026-05-07 19:04:35,384 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:04:35,385 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:45 UTC)" executed successfully
+2026-05-07 19:04:45,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:55 UTC)" (scheduled at 2026-05-07 19:04:45.295885+00:00)
+2026-05-07 19:04:45,386 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:04:45,387 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:04:55 UTC)" executed successfully
+2026-05-07 19:04:55,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:05:05 UTC)" (scheduled at 2026-05-07 19:04:55.295885+00:00)
+2026-05-07 19:04:55,386 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:04:55,387 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:05:05 UTC)" executed successfully
+
+---
+# end

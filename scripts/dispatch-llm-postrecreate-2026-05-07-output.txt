@@ -1,0 +1,31 @@
+﻿# llm postrecreate 2026-05-07T12:06:54.5622100-07:00
+
+## post-recreate autotrader_runs (>=18:57)
+(0, 0, 0, 0, 0, 0, 0, 0)
+
+--- last 10 post-recreate runs ---
+
+## alerts (post-recreate, >=18:57) - alert_type/ticker/created_at
+(12045, 'stock_breakout', 'PRMB', datetime.datetime(2026, 5, 7, 19, 0, 29, 709577), None, None)
+(12044, 'stock_breakout', 'PANW', datetime.datetime(2026, 5, 7, 19, 0, 29, 586570), None, None)
+(12043, 'crypto_breakout', 'ETC-USD', datetime.datetime(2026, 5, 7, 18, 59, 34, 318677), None, None)
+(12042, 'crypto_squeeze_firing', 'BLEND-USD', datetime.datetime(2026, 5, 7, 18, 59, 34, 200203), None, None)
+
+--- alert_type histogram (last hour) ---
+('stock_breakout', 6, datetime.datetime(2026, 5, 7, 18, 0, 51, 508091), datetime.datetime(2026, 5, 7, 19, 0, 29, 709577))
+('pattern_breakout_imminent', 5, datetime.datetime(2026, 5, 7, 18, 13, 27, 897931), datetime.datetime(2026, 5, 7, 18, 43, 59, 783525))
+('crypto_breakout', 3, datetime.datetime(2026, 5, 7, 18, 13, 4, 921850), datetime.datetime(2026, 5, 7, 18, 59, 34, 318677))
+('crypto_squeeze_firing', 1, datetime.datetime(2026, 5, 7, 18, 59, 34, 200203), datetime.datetime(2026, 5, 7, 18, 59, 34, 200203))
+
+## why candidate_pool=0? Look at autotrader's alert query (recent processed_at)
+trading_alerts_processed cols: []
+
+Traceback (most recent call last):
+  File "<stdin>", line 12, in <module>
+psycopg2.errors.UndefinedTable: relation "trading_alerts_processed" does not exist
+LINE 2:   SELECT MAX(created_at) FROM trading_alerts_processed
+                                      ^
+System.Management.Automation.RemoteException
+
+---
+# end

@@ -1,0 +1,47 @@
+﻿# schema discover 2026-05-07T12:05:48.8648454-07:00
+
+## trading_autotrader_runs columns
+('id', 'integer')
+('user_id', 'integer')
+('breakout_alert_id', 'integer')
+('scan_pattern_id', 'integer')
+('ticker', 'character varying')
+('decision', 'character varying')
+('reason', 'text')
+('rule_snapshot', 'jsonb')
+('llm_snapshot', 'jsonb')
+('trade_id', 'integer')
+('created_at', 'timestamp without time zone')
+('management_scope', 'character varying')
+
+--- trading_alerts columns ---
+('id', 'integer')
+('user_id', 'integer')
+('alert_type', 'character varying')
+('ticker', 'character varying')
+('message', 'text')
+('trade_type', 'character varying')
+('duration_estimate', 'character varying')
+('sent_via', 'character varying')
+('success', 'boolean')
+('created_at', 'timestamp without time zone')
+('scan_pattern_id', 'integer')
+('content_signature', 'character varying')
+
+## last 5 autotrader runs (using *)
+{'id': 17995, 'user_id': 1, 'breakout_alert_id': 10954, 'scan_pattern_id': 585, 'ticker': 'HAE', 'decision': 'blocked', 'reason': 'llm_not_viable', 'rule_snapshot': "{'ticker': 'HAE', 'alert_id': 10954, 'asset_type': 'stock', 'confidence': 0.8155452786377709, 'capital_usd': 6350.26, 'crypto_path': False, 'options_path': False, 'brain_context': {'regime': 'risk_off', 'source': 'brain'...TRUNC", 'llm_snapshot': {'error': 'parse_failed', 'raw_preview': ''}, 'trade_id': None, 'created_at': datetime.datetime(2026, 5, 7, 18, 44, 12, 415346), 'management_scope': 'auto_trader_v1'}
+{'id': 17994, 'user_id': 1, 'breakout_alert_id': 10953, 'scan_pattern_id': 585, 'ticker': 'RZLV', 'decision': 'blocked', 'reason': 'llm_not_viable', 'rule_snapshot': "{'ticker': 'RZLV', 'alert_id': 10953, 'asset_type': 'stock', 'confidence': 0.8156354166666666, 'capital_usd': 6350.26, 'crypto_path': False, 'options_path': False, 'brain_context': {'regime': 'risk_off', 'source': 'brain...TRUNC", 'llm_snapshot': {'error': 'parse_failed', 'raw_preview': ''}, 'trade_id': None, 'created_at': datetime.datetime(2026, 5, 7, 18, 44, 10, 414665), 'management_scope': 'auto_trader_v1'}
+{'id': 17993, 'user_id': 1, 'breakout_alert_id': 10952, 'scan_pattern_id': 585, 'ticker': 'AIG', 'decision': 'skipped', 'reason': 'projected_profit_below_min', 'rule_snapshot': "{'ticker': 'AIG', 'alert_id': 10952, 'asset_type': 'stock', 'confidence': 0.8203310810810811, 'crypto_path': False, 'options_path': False, 'for_new_entry': True, 'pattern_signal': {'source': 'brain_ledger', 'n_cells': 2,...TRUNC", 'llm_snapshot': None, 'trade_id': None, 'created_at': datetime.datetime(2026, 5, 7, 18, 44, 4, 330541), 'management_scope': 'auto_trader_v1'}
+{'id': 17992, 'user_id': 1, 'breakout_alert_id': 10945, 'scan_pattern_id': 585, 'ticker': 'AAON', 'decision': 'skipped', 'reason': 'missed_entry_slippage', 'rule_snapshot': "{'ticker': 'AAON', 'alert_id': 10945, 'asset_type': 'stock', 'confidence': 0.8155049694189602, 'crypto_path': False, 'options_path': False, 'current_price': 131.58, 'for_new_entry': True, 'pattern_signal': {'source': 'br...TRUNC", 'llm_snapshot': None, 'trade_id': None, 'created_at': datetime.datetime(2026, 5, 7, 18, 28, 41, 699369), 'management_scope': 'auto_trader_v1'}
+{'id': 17991, 'user_id': 1, 'breakout_alert_id': 10944, 'scan_pattern_id': 585, 'ticker': 'SOXS', 'decision': 'blocked', 'reason': 'llm_not_viable', 'rule_snapshot': "{'ticker': 'SOXS', 'alert_id': 10944, 'asset_type': 'stock', 'confidence': 0.8155062022900763, 'capital_usd': 6366.01, 'crypto_path': False, 'options_path': False, 'brain_context': {'regime': 'risk_off', 'source': 'brain...TRUNC", 'llm_snapshot': {'error': 'parse_failed', 'raw_preview': ''}, 'trade_id': None, 'created_at': datetime.datetime(2026, 5, 7, 18, 28, 38, 369044), 'management_scope': 'auto_trader_v1'}
+
+## last 10 alerts (any type) by fired_at
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+psycopg2.errors.UndefinedColumn: column "fired_at" does not exist
+LINE 1: SELECT * FROM trading_alerts ORDER BY fired_at DESC LIMIT 10
+                                              ^
+System.Management.Automation.RemoteException
+
+---
+# end

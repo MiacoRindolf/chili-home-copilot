@@ -1,0 +1,178 @@
+﻿# fastpath pnl audit 2026-05-07T12:20:40.3421687-07:00
+
+## Schema discovery for fast-path tables
+=== fast_alerts (7 cols)
+   ('id', 'bigint')
+   ('ticker', 'character varying')
+   ('alert_type', 'character varying')
+   ('fired_at', 'timestamp without time zone')
+   ('signal_score', 'double precision')
+   ('features', 'jsonb')
+   ('source', 'character varying')
+=== fast_snapshots (14 cols)
+   ('id', 'bigint')
+   ('ticker', 'character varying')
+   ('interval', 'character varying')
+   ('bar_open_at', 'timestamp without time zone')
+   ('bar_close_at', 'timestamp without time zone')
+   ('open_price', 'double precision')
+   ('high_price', 'double precision')
+   ('low_price', 'double precision')
+   ('close_price', 'double precision')
+   ('volume', 'double precision')
+   ('trade_count', 'integer')
+   ('vwap', 'double precision')
+   ('source', 'character varying')
+   ('received_at', 'timestamp without time zone')
+=== fast_orderbook (10 cols)
+   ('id', 'bigint')
+   ('ticker', 'character varying')
+   ('snapshot_at', 'timestamp without time zone')
+   ('bid_levels', 'jsonb')
+   ('ask_levels', 'jsonb')
+   ('bid_total_size', 'double precision')
+   ('ask_total_size', 'double precision')
+   ('imbalance', 'double precision')
+   ('spread_bps', 'double precision')
+   ('source', 'character varying')
+=== fast_signal_decay (10 cols)
+   ('ticker', 'character varying')
+   ('alert_type', 'character varying')
+   ('score_bucket', 'character varying')
+   ('horizon_s', 'integer')
+   ('sample_count', 'bigint')
+   ('mean_return', 'double precision')
+   ('m2_return', 'double precision')
+   ('realized_validation_count', 'bigint')
+   ('realized_validation_residual', 'double precision')
+   ('last_updated', 'timestamp without time zone')
+=== fast_path_status (9 cols)
+   ('ticker', 'character varying')
+   ('state', 'character varying')
+   ('last_bar_at', 'timestamp without time zone')
+   ('last_seq', 'bigint')
+   ('error_count_60s', 'integer')
+   ('last_error', 'text')
+   ('last_reconnect_at', 'timestamp without time zone')
+   ('reconnect_count', 'integer')
+   ('updated_at', 'timestamp without time zone')
+=== fast_executions (15 cols)
+   ('id', 'bigint')
+   ('ticker', 'character varying')
+   ('alert_type', 'character varying')
+   ('alert_fired_at', 'timestamp without time zone')
+   ('decision', 'character varying')
+   ('reject_reason', 'character varying')
+   ('mode', 'character varying')
+   ('side', 'character varying')
+   ('quantity', 'double precision')
+   ('fill_price', 'double precision')
+   ('notional_usd', 'double precision')
+   ('gates_json', 'jsonb')
+   ('broker_order_id', 'character varying')
+   ('latency_ms', 'double precision')
+   ('decided_at', 'timestamp without time zone')
+=== fast_exits (19 cols)
+   ('id', 'bigint')
+   ('entry_execution_id', 'bigint')
+   ('ticker', 'character varying')
+   ('side', 'character varying')
+   ('quantity', 'double precision')
+   ('entry_price', 'double precision')
+   ('exit_price', 'double precision')
+   ('stop_at_entry', 'double precision')
+   ('target_at_entry', 'double precision')
+   ('exit_reason', 'character varying')
+   ('realized_pnl_usd', 'double precision')
+   ('realized_return_pct', 'double precision')
+   ('holding_period_s', 'double precision')
+   ('mode', 'character varying')
+   ('broker_order_id', 'character varying')
+   ('brain_json', 'jsonb')
+   ('latency_ms', 'double precision')
+   ('entered_at', 'timestamp without time zone')
+   ('exited_at', 'timestamp without time zone')
+=== fast_paper_trades (0 cols)
+
+## All fast_* tables that exist
+('fast_alerts',)
+('fast_alerts_default',)
+('fast_executions',)
+('fast_executions_default',)
+('fast_exits',)
+('fast_exits_default',)
+('fast_orderbook',)
+('fast_orderbook_default',)
+('fast_path_status',)
+('fast_signal_decay',)
+('fast_snapshots',)
+('fast_snapshots_default',)
+
+## fast_alerts: total volume + by signal type
+total alerts (lifetime): (44656, datetime.datetime(2026, 5, 1, 12, 1), datetime.datetime(2026, 5, 7, 19, 20, 28, 884199))
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+psycopg2.errors.UndefinedColumn: column "score" does not exist
+LINE 3:          AVG(score)::numeric(6,4) AS avg_score,
+                     ^
+System.Management.Automation.RemoteException
+
+## fast_signal_decay: realized forward-return by signal/ticker/score bucket
+fast_signal_decay cols: [('ticker', 'character varying'), ('alert_type', 'character varying'), ('score_bucket', 'character varying'), ('horizon_s', 'integer'), ('sample_count', 'bigint'), ('mean_return', 'double precision'), ('m2_return', 'double precision'), ('realized_validation_count', 'bigint'), ('realized_validation_residual', 'double precision'), ('last_updated', 'timestamp without time zone')]
+
+rows: (518,)
+
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 5, 'sample_count': 1722, 'mean_return': 1.5433467564393716e-05, 'm2_return': 5.49791748386207e-05, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 18, 49, 575008)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 30, 'sample_count': 1702, 'mean_return': 4.480089964734161e-05, 'm2_return': 0.0002914580528021455, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 19, 44, 781706)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 1, 'sample_count': 1682, 'mean_return': 6.152740568749088e-06, 'm2_return': 5.419738799059987e-06, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 17, 45, 859324)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 60, 'sample_count': 1652, 'mean_return': 4.690802509428682e-05, 'm2_return': 0.0005766438421573913, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 20, 14, 738259)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 5, 'sample_count': 1643, 'mean_return': 1.6525564342670717e-05, 'm2_return': 2.5830540480210553e-05, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 17, 49, 921171)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'med', 'horizon_s': 1, 'sample_count': 1643, 'mean_return': 1.2237231582397503e-05, 'm2_return': 7.905551058280987e-06, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 18, 25, 522900)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 300, 'sample_count': 1634, 'mean_return': 1.8958078651177738e-05, 'm2_return': 0.0029408894874941582, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 4, 32, 946634)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 60, 'sample_count': 1596, 'mean_return': 2.093267693140964e-05, 'm2_return': 0.00030489394502059334, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 11, 53, 192982)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 1, 'sample_count': 1591, 'mean_return': 7.721741889426577e-06, 'm2_return': 1.2922893686906651e-05, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 17, 36, 465745)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'med', 'horizon_s': 30, 'sample_count': 1576, 'mean_return': 1.823755434670671e-05, 'm2_return': 0.0001753708580360843, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 9, 37, 613359)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 30, 'sample_count': 1576, 'mean_return': 2.9420344064427488e-05, 'm2_return': 0.0001483998656921767, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 19, 35, 854314)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'med', 'horizon_s': 5, 'sample_count': 1569, 'mean_return': 2.4260656477454914e-05, 'm2_return': 3.936808603211974e-05, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 3, 18, 925985)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 300, 'sample_count': 1557, 'mean_return': 6.499878731839066e-05, 'm2_return': 0.0018771336845174497, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 8, 45, 133375)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'med', 'horizon_s': 60, 'sample_count': 1552, 'mean_return': 2.5973636554783768e-05, 'm2_return': 0.00035826965967258466, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 19, 24, 536890)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 1800, 'sample_count': 1513, 'mean_return': -6.146864346916931e-05, 'm2_return': 0.015255318505021216, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 20, 25, 637227)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 5, 'sample_count': 1510, 'mean_return': 3.151821255947369e-05, 'm2_return': 4.599876631134987e-05, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 20, 24, 919226)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 30, 'sample_count': 1482, 'mean_return': 4.509423069351625e-05, 'm2_return': 0.0002808108778642698, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 19, 38, 232422)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 60, 'sample_count': 1466, 'mean_return': 6.727251894443074e-05, 'm2_return': 0.0004955352065869393, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 20, 8, 244759)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 1, 'sample_count': 1456, 'mean_return': 1.4177128709956127e-05, 'm2_return': 1.132819446104053e-05, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 10, 18, 329650)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'med', 'horizon_s': 300, 'sample_count': 1446, 'mean_return': 5.678973427384755e-05, 'm2_return': 0.0015886150849043106, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 20, 27, 778908)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 3600, 'sample_count': 1411, 'mean_return': -0.0002840004960826211, 'm2_return': 0.028707140842104382, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 18, 48, 357012)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 300, 'sample_count': 1401, 'mean_return': 0.00013342918896922526, 'm2_return': 0.0022937528493110594, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 12, 12, 180914)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 1800, 'sample_count': 1384, 'mean_return': -0.0001212021346049845, 'm2_return': 0.00949302877178558, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 4, 54, 615222)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 3600, 'sample_count': 1368, 'mean_return': -8.727401150188396e-05, 'm2_return': 0.016259152276960454, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 13, 58, 925272)}
+{'ticker': 'ETH-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'low', 'horizon_s': 1800, 'sample_count': 1360, 'mean_return': 0.0003603321377818596, 'm2_return': 0.013620791829695259, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 19, 59, 986384)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 1, 'sample_count': 1346, 'mean_return': 1.2587469538646626e-05, 'm2_return': 5.4753931870529735e-06, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 13, 58, 895518)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'med', 'horizon_s': 1800, 'sample_count': 1317, 'mean_return': -0.0001157001723867904, 'm2_return': 0.008131340150303413, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 18, 59, 31, 140590)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 5, 'sample_count': 1301, 'mean_return': 2.248490501173815e-05, 'm2_return': 3.2283799604328444e-05, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 13, 32, 834925)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_long', 'score_bucket': 'low', 'horizon_s': 30, 'sample_count': 1301, 'mean_return': 3.682218879919295e-05, 'm2_return': 0.0001600963358992359, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 4, 58, 615286)}
+{'ticker': 'BTC-USD', 'alert_type': 'imbalance_short', 'score_bucket': 'med', 'horizon_s': 3600, 'sample_count': 1255, 'mean_return': -0.00027429354567816313, 'm2_return': 0.016916205964183823, 'realized_validation_count': 0, 'realized_validation_residual': 0.0, 'last_updated': datetime.datetime(2026, 5, 7, 19, 18, 55, 183559)}
+
+## decay_miner observations: pending heap, finalized, validations
+candidate tables: [('fast_signal_decay',)]
+
+## paper trades + realized P&L (Trade table where management_scope LIKE 'fast%' OR similar)
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+psycopg2.errors.UndefinedTable: relation "trades" does not exist
+LINE 2:   SELECT DISTINCT management_scope FROM trades
+                                                ^
+System.Management.Automation.RemoteException
+
+## current open paper position SOL-USD detail
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+psycopg2.errors.UndefinedTable: relation "trades" does not exist
+LINE 4:   FROM trades
+               ^
+System.Management.Automation.RemoteException
+
+## settings.py thresholds for context
+
+---
+# end

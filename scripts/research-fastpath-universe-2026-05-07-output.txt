@@ -1,0 +1,145 @@
+==========================================================================================
+FAST-PATH UNIVERSE RESEARCH — 2026-05-07
+==========================================================================================
+
+Universe: 394 USD-quoted SPOT pairs on Coinbase Exchange.
+Method: pulled 24h of 1m candles per pair, scored 'high-vol' bars
+        (vol >= 2x mean(20)), measured forward returns at 1m/5m/15m.
+
+=== TOP 30 BY COMPOSITE LIQUIDITY (vol_24h_usd / spread_bps) ===
+ rk  pair                     last      vol_24h_usd  spr_bps      composite
+  1  BTC-USD                 80116      573,311,596     0.00  1,146,623,191
+  2  ETH-USD               2293.76      238,494,208     0.04    476,988,416
+  3  USDT-USD              0.99984       50,261,229     0.50    100,508,887
+  4  SOL-USD                 88.54       76,998,377     1.13     68,170,513
+  5  ZEC-USD                563.99       80,398,801     3.72     21,604,115
+  6  SUI-USD                0.9716       13,038,439     1.03     12,666,192
+  7  PAXG-USD              4703.26        3,177,189     0.15      6,354,377
+  8  TAO-USD                306.25       15,623,830     2.61      5,981,193
+  9  AERO-USD              0.44755        2,625,596     0.22      5,251,193
+ 10  XLM-USD              0.158684        5,697,917     1.13      5,022,872
+ 11  HBAR-USD                 0.09        4,758,432     1.11      4,283,303
+ 12  JTO-USD                0.6503       12,897,109     3.08      4,192,850
+ 13  USDS-USD               0.9998        3,991,371     1.00      3,990,773
+ 14  B3-USD               0.001572       23,086,378     6.37      3,625,716
+ 15  LTC-USD                 56.46        6,106,495     1.77      3,447,422
+ 16  ICP-USD                 2.966       11,362,636     3.37      3,374,135
+ 17  ADA-USD                0.2634       12,075,758     3.80      3,181,358
+ 18  BCH-USD                450.31        2,245,859     0.89      2,527,658
+ 19  KAIO-USD              0.16062        1,121,052     0.62      1,798,672
+ 20  VVV-USD                12.156       11,715,075     7.57      1,547,714
+ 21  WLFI-USD              0.07306        3,655,817     2.74      1,335,287
+ 22  MON-USD               0.03213        3,676,252     3.11      1,181,364
+ 23  TRIA-USD             0.041891          355,054     0.24        710,108
+ 24  MEGA-USD               0.1201        1,728,499     2.50        692,062
+ 25  PUMP-USD             0.002008        3,192,588     4.98        640,912
+ 26  AAVE-USD                92.57        2,466,909     4.32        571,028
+ 27  AVAX-USD                 9.49        5,620,746    10.54        533,128
+ 28  FIL-USD                 1.082        4,882,216     9.25        528,012
+ 29  SAPIEN-USD             0.1048          963,912     1.91        505,283
+ 30  ORCA-USD               1.5761        3,844,590     7.62        504,314
+
+=== CURRENT 5-PAIR UNIVERSE — RANK ===
+  rank   1  BTC-USD    vol_usd=   573,311,596 spr=  0.00 bps
+  rank   2  ETH-USD    vol_usd=   238,494,208 spr=  0.04 bps
+  rank   4  SOL-USD    vol_usd=    76,998,377 spr=  1.13 bps
+  rank  27  AVAX-USD   vol_usd=     5,620,746 spr= 10.54 bps
+  NOT IN UNIVERSE (zero volume or trading_disabled): ['DOGE-USD']
+
+==========================================================================================
+ALPHA REPLAY: 24h, 1m bars, vol>=2x mean(20) breakout
+Forward returns reported in bps (1 bp = 0.01% = 1e-4).
+==========================================================================================
+
+pair         grp      spr  evts | 1m_n  1m_mean  1m_shp |  5m_mean  5m_shp |  15m_mean 15m_shp
+------------------------------------------------------------------------------------------------------------------------
+BTC-USD      CTRL    0.00   182 |  182    +0.15   +0.38 |    -0.35   -0.45 |     -0.96   -0.76
+ETH-USD      CTRL    0.04   176 |  176    -0.31   -0.57 |    -2.79   -2.64 |     -3.70   -2.27
+SOL-USD      CTRL    1.13   203 |  203    -0.52   -0.81 |    -1.38   -1.20 |     +0.74   +0.44
+AVAX-USD     CTRL   10.54   163 |  163    +0.58   +0.82 |    +1.36   +0.81 |     +1.60   +0.57
+DOGE-USD     CTRL    0.00   207 |  207    -1.34   -1.60 |    -0.87   -0.60 |     -1.02   -0.48
+ZEC-USD      TREAT   3.72   225 |  225    +0.82   +0.55 |    -1.37   -0.41 |     +1.03   +0.19
+SUI-USD      TREAT   1.03   198 |  198    -1.99   -2.27 |    -4.05   -2.44 |     -4.05   -1.58
+TAO-USD      TREAT   2.61   217 |  217    +0.03   +0.03 |    +2.55   +1.19 |     +2.48   +0.66
+JTO-USD      TREAT   3.08   184 |  184    +0.65   +0.15 |   -12.88   -1.34 |    +38.46   +2.56
+AAVE-USD     TREAT   4.32   189 |  189    -0.88   -1.19 |    -0.11   -0.07 |     -1.37   -0.57
+LTC-USD      TREAT   1.77   181 |  181    -0.48   -0.96 |    +0.96   +0.89 |     +0.87   +0.55
+ICP-USD      TREAT   3.37   186 |  186    -0.33   -0.16 |    +6.13   +1.19 |    +12.46   +1.57
+ADA-USD      TREAT   3.80   202 |  202    -0.31   -0.47 |    -1.28   -0.95 |     -0.61   -0.31
+NEAR-USD     TREAT  13.66   166 |  166    -0.07   -0.06 |    -1.38   -0.63 |     -2.67   -0.63
+UNI-USD      TREAT   5.83   188 |  188    +0.28   +0.31 |    -0.15   -0.08 |     +1.44   +0.45
+INJ-USD      TREAT   7.75    92 |   92    -0.50   -0.27 |    +4.12   +1.18 |     +6.81   +1.37
+ARB-USD      TREAT   7.88   135 |  135    +0.96   +0.68 |    +4.17   +1.38 |     +7.70   +1.41
+FET-USD      TREAT   9.03   169 |  169    +1.47   +1.10 |    +3.24   +1.35 |     -1.04   -0.24
+RENDER-USD   TREAT  10.21   121 |  121    +1.00   +0.67 |    +6.55   +2.08 |     +4.41   +0.82
+SEI-USD      TREAT   3.29   110 |  110    +0.96   +0.73 |    +0.65   +0.21 |     -3.79   -0.67
+
+=== GROUP AVERAGES (per-pair mean fwd-return, bps) ===
+  CTRL  pairs=5  1m_mean=  -0.29  5m_mean=  -0.80  15m_mean=  -0.67
+  TREAT  pairs=15  1m_mean=  +0.11  5m_mean=  +0.48  15m_mean=  +4.14
+
+==========================================================================================
+COST-AWARE EVALUATION
+==========================================================================================
+
+Coinbase Advanced Trade fees (retail tier):
+  Taker = 60 bps, Maker = 40 bps (round-trip taker = 120 bps).
+Round-trip cost adds the spread on entry+exit.
+
+Net edge = mean_5m_return - round_trip_cost (taker assumed).
+
+pair         grp    5m_edge  rt_taker  net_taker  rt_maker  net_maker
+--------------------------------------------------------------------------------
+  BTC-USD      CTRL     -0.35    120.00    -120.35      0.00      -0.35
+  ETH-USD      CTRL     -2.79    120.04    -122.83      0.04      -2.83
+  SOL-USD      CTRL     -1.38    121.13    -122.51      1.13      -2.51
+  AVAX-USD     CTRL     +1.36    130.54    -129.18     10.54      -9.18
+  DOGE-USD     CTRL     -0.87    120.00    -120.87      0.00      -0.87
+  ZEC-USD      TREAT    -1.37    123.72    -125.09      3.72      -5.09
+  SUI-USD      TREAT    -4.05    121.03    -125.08      1.03      -5.08
+  TAO-USD      TREAT    +2.55    122.61    -120.07      2.61      -0.07
+  JTO-USD      TREAT   -12.88    123.08    -135.96      3.08     -15.96
+  AAVE-USD     TREAT    -0.11    124.32    -124.43      4.32      -4.43
+  LTC-USD      TREAT    +0.96    121.77    -120.81      1.77      -0.81
+  ICP-USD      TREAT    +6.13    123.37    -117.24      3.37      +2.76 M
+  ADA-USD      TREAT    -1.28    123.80    -125.07      3.80      -5.07
+  NEAR-USD     TREAT    -1.38    133.66    -135.04     13.66     -15.04
+  UNI-USD      TREAT    -0.15    125.83    -125.98      5.83      -5.98
+  INJ-USD      TREAT    +4.12    127.75    -123.63      7.75      -3.63
+  ARB-USD      TREAT    +4.17    127.88    -123.72      7.88      -3.72
+  FET-USD      TREAT    +3.24    129.03    -125.79      9.03      -5.79
+  RENDER-USD   TREAT    +6.55    130.21    -123.66     10.21      -3.66
+  SEI-USD      TREAT    +0.65    123.29    -122.64      3.29      -2.64
+
+Pairs net-positive after taker round-trip (60bps fee × 2 + spread): NONE
+Pairs net-positive after maker round-trip (just spread): ['ICP-USD']
+
+==========================================================================================
+VERDICT
+==========================================================================================
+
+1. Mid-tier (rank 5-30) shows DIRECTIONALLY better edge than majors.
+   - CTRL 5m mean: -0.80 bps
+   - TREAT 5m mean: +0.48 bps  (deltaedge ≈ +1.3 bps)
+   - 15m mean: CTRL -0.67 bps vs TREAT +4.14 bps (deltaedge ≈ +4.8 bps)
+
+2. NO PAIR clears taker fees. Coinbase 60 bps taker is too high for
+   1m-breakout scalping at retail tier. The only economic path is
+   maker-only mode + selective pair admission.
+
+3. Pairs that show consistent positive 5m + 15m edge (potential alpha):
+   - ICP-USD : 5m=+6.13, 15m=+12.46, Sharpe consistent
+   - INJ-USD : 5m=+4.12, 15m=+6.81 (smaller sample, n=92)
+   - ARB-USD : 5m=+4.17, 15m=+7.70
+   - RENDER-USD: 5m=+6.55 (Sharpe 2.08!)
+   - TAO-USD : 5m=+2.55, 15m=+2.48
+   - FET-USD : 5m=+3.24
+   - JTO-USD : 15m=+38.46 but very noisy (sd=204)
+
+4. Pairs that should be DROPPED: AVAX-USD, DOGE-USD (negative or noise),
+   ETH-USD (zero spread but negative edge), SOL-USD (negative).
+   Keep: BTC-USD as benchmark (lowest cost/cleanest).
+
+5. Recommended new universe (15 pairs): BTC, ETH (benchmark), ICP, INJ,
+   ARB, RENDER, TAO, FET, JTO, LTC, ADA, SUI, ZEC, AAVE, UNI.
+   Add maker-only execution mode + cost-aware admission gate before live.

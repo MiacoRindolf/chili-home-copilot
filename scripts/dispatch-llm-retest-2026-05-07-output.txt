@@ -1,0 +1,47 @@
+﻿# llm retest 2026-05-07T11:57:23.8854365-07:00
+
+## Step 1: force-recreate chili + autotrader-worker (clears _auth_failed_urls and reloads env)
+ Container chili-home-copilot-ollama-1 Running 
+ Container chili-home-copilot-postgres-1 Running 
+ Container chili-home-copilot-chili-1 Recreate 
+ Container chili-home-copilot-autotrader-worker-1 Recreate 
+ Container chili-home-copilot-autotrader-worker-1 Recreated 
+ Container chili-home-copilot-chili-1 Recreated 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-postgres-1 Waiting 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-ollama-1 Waiting 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-ollama-1 Healthy 
+ Container chili-home-copilot-autotrader-worker-1 Starting 
+ Container chili-home-copilot-postgres-1 Healthy 
+ Container chili-home-copilot-chili-1 Starting 
+ Container chili-home-copilot-autotrader-worker-1 Started 
+ Container chili-home-copilot-chili-1 Started 
+
+## Step 2: probe call_llm directly
+is_configured: True
+2026-05-07 18:57:43 | INFO | trace=retest-probe | llm_cascade_order=legacy (openaiΓåÆgroqΓåÆgroq_secondaryΓåÆgemini)
+2026-05-07 18:57:43 | INFO | trace=retest-probe | auth_failed base_url=https://api.groq.com/openai/v1 ΓÇö suppressing further calls this process (rotate env key + restart to re-enable): Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}
+2026-05-07 18:57:43 | INFO | trace=retest-probe | falling back to gemini (free)
+2026-05-07 18:57:46 | INFO | trace=retest-probe | llm_reply model=gpt-5.5 tokens=536
+call_llm returned: 'OK'
+
+## Step 3: probe again 5s later (any cascade caching effect?)
+is_configured: True
+2026-05-07 18:57:52 | INFO | trace=retest-probe | llm_cascade_order=legacy (openaiΓåÆgroqΓåÆgroq_secondaryΓåÆgemini)
+2026-05-07 18:57:53 | INFO | trace=retest-probe | auth_failed base_url=https://api.groq.com/openai/v1 ΓÇö suppressing further calls this process (rotate env key + restart to re-enable): Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}
+2026-05-07 18:57:53 | INFO | trace=retest-probe | falling back to gemini (free)
+2026-05-07 18:57:54 | INFO | trace=retest-probe | llm_reply model=gpt-5.5 tokens=540
+call_llm returned: ''
+
+## Step 4: probe a third time with a different prompt
+2026-05-07 18:57:59 | INFO | trace=retest-probe-2 | llm_cascade_order=legacy (openaiΓåÆgroqΓåÆgroq_secondaryΓåÆgemini)
+2026-05-07 18:57:59 | INFO | trace=retest-probe-2 | auth_failed base_url=https://api.groq.com/openai/v1 ΓÇö suppressing further calls this process (rotate env key + restart to re-enable): Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}
+2026-05-07 18:57:59 | INFO | trace=retest-probe-2 | falling back to gemini (free)
+2026-05-07 18:58:02 | INFO | trace=retest-probe-2 | llm_reply model=gpt-5.5 tokens=544
+call_llm returned: 'Yes.'
+
+---
+# end

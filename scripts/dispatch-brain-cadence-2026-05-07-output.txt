@@ -1,0 +1,357 @@
+﻿# brain cadence 2026-05-07T12:08:06.4631528-07:00
+
+## docker compose ps - everything
+NAME                                      SERVICE              STATUS
+chili-home-copilot-autotrader-worker-1    autotrader-worker    Up 10 minutes
+chili-home-copilot-brain-worker-1         brain-worker         Up About an hour (healthy)
+chili-home-copilot-broker-sync-worker-1   broker-sync-worker   Up About an hour
+chili-home-copilot-chili-1                chili                Up 10 minutes (healthy)
+chili-home-copilot-fast-data-worker-1     fast-data-worker     Up About an hour (healthy)
+chili-home-copilot-ollama-1               ollama               Up 30 minutes (healthy)
+chili-home-copilot-postgres-1             postgres             Up 2 hours (healthy)
+chili-home-copilot-scheduler-worker-1     scheduler-worker     Up About an hour
+
+## brain-worker last 60 log lines
+2026-05-07 19:05:54,973 [INFO] [brain] Retest queue: 413 pending. Continuing in 1 minute
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/375 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/124 [00:00<?, ?bar/s]
+                                                                
+2026-05-07 19:07:13,141 [INFO] [brain] work ledger dispatch round processed=0 claimed=0 per_type={'execution_feedback_digest': 0, 'market_snapshots_batch': 0, 'backtest_requested': 0, 'backtest_completed': 0, 'pattern_eligible_promotion': 0, 'live_trade_closed': 0, 'paper_trade_closed': 0, 'broker_fill_closed': 0, 'breakout_alert_resolved': 0} errors=[]
+2026-05-07 19:07:13,245 [INFO] [brain] legacy run_learning_cycle DISABLED via CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0. Phase 2 handlers run instead. Set =1 to re-enable for emergency rollback.
+2026-05-07 19:07:13,453 [INFO] [brain] Reconcile pass SKIPPED (legacy_cycle_disabled); event-driven only this iteration
+2026-05-07 19:07:13,973 [INFO] [brain:subtask] signal_refresh completed in 0.5s
+2026-05-07 19:07:15,632 [INFO] [realized_sync] complete: updated=9 skipped=0 patterns_with_no_closed_trades=760
+2026-05-07 19:07:15,686 [INFO] [brain:subtask] realized_sync completed in 1.6s
+2026-05-07 19:07:16,434 [INFO] [brain_neural_mesh] metrics flush published=0 processed=3 fires=0 queue_lag_s=0.00 stale_nodes=30
+2026-05-07 19:07:18,043 [INFO] [brain] Retest queue: 413 pending. Continuing in 1 minute
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/124 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/499 [00:00<?, ?bar/s]
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/124 [00:00<?, ?bar/s][A
+System.Management.Automation.RemoteException
+                                                                [A
+FractionalBacktest.run:   0%|          | 0/125 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/124 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/124 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/125 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/124 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/125 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/124 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/123 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/123 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/494 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/498 [00:00<?, ?bar/s]2026-05-07 19:07:43,783 [INFO] [exit_engine_ops] mode=shadow source=backtest position_id=none ticker=ETN legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true config_hash=b692d5059996c1d8 sample_pct=1.000
+System.Management.Automation.RemoteException
+                                                                
+2026-05-07 19:07:44,887 [INFO] [exit_parity] persisted 50 backtest parity rows ticker=ETN
+
+## brain-worker pattern_breakout cadence (psql)
+--- pattern_breakout_imminent timeline (last 4h) ---
+(12039, 'HAE', datetime.datetime(2026, 5, 7, 18, 43, 59, 783525), 585, None)
+(12038, 'RZLV', datetime.datetime(2026, 5, 7, 18, 43, 58, 709439), 585, None)
+(12037, 'AIG', datetime.datetime(2026, 5, 7, 18, 43, 57, 849708), 585, None)
+(12036, 'ACMR', datetime.datetime(2026, 5, 7, 18, 13, 29, 242757), 585, None)
+(12035, 'AGBK', datetime.datetime(2026, 5, 7, 18, 13, 27, 897931), 585, None)
+(12028, 'ULCC', datetime.datetime(2026, 5, 7, 17, 57, 32, 529610), 585, None)
+(12027, 'FOFO', datetime.datetime(2026, 5, 7, 17, 57, 31, 121205), 585, None)
+(12026, 'TKNO', datetime.datetime(2026, 5, 7, 17, 57, 30, 19115), 585, None)
+(12025, 'CAM', datetime.datetime(2026, 5, 7, 17, 56, 14, 257717), 585, None)
+(12024, 'ACGL', datetime.datetime(2026, 5, 7, 17, 56, 13, 427367), 585, None)
+(12023, 'ISRG', datetime.datetime(2026, 5, 7, 17, 56, 12, 665894), 585, None)
+(11994, 'A', datetime.datetime(2026, 5, 7, 16, 59, 49, 332807), 585, None)
+(11993, 'LQD', datetime.datetime(2026, 5, 7, 16, 59, 48, 557223), 585, None)
+(11992, 'AGNC', datetime.datetime(2026, 5, 7, 16, 59, 48, 421903), 585, None)
+(11989, 'ABBV', datetime.datetime(2026, 5, 7, 16, 54, 21, 490927), 586, None)
+(11988, 'MAR', datetime.datetime(2026, 5, 7, 16, 54, 21, 219016), 585, None)
+(11987, 'A', datetime.datetime(2026, 5, 7, 16, 54, 21, 103502), 585, None)
+(11986, 'AGNC', datetime.datetime(2026, 5, 7, 16, 54, 20, 962698), 585, None)
+(11981, 'ALLY', datetime.datetime(2026, 5, 7, 16, 41, 24, 163109), 586, None)
+(11980, 'BAC', datetime.datetime(2026, 5, 7, 16, 41, 23, 857538), 586, None)
+(11979, 'ABBV', datetime.datetime(2026, 5, 7, 16, 41, 22, 997775), 585, None)
+(11978, 'MS', datetime.datetime(2026, 5, 7, 16, 41, 22, 270598), 585, None)
+(11977, 'USB', datetime.datetime(2026, 5, 7, 16, 41, 21, 135536), 585, None)
+(11972, 'ALLY', datetime.datetime(2026, 5, 7, 16, 27, 17, 878140), 586, None)
+(11971, 'BAC', datetime.datetime(2026, 5, 7, 16, 27, 17, 729406), 586, None)
+(11970, 'ABBV', datetime.datetime(2026, 5, 7, 16, 27, 17, 194545), 585, None)
+(11969, 'MS', datetime.datetime(2026, 5, 7, 16, 27, 17, 64470), 585, None)
+(11968, 'USB', datetime.datetime(2026, 5, 7, 16, 27, 16, 923696), 585, None)
+(11955, 'AIG', datetime.datetime(2026, 5, 7, 15, 36, 47, 569875), 586, None)
+(11954, 'ADT', datetime.datetime(2026, 5, 7, 15, 36, 46, 811031), 586, None)
+(11953, 'VLTO', datetime.datetime(2026, 5, 7, 15, 36, 45, 842200), 585, None)
+(11952, 'ALLY', datetime.datetime(2026, 5, 7, 15, 36, 45, 40188), 585, None)
+(11951, 'WFC', datetime.datetime(2026, 5, 7, 15, 36, 44, 254772), 585, None)
+(11948, 'ABNB', datetime.datetime(2026, 5, 7, 15, 22, 34, 801737), 586, None)
+(11947, 'UNTY', datetime.datetime(2026, 5, 7, 15, 22, 33, 340191), 585, None)
+(11946, 'AIG', datetime.datetime(2026, 5, 7, 15, 22, 32, 615988), 585, None)
+(11945, 'ADT', datetime.datetime(2026, 5, 7, 15, 22, 31, 834110), 585, None)
+
+--- last 5 brain reconcile / scan events from any *log* table? ---
+('brain_activation_events',)
+('brain_activation_path_log',)
+('brain_batch_jobs',)
+('brain_cycle_lease',)
+('brain_fire_log',)
+('brain_graph_edge_mutations',)
+('brain_graph_edge_weight_baseline',)
+('brain_graph_edges',)
+('brain_graph_metrics',)
+('brain_graph_nodes',)
+('brain_graph_snapshots',)
+('brain_integration_event',)
+('brain_learning_cycle_run',)
+('brain_node_states',)
+('brain_prediction_line',)
+('brain_prediction_snapshot',)
+('brain_stage_job',)
+('brain_validation_slice_ledger',)
+('brain_work_events',)
+('brain_worker_control',)
+('code_brain_events',)
+('code_brain_runtime_state',)
+('context_brain_outcome',)
+('context_brain_runtime_state',)
+('scan_patterns',)
+('trading_brain_performance_daily',)
+('trading_brain_runtime_modes',)
+('trading_scans',)
+
+## scheduler-worker last 30 log lines (mining/scan worker)
+2026-05-07 19:06:53,836 [INFO] apscheduler.executors.default: Job "Momentum live automation runner (every 2min; real orders) (trigger: interval[0:02:00], next run at: 2026-05-07 19:08:53 UTC)" executed successfully
+2026-05-07 19:06:58,230 [INFO] apscheduler.executors.default: Running job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:28 UTC)" (scheduled at 2026-05-07 19:06:58.229608+00:00)
+2026-05-07 19:06:58,230 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=start
+2026-05-07 19:06:58,366 [INFO] app.services.trading.brain_neural_mesh.metrics: [brain_neural_mesh] metrics flush published=30 processed=27 fires=0 queue_lag_s=0.00 stale_nodes=30
+2026-05-07 19:06:58,393 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=ok duration_ms=163
+2026-05-07 19:06:58,889 [INFO] apscheduler.executors.default: Job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:28 UTC)" executed successfully
+2026-05-07 19:07:07,862 [INFO] apscheduler.executors.default: Running job "Stale brain_batch_jobs reconciler (every 5min) (trigger: interval[0:05:00], next run at: 2026-05-07 19:12:07 UTC)" (scheduled at 2026-05-07 19:07:07.861857+00:00)
+2026-05-07 19:07:07,869 [INFO] apscheduler.executors.default: Job "Stale brain_batch_jobs reconciler (every 5min) (trigger: interval[0:05:00], next run at: 2026-05-07 19:12:07 UTC)" executed successfully
+2026-05-07 19:07:18,567 [INFO] apscheduler.executors.default: Running job "main.<locals>._watch_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:48 UTC)" (scheduled at 2026-05-07 19:07:18.567393+00:00)
+2026-05-07 19:07:18,568 [INFO] apscheduler.executors.default: Running job "main.<locals>._process_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:48 UTC)" (scheduled at 2026-05-07 19:07:18.567565+00:00)
+2026-05-07 19:07:18,571 [INFO] apscheduler.executors.default: Job "main.<locals>._process_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:48 UTC)" executed successfully
+2026-05-07 19:07:18,577 [INFO] apscheduler.executors.default: Job "main.<locals>._watch_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:48 UTC)" executed successfully
+2026-05-07 19:07:28,230 [INFO] apscheduler.executors.default: Running job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:58 UTC)" (scheduled at 2026-05-07 19:07:28.229608+00:00)
+2026-05-07 19:07:28,230 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=start
+2026-05-07 19:07:28,285 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=ok duration_ms=55
+2026-05-07 19:07:28,765 [INFO] apscheduler.executors.default: Job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:58 UTC)" executed successfully
+2026-05-07 19:07:42,863 [INFO] apscheduler.executors.default: Running job "Momentum paper automation runner (every 1min, heartbeat) (trigger: interval[0:01:00], next run at: 2026-05-07 19:08:42 UTC)" (scheduled at 2026-05-07 19:07:42.862697+00:00)
+2026-05-07 19:07:42,863 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=momentum_paper_runner_batch phase=start
+2026-05-07 19:07:43,046 [INFO] app.services.trading_scheduler: [scheduler] Momentum paper runner: ticked 2 session(s)
+2026-05-07 19:07:43,046 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=momentum_paper_runner_batch phase=ok duration_ms=183
+2026-05-07 19:07:43,515 [INFO] apscheduler.executors.default: Job "Momentum paper automation runner (every 1min, heartbeat) (trigger: interval[0:01:00], next run at: 2026-05-07 19:08:42 UTC)" executed successfully
+2026-05-07 19:07:48,567 [INFO] apscheduler.executors.default: Running job "main.<locals>._watch_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:18 UTC)" (scheduled at 2026-05-07 19:07:48.567393+00:00)
+2026-05-07 19:07:48,567 [INFO] apscheduler.executors.default: Running job "main.<locals>._process_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:18 UTC)" (scheduled at 2026-05-07 19:07:48.567565+00:00)
+2026-05-07 19:07:48,570 [INFO] apscheduler.executors.default: Job "main.<locals>._process_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:18 UTC)" executed successfully
+2026-05-07 19:07:48,574 [INFO] apscheduler.executors.default: Job "main.<locals>._watch_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:18 UTC)" executed successfully
+2026-05-07 19:07:58,230 [INFO] apscheduler.executors.default: Running job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:28 UTC)" (scheduled at 2026-05-07 19:07:58.229608+00:00)
+2026-05-07 19:07:58,230 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=start
+2026-05-07 19:07:58,294 [INFO] app.services.trading.brain_neural_mesh.metrics: [brain_neural_mesh] metrics flush published=30 processed=27 fires=0 queue_lag_s=0.00 stale_nodes=30
+2026-05-07 19:07:58,316 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=ok duration_ms=86
+2026-05-07 19:07:58,750 [INFO] apscheduler.executors.default: Job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:28 UTC)" executed successfully
+
+## chili-cron / chili-mining last 20 lines (if exist)
+
+### container: chili-home-copilot-autotrader-worker-1
+2026-05-07 19:07:15,382 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:07:25 UTC)" executed successfully
+2026-05-07 19:07:25,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:07:35 UTC)" (scheduled at 2026-05-07 19:07:25.295885+00:00)
+2026-05-07 19:07:25,383 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:07:25,384 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:07:35 UTC)" executed successfully
+2026-05-07 19:07:30,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:00 UTC)" (scheduled at 2026-05-07 19:07:30.296073+00:00)
+2026-05-07 19:07:31,085 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:00 UTC)" executed successfully
+2026-05-07 19:07:35,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:07:45 UTC)" (scheduled at 2026-05-07 19:07:35.295885+00:00)
+2026-05-07 19:07:35,372 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:07:35,373 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:07:45 UTC)" executed successfully
+2026-05-07 19:07:45,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:07:55 UTC)" (scheduled at 2026-05-07 19:07:45.295885+00:00)
+2026-05-07 19:07:45,378 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:07:45,379 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:07:55 UTC)" executed successfully
+2026-05-07 19:07:55,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:08:05 UTC)" (scheduled at 2026-05-07 19:07:55.295885+00:00)
+2026-05-07 19:07:55,378 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:07:55,379 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:08:05 UTC)" executed successfully
+2026-05-07 19:08:00,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:30 UTC)" (scheduled at 2026-05-07 19:08:00.296073+00:00)
+2026-05-07 19:08:03,038 [INFO] apscheduler.executors.default: Job "AutoTrader v1 monitor (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:30 UTC)" executed successfully
+2026-05-07 19:08:05,296 [INFO] apscheduler.executors.default: Running job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:08:15 UTC)" (scheduled at 2026-05-07 19:08:05.295885+00:00)
+2026-05-07 19:08:05,384 [INFO] app.services.trading.auto_trader: [autotrader] tick uid=1 candidate_pool=0 batch=0 processed=0 placed=0 scaled_in=0 skipped=0 last_kind=- last_reason=- last_alert_id=- last_ticker=-
+2026-05-07 19:08:05,385 [INFO] apscheduler.executors.default: Job "AutoTrader v1 tick (every 10s) (trigger: interval[0:00:10], next run at: 2026-05-07 19:08:15 UTC)" executed successfully
+
+### container: chili-home-copilot-brain-worker-1
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/125 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/124 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/123 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/123 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/494 [00:00<?, ?bar/s]
+                                                                
+System.Management.Automation.RemoteException
+FractionalBacktest.run:   0%|          | 0/498 [00:00<?, ?bar/s]2026-05-07 19:07:43,783 [INFO] [exit_engine_ops] mode=shadow source=backtest position_id=none ticker=ETN legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true config_hash=b692d5059996c1d8 sample_pct=1.000
+System.Management.Automation.RemoteException
+                                                                
+2026-05-07 19:07:44,887 [INFO] [exit_parity] persisted 50 backtest parity rows ticker=ETN
+
+### container: chili-home-copilot-broker-sync-worker-1
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69f54360-97ca-4462-9197-00aec5562ecc/
+2026-05-07 19:08:01,987 [INFO] app.services.broker_service: [broker] Order sync: 0 checked, 0 filled, 0 cancelled, 0 errors
+2026-05-07 19:08:01,987 [INFO] app.services.trading_scheduler: [scheduler] RH order sync (user=1): {'synced': 0, 'filled': 0, 'cancelled': 0, 'errors': 0}
+2026-05-07 19:08:02,498 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position XLM-USD qty=1851.0 avg=0.16356024 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+2026-05-07 19:08:02,843 [WARNING] app.services.broker_service: [broker_sync] FIX C2: position GRT-USD qty=12376.0 avg=0.02446752 present in broker but no matching filled buy order found in recent history; REFUSING to create phantom Trade row. Next reconcile pass will retry.
+2026-05-07 19:08:03,027 [WARNING] app.services.broker_service: [broker_sync] skipping DOGE-USD: broker returned qty=1.0 but avg_price=0 (likely legacy/incomplete position data); not writing Trade row.
+2026-05-07 19:08:03,057 [WARNING] app.services.broker_service: [broker_sync] skipping ETH-USD: broker returned qty=1.34927980988e-07 but avg_price=0 (likely legacy/incomplete position data); not writing Trade row.
+2026-05-07 19:08:03,158 [INFO] app.services.broker_service: [broker] Position sync: 0 created, 20 updated, 0 closed, 0 duplicates cancelled
+2026-05-07 19:08:03,158 [INFO] app.services.trading_scheduler: [scheduler] RH position sync (user=1): {'created': 0, 'updated': 20, 'closed': 0, 'reopened': 0, 'deduped': 0, '_live_tickers': {'DOGE-USD', 'QNT-USD', 'ETH-USD', 'XRP-USD', 'VFS', 'IMTX', 'HBAR-USD', 'RAY-USD', 'TLS', 'GRT-USD', 'RENDER-USD', 'AAVE-USD', 'XLM-USD', 'ADA-USD', 'SOL-USD', 'AVAX-USD', 'XPL-USD', 'DOT-USD', 'CRDL', 'CCCC', 'PED', 'AIDX', 'ARB-USD', 'TRUMP-USD'}}
+2026-05-07 19:08:03,158 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=broker_sync phase=ok duration_ms=3157
+2026-05-07 19:08:03,349 [INFO] apscheduler.executors.default: Job "Robinhood order+position sync (ET 8am-8pm every 2min) (trigger: cron[day_of_week='mon-fri', hour='8-20', minute='*/2'], next run at: 2026-05-07 15:10:00 EDT)" executed successfully
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69f5f822-a327-44d4-8d49-36a67eec4f7e/
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69f7f650-5555-4b0f-82b3-88198c4be505/
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69f44374-31c2-425c-9b57-513c2a1fdb52/
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69f438fb-1652-41c9-b9c4-732ac8394abf/
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69f800c2-e39c-49b7-92d9-5925da3061b6/
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69fb2b61-e741-4004-a7c7-687fd5ffe6b4/
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69fb1d2f-3a1a-4421-ba8e-e8cd6504d48d/
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69f9e730-b612-4125-be54-9039150b5a8e/
+404 Client Error: Not Found for url: https://api.robinhood.com/orders/69f43907-e54e-4cea-9e8e-315f85d3f16e/
+
+### container: chili-home-copilot-chili-1
+INFO:     172.18.0.1:58746 - "GET /api/brain/status HTTP/1.1" 200 OK
+INFO:     172.18.0.1:48902 - "GET /api/trading/fast-path/recent-decisions?limit=30&minutes=120 HTTP/1.1" 200 OK
+INFO:     172.18.0.1:48884 - "GET /api/trading/fast-path/realized-stats?include_inherited=true HTTP/1.1" 200 OK
+INFO:     172.18.0.1:53238 - "GET /api/trading/fast-path/closed-trades?limit=50&include_inherited=true HTTP/1.1" 200 OK
+INFO:     172.18.0.1:53238 - "GET /api/trading/brain/graph/live-overlay?activation_limit=80&time_window_sec=2 HTTP/1.1" 200 OK
+INFO:     172.18.0.1:58746 - "GET /api/trading/fast-path/paper-trades?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33526 - "GET /api/brain/status HTTP/1.1" 200 OK
+INFO:     172.18.0.1:58746 - "GET /api/trading/scan/status HTTP/1.1" 200 OK
+INFO:     172.18.0.1:58746 - "GET /api/trading/scan/status HTTP/1.1" 200 OK
+INFO:     172.18.0.1:58746 - "GET /api/brain/status HTTP/1.1" 200 OK
+INFO:     172.18.0.1:58746 - "GET /api/trading/brain/graph/live-overlay?activation_limit=80&time_window_sec=2 HTTP/1.1" 200 OK
+INFO:     172.18.0.1:58746 - "GET /api/trading/fast-path/recent-decisions?limit=30&minutes=120 HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42422 - "GET /api/trading/fast-path/realized-stats?include_inherited=true HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42428 - "GET /api/trading/fast-path/closed-trades?limit=50&include_inherited=true HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42428 - "GET /api/trading/quote?ticker=ALMU HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42428 - "GET /api/trading/scan/status HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42428 - "GET /api/trading/scan/status HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42428 - "GET /api/brain/status HTTP/1.1" 200 OK
+INFO:     172.18.0.1:53238 - "GET /api/trading/fast-path/paper-trades?limit=50 HTTP/1.1" 200 OK
+INFO:     172.18.0.1:53238 - "GET /api/trading/brain/graph/live-overlay?activation_limit=80&time_window_sec=2 HTTP/1.1" 200 OK
+
+### container: chili-home-copilot-fast-data-worker-1
+2026-05-07 19:07:09,655 [INFO] app.services.trading.fast_path.ws_client: [fast_path] ALERT ticker=BTC-USD type=imbalance_short score=0.377 features={'imbalance': 0.3113464938311359, 'spread_bps': 0.06743847082438126, 'bid_total_size': 0.77892366, 'ask_total_size': 1.7228667099999997, 'best_bid': 80072.72, 'best_ask': 80073.26}
+2026-05-07 19:07:11,997 [INFO] app.services.trading.fast_path.ws_client: [fast_path] ALERT ticker=ETH-USD type=imbalance_short score=0.365 features={'imbalance': 0.3173507748381872, 'spread_bps': 0.0436451561524101, 'bid_total_size': 23.976443259999996, 'ask_total_size': 51.57542288, 'best_bid': 2291.2, 'best_ask': 2291.21}
+2026-05-07 19:07:22,034 [INFO] app.services.trading.fast_path.ws_client: [fast_path] ALERT ticker=ETH-USD type=imbalance_long score=0.337 features={'imbalance': 0.6682511811209731, 'spread_bps': 0.04366612011334973, 'bid_total_size': 63.71543904, 'ask_total_size': 31.631102560000002, 'best_bid': 2290.1, 'best_ask': 2290.11}
+2026-05-07 19:07:39,048 [INFO] app.services.trading.fast_path.ws_client: [fast_path] ALERT ticker=BTC-USD type=imbalance_long score=0.955 features={'imbalance': 0.9773238317487438, 'spread_bps': 0.001249032703399914, 'bid_total_size': 3.566689190000001, 'ask_total_size': 0.08275542000000001, 'best_bid': 80061.95, 'best_ask': 80061.96}
+2026-05-07 19:07:39,651 [INFO] aiohttp.access: 127.0.0.1 [07/May/2026:19:07:39 +0000] "GET /healthz HTTP/1.1" 200 405 "-" "Python-urllib/3.11"
+2026-05-07 19:07:41,438 [INFO] app.services.trading.fast_path.ws_client: [fast_path] ALERT ticker=SOL-USD type=imbalance_long score=0.390 features={'imbalance': 0.6949833785071113, 'spread_bps': 1.1314137014205032, 'bid_total_size': 21089.857820399997, 'ask_total_size': 9255.98709132, 'best_bid': 88.38, 'best_ask': 88.39}
+2026-05-07 19:07:49,279 [INFO] app.services.trading.fast_path.supervisor: [fast_path] decay_miner watchdog: OK
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] ws raw_messages=385017 candles_events=2169 candles=3753 filtered_unclosed=347 filtered_dedupe=2821 heartbeats=5094 subscriptions=9 unknown=0 last_unknown=None
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] book snapshots=20 updates_recv=377725 updates_applied=5091297 malformed=0 emitted=77722 skip_no_snap=0 skip_throttled=300023 skip_empty=0 tickers=5 levels_held=39757 writer_books_received=77722 writer_books_written=77720
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] decay_miner alerts=570 exits=0 book_ticks=77720 obs_scheduled=4560 obs_finalized=886 backfilled=0 pending_heap=1201 validations=0 db_errors=0 last_finalize=2026-05-07T19:07:28.220752
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] exit_manager polls=5138 bootstrap=2 open=2 stop_hit=0 target_hit=0 time_stop=0 skipped_no_book=59 db_errors=0 last_decision=None max_hold_s=14400 tickers=['SOL-USD']
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] executor mode=paper live_authorized=False polls=5119 alerts_seen=582 paper_fill=1 live_placed=0 rejected=581 db_errors=0 last_alert_id=44852 open_positions=1 tickers_held=1 daily_used_usd=25.00
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] scanner bars_seen=585 books_seen=77722 vol_breakout=13 vol_pullback=13 pullback_heap=0 pullback_dropped=0 imb_long=328 imb_short=224 spread_squeeze=4 suppressed_cooldown=16081 suppressed_warmup=100 tickers=5 writer_alerts_received=582 writer_alerts_written=582 writer_alerts_dropped=0
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] pair=BTC-USD state=streaming last_bar_at=2026-05-07T19:06:00 errors_60s=1 reconnects=2 queue_depth=0/10000 writer_bars_received=585 writer_bars_written=585 writer_bars_dropped=0
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] pair=ETH-USD state=streaming last_bar_at=2026-05-07T19:06:00 errors_60s=1 reconnects=2 queue_depth=0/10000 writer_bars_received=585 writer_bars_written=585 writer_bars_dropped=0
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] pair=SOL-USD state=streaming last_bar_at=2026-05-07T19:06:00 errors_60s=1 reconnects=2 queue_depth=0/10000 writer_bars_received=585 writer_bars_written=585 writer_bars_dropped=0
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] pair=AVAX-USD state=streaming last_bar_at=2026-05-07T19:06:00 errors_60s=1 reconnects=2 queue_depth=0/10000 writer_bars_received=585 writer_bars_written=585 writer_bars_dropped=0
+2026-05-07 19:07:50,377 [INFO] app.services.trading.fast_path.supervisor: [fast_path] pair=DOGE-USD state=streaming last_bar_at=2026-05-07T19:06:00 errors_60s=1 reconnects=2 queue_depth=0/10000 writer_bars_received=585 writer_bars_written=585 writer_bars_dropped=0
+2026-05-07 19:07:51,550 [INFO] app.services.trading.fast_path.ws_client: [fast_path] ALERT ticker=BTC-USD type=imbalance_short score=0.439 features={'imbalance': 0.280361746661111, 'spread_bps': 0.0012485241675653305, 'bid_total_size': 1.07507318, 'ask_total_size': 2.7595197800000006, 'best_bid': 80094.56, 'best_ask': 80094.57}
+2026-05-07 19:08:05,622 [INFO] app.services.trading.fast_path.ws_client: [fast_path] ALERT ticker=ETH-USD type=imbalance_long score=0.305 features={'imbalance': 0.6523552394899731, 'spread_bps': 0.04361755257447602, 'bid_total_size': 60.964496430000004, 'ask_total_size': 32.48841502, 'best_bid': 2292.65, 'best_ask': 2292.66}
+
+### container: chili-home-copilot-ollama-1
+[GIN] 2026/05/07 - 19:03:11 | 200 |      24.961┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:03:11 | 200 |   51.603987ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:03:41 | 200 |      28.452┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:03:41 | 200 |    59.75583ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:04:12 | 200 |      31.481┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:04:12 | 200 |   54.050129ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:04:42 | 200 |      36.602┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:04:42 | 200 |    68.86445ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:05:12 | 200 |      38.351┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:05:12 | 200 |   73.685278ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:05:42 | 200 |      30.821┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:05:42 | 200 |   79.451718ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:06:12 | 200 |      49.292┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:06:12 | 200 |   74.917123ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:06:42 | 200 |      27.491┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:06:42 | 200 |   52.937279ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:07:12 | 200 |      35.201┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:07:13 | 200 |   58.172505ms |       127.0.0.1 | GET      "/api/tags"
+[GIN] 2026/05/07 - 19:07:43 | 200 |      29.451┬╡s |       127.0.0.1 | HEAD     "/"
+[GIN] 2026/05/07 - 19:07:43 | 200 |   68.981519ms |       127.0.0.1 | GET      "/api/tags"
+
+### container: chili-home-copilot-postgres-1
+2026-05-07 19:07:53.260 UTC [11358] ERROR:  invalid input syntax for type json at character 155
+2026-05-07 19:07:53.260 UTC [11358] DETAIL:  Token "NaN" is invalid.
+2026-05-07 19:07:53.260 UTC [11358] CONTEXT:  JSON data, line 1: ...": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN...
+2026-05-07 19:07:53.260 UTC [11358] STATEMENT:  INSERT INTO trading_backtest_param_sets (param_hash, params_json, created_at) VALUES ('a3d99265cca55a9c1d897944ea3cf1867a3960018e3f8ce4f8a00c2fe9ba3bde', '{"chart_time_from": 1715054400, "chart_time_to": 1778126400, "commission_used": 0.001, "data_provenance": {"chart_time_from": 1715054400, "chart_time_to": 1778126400, "interval": "1d", "ohlc_bars": 502, "ohlc_end": null, "ohlc_start": null, "period": "2y", "provider_hint": "market_data_fetch", "rules_fingerprint": "399e6db88207c9bb", "scan_pattern_id": 649, "ticker": "PFE"}, "in_sample_bars": 376, "interval": "1d", "kpis": {"beta": 0.0, "cagr_pct": 0.0, "information_ratio": -0.013, "jensen_alpha_pct": 0.0, "max_drawdown_pct": -0.0, "return_ann_pct": 0.0, "volatility_ann_pct": 0.0}, "ohlc_bars": 502, "oos_holdout_fraction": 0.25, "oos_return_pct": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN, "out_of_sample_bars": 126, "period": "2y", "provenance_issues": [], "provenance_status": "complete", "research_integrity": {"causality_checked_bars": 49, "lookahead_ok": true, "mismatches": [], "provenance_issues": [], "provenance_status": "complete", "recursive_ok": true, "recursive_warnings": []}, "spread_used": 0.0002, "strategy_id": "dynamic_pattern"}'::JSONB, '2026-05-07T19:07:53.260189'::timestamp) RETURNING trading_backtest_param_sets.id
+2026-05-07 19:07:54.405 UTC [11361] ERROR:  invalid input syntax for type json at character 155
+2026-05-07 19:07:54.405 UTC [11361] DETAIL:  Token "NaN" is invalid.
+2026-05-07 19:07:54.405 UTC [11361] CONTEXT:  JSON data, line 1: ...": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN...
+2026-05-07 19:07:54.405 UTC [11361] STATEMENT:  INSERT INTO trading_backtest_param_sets (param_hash, params_json, created_at) VALUES ('544a27647f2b26dc4d952f9cd85763ed5555f68be702e2568813311e4f7a292d', '{"chart_time_from": 1715054400, "chart_time_to": 1778126400, "commission_used": 0.001, "data_provenance": {"chart_time_from": 1715054400, "chart_time_to": 1778126400, "interval": "1d", "ohlc_bars": 496, "ohlc_end": null, "ohlc_start": null, "period": "2y", "provider_hint": "market_data_fetch", "rules_fingerprint": "399e6db88207c9bb", "scan_pattern_id": 649, "ticker": "VRTX"}, "in_sample_bars": 372, "interval": "1d", "kpis": {"beta": 0.0, "cagr_pct": 0.0, "information_ratio": -0.226, "jensen_alpha_pct": 0.0, "max_drawdown_pct": -0.0, "return_ann_pct": 0.0, "volatility_ann_pct": 0.0}, "ohlc_bars": 496, "oos_holdout_fraction": 0.25, "oos_return_pct": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN, "out_of_sample_bars": 124, "period": "2y", "provenance_issues": [], "provenance_status": "complete", "research_integrity": {"causality_checked_bars": 49, "lookahead_ok": true, "mismatches": [], "provenance_issues": [], "provenance_status": "complete", "recursive_ok": true, "recursive_warnings": []}, "spread_used": 0.0002, "strategy_id": "dynamic_pattern"}'::JSONB, '2026-05-07T19:07:54.405253'::timestamp) RETURNING trading_backtest_param_sets.id
+2026-05-07 19:07:55.146 UTC [11362] ERROR:  invalid input syntax for type json at character 155
+2026-05-07 19:07:55.146 UTC [11362] DETAIL:  Token "NaN" is invalid.
+2026-05-07 19:07:55.146 UTC [11362] CONTEXT:  JSON data, line 1: ...": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN...
+2026-05-07 19:07:55.146 UTC [11362] STATEMENT:  INSERT INTO trading_backtest_param_sets (param_hash, params_json, created_at) VALUES ('3bca6aede2cb231605afd2497080c335a91b2a8a2ad044e76ddcb172cbf32053', '{"chart_time_from": 1715054400, "chart_time_to": 1778126400, "commission_used": 0.001, "data_provenance": {"chart_time_from": 1715054400, "chart_time_to": 1778126400, "interval": "1d", "ohlc_bars": 502, "ohlc_end": null, "ohlc_start": null, "period": "2y", "provider_hint": "market_data_fetch", "rules_fingerprint": "399e6db88207c9bb", "scan_pattern_id": 649, "ticker": "MRNA"}, "in_sample_bars": 376, "interval": "1d", "kpis": {"beta": 0.0, "cagr_pct": 0.0, "information_ratio": 0.35, "jensen_alpha_pct": 0.0, "max_drawdown_pct": -0.0, "return_ann_pct": 0.0, "volatility_ann_pct": 0.0}, "ohlc_bars": 502, "oos_holdout_fraction": 0.25, "oos_return_pct": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN, "out_of_sample_bars": 126, "period": "2y", "provenance_issues": [], "provenance_status": "complete", "research_integrity": {"causality_checked_bars": 49, "lookahead_ok": true, "mismatches": [], "provenance_issues": [], "provenance_status": "complete", "recursive_ok": true, "recursive_warnings": []}, "spread_used": 0.0002, "strategy_id": "dynamic_pattern"}'::JSONB, '2026-05-07T19:07:55.145910'::timestamp) RETURNING trading_backtest_param_sets.id
+2026-05-07 19:07:56.063 UTC [11348] ERROR:  invalid input syntax for type json at character 155
+2026-05-07 19:07:56.063 UTC [11348] DETAIL:  Token "NaN" is invalid.
+2026-05-07 19:07:56.063 UTC [11348] CONTEXT:  JSON data, line 1: ...": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN...
+2026-05-07 19:07:56.063 UTC [11348] STATEMENT:  INSERT INTO trading_backtest_param_sets (param_hash, params_json, created_at) VALUES ('d89242426c7fa68dd826a5aeb3d0716654066a7e0419db9f94b26359358f6923', '{"chart_time_from": 1715054400, "chart_time_to": 1778126400, "commission_used": 0.001, "data_provenance": {"chart_time_from": 1715054400, "chart_time_to": 1778126400, "interval": "1d", "ohlc_bars": 501, "ohlc_end": null, "ohlc_start": null, "period": "2y", "provider_hint": "market_data_fetch", "rules_fingerprint": "399e6db88207c9bb", "scan_pattern_id": 649, "ticker": "PEP"}, "in_sample_bars": 375, "interval": "1d", "kpis": {"beta": 0.0, "cagr_pct": 0.0, "information_ratio": 0.21, "jensen_alpha_pct": 0.0, "max_drawdown_pct": -0.0, "return_ann_pct": 0.0, "volatility_ann_pct": 0.0}, "ohlc_bars": 501, "oos_holdout_fraction": 0.25, "oos_return_pct": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN, "out_of_sample_bars": 126, "period": "2y", "provenance_issues": [], "provenance_status": "complete", "research_integrity": {"causality_checked_bars": 49, "lookahead_ok": true, "mismatches": [], "provenance_issues": [], "provenance_status": "complete", "recursive_ok": true, "recursive_warnings": []}, "spread_used": 0.0002, "strategy_id": "dynamic_pattern"}'::JSONB, '2026-05-07T19:07:56.063366'::timestamp) RETURNING trading_backtest_param_sets.id
+2026-05-07 19:07:56.936 UTC [11360] ERROR:  invalid input syntax for type json at character 155
+2026-05-07 19:07:56.936 UTC [11360] DETAIL:  Token "NaN" is invalid.
+2026-05-07 19:07:56.936 UTC [11360] CONTEXT:  JSON data, line 1: ...": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN...
+2026-05-07 19:07:56.936 UTC [11360] STATEMENT:  INSERT INTO trading_backtest_param_sets (param_hash, params_json, created_at) VALUES ('a4e7fca15a364fdceb0314ca6b954922ebd1310c930166225c313419fdf692d8', '{"chart_time_from": 1715054400, "chart_time_to": 1778126400, "commission_used": 0.001, "data_provenance": {"chart_time_from": 1715054400, "chart_time_to": 1778126400, "interval": "1d", "ohlc_bars": 495, "ohlc_end": null, "ohlc_start": null, "period": "2y", "provider_hint": "market_data_fetch", "rules_fingerprint": "399e6db88207c9bb", "scan_pattern_id": 649, "ticker": "NKE"}, "in_sample_bars": 371, "interval": "1d", "kpis": {"beta": 0.0, "cagr_pct": 0.0, "information_ratio": 0.756, "jensen_alpha_pct": 0.0, "max_drawdown_pct": -0.0, "return_ann_pct": 0.0, "volatility_ann_pct": 0.0}, "ohlc_bars": 495, "oos_holdout_fraction": 0.25, "oos_return_pct": 0.0, "oos_trade_count": 0, "oos_win_rate": NaN, "out_of_sample_bars": 124, "period": "2y", "provenance_issues": [], "provenance_status": "complete", "research_integrity": {"causality_checked_bars": 49, "lookahead_ok": true, "mismatches": [], "provenance_issues": [], "provenance_status": "complete", "recursive_ok": true, "recursive_warnings": []}, "spread_used": 0.0002, "strategy_id": "dynamic_pattern"}'::JSONB, '2026-05-07T19:07:56.936423'::timestamp) RETURNING trading_backtest_param_sets.id
+
+### container: chili-home-copilot-scheduler-worker-1
+2026-05-07 19:07:18,571 [INFO] apscheduler.executors.default: Job "main.<locals>._process_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:48 UTC)" executed successfully
+2026-05-07 19:07:18,577 [INFO] apscheduler.executors.default: Job "main.<locals>._watch_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:48 UTC)" executed successfully
+2026-05-07 19:07:28,230 [INFO] apscheduler.executors.default: Running job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:58 UTC)" (scheduled at 2026-05-07 19:07:28.229608+00:00)
+2026-05-07 19:07:28,230 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=start
+2026-05-07 19:07:28,285 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=ok duration_ms=55
+2026-05-07 19:07:28,765 [INFO] apscheduler.executors.default: Job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:07:58 UTC)" executed successfully
+2026-05-07 19:07:42,863 [INFO] apscheduler.executors.default: Running job "Momentum paper automation runner (every 1min, heartbeat) (trigger: interval[0:01:00], next run at: 2026-05-07 19:08:42 UTC)" (scheduled at 2026-05-07 19:07:42.862697+00:00)
+2026-05-07 19:07:42,863 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=momentum_paper_runner_batch phase=start
+2026-05-07 19:07:43,046 [INFO] app.services.trading_scheduler: [scheduler] Momentum paper runner: ticked 2 session(s)
+2026-05-07 19:07:43,046 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=momentum_paper_runner_batch phase=ok duration_ms=183
+2026-05-07 19:07:43,515 [INFO] apscheduler.executors.default: Job "Momentum paper automation runner (every 1min, heartbeat) (trigger: interval[0:01:00], next run at: 2026-05-07 19:08:42 UTC)" executed successfully
+2026-05-07 19:07:48,567 [INFO] apscheduler.executors.default: Running job "main.<locals>._watch_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:18 UTC)" (scheduled at 2026-05-07 19:07:48.567393+00:00)
+2026-05-07 19:07:48,567 [INFO] apscheduler.executors.default: Running job "main.<locals>._process_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:18 UTC)" (scheduled at 2026-05-07 19:07:48.567565+00:00)
+2026-05-07 19:07:48,570 [INFO] apscheduler.executors.default: Job "main.<locals>._process_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:18 UTC)" executed successfully
+2026-05-07 19:07:48,574 [INFO] apscheduler.executors.default: Job "main.<locals>._watch_job (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:18 UTC)" executed successfully
+2026-05-07 19:07:58,230 [INFO] apscheduler.executors.default: Running job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:28 UTC)" (scheduled at 2026-05-07 19:07:58.229608+00:00)
+2026-05-07 19:07:58,230 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=start
+2026-05-07 19:07:58,294 [INFO] app.services.trading.brain_neural_mesh.metrics: [brain_neural_mesh] metrics flush published=30 processed=27 fires=0 queue_lag_s=0.00 stale_nodes=30
+2026-05-07 19:07:58,316 [INFO] app.services.trading_scheduler: [scheduler_job] job_id=neural_mesh_drain phase=ok duration_ms=86
+2026-05-07 19:07:58,750 [INFO] apscheduler.executors.default: Job "Neural mesh activation drain (every 30s) (trigger: interval[0:00:30], next run at: 2026-05-07 19:08:28 UTC)" executed successfully
+
+---
+# end
