@@ -101,6 +101,76 @@ class FastPathSettings:
     healthz_port: int = 8090
     metrics_log_interval_s: int = 60
 
+    # ── Universe rotation (f-fastpath-universe-rotation, 2026-05-07) ─
+    universe_rotation_enabled: bool = False
+    """Master flag for the data-driven universe rotation. When False
+    (default), the executor + ws_client read from ``pairs`` (the
+    hardcoded 5-pair list). When True, ws_client reads
+    ``fast_path_universe WHERE status='active'`` and the rotator runs
+    hourly. Rollback path: flip this False and the system reverts to
+    the 5-pair fallback bit-identically."""
+
+    universe_top_n: int = 25
+    """Top-N pairs by composite_score that the rotator promotes per
+    pass. Mid-tier sweet spot per the 2026-05-07 alpha replay; tighten
+    for volatility, loosen for coverage."""
+
+    universe_hysteresis_ranks: int = 3
+    """A pair must drop ≥ this many ranks below the top-N cut to be
+    demoted. Avoids subscription churn on rank-edge oscillation."""
+
+    universe_shadow_window_h: int = 24
+    """Cold-start window length (hours) before a newly-promoted pair
+    transitions from ``status='shadow'`` to ``status='active'`` and
+    becomes admission-eligible. ``decay_miner`` accumulates
+    ``fast_signal_decay`` rows during this window."""
+
+    # Admission gate thresholds (settings-tunable per the brief's
+    # no-magic-numbers rule). Cited from
+    # docs/STRATEGY/RESEARCH/2026-05-07_fastpath-universe-alpha-replay.md.
+    universe_min_volume_24h_usd: float = 10_000_000.0
+    """Lower bound for 24h-volume filter (USD). $10M filters out
+    illiquid pairs whose round-trip cost exceeds reasonable alpha."""
+
+    universe_max_spread_bps: float = 10.0
+    """Upper bound for top-of-book spread (bps). 10 bps is the
+    economic-line consensus from the alpha replay; pairs above are
+    cost-prohibitive for alpha extraction at fast horizons."""
+
+    universe_min_top_of_book_usd: float = 5_000.0
+    """Minimum top-of-book size (USD) on each side. Below this, market
+    impact dominates the predicted alpha at typical fast-path order
+    sizes."""
+
+    universe_min_trades_24h: int = 1_000
+    """Minimum 24h trade count. Below this, the order book is too
+    thin / discontinuous for the rotator's price snapshots to be
+    reliable."""
+
+    # Cost-aware admission gate (Step 5 of the brief). Off-by-default
+    # so behavior at switchover is bit-identical to current.
+    cost_aware_admission_enabled: bool = False
+    """When True, the executor applies ``gate_cost_aware_admission``:
+    rejects any signal whose ``mean_return < 2 × (taker_fee_bps +
+    median_spread_bps_for_ticker)`` at the best-Sharpe horizon. When
+    False (default), the gate is a no-op."""
+
+    cost_aware_taker_fee_bps: float = 5.0
+    """Coinbase Advanced Trade taker fee in bps. Maker-only mode
+    (separate brief: ``f-fastpath-maker-only``) flips this to the
+    maker rebate; in taker mode this is the round-trip cost component
+    we have to clear."""
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
 
 def load() -> FastPathSettings:
     """Read settings from the process environment. Called once at
@@ -119,6 +189,26 @@ def load() -> FastPathSettings:
         cb_threshold=_env_int("CHILI_FAST_PATH_CB_THRESHOLD", 5),
         healthz_port=_env_int("CHILI_FAST_PATH_HEALTHZ_PORT", 8090),
         metrics_log_interval_s=_env_int("CHILI_FAST_PATH_METRICS_INTERVAL_S", 60),
+        # f-fastpath-universe-rotation (2026-05-07)
+        universe_rotation_enabled=_env_bool(
+            "CHILI_FAST_PATH_UNIVERSE_ROTATION_ENABLED", False),
+        universe_top_n=_env_int("CHILI_FAST_PATH_UNIVERSE_TOP_N", 25),
+        universe_hysteresis_ranks=_env_int(
+            "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", 3),
+        universe_shadow_window_h=_env_int(
+            "CHILI_FAST_PATH_UNIVERSE_SHADOW_WINDOW_H", 24),
+        universe_min_volume_24h_usd=_env_float(
+            "CHILI_FAST_PATH_UNIVERSE_MIN_VOLUME_24H_USD", 10_000_000.0),
+        universe_max_spread_bps=_env_float(
+            "CHILI_FAST_PATH_UNIVERSE_MAX_SPREAD_BPS", 10.0),
+        universe_min_top_of_book_usd=_env_float(
+            "CHILI_FAST_PATH_UNIVERSE_MIN_TOP_OF_BOOK_USD", 5_000.0),
+        universe_min_trades_24h=_env_int(
+            "CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H", 1_000),
+        cost_aware_admission_enabled=_env_bool(
+            "CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED", False),
+        cost_aware_taker_fee_bps=_env_float(
+            "CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS", 5.0),
     )
 
 

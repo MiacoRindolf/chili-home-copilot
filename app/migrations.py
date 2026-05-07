@@ -14764,6 +14764,65 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_231_fast_path_universe(conn) -> None:
+    """f-fastpath-universe-rotation (2026-05-07).
+
+    Replaces the hardcoded 5-pair fast-path universe
+    (``settings.pairs`` = BTC/ETH/SOL/AVAX/DOGE) with a data-driven
+    mid-tier rotation read from this table, populated hourly by a new
+    ``universe_rotator`` job.
+
+    Rows represent the rotator's per-hour ranking decisions. The
+    ``status`` column gates the executor: ``active`` rows are eligible
+    for live admission (subject to all the existing gates), ``shadow``
+    rows are subscribed for data collection only (cold-start window
+    while ``decay_miner`` accumulates ``fast_signal_decay`` rows), and
+    ``inactive`` rows have been demoted out of the top-N and unsubscribed.
+
+    The four gate values (volume_24h_usd / spread_bps / top_of_book_usd
+    / trades_24h) are persisted alongside the composite_score so the
+    rotation decision is reproducible from the row alone.
+
+    ``rotation_at`` is the timestamp of the rotator pass that wrote
+    this row -- a single rotation pass writes one row per ticker for
+    the ranked top-N (one rank per ticker per pass). ``rank`` is the
+    rotator's ordering within that pass (lower = better composite).
+
+    Idempotent: ``CREATE TABLE IF NOT EXISTS`` + ``CREATE INDEX IF NOT
+    EXISTS``. Purely additive -- no destructive ALTERs.
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fast_path_universe (
+            id                  BIGSERIAL PRIMARY KEY,
+            ticker              VARCHAR(32) NOT NULL,
+            status              VARCHAR(16) NOT NULL,
+            rank                INTEGER NULL,
+            composite_score     DOUBLE PRECISION NULL,
+            volume_24h_usd      DOUBLE PRECISION NULL,
+            spread_bps          DOUBLE PRECISION NULL,
+            top_of_book_usd     DOUBLE PRECISION NULL,
+            trades_24h          INTEGER NULL,
+            rotation_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            promoted_at         TIMESTAMP NULL,
+            CONSTRAINT fast_path_universe_status_check
+                CHECK (status IN ('active', 'shadow', 'inactive'))
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_path_universe_status_rank
+            ON fast_path_universe (status, rank)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_path_universe_ticker_rotation
+            ON fast_path_universe (ticker, rotation_at DESC)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_path_universe_rotation_at
+            ON fast_path_universe (rotation_at DESC)
+    """))
+    conn.commit()
+
+
 def _migration_230_exit_parity_metric_v2(conn) -> None:
     """f-exit-parity-metric-v2 (2026-05-07).
 
@@ -15590,6 +15649,8 @@ MIGRATIONS = [
      _migration_229_paper_shadow_attribution),
     ("230_exit_parity_metric_v2",
      _migration_230_exit_parity_metric_v2),
+    ("231_fast_path_universe",
+     _migration_231_fast_path_universe),
 ]
 
 

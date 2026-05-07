@@ -3275,3 +3275,52 @@ class PatternRegimeAutopilotLog(Base):
     approval_id: Optional[int] = Column(Integer, nullable=True)
     days_in_stage: Optional[int] = Column(Integer, nullable=True)
     ops_log_excerpt: Optional[str] = Column(Text, nullable=True)
+
+
+class FastPathUniverseEntry(Base):
+    """f-fastpath-universe-rotation (Migration 231, 2026-05-07).
+
+    Per-rotation-pass row recording the rotator's ranking decision for
+    one ticker. Replaces the hardcoded 5-pair list
+    (``settings.pairs``) with a data-driven mid-tier rotation.
+
+    ``status`` gates the executor:
+
+    * ``active``   -- eligible for live admission (subject to all the
+                      other fast-path gates).
+    * ``shadow``   -- subscribed for data collection only; cold-start
+                      window while ``decay_miner`` accumulates
+                      ``fast_signal_decay`` rows. No executor admission.
+    * ``inactive`` -- demoted out of the top-N and unsubscribed.
+
+    The four gate values are persisted alongside the composite_score so
+    a single row reproduces the rotator's decision without re-querying
+    Coinbase. ``rank`` is the rotator's ordering within one pass
+    (lower = better composite); ``rotation_at`` groups rows from the
+    same pass.
+    """
+
+    __tablename__ = "fast_path_universe"
+    __table_args__ = (
+        Index("ix_fast_path_universe_status_rank", "status", "rank"),
+        Index(
+            "ix_fast_path_universe_ticker_rotation",
+            "ticker",
+            "rotation_at",
+        ),
+        Index("ix_fast_path_universe_rotation_at", "rotation_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    ticker: str = Column(String(32), nullable=False)
+    status: str = Column(String(16), nullable=False)
+    rank: Optional[int] = Column(Integer, nullable=True)
+    composite_score: Optional[float] = Column(Float, nullable=True)
+    volume_24h_usd: Optional[float] = Column(Float, nullable=True)
+    spread_bps: Optional[float] = Column(Float, nullable=True)
+    top_of_book_usd: Optional[float] = Column(Float, nullable=True)
+    trades_24h: Optional[int] = Column(Integer, nullable=True)
+    rotation_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    promoted_at: Optional[datetime] = Column(DateTime, nullable=True)
