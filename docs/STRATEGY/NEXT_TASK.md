@@ -1,6 +1,6 @@
 # NEXT_TASK: f-fastpath-universe-rotation
 
-STATUS: PENDING
+STATUS: DONE
 
 **Promoted 2026-05-07 after empirical research confirmed the current 5-pair fast-path universe is the wrong end of the liquidity spectrum.** Companion brief `f-fastpath-maker-only` is queued as the immediate follow-up and is the prerequisite for live activation — universe rotation alone does not clear Coinbase taker round-trip cost, but it surfaces the pairs that will clear maker round-trip once that mode ships.
 
