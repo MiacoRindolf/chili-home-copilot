@@ -437,6 +437,19 @@ def _phase_b_shadow_parity(
                 * 100.0
             )
 
+        # f-exit-parity-metric-v2 (Migration 230): compute the four new
+        # parity-decomposition fields via the shared pure helper so the
+        # live and backtest paths stay byte-identical on this logic.
+        from .exit_parity_metric import compute_parity_v2_fields
+        v2 = compute_parity_v2_fields(
+            legacy_action=legacy_action,
+            canonical_action=canonical_action,
+            legacy_exit_price=legacy_xp,
+            canonical_exit_price=canonical_xp,
+            canonical_reason_code=decision.reason_code,
+            direction="long" if is_long else "short",
+        )
+
         row_kwargs = dict(
             source="live",
             position_id=int(getattr(trade, "id", 0) or 0) or None,
@@ -450,6 +463,10 @@ def _phase_b_shadow_parity(
             pnl_diff_pct=pnl_diff_pct,
             agree_bool=bool(agree),
             agree_strict_bool=bool(agree_strict),
+            action_class=v2.action_class,
+            label_match=v2.label_match,
+            exit_price_drift_bps=v2.exit_price_drift_bps,
+            priority_winner=v2.priority_winner,
             mode=mode,
             config_hash=config_hash,
             provenance_json={

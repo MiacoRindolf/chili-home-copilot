@@ -1762,6 +1762,16 @@ class ExitParityLog(Base):
     row id emitted by the backtest adapter (or NULL if not tracked).
     ``config_hash`` is a stable hash of the ``ExitConfig`` used by the canonical
     evaluator so disagreements can be grouped by config flavor.
+
+    f-exit-parity-metric-v2 (Migration 230, 2026-05-07): adds four
+    nullable columns that decompose the parity decision into
+    statistically tractable signals. ``action_class`` partitions every
+    row into one of four states; ``label_match``, ``exit_price_drift_bps``
+    and ``priority_winner`` populate selectively per the brief's
+    decomposition. **Sign convention for ``exit_price_drift_bps``**:
+    positive ALWAYS means canonical produced better realized P/L
+    relative to legacy, regardless of whether the trade is long or
+    short — the row-construction code applies the direction-aware sign.
     """
 
     __tablename__ = "trading_exit_parity_log"
@@ -1775,6 +1785,9 @@ class ExitParityLog(Base):
             "agree_strict_bool",
             "created_at",
         ),
+        # Migration 230 indices for the verdict/cutover-gate query paths.
+        Index("ix_exit_parity_action_class_created", "action_class", "created_at"),
+        Index("ix_exit_parity_priority_winner_created", "priority_winner", "created_at"),
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -1794,6 +1807,13 @@ class ExitParityLog(Base):
     # definition across backtest + live should filter on this and
     # ``agree_strict_bool IS NOT NULL``.
     agree_strict_bool: Optional[bool] = Column(Boolean, nullable=True)
+    # Migration 230: v2 metric decomposition. NULL on pre-v2 rows;
+    # v2-era rows always populate ``action_class`` and selectively
+    # populate the other three per the brief's decomposition.
+    action_class: Optional[str] = Column(String(32), nullable=True)
+    label_match: Optional[bool] = Column(Boolean, nullable=True)
+    exit_price_drift_bps: Optional[float] = Column(Float, nullable=True)
+    priority_winner: Optional[str] = Column(String(32), nullable=True)
     mode: str = Column(String(16), nullable=False)
     config_hash: Optional[str] = Column(String(64), nullable=True)
     provenance_json: Optional[dict] = Column(JSONB, nullable=True)

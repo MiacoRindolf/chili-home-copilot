@@ -1447,6 +1447,19 @@ def _phase_b_bt_shadow_parity(
         agree_strict = (legacy_action == canonical_action)
         config_hash = cfg.config_hash()
 
+        # f-exit-parity-metric-v2 (Migration 230): compute the four
+        # parity-decomposition fields via the shared pure helper so the
+        # live and backtest paths stay byte-identical on this logic.
+        from .trading.exit_parity_metric import compute_parity_v2_fields
+        v2 = compute_parity_v2_fields(
+            legacy_action=legacy_action,
+            canonical_action=canonical_action,
+            legacy_exit_price=legacy_exit_price,
+            canonical_exit_price=decision.exit_price,
+            canonical_reason_code=decision.reason_code,
+            direction=state.direction,
+        )
+
         sink = getattr(strategy, "_parity_sink", None)
         if sink is not None:
             sink.append({
@@ -1460,6 +1473,10 @@ def _phase_b_bt_shadow_parity(
                 "canonical_exit_price": decision.exit_price,
                 "agree_bool": bool(agree),
                 "agree_strict_bool": bool(agree_strict),
+                "action_class": v2.action_class,
+                "label_match": v2.label_match,
+                "exit_price_drift_bps": v2.exit_price_drift_bps,
+                "priority_winner": v2.priority_winner,
                 "mode": mode,
                 "config_hash": config_hash,
                 "reason_code": decision.reason_code,
@@ -1553,6 +1570,11 @@ def _drain_backtest_parity_sink(strat_cls: type, ticker: str) -> None:
                     agree_strict_bool=bool(r.get("agree_strict_bool"))
                     if r.get("agree_strict_bool") is not None
                     else None,
+                    # f-exit-parity-metric-v2 (Migration 230) fields:
+                    action_class=r.get("action_class"),
+                    label_match=r.get("label_match"),
+                    exit_price_drift_bps=r.get("exit_price_drift_bps"),
+                    priority_winner=r.get("priority_winner"),
                     mode=r["mode"],
                     config_hash=r["config_hash"],
                     provenance_json={

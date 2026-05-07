@@ -14764,6 +14764,83 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_230_exit_parity_metric_v2(conn) -> None:
+    """f-exit-parity-metric-v2 (2026-05-07).
+
+    Replaces the binary ``agree_bool`` / ``agree_strict_bool`` parity
+    decision with a multi-dimensional, signed, statistically tractable
+    decomposition. Adds four nullable columns to
+    ``trading_exit_parity_log``:
+
+    ``action_class`` (CHECK constrained to four values):
+      * ``both_hold``           — neither engine fires
+      * ``both_close``          — both fire (label may match or not)
+      * ``canonical_only_close`` — canonical fires, legacy holds
+      * ``legacy_only_close``    — legacy fires, canonical holds
+
+    ``label_match`` (BOOLEAN, NULL unless ``action_class='both_close'``):
+      true iff the two engines picked the same exit reason.
+
+    ``exit_price_drift_bps`` (DOUBLE PRECISION, signed): basis-points
+    drift of canonical's exit price vs legacy's. Direction-aware: a
+    positive value ALWAYS means canonical produced better realized P/L
+    (regardless of whether the trade is long or short). NULL unless
+    both engines closed AND both prices are present.
+
+    ``priority_winner`` (VARCHAR(32)): the canonical
+    ``ExitDecision.reason_code`` that won when labels disagreed (for
+    ``both_close`` mismatches), or the canonical reason for canonical-
+    only closes, or the legacy action for legacy-only closes. NULL on
+    ``both_hold`` and on ``both_close`` with matching labels.
+
+    Two BTree indices for the verdict-query GROUP BY paths:
+    ``(action_class, created_at)`` and ``(priority_winner, created_at)``.
+
+    Existing rows pre-date the metric and stay NULL on these columns;
+    verdict queries filter on ``action_class IS NOT NULL`` to restrict
+    to v2-era rows.
+
+    Idempotent: ``ADD COLUMN IF NOT EXISTS`` + ``CREATE INDEX IF NOT
+    EXISTS`` + ``ADD CONSTRAINT IF NOT EXISTS`` (Postgres 9.6+ via the
+    DO-block existence check).
+    """
+    conn.execute(text("""
+        ALTER TABLE trading_exit_parity_log
+            ADD COLUMN IF NOT EXISTS action_class VARCHAR(32) NULL,
+            ADD COLUMN IF NOT EXISTS label_match BOOLEAN NULL,
+            ADD COLUMN IF NOT EXISTS exit_price_drift_bps DOUBLE PRECISION NULL,
+            ADD COLUMN IF NOT EXISTS priority_winner VARCHAR(32) NULL
+    """))
+    # CHECK constraint: must guard with existence check because
+    # ALTER TABLE ADD CONSTRAINT IF NOT EXISTS isn't standard SQL on
+    # constraint-name; use the DO block pattern.
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'trading_exit_parity_log_action_class_check'
+            ) THEN
+                ALTER TABLE trading_exit_parity_log
+                    ADD CONSTRAINT trading_exit_parity_log_action_class_check
+                    CHECK (action_class IS NULL OR action_class IN (
+                        'both_hold', 'both_close',
+                        'canonical_only_close', 'legacy_only_close'
+                    ));
+            END IF;
+        END$$;
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_exit_parity_action_class_created
+            ON trading_exit_parity_log (action_class, created_at)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_exit_parity_priority_winner_created
+            ON trading_exit_parity_log (priority_winner, created_at)
+    """))
+    conn.commit()
+
+
 def _migration_229_paper_shadow_attribution(conn) -> None:
     """f-add-paper-shadow-mode (2026-05-06).
 
@@ -15511,6 +15588,8 @@ MIGRATIONS = [
      _migration_228_pattern_evidence_corrections),
     ("229_paper_shadow_attribution",
      _migration_229_paper_shadow_attribution),
+    ("230_exit_parity_metric_v2",
+     _migration_230_exit_parity_metric_v2),
 ]
 
 
