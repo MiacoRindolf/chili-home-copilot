@@ -1,281 +1,193 @@
-# NEXT_TASK: f-thread-housekeeping-followups-2026-05-07
+# NEXT_TASK: f-thread-housekeeping-tail-2026-05-07
 
 STATUS: DONE
 
 ## Goal
 
-Close the three optional follow-ups surfaced in the prior `f-thread-cleanup-2026-05-07` review so housekeeping is done end-to-end and `git status` returns to a state that reflects only real work-in-progress. Three locally-scoped subtasks bundled in one brief:
+Close the two actionable follow-ups surfaced in the prior `f-thread-housekeeping-followups-2026-05-07` review:
 
-1. **Fix the `test_create_watchlist_item` fixture bug.** Hardcoded `user_id=1` against `tests/conftest.py`'s per-test users-table truncate. Pre-existing across many sessions; blocks `pytest tests/test_trading.py` from running clean. ~30 LOC.
+1. **Sweep the rest of `tests/test_trading.py`** for the `user_id=1` hardcoded-FK anti-pattern. 47 hits across 4 service-layer test classes (`TestWatchlistService` 12, `TestTradeService` ~16, `TestJournalService` ~7, `TestTradeStats` ~5+). Same fix shape as the prior brief's `TestTradingModels` step. After this lands, `pytest tests/test_trading.py -v` runs green for everything below the API-layer classes.
 
-2. **Add `.gitattributes` to normalize line endings + renormalize.** The 1,720-file CRLF mount-artifact noise (Windows host CRLF vs git's LF view) makes `git status --short` unusable for spotting real work. One-line `.gitattributes` + `git add --renormalize .` permanently closes it.
+2. **Commit the `docs/STRATEGY/COWORK_REVIEWS/*` backlog.** The Cowork ↔ CC protocol expects these tracked alongside `CC_REPORTS/`, but the operator hasn't been `git add`-ing them. Sweep all the untracked review files into one docs commit so the strategy thread's full audit trail is in git history.
 
-3. **Gitignore `docs/AUDITS/`.** Twelve untracked audit docs that are clearly operator-scratch — ad-hoc audit reports that drive specific briefs and then either get superseded or absorbed into formal CC reports. Best fit: untracked-by-default; operator can `git add -f` to share any specific audit. Same disposition for the other operator-scratch files at repo root (`HARDCODED_MAGIC_NUMBERS_AUDIT.txt`, `docs/AUDIT_PROMPT.md`, `docs/FAST_PATH_CLAUDE_CODE_PROMPT.md`).
-
-After this lands, `git status --short` shows only legitimate in-progress work.
+The third follow-up from the review (working-tree disk view sync) is operator-side — the working-tree-vs-HEAD CRLF lag is resolved by the operator re-syncing the mount or `git checkout-index -f -a` from the Windows host. Not in scope here.
 
 ## Why now
 
-The user wants the housekeeping fully done. Each item is small enough on its own to not justify a brief; bundled, they're one round-trip. None of them touch live trading code; lowest-risk cleanup batch on the queue.
+The user wants the housekeeping fully done. Both items are small, scoped, and unblock real value: green test suite + complete review audit trail in git. Bundling beats two separate small briefs.
 
 ## Scope boundary
 
 **In scope:**
-- Edit `tests/test_trading.py::test_create_watchlist_item` (and any sibling tests in the same class with the same hardcoded-user_id pattern; check `grep -n "user_id=1\|user_id = 1" tests/test_trading.py`).
-- Create `.gitattributes` at repo root with line-ending normalization rules.
-- Run `git add --renormalize .` to apply the new rules to all already-tracked files.
-- Edit `.gitignore` to add `docs/AUDITS/` and the three repo-root operator-scratch files.
+- Edit `tests/test_trading.py` — apply the same `_seed_user(db, name)` helper pattern from the prior brief to the 4 service-layer test classes (`TestWatchlistService`, `TestTradeService`, `TestJournalService`, `TestTradeStats`). Replace each hardcoded `user_id=1` with a fixture-created user's id.
+- `git add docs/STRATEGY/COWORK_REVIEWS/*` to track the review backlog.
 
 **Out of scope:**
-- Any change to production trading code.
-- Any DB migration.
-- Any change to existing `.gitattributes` directives if the file already exists (verify first with `ls .gitattributes`).
-- Any change to docs/STRATEGY/COWORK_REVIEWS/ tracking — that's Cowork's working backlog, separate from operator-scratch.
+- API-layer test classes (`TestTradingPageAPI`, `TestWatchlistAPI`, `TestTradesAPI`, `TestJournalAPI`, `TestMarketDataAPI`, `TestInsightsAPI`, `TestPortfolioAPI` — line 345 onward in `tests/test_trading.py`). These use the `paired_client` fixture which already seeds a user; they're a different pattern. Confirm by reading one before assuming.
+- Any test file beyond `tests/test_trading.py`.
+- Working-tree CRLF disk-view sync (operator-side host-mount refresh).
+- Any production code changes.
+- `tests/conftest.py` modifications. The `_seed_user` helper lives in the test file, not the shared conftest.
 
 ## Path
 
-### Step 1 — Test fixture fix
+### Step 1 — Apply `_seed_user` helper to the 4 service-layer classes
+
+The helper already exists from the prior brief (`tests/test_trading.py` should have a module-level `_seed_user(db, name)` function added by commit `aa5fd0c`). Verify it's present:
 
 ```bash
-grep -n "test_create_watchlist_item\|user_id=1\|user_id = 1" tests/test_trading.py
+grep -n "_seed_user" tests/test_trading.py | head -5
 ```
 
-Find the test and any siblings with the same anti-pattern. Fix shape: replace `user_id=1` (and any other hardcoded user-table FK) with a fixture-created user. Pattern from elsewhere in the same file (look for `paired_client` or `db` fixture usages):
+If it's there: just call it. If it isn't (unlikely; the prior commit added it for `TestTradingModels`): create it once at module level.
+
+For each class, update the test methods. Pattern shape (TestWatchlistService example):
 
 ```python
-def test_create_watchlist_item(db):
-    # OLD: hardcoded user_id=1 fails when conftest truncates users
-    # NEW: create a user via the existing User model and use its id
-    from app.models.core import User  # adjust import path to match the file
-    user = User(email="watchlist-test@example.com", display_name="WL Test")
-    db.add(user); db.commit(); db.refresh(user)
-    
-    item = WatchlistItem(user_id=user.id, ticker="AAPL", note="test")
-    db.add(item); db.commit(); db.refresh(item)
-    
-    assert item.id is not None
-    assert item.user_id == user.id
-    # ... rest of existing assertions
+class TestWatchlistService:
+    def test_add_to_watchlist(self, db):
+        user = _seed_user(db, "watchlist-add-test")
+        item = ts.add_to_watchlist(db, user_id=user.id, ticker="AAPL")
+        # ... rest of existing assertions
 ```
 
-If the test already accepts a `paired_client` fixture (which seeds a user), use that user's id instead of creating a new one. Read the existing test before deciding which pattern fits.
+Each test method gets its own `_seed_user` call with a unique name suffix tied to the test name. The per-test truncate in `tests/conftest.py` ensures clean state between tests.
 
-Run after:
+For methods that need MULTIPLE distinct users (e.g., `TestJournalService::test_journal_user_isolation` if it exists, or any test that asserts cross-user isolation), seed multiple users:
+
+```python
+user_a = _seed_user(db, "journal-isolation-a")
+user_b = _seed_user(db, "journal-isolation-b")
+# ... assert content for user_a.id doesn't bleed into user_b.id
+```
+
+Read the existing test before deciding if the user-isolation case applies; some tests at line 302 reference "User 1 note" suggesting a single-user scope, but the test name will tell you.
+
+**Don't introduce new test classes or new fixtures.** This is a literal swap: `user_id=1` → `user_id=user.id`. Same structure.
+
+Run after each class is done:
 
 ```powershell
 $env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
+pytest tests/test_trading.py::TestWatchlistService -v --tb=short
+pytest tests/test_trading.py::TestTradeService -v --tb=short
+pytest tests/test_trading.py::TestJournalService -v --tb=short
+pytest tests/test_trading.py::TestTradeStats -v --tb=short
+```
+
+Each class should run green. If any test fails on a real (non-fixture) bug, surface it to the operator and stop — the brief is scoped to the FK fix only, not test-logic fixes.
+
+Final pass:
+
+```powershell
 pytest tests/test_trading.py -v --tb=short
 ```
 
-Should run clean (or fail on a different unrelated issue, in which case surface to the operator and stop — the brief is scoped to the watchlist fixture only).
+Whole file should run clean OR fail only on API-layer classes (which weren't touched by this brief). Document either outcome in the CC report.
 
-### Step 2 — `.gitattributes` CRLF normalize
-
-Check first:
+### Step 2 — Commit the COWORK_REVIEWS backlog
 
 ```bash
-ls -la .gitattributes
+ls docs/STRATEGY/COWORK_REVIEWS/
 ```
 
-If it exists, read it and only ADD the line-ending directive (don't overwrite anything). If it doesn't, create it.
-
-Content:
-
-```
-# Line endings: store as LF in git, convert to platform-native on checkout.
-# Closes the 1,720-file CRLF mount-artifact noise that comes from the
-# Windows host (CRLF on disk) vs git's LF-internal view. Without this,
-# every file shows as modified in `git status` on the Linux workspace
-# mount, even though no content has changed.
-* text=auto eol=lf
-
-# Shell scripts must stay LF even on Windows checkouts (bash + Docker
-# CMD interpretation requires it).
-*.sh text eol=lf
-*.bash text eol=lf
-
-# PowerShell scripts on Windows are fine with CRLF; let git auto-detect.
-*.ps1 text
-
-# Binary types — never normalize.
-*.png binary
-*.jpg binary
-*.jpeg binary
-*.gif binary
-*.ico binary
-*.pdf binary
-*.zip binary
-*.tar binary
-*.gz binary
-*.7z binary
-*.db binary
-*.sqlite binary
-```
-
-Apply:
+Should show all the Cowork reviews from this thread (and possibly older ones). All untracked. Stage them:
 
 ```bash
-git add .gitattributes
-git add --renormalize .
-git status --short | head -20
+git add docs/STRATEGY/COWORK_REVIEWS/
+git status --short docs/STRATEGY/COWORK_REVIEWS/
 ```
 
-The `--renormalize` will stage all the line-ending-only changes. This is expected to be ~1,720 files. Commit them in their OWN commit (separate from the test fixture and gitignore changes) so the diff is unambiguously "no semantic content, just line endings":
+Verify no surprises (e.g., a half-written draft file). If any file's content looks like an incomplete draft, surface to the operator before committing.
+
+### Step 3 — Commit and push
 
 ```bash
-git commit -m "chore(repo): normalize line endings via .gitattributes
+# Commit 1: test sweep
+git add tests/test_trading.py
+git commit -m "test(trading): sweep remaining user_id=1 hardcodes across service classes
 
-Adds * text=auto eol=lf to keep git's stored view as LF while letting
-checkouts on Windows produce CRLF natively. Closes the ~1,720-file
-'modified' noise in git status that comes from the Linux Docker bind
-mount seeing CRLF-on-disk vs git's LF-internal view.
+Closes the per-class FK-violation pattern surfaced in the prior brief's
+TestTradingModels fix. Applies _seed_user(db, name) to:
 
-This commit's diff is large (every text file in the repo) but contains
-zero semantic changes. Verified via 'git diff --ignore-all-space HEAD~1'
-showing no content delta.
+- TestWatchlistService (12 hits)
+- TestTradeService (~16 hits)
+- TestJournalService (~7 hits)
+- TestTradeStats (~5+ hits)
 
-(f-thread-housekeeping-followups-2026-05-07 step 2)"
+API-layer classes (TestTradingPageAPI onward) use the paired_client
+fixture and are out of scope for this brief.
+
+Verified: pytest tests/test_trading.py -v -> service-layer classes green.
+
+(f-thread-housekeeping-tail-2026-05-07 step 1)"
+
+# Commit 2: track Cowork review backlog
+git add docs/STRATEGY/COWORK_REVIEWS/
+git commit -m "docs(strategy): commit Cowork review backlog
+
+The Cowork <-> CC protocol expects COWORK_REVIEWS/* tracked alongside
+CC_REPORTS/*. The operator had been leaving them untracked; this commit
+stages the backlog so the strategy thread's full audit trail is in git
+history.
+
+(f-thread-housekeeping-tail-2026-05-07 step 2)"
+
+# Commit 3: docs
+git add docs/STRATEGY/CC_REPORTS/2026-05-07_f-thread-housekeeping-tail-2026-05-07.md docs/STRATEGY/NEXT_TASK.md
+git commit -m "docs(strategy): f-thread-housekeeping-tail-2026-05-07 CC report + mark NEXT_TASK done"
 ```
 
-Then verify:
-
-```bash
-git diff --ignore-all-space HEAD~1 HEAD | wc -l
-```
-
-Should be 0 (or very small if any file had genuine content changes mixed in — investigate any non-zero result before pushing).
-
-### Step 3 — Gitignore operator-scratch
-
-Read `.gitignore`:
-
-```bash
-cat .gitignore
-```
-
-Append (don't overwrite):
-
-```
-# Operator audit working-set (pre-CC scratch; not intended for git).
-# To share a specific audit, use 'git add -f docs/AUDITS/<file>'.
-docs/AUDITS/
-
-# Operator-scratch at repo root.
-HARDCODED_MAGIC_NUMBERS_AUDIT.txt
-docs/AUDIT_PROMPT.md
-docs/FAST_PATH_CLAUDE_CODE_PROMPT.md
-
-# Cowork's working backlog of strategy reviews — keep tracked normally
-# (this is part of the Cowork ↔ CC protocol, not operator scratch).
-# (No ignore line for docs/STRATEGY/COWORK_REVIEWS — intentional.)
-```
-
-Verify the previously-untracked files now show as ignored:
-
-```bash
-git check-ignore -v docs/AUDITS/2026-05-06_chili-app-closure-leak.md
-git check-ignore -v HARDCODED_MAGIC_NUMBERS_AUDIT.txt
-```
-
-Both should report a match. `git status --short` should no longer list those files.
-
-If any of the four target files are CURRENTLY TRACKED (check `git ls-files docs/AUDITS/ HARDCODED_MAGIC_NUMBERS_AUDIT.txt docs/AUDIT_PROMPT.md docs/FAST_PATH_CLAUDE_CODE_PROMPT.md`), un-track without deleting:
-
-```bash
-git rm --cached <each-tracked-file>
-```
-
-Don't `rm` the actual files — operator's working copies stay.
-
-### Step 4 — Commit Step 1 + Step 3 together; Step 2 separately
-
-```bash
-# Commit 1: the small fixes (test fixture + gitignore)
-git add tests/test_trading.py .gitignore
-git commit -m "chore: fix watchlist test fixture + gitignore operator-scratch
-
-- tests/test_trading.py::test_create_watchlist_item: replaced hardcoded
-  user_id=1 with a fixture-created user. Pre-existing bug across many
-  sessions; conftest.py per-test truncate of users table caused
-  FK violation. Surfaced in f-thread-cleanup-2026-05-07 review.
-- .gitignore: docs/AUDITS/ + 3 operator-scratch files at repo root.
-  These are operator audit working-set; share specific items via
-  'git add -f' when needed.
-
-(f-thread-housekeeping-followups-2026-05-07 steps 1 + 3)"
-
-# Commit 2: the renormalize (already done above)
-# Already committed as a separate commit per Step 2.
-
-# Commit 3: CC report + NEXT_TASK status
-git add docs/STRATEGY/CC_REPORTS/2026-05-07_f-thread-housekeeping-followups-2026-05-07.md docs/STRATEGY/NEXT_TASK.md
-git commit -m "docs(strategy): f-thread-housekeeping-followups-2026-05-07 CC report + mark NEXT_TASK done"
-```
-
-Three commits total: small fixes, renormalize, docs. Renormalize commit is the only large diff; the other two are surgical.
+Three commits: test fix, review backlog, docs.
 
 ## Constraints / do not touch
 
-- **No new magic numbers.** This brief introduces no new thresholds. The 1,720-file CRLF count is descriptive (it's the count of mount-artifact files at brief-write time), not a configurable threshold.
-- **No production trading code.** Don't touch `app/services/trading/*` or `app/services/broker_service.py`.
+- **No new magic numbers.** No numerical thresholds anywhere in this brief.
+- **No production trading code.** Tests only.
+- **No `tests/conftest.py` edits.** The shared fixture surface is stable; the helper lives in `tests/test_trading.py`.
+- **No API-layer test refactors.** They use a different fixture pattern; out of scope.
 - **No `git push --force` to main.** Standard PROTOCOL Hard Rule.
-- **The renormalize commit must be its own commit.** Mixing the renormalize diff with semantic changes would make the diff unreadable. Two separate `git commit` calls.
-- **Don't add anything to `.gitattributes` beyond what's specified.** No bespoke per-file rules; let `text=auto` do its job.
-- **Don't `git rm` actual files.** Use `git rm --cached` for tracked-but-now-ignored files; the working-copy stays for the operator.
 
 ## Success criteria
 
 1. **Three commits, all pushed:**
-   - `chore: fix watchlist test fixture + gitignore operator-scratch (f-thread-housekeeping-followups-2026-05-07 steps 1 + 3)`
-   - `chore(repo): normalize line endings via .gitattributes (...step 2)`
-   - `docs(strategy): f-thread-housekeeping-followups-2026-05-07 CC report + mark NEXT_TASK done`
-2. **`git status --short` is clean.** After the three commits, the only entries should be live runtime artifacts (`brain_worker.log`, `data/ticker_cache/crypto_top.json`) and any operator work-in-progress that's actually in-progress. No CRLF mount churn, no `docs/AUDITS/*`, no `.commit_msg*.txt`.
-3. **Test fixture passes.** `pytest tests/test_trading.py::TestTradingModels::test_create_watchlist_item -v` (or whatever the test class name actually is) returns green.
-4. **Renormalize diff is byte-equivalent.** `git diff --ignore-all-space HEAD~2 HEAD~1 | wc -l` returns 0.
-5. **Gitignored files no longer appear.** `git status --short | grep -E "AUDITS|HARDCODED|AUDIT_PROMPT|FAST_PATH"` returns nothing.
-6. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-07_f-thread-housekeeping-followups-2026-05-07.md` per PROTOCOL format. Include:
-   - Per-step status (3 steps).
-   - Whether any test sibling beyond `test_create_watchlist_item` had the same hardcoded-user pattern.
-   - Renormalize file count (expected ~1,720).
-   - Confirmation that `docs/STRATEGY/COWORK_REVIEWS/*` was NOT gitignored (it should remain tracked per the Cowork ↔ CC protocol).
+   - `test(trading): sweep remaining user_id=1 hardcodes across service classes`
+   - `docs(strategy): commit Cowork review backlog`
+   - `docs(strategy): f-thread-housekeeping-tail-2026-05-07 CC report + mark NEXT_TASK done`
+2. **`pytest tests/test_trading.py -v`** — all 4 service-layer classes (`TestWatchlistService`, `TestTradeService`, `TestJournalService`, `TestTradeStats`) green. API-layer classes either also green (bonus) or fail on unrelated reasons documented in the CC report.
+3. **`git ls-files docs/STRATEGY/COWORK_REVIEWS/ | wc -l`** ≥ 5 (this thread alone added 5+ reviews).
+4. **`grep -nE "user_id\s*=\s*1\b" tests/test_trading.py`** returns zero hits in the 4 target classes (or only hits in API-layer classes / docstrings / commented-out lines).
+5. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-07_f-thread-housekeeping-tail-2026-05-07.md` per PROTOCOL format. Include:
+   - Per-class hit count fixed.
+   - Whether any test failed on a real (non-fixture) bug — surface those, don't auto-fix.
+   - Final `git ls-files docs/STRATEGY/COWORK_REVIEWS/` count.
    - Magic-number audit (zero new literals).
 
 ## Rollback plan
 
-- **Step 1 (fixture):** `git revert <commit>` — test goes back to FK-violation state. No live-money impact.
-- **Step 2 (renormalize):** `git revert <commit>` — line endings flip back. No semantic regression. If the renormalize itself broke something (rare; should only happen if a test asserts on raw bytes including line endings), the revert is clean.
-- **Step 3 (gitignore):** edit `.gitignore` to remove the entries; the working-copy files reappear as `??` in `git status`. Operator can `git add` selectively to track them.
+- **Step 1 (test sweep):** `git revert <commit>` — tests go back to FK-violation state. No production impact.
+- **Step 2 (review backlog):** `git revert <commit>` — review files un-tracked again, working copies preserved. No production impact.
 
 ## Verification commands (for the executor + the operator)
 
 ```powershell
-# 1. Test passes
+# Test sweep verification
 $env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
-pytest tests/test_trading.py::TestTradingModels::test_create_watchlist_item -v
+pytest tests/test_trading.py::TestWatchlistService tests/test_trading.py::TestTradeService tests/test_trading.py::TestJournalService tests/test_trading.py::TestTradeStats -v
 
-# 2. .gitattributes has the directive
-grep "text=auto" .gitattributes
+# Review backlog tracked
+git ls-files docs/STRATEGY/COWORK_REVIEWS/ | wc -l
 
-# 3. Renormalize commit is byte-equivalent
-git diff --ignore-all-space HEAD~2 HEAD~1 | wc -l
-# Expected: 0
-
-# 4. Gitignore covers the targets
-git check-ignore docs/AUDITS/2026-05-06_chili-app-closure-leak.md
-git check-ignore HARDCODED_MAGIC_NUMBERS_AUDIT.txt
-
-# 5. git status is clean
-git status --short
-# Expected: only brain_worker.log, data/ticker_cache/crypto_top.json (runtime),
-# possibly docs/STRATEGY/COWORK_REVIEWS/* (Cowork's review backlog).
+# Anti-pattern resolved in service-layer classes
+grep -nE "user_id\s*=\s*1\b" tests/test_trading.py | grep -E "^[0-9]+:" | awk -F: '{if ($1 < 320) print}'
+# Expected: zero hits below line 320 (the API-layer boundary).
 ```
 
-## Open questions for Cowork (surface in CC report — likely none)
+## Open questions for Cowork (surface in CC report)
 
-If the renormalize diff turns out to have non-zero `--ignore-all-space` content, that's a real surprise — a file in the repo has trailing-whitespace-only changes or BOM differences that aren't pure line endings. Surface for operator review before committing.
-
-If any test in `test_trading.py` beyond `test_create_watchlist_item` is also broken by a hardcoded `user_id` and the fix isn't trivially the same shape, surface that too rather than fixing in this brief.
+1. **API-layer classes** (line 345+). If any of these classes also have hardcoded `user_id` patterns under a different shape (e.g., `paired_client.user.id` vs `1`), surface them. Same fix shape; could ship as a tiny follow-up.
+2. **`docs/STRATEGY/COWORK_REVIEWS/*` content audit.** Skim each review for any half-written draft or sensitive content that shouldn't go into git history. If anything looks off, surface to operator before committing.
 
 ## Forward pointer
 
-After this lands, the strategy thread is fully closed. No housekeeping debt remaining. The next NEXT_TASK is whatever the operator queues fresh — Phase 2 of the position-identity refactor when the 2026-05-11 soak completes, or any new bug class.
+After this lands, the strategy thread is fully closed for the third and last time. No actionable follow-ups remaining; only the working-tree disk-view sync (operator-side mount refresh) and that's not a thing CC executes.
