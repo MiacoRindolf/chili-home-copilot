@@ -47,8 +47,10 @@ logger = logging.getLogger(__name__)
 # ``MONITOR_EXIT_NOW_MAX_AGE_HOURS`` is the single source of truth.
 from .._exit_monitor_common import (
     MONITOR_EXIT_NOW_MAX_AGE_HOURS as _CRYPTO_MONITOR_EXIT_NOW_MAX_AGE_HOURS,
+    is_implausible_quote,
     latest_monitor_decisions_by_trade as _latest_monitor_decisions_by_trade,
     fresh_monitor_exit_meta as _fresh_monitor_exit_meta,
+    should_consult_monitor_after_refusal,
 )
 
 
@@ -109,13 +111,20 @@ def _evaluate_exit_triggers(
     # divergence (or 0.1x) is an upstream-data error, not a real move.
     # When entry is unset (0/None), skip this guard since we can't
     # judge plausibility.
-    if entry and entry > 0:
+    #
+    # f-exit-monitor-quote-guard-unification (2026-05-06): the
+    # implausibility threshold lives in ``_exit_monitor_common.py`` so
+    # all three lanes share one definition. Reason string format
+    # preserved byte-identical so the prefix-match contract in
+    # ``run_crypto_exit_pass`` and the upstream-shape test
+    # (``test_evaluate_exit_triggers_implausible_quote_prefix``) keep
+    # working unmodified.
+    if is_implausible_quote(px, entry):
         ratio = px / entry
-        if ratio > 10.0 or ratio < 0.1:
-            return False, (
-                f"no_trigger:implausible_quote px={px} entry={entry} "
-                f"ratio={ratio:.4f} (rejected; refusing to act on data error)"
-            )
+        return False, (
+            f"no_trigger:implausible_quote px={px} entry={entry} "
+            f"ratio={ratio:.4f} (rejected; refusing to act on data error)"
+        )
 
     if stop is not None and stop > 0:
         if is_long and px <= stop:
@@ -213,29 +222,6 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             px=px, entry=entry, stop=stop, target=target,
             direction=(t.direction or "long"),
         )
-        # f-fix-implausible-quote-vs-exit_now-ordering (2026-05-06):
-        # when _evaluate_exit_triggers refuses on an implausible quote
-        # (price ratio > 10x or < 0.1x of entry), do NOT consult the
-        # pattern-monitor advisory. The lane has just declared it does
-        # not trust its own price feed for this trade; an LLM advisory
-        # would only override that refusal -- and the LLM may be reading
-        # a different (clean) feed than the exit-engine. Acting on the
-        # advisory while the engine itself disowns the price is a
-        # different kind of foot-gun than acting on the bad price
-        # directly. Per the no-hardcoded-fallback rule: when inputs
-        # disagree, abstain.
-        #
-        # Match by reason-prefix because _evaluate_exit_triggers returns
-        # the refusal in the string ("no_trigger:implausible_quote ...").
-        # The prefix is the contract; the prefix-shape test in
-        # tests/test_crypto_exit_monitor_pattern_exit_now.py pins it.
-        # Other no_trigger / no_quote reasons are NOT refusals to trust
-        # the feed -- monitor consultation still proceeds for those.
-        _refused_quote = (
-            not should_exit
-            and isinstance(reason, str)
-            and reason.startswith("no_trigger:implausible_quote")
-        )
         # Pattern-monitor exit_now branch -- only consulted when price triggers
         # have not fired, so stop/target wins on tie (cheaper to evaluate, and
         # those reasons carry stronger semantics for postmortems). The canonical
@@ -243,8 +229,16 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
         # lane (auto_trader_monitor.py:453); the decision-id audit detail goes
         # in the structured log line rather than being truncated into the 50-char
         # reason column.
+        #
+        # f-fix-implausible-quote-vs-exit_now-ordering (2026-05-06): when
+        # _evaluate_exit_triggers refuses on an implausible quote, do NOT
+        # consult the pattern-monitor advisory -- the lane has just
+        # declared it does not trust its own price feed for this trade.
+        # f-exit-monitor-quote-guard-unification (2026-05-06): gate routed
+        # through the shared ``should_consult_monitor_after_refusal`` helper
+        # so all three lanes use one trust-boundary definition.
         monitor_exit_meta: Optional[dict[str, Any]] = None
-        if not should_exit and not _refused_quote:
+        if not should_exit and should_consult_monitor_after_refusal(reason):
             monitor_exit_meta = _fresh_monitor_exit_meta(
                 latest_monitor_decisions.get(int(t.id))
             )

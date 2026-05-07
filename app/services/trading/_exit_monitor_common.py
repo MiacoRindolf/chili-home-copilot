@@ -15,6 +15,13 @@ copies, no per-lane fork of the freshness window.
 Why not a class: each helper is a pure function with no shared state.
 A module-level function plus a single constant is simpler than a
 ExitMonitorCommon class with two methods.
+
+f-exit-monitor-quote-guard-unification (2026-05-06): added the
+``is_implausible_quote`` and ``should_consult_monitor_after_refusal``
+helpers. The 0.1x / 10x bounds were previously inlined in crypto's and
+options' ``_evaluate_exit_triggers``; they're relocated here as
+documented module-level constants. Same values, one home, structural
+(not strategy-tuning) constants.
 """
 
 from __future__ import annotations
@@ -38,6 +45,80 @@ if TYPE_CHECKING:
 # options where a 96h-old advisory is materially stale), introduce a
 # per-asset override at the call site rather than splitting the module.
 MONITOR_EXIT_NOW_MAX_AGE_HOURS = 96.0
+
+
+# ── Implausibility bounds ──────────────────────────────────────────────
+#
+# Bounds for the ``observed_price / entry_price`` ratio. These are
+# STRUCTURAL constants (data-feed-trust boundary), not strategy tuning
+# parameters:
+#
+#   ratio < 0.1   -- quote is < 10% of entry. A stock dropping 90%
+#                    intraday is almost certainly a data feed error;
+#                    a real corporate action would carry a separate
+#                    adjustment signal.
+#   ratio > 10.0  -- quote is > 10x entry. Same reasoning, opposite
+#                    direction. A 10x intraday move is essentially
+#                    impossible without a stock split / decimal-place
+#                    misread at the source.
+#
+# Per-ticker derivation from historical volatility is a future
+# enhancement (see ``f-implausible-quote-per-ticker-vol`` open question
+# in the unification CC report); not env-tunable today.
+IMPLAUSIBLE_QUOTE_RATIO_LOW: float = 0.1
+IMPLAUSIBLE_QUOTE_RATIO_HIGH: float = 10.0
+
+
+def is_implausible_quote(px: float | None, entry: float | None) -> bool:
+    """True iff the observed quote vs entry implies a data-feed error.
+
+    Returns False (not refused) when ``entry`` is zero/negative/None or
+    ``px`` is zero/negative/None -- the caller is responsible for
+    handling the no-anchor / no-px cases before reaching this helper
+    (each lane has its own no-quote / no-entry skip path with
+    different semantics).
+    """
+    if not entry or entry <= 0:
+        return False
+    if not px or px <= 0:
+        return False
+    ratio = px / entry
+    return (
+        ratio < IMPLAUSIBLE_QUOTE_RATIO_LOW
+        or ratio > IMPLAUSIBLE_QUOTE_RATIO_HIGH
+    )
+
+
+def should_consult_monitor_after_refusal(
+    reason: str | None,
+    abstained_implausible: bool = False,
+) -> bool:
+    """True iff the lane should consult the LLM advisory after a no-go.
+
+    Returns ``False`` (do NOT consult) iff EITHER:
+
+      * ``reason`` starts with ``no_trigger:implausible_quote``
+        (crypto's prefix-match contract -- crypto's
+        ``_evaluate_exit_triggers`` carries the refusal in the string
+        portion of its ``(bool, str)`` return), OR
+      * ``abstained_implausible`` is ``True`` (options' boolean flag --
+        options' ``_evaluate_exit_triggers`` returns
+        ``(reason, abstained_implausible)``).
+
+    Both signals indicate the lane refused to trust its own price feed
+    for this trade. Acting on a different (LLM/monitor) feed when our
+    own is suspect is a foot-gun; abstain.
+
+    Other "no exit" reasons (``no_trigger`` for "no stop/target hit",
+    ``no_quote`` for "px=0") are NOT data-quality refusals -- the LLM
+    is the secondary signal in those cases and consultation IS
+    permitted. Returns ``True`` for those.
+    """
+    if abstained_implausible:
+        return False
+    if isinstance(reason, str) and reason.startswith("no_trigger:implausible_quote"):
+        return False
+    return True
 
 
 def latest_monitor_decisions_by_trade(
@@ -103,6 +184,10 @@ def fresh_monitor_exit_meta(
 
 __all__ = [
     "MONITOR_EXIT_NOW_MAX_AGE_HOURS",
+    "IMPLAUSIBLE_QUOTE_RATIO_LOW",
+    "IMPLAUSIBLE_QUOTE_RATIO_HIGH",
     "latest_monitor_decisions_by_trade",
     "fresh_monitor_exit_meta",
+    "is_implausible_quote",
+    "should_consult_monitor_after_refusal",
 ]

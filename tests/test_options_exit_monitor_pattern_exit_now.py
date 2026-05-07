@@ -131,18 +131,25 @@ def test_case4_native_dte_trigger_wins():
     options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
     idx = options_src.find('reason = "pattern_exit_now"')
     assert idx > 0, "pattern_exit_now assignment must exist in options lane"
-    surrounding = options_src[max(0, idx - 600):idx]
+    surrounding = options_src[max(0, idx - 800):idx]
     # The gate must require ``not reason`` (so native DTE/premium/stop
     # triggers always win on tie). After
-    # f-fix-implausible-quote-vs-exit_now-ordering the gate is widened
-    # to also require ``not abstained_implausible`` -- both forms count.
-    assert (
-        "if not reason:" in surrounding
-        or "if not reason and not abstained_implausible:" in surrounding
-    ), (
+    # f-exit-monitor-quote-guard-unification the post-refusal piece
+    # routes through the shared ``should_consult_monitor_after_refusal``
+    # helper -- the `not reason` short-circuit still has to be present
+    # so the helper isn't even consulted when a native trigger fired.
+    assert "if not reason " in surrounding or "if not reason:" in surrounding, (
         "the `reason = \"pattern_exit_now\"` assignment must be inside "
         "a block that requires `not reason` so native DTE/premium/stop "
         "triggers win when both fire"
+    )
+    # And the post-refusal gate must call the shared helper (refusal-
+    # aware) -- catches a future refactor that drops the gate or
+    # re-implements it inline.
+    assert "should_consult_monitor_after_refusal" in surrounding, (
+        "the options call site must route the post-refusal gate "
+        "through `should_consult_monitor_after_refusal` from "
+        "_exit_monitor_common; inline gate is no longer the contract"
     )
 
 
@@ -199,9 +206,14 @@ def test_evaluate_exit_triggers_normal_path_returns_abstained_false():
 
 def test_options_call_site_gates_monitor_on_abstained_implausible():
     """Source guard: the call site in run_options_exit_pass MUST
-    consult fresh_monitor_exit_meta only when ``not abstained_implausible``.
-    Catches future refactors that drop the gate."""
+    consult fresh_monitor_exit_meta only when the shared
+    ``should_consult_monitor_after_refusal`` helper allows it. Catches
+    future refactors that drop the gate or re-introduce an inline copy.
+    """
     options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
     assert "abstained_implausible" in options_src
-    # The gate appears as `if not reason and not abstained_implausible:`.
-    assert "not reason and not abstained_implausible" in options_src
+    # After f-exit-monitor-quote-guard-unification (2026-05-06), the
+    # gate routes through the shared helper. The helper is imported
+    # AND called with both pieces of state.
+    assert "should_consult_monitor_after_refusal" in options_src
+    assert "abstained_implausible=abstained_implausible" in options_src

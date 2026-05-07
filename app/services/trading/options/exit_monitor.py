@@ -194,11 +194,16 @@ def _evaluate_exit_triggers(
     bound. Real legitimate exits happen at change_pct = -50% which is
     ratio = 0.5 -- well within the (0.1, 10) plausibility envelope.
     """
+    # f-exit-monitor-quote-guard-unification (2026-05-06): the
+    # implausibility check is sourced from ``_exit_monitor_common.py``
+    # so all three lanes share one trust-boundary definition.
+    from .._exit_monitor_common import is_implausible_quote
+
     if dte is not None and dte <= dte_threshold:
         return "options_dte_threshold", False
     if entry_premium > 0 and current_premium is not None and current_premium > 0:
-        ratio = current_premium / entry_premium
-        if ratio > 10.0 or ratio < 0.1:
+        if is_implausible_quote(current_premium, entry_premium):
+            ratio = current_premium / entry_premium
             # Implausible move -- abstain. Per no-hardcoded-fallback rule,
             # don't synthesize a "current value" -- return None and let the
             # next pass retry with a fresh quote. Set abstained_implausible
@@ -210,6 +215,7 @@ def _evaluate_exit_triggers(
                 ratio, current_premium, entry_premium,
             )
             return None, True
+        ratio = current_premium / entry_premium
         change_pct = (ratio - 1.0) * 100.0
         if change_pct <= -abs(stop_pct):
             return "options_premium_stop_loss", False
@@ -285,6 +291,7 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
     from .._exit_monitor_common import (
         latest_monitor_decisions_by_trade,
         fresh_monitor_exit_meta,
+        should_consult_monitor_after_refusal,
     )
     latest_monitor_decisions = latest_monitor_decisions_by_trade(
         db, [int(t.id) for t in candidates]
@@ -363,8 +370,14 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         # recommendation while the engine itself disowns the price
         # is a different kind of foot-gun. Per no-hardcoded-fallback:
         # when inputs disagree, abstain.
+        # f-exit-monitor-quote-guard-unification (2026-05-06): gate
+        # routed through the shared
+        # ``should_consult_monitor_after_refusal`` helper so all three
+        # lanes use one trust-boundary definition.
         monitor_exit_meta: Optional[dict[str, Any]] = None
-        if not reason and not abstained_implausible:
+        if not reason and should_consult_monitor_after_refusal(
+            reason, abstained_implausible=abstained_implausible
+        ):
             monitor_exit_meta = fresh_monitor_exit_meta(
                 latest_monitor_decisions.get(int(t.id))
             )

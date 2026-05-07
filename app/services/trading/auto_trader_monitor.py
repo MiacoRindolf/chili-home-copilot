@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # `_MONITOR_EXIT_NOW_MAX_AGE_HOURS` keeps working).
 from ._exit_monitor_common import (
     MONITOR_EXIT_NOW_MAX_AGE_HOURS as _MONITOR_EXIT_NOW_MAX_AGE_HOURS,
+    is_implausible_quote,
     latest_monitor_decisions_by_trade as _latest_monitor_decisions_by_trade,
     fresh_monitor_exit_meta as _fresh_monitor_exit_meta,
 )
@@ -343,6 +344,30 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
             summary["errors"].append(f"no_quote:{t.ticker}")
             continue
         summary.setdefault("quote_sources", {})[t.ticker] = quote_src
+
+        # f-exit-monitor-quote-guard-unification (2026-05-06): equity
+        # had no implausible-quote guard until now. A bogus $0.50 quote
+        # on a $50 entry would force ``hit_stop=True`` and force-sell at
+        # the bad price. Per-lane parity with crypto and options. Note
+        # this lane does NOT consult an LLM advisory after the trigger
+        # check today (the advisory branch is in auto_trader.py, the
+        # entry path); ``should_consult_monitor_after_refusal`` is only
+        # needed at lanes that do consult. If a future brief adds an
+        # exit-side advisory here, route it through that helper.
+        if is_implausible_quote(px, t.entry_price):
+            try:
+                _ratio = (px / float(t.entry_price)) if t.entry_price else float("inf")
+            except (TypeError, ZeroDivisionError):
+                _ratio = float("inf")
+            logger.warning(
+                "[autotrader_monitor] implausible quote refused: "
+                "ticker=%s trade_id=%s px=%s entry=%s ratio=%.4f",
+                t.ticker, t.id, px, t.entry_price, _ratio,
+            )
+            summary["skipped_implausible_quote"] = (
+                summary.get("skipped_implausible_quote", 0) + 1
+            )
+            continue
 
         stop = float(t.stop_loss or 0)
         tgt = float(t.take_profit or 0)
