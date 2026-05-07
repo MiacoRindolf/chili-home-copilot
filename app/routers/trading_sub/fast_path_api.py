@@ -504,4 +504,141 @@ def get_summary() -> JSONResponse:
     })
 
 
+@router.get("/universe")
+def get_universe() -> JSONResponse:
+    """f-fastpath-universe-rotation Step 6 (2026-05-07): status surface
+    for the data-driven universe rotation.
+
+    Returns:
+      - ``flags``: the rotation toggles + thresholds in effect.
+      - ``active``: tickers currently in ``status='active'`` (executor-
+        eligible) from the most recent rotation pass, ordered by rank.
+      - ``shadow``: tickers in cold-start window
+        (``status='shadow'``), ordered by rank.
+      - ``recent_rotations``: last 24h of rotation passes summarised
+        (one row per pass with the active+shadow+inactive count).
+      - ``last_pass``: timestamp of the most recent rotation_at.
+
+    Read-only. Cheap (3 small queries against fast_path_universe).
+    """
+    from ...services.trading.fast_path import settings as fp_settings_mod
+
+    fp_settings = fp_settings_mod.load()
+
+    out: dict[str, Any] = {
+        "as_of": _utc_now_naive().isoformat(),
+        "flags": {
+            "universe_rotation_enabled": bool(
+                fp_settings.universe_rotation_enabled
+            ),
+            "universe_top_n": int(fp_settings.universe_top_n),
+            "universe_hysteresis_ranks": int(
+                fp_settings.universe_hysteresis_ranks
+            ),
+            "universe_shadow_window_h": int(
+                fp_settings.universe_shadow_window_h
+            ),
+            "universe_min_volume_24h_usd": float(
+                fp_settings.universe_min_volume_24h_usd
+            ),
+            "universe_max_spread_bps": float(
+                fp_settings.universe_max_spread_bps
+            ),
+            "universe_min_top_of_book_usd": float(
+                fp_settings.universe_min_top_of_book_usd
+            ),
+            "universe_min_trades_24h": int(
+                fp_settings.universe_min_trades_24h
+            ),
+            "cost_aware_admission_enabled": bool(
+                fp_settings.cost_aware_admission_enabled
+            ),
+            "cost_aware_taker_fee_bps": float(
+                fp_settings.cost_aware_taker_fee_bps
+            ),
+        },
+        "active": [],
+        "shadow": [],
+        "recent_rotations": [],
+        "last_pass": None,
+    }
+
+    try:
+        with engine.connect() as conn:
+            # Active + shadow from the most recent rotation
+            rows = conn.execute(text("""
+                WITH latest AS (
+                    SELECT MAX(rotation_at) AS ts FROM fast_path_universe
+                )
+                SELECT ticker, status, rank, composite_score,
+                       volume_24h_usd, spread_bps,
+                       top_of_book_usd, trades_24h, promoted_at
+                FROM fast_path_universe
+                WHERE rotation_at = (SELECT ts FROM latest)
+                  AND status IN ('active', 'shadow')
+                ORDER BY status, rank ASC NULLS LAST
+            """)).mappings().all()
+            for r in rows:
+                row = {
+                    "ticker": r["ticker"],
+                    "rank": int(r["rank"]) if r["rank"] is not None else None,
+                    "composite_score": (
+                        float(r["composite_score"])
+                        if r["composite_score"] is not None else None
+                    ),
+                    "volume_24h_usd": (
+                        float(r["volume_24h_usd"])
+                        if r["volume_24h_usd"] is not None else None
+                    ),
+                    "spread_bps": (
+                        float(r["spread_bps"])
+                        if r["spread_bps"] is not None else None
+                    ),
+                    "top_of_book_usd": (
+                        float(r["top_of_book_usd"])
+                        if r["top_of_book_usd"] is not None else None
+                    ),
+                    "trades_24h": (
+                        int(r["trades_24h"])
+                        if r["trades_24h"] is not None else None
+                    ),
+                    "promoted_at": (
+                        r["promoted_at"].isoformat()
+                        if r["promoted_at"] is not None else None
+                    ),
+                }
+                if r["status"] == "active":
+                    out["active"].append(row)
+                else:
+                    out["shadow"].append(row)
+
+            # Recent rotation passes (last 24h)
+            rotations = conn.execute(text("""
+                SELECT rotation_at,
+                       COUNT(*) FILTER (WHERE status = 'active')   AS active_n,
+                       COUNT(*) FILTER (WHERE status = 'shadow')   AS shadow_n,
+                       COUNT(*) FILTER (WHERE status = 'inactive') AS inactive_n
+                FROM fast_path_universe
+                WHERE rotation_at >= NOW() - INTERVAL '24 hours'
+                GROUP BY rotation_at
+                ORDER BY rotation_at DESC
+                LIMIT 48
+            """)).mappings().all()
+            out["recent_rotations"] = [
+                {
+                    "rotation_at": r["rotation_at"].isoformat(),
+                    "active_n": int(r["active_n"]),
+                    "shadow_n": int(r["shadow_n"]),
+                    "inactive_n": int(r["inactive_n"]),
+                }
+                for r in rotations
+            ]
+            if out["recent_rotations"]:
+                out["last_pass"] = out["recent_rotations"][0]["rotation_at"]
+    except Exception as exc:
+        out["error"] = f"universe_query_failed: {exc!s:.200}"
+
+    return JSONResponse(out)
+
+
 __all__ = ["router"]
