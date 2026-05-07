@@ -1,6 +1,6 @@
 # NEXT_TASK: f-fix-implausible-quote-vs-exit_now-ordering
 
-STATUS: PENDING
+STATUS: DONE
 
 **Promoted from `docs/STRATEGY/QUEUED/f-fix-implausible-quote-vs-exit_now-ordering.md` on 2026-05-06 17:55 UTC. The previous DONE task (`f-crypto-exit-monitor-pattern-exit-now-test`) shipped 6 cases — 4 PASS, 1 alias-guard PASS, 1 xfail(strict=True) — see `docs/STRATEGY/CC_REPORTS/2026-05-06_f-crypto-exit-monitor-pattern-exit-now-test.md` and `docs/STRATEGY/COWORK_REVIEWS/2026-05-06_f-crypto-exit-monitor-pattern-exit-now-test.md`.**
 

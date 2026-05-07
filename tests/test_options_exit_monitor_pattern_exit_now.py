@@ -131,11 +131,18 @@ def test_case4_native_dte_trigger_wins():
     options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
     idx = options_src.find('reason = "pattern_exit_now"')
     assert idx > 0, "pattern_exit_now assignment must exist in options lane"
-    surrounding = options_src[max(0, idx - 400):idx]
-    assert "if not reason:" in surrounding, (
+    surrounding = options_src[max(0, idx - 600):idx]
+    # The gate must require ``not reason`` (so native DTE/premium/stop
+    # triggers always win on tie). After
+    # f-fix-implausible-quote-vs-exit_now-ordering the gate is widened
+    # to also require ``not abstained_implausible`` -- both forms count.
+    assert (
+        "if not reason:" in surrounding
+        or "if not reason and not abstained_implausible:" in surrounding
+    ), (
         "the `reason = \"pattern_exit_now\"` assignment must be inside "
-        "an `if not reason:` block so native DTE/premium/stop triggers "
-        "win when both fire"
+        "a block that requires `not reason` so native DTE/premium/stop "
+        "triggers win when both fire"
     )
 
 
@@ -149,3 +156,52 @@ def test_case5_pending_exit_reason_canonical_pattern_exit_now():
     # The log line for monitor-driven exits includes the audit metadata.
     assert "monitor_decision_id=" in options_src
     assert "monitor_age_h=" in options_src
+
+
+# ---------------------------------------------------------------------------
+# f-fix-implausible-quote-vs-exit_now-ordering (2026-05-06):
+# the options _evaluate_exit_triggers now returns (reason, abstained_implausible)
+# so the call site can refuse to consult the LLM advisory when the
+# implausible-quote guard fires. Pin both the new tuple return AND the
+# call-site gate.
+# ---------------------------------------------------------------------------
+
+def test_evaluate_exit_triggers_implausible_quote_returns_abstained_true():
+    """Pins the contract: when current/entry ratio is < 0.1 (or > 10),
+    the function returns ``(None, True)``. The True flag tells the
+    caller NOT to fall through to the LLM advisory."""
+    from app.services.trading.options.exit_monitor import _evaluate_exit_triggers
+
+    # entry premium $0.50, current premium $0.001 -> ratio 0.002 (< 0.1)
+    reason, abstained = _evaluate_exit_triggers(
+        dte=30, entry_premium=0.50, current_premium=0.001,
+        dte_threshold=7, stop_pct=50.0, tp_pct=100.0,
+    )
+    assert reason is None
+    assert abstained is True
+
+
+def test_evaluate_exit_triggers_normal_path_returns_abstained_false():
+    """Regression: ordinary "no trigger fired" path must return
+    ``(None, False)`` so the LLM advisory IS consulted when nothing
+    native fires. Otherwise the gate would over-fire and silently
+    suppress legitimate pattern_exit_now closes."""
+    from app.services.trading.options.exit_monitor import _evaluate_exit_triggers
+
+    # entry $0.50, current $0.45 -> ratio 0.9, change -10%, no trigger.
+    reason, abstained = _evaluate_exit_triggers(
+        dte=30, entry_premium=0.50, current_premium=0.45,
+        dte_threshold=7, stop_pct=50.0, tp_pct=100.0,
+    )
+    assert reason is None
+    assert abstained is False
+
+
+def test_options_call_site_gates_monitor_on_abstained_implausible():
+    """Source guard: the call site in run_options_exit_pass MUST
+    consult fresh_monitor_exit_meta only when ``not abstained_implausible``.
+    Catches future refactors that drop the gate."""
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+    assert "abstained_implausible" in options_src
+    # The gate appears as `if not reason and not abstained_implausible:`.
+    assert "not reason and not abstained_implausible" in options_src

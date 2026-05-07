@@ -161,13 +161,22 @@ def _dte(expiration: str) -> Optional[int]:
 def _evaluate_exit_triggers(
     *, dte: Optional[int], entry_premium: float, current_premium: Optional[float],
     dte_threshold: int, stop_pct: float, tp_pct: float,
-) -> Optional[str]:
-    """Return the exit reason string when a trigger fires, else None.
+) -> tuple[Optional[str], bool]:
+    """Return ``(reason, abstained_implausible)``.
+
+    ``reason`` is the exit-trigger string when a trigger fires, else
+    ``None``. ``abstained_implausible`` is ``True`` only when the
+    implausible-quote guard fired -- the lane has refused to trust
+    its own price feed for this trade and the caller MUST NOT
+    consult the LLM/monitor advisory in that case (see
+    ``f-fix-implausible-quote-vs-exit_now-ordering`` 2026-05-06).
+    For ordinary "no trigger fired" the second tuple element is
+    ``False`` and monitor consultation may proceed.
 
     Reasons (also stored on the trade row as exit_reason):
-      ``options_dte_threshold``     — DTE <= dte_threshold
-      ``options_premium_stop_loss``  — drop > stop_pct
-      ``options_premium_take_profit`` — gain > tp_pct
+      ``options_dte_threshold``     -- DTE <= dte_threshold
+      ``options_premium_stop_loss``  -- drop > stop_pct
+      ``options_premium_take_profit`` -- gain > tp_pct
 
     Round-15 (2026-04-30): added implausible-quote guard parallel to
     the stock + crypto exit decision paths. A corrupted upstream
@@ -175,8 +184,10 @@ def _evaluate_exit_triggers(
     trigger ``options_premium_stop_loss``. Reject quotes where the
     ratio (current/entry) > 10 or < 0.1 -- that's a 10x divergence,
     far more than legitimate option moves between 5-min monitor passes.
-    Returns None so the next pass retries with a fresh quote rather
-    than acting on garbage data.
+    Returns ``(None, True)`` so the next pass retries with a fresh
+    quote rather than acting on garbage data, AND so the caller can
+    distinguish refusal from "no trigger" when deciding whether to
+    fall through to the LLM advisory.
 
     Note: options CAN legitimately drop near zero at expiration, but
     the configured stop_pct (default 50%) fires LONG BEFORE the 0.1x
@@ -184,26 +195,27 @@ def _evaluate_exit_triggers(
     ratio = 0.5 -- well within the (0.1, 10) plausibility envelope.
     """
     if dte is not None and dte <= dte_threshold:
-        return "options_dte_threshold"
+        return "options_dte_threshold", False
     if entry_premium > 0 and current_premium is not None and current_premium > 0:
         ratio = current_premium / entry_premium
         if ratio > 10.0 or ratio < 0.1:
             # Implausible move -- abstain. Per no-hardcoded-fallback rule,
             # don't synthesize a "current value" -- return None and let the
-            # next pass retry with a fresh quote.
+            # next pass retry with a fresh quote. Set abstained_implausible
+            # so the caller does NOT consult the LLM advisory as an override.
             logger.warning(
                 "[options_exit_monitor] implausible quote ratio=%.4f "
                 "(current=%s, entry=%s); refusing to act on data error -- "
                 "next pass retries with fresh quote.",
                 ratio, current_premium, entry_premium,
             )
-            return None
+            return None, True
         change_pct = (ratio - 1.0) * 100.0
         if change_pct <= -abs(stop_pct):
-            return "options_premium_stop_loss"
+            return "options_premium_stop_loss", False
         if change_pct >= abs(tp_pct):
-            return "options_premium_take_profit"
-    return None
+            return "options_premium_take_profit", False
+    return None, False
 
 
 def run_options_exit_pass(db: Session) -> dict[str, int]:
@@ -326,7 +338,7 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         except (TypeError, ValueError):
             entry_premium = 0.0
 
-        reason = _evaluate_exit_triggers(
+        reason, abstained_implausible = _evaluate_exit_triggers(
             dte=_dte(expiration),
             entry_premium=entry_premium,
             current_premium=current_premium,
@@ -341,8 +353,18 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         # exit_now because they carry stronger semantics for the
         # postmortem ("stop hit at $X" vs "LLM said so"). exit_now
         # is the fallback when the position would otherwise drift.
+        #
+        # f-fix-implausible-quote-vs-exit_now-ordering (2026-05-06):
+        # parity with the crypto fix -- when _evaluate_exit_triggers
+        # abstains because the quote is implausible, do NOT consult
+        # the LLM advisory. The lane has just declared it does not
+        # trust its own price feed for this trade; the LLM may be
+        # reading a different (clean) feed and acting on its
+        # recommendation while the engine itself disowns the price
+        # is a different kind of foot-gun. Per no-hardcoded-fallback:
+        # when inputs disagree, abstain.
         monitor_exit_meta: Optional[dict[str, Any]] = None
-        if not reason:
+        if not reason and not abstained_implausible:
             monitor_exit_meta = fresh_monitor_exit_meta(
                 latest_monitor_decisions.get(int(t.id))
             )

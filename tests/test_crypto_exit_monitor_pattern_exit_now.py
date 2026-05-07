@@ -208,34 +208,19 @@ def test_case4_native_stop_trigger_wins_on_tie(db):
 # Case 5 -- implausible-quote guard MUST win over fresh exit_now
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Surfaces a real ordering bug in run_crypto_exit_pass: when "
-        "_evaluate_exit_triggers returns should_exit=False with "
-        "reason='no_trigger:implausible_quote', the next branch consults "
-        "fresh_monitor_exit_meta unconditionally and overrides the refusal "
-        "with should_exit=True, reason='pattern_exit_now'. The exit-engine "
-        "sells from a quote it just refused to trust. Brief Open Q matches "
-        "Cowork's preferred fix (a): tighten the crypto code so the "
-        "implausible-quote guard always wins regardless of LLM input. "
-        "When that fix lands, xfail(strict=True) flips this test from XFAIL "
-        "to XPASS -> failure, prompting removal of the marker."
-    ),
-)
 def test_case5_implausible_quote_guard_wins_over_exit_now(db):
-    """Open Q (brief): if the price feed is poisoned (px ~ 0.00003x
-    entry), the implausible-quote guard inside ``_evaluate_exit_triggers``
-    short-circuits to ``should_exit=False, reason='no_trigger:implausible_quote'``.
-    A fresh ``exit_now`` must NOT override that refusal -- the LLM is
-    reading a different (clean) feed than the exit-engine, and acting
-    on its recommendation while the exit-engine doesn't trust its own
-    price is a different kind of foot-gun than acting on the bad price.
+    """When the price feed is poisoned (px ~ 0.00003x entry), the
+    implausible-quote guard inside ``_evaluate_exit_triggers`` short-
+    circuits to ``should_exit=False, reason='no_trigger:implausible_quote'``.
+    A fresh ``exit_now`` must NOT override that refusal -- the LLM
+    may be reading a different (clean) feed than the exit-engine, and
+    acting on its recommendation while the engine itself doesn't trust
+    its own price is a different kind of foot-gun than acting on the
+    bad price.
 
-    Brief: Case 5 EXPECTS the implausible-quote guard to win
-    (``closed == 0``). 2026-05-06 run confirmed it does NOT win today --
-    fresh exit_now overrides the refusal. Marked xfail(strict=True) to
-    pin the bug for Cowork follow-up rather than silently muting."""
+    f-fix-implausible-quote-vs-exit_now-ordering (2026-05-06): the
+    fix gates ``fresh_monitor_exit_meta`` consultation on the refusal
+    prefix. xfail removed; assertion now passes."""
     t = _seed_open_crypto_trade(db, name_suffix="case5")
     _seed_decision(db, t.id, action="exit_now")
 
@@ -247,3 +232,49 @@ def test_case5_implausible_quote_guard_wins_over_exit_now(db):
     db.refresh(t)
     assert t.pending_exit_order_id is None
     sell_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Upstream contract pin: _evaluate_exit_triggers refusal prefix
+# ---------------------------------------------------------------------------
+
+def test_evaluate_exit_triggers_implausible_quote_prefix():
+    """Pins the contract that Phase 1's prefix-match gate relies on:
+    when ``entry > 0`` and ``px / entry < 0.1``, the function returns
+    ``(False, "no_trigger:implausible_quote ...")``. If this contract
+    ever changes (different reason wording, sentinel restructure),
+    the gate in ``run_crypto_exit_pass`` would silently regress."""
+    from app.services.trading.crypto.exit_monitor import _evaluate_exit_triggers
+
+    should_exit, reason = _evaluate_exit_triggers(
+        px=0.0003, entry=10.0, stop=9.0, target=14.0, direction="long",
+    )
+    assert should_exit is False
+    assert reason.startswith("no_trigger:implausible_quote")
+
+
+# ---------------------------------------------------------------------------
+# Case 5b -- ordinary "no_trigger" + fresh exit_now -> closes
+# ---------------------------------------------------------------------------
+
+def test_case5b_no_trigger_plus_fresh_exit_now_still_closes(db):
+    """Regression: the Phase 1 gate must NOT extend its refusal to the
+    ordinary "no_trigger" reason (price between stop and target with no
+    plausibility issue). That was Case 1's success path; this case
+    re-exercises it after the gate to confirm the gate's scope is
+    surgical (only the implausible-quote refusal blocks consultation)."""
+    t = _seed_open_crypto_trade(db, name_suffix="case5b")
+    _seed_decision(db, t.id, action="exit_now")
+
+    # entry $10, px $11 -- ratio 1.1, well within (0.1, 10), so
+    # _evaluate_exit_triggers returns (False, "no_trigger") and the
+    # monitor consultation IS allowed to fire.
+    out, sell_mock, _ = _run_with_mocks(
+        db, quote_price=11.00, sell_order_id="test-oid-5b"
+    )
+
+    assert out.get("closed") == 1
+    db.refresh(t)
+    assert t.pending_exit_reason == "pattern_exit_now"
+    assert t.pending_exit_order_id == "test-oid-5b"
+    sell_mock.assert_called_once()

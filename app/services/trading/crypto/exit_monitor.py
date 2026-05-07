@@ -213,6 +213,29 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             px=px, entry=entry, stop=stop, target=target,
             direction=(t.direction or "long"),
         )
+        # f-fix-implausible-quote-vs-exit_now-ordering (2026-05-06):
+        # when _evaluate_exit_triggers refuses on an implausible quote
+        # (price ratio > 10x or < 0.1x of entry), do NOT consult the
+        # pattern-monitor advisory. The lane has just declared it does
+        # not trust its own price feed for this trade; an LLM advisory
+        # would only override that refusal -- and the LLM may be reading
+        # a different (clean) feed than the exit-engine. Acting on the
+        # advisory while the engine itself disowns the price is a
+        # different kind of foot-gun than acting on the bad price
+        # directly. Per the no-hardcoded-fallback rule: when inputs
+        # disagree, abstain.
+        #
+        # Match by reason-prefix because _evaluate_exit_triggers returns
+        # the refusal in the string ("no_trigger:implausible_quote ...").
+        # The prefix is the contract; the prefix-shape test in
+        # tests/test_crypto_exit_monitor_pattern_exit_now.py pins it.
+        # Other no_trigger / no_quote reasons are NOT refusals to trust
+        # the feed -- monitor consultation still proceeds for those.
+        _refused_quote = (
+            not should_exit
+            and isinstance(reason, str)
+            and reason.startswith("no_trigger:implausible_quote")
+        )
         # Pattern-monitor exit_now branch -- only consulted when price triggers
         # have not fired, so stop/target wins on tie (cheaper to evaluate, and
         # those reasons carry stronger semantics for postmortems). The canonical
@@ -221,7 +244,7 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
         # in the structured log line rather than being truncated into the 50-char
         # reason column.
         monitor_exit_meta: Optional[dict[str, Any]] = None
-        if not should_exit:
+        if not should_exit and not _refused_quote:
             monitor_exit_meta = _fresh_monitor_exit_meta(
                 latest_monitor_decisions.get(int(t.id))
             )
