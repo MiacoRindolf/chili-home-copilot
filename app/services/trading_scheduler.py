@@ -3103,6 +3103,48 @@ def _run_momentum_scanner_job():
         db.close()
 
 
+def _run_fast_path_universe_rotator_job():
+    """f-fastpath-universe-rotation (2026-05-07): hourly mid-tier rotator.
+
+    Scans Coinbase USD products, applies the four admission gates,
+    scores by ``volume_24h_usd / max(spread_bps, 0.5)``, applies
+    hysteresis, writes top-N to ``fast_path_universe``. New entrants
+    land in ``status='shadow'`` for ``universe_shadow_window_h`` hours
+    before promotion to ``status='active'``.
+
+    No-op when ``settings.universe_rotation_enabled`` is False (the
+    flag's default). Failures log + return; never raises into the
+    scheduler.
+    """
+    from ..db import SessionLocal
+    from .trading.fast_path import settings as fp_settings_mod
+    from .trading.fast_path.universe_rotator import run_rotation_pass
+
+    fp_settings = fp_settings_mod.load()
+    if not fp_settings.universe_rotation_enabled:
+        logger.debug(
+            "[scheduler] fast-path universe rotator: skipped "
+            "(universe_rotation_enabled=False)"
+        )
+        return
+
+    logger.info("[scheduler] Running fast-path universe rotator")
+    db = SessionLocal()
+    try:
+        out = run_rotation_pass(db, settings=fp_settings)
+        logger.info(
+            "[scheduler] fast-path universe rotator pass complete: %s", out
+        )
+    except Exception as e:
+        logger.warning("[scheduler] fast-path universe rotator failed: %s", e)
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
 def _run_crypto_viability_refresh_job():
     """24/7 crypto viability refresh: pull latest breakout scan results and bridge to viability.
 
@@ -3949,6 +3991,16 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=90),
+            )
+
+            _scheduler.add_job(
+                _run_fast_path_universe_rotator_job,
+                trigger=IntervalTrigger(minutes=60),
+                id="fast_path_universe_rotator",
+                name="Fast-path universe rotator (every 60min, 24/7)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=120),
             )
 
             _scheduler.add_job(
