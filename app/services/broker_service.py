@@ -151,6 +151,14 @@ def _load_session_from_db(broker: str, username: str) -> dict | None:
                 return data
             return None
         finally:
+            # FIX 46 pattern (canonical: scanner.py:1064-1074): explicit rollback
+            # to end the implicit read-only transaction. session.close() alone
+            # leaves the connection 'idle in transaction' in pg_stat_activity.
+            # Lower volume than the market_data anchor leak but the same shape.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     except Exception as e:
         logger.debug("[broker] Failed to load session from DB: %s", e)

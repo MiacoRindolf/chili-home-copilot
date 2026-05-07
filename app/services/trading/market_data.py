@@ -754,6 +754,17 @@ def _resolve_implausibility_anchor(ticker: str) -> float | None:
             if row and row.entry_price and float(row.entry_price) > 0:
                 return float(row.entry_price)
         finally:
+            # FIX 46 pattern (canonical: scanner.py:1064-1074): explicit rollback
+            # to end the implicit read-only transaction. SQLAlchemy's
+            # session.close() returns the connection to the pool but doesn't
+            # ROLLBACK by default — leaving it as 'idle in transaction' in
+            # pg_stat_activity. Without this, every fetch_quote cache miss leaks
+            # one idle-in-tx session until the pool exhausts or postgres
+            # terminates the connection.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     except Exception:
         pass
