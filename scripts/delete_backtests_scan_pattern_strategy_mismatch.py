@@ -74,6 +74,11 @@ def main() -> int:
         session.rollback()
         raise
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            session.rollback()
+        except Exception:
+            pass
         session.close()
     return 0
 

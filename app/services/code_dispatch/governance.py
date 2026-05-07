@@ -72,6 +72,11 @@ def restore_from_db() -> None:
                     _kill_switch = bool(row[0])
                     _kill_switch_reason = row[1]
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[code_dispatch.governance] restore_from_db skipped", exc_info=True)
@@ -99,6 +104,11 @@ def record_consecutive_failure(run_id: Optional[int]) -> int:
             sess.commit()
             new_count = int(row[0]) if row else 0
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[code_dispatch.governance] record_failure failed", exc_info=True)
@@ -126,6 +136,11 @@ def reset_consecutive_failures() -> None:
             )
             sess.commit()
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[code_dispatch.governance] reset_failures failed", exc_info=True)
@@ -150,6 +165,11 @@ def _persist(active: bool, reason: Optional[str], actor: str) -> None:
             )
             sess.commit()
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[code_dispatch.governance] persist failed", exc_info=True)

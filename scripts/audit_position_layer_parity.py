@@ -144,6 +144,11 @@ def _audit_live_positions() -> dict:
             "ok": len(discrepancies) == 0,
         }
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -185,6 +190,11 @@ def _audit_paper_positions() -> dict:
             "ok": len(discrepancies) == 0,
         }
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

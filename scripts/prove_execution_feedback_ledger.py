@@ -154,6 +154,11 @@ def main() -> int:
             pass
         return 1
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

@@ -161,6 +161,11 @@ def main() -> int:
         session.commit()
         print(f"\nCommitted {len(plan)} trading_backtests.scan_pattern_id fixes (+ pattern_trade rows).")
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            session.rollback()
+        except Exception:
+            pass
         session.close()
 
     return 0

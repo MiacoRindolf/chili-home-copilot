@@ -265,6 +265,11 @@ def check_runtime_override_roundtrip() -> None:
         db.commit()
         invalidate_cache(slice_name)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -298,6 +303,11 @@ def check_clear_override() -> None:
             db.commit()
             invalidate_cache(s)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -404,6 +414,11 @@ def check_service_tick_noop_when_disabled() -> None:
     try:
         out = run_autopilot_tick(db)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     assert isinstance(out, dict)
     # When flag False, skipped True OR enabled False.
@@ -421,6 +436,11 @@ def check_diagnostics_shape() -> None:
     try:
         payload = diagnostics_summary(db)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     for k in ("enabled", "kill", "cron_hour", "cron_minute", "slices"):
         assert k in payload, f"missing key in diagnostics: {k}"

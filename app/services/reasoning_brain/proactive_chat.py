@@ -160,6 +160,11 @@ def process_insight_reply(
     except Exception as e:
         log_info(trace_id, f"insight_reply_memory_error={e}")
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            s.rollback()
+        except Exception:
+            pass
         s.close()
 
     goal.evidence_count += max(1, len(new_facts))

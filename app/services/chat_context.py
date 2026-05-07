@@ -25,6 +25,11 @@ def _thread_get_personality_memory(user_id: int) -> str | None:
             personality = memory
         return personality
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            s.rollback()
+        except Exception:
+            pass
         s.close()
 
 
@@ -38,6 +43,11 @@ def _thread_get_project_summary(user_id: int) -> str | None:
     try:
         return planner_service.get_user_project_summary(s, user_id)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            s.rollback()
+        except Exception:
+            pass
         s.close()
 
 

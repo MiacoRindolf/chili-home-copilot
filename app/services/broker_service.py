@@ -127,6 +127,11 @@ def _save_session_to_db(broker: str, username: str, token_data: dict, device_tok
             db.commit()
             logger.info("[broker] Session token persisted to DB for %s/%s", broker, username)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     except Exception as e:
         logger.warning("[broker] Failed to persist session to DB: %s", e)

@@ -2553,6 +2553,11 @@ def _persist_crypto_breakout_adhoc(
         logger.warning("[crypto_breakout] DB persist failed: %s", e)
         db.rollback()
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2765,6 +2770,11 @@ def get_crypto_breakout_cache() -> dict[str, Any]:
             "total_scanned": int(payload.get("total_scanned") or 0),
         }
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -3424,6 +3434,11 @@ def get_breakout_cache() -> dict[str, Any]:
             if ended_at:
                 stock_age = int((datetime.utcnow() - ended_at).total_seconds())
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
     ages = [a for a in (stock_age, crypto_age) if a is not None]
@@ -3566,6 +3581,11 @@ def _persist_stock_breakout_adhoc(meta: dict[str, Any], payload: dict[str, Any])
         logger.warning("[breakout] stock DB persist failed: %s", e)
         db.rollback()
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -3737,6 +3757,11 @@ def _persist_momentum_adhoc(meta: dict[str, Any], payload: dict[str, Any]) -> No
         logger.warning("[momentum] DB persist failed: %s", e)
         db.rollback()
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -4270,6 +4295,11 @@ def _bg_refresh_top_picks(user_id: int | None) -> None:
             picks = _generate_top_picks_impl(s, user_id)
             _top_picks_cache = {"picks": picks, "ts": time.time()}
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                s.rollback()
+            except Exception:
+                pass
             s.close()
     except Exception:
         logger.debug("Background top-picks refresh failed", exc_info=True)
@@ -4896,6 +4926,11 @@ def _bg_refresh_smart_pick_context(
         try:
             smart_pick_context(db, user_id, budget=budget, risk_tolerance=risk_tolerance, force_fresh=True)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     except Exception:
         # Background refresh failures should never break foreground requests

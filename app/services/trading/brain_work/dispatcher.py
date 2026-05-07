@@ -89,6 +89,11 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
         )
         s1.commit()
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            s1.rollback()
+        except Exception:
+            pass
         s1.close()
 
     try:

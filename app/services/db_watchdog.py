@@ -175,6 +175,11 @@ def _poll_once() -> tuple[int, int]:
                 )
                 warned += 1
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            sess.rollback()
+        except Exception:
+            pass
         sess.close()
 
     return warned, killed

@@ -108,6 +108,11 @@ def main() -> int:
             print(f"TradingInsight rows with this scan_pattern_id: {ins_n}")
 
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     return 0
 

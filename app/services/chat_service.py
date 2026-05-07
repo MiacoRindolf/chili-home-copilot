@@ -415,6 +415,11 @@ def _thread_get_personality_memory(user_id: int) -> str | None:
             personality = memory
         return personality
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            s.rollback()
+        except Exception:
+            pass
         s.close()
 
 
@@ -426,6 +431,11 @@ def _thread_get_project_summary(user_id: int) -> str | None:
     try:
         return planner_service.get_user_project_summary(s, user_id)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            s.rollback()
+        except Exception:
+            pass
         s.close()
 
 
@@ -747,6 +757,11 @@ def store_and_title(
             except Exception as e:
                 log_info(trace_id, f"personality_extraction_error={e}")
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            s.rollback()
+        except Exception:
+            pass
         s.close()
 
 
@@ -794,6 +809,11 @@ def run_personality_and_memory_in_background(
             user_id, is_guest, message, llm_reply, action_type, db, trace_id,
         )
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

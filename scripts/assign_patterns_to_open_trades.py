@@ -203,6 +203,11 @@ def main() -> int:
         else:
             log.info("No assignments made (considered %d trades)", considered)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     return 0
 

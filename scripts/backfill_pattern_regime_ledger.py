@@ -169,6 +169,11 @@ def main() -> int:
                 f"cells_persisted={ref.cells_persisted}"
             )
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
     print(

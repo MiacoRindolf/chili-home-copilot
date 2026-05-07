@@ -228,6 +228,11 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             pass
         return (0, 1)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

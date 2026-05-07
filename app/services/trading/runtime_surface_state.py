@@ -97,6 +97,11 @@ def persist_runtime_surface_now(
             db.commit()
             return True
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     except Exception:
         return False

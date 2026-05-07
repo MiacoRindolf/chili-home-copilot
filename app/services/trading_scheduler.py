@@ -153,6 +153,11 @@ def _run_daily_prescreen_job():
             result = _prescreen_run(db)
             logger.info("[scheduler] Daily prescreen result: %s", result)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("daily_prescreen", _work)
@@ -280,6 +285,11 @@ def _run_brain_market_snapshot_job():
                 except Exception:
                     logger.exception("[scheduler] brain_market_snapshots batch finish failed")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("brain_market_snapshots", _work)
@@ -341,6 +351,11 @@ def _run_paper_trade_check_job():
             except Exception:
                 logger.debug("[scheduler] live_exit_engine error", exc_info=True)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("paper_trade_check", _work)
@@ -373,6 +388,11 @@ def _run_momentum_paper_runner_batch_job():
             logger.warning("[scheduler] paper runner: failed to list runnable sessions", exc_info=True)
             return
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
         if not session_ids:
@@ -389,6 +409,11 @@ def _run_momentum_paper_runner_batch_job():
                 db.rollback()
                 logger.warning("[scheduler] paper runner tick failed session=%s", sid, exc_info=True)
             finally:
+                # FIX 46 pattern (rollback before close).
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 db.close()
 
         if ticked:
@@ -424,6 +449,11 @@ def _run_momentum_live_runner_batch_job():
             logger.warning("[scheduler] live runner: failed to list runnable sessions", exc_info=True)
             return
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
         if not session_ids:
@@ -440,6 +470,11 @@ def _run_momentum_live_runner_batch_job():
                 db.rollback()
                 logger.warning("[scheduler] live runner tick failed session=%s", sid, exc_info=True)
             finally:
+                # FIX 46 pattern (rollback before close).
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 db.close()
 
         if ticked:
@@ -504,6 +539,11 @@ def _run_neural_mesh_drain_job():
             except Exception:
                 pass
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("neural_mesh_drain", _work)
@@ -546,6 +586,11 @@ def _run_bracket_reconciliation_job():
         except Exception:
             logger.exception("[scheduler] bracket_reconciliation sweep failed")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("bracket_reconciliation", _work)
@@ -635,6 +680,11 @@ def _run_capital_reweight_weekly_job():
         except Exception:
             logger.exception("[scheduler] capital_reweight_weekly sweep failed")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("capital_reweight_weekly", _work)
@@ -762,6 +812,11 @@ def _run_drift_monitor_daily_job():
         except Exception:
             logger.exception("[scheduler] drift_monitor_daily sweep failed")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("drift_monitor_daily", _work)
@@ -846,6 +901,11 @@ def _run_divergence_sweep_daily_job():
                 "[scheduler] divergence_sweep_daily sweep failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("divergence_sweep_daily", _work)
@@ -867,6 +927,11 @@ def _run_weekly_regime_retrain_job():
             out = run_weekly_regime_retrain(db)
             logger.info("[scheduler] regime_classifier_weekly: %s", out)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("regime_classifier_weekly", _work)
@@ -952,6 +1017,11 @@ def _run_macro_regime_daily_job():
                         "[scheduler] macro_regime_daily batch_job_finish failed"
                     )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("macro_regime_daily", _work)
@@ -980,6 +1050,11 @@ def _run_fred_yield_curve_daily_job():
         except Exception:
             logger.exception("[scheduler] fred_yield_curve_daily failed")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("fred_yield_curve_daily", _work)
@@ -1035,6 +1110,11 @@ def _run_breadth_relstr_daily_job():
                 "[scheduler] breadth_relstr_daily sweep failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("breadth_relstr_daily", _work)
@@ -1090,6 +1170,11 @@ def _run_cross_asset_daily_job():
                 "[scheduler] cross_asset_daily sweep failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("cross_asset_daily", _work)
@@ -1138,6 +1223,11 @@ def _run_ticker_regime_daily_job():
                 "[scheduler] ticker_regime_daily sweep failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("ticker_regime_daily", _work)
@@ -1194,6 +1284,11 @@ def _run_vol_dispersion_daily_job():
                 "[scheduler] vol_dispersion_daily sweep failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("vol_dispersion_daily", _work)
@@ -1250,6 +1345,11 @@ def _run_intraday_session_daily_job():
                 "[scheduler] intraday_session_daily sweep failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("intraday_session_daily", _work)
@@ -1309,6 +1409,11 @@ def _run_pattern_regime_perf_daily_job():
                 "[scheduler] pattern_regime_perf_daily sweep failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("pattern_regime_perf_daily", _work)
@@ -1357,6 +1462,11 @@ def _run_pattern_regime_killswitch_daily_job():
                 "[scheduler] pattern_regime_killswitch_daily sweep failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("pattern_regime_killswitch_daily", _work)
@@ -1396,6 +1506,11 @@ def _run_pattern_regime_autopilot_tick_job():
                 "[scheduler] pattern_regime_autopilot_tick failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("pattern_regime_autopilot_tick", _work)
@@ -1420,6 +1535,11 @@ def _run_pattern_regime_autopilot_weekly_job():
                 "[scheduler] pattern_regime_autopilot_weekly failed",
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("pattern_regime_autopilot_weekly", _work)
@@ -1438,6 +1558,11 @@ def _run_data_retention_job():
             results = run_retention_policy(db)
             logger.info("[scheduler] Data retention done: %s", results)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("data_retention", _work)
@@ -1482,6 +1607,11 @@ def _run_realized_ev_demote_pass_job():
                 except Exception:
                     logger.exception("[scheduler] realized_ev_demote_pass batch_job_finish failed")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("realized_ev_demote_pass", _work)
@@ -1524,6 +1654,11 @@ def _run_breaker_heartbeat_job():
                 except Exception:
                     logger.exception("[scheduler] breaker_heartbeat batch_job_finish failed")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("breaker_heartbeat", _work)
@@ -1553,6 +1688,11 @@ def _run_backtest_priority_scorer_job():
             summary = run_priority_scoring(db)
             logger.info("[scheduler] backtest_priority_scorer done: %s", summary)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("backtest_priority_scorer", _work)
@@ -1569,6 +1709,11 @@ def _run_weekly_review_job():
         try:
             _weekly_review(db, user_id=None)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("weekly_review", _work)
@@ -1720,6 +1865,11 @@ def _run_broker_sync_job():
                     cb_pos = coinbase_service.sync_positions_to_db(db, user_id=cb_uid)
                     logger.info("[scheduler] CB position sync (user=%s): %s", cb_uid, cb_pos)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("broker_sync", _work)
@@ -1768,6 +1918,11 @@ def _run_price_monitor_job():
             if pattern_tickers:
                 trigger_pattern_monitor_for_tickers(pattern_tickers, reason="price_monitor")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("price_monitor", _work)
@@ -1804,6 +1959,11 @@ def _run_daytrade_fast_monitor_job():
                     db.rollback()
                     logger.debug("[scheduler] daytrade fast monitor failed for uid=%s", uid, exc_info=True)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("daytrade_fast_monitor", _work)
@@ -1861,6 +2021,11 @@ def _run_stop_alert_dispatch_job():
                 except Exception:
                     logger.warning("[scheduler] stop_alert_dispatch failed for uid=%s", uid, exc_info=True)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("crypto_stop_monitor", _work)
@@ -1901,6 +2066,11 @@ def _run_pattern_position_monitor_job():
                 except Exception:
                     logger.warning("[scheduler] pattern_position_monitor failed uid=%s", uid, exc_info=True)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("pattern_position_monitor", _work)
@@ -2021,6 +2191,11 @@ def _run_pattern_imminent_job():
                 except Exception:
                     logger.exception("[scheduler] pattern_imminent batch_job_finish failed")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("pattern_imminent_scanner", _work)
@@ -2313,6 +2488,11 @@ def _record_breakout_alert(
                 )
             db.commit()
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     except Exception as e:
         logger.warning(f"[scheduler] Failed to record breakout alert: {e}", exc_info=True)
@@ -2997,6 +3177,11 @@ def _run_brain_batch_reconciler_job() -> None:
         try:
             reconcile_stale_batch_jobs(sess)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception as e:
         logger.warning("[scheduler_job] brain_batch_reconciler failed: %s", e)
@@ -3019,6 +3204,11 @@ def _run_promotion_evidence_audit_job() -> None:
         try:
             run_promotion_evidence_audit(sess)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception as e:
         logger.warning("[scheduler_job] promotion_evidence_audit failed: %s", e)
@@ -3035,6 +3225,11 @@ def _run_monitor_decision_review_job():
             if result.get("filled_1h") or result.get("filled_4h"):
                 logger.info("[scheduler] monitor decision review: %s", result)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("monitor_decision_review", _work)
@@ -4583,6 +4778,11 @@ def start_scheduler():
                                 "[gateway-learning] distiller pass: %s", res
                             )
                         finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
                             _db.close()
                     except Exception:
                         logger.exception("[gateway-learning] distiller failed")
@@ -4600,6 +4800,11 @@ def start_scheduler():
                                 "[gateway-learning] evolver pass: %s", res
                             )
                         finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
                             _db.close()
                     except Exception:
                         logger.exception("[gateway-learning] evolver failed")
@@ -4643,6 +4848,11 @@ def start_scheduler():
                                 "[strategy-param] learning pass: %s", res
                             )
                         finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
                             _db.close()
                     except Exception:
                         logger.exception(
@@ -4683,6 +4893,11 @@ def start_scheduler():
                                 "[pattern-survival] daily snapshot: %s", res
                             )
                         finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
                             _db.close()
                     except Exception:
                         logger.exception(
@@ -4730,6 +4945,11 @@ def start_scheduler():
                                 "[pattern-survival] demote pass: %s", res
                             )
                         finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
                             _db.close()
                     except Exception:
                         logger.exception(
@@ -4776,6 +4996,11 @@ def start_scheduler():
                                 "[pattern-survival] training pass: %s", res
                             )
                         finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
                             _db.close()
                     except Exception:
                         logger.exception(
@@ -4826,6 +5051,11 @@ def start_scheduler():
                             res = run_perps_ingestion_pass(_db)
                             logger.info("[perps] ingestion: %s", res)
                         finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                _db.rollback()
+                            except Exception:
+                                pass
                             _db.close()
                     except Exception:
                         logger.exception("[perps] ingestion failed")

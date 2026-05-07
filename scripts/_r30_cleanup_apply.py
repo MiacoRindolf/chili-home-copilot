@@ -89,6 +89,11 @@ SC_OLD_FUNC = """def _run_crypto_stop_monitor_job():
                 except Exception:
                     logger.warning(\"[scheduler] Crypto stop monitor failed for uid=%s\", uid, exc_info=True)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded(\"crypto_stop_monitor\", _work)"""
@@ -146,6 +151,11 @@ SC_NEW_FUNC = """def _run_stop_alert_dispatch_job():
                 except Exception:
                     logger.warning(\"[scheduler] stop_alert_dispatch failed for uid=%s\", uid, exc_info=True)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded(\"crypto_stop_monitor\", _work)"""

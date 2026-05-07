@@ -427,6 +427,11 @@ def main() -> int:
         print("[phase_l17_soak] ALL GREEN")
         return 0
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

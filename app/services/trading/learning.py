@@ -176,6 +176,11 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
                             _pred_cache = {"results": fresh, "ts": time.time()}
                             _persist_prediction_runtime_surface(fresh)
                         finally:
+                            # FIX 46 pattern (rollback before close).
+                            try:
+                                s.rollback()
+                            except Exception:
+                                pass
                             s.close()
                     except Exception:
                         logger.debug("Background prediction refresh failed", exc_info=True)

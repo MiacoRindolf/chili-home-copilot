@@ -205,6 +205,11 @@ def main() -> int:
             n = refresh_trading_insight_backtest_counts(db)
             print(f"[recompute] TradingInsight counts refreshed: {n} insights")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     elif args.dry_run and not args.skip_recompute:
         print("[recompute] skipped in --dry-run (run without --dry-run to apply).")

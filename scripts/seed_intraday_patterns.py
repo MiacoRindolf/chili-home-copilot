@@ -225,6 +225,11 @@ def main() -> int:
             log.info("  %-25s  %d -> %d  (%+d)", str(fam), b, a, a - b)
         return 0
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

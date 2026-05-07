@@ -74,6 +74,11 @@ def log_call(
             sess.commit()
             return int(row[0]) if row else None
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         # Never let logging break a production call path.
@@ -101,6 +106,11 @@ def mark_validation_outcome(call_id: int, status: str) -> None:
             )
             sess.commit()
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[llm_router.log] mark_validation_outcome failed", exc_info=True)

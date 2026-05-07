@@ -159,6 +159,11 @@ def main() -> dict:
         print("[backfill_position_rows] summary:", summary)
         return summary
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

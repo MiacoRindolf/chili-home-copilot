@@ -40,6 +40,11 @@ def main() -> int:
             n = refresh_trading_insight_backtest_counts(db)
             print(f"refresh_trading_insight_backtest_counts: {n} insights updated")
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     return 0

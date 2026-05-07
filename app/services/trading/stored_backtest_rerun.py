@@ -202,6 +202,11 @@ def run_insight_stored_backtests_rerun_job(insight_id: int, *, limit: int | None
     except Exception:
         logger.exception("[rerun_all_insight] job failed insight=%s", insight_id)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            sdb.rollback()
+        except Exception:
+            pass
         sdb.close()
 
 

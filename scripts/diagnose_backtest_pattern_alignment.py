@@ -130,6 +130,11 @@ def main() -> int:
         print("Docs: docs/TRADING_BACKTEST_DB_AUDIT.md | 081 risk: docs/MIGRATION_081_BACKTEST_DEDUPE_RISK.md")
         return 0
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

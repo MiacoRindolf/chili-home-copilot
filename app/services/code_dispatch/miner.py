@@ -132,6 +132,11 @@ def pick_next_task() -> Optional[Candidate]:
 
             return None
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[miner] pick failed", exc_info=True)

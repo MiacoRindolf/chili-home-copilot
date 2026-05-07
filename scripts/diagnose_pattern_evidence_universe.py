@@ -161,6 +161,11 @@ def main() -> int:
                     continue
                 _diagnose_one(db, ins)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     return 0
 

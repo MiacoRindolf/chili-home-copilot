@@ -48,6 +48,11 @@ def main() -> int:
         print(json.dumps(out, indent=2, default=str))
         return 0
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

@@ -58,6 +58,11 @@ def main() -> int:
         if not args.dry_run:
             db.commit()
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
     print(f"{'Would update' if args.dry_run else 'Updated'} {updated} row(s)")

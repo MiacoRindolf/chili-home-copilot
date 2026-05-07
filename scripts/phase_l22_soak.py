@@ -440,6 +440,11 @@ def check_shadow_persist_append_only() -> None:
             "session_neutral",
         )
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -460,6 +465,11 @@ def check_off_mode_is_noop() -> None:
         )
         assert row is None, "off mode must return None"
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -485,6 +495,11 @@ def check_authoritative_refuses() -> None:
         except RuntimeError:
             pass
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -525,6 +540,11 @@ def check_coverage_gate_persists_but_returns_none() -> None:
             ), {"d": as_of}).scalar_one()
             assert int(n) == 1, f"expected 1 below-coverage row, got {n}"
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -549,6 +569,11 @@ def check_summary_frozen_shape() -> None:
     try:
         s = intraday_session_summary(db, lookback_days=7)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
     expected_keys = {
@@ -615,6 +640,11 @@ def check_additive_only_l17_l21_counts_unchanged() -> None:
             prev_close_override=100.0,
         )
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
     with engine.connect() as conn:

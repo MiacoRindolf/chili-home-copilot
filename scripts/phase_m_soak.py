@@ -363,6 +363,11 @@ def check_off_mode_noop() -> None:
         )
         assert ref is None, "off mode must return None"
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -388,6 +393,11 @@ def check_authoritative_refused() -> None:
             raised = True
         assert raised, "authoritative mode must raise RuntimeError"
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -435,6 +445,11 @@ def check_shadow_persists_cells() -> None:
         assert ref.cells_persisted == 2 * len(DEFAULT_DIMENSIONS)
         assert _count_rows(db, run_id) == ref.cells_persisted
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -476,6 +491,11 @@ def check_append_only_repeated_writes() -> None:
             f"got {total}"
         )
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -489,6 +509,11 @@ def check_summary_frozen_shape() -> None:
     try:
         s = pattern_regime_perf_summary(db, lookback_days=7)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
     expected_top = {
@@ -601,6 +626,11 @@ def check_additive_only_l17_l22_counts_unchanged() -> None:
                 ).scalar_one()
             )
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
     diffs = {t: (before[t], after[t]) for t in peer_tables if before[t] != after[t]}

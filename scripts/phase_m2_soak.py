@@ -320,6 +320,11 @@ def check_has_live_approval_no_rows() -> None:
             is False
         )
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -340,6 +345,11 @@ def check_load_resolved_context_empty() -> None:
         assert ctx.n_confident_dimensions == 0
         assert ctx.mean_expectancy() is None
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -603,6 +613,11 @@ def check_tilt_service_off_returns_none() -> None:
         )
         assert out is None
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
         _restore_setting("brain_pattern_regime_tilt_mode", prev)
 
@@ -633,6 +648,11 @@ def check_tilt_service_authoritative_without_approval_refused() -> None:
         assert out.multiplier == 1.0
         assert out.fallback_used is True
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
         _restore_setting("brain_pattern_regime_tilt_mode", prev_mode)
         _restore_setting("brain_pattern_regime_tilt_ops_log_enabled", prev_ops)
@@ -654,6 +674,11 @@ def check_promotion_service_off_returns_none() -> None:
         )
         assert out is None
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
         _restore_setting("brain_pattern_regime_promotion_mode", prev)
 
@@ -686,6 +711,11 @@ def check_promotion_service_authoritative_without_approval_refused() -> None:
         assert out.consumer_allow is True
         assert out.fallback_used is True
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
         _restore_setting("brain_pattern_regime_promotion_mode", prev_mode)
         _restore_setting(
@@ -709,6 +739,11 @@ def check_killswitch_service_off_returns_none() -> None:
         )
         assert out is None
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
         _restore_setting("brain_pattern_regime_killswitch_mode", prev)
 
@@ -727,6 +762,11 @@ def check_run_daily_sweep_off_mode() -> None:
         assert out.get("skipped") is True
         assert out.get("reason") == "mode_off"
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
         _restore_setting("brain_pattern_regime_killswitch_mode", prev)
 
@@ -749,6 +789,11 @@ def check_tilt_diagnostics_shape() -> None:
     try:
         s = diagnostics_summary(db, lookback_hours=1)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     _assert_keys(
         s,
@@ -777,6 +822,11 @@ def check_promotion_diagnostics_shape() -> None:
     try:
         s = diagnostics_summary(db, lookback_hours=1)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     _assert_keys(
         s,
@@ -804,6 +854,11 @@ def check_killswitch_diagnostics_shape() -> None:
     try:
         s = diagnostics_summary(db, lookback_hours=1)
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     _assert_keys(
         s,
@@ -860,6 +915,11 @@ def check_additive_only_m1_ledger_unchanged() -> None:
             f"M.1 ledger must be additive-only; before={before} after={after}"
         )
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

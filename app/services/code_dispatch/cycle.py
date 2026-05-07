@@ -71,6 +71,11 @@ def _reap_stuck_runs() -> int:
                 )
             return len(ids)
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[code_dispatch] reaper failed", exc_info=True)
@@ -89,6 +94,11 @@ def _set_code_agent_cycle_step(run_id: int, step: str) -> None:
             )
             sess.commit()
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[code_dispatch] cycle_step update failed", exc_info=True)
@@ -156,6 +166,11 @@ def _dispatch_draft_suggestion(task_id: int, user_id: int) -> tuple[Optional[int
         }
         return int(sid), meta, (time.monotonic() - t0) * 1000.0
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -335,6 +350,11 @@ def _run_sandboxed(
                 validation_timeout_sec=v_timeout,
             )
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                vdb.rollback()
+            except Exception:
+                pass
             vdb.close()
         val_run_id = vrid
         ms_val = (time.monotonic() - t_val0) * 1000.0

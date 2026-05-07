@@ -53,6 +53,11 @@ def _mark_run(run_id: int) -> None:
         )
         sess.commit()
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            sess.rollback()
+        except Exception:
+            pass
         sess.close()
 
 

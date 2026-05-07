@@ -102,6 +102,11 @@ def main(*, force: bool = False, limit: int | None = None) -> None:
         logger.info(f"  Win rate: {total_wins / max(1, total_wins + total_losses) * 100:.1f}%")
         
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

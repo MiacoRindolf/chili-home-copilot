@@ -52,6 +52,11 @@ def main() -> int:
             q = q.filter(BreakoutAlert.user_id == int(args.user_id))
         rows = list(q.all())
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
     hist: Counter[str] = Counter()
@@ -86,6 +91,11 @@ def main() -> int:
                     continue
             hist["would_place"] += 1
         finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     print("AutoTrader shadow replay")

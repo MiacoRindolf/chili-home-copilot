@@ -52,6 +52,11 @@ def main() -> None:
         db.refresh(u)
         print(f"Created user id={u.id} name={u.name!r} email={u.email!r}")
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 

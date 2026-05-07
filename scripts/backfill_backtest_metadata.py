@@ -210,6 +210,11 @@ def _rerun_one_by_id(bt_id: int) -> tuple[bool, int | None]:
             pass
         return False, None
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -422,6 +427,11 @@ def main() -> None:
         db.commit()
         logger.info("Rerun finished: ok=%s fail=%s (insights recomputed: %s)", ok, fail, len(affected_insights))
     finally:
+        # FIX 46 pattern (rollback before close).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
