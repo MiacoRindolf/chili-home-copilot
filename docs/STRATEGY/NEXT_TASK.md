@@ -1,6 +1,6 @@
 # NEXT_TASK: f-thread-tail-2026-05-07-2
 
-STATUS: PENDING
+STATUS: DONE
 
 **Promoted as a combined two-phase tail brief on 2026-05-07 14:30 UTC. Drains the two remaining unblocked QUEUED briefs in one CC run. Phase 1 is pure analysis (zero code, fast); Phase 2 is small code + tests + observability. Independent — Phase 2 is not blocked by Phase 1's findings.**
 
