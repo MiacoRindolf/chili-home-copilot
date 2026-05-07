@@ -85,6 +85,41 @@ class CoinbaseWSClient:
         self._subscriptions_total: int = 0
         self._unknown_channel_total: int = 0
         self._last_unknown_channel: str | None = None
+        # f-fastpath-universe-rotation (2026-05-07): cached active-pair
+        # set. Resolved at start() and refreshed on each reconnect via
+        # ``_resolve_active_pairs``. When ``universe_rotation_enabled``
+        # is False (default), this is identical to ``settings.pairs``;
+        # when True, it's read from ``fast_path_universe`` with the
+        # 5-pair fallback if the table is empty.
+        self._active_pairs: list[str] = list(settings.pairs)
+
+    def _resolve_active_pairs(self) -> list[str]:
+        """Return the current subscription set.
+
+        - If ``universe_rotation_enabled`` is False -> ``settings.pairs``.
+        - Else -> ``fast_path_universe.status IN ('active','shadow')``
+          from the most-recent rotation, falling back to ``settings.pairs``
+          if the table is empty (cold-start / rotator hasn't run yet).
+        """
+        if not getattr(self._settings, "universe_rotation_enabled", False):
+            return list(self._settings.pairs)
+        try:
+            from ....db import SessionLocal
+            from .universe_rotator import get_subscribed_pairs
+
+            db = SessionLocal()
+            try:
+                tickers = get_subscribed_pairs(db)
+            finally:
+                db.close()
+            if tickers:
+                return tickers
+        except Exception as exc:
+            logger.warning(
+                "[fast_path] universe-rotation read failed; "
+                "falling back to settings.pairs: %s", exc,
+            )
+        return list(self._settings.pairs)
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -101,7 +136,12 @@ class CoinbaseWSClient:
             return
         if self._task is not None:
             return
-        for ticker in self._settings.pairs:
+        # f-fastpath-universe-rotation (2026-05-07): resolve the active
+        # subscription set at start() time so the WS lifecycle uses the
+        # rotator's selection rather than the hardcoded 5-pair fallback
+        # when the rotation flag is on.
+        self._active_pairs = self._resolve_active_pairs()
+        for ticker in self._active_pairs:
             self._status.register(ticker)
         self._task = asyncio.create_task(self._run(), name="coinbase_ws_client")
 
@@ -127,7 +167,7 @@ class CoinbaseWSClient:
                 raise
             except Exception as exc:
                 # Per-connection error — log + back off + retry.
-                for ticker in self._settings.pairs:
+                for ticker in self._active_pairs:
                     self._status.record_error(ticker, f"ws_loop:{type(exc).__name__}")
                 logger.warning(
                     "[fast_path] ws connection error (backoff=%.1fs): %s",
@@ -142,7 +182,11 @@ class CoinbaseWSClient:
             except asyncio.TimeoutError:
                 pass
             backoff = min(backoff * 2.0, self._settings.reconnect_max_s)
-            for ticker in self._settings.pairs:
+            # f-fastpath-universe-rotation: refresh the active set on
+            # reconnect so the universe rotator's hourly updates land
+            # without a fast-data-worker restart.
+            self._active_pairs = self._resolve_active_pairs()
+            for ticker in self._active_pairs:
                 self._status.record_reconnect(ticker)
 
     async def _connect_and_consume(self) -> None:
@@ -160,7 +204,7 @@ class CoinbaseWSClient:
             await self._subscribe(ws, "candles")
             await self._subscribe(ws, "level2")
             await self._subscribe(ws, "heartbeats")
-            for ticker in self._settings.pairs:
+            for ticker in self._active_pairs:
                 self._status.mark_streaming(ticker)
             async for raw in ws:
                 if self._stop.is_set():
@@ -170,7 +214,7 @@ class CoinbaseWSClient:
     async def _subscribe(self, ws, channel: str) -> None:
         msg = {
             "type": "subscribe",
-            "product_ids": list(self._settings.pairs),
+            "product_ids": list(self._active_pairs),
             "channel": channel,
         }
         await ws.send(json.dumps(msg))

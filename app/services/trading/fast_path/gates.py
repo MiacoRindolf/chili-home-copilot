@@ -248,6 +248,114 @@ def gate_negative_edge_excluded(alert: dict, ctx: ExecContext) -> GateResult:
     return GateResult("negative_edge", True, "", evidence)
 
 
+def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
+    """f-fastpath-universe-rotation Step 5 (2026-05-07): cost-aware
+    admission gate.
+
+    Rejects any signal whose calibrated best-Sharpe-horizon
+    ``mean_return`` does not clear ``2 * (taker_fee_bps +
+    spread_bps_at_decision_time)``. This is the **right** form of the
+    economic-line check — the F6.5 ``gate_calibrated_tradeability``
+    uses a static cost multiplier; this gate uses the live spread as
+    measured at the decision moment, which is what the round-trip
+    actually pays.
+
+    No-op when ``settings.cost_aware_admission_enabled`` is False (the
+    default). Off-by-default keeps switchover bit-identical to current.
+
+    The factor of 2 accounts for the round-trip: pay the fee + cross
+    the spread on entry AND on exit. Coinbase taker fee defaults to
+    5 bps in ``settings.cost_aware_taker_fee_bps``; live spread comes
+    from ``ctx.spread_bps`` (the same in-memory book the existing
+    spread-sanity gate reads).
+
+    Engine missing (unit tests): allows with verdict='no_engine' for
+    parity with the other calibration gates.
+
+    Insufficient calibration data: allows with verdict='no_data' so
+    new pairs (in shadow window) aren't auto-rejected before
+    ``decay_miner`` accumulates samples.
+    """
+    from .settings import load as _load_fp_settings
+
+    fp_settings = _load_fp_settings()
+    if not getattr(fp_settings, "cost_aware_admission_enabled", False):
+        return GateResult(
+            "cost_aware_admission", True, "",
+            {"verdict": "disabled"},
+        )
+
+    if ctx.engine is None:
+        return GateResult(
+            "cost_aware_admission", True, "",
+            {"verdict": "no_engine"},
+        )
+
+    ticker = str(alert.get("ticker") or "")
+    alert_type = str(alert.get("alert_type") or "")
+    signal_score = float(alert.get("signal_score") or 0.0)
+
+    # Cost = round-trip in bps: 2 * (taker_fee + spread). Spread comes
+    # from the LIVE book (ctx) so a momentarily-wide top-of-book gates
+    # the trade even if the calibrated mean cleared a static threshold.
+    taker_fee_bps = float(fp_settings.cost_aware_taker_fee_bps or 0.0)
+    spread_bps = float(ctx.spread_bps or 0.0)
+    cost_bps = 2.0 * (taker_fee_bps + spread_bps)
+    cost_return = cost_bps / 10000.0  # bps -> return units (mean_return is fraction)
+
+    try:
+        from .calibration import _fetch_bucket_rows, _best_sharpe_row
+        from .decay_miner import score_bucket as _score_bucket
+
+        bucket = _score_bucket(signal_score)
+        rows = _fetch_bucket_rows(
+            ctx.engine, ticker=ticker, alert_type=alert_type, bucket=bucket,
+        )
+    except Exception as exc:
+        # Lookup failures shouldn't block; mirrors gate_calibrated_tradeability.
+        return GateResult(
+            "cost_aware_admission", True, "",
+            {"verdict": "lookup_failed", "error": str(exc)[:120]},
+        )
+
+    if not rows:
+        return GateResult(
+            "cost_aware_admission", True, "",
+            {"verdict": "no_data", "score_bucket": bucket,
+             "cost_bps": cost_bps},
+        )
+
+    best_row = _best_sharpe_row(rows)
+    if best_row is None:
+        return GateResult(
+            "cost_aware_admission", True, "",
+            {"verdict": "insufficient_data", "score_bucket": bucket,
+             "cost_bps": cost_bps},
+        )
+
+    mean_return = float(best_row.get("mean_return") or 0.0)
+    horizon_s = int(best_row.get("horizon_s") or 0)
+    sample_count = int(best_row.get("sample_count") or 0)
+    mean_bps = mean_return * 10000.0
+    cleared = mean_return >= cost_return
+
+    detail = {
+        "verdict": "cleared" if cleared else "below_cost",
+        "score_bucket": bucket,
+        "best_horizon_s": horizon_s,
+        "sample_count": sample_count,
+        "mean_return_bps": round(mean_bps, 4),
+        "cost_bps": round(cost_bps, 4),
+        "taker_fee_bps": round(taker_fee_bps, 4),
+        "spread_bps": round(spread_bps, 4),
+    }
+    if not cleared:
+        return GateResult(
+            "cost_aware_admission", False, "below_round_trip_cost", detail,
+        )
+    return GateResult("cost_aware_admission", True, "", detail)
+
+
 def gate_spread_sanity(alert: dict, ctx: ExecContext,
                        *, max_spread_bps: float = MAX_SPREAD_BPS) -> GateResult:
     """Reject when the live book is too wide. We grab spread from
@@ -381,6 +489,15 @@ DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
     # postmortem detail is unchanged either way.
     gate_negative_edge_excluded,
     gate_calibrated_tradeability,
+    # f-fastpath-universe-rotation Step 5 (2026-05-07): cost-aware
+    # admission gate. Off-by-default
+    # (cost_aware_admission_enabled=False) so switchover is bit-
+    # identical. When enabled, runs AFTER the static
+    # gate_calibrated_tradeability so its more-specific "below_round_
+    # trip_cost" reason dominates as the primary rejection in
+    # postmortems; the calibrated gate's pre-existing detail is
+    # preserved in gates_json regardless.
+    gate_cost_aware_admission,
     # F8b: signal-class-specific ticker allowlist runs AFTER the
     # calibrated-edge gates so that a calibrated negative-edge or
     # not-tradeable verdict still reports as the primary reject
@@ -458,6 +575,7 @@ __all__ = [
     "GateResult", "ExecContext", "GateRunResult",
     "gate_recency", "gate_min_score", "gate_calibrated_tradeability",
     "gate_negative_edge_excluded", "gate_pullback_ticker_allowed",
+    "gate_cost_aware_admission",
     "gate_spread_sanity",
     "gate_capacity", "gate_daily_budget", "gate_mode_interlock",
     "DEFAULT_GATES", "run_gates",
