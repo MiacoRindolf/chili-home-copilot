@@ -1,93 +1,146 @@
-# NEXT_TASK: f-fastpath-cost-aware-fee-default-fix
+# NEXT_TASK: f-fastpath-maker-only
 
 STATUS: PENDING
 
-**Tiny follow-up to `f-fastpath-universe-rotation` (DONE 2026-05-07).** The cost-aware admission gate ships with a wrong default for `cost_aware_taker_fee_bps`. This brief flips it to the correct retail-tier value, fixes the misleading docstring, and adds a settings-validation test. ~30 min for CC.
+**Promoted 2026-05-07 evening, in parallel with the universe-rotation 48h soak.** The maker-only execution mode is the structural prerequisite for any live activation on Coinbase — the alpha replay confirmed no pair clears the 120 bps round-trip taker cost, but ICP-USD already clears the maker round-trip, and four other mid-tier pairs (RENDER/ARB/INJ/TAO) sit close. Code can ship in parallel with the soak; the soak's outcome only changes the activation decision.
 
 ## Why now
 
-In the just-shipped `gates.py:gate_cost_aware_admission`, the formula is:
+From `docs/STRATEGY/RESEARCH/2026-05-07_fastpath-universe-alpha-replay.md` and the universe-rotation review:
 
-```python
-cost_bps = 2.0 * (taker_fee_bps + spread_bps)
-```
+| Pair | 5m edge (bps) | rt_taker | net_taker | rt_maker | net_maker |
+|---|---|---|---|---|---|
+| **ICP-USD** | +6.13 | 123.4 | −117.2 | 3.4 | **+2.76** |
+| RENDER-USD | +6.55 | 130.2 | −123.7 | 10.2 | −3.7 |
+| ARB-USD | +4.17 | 127.9 | −123.7 | 7.9 | −3.7 |
+| INJ-USD | +4.12 | 127.8 | −123.6 | 7.8 | −3.6 |
+| TAO-USD | +2.55 | 122.6 | −120.1 | 2.6 | −0.07 |
 
-Per the docstring at `gates.py:266-267`, **the factor of 2 accounts for the round-trip**, so `taker_fee_bps` is per-side. But the default in `settings.py:158` is **`5.0`** — which corresponds to Coinbase volume tier ~6 (≥$75M 30d volume), not the operator's retail tier.
+Even on the best pair, taker round-trip costs ~117 bps per trip. Maker-only makes one pair tradeable today and brings four more to within 4 bps of break-even — and once any of those signals get a 1.3× edge improvement (e.g., from the planned `f-fastpath-microstructure-features-v2`), they all clear maker round-trip. **This is the critical leg between "structural loss" and "first positive-EV configuration."**
 
-**Coinbase Advanced Trade retail tier 1 (≥$10k 30d volume) is 60 bps taker per side** (round-trip 120 bps + spread). With the current default, the gate computes `cost_bps = 2 × (5 + spread)` instead of `2 × (60 + spread)` — **off by ~110 bps**.
-
-Live impact if the operator flips `CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED=1` with this default: signals with `mean_return` in the **18–128 bps band** get a false "tradeable" verdict. From the alpha-replay data, the top mid-tier pairs (RENDER, ICP, ARB, INJ) are well below 18 bps so they'd still reject correctly — but post-event noise on smaller alts (JTO 15m=+38.46 bps with sd=204 is the obvious example) would slip through.
-
-The fix is one line; the verification is one test. Ship before the operator can flip the flag.
-
-Full review: `docs/STRATEGY/COWORK_REVIEWS/2026-05-07_f-fastpath-universe-rotation.md` (§ "Defect" section).
+Brief: `docs/STRATEGY/QUEUED/f-fastpath-maker-only.md`. Earlier work landed today: `f-fastpath-universe-rotation` (commits `22cb7bd`, `d83ff03`, `a096651`, `107c349`); fee-default fix (commit `3f91cdc`).
 
 ## Goal
 
-Replace the `cost_aware_taker_fee_bps: float = 5.0` default with `60.0` (Coinbase Advanced Trade retail tier 1 taker per-side, in bps). Update the docstring to clearly identify the fee tier. Add a settings-validation test that the loaded value is in the plausible range for any Coinbase tier. Update the docstring on `gate_cost_aware_admission` to match.
+Add a maker-only execution mode to `app/services/trading/fast_path/executor.py`. Place `post_only=true` limit orders inside the spread instead of crossing it. Track fills + cancels in a new `fast_path_maker_attempts` table. Add a separate calibration table `fast_signal_decay_maker_filled` for adverse-selection-aware decay stats. Ship in **paper mode by default** (Hard Rule 1); operator's own decision when to flip live.
 
 ## Acceptance criteria
 
-1. `app/services/trading/fast_path/settings.py:158` default changes from `5.0` → `60.0`.
-2. Docstring at `settings.py:159–162` rewritten to:
-   - Identify the fee tier explicitly ("Coinbase Advanced Trade retail tier 1 taker, per-side, in bps").
-   - Reference the Coinbase fee schedule URL: `https://docs.cdp.coinbase.com/exchange/docs/fees`.
-   - State explicitly that this is per-side (the gate formula multiplies by 2 for round-trip).
-   - Note that operator should override via `CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS` if their account is in a different volume tier.
-3. Docstring at `gates.py:266–270` updated to match — remove the "defaults to 5 bps" stale claim.
-4. **New test file `tests/test_fastpath_settings_validation.py`** with at least these tests:
-   - `test_cost_aware_taker_fee_bps_default_is_retail_tier_1`: asserts default is 60.0.
-   - `test_cost_aware_taker_fee_bps_in_plausible_range`: asserts loaded value is in `[1.0, 200.0]` (catches both "5.0 typo" and "6000 = 60% as decimal" typo).
-   - `test_cost_aware_taker_fee_bps_env_override_works`: monkeypatch the env var, assert the loaded value matches.
-5. Existing 7 cost-aware-gate tests in `tests/test_fastpath_cost_aware_gate.py` still pass — the gate behavior is unchanged when the flag is off (default), and the formula doesn't depend on the absolute value of the fee for the disabled path.
-6. CC report at `docs/STRATEGY/CC_REPORTS/2026-05-07_f-fastpath-cost-aware-fee-default-fix.md`.
-7. One commit, one push.
+1. **Migration 232** (after universe rotation's 231) creates `fast_path_maker_attempts` and `fast_signal_decay_maker_filled` tables. Idempotent. Additive only — no destructive ALTERs on existing tables.
+2. **Three execution-mode flag values** in `settings.py`:
+   - `taker` — current behavior, default, retained as benchmark.
+   - `maker_only` — `post_only=true` limit orders only; cancel + abandon if unfilled within timeout.
+   - `maker_first_then_taker` — try maker, fall back to taker after `T` seconds (operator-tunable).
+3. **Three new settings** with explicit doc comments and per-tier reference values:
+   - `cost_aware_maker_fee_bps: float = 40.0` — Coinbase Advanced Trade retail tier 1 maker fee per-side. Same defect class as the fee-fix that just shipped — the docstring MUST be honest about the per-side framing and reference https://docs.cdp.coinbase.com/exchange/docs/fees with per-tier reference values.
+   - `maker_cancel_on_timeout_s: int = 10` — cancel + abandon if unfilled.
+   - `maker_first_taker_fallback_s: int = 5` — only used in `maker_first_then_taker` mode.
+4. **`place_maker_only` path in `executor.py`**:
+   - Limit price = `best_bid + 1 tick` for long entries (sit at the bid+ε to be filled by aggressive sellers).
+   - Coinbase Advanced Trade flag `post_only=true`.
+   - Cancel-on-timeout via async task; persist fill / cancel outcome to `fast_path_maker_attempts`.
+   - Hard cap of **1 outstanding maker order per (ticker, side)** — prevents stale-limit pile-up.
+   - Mirror logic for short entries.
+5. **`fast_signal_decay_maker_filled` schema and writer**:
+   ```sql
+   CREATE TABLE fast_signal_decay_maker_filled (
+     ticker varchar,
+     alert_type varchar,
+     score_bucket varchar,
+     horizon_s integer,
+     sample_count bigint,
+     mean_return double precision,
+     m2_return double precision,
+     fill_rate double precision,            -- N filled / N attempted in this cell
+     last_updated timestamp,
+     PRIMARY KEY (ticker, alert_type, score_bucket, horizon_s)
+   );
+   ```
+   Decay miner (or a peer module — operator/CC's call which) writes here when an attempted maker fill is observed (filled or cancelled). The "filled" subset's forward returns are biased by adverse selection; the table captures that empirically rather than modeling it.
+6. **`gate_cost_aware_admission` reads from `fast_signal_decay_maker_filled`** when `execution_mode == 'maker_only'`. Falls back to `fast_signal_decay` when the maker-filled table has no row for the cell. Cold-start carve-out: same `no_data` allows-through pattern as universe rotation.
+7. **Status surface**: extend `GET /api/trading/fast-path/universe` (or new endpoint `GET /api/trading/fast-path/maker-stats`) to expose per-pair fill rate over the last 24 h. Pairs with fill rate < 25% are flagged in the response with an `advisory: "uneconomic for maker-only"` hint.
+8. **Tests**:
+   - `tests/test_fastpath_maker_only.py` — helper-level: `post_only` flag passed to broker stub; cancel-on-timeout path; 1-outstanding-per-(ticker,side) cap; partial-fill bookkeeping path; mode-flag dispatch (`taker` vs `maker_only` vs `maker_first_then_taker`).
+   - `tests/test_fastpath_maker_settings_validation.py` — same plausible-range pattern as `test_fastpath_settings_validation.py` for the new fee + timeout settings. **Critical**: `test_cost_aware_maker_fee_bps_default_is_retail_tier_1` asserting `40.0`. The brief's whole reason for existing today is that the prior brief shipped with a wrong fee default; CC's review SHOULD catch a repeat by running this test.
+9. **No regression** in existing tests:
+   - `test_fastpath_cost_aware_gate.py` (7 tests) — should still pass; the gate's behavior in `taker` mode is unchanged.
+   - `test_fastpath_universe_rotator.py` (helper-level 7 tests) — orthogonal; should still pass.
+   - `test_fastpath_settings_validation.py` (5 tests, just-shipped) — should still pass; the new maker setting must not regress the existing `cost_aware_taker_fee_bps == 60.0` assertion.
+10. CC report at `docs/STRATEGY/CC_REPORTS/2026-05-07_f-fastpath-maker-only.md` per PROTOCOL format.
 
 ## Brain integration (reuse, don't rewrite)
 
-- Existing `tests/test_fastpath_cost_aware_gate.py` — leave alone, just verify it still passes.
-- Existing `_env_float` helper in `settings.py` — reuse for the override.
-- Use the same dataclass `FastPathSettings` — no new module.
+- `app/services/trading/fast_path/executor.py` — the existing place-paper-fill path is the model. Add the maker-only path as a sibling, not a rewrite.
+- `app/services/trading/fast_path/gates.py:gate_cost_aware_admission` — the cell-lookup pattern is established. The maker-mode read just changes which table it reads from; the verdict logic is unchanged.
+- `app/services/trading/fast_path/decay_miner.py` — already does Welford updates on cells. Reuse the helpers; don't duplicate.
+- `app/services/trading/fast_path/settings.py` — same `_env_*` helpers + dataclass pattern. The just-shipped fee-fix is the template.
+- `app/services/trading/fast_path/calibration.py` — `_fetch_bucket_rows` and `_best_sharpe_row` should accept a table-name parameter (or a sibling function) so the cost-aware gate can choose which table to read from.
 
 ## Constraints / do not touch
 
-- **Hard Rule 1: live-placement safety belts.** Untouched.
-- **No formula changes in `gate_cost_aware_admission`.** Only the default constant + docstrings.
-- **No threshold tuning of any other settings.** This brief is fee-default-only.
-- **No env-var rename.** `CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS` stays.
+- **Hard Rule 1**: live-placement safety belts unchanged. Default `CHILI_FAST_PATH_MODE=paper`. Default `CHILI_FAST_PATH_EXECUTION_MODE=taker` (preserves current behavior at switchover).
+- **No magic numbers.** The maker-fee default and the two timeouts MUST be settings-tunable per the no-magic-numbers rule. Per-knob doc comments.
+- **Must default to `taker` execution mode.** This brief introduces the new mode but does NOT flip it on by default.
+- **No removal or modification of existing taker-mode behavior.** The taker code path stays bit-identical.
+- **No changes to `fast_signal_decay`.** The new table is sibling, not derived.
+- **Migration 232 must check `_migration_NNN_` registry.** Same constraint that caught CC on the universe-rotation brief — they shipped 231 because 230 was taken. Now 232 is the next free ID.
 - **Tests use `_test`-suffixed DB.**
-- **No magic numbers.** The new range bounds `[1.0, 200.0]` in the validation test must have a one-line comment explaining each edge: `1.0` = below tier-6 floor, `200.0` = above tier-0 ceiling (12 bps × 17ish for safety margin).
+- **Edit-tool truncation hazard.** Today this hit twice in the same session. **Always verify Python file edits with `wc -l` against HEAD AND `ast.parse()` immediately post-Edit.** If editing more than a single-line literal, use the `git show HEAD: | python str.replace + ast.parse + write` splice pattern. This is a hard requirement for this brief — losing 100+ lines of `executor.py` mid-Edit is much more dangerous than losing 100+ lines of `gates.py`.
 
 ## Out of scope
 
-- Maker-fee handling. Maker-only mode is `f-fastpath-maker-only`, separate brief.
-- Per-tier auto-detection from broker API. Operator's call.
-- Adjusting other fee-related defaults (none exist anyway).
-- Tightening other gates' cost models.
-- Migration changes.
+- Hyperliquid perps integration (`f-fastpath-hyperliquid-perps`). Different venue.
+- Toxic-flow / depth-decay / OFI features (`f-fastpath-microstructure-features-v2`). Sequence after this brief.
+- Order book queue position estimation. Out of scope; queued separately.
+- Adaptive limit-tick offset based on book depth. Out of scope; queued separately.
+- Smart order routing across venues. Out of scope.
+- Backfilling `fast_signal_decay_maker_filled` from historical data. Cold-start shadow window pattern from the universe-rotation brief is the right way; backfill could leak data from windows where adverse-selection events were observed retroactively.
+- Removing the legacy 5-pair pullback allowlist in `gates.py:280`. Separate brief.
+- Changes to the universe rotator. The rotator already populates the active set; the maker-only path consumes that set without changes.
 
-## Sequencing
+## Sequencing within this task
 
-1. Edit `settings.py:158` default + docstring.
-2. Edit `gates.py:266-270` docstring.
-3. Write `tests/test_fastpath_settings_validation.py` with 3 tests.
-4. Run tests against `chili_test` — assert pass.
-5. Run existing fast-path test suite — assert no regression.
-6. Commit + push.
-7. Write CC report.
+1. **Migration 232 + tables.** Idempotent. Verify with `.\scripts\verify-migration-ids.ps1` before merge.
+2. **`settings.py` additions** — three new fields + env loaders. **Verify the file with `wc -l + ast.parse` immediately post-Edit.**
+3. **`gates.py` adaptation** — `gate_cost_aware_admission` reads the right table based on execution mode. **Verify the file with `wc -l + ast.parse` immediately post-Edit.**
+4. **`calibration.py` parameterization** — make the table-name optionally injectable; existing callers pass the legacy table.
+5. **`decay_miner.py` writer** — when a maker fill outcome is observed, update the new table. The legacy table continues to be updated as today (taker assumption).
+6. **`executor.py` maker-only path** — branch on `execution_mode` flag; place `post_only=true`; track in `fast_path_maker_attempts`; cancel on timeout. **HIGH RISK FILE for Edit truncation.** Use the splice pattern from the start; verify with `wc -l + ast.parse + grep` for known landmarks (e.g., `def execute_paper_fill`, `class ExecContext`).
+7. **Status endpoint extension** — per-pair fill rate over last 24h.
+8. **Tests** — both new test files; run them in chili container in a SEPARATE dispatch from the commit (lesson from today: don't bundle long pytest with commit dispatches).
+9. **CC report**.
 
-## Operator-side after CC ships
+## Risks / hazards (carried from QUEUED brief)
 
-1. Pull the commit.
-2. Restart `chili` + `fast-data-worker` to pick up the new default.
-3. **Now safe to set `CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED=1`** if the universe-rotation soak shows enough decay rows accumulating (≥24h post universe-rotator activation).
-4. Continue with the universe-rotation operator checklist from the prior CC report.
+1. **Adverse selection** on maker fills (a fill happens when someone aggressive ate through the resting limit). Realized post-fill returns typically 30–60% worse than no-friction backtest. Mitigated by the new `fast_signal_decay_maker_filled` table — it captures the bias empirically.
+2. **Cancel storms** — the 1-outstanding-per-(ticker,side) cap is the structural fix. Verify in tests.
+3. **Coinbase post-only rejection rate** — track in `fast_executions.reject_reason='post_only_would_cross'`. If >10% of attempts reject, the limit-tick offset is too aggressive. Surface in CC report.
+4. **Fill latency vs signal half-life** — many imbalance signals decay in 100–500 ms. A 10-second timeout may catch a stale signal. Post-fill calibration table will surface this empirically.
+5. **Partial fills** — `fast_executions.quantity` already supports them; verify the `exit_manager.py` reads partials correctly. Test #4 in the test plan above covers this.
+
+## Acceptance criteria for live activation (NOT this brief)
+
+This brief ships the code; it does NOT activate live trading on the new mode. Acceptance criteria for a future "flip the live switch" brief:
+
+- 48h+ of decay rows in `fast_signal_decay_maker_filled` for at least 3 active pairs.
+- Fill rate ≥ 25% on those 3 pairs.
+- At least one (ticker, alert_type, score_bucket) cell shows `mean_return > 2 × maker_round_trip` with `sample_count ≥ 30`.
+- Operator explicit "yes" via Cowork session.
+
+## Push & deploy
+
+- Multiple commits in a tight series (one per logical step, per CLAUDE.md). Don't bundle.
+- After commit + push, restart `chili` + `fast-data-worker` to pick up the new executor path. Bind-mount means no rebuild.
+- Do NOT restart `autotrader-worker` for this — different lane.
+- Verify settings via `docker exec ... python -c "from app.services.trading.fast_path.settings import load; print(load())"` post-restart.
 
 ## Rollback plan
 
-`git revert` the commit. The default reverts to 5.0; the docstring reverts; the new test file is removed. Zero schema or behavior dependencies.
+`git revert` the commits. Migration 232 is purely additive (no destructive ALTERs). Setting `CHILI_FAST_PATH_EXECUTION_MODE=taker` (the default) restores bit-identical pre-this-brief behavior. The new `fast_path_maker_attempts` table sits empty.
 
 ## Open questions for Cowork (surface in CC report only if relevant)
 
-1. **Should the validation test be runtime-asserted at boot** (i.e., raise on out-of-range)? Currently the brief asks for a unit test only. Boot-time assertion is stricter but introduces a startup-blocker if the operator typoes the env var. Default to test-only; flag if there's a reason to escalate.
-2. **The 5.0 default came from somewhere.** Worth a one-line check in the CC report: was it from a stale Hyperliquid value (~3.5), a typo for 50, or unintentional? Not blocking — but if there's a reasonable explanation, surface it so we know whether the same class of error might exist elsewhere.
+1. **Limit-tick offset calibration.** Default is `best_bid + 1 tick` for long. If observed `post_only_would_cross` rejection rate is high (>10%), the offset should widen. Surface the rate and propose a per-pair adaptive widening if it's a real issue.
+2. **`maker_cancel_on_timeout_s` default of 10s.** This is a guess based on imbalance signal half-life of 100–500 ms × 20× safety. If observed fill latency cluster is bimodal (some <2s, others 8–10s), the default should be tighter for short signals. Surface fill-latency histogram in CC report.
+3. **Should `maker_first_then_taker` mode log a "would have been taker" line for the would-be-fallback trades that DID get filled by maker?** Helps the operator understand the cost trade-off without an A/B. Bookkeeping cost is small; surface if implementation isn't clean.
+4. **`cost_aware_maker_fee_bps` default — please double-check the Coinbase fee schedule URL on the day of implementation.** Coinbase periodically updates the schedule; if the retail tier 1 maker is no longer 40 bps, the default needs to match the live schedule. Cite the URL fetched in the CC report.
