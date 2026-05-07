@@ -6931,6 +6931,11 @@ def _overlay_learning_from_brain_worker_db(status: dict[str, Any]) -> None:
                 if k in data:
                     status[k] = data[k]
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                _sdb.rollback()
+            except Exception:
+                pass
             _sdb.close()
     except Exception:
         logger.debug("[learning] _overlay_learning_from_brain_worker_db: non-critical operation failed", exc_info=True)
@@ -6946,6 +6951,11 @@ def _persist_learning_live_snapshot_to_db() -> None:
         try:
             persist_learning_live_json(_sdb, snap)
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                _sdb.rollback()
+            except Exception:
+                pass
             _sdb.close()
     except Exception as e:
         logger.warning("[learning] persist_learning_live_snapshot_to_db: %s", e)

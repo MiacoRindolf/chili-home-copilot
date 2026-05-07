@@ -41,6 +41,11 @@ def _load_globs() -> list[tuple[str, str, str]]:
             ).fetchall()
             return [(r[0], r[1], r[2]) for r in rows]
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[frozen_scope] load failed", exc_info=True)

@@ -245,6 +245,11 @@ def _run_sandboxed(
             root = resolve_repo_runtime_path(rrepo)
             repo_root = str(root)
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sdb.rollback()
+            except Exception:
+                pass
             sdb.close()
 
         handle = runner.create_dispatch_worktree(repo_root, int(candidate.task_id))
@@ -270,6 +275,11 @@ def _run_sandboxed(
                 repo_root=repo_root,
             )
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                adb.rollback()
+            except Exception:
+                pass
             adb.close()
         ms_apply = (time.monotonic() - t_apply0) * 1000.0
         if not apply_out.get("ok"):

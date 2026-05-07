@@ -80,6 +80,11 @@ def _persist_kill_switch_state(active: bool, reason: str | None) -> None:
             ), {"uid": None, "tripped": active, "reason": reason or ""})
             sess.commit()
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[governance] Failed to persist kill-switch state to DB", exc_info=True)
@@ -103,6 +108,11 @@ def restore_kill_switch_from_db() -> None:
                     _kill_switch_reason = row[1] or "restored from DB"
                 logger.warning("[governance] Kill switch restored from DB: %s", _kill_switch_reason)
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[governance] Could not restore kill-switch from DB", exc_info=True)
@@ -140,6 +150,11 @@ def _insert_approval_row(action_type: str, details: dict[str, Any]) -> int | Non
             sess.commit()
             return int(row[0]) if row and row[0] is not None else None
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[governance] Failed to persist approval request", exc_info=True)
@@ -184,6 +199,11 @@ def _fetch_pending_approvals_from_db() -> list[dict[str, Any]]:
                 )
             return out
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[governance] Failed to fetch DB approvals", exc_info=True)
@@ -219,6 +239,11 @@ def _set_approval_decision_db(approval_id: int, decision: str, notes: str = "") 
             sess.commit()
             return bool(row)
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[governance] Failed to update DB approval decision", exc_info=True)

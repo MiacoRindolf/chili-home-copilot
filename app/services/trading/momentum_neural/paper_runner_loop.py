@@ -77,6 +77,11 @@ class _SessionTracker:
         except Exception as e:
             _log.warning("[runner_loop] session refresh failed: %s", e)
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     def get_sessions_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
@@ -235,6 +240,11 @@ class PaperRunnerLoop:
             except Exception:
                 pass
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
 

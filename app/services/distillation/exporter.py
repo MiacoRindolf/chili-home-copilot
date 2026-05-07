@@ -77,6 +77,11 @@ def build_jsonl_dataset(
             {"lim": max_rows},
         ).fetchall()
     finally:
+        # FIX 46 pattern: rollback to end implicit read txn before close.
+        try:
+            sess.rollback()
+        except Exception:
+            pass
         sess.close()
 
     with open(output_path, "w", encoding="utf-8") as fh:

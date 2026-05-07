@@ -81,6 +81,11 @@ def _runs_in_last_minute() -> int:
             ).fetchone()
             return int(row[0]) if row else 0
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         return 0
@@ -100,6 +105,11 @@ def _spend_today_usd() -> float:
             ).fetchone()
             return float(row[0]) if row else 0.0
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         return 0.0

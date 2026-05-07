@@ -1094,6 +1094,11 @@ def _persist_breaker_state(tripped: bool, reason: str | None) -> None:
             ), {"uid": None, "tripped": tripped, "reason": reason or ""})
             sess.commit()
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[circuit_breaker] Failed to persist breaker state to DB", exc_info=True)
@@ -1171,6 +1176,11 @@ def restore_breaker_from_db() -> None:
                 _breaker_reason = row[1] or "restored from DB"
                 logger.warning("[circuit_breaker] Breaker restored from DB: %s", _breaker_reason)
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                sess.rollback()
+            except Exception:
+                pass
             sess.close()
     except Exception:
         logger.debug("[circuit_breaker] Could not restore breaker from DB", exc_info=True)

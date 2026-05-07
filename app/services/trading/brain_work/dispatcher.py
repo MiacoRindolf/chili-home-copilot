@@ -51,6 +51,11 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
         old_promo = (p0.promotion_status or "").strip()
         old_lc = (p0.lifecycle_stage or "").strip()
     finally:
+        # FIX 46 pattern: rollback to end implicit read txn before close.
+        try:
+            s0.rollback()
+        except Exception:
+            pass
         s0.close()
 
     bt_run, _proc = execute_queue_backtest_for_pattern(pid, user_id)

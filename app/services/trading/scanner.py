@@ -2593,6 +2593,11 @@ def run_crypto_breakout_scan(
                         "age_seconds": int(age_s),
                     }
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                _db.rollback()
+            except Exception:
+                pass
             _db.close()
 
     if _crypto_scan_running:
@@ -2622,6 +2627,11 @@ def run_crypto_breakout_scan(
                 ).distinct().all()
                 tickers.update(t[0] for t in known)
             finally:
+                # FIX 46 pattern: rollback to end implicit read txn before close.
+                try:
+                    _db.rollback()
+                except Exception:
+                    pass
                 _db.close()
         except Exception:
             logger.debug("[scanner] run_crypto_breakout_scan: optional signal component failed", exc_info=True)
@@ -3592,6 +3602,11 @@ def run_breakout_scan(
                         "brain": _brain_meta(),
                     }
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                _db.rollback()
+            except Exception:
+                pass
             _db.close()
 
     if _breakout_scan_running:
@@ -3761,6 +3776,11 @@ def run_momentum_scanner(
                         "brain": _brain_meta(),
                     }
         finally:
+            # FIX 46 pattern: rollback to end implicit read txn before close.
+            try:
+                _db.rollback()
+            except Exception:
+                pass
             _db.close()
 
     from .prescreener import get_daytrade_candidates

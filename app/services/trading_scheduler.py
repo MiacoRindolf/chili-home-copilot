@@ -1947,6 +1947,13 @@ def trigger_pattern_monitor_for_tickers(tickers: list[str], reason: str = "event
     except Exception:
         logger.warning("[scheduler] Event-driven pattern monitor failed", exc_info=True)
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2060,6 +2067,13 @@ def _run_auto_trader_tick_job():
     except Exception:
         logger.exception("[scheduler] auto_trader tick failed")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
         dur = time.monotonic() - started
         # Keep the slow-tick warning so operator still sees when a
@@ -2112,6 +2126,13 @@ def _run_auto_trader_monitor_job():
     except Exception:
         logger.exception("[scheduler] auto_trader monitor failed")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2134,6 +2155,13 @@ def _run_stuck_order_watchdog_job():
     except Exception:
         logger.exception("[scheduler] stuck_order_watchdog tick failed")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2152,6 +2180,13 @@ def _run_execution_event_lag_job():
     except Exception:
         logger.exception("[scheduler] execution_event_lag tick failed")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2171,6 +2206,13 @@ def _run_drift_escalation_watchdog_job():
     except Exception:
         logger.exception("[scheduler] drift_escalation_watchdog tick failed")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2577,6 +2619,13 @@ def _run_crypto_breakout_job():
             except Exception:
                 logger.exception("[scheduler] crypto breakout batch_job_finish failed")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2750,6 +2799,13 @@ def _run_stock_breakout_job():
             except Exception:
                 logger.exception("[scheduler] stock breakout batch_job_finish failed")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2857,6 +2913,13 @@ def _run_momentum_scanner_job():
             except Exception:
                 logger.exception("[scheduler] momentum batch_job_finish failed")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2881,6 +2944,13 @@ def _run_crypto_viability_refresh_job():
     except Exception as e:
         logger.warning("[scheduler] crypto viability refresh failed: %s", e)
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -2902,6 +2972,13 @@ def _run_intraday_signal_sweep_job():
         db.commit()
         logger.info("[scheduler] Intraday signal sweep result: %s", out)
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -3157,6 +3234,13 @@ def _check_breakout_outcomes():
     except Exception as e:
         logger.error(f"[scheduler] Breakout outcome check failed: {e}")
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -3176,6 +3260,13 @@ def _run_promoted_fast_eval_job():
     except Exception as e:
         logger.error("[scheduler] Promoted fast eval failed: %s", e, exc_info=True)
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -3193,6 +3284,13 @@ def _run_code_learning_job():
     except Exception as e:
         logger.error("[scheduler] Code Brain learning failed: %s", e)
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -3218,6 +3316,13 @@ def _run_reasoning_learning_job():
     except Exception as e:
         logger.error("[scheduler] Reasoning Brain failed: %s", e)
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -3243,6 +3348,13 @@ def _run_project_brain_job():
     except Exception as e:
         logger.error("[scheduler] Project Brain failed: %s", e)
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -3267,6 +3379,13 @@ def _run_scheduler_worker_heartbeat():
         logger.warning("[scheduler] heartbeat failed: %s", e)
         db.rollback()
     finally:
+        # FIX 46 pattern: explicit rollback to end implicit read-only
+        # transaction so connection returns to pool 'idle' (clean), not
+        # 'idle in transaction'. See scanner.py:1064-1074.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
