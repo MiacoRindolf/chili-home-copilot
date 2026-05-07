@@ -195,6 +195,65 @@ def _trade_derive_asset_kind(_mapper, _conn, target: Trade) -> None:
     target.asset_kind = "equity"
 
 
+# Structural data-feed-trust bound -- option premium cannot legitimately be
+# 50x its underlying spot (or vice versa) on a clean close. A trade-update
+# transition into status='closed' with a 50x divergence between entry and
+# exit price is almost certainly the option-vs-underlying mix-up bug class
+# (e.g. closing an SPY option against the SPY spot). Not strategy tuning;
+# the brain doesn't get to relax this. Single named constant so the bound
+# lives in one place.
+_PHANTOM_CLOSE_RATIO_BOUND: float = 50.0
+
+
+@_sa_event.listens_for(Trade, "before_update")
+def _trade_phantom_close_guard(_mapper, _conn, target: Trade) -> None:
+    """R36 -- phantom-close guard.
+
+    Catches the pattern where a Trade gets status='closed' with an
+    exit_price that is implausibly far from entry_price (>50x). This is
+    a strong indicator of the option-vs-underlying bug class:
+    trade#392 was phantom-closed at $716 (SPY underlying) against $4.01
+    entry premium = 178x ratio, booking a fake +$712 P&L.
+
+    The guard logs CRITICAL and rejects the close. Legitimate options
+    or thin-stock entries should never have a 50x exit ratio; if they
+    do, the Trade row needs explicit out-of-band repair, not silent
+    closing via a buggy code path.
+    """
+    try:
+        new_status = (target.status or "").lower()
+        if new_status != "closed":
+            return
+        ep = float(target.entry_price or 0)
+        xp = float(target.exit_price or 0)
+        if ep <= 0 or xp <= 0:
+            return
+        ratio = xp / ep
+        if ratio > _PHANTOM_CLOSE_RATIO_BOUND or ratio < 1.0 / _PHANTOM_CLOSE_RATIO_BOUND:
+            import logging
+            _log = logging.getLogger("app.models.trading")
+            _log.critical(
+                "[trade_anomaly] R36 phantom-close guard REJECTED "
+                "trade_id=%s ticker=%s entry=%s exit=%s ratio=%.1fx -- ",
+                getattr(target, "id", "new"), target.ticker, ep, xp, ratio,
+            )
+            raise ValueError(
+                f"trade_anomaly: R36 phantom-close guard rejected "
+                f"trade_id={getattr(target, 'id', 'new')} ticker={target.ticker} "
+                f"entry={ep} exit={xp} ratio={ratio:.1f}x. Likely option-vs-underlying "
+                f"price mismatch (e.g. closing an option contract using the underlying spot). "
+                f"Repair manually or fix the upstream caller; do not auto-close."
+            )
+    except ValueError:
+        raise
+    except Exception:
+        # Never let the guard ITSELF crash the commit. Log only.
+        import logging
+        logging.getLogger("app.models.trading").exception(
+            "[trade_anomaly] R36 guard internal failure",
+        )
+
+
 class AutoTraderRun(Base):
     """Audit row for AutoTrader v1 decisions (pattern-imminent → gates → placement)."""
 
