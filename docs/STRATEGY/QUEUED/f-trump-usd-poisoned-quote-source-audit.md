@@ -1,3 +1,13 @@
+# QUEUED TASK: f-trump-usd-poisoned-quote-source-audit (PROMOTED)
+
+**Promoted to `docs/STRATEGY/NEXT_TASK.md` on 2026-05-07 11:15 UTC. The defense layer (implausible-quote guards across all three exit lanes) shipped via `f-fix-implausible-quote-vs-exit_now-ordering` + `f-exit-monitor-quote-guard-unification`; this brief closes the loop by fixing the upstream cache.**
+
+The full brief content (with revisions reflecting the now-shared `_exit_monitor_common.is_implausible_quote` helper and the storm having continued for 24+ hours) now lives in `NEXT_TASK.md`. This file is preserved as a placeholder so the queue history stays linkable; do not edit. If the brief is ever re-queued, restore the body from `docs/STRATEGY/CC_REPORTS/<date>_f-trump-usd-poisoned-quote-source-audit.md` once it ships, or from git history.
+
+---
+
+The original body below is preserved verbatim for reference.
+
 # QUEUED TASK: f-trump-usd-poisoned-quote-source-audit
 
 **Originally surfaced during the live debug session on 2026-05-06 that fixed `f-crypto-exit-monitor-pattern-exit-now`. The implausible-quote guard at `stop_engine.py:436-443` is correctly refusing to act on a `$0.0003` quote for TRUMP-USD vs entry $2.4194, but the bogus quote keeps coming back every cycle. This brief tracks down which upstream is poisoned and fixes the source.**
