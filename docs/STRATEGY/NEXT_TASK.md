@@ -1,193 +1,125 @@
-# NEXT_TASK: f-thread-housekeeping-tail-2026-05-07
+# NEXT_TASK: f-trump-usd-poisoned-quote-source-audit
 
 STATUS: DONE
 
+**Promoted from `docs/STRATEGY/QUEUED/f-trump-usd-poisoned-quote-source-audit.md` on 2026-05-07 11:15 UTC after the prior thread shipped the implausible-quote-guard chain (`f-fix-implausible-quote-vs-exit_now-ordering` + `f-exit-monitor-quote-guard-unification`). Defense layer is now complete across all three exit lanes (equity / crypto / options); this brief closes the loop by fixing the upstream cache that's still emitting the poisoned value.**
+
+**Why this is next**: with the guards in place, the system safely refuses to act on the bogus `$0.0003` quote — but the bad value still streams in every cycle, polluting `trading_stop_decisions` with `DATA_IMPLAUSIBLE` rows and bumping the new `skipped_implausible_quote` counter on every monitor pass. The TRUMP-USD storm has been observed for 24+ hours with the same value to four decimal places. That's a stale singleton-cache fingerprint, not transient noise. Identify and clear the cache.
+
 ## Goal
 
-Close the two actionable follow-ups surfaced in the prior `f-thread-housekeeping-followups-2026-05-07` review:
-
-1. **Sweep the rest of `tests/test_trading.py`** for the `user_id=1` hardcoded-FK anti-pattern. 47 hits across 4 service-layer test classes (`TestWatchlistService` 12, `TestTradeService` ~16, `TestJournalService` ~7, `TestTradeStats` ~5+). Same fix shape as the prior brief's `TestTradingModels` step. After this lands, `pytest tests/test_trading.py -v` runs green for everything below the API-layer classes.
-
-2. **Commit the `docs/STRATEGY/COWORK_REVIEWS/*` backlog.** The Cowork ↔ CC protocol expects these tracked alongside `CC_REPORTS/`, but the operator hasn't been `git add`-ing them. Sweep all the untracked review files into one docs commit so the strategy thread's full audit trail is in git history.
-
-The third follow-up from the review (working-tree disk view sync) is operator-side — the working-tree-vs-HEAD CRLF lag is resolved by the operator re-syncing the mount or `git checkout-index -f -a` from the Windows host. Not in scope here.
+Identify which upstream quote source is returning `price=$0.0003` for `TRUMP-USD` (real Coinbase ground truth at investigation time was `$2.37`), and fix the source. The Round-13/14 implausible-quote guards (now uniformly across all three exit lanes via `_exit_monitor_common.is_implausible_quote`) correctly refuse to act on the bad value, but every monitor pass still writes a `DATA_IMPLAUSIBLE` row to `trading_stop_decisions`. Forensic evidence shows the same `price=0.0003` repeating across 24+ hours of decisions, every ~14 minutes, identical to four decimal places — a CACHED bogus value, not transient noise.
 
 ## Why now
 
-The user wants the housekeeping fully done. Both items are small, scoped, and unblock real value: green test suite + complete review audit trail in git. Bundling beats two separate small briefs.
+1. The implausible-quote guard is a defense, not a fix. Anything else in the trading brain that reads the same quote-source without the guard (UI surfaces, alert formatters, downstream features computed off price) will silently pollute its output. The pattern-monitor's `exit_now` recommendation for TRUMP-USD on 2026-05-06 was based on the LLM seeing `price=$2.39` (a healthy quote) — so we already know two paths read DIFFERENT quotes, and one of those paths is poisoned.
 
-## Scope boundary
+2. This is the second crypto-cache-pollution incident with the same shape. Round-13 originated when ARB-USD trade 585 was force-closed at `px=0.00075706` vs entry $0.1295 because the upstream quote provider returned a bad value. The guard was added to prevent re-triggering, but the upstream-bad-value pattern is recurrent.
 
-**In scope:**
-- Edit `tests/test_trading.py` — apply the same `_seed_user(db, name)` helper pattern from the prior brief to the 4 service-layer test classes (`TestWatchlistService`, `TestTradeService`, `TestJournalService`, `TestTradeStats`). Replace each hardcoded `user_id=1` with a fixture-created user's id.
-- `git add docs/STRATEGY/COWORK_REVIEWS/*` to track the review backlog.
+3. It is a fingerprint: identical bad value, repeated, suggests a stale entry in a singleton cache that was never invalidated. That is a broader hygiene concern across the price-bus / Massive WS / Massive REST stack.
 
-**Out of scope:**
-- API-layer test classes (`TestTradingPageAPI`, `TestWatchlistAPI`, `TestTradesAPI`, `TestJournalAPI`, `TestMarketDataAPI`, `TestInsightsAPI`, `TestPortfolioAPI` — line 345 onward in `tests/test_trading.py`). These use the `paired_client` fixture which already seeds a user; they're a different pattern. Confirm by reading one before assuming.
-- Any test file beyond `tests/test_trading.py`.
-- Working-tree CRLF disk-view sync (operator-side host-mount refresh).
-- Any production code changes.
-- `tests/conftest.py` modifications. The `_seed_user` helper lives in the test file, not the shared conftest.
+4. Defense-only is operationally costly. Every monitor pass writes a stop_decision row + bumps the counter; that's noise for forensics and budget for the DB.
 
-## Path
+## Suspected source ranking
 
-### Step 1 — Apply `_seed_user` helper to the 4 service-layer classes
+`market_data.fetch_quote(ticker)` walks (in order, 1st hit wins):
+1. **price_bus** — unified WS cache via `price_bus.get_live_quote(ticker)` (line 696)
+2. **Massive WS cache** — `_massive.get_ws_quote(ticker)` (line 727)
+3. **Massive REST** — `_massive.get_last_quote(ticker)` (line 748)
+4. **Polygon** (line 770) — equities only
+5. **yfinance** — fallback
 
-The helper already exists from the prior brief (`tests/test_trading.py` should have a module-level `_seed_user(db, name)` function added by commit `aa5fd0c`). Verify it's present:
+The implausible value (`$0.0003`) being **stable across 24+ hours and across `evaluate_trade` cadence** strongly implicates 1 or 2 (a cached entry that nobody invalidated). REST would generally return a fresh value or fail, not a stale day-old one. Coinbase ground truth at any sample time during the storm has been `$2.30-$2.40`, so neither WS nor REST should naturally return $0.0003 for ANY recent timestamp.
 
-```bash
-grep -n "_seed_user" tests/test_trading.py | head -5
-```
+Most likely root causes (by prior probability):
+1. **Massive WS subscribed to a stale or wrong-symbol pair** — TRUMP-USD ambiguity (e.g., `OFFICIAL TRUMP / SOLANA` listed at low precision) returning a fragment of an order book at the wrong scale.
+2. **price_bus cached a malformed broadcast on first connect** — TLS failure / partial frame returned a near-zero price; cache TTL absent or too long.
+3. **Symbol normalization bug** — `TRUMP-USD` resolved to a different upstream symbol that exists at a different price.
+4. **Massive REST returning $0.0003 with a stale `last_price` field** — possible if the provider serves cached quotes during a Massive-side incident; check `runtime_surface_state` for `market_data.state='degraded'` rows in the storm window.
 
-If it's there: just call it. If it isn't (unlikely; the prior commit added it for `TestTradingModels`): create it once at module level.
+## Phase 1 — Diagnose (READ-ONLY)
 
-For each class, update the test methods. Pattern shape (TestWatchlistService example):
+**Phase 1.1 — Reproduce the read.** Write a one-shot diagnostic script `scripts/dispatch-trump-quote-trace.ps1` that:
+- Imports `app.services.trading.market_data` inside `chili-env`.
+- Logs the COMPLETE return dict from `fetch_quote("TRUMP-USD")` including the `source` field.
+- Hits each upstream in isolation: `price_bus.get_live_quote("TRUMP-USD")`, `_massive.get_ws_quote("TRUMP-USD")`, `_massive.get_last_quote("TRUMP-USD")`. Logs raw response from each.
+- Hits Coinbase public ticker `https://api.exchange.coinbase.com/products/TRUMP-USD/ticker` for ground truth.
+- Writes results to `scripts/dispatch-trump-quote-trace-output.txt`.
 
-```python
-class TestWatchlistService:
-    def test_add_to_watchlist(self, db):
-        user = _seed_user(db, "watchlist-add-test")
-        item = ts.add_to_watchlist(db, user_id=user.id, ticker="AAPL")
-        # ... rest of existing assertions
-```
+Acceptance: the script runs without auth and shows which of the four sources returns the bad value, what it actually returns, and how it differs from Coinbase.
 
-Each test method gets its own `_seed_user` call with a unique name suffix tied to the test name. The per-test truncate in `tests/conftest.py` ensures clean state between tests.
+**Phase 1.2 — History check.** Query `trading_stop_decisions` for ALL `DATA_IMPLAUSIBLE` rows in the last 30 days (any ticker, any trade), grouped by `(ticker, trigger_price_from_reason)`. The reason string carries `price=$X.XXXX entry=$Y.YYYY` — extract via regex. Also check the new `skipped_implausible_quote` counter from the equity lane (added in `f-exit-monitor-quote-guard-unification`) for additional evidence. Goal: see whether this is a TRUMP-only outage, a recurring crypto-symbol class issue, or a broader cache-pollution incident. Write findings to `docs/AUDITS/2026-05-07_implausible-quote-history.md`.
 
-For methods that need MULTIPLE distinct users (e.g., `TestJournalService::test_journal_user_isolation` if it exists, or any test that asserts cross-user isolation), seed multiple users:
+Acceptance: a table with one row per `(ticker, bad_price)` pair showing how often each fired and over what window. Identify whether the value is identical across rows (one cached entry) or varies (dynamic upstream issue).
 
-```python
-user_a = _seed_user(db, "journal-isolation-a")
-user_b = _seed_user(db, "journal-isolation-b")
-# ... assert content for user_a.id doesn't bleed into user_b.id
-```
+## Phase 2 — Fix the source
 
-Read the existing test before deciding if the user-isolation case applies; some tests at line 302 reference "User 1 note" suggesting a single-user scope, but the test name will tell you.
+Branch on what Phase 1.1 finds:
 
-**Don't introduce new test classes or new fixtures.** This is a literal swap: `user_id=1` → `user_id=user.id`. Same structure.
+**If price_bus is the cache holding the bad value:**
+- Add a TTL invalidation: any cached quote older than 60s is dropped on next read.
+- Add a sanity guard at write-time: never cache a quote where `price < 0.0001` for tickers with prior known-good price > $1. The guard should LOG and SKIP the write, not silently substitute.
+- Lean on the existing `is_implausible_quote(px, prior_known_good)` helper from `_exit_monitor_common.py` rather than introducing a parallel threshold. Reuse the same 0.1x/10x bounds.
+- Add a test in `tests/test_price_bus_sanity_guard.py` covering the bad-write rejection.
 
-Run after each class is done:
+**If Massive WS is returning the bad value:**
+- Audit symbol normalization in `_massive.get_ws_quote`. If TRUMP-USD is being resolved to a different upstream symbol (e.g., low-supply tokens), surface the resolved symbol in the response payload.
+- Add a periodic re-subscribe at the WS layer to recover from torn frames.
+- File a vendor ticket with Massive if their ground-truth response is wrong; cite the timestamp and resolved symbol.
 
-```powershell
-$env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
-pytest tests/test_trading.py::TestWatchlistService -v --tb=short
-pytest tests/test_trading.py::TestTradeService -v --tb=short
-pytest tests/test_trading.py::TestJournalService -v --tb=short
-pytest tests/test_trading.py::TestTradeStats -v --tb=short
-```
+**If Massive REST is returning the bad value:**
+- Check `runtime_surface_state` for `market_data.state='degraded'` rows; if Massive flagged itself, add a fallback skip.
+- If Massive is healthy but returning bad data, that's a vendor escalation. Stage a yfinance fallback for crypto when Massive returns implausible values.
 
-Each class should run green. If any test fails on a real (non-fixture) bug, surface it to the operator and stop — the brief is scoped to the FK fix only, not test-logic fixes.
+In ALL branches:
+- Apply the implausible-quote guard at the `fetch_quote` boundary, not just at the exit-monitor consumers. Per the no-hardcoded-fallback rule, the guard returns `None` (not a substitute price) when the quote is implausible relative to the most recent fresh good quote. This forces every consumer to handle the absence rather than acting on poison.
+- Use the shared `is_implausible_quote` helper — do not introduce a fourth threshold.
 
-Final pass:
+## Phase 3 — Add a runtime monitor
 
-```powershell
-pytest tests/test_trading.py -v --tb=short
-```
+`runtime_surface_state.market_data` already exists. Extend it: when an implausible-quote rejection fires at the `fetch_quote` boundary, write a `degraded` row with the bad value and source. After 5 consecutive rejections within 10 minutes for the same `(ticker, source)`, escalate via the existing alert pipeline. This catches the next poisoned-cache incident in real time rather than via a forensic look-back.
 
-Whole file should run clean OR fail only on API-layer classes (which weren't touched by this brief). Document either outcome in the CC report.
+Acceptance: a unit test in `tests/test_market_data_implausible_alert.py` simulating 5 bad reads in window and asserting an alert is queued.
 
-### Step 2 — Commit the COWORK_REVIEWS backlog
+## Phase 4 — Postmortem doc
 
-```bash
-ls docs/STRATEGY/COWORK_REVIEWS/
-```
+Write `docs/AUDITS/2026-05-07_trump-usd-poisoned-quote-postmortem.md` capturing:
+- Timeline (first observation 2026-05-06 ~02:42 UTC per the original `trading_stop_decisions` rows; storm ongoing through 2026-05-07; fix-source-identified date; fix-shipped date).
+- Root cause (whichever upstream Phase 1.1 names).
+- Why the implausible-quote guard caught it but didn't surface it operationally before the unification work added `skipped_implausible_quote` to the equity lane summary.
+- Why no other consumer was visibly affected during the window (the LLM pattern-monitor reads via a different code path; document which one to ensure that path stays clean post-fix).
+- Generalization: the guard is a backstop. The next quote-cache issue might present at a ratio JUST under the 0.1-10x threshold and slip through. Consider tightening or making the threshold ticker-specific (lifetime-realized-vol-scaled).
 
-Should show all the Cowork reviews from this thread (and possibly older ones). All untracked. Stage them:
+## Open questions
 
-```bash
-git add docs/STRATEGY/COWORK_REVIEWS/
-git status --short docs/STRATEGY/COWORK_REVIEWS/
-```
+1. **Is the bogus value `$0.0003` IDENTICAL across all DATA_IMPLAUSIBLE rows for TRUMP-USD?** If yes, it's one cached entry. If it varies, the upstream is dynamically returning bad values and the diagnosis branches differently. Phase 1.2 query answers this directly.
 
-Verify no surprises (e.g., a half-written draft file). If any file's content looks like an incomplete draft, surface to the operator before committing.
+2. **Was there a Massive-side incident around the time the storm started (2026-05-06 ~02:42 UTC)?** Phase 1.2 history narrows the start time; cross-reference Massive's status page if accessible.
 
-### Step 3 — Commit and push
+3. **Does the LLM/pattern-monitor pipeline read price_bus directly or use a different cache?** Per the `pattern_monitor_decision.price_at_decision` rows for trade 1829 (range $2.34-$2.43 during the storm), the LLM was reading clean quotes. Need to confirm which path it uses to ensure that path stays clean post-fix.
 
-```bash
-# Commit 1: test sweep
-git add tests/test_trading.py
-git commit -m "test(trading): sweep remaining user_id=1 hardcodes across service classes
+4. **Should Phase 2's `fetch_quote`-boundary guard use `is_implausible_quote` directly or a wrapper that also handles the "first quote ever" case (no prior known-good)?** The shared helper requires `entry > 0` to evaluate ratio. For a brand-new ticker the first quote IS the prior known-good. Need a small adapter: maintain a per-ticker last-known-good in price_bus, falling back to `entry_price` from any open Trade, falling back to "accept as known-good" when there's no prior reference. Surface this adapter design in Phase 2 if Phase 1.1 implicates price_bus.
 
-Closes the per-class FK-violation pattern surfaced in the prior brief's
-TestTradingModels fix. Applies _seed_user(db, name) to:
+## Out of scope
 
-- TestWatchlistService (12 hits)
-- TestTradeService (~16 hits)
-- TestJournalService (~7 hits)
-- TestTradeStats (~5+ hits)
+- Replacing Massive as the primary crypto data source.
+- Refactoring `market_data.fetch_quote`'s fallback chain.
+- Adding new ticker-specific thresholds beyond the existing 0.1x-10x ratio.
+- Tightening the threshold itself; that's a separate brief if Phase 4's postmortem argues for it.
 
-API-layer classes (TestTradingPageAPI onward) use the paired_client
-fixture and are out of scope for this brief.
+## Acceptance bar
 
-Verified: pytest tests/test_trading.py -v -> service-layer classes green.
+- Phase 1 diagnostic identifies the poisoned upstream by name (price_bus / Massive WS / Massive REST / something else).
+- Phase 2 fix lands the implausible-quote guard at `fetch_quote` boundary AND clears the bad cache entry (ad-hoc clear via the script if cache is in-memory; restart of the relevant container if cache is process-local; vendor escalation if upstream).
+- Phase 3 monitor surfaces future occurrences within 10 minutes via `runtime_surface_state`.
+- Phase 4 postmortem filed.
+- One unit test per phase that has new code.
+- After deploy: zero new `DATA_IMPLAUSIBLE` rows for TRUMP-USD in `trading_stop_decisions` for 1 hour. (If the upstream is still emitting the bad value but `fetch_quote` now refuses at boundary, the rows stop because the exit monitor never sees the bad quote.)
 
-(f-thread-housekeeping-tail-2026-05-07 step 1)"
+## Operator-side after CC ships
 
-# Commit 2: track Cowork review backlog
-git add docs/STRATEGY/COWORK_REVIEWS/
-git commit -m "docs(strategy): commit Cowork review backlog
-
-The Cowork <-> CC protocol expects COWORK_REVIEWS/* tracked alongside
-CC_REPORTS/*. The operator had been leaving them untracked; this commit
-stages the backlog so the strategy thread's full audit trail is in git
-history.
-
-(f-thread-housekeeping-tail-2026-05-07 step 2)"
-
-# Commit 3: docs
-git add docs/STRATEGY/CC_REPORTS/2026-05-07_f-thread-housekeeping-tail-2026-05-07.md docs/STRATEGY/NEXT_TASK.md
-git commit -m "docs(strategy): f-thread-housekeeping-tail-2026-05-07 CC report + mark NEXT_TASK done"
-```
-
-Three commits: test fix, review backlog, docs.
-
-## Constraints / do not touch
-
-- **No new magic numbers.** No numerical thresholds anywhere in this brief.
-- **No production trading code.** Tests only.
-- **No `tests/conftest.py` edits.** The shared fixture surface is stable; the helper lives in `tests/test_trading.py`.
-- **No API-layer test refactors.** They use a different fixture pattern; out of scope.
-- **No `git push --force` to main.** Standard PROTOCOL Hard Rule.
-
-## Success criteria
-
-1. **Three commits, all pushed:**
-   - `test(trading): sweep remaining user_id=1 hardcodes across service classes`
-   - `docs(strategy): commit Cowork review backlog`
-   - `docs(strategy): f-thread-housekeeping-tail-2026-05-07 CC report + mark NEXT_TASK done`
-2. **`pytest tests/test_trading.py -v`** — all 4 service-layer classes (`TestWatchlistService`, `TestTradeService`, `TestJournalService`, `TestTradeStats`) green. API-layer classes either also green (bonus) or fail on unrelated reasons documented in the CC report.
-3. **`git ls-files docs/STRATEGY/COWORK_REVIEWS/ | wc -l`** ≥ 5 (this thread alone added 5+ reviews).
-4. **`grep -nE "user_id\s*=\s*1\b" tests/test_trading.py`** returns zero hits in the 4 target classes (or only hits in API-layer classes / docstrings / commented-out lines).
-5. **CC_REPORT** at `docs/STRATEGY/CC_REPORTS/2026-05-07_f-thread-housekeeping-tail-2026-05-07.md` per PROTOCOL format. Include:
-   - Per-class hit count fixed.
-   - Whether any test failed on a real (non-fixture) bug — surface those, don't auto-fix.
-   - Final `git ls-files docs/STRATEGY/COWORK_REVIEWS/` count.
-   - Magic-number audit (zero new literals).
-
-## Rollback plan
-
-- **Step 1 (test sweep):** `git revert <commit>` — tests go back to FK-violation state. No production impact.
-- **Step 2 (review backlog):** `git revert <commit>` — review files un-tracked again, working copies preserved. No production impact.
-
-## Verification commands (for the executor + the operator)
-
-```powershell
-# Test sweep verification
-$env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
-pytest tests/test_trading.py::TestWatchlistService tests/test_trading.py::TestTradeService tests/test_trading.py::TestJournalService tests/test_trading.py::TestTradeStats -v
-
-# Review backlog tracked
-git ls-files docs/STRATEGY/COWORK_REVIEWS/ | wc -l
-
-# Anti-pattern resolved in service-layer classes
-grep -nE "user_id\s*=\s*1\b" tests/test_trading.py | grep -E "^[0-9]+:" | awk -F: '{if ($1 < 320) print}'
-# Expected: zero hits below line 320 (the API-layer boundary).
-```
-
-## Open questions for Cowork (surface in CC report)
-
-1. **API-layer classes** (line 345+). If any of these classes also have hardcoded `user_id` patterns under a different shape (e.g., `paired_client.user.id` vs `1`), surface them. Same fix shape; could ship as a tiny follow-up.
-2. **`docs/STRATEGY/COWORK_REVIEWS/*` content audit.** Skim each review for any half-written draft or sensitive content that shouldn't go into git history. If anything looks off, surface to operator before committing.
-
-## Forward pointer
-
-After this lands, the strategy thread is fully closed for the third and last time. No actionable follow-ups remaining; only the working-tree disk-view sync (operator-side mount refresh) and that's not a thing CC executes.
+- Clear the corrupted git index lock first: `Remove-Item C:\dev\chili-home-copilot\.git\index.lock` (currently blocking commits — `git status` returns `fatal: unable to read cf7133c5...` because the index is locked by an IDE process).
+- Push the fix.
+- Restart whichever container holds the poisoned cache (likely autotrader-worker or chili — Phase 2 names which).
+- Run the diagnostic script from Phase 1.1 once more to confirm the upstream is now clean.
+- Eyeball `trading_stop_decisions` for 1 hour: if zero new `DATA_IMPLAUSIBLE` rows for TRUMP-USD, the source is fixed. If the rows continue, the upstream is still bad but the boundary guard is shielding consumers — that's a partial win and the source-fix needs a vendor escalation.
