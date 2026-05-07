@@ -682,8 +682,187 @@ def fetch_ohlcv_batch(
 
 # ── Quote ──────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────
+# Implausible-quote boundary guard
+# ─────────────────────────────────────────────────────────────────────
+#
+# f-trump-usd-poisoned-quote-source-audit (2026-05-07): the
+# implausible-quote check (formerly enforced only at the exit-monitor
+# layer via ``_exit_monitor_common.is_implausible_quote``) now also
+# fires at the ``fetch_quote`` boundary. Two incidents (ARB-USD
+# 2026-05-04 and TRUMP-USD 2026-05-06) showed identical bad prices
+# repeating across hours of decisions -- a stale singleton-cache
+# fingerprint in ``price_bus`` or the Massive WS subscriber. The
+# exit-monitor guard kept the engine from acting, but every other
+# consumer of ``fetch_quote`` (UI surfaces, feature engineering,
+# regime classifier inputs) was silently exposed.
+#
+# Defense-in-depth: by validating at the data boundary, no consumer
+# past ``fetch_quote`` ever sees implausible data. Returns ``None``
+# (per the no-hardcoded-fallback rule) -- consumers handle absence,
+# not substitute prices.
+#
+# Plausibility uses the SAME 0.1x-10x ratio bound as the three
+# exit-monitor lanes share (``_exit_monitor_common.is_implausible_quote``).
+# Anchor priority for the ratio comparison:
+#   1. Per-ticker last-known-good cache (in-memory, this module).
+#   2. Most-recent open Trade's ``entry_price`` for the same ticker.
+#   3. None -- with no anchor we can't judge plausibility, so we
+#      ACCEPT the quote and seed the cache with it.
+#
+# Rejection telemetry: each rejection is recorded per
+# ``(ticker, source)``. After ``_REJECTION_THRESHOLD`` rejections in
+# ``_REJECTION_WINDOW_S`` seconds, we write a ``degraded`` row to
+# ``runtime_surface_state.market_data`` for the alert pipeline. This
+# replaces the visibility we previously had via ``trading_stop_decisions``
+# DATA_IMPLAUSIBLE rows -- those will now stop appearing because
+# ``fetch_quote`` will return ``None`` before the exit-monitor sees
+# the bad value.
+from collections import deque as _deque
+from threading import Lock as _Lock
+
+_KNOWN_GOOD_CACHE: dict[str, float] = {}
+_KNOWN_GOOD_LOCK = _Lock()
+
+_REJECTION_WINDOW_S: float = 600.0  # 10 minutes
+_REJECTION_THRESHOLD: int = 5
+_REJECTIONS: dict[tuple[str, str], "_deque[float]"] = {}
+_REJECTIONS_LOCK = _Lock()
+
+
+def _resolve_implausibility_anchor(ticker: str) -> float | None:
+    """Anchor for the implausibility ratio: cache → open Trade → None."""
+    tk = (ticker or "").upper()
+    if not tk:
+        return None
+    with _KNOWN_GOOD_LOCK:
+        cached = _KNOWN_GOOD_CACHE.get(tk)
+    if cached is not None and cached > 0:
+        return cached
+    try:
+        from ...db import SessionLocal
+        from ...models.trading import Trade
+
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(Trade)
+                .filter(Trade.ticker == tk, Trade.status == "open")
+                .order_by(Trade.entry_date.desc())
+                .first()
+            )
+            if row and row.entry_price and float(row.entry_price) > 0:
+                return float(row.entry_price)
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return None
+
+
+def _record_implausible_rejection(
+    ticker: str, source: str, bad_price: float, anchor: float
+) -> None:
+    """Record a rejection; emit degraded surface state if threshold hit."""
+    key = ((ticker or "").upper(), source or "unknown")
+    now = _time.time()
+    with _REJECTIONS_LOCK:
+        dq = _REJECTIONS.setdefault(key, _deque(maxlen=64))
+        dq.append(now)
+        while dq and dq[0] < now - _REJECTION_WINDOW_S:
+            dq.popleft()
+        count = len(dq)
+
+    if count >= _REJECTION_THRESHOLD:
+        try:
+            from .runtime_surface_state import persist_runtime_surface_now
+
+            persist_runtime_surface_now(
+                surface="market_data",
+                state="degraded",
+                source=source or "unknown",
+                details={
+                    "reason": "implausible_quote_burst",
+                    "ticker": key[0],
+                    "bad_price": bad_price,
+                    "anchor": anchor,
+                    "rejection_count": count,
+                    "rejection_window_s": _REJECTION_WINDOW_S,
+                    "rejection_threshold": _REJECTION_THRESHOLD,
+                },
+                updated_by="market_data.boundary_guard",
+            )
+        except Exception:
+            pass
+
+
+def _accept_known_good_price(ticker: str, price: float) -> None:
+    """Update the per-ticker last-known-good cache after a clean fetch."""
+    tk = (ticker or "").upper()
+    if not tk or not price or price <= 0:
+        return
+    with _KNOWN_GOOD_LOCK:
+        _KNOWN_GOOD_CACHE[tk] = float(price)
+
+
+def _apply_boundary_guard(
+    ticker: str, quote: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Validate a fetched quote against the per-ticker plausibility anchor.
+
+    Returns ``None`` (and records the rejection for alerting) when the
+    quote's price is implausibly far from the anchor. Otherwise updates
+    the last-known-good cache and returns the quote unchanged.
+    """
+    if not quote:
+        return quote
+    try:
+        price = float(quote.get("price") or 0.0)
+    except (TypeError, ValueError):
+        return quote
+    if price <= 0:
+        return quote
+
+    anchor = _resolve_implausibility_anchor(ticker)
+    if anchor is None or anchor <= 0:
+        # No anchor available -- accept and seed the cache.
+        _accept_known_good_price(ticker, price)
+        return quote
+
+    from ._exit_monitor_common import is_implausible_quote
+
+    if is_implausible_quote(price, anchor):
+        source = str(quote.get("source") or "unknown")
+        ratio = price / anchor
+        logger.warning(
+            "[market_data] boundary guard REJECTED ticker=%s price=%s "
+            "anchor=%s ratio=%.4f source=%s -- abstaining (returning None)",
+            ticker, price, anchor, ratio, source,
+        )
+        _record_implausible_rejection(ticker, source, price, anchor)
+        return None
+
+    _accept_known_good_price(ticker, price)
+    return quote
+
+
 def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> dict[str, Any] | None:
-    """Current price + enriched info.  Price bus → Massive WS → Massive REST → Polygon → yfinance.
+    """Current price + enriched info, with implausible-quote boundary guard.
+
+    Wraps the upstream cascade (price_bus → Massive WS → Massive REST →
+    Polygon → yfinance) and applies ``_apply_boundary_guard`` to the
+    result. Implausible-vs-anchor returns ``None`` rather than passing
+    poisoned data downstream.
+    """
+    return _apply_boundary_guard(
+        ticker, _fetch_quote_unguarded(ticker, allow_provider_fallback=allow_provider_fallback),
+    )
+
+
+def _fetch_quote_unguarded(
+    ticker: str, *, allow_provider_fallback: bool | None = None
+) -> dict[str, Any] | None:
+    """Underlying fetch (no boundary guard).  Price bus → Massive WS → Massive REST → Polygon → yfinance.
 
     *allow_provider_fallback* ``None`` uses ``settings.market_data_allow_provider_fallback``.
     ``False`` forces Massive-only (WS + REST).
