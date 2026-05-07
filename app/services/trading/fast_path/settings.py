@@ -155,11 +155,23 @@ class FastPathSettings:
     median_spread_bps_for_ticker)`` at the best-Sharpe horizon. When
     False (default), the gate is a no-op."""
 
-    cost_aware_taker_fee_bps: float = 5.0
-    """Coinbase Advanced Trade taker fee in bps. Maker-only mode
-    (separate brief: ``f-fastpath-maker-only``) flips this to the
-    maker rebate; in taker mode this is the round-trip cost component
-    we have to clear."""
+    cost_aware_taker_fee_bps: float = 60.0
+    """Coinbase Advanced Trade taker fee, **per-side, in bps**. Default
+    is **60 bps** = retail volume tier 1 (>=$10k 30d volume), per
+    https://docs.cdp.coinbase.com/exchange/docs/fees. The cost-aware
+    gate's formula ``2 * (taker_fee_bps + spread_bps)`` multiplies by 2
+    for the round-trip, so this value MUST be per-side, not round-trip.
+
+    Operators on a higher volume tier should override via
+    ``CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS``. Reference values:
+    tier 1 = 60, tier 2 = 40, tier 3 = 25, tier 4 = 15, tier 5 = 10,
+    tier 6 = 8, tier 7 = 5, tier 8 = 4, tier 9 = 4. Coinbase One
+    subscribers may have different rates -- check the live fee schedule
+    on the operator's account.
+
+    Maker-only mode (separate brief: ``f-fastpath-maker-only``) replaces
+    this default with the maker fee for the active tier; that brief
+    will introduce a separate ``cost_aware_maker_fee_bps`` setting."""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -208,7 +220,7 @@ def load() -> FastPathSettings:
         cost_aware_admission_enabled=_env_bool(
             "CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED", False),
         cost_aware_taker_fee_bps=_env_float(
-            "CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS", 5.0),
+            "CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS", 60.0),
     )
 
 

@@ -264,9 +264,11 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
     default). Off-by-default keeps switchover bit-identical to current.
 
     The factor of 2 accounts for the round-trip: pay the fee + cross
-    the spread on entry AND on exit. Coinbase taker fee defaults to
-    5 bps in ``settings.cost_aware_taker_fee_bps``; live spread comes
-    from ``ctx.spread_bps`` (the same in-memory book the existing
+    the spread on entry AND on exit. ``settings.cost_aware_taker_fee_bps``
+    is **per-side, in bps** (default 60 bps = Coinbase Advanced Trade
+    retail tier 1; operators on a higher volume tier should override
+    via ``CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS``). Live spread
+    comes from ``ctx.spread_bps`` (the same in-memory book the existing
     spread-sanity gate reads).
 
     Engine missing (unit tests): allows with verdict='no_engine' for
