@@ -123,3 +123,16 @@ host-debug-logs/
 scripts/_smoke_*.py
 scripts/_diag_*.py
 .pr_body.md
+
+# Operator audit working-set (pre-CC scratch; not intended for git).
+# To share a specific audit, use 'git add -f docs/AUDITS/<file>'.
+docs/AUDITS/
+
+# Operator-scratch at repo root.
+HARDCODED_MAGIC_NUMBERS_AUDIT.txt
+docs/AUDIT_PROMPT.md
+docs/FAST_PATH_CLAUDE_CODE_PROMPT.md
+
+# Cowork's working backlog of strategy reviews — keep tracked normally
+# (this is part of the Cowork ↔ CC protocol, not operator scratch).
+# (No ignore line for docs/STRATEGY/COWORK_REVIEWS — intentional.)

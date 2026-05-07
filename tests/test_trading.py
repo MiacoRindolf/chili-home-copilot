@@ -29,9 +29,25 @@ def _make_paired(db):
 # ── Model Tests ──────────────────────────────────────────────────────────────
 
 
+def _seed_user(db, name: str) -> int:
+    """Create a User row and return its id.
+
+    f-thread-housekeeping-followups-2026-05-07: replaces the prior
+    hardcoded-``user_id=1`` anti-pattern in these per-test cases.
+    ``conftest.py`` truncates ``users`` per-test so a literal ``1``
+    triggered FK violations on the user FK columns.
+    """
+    user = User(name=name)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user.id
+
+
 class TestTradingModels:
     def test_create_watchlist_item(self, db):
-        item = WatchlistItem(user_id=1, ticker="AAPL")
+        uid = _seed_user(db, "watchlist_item_u")
+        item = WatchlistItem(user_id=uid, ticker="AAPL")
         db.add(item)
         db.commit()
         db.refresh(item)
@@ -40,8 +56,9 @@ class TestTradingModels:
         assert item.added_at is not None
 
     def test_create_trade(self, db):
+        uid = _seed_user(db, "create_trade_u")
         trade = Trade(
-            user_id=1, ticker="TSLA", direction="long",
+            user_id=uid, ticker="TSLA", direction="long",
             entry_price=200.0, quantity=10,
         )
         db.add(trade)
@@ -52,8 +69,9 @@ class TestTradingModels:
         assert trade.pnl is None
 
     def test_create_short_trade(self, db):
+        uid = _seed_user(db, "create_short_trade_u")
         trade = Trade(
-            user_id=1, ticker="SPY", direction="short",
+            user_id=uid, ticker="SPY", direction="short",
             entry_price=450.0, quantity=5,
         )
         db.add(trade)
@@ -62,7 +80,8 @@ class TestTradingModels:
         assert trade.direction == "short"
 
     def test_create_journal_entry(self, db):
-        entry = JournalEntry(user_id=1, content="Market looks bullish", trade_id=None)
+        uid = _seed_user(db, "create_journal_u")
+        entry = JournalEntry(user_id=uid, content="Market looks bullish", trade_id=None)
         db.add(entry)
         db.commit()
         db.refresh(entry)
@@ -70,6 +89,7 @@ class TestTradingModels:
         assert entry.created_at is not None
 
     def test_create_trading_insight(self, db):
+        uid = _seed_user(db, "create_insight_u")
         sp = ScanPattern(
             name="Test insight pattern",
             rules_json="{}",
@@ -79,7 +99,7 @@ class TestTradingModels:
         db.commit()
         db.refresh(sp)
         insight = TradingInsight(
-            user_id=1,
+            user_id=uid,
             scan_pattern_id=sp.id,
             pattern_description="RSI oversold bounce on AAPL",
             confidence=0.75,
@@ -92,8 +112,9 @@ class TestTradingModels:
         assert insight.active is True
 
     def test_create_scan_result(self, db):
+        uid = _seed_user(db, "create_scan_u")
         scan = ScanResult(
-            user_id=1, ticker="NVDA", score=8.5, signal="buy",
+            user_id=uid, ticker="NVDA", score=8.5, signal="buy",
             entry_price=500.0, stop_loss=480.0, take_profit=550.0,
             risk_level="medium", rationale="Strong momentum",
         )
@@ -103,8 +124,9 @@ class TestTradingModels:
         assert scan.id is not None
 
     def test_create_backtest_result(self, db):
+        uid = _seed_user(db, "create_backtest_u")
         bt = BacktestResult(
-            user_id=1, ticker="AAPL", strategy_name="sma_cross",
+            user_id=uid, ticker="AAPL", strategy_name="sma_cross",
             return_pct=15.2, win_rate=0.6, max_drawdown=-8.3, trade_count=25,
         )
         db.add(bt)
@@ -123,8 +145,9 @@ class TestTradingModels:
         assert snap.id is not None
 
     def test_create_learning_event(self, db):
+        uid = _seed_user(db, "create_learning_u")
         ev = LearningEvent(
-            user_id=1, event_type="discovery",
+            user_id=uid, event_type="discovery",
             description="New bullish pattern found",
             confidence_before=0.5, confidence_after=0.65,
         )
