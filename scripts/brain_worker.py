@@ -83,6 +83,11 @@ def _db_heartbeat_tick() -> None:
             except Exception:
                 pass
         finally:
+            # FIX 46 pattern: rollback before close (read txn cleanup).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     except Exception as exc:
         logger.debug("[brain] heartbeat tick failed: %s", exc)
@@ -258,6 +263,11 @@ def check_any_wake() -> bool:
     except Exception as e:
         logger.warning("[brain] DB wake consume failed: %s", e)
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     return got
 
@@ -284,6 +294,11 @@ def _check_db_stop_idle() -> bool:
             pass
         return False
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -299,6 +314,11 @@ def _consume_wake_queued_during_cycle(status: BrainWorkerStatus) -> bool:
     except Exception as e:
         logger.warning("[brain] DB wake consume after cycle failed: %s", e)
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
     status.wake_skip_idle.clear()
     logger.info("[brain] Wake was queued during cycle — skipping idle sleep")
@@ -342,6 +362,11 @@ def _brain_db_poll_loop(
             except Exception:
                 pass
         finally:
+            # FIX 46 pattern: rollback before close (read txn cleanup).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
         if track_learning_progress:
@@ -370,6 +395,11 @@ def _get_live_queue_status():
         status = get_queue_status(db, use_cache=False)
         return status.get("pending", 0), status.get("queue_empty", True)
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -390,6 +420,11 @@ def _run_subtask_alpha_decay(status: "BrainWorkerStatus") -> dict:
         logger.warning("[brain:subtask] alpha_decay failed: %s", e)
         return {"error": str(e)}
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -405,6 +440,11 @@ def _run_subtask_retention(status: "BrainWorkerStatus") -> dict:
         logger.warning("[brain:subtask] retention failed: %s", e)
         return {"error": str(e)}
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -420,6 +460,11 @@ def _run_subtask_signal_refresh(status: "BrainWorkerStatus") -> dict:
         logger.warning("[brain:subtask] signal_refresh failed: %s", e)
         return {"error": str(e)}
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -494,6 +539,11 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
             logger.warning("[brain:subtask] fast_backtest item failed: %s", e)
             errors += 1
         finally:
+            # FIX 46 pattern: rollback before close (read txn cleanup).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
     return {"completed": completed, "errors": errors, "batch_size": batch_size}
 
@@ -512,6 +562,11 @@ def _run_subtask_pattern_regime_ledger(status: "BrainWorkerStatus") -> dict:
         logger.warning("[brain:subtask] pattern_regime_ledger failed: %s", e)
         return {"error": str(e)}
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -529,6 +584,11 @@ def _run_subtask_realized_sync(status: "BrainWorkerStatus") -> dict:
         logger.warning("[brain:subtask] realized_sync failed: %s", e)
         return {"error": str(e)}
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -551,6 +611,11 @@ def _run_subtask_crypto_pattern_miner(status: "BrainWorkerStatus") -> dict:
         logger.warning("[brain:subtask] crypto_pattern_miner failed: %s", e)
         return {"error": str(e)}
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -573,6 +638,11 @@ def _run_subtask_ticker_autotune(status: "BrainWorkerStatus") -> dict:
         logger.warning("[brain:subtask] ticker_autotune failed: %s", e)
         return {"error": str(e)}
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -771,6 +841,11 @@ def _learning_cycle_audit_begin() -> str | None:
             pass
         return None
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -797,6 +872,11 @@ def _learning_cycle_audit_finish(jid: str | None, *, ok: bool, error: str | None
         except Exception:
             pass
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -868,6 +948,11 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
                 try:
                     _apply_learning_result_to_stats(result, cycle_stats, db_remote)
                 finally:
+                    # FIX 46 pattern: rollback before close (read txn cleanup).
+                    try:
+                        db_remote.rollback()
+                    except Exception:
+                        pass
                     db_remote.close()
                 audit_ok = True
             except Exception as e:
@@ -927,6 +1012,11 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
                 logger.warning(f"[brain] Could not get live queue status: {qe}")
 
         finally:
+            # FIX 46 pattern: rollback before close (read txn cleanup).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
         return cycle_stats
@@ -981,6 +1071,11 @@ def _maybe_run_neural_activation_batch() -> None:
         except Exception:
             pass
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -1008,6 +1103,11 @@ def _maybe_run_brain_work_batch() -> None:
         except Exception:
             pass
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 
@@ -1506,6 +1606,11 @@ def _run_activation_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
                 except Exception:
                     pass
             finally:
+                # FIX 46 pattern: rollback before close (read txn cleanup).
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 db.close()
             status.save()
             if args.once:
@@ -1548,6 +1653,11 @@ def _run_mining_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> Non
             except Exception:
                 pass
         finally:
+            # FIX 46 pattern: rollback before close (read txn cleanup).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
         status.save()
         if args.once:
@@ -1610,6 +1720,11 @@ def _run_fast_scan_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> 
             except Exception:
                 pass
         finally:
+            # FIX 46 pattern: rollback before close (read txn cleanup).
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
         status.save()
         if args.once:
@@ -1709,6 +1824,11 @@ def main():
         except Exception:
             pass
     finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db_boot.rollback()
+        except Exception:
+            pass
         db_boot.close()
 
     # FIX 34 (2026-04-29): Start the independent fast_backtest timer thread
