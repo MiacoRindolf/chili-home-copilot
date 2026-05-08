@@ -162,17 +162,6 @@ class FastPathSupervisor:
         # ingestion is enabled — if enabled=False, no alerts will be
         # written, so don't spin it up.
         if self._settings.enabled:
-            self._executor = FastPathExecutor(
-                self._settings, self._engine, self._ws._book,  # noqa: SLF001
-            )
-            # F5: exit manager closes the loop on F4 entries —
-            # streams top-of-book against per-position bracket
-            # (stop_engine-derived stop+target) and writes fast_exits
-            # rows with realized P/L. Paper-only in F5; live exit is
-            # a follow-up (same three-flag belt as live entry).
-            self._exit_manager = FastPathExitManager(
-                self._settings, self._engine, self._ws._book,  # noqa: SLF001
-            )
             # F6: signal-decay miner. Event-driven brain node that
             # LISTENs on fp_alert_inserted / fp_exit_inserted /
             # fp_book_inserted (NOTIFY triggers in migration 221) and
@@ -181,8 +170,29 @@ class FastPathSupervisor:
             # instead of the current hardcoded magic numbers.
             # Independent of executor: even if F4 is paused, learning
             # from raw fast_alerts continues.
+            #
+            # f-fastpath-maker-only-executor (2026-05-08): constructed
+            # before the executor so a reference can be passed in.
+            # The executor calls decay_miner.record_maker_outcome on
+            # maker fills so the maker-filled decay table accumulates.
             self._decay_miner = FastPathDecayMiner(
                 self._settings, self._engine,
+            )
+            # F4: executor reads from fast_alerts (written by F3 scanner)
+            # and decides paper/live actions. It's only useful when
+            # ingestion is enabled — if enabled=False, no alerts will be
+            # written, so don't spin it up.
+            self._executor = FastPathExecutor(
+                self._settings, self._engine, self._ws._book,  # noqa: SLF001
+                decay_miner=self._decay_miner,
+            )
+            # F5: exit manager closes the loop on F4 entries —
+            # streams top-of-book against per-position bracket
+            # (stop_engine-derived stop+target) and writes fast_exits
+            # rows with realized P/L. Paper-only in F5; live exit is
+            # a follow-up (same three-flag belt as live entry).
+            self._exit_manager = FastPathExitManager(
+                self._settings, self._engine, self._ws._book,  # noqa: SLF001
             )
 
         if self._settings.enabled:

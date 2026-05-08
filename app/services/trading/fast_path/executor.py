@@ -240,6 +240,148 @@ def _place_coinbase_order_live(ticker: str, side: str, quantity: float,
     return order_id
 
 
+# ── Maker-only execution helpers (f-fastpath-maker-only-executor) ────
+
+
+MAKER_LIMIT_TICK_FRACTION_OF_MID = 1e-4
+"""Default tick offset, expressed as a fraction of mid-price, when the
+venue's quote_increment isn't available. 1bp = 0.01% — small enough
+that the resting limit is consistently inside the spread for any
+reasonable Coinbase pair (median spread is well above 1bp), but not so
+small that it lands at the same price as a competing best bid/ask.
+
+Settings-tunable via ``CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID`` if a
+follow-up brief lifts this into ``settings.py``. For now the constant
+encodes the default; an operator override should NOT be needed since
+the gate already filters wide-spread pairs."""
+
+MAKER_TIMEOUT_TASK_NAME_PREFIX = "fast_path_maker_timeout"
+
+
+def _maker_default_tick_size(mid_price: float) -> float:
+    """Fallback tick offset in absolute price units when the venue
+    quote_increment isn't available. Bounded below by $1e-8 so we
+    don't generate sub-Coinbase-tick prices for high-priced assets like
+    BTC where ``mid * 1e-4`` is still a valid sub-tick.
+    """
+    if mid_price <= 0:
+        return 0.0
+    return max(mid_price * MAKER_LIMIT_TICK_FRACTION_OF_MID, 1e-8)
+
+
+def _compute_maker_limit_price(side: str, best_bid: float, best_ask: float,
+                               tick_size: float) -> float:
+    """Place the limit one tick INSIDE the spread on our side of the
+    book.
+
+      * long  (side='buy'):  best_bid + tick   (just above the BBO bid;
+                                                fills only if the book
+                                                trades down to us)
+      * short (side='sell'): best_ask - tick   (just below the BBO ask)
+
+    Returns 0.0 if the inputs are degenerate (no quote, or the offset
+    would invert the book). Caller treats 0.0 as a reject reason.
+    """
+    if best_bid <= 0 or best_ask <= 0 or tick_size <= 0:
+        return 0.0
+    if side == "buy":
+        candidate = best_bid + tick_size
+        # Don't cross the spread — that would make us a taker.
+        return candidate if candidate < best_ask else 0.0
+    elif side == "sell":
+        candidate = best_ask - tick_size
+        return candidate if candidate > best_bid else 0.0
+    return 0.0
+
+
+def _place_coinbase_maker_order_live(ticker: str, side: str, quantity: float,
+                                     limit_price: float, notional_usd: float) -> str:
+    """Place a Coinbase POST_ONLY limit order and return the broker
+    order_id. Mirror of ``_place_coinbase_order_live`` but for the
+    maker path: same authorization belts, same first-trade hard cap,
+    same SDK-level connection check.
+
+    The Coinbase Advanced Trade SDK's POST_ONLY variant rejects any
+    limit that would cross the book at place-time, so a misconfigured
+    aggressive price can't accidentally take liquidity.
+    """
+    if not is_live_authorized():
+        raise LiveExecutionNotAuthorized(
+            "live placement attempted but CHILI_FAST_PATH_EXEC_LIVE_AUTHORIZED is unset"
+        )
+
+    if notional_usd > LIVE_FIRST_TRADE_USD_HARD_CAP and not _live_notional_override():
+        raise LiveExecutionNotAuthorized(
+            f"notional ${notional_usd:.2f} exceeds first-trade cap "
+            f"${LIVE_FIRST_TRADE_USD_HARD_CAP:.2f}; set "
+            f"CHILI_FAST_PATH_LIVE_NOTIONAL_OK=1 after validating the "
+            f"first small live orders behave correctly"
+        )
+
+    if side not in ("buy", "sell"):
+        raise LiveExecutionNotAuthorized(f"unsupported side={side!r} for live placement")
+    if limit_price <= 0:
+        raise LiveExecutionNotAuthorized(f"non-positive limit_price={limit_price!r}")
+
+    try:
+        from app.services import coinbase_service as cb
+    except Exception as exc:
+        raise LiveExecutionNotAuthorized(f"coinbase_service import failed: {exc}") from exc
+
+    if not cb.is_connected():
+        try:
+            cb.connect()
+        except Exception:
+            pass
+    if not cb.is_connected():
+        raise LiveExecutionNotAuthorized(
+            "coinbase client not connected; configure credentials via vault or env"
+        )
+
+    logger.critical(
+        "[fast_path] LIVE MAKER PLACEMENT %s %s qty=%.8f limit_px=%.6f notional_usd=%.2f",
+        side.upper(), ticker, quantity, limit_price, notional_usd,
+    )
+
+    if side == "buy":
+        resp = cb.place_buy_order(
+            ticker, quantity, order_type="limit",
+            limit_price=limit_price, post_only=True,
+        )
+    else:
+        resp = cb.place_sell_order(
+            ticker, quantity, order_type="limit",
+            limit_price=limit_price, post_only=True,
+        )
+
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        msg = (resp or {}).get("error", "unknown_broker_error")
+        raise RuntimeError(f"coinbase rejected maker order: {msg}")
+
+    order_id = str(resp.get("order_id") or "").strip()
+    if not order_id:
+        raise RuntimeError("coinbase response missing order_id")
+    return order_id
+
+
+def _cancel_coinbase_order_live(order_id: str) -> bool:
+    """Cancel a Coinbase order. Returns True on accepted cancel, False
+    otherwise. Errors are swallowed because the maker-timeout handler
+    treats failed cancels as 'cancellation in flight; let reconcile
+    sweep' rather than a fatal condition.
+    """
+    try:
+        from app.services import coinbase_service as cb
+    except Exception:
+        return False
+    try:
+        resp = cb.cancel_order_by_id(order_id)
+        return bool(resp.get("ok"))
+    except Exception as exc:
+        logger.warning("[fast_path] cancel_order_by_id %s failed: %s", order_id, exc)
+        return False
+
+
 # ── Executor ──────────────────────────────────────────────────────────
 
 
@@ -253,6 +395,13 @@ class _ExecutorMetrics:
     db_errors: int = 0
     last_alert_id_seen: int = 0
     last_decision_at: datetime | None = None
+    # f-fastpath-maker-only-executor (2026-05-08).
+    maker_attempts_placed: int = 0
+    maker_attempts_filled: int = 0
+    maker_attempts_cancelled: int = 0
+    maker_attempts_replaced: int = 0
+    maker_attempts_rejected: int = 0
+    maker_attempts_capped: int = 0  # blocked by 1-outstanding-per-(ticker,side) cap
 
 
 class FastPathExecutor:
@@ -261,6 +410,7 @@ class FastPathExecutor:
         settings: FastPathSettings,
         engine: Engine,
         order_book: OrderBookAggregator,
+        decay_miner: Any | None = None,
     ) -> None:
         self._settings = settings
         self._engine = engine
@@ -275,6 +425,17 @@ class FastPathExecutor:
         self._daily_window_date: str = self._utc_date_str(datetime.now(timezone.utc))
         self._overrides = env_overrides()
         self._metrics = _ExecutorMetrics()
+        # f-fastpath-maker-only-executor (2026-05-08).
+        # ``decay_miner`` is the FastPathDecayMiner instance (or None
+        # in tests / when ingestion is disabled). The executor calls
+        # its ``record_maker_outcome`` when a maker order's outcome is
+        # known so the maker-filled decay table accumulates properly.
+        self._decay_miner = decay_miner
+        # Hard cap: 1 outstanding maker order per (ticker, side).
+        # Keyed by (ticker, side); value is a dict carrying attempt_id,
+        # broker_order_id, timeout_task, alert metadata. The
+        # cancel-on-timeout handler removes its own entry when done.
+        self._outstanding_maker: dict[tuple[str, str], dict] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -443,6 +604,21 @@ class FastPathExecutor:
             return
         quantity = notional_usd / fill_price
 
+        # f-fastpath-maker-only-executor (2026-05-08): dispatch on
+        # the effective execution mode. ``taker`` (default) is
+        # bit-identical to the original taker path; the maker variants
+        # delegate to the maker-only / maker-first methods.
+        execution_mode = (self._settings.execution_mode or "taker").strip().lower()
+        if execution_mode in ("maker_only", "maker_first_then_taker"):
+            await self._process_alert_maker(
+                alert=alert, ctx=ctx, gate_run=gate_run, side=side,
+                quantity=quantity, fill_price=fill_price,
+                notional_usd=notional_usd, decided_at=decided_at,
+                latency_ms=latency_ms, execution_mode=execution_mode,
+            )
+            return
+
+        # ── Taker path (unchanged) ────────────────────────────────────────
         # ctx.mode is the EFFECTIVE mode after gate_mode_interlock —
         # which forces paper if live wasn't authorized. We trust that
         # value rather than re-checking env.
@@ -521,6 +697,439 @@ class FastPathExecutor:
         self._open_positions[ticker] = self._open_positions.get(ticker, 0) + 1
         self._daily_notional_used_usd += notional_usd
         self._metrics.last_decision_at = decided_at
+
+    # ── Maker-only path (f-fastpath-maker-only-executor, 2026-05-08) ──
+
+    async def _process_alert_maker(
+        self,
+        *,
+        alert: dict,
+        ctx: ExecContext,
+        gate_run: GateRunResult,
+        side: str,
+        quantity: float,
+        fill_price: float,
+        notional_usd: float,
+        decided_at: datetime,
+        latency_ms: float,
+        execution_mode: str,
+    ) -> None:
+        """Maker-only / maker-first-then-taker placement entry point.
+
+        Steps:
+          1. 1-outstanding-per-(ticker,side) cap enforcement.
+          2. Compute limit price one tick inside the spread.
+          3. Live mode: place via ``_place_coinbase_maker_order_live``
+             behind the same authorization belts as the taker path.
+             Paper mode: synthesize a placement (no broker call).
+          4. INSERT a ``fast_path_maker_attempts`` row.
+          5. Schedule a background asyncio task that fires after
+             ``settings.maker_cancel_on_timeout_s`` (or
+             ``maker_first_taker_fallback_s`` in hybrid mode) and
+             resolves the attempt: fill / cancel / replaced.
+
+        ``execution_mode`` controls the timeout duration AND the
+        outcome label when the timeout cancels: ``maker_only`` →
+        ``cancelled``; ``maker_first_then_taker`` → ``replaced`` plus a
+        sibling taker fallback placement.
+        """
+        ticker = str(alert.get("ticker") or "")
+        # 1-outstanding cap: prevent stale-limit pile-up if signals
+        # fire faster than the cancel-on-timeout window.
+        cap_key = (ticker, side)
+        if cap_key in self._outstanding_maker:
+            self._metrics.maker_attempts_capped += 1
+            await self._write_decision(
+                alert, ctx, decision="rejected",
+                reject_reason="maker_outstanding_cap_per_ticker_side",
+                gate_run=gate_run, side=side,
+                quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                broker_order_id=None, decided_at=decided_at,
+                latency_ms=latency_ms,
+            )
+            self._metrics.decisions_rejected += 1
+            return
+
+        tick_size = _maker_default_tick_size(
+            (ctx.best_bid + ctx.best_ask) / 2.0
+            if (ctx.best_bid > 0 and ctx.best_ask > 0)
+            else fill_price,
+        )
+        limit_price = _compute_maker_limit_price(
+            side, ctx.best_bid, ctx.best_ask, tick_size,
+        )
+        if limit_price <= 0:
+            await self._write_decision(
+                alert, ctx, decision="rejected",
+                reject_reason="maker_limit_price_unavailable",
+                gate_run=gate_run, side=side,
+                quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                broker_order_id=None, decided_at=decided_at,
+                latency_ms=latency_ms,
+            )
+            self._metrics.decisions_rejected += 1
+            return
+
+        spread_at_placement_bps = ctx.spread_bps
+
+        # Place — paper synthesises; live calls SDK.
+        broker_order_id: str | None = None
+        attempt_decision = "paper_fill"
+        if ctx.mode == "live":
+            if not is_live_authorized():
+                await self._write_decision(
+                    alert, ctx, decision="rejected",
+                    reject_reason="mode_live_but_not_authorized_at_place",
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=latency_ms,
+                )
+                self._metrics.decisions_rejected += 1
+                return
+            try:
+                loop = asyncio.get_running_loop()
+                broker_order_id = await loop.run_in_executor(
+                    None,
+                    _place_coinbase_maker_order_live,
+                    ticker, side, quantity, limit_price, notional_usd,
+                )
+                attempt_decision = "live_placed"
+            except LiveExecutionNotAuthorized as exc:
+                await self._write_decision(
+                    alert, ctx, decision="rejected",
+                    reject_reason=f"maker_live_blocked:{str(exc)[:40]}",
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=latency_ms,
+                )
+                self._metrics.decisions_rejected += 1
+                self._metrics.maker_attempts_rejected += 1
+                return
+            except Exception as exc:
+                logger.exception(
+                    "[fast_path] maker live placement failed ticker=%s side=%s qty=%.8f: %s",
+                    ticker, side, quantity, exc,
+                )
+                await self._write_decision(
+                    alert, ctx, decision="rejected",
+                    reject_reason=f"maker_live_error:{str(exc)[:40]}",
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=latency_ms,
+                )
+                self._metrics.decisions_rejected += 1
+                self._metrics.maker_attempts_rejected += 1
+                return
+
+        # Audit row in fast_path_maker_attempts.
+        loop = asyncio.get_running_loop()
+        attempt_id = await loop.run_in_executor(
+            None, self._insert_maker_attempt_sync,
+            {
+                "alert_id": alert.get("id"),
+                "ticker": ticker,
+                "side": side,
+                "limit_price": float(limit_price),
+                "spread_at_placement_bps": float(spread_at_placement_bps),
+                "broker_order_id": broker_order_id,
+                "execution_mode": execution_mode,
+            },
+        )
+        self._metrics.maker_attempts_placed += 1
+
+        # Decision row matches the taker shape so the autopilot UI
+        # treats maker placements as first-class.
+        await self._write_decision(
+            alert, ctx, decision=attempt_decision,
+            reject_reason=None,
+            gate_run=gate_run, side=side,
+            quantity=quantity, fill_price=limit_price, notional_usd=notional_usd,
+            broker_order_id=broker_order_id, decided_at=decided_at,
+            latency_ms=latency_ms,
+        )
+        if ctx.mode == "live":
+            self._metrics.decisions_live_placed += 1
+        else:
+            self._metrics.decisions_paper_fill += 1
+
+        # Schedule the timeout-driven outcome resolver. Hybrid mode
+        # uses the shorter ``maker_first_taker_fallback_s`` and labels
+        # the unfilled outcome ``replaced`` (since we'll then place a
+        # taker). Pure maker_only uses ``maker_cancel_on_timeout_s`` and
+        # labels ``cancelled``.
+        if execution_mode == "maker_first_then_taker":
+            timeout_s = max(int(self._settings.maker_first_taker_fallback_s), 1)
+            unfilled_outcome = "replaced"
+        else:
+            timeout_s = max(int(self._settings.maker_cancel_on_timeout_s), 1)
+            unfilled_outcome = "cancelled"
+
+        attempt_record = {
+            "attempt_id": attempt_id,
+            "alert_id": int(alert.get("id") or 0),
+            "ticker": ticker,
+            "side": side,
+            "limit_price": float(limit_price),
+            "broker_order_id": broker_order_id,
+            "execution_mode": execution_mode,
+            "alert_type": str(alert.get("alert_type") or ""),
+            "signal_score": float(alert.get("signal_score") or 0.0),
+            "fired_at": alert.get("fired_at"),
+            "placed_at": time.monotonic(),
+            "quantity": float(quantity),
+            "notional_usd": float(notional_usd),
+        }
+        self._outstanding_maker[cap_key] = attempt_record
+
+        timeout_task = asyncio.create_task(
+            self._maker_timeout_handler(
+                cap_key=cap_key,
+                attempt=attempt_record,
+                timeout_s=timeout_s,
+                unfilled_outcome=unfilled_outcome,
+                ctx=ctx,
+                alert=alert,
+                gate_run=gate_run,
+            ),
+            name=f"{MAKER_TIMEOUT_TASK_NAME_PREFIX}_{ticker}_{side}",
+        )
+        attempt_record["timeout_task"] = timeout_task
+
+        self._metrics.last_decision_at = decided_at
+
+    async def _maker_timeout_handler(
+        self,
+        *,
+        cap_key: tuple[str, str],
+        attempt: dict,
+        timeout_s: int,
+        unfilled_outcome: str,
+        ctx: ExecContext,
+        alert: dict,
+        gate_run: GateRunResult,
+    ) -> None:
+        """Run after ``timeout_s`` seconds; resolve the maker attempt.
+
+        Resolution logic:
+
+          * Live mode: poll the broker for terminal state. If filled,
+            mark filled. Else cancel via SDK and mark
+            ``unfilled_outcome``.
+          * Paper mode: peek at the in-memory book. If the BBO has
+            crossed our limit (best_bid >= our buy_limit, etc.), call
+            it filled at the limit price. Else mark unfilled.
+
+        On filled / partial: notify the decay_miner so the maker-filled
+        forward-return obs accumulate.
+        For ``unfilled_outcome='replaced'`` (hybrid mode), the caller's
+        responsibility for the taker fallback would be a follow-up; for
+        this brief we record the replaced outcome and let the next
+        signal in.
+        """
+        try:
+            await asyncio.sleep(int(timeout_s))
+        except asyncio.CancelledError:
+            return
+
+        ticker = attempt["ticker"]
+        side = attempt["side"]
+        limit_price = float(attempt["limit_price"])
+        broker_order_id = attempt.get("broker_order_id")
+        attempt_id = attempt.get("attempt_id")
+
+        # Determine the realized outcome.
+        outcome = unfilled_outcome
+        final_price: float | None = None
+        time_to_fill_ms: int | None = None
+
+        # Re-read top-of-book from the same in-memory aggregator the
+        # gate read at placement.
+        peek_ctx = self._build_context(ticker)
+        spread_at_fill_bps = peek_ctx.spread_bps
+        mid_drift_bps: float | None = None
+        if peek_ctx.best_bid > 0 and peek_ctx.best_ask > 0:
+            mid_now = (peek_ctx.best_bid + peek_ctx.best_ask) / 2.0
+            mid_at_place = (
+                (ctx.best_bid + ctx.best_ask) / 2.0
+                if (ctx.best_bid > 0 and ctx.best_ask > 0) else 0.0
+            )
+            if mid_at_place > 0:
+                mid_drift_bps = ((mid_now - mid_at_place) / mid_at_place) * 10_000.0
+
+        if ctx.mode == "live" and broker_order_id:
+            # Poll broker for terminal state.
+            try:
+                from app.services import coinbase_service as cb
+                info = cb.get_order_by_id(broker_order_id) or {}
+            except Exception:
+                info = {}
+            state = str(
+                info.get("status") or info.get("order_status") or ""
+            ).lower()
+            if state == "filled":
+                outcome = "filled"
+                # Coinbase reports avg_filled_price / filled_value; use
+                # whichever is present.
+                try:
+                    final_price = float(
+                        info.get("average_filled_price")
+                        or info.get("filled_avg_price")
+                        or limit_price
+                    )
+                except (TypeError, ValueError):
+                    final_price = limit_price
+            elif state in ("partially_filled", "partial"):
+                outcome = "partial"
+                try:
+                    final_price = float(
+                        info.get("average_filled_price")
+                        or info.get("filled_avg_price")
+                        or limit_price
+                    )
+                except (TypeError, ValueError):
+                    final_price = limit_price
+            else:
+                # Cancel the resting order; record the unfilled outcome.
+                _cancel_coinbase_order_live(broker_order_id)
+                outcome = unfilled_outcome
+                final_price = None
+        else:
+            # Paper: book-cross simulation.
+            if side == "buy":
+                # A buy maker fills if the book traded down through our
+                # limit, i.e. the prevailing best_bid is at or below our
+                # limit price (someone matched us). Equivalent
+                # observable: an aggressive seller hit the bid-side at
+                # our limit.
+                book_crossed = (
+                    peek_ctx.best_bid > 0 and peek_ctx.best_bid <= limit_price
+                    and peek_ctx.best_ask > 0 and peek_ctx.best_ask <= limit_price
+                )
+            else:  # sell
+                book_crossed = (
+                    peek_ctx.best_ask > 0 and peek_ctx.best_ask >= limit_price
+                    and peek_ctx.best_bid > 0 and peek_ctx.best_bid >= limit_price
+                )
+            if book_crossed:
+                outcome = "filled"
+                final_price = limit_price
+            # else: outcome stays as unfilled_outcome ('cancelled' or
+            # 'replaced').
+
+        if outcome in ("filled", "partial"):
+            time_to_fill_ms = int(
+                (time.monotonic() - float(attempt["placed_at"])) * 1000.0
+            )
+
+        # Update fast_path_maker_attempts row with the outcome.
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None, self._update_maker_attempt_sync,
+                {
+                    "id": attempt_id,
+                    "fill_outcome": outcome,
+                    "final_price": final_price,
+                    "time_to_fill_ms": time_to_fill_ms,
+                    "spread_at_fill_bps": float(spread_at_fill_bps)
+                        if spread_at_fill_bps else None,
+                    "mid_drift_bps": (
+                        float(mid_drift_bps) if mid_drift_bps is not None else None
+                    ),
+                },
+            )
+        except Exception as exc:
+            self._metrics.db_errors += 1
+            logger.warning(
+                "[fast_path] maker attempt update failed id=%s: %s",
+                attempt_id, exc, exc_info=True,
+            )
+
+        # Bump per-outcome counters.
+        if outcome == "filled":
+            self._metrics.maker_attempts_filled += 1
+        elif outcome == "partial":
+            self._metrics.maker_attempts_filled += 1
+        elif outcome == "replaced":
+            self._metrics.maker_attempts_replaced += 1
+        elif outcome == "cancelled":
+            self._metrics.maker_attempts_cancelled += 1
+
+        # Notify decay_miner so the maker-filled forward-return obs
+        # accumulate. For unfilled outcomes the call is a no-op.
+        if self._decay_miner is not None and outcome in ("filled", "partial"):
+            try:
+                fired_at = attempt.get("fired_at")
+                if fired_at is None:
+                    fired_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                self._decay_miner.record_maker_outcome(
+                    alert_id=int(attempt.get("alert_id") or 0),
+                    ticker=ticker,
+                    alert_type=str(attempt.get("alert_type") or ""),
+                    signal_score=float(attempt.get("signal_score") or 0.0),
+                    fired_at=fired_at,
+                    fill_outcome=outcome,
+                    entry_at_alert=float(final_price or limit_price),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[fast_path] decay_miner.record_maker_outcome failed: %s",
+                    exc, exc_info=True,
+                )
+
+        # Drop our entry from the outstanding cap.
+        self._outstanding_maker.pop(cap_key, None)
+
+    def _insert_maker_attempt_sync(self, payload: dict) -> int:
+        """INSERT a fast_path_maker_attempts row, return the new id."""
+        with self._engine.begin() as conn:
+            row = conn.execute(text("""
+                INSERT INTO fast_path_maker_attempts (
+                    alert_id, ticker, side, limit_price,
+                    spread_at_placement_bps, broker_order_id,
+                    execution_mode
+                ) VALUES (
+                    :alert_id, :ticker, :side, :limit_price,
+                    :spread_at_placement_bps, :broker_order_id,
+                    :execution_mode
+                )
+                RETURNING id
+            """), payload).mappings().first()
+            return int(row["id"]) if row else 0
+
+    def _update_maker_attempt_sync(self, payload: dict) -> None:
+        """UPDATE a fast_path_maker_attempts row at outcome resolution.
+
+        ``filled_at`` / ``cancelled_at`` are derived from
+        ``fill_outcome`` so the schema's two timestamps stay distinct.
+        """
+        outcome = payload["fill_outcome"]
+        with self._engine.begin() as conn:
+            if outcome in ("filled", "partial"):
+                conn.execute(text("""
+                    UPDATE fast_path_maker_attempts SET
+                        filled_at = NOW(),
+                        final_price = :final_price,
+                        fill_outcome = :fill_outcome,
+                        time_to_fill_ms = :time_to_fill_ms,
+                        spread_at_fill_bps = :spread_at_fill_bps,
+                        mid_drift_bps = :mid_drift_bps
+                    WHERE id = :id
+                """), payload)
+            else:
+                conn.execute(text("""
+                    UPDATE fast_path_maker_attempts SET
+                        cancelled_at = NOW(),
+                        final_price = :final_price,
+                        fill_outcome = :fill_outcome,
+                        time_to_fill_ms = :time_to_fill_ms,
+                        spread_at_fill_bps = :spread_at_fill_bps,
+                        mid_drift_bps = :mid_drift_bps
+                    WHERE id = :id
+                """), payload)
 
     # ── Live placement (stub) ─────────────────────────────────────────
 
@@ -696,6 +1305,15 @@ class FastPathExecutor:
             "daily_window_date": self._daily_window_date,
             "mode": self._settings.mode,
             "live_authorized": is_live_authorized(),
+            # f-fastpath-maker-only-executor (2026-05-08).
+            "execution_mode": self._settings.execution_mode,
+            "maker_attempts_placed": self._metrics.maker_attempts_placed,
+            "maker_attempts_filled": self._metrics.maker_attempts_filled,
+            "maker_attempts_cancelled": self._metrics.maker_attempts_cancelled,
+            "maker_attempts_replaced": self._metrics.maker_attempts_replaced,
+            "maker_attempts_rejected": self._metrics.maker_attempts_rejected,
+            "maker_attempts_capped": self._metrics.maker_attempts_capped,
+            "maker_outstanding_count": len(self._outstanding_maker),
         }
 
 
