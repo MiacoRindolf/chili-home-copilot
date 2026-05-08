@@ -1,6 +1,6 @@
 # NEXT_TASK: f-fastpath-rotator-coinbase-fixes-bundle
 
-STATUS: PENDING
+STATUS: DONE
 
 **Bumps `f-fastpath-maker-only`** which was the prior NEXT_TASK. The maker-only work cannot soak meaningfully on a system with zero rows in `fast_path_universe`. Live verification 2026-05-07 evening confirmed the rotator is non-functional in two distinct ways. This brief unblocks both in a single CC run; maker-only can be promoted next.
 

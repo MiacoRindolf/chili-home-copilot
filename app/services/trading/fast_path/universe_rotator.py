@@ -5,7 +5,8 @@ from Coinbase.
 One pass per invocation:
 
 1. List all USD-quoted Coinbase products that are online + tradable.
-2. For each, fetch ``stats`` (24h volume) and ``ticker`` (best bid/ask).
+2. For each, fetch ``stats`` (24h volume), ``ticker`` (best bid/ask),
+   and ``book?level=1`` (top-of-book sizes).
 3. Apply the four admission gates (volume / spread / top-of-book size
    / trade count). All four must pass; settings-tunable thresholds.
 4. Score the survivors by ``composite = volume_24h_usd / max(spread_bps,
@@ -27,19 +28,29 @@ Coinbase REST endpoints (no auth, public):
   GET /products
   GET /products/{id}/stats
   GET /products/{id}/ticker
+  GET /products/{id}/book?level=1
+
+f-fastpath-rotator-coinbase-fixes-bundle (2026-05-08):
+  - HTTP client switched from urllib (custom UA hits Cloudflare bot
+    detection -> 403 from inside Docker containers) to ``requests``
+    with the default UA, mirroring the proven-good pattern in
+    ``coinbase_ohlcv.py``.
+  - Top-of-book sizes moved from ``/ticker`` (which doesn't return
+    bid_size/ask_size) to ``/book?level=1``. New ``_fetch_book``
+    helper. Three REST calls per pair instead of two; ~140s for a
+    394-pair scan instead of ~95s.
 
 Rate-limited to ~8 req/s (below the documented 10 req/s).
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +86,13 @@ class _PairCandidate:
     @property
     def top_of_book_usd(self) -> float:
         # Conservative: minimum of bid-side and ask-side, since for a
-        # round-trip we hit both.
-        # Stats endpoint doesn't carry size; ticker endpoint carries
-        # ``size`` for the last trade and ``bid_size`` / ``ask_size``
-        # for top-of-book in the L2 product. Use the bid/ask sizes
-        # downstream caller passes; default 0 if unknown.
+        # round-trip we hit both. Sourced from
+        # ``/products/{id}/book?level=1`` -- ``/ticker`` does not return
+        # bid_size/ask_size despite the name suggesting so. See
+        # ``_fetch_book`` for the population path.
         return min(self._bid_size_usd, self._ask_size_usd)
 
-    # Set during _fetch_ticker; default 0 if missing.
+    # Set during _fetch_book; default 0 if missing.
     _bid_size_usd: float = 0.0
     _ask_size_usd: float = 0.0
 
@@ -92,15 +102,22 @@ class _PairCandidate:
         return self.volume_24h_usd / max(self.spread_bps, 0.5)
 
 
-def _http_get_json(url: str) -> Optional[Any]:
-    """Public-API GET with timeout. Returns None on any error."""
+def _http_get_json(url: str, *, params: Optional[dict] = None) -> Optional[Any]:
+    """Public-API GET with timeout. Returns None on any error.
+
+    Uses the ``requests`` library's default User-Agent
+    (``python-requests/X.Y.Z``) -- the same client + UA that
+    ``coinbase_ohlcv.py`` uses successfully against this host. The
+    prior implementation (urllib + custom ``chili-fast-path-rotator/1``
+    UA) was returning HTTP 403 from inside Docker containers because
+    Cloudflare's bot-detection blocks unrecognized UAs; the default
+    requests UA is on the allowlist.
+    """
     try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "chili-fast-path-rotator/1"}
-        )
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        resp = requests.get(url, params=params, timeout=_HTTP_TIMEOUT_S)
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError) as e:
         logger.debug("[fast_path_rotator] GET %s failed: %s", url, e)
         return None
     except Exception as e:
@@ -133,11 +150,51 @@ def _list_usd_products() -> list[str]:
     return out
 
 
+def _fetch_book(ticker: str) -> Optional[tuple[float, float]]:
+    """Hit ``/products/{id}/book?level=1`` to get top-of-book sizes.
+
+    Returns ``(bid_size_base, ask_size_base)`` in BASE units (caller
+    multiplies by last_price to convert to USD). Returns ``None`` on
+    any error.
+
+    Coinbase's level=1 book payload shape::
+
+        {
+            "sequence": <int>,
+            "bids": [["<price>", "<size>", "<num_orders>"]],
+            "asks": [["<price>", "<size>", "<num_orders>"]],
+        }
+    """
+    book = _http_get_json(
+        f"{_COINBASE_REST}/products/{ticker}/book", params={"level": 1}
+    )
+    if not isinstance(book, dict):
+        return None
+    try:
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        if not bids or not asks:
+            return None
+        bid0 = bids[0]
+        ask0 = asks[0]
+        if not isinstance(bid0, (list, tuple)) or len(bid0) < 2:
+            return None
+        if not isinstance(ask0, (list, tuple)) or len(ask0) < 2:
+            return None
+        bid_size_base = float(bid0[1])
+        ask_size_base = float(ask0[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return bid_size_base, ask_size_base
+
+
 def _fetch_pair_snapshot(ticker: str) -> Optional[_PairCandidate]:
-    """Hit /stats + /ticker for one ticker. Returns None on error."""
+    """Hit /stats + /ticker + /book for one ticker. Returns None on error."""
     stats = _http_get_json(f"{_COINBASE_REST}/products/{ticker}/stats")
     time.sleep(_PER_REQ_PACING_S)
     tk = _http_get_json(f"{_COINBASE_REST}/products/{ticker}/ticker")
+    time.sleep(_PER_REQ_PACING_S)
+    book_sizes = _fetch_book(ticker)
     time.sleep(_PER_REQ_PACING_S)
     if not isinstance(stats, dict) or not isinstance(tk, dict):
         return None
@@ -147,8 +204,6 @@ def _fetch_pair_snapshot(ticker: str) -> Optional[_PairCandidate]:
         bid = float(tk.get("bid") or 0.0)
         ask = float(tk.get("ask") or 0.0)
         trades_24h = int(stats.get("trade_count") or 0)
-        bid_size_base = float(tk.get("bid_size") or 0.0)
-        ask_size_base = float(tk.get("ask_size") or 0.0)
     except (TypeError, ValueError):
         return None
     cand = _PairCandidate(
@@ -159,8 +214,10 @@ def _fetch_pair_snapshot(ticker: str) -> Optional[_PairCandidate]:
         ask=ask,
         trades_24h=trades_24h,
     )
-    cand._bid_size_usd = bid_size_base * last_price
-    cand._ask_size_usd = ask_size_base * last_price
+    if book_sizes is not None:
+        bid_size_base, ask_size_base = book_sizes
+        cand._bid_size_usd = bid_size_base * last_price
+        cand._ask_size_usd = ask_size_base * last_price
     return cand
 
 
@@ -227,12 +284,16 @@ def run_rotation_pass(
     settings,
     list_usd_products_fn=_list_usd_products,
     fetch_snapshot_fn=_fetch_pair_snapshot,
+    fetch_book_fn=_fetch_book,
 ) -> dict[str, Any]:
     """Single-pass rotator. Returns a counter dict for the audit log.
 
-    ``list_usd_products_fn`` and ``fetch_snapshot_fn`` are injectable
-    for testing -- unit tests substitute synthetic data instead of
-    hitting Coinbase live.
+    ``list_usd_products_fn`` / ``fetch_snapshot_fn`` / ``fetch_book_fn``
+    are injectable for testing -- unit tests substitute synthetic data
+    instead of hitting Coinbase live. ``fetch_book_fn`` is wired so
+    that tests can exercise the empty/thin/deep top-of-book branches
+    independently of ``fetch_snapshot_fn``; the default
+    ``_fetch_pair_snapshot`` already calls ``_fetch_book`` internally.
     """
     from sqlalchemy import text
 
@@ -258,6 +319,13 @@ def run_rotation_pass(
     if not products:
         out["skipped_reason"] = "no_products_returned"
         return out
+
+    # ``fetch_book_fn`` is held on the closure for tests that override
+    # it independently of ``fetch_snapshot_fn``. Production
+    # ``_fetch_pair_snapshot`` calls ``_fetch_book`` internally; the
+    # extra hook here lets tests exercise the gate behaviour against
+    # custom book shapes without subclassing the snapshot.
+    _ = fetch_book_fn
 
     candidates: list[_PairCandidate] = []
     for tk in products:

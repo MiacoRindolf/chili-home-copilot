@@ -201,3 +201,120 @@ def test_run_rotation_pass_first_pass_writes_shadow(db):
     assert len(rows) == 3
     assert all(r["status"] == "shadow" for r in rows)
     assert [r["ticker"] for r in rows] == ["BTC-USD", "ETH-USD", "SOL-USD"]
+
+
+# ---------------------------------------------------------------------------
+# Book-gate behaviour (f-fastpath-rotator-coinbase-fixes-bundle, 2026-05-08)
+# ---------------------------------------------------------------------------
+#
+# The /book-derived top_of_book_usd gate fails when sizes are too thin.
+# Three cases cover the surface:
+#   - empty book -> _fetch_book returns None -> sizes stay 0 -> gate rejects
+#   - thin book  -> _fetch_book returns small base sizes -> gate rejects
+#   - deep book  -> _fetch_book returns large sizes -> gate passes
+
+
+def test_passes_admission_gates_empty_book_rejected():
+    """When _fetch_book returns no sizes (None), candidate carries 0
+    bid/ask USD; the top-of-book gate rejects it."""
+    from app.services.trading.fast_path.universe_rotator import (
+        _PairCandidate,
+        passes_admission_gates,
+    )
+    cand = _PairCandidate(
+        ticker="EMPTY-USD",
+        volume_24h_base=1_000_000.0,  # huge volume so volume gate passes
+        last_price=100.0,
+        bid=99.95,
+        ask=100.05,
+        trades_24h=10_000,
+    )
+    # _fetch_book returned None -> _bid_size_usd/_ask_size_usd stay at 0
+    assert cand.top_of_book_usd == 0.0
+    ok, reason = passes_admission_gates(
+        cand,
+        min_volume_24h_usd=10_000_000.0,
+        max_spread_bps=10.0,
+        min_top_of_book_usd=5_000.0,
+        min_trades_24h=1_000,
+    )
+    assert ok is False
+    assert reason == "top_of_book_below_threshold"
+
+
+def test_passes_admission_gates_thin_book_rejected():
+    """Small but non-zero sizes still fail the top-of-book gate when
+    USD value is below the threshold."""
+    cand = _make_candidate(
+        bid_size_base=10.0,  # 10 base * 100 = $1k each side
+        ask_size_base=10.0,
+    )
+    from app.services.trading.fast_path.universe_rotator import (
+        passes_admission_gates,
+    )
+    ok, reason = passes_admission_gates(
+        cand,
+        min_volume_24h_usd=10_000_000.0,
+        max_spread_bps=10.0,
+        min_top_of_book_usd=5_000.0,
+        min_trades_24h=1_000,
+    )
+    assert ok is False
+    assert reason == "top_of_book_below_threshold"
+
+
+def test_passes_admission_gates_deep_book_passes():
+    """Deep book sizes clear the top-of-book gate."""
+    cand = _make_candidate(
+        bid_size_base=500.0,  # 500 base * 100 = $50k each side
+        ask_size_base=500.0,
+    )
+    from app.services.trading.fast_path.universe_rotator import (
+        passes_admission_gates,
+    )
+    ok, reason = passes_admission_gates(
+        cand,
+        min_volume_24h_usd=10_000_000.0,
+        max_spread_bps=10.0,
+        min_top_of_book_usd=5_000.0,
+        min_trades_24h=1_000,
+    )
+    assert ok is True
+    assert reason is None
+
+
+# ---------------------------------------------------------------------------
+# _fetch_book parser (level=1 payload)
+# ---------------------------------------------------------------------------
+
+def test_fetch_book_parses_level1_payload():
+    """Mock _http_get_json to return a synthetic level=1 book; assert
+    _fetch_book returns ``(bid_size_base, ask_size_base)``."""
+    from unittest.mock import patch
+    from app.services.trading.fast_path.universe_rotator import _fetch_book
+
+    fake_book = {
+        "sequence": 12345,
+        "bids": [["99.50", "1.5", 1]],
+        "asks": [["100.00", "2.5", 1]],
+    }
+    with patch(
+        "app.services.trading.fast_path.universe_rotator._http_get_json",
+        return_value=fake_book,
+    ):
+        result = _fetch_book("BTC-USD")
+    assert result == (1.5, 2.5)
+
+
+def test_fetch_book_returns_none_on_empty_book():
+    """Empty bids/asks -> None (the gate then sees 0 top_of_book_usd
+    and rejects appropriately)."""
+    from unittest.mock import patch
+    from app.services.trading.fast_path.universe_rotator import _fetch_book
+
+    with patch(
+        "app.services.trading.fast_path.universe_rotator._http_get_json",
+        return_value={"sequence": 1, "bids": [], "asks": []},
+    ):
+        result = _fetch_book("BTC-USD")
+    assert result is None
