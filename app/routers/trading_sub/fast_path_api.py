@@ -641,4 +641,153 @@ def get_universe() -> JSONResponse:
     return JSONResponse(out)
 
 
+# ── Maker-only stats (f-fastpath-maker-only-executor, 2026-05-08) ────
+
+# Below this fill rate, sub-25% of placed maker orders fill within the
+# cancel-on-timeout window. The brief flags these as "uneconomic for
+# maker-only" so the operator can drop them from the universe rather
+# than waste fee-saving budget on signals that miss the limit.
+MAKER_FILL_RATE_UNECONOMIC_THRESHOLD = 0.25
+
+MAKER_STATS_WINDOW_HOURS = 24
+
+# Hard cap on the per-pair list returned. The status surface is
+# operator-facing; >100 pairs in a single payload is a rendering bug,
+# not a feature.
+MAKER_STATS_PAIR_LIMIT = 100
+
+
+@router.get("/maker-stats")
+def get_maker_stats() -> JSONResponse:
+    """f-fastpath-maker-only-executor (2026-05-08).
+
+    Surfaces last-24h maker-attempt outcomes per ticker for the
+    operator soak. Reads from ``fast_path_maker_attempts`` directly
+    (the executor's INSERT-on-place + UPDATE-on-resolve provides the
+    full lifecycle row); no executor IPC required.
+
+    Response shape::
+
+        {
+          "ok": true,
+          "settings": {
+            "execution_mode": "taker"|"maker_only"|"maker_first_then_taker",
+            "cost_aware_maker_fee_bps": 40.0,
+            "maker_cancel_on_timeout_s": 10,
+            "maker_first_taker_fallback_s": 5
+          },
+          "window_hours": 24,
+          "totals": {
+            "attempts": int, "fills": int, "cancels": int,
+            "replaced": int, "fill_rate": float | null
+          },
+          "per_pair": [
+            {
+              "ticker": "BTC-USD",
+              "attempts": int, "fills": int, "cancels": int,
+              "replaced": int, "fill_rate": float | null,
+              "advisory": "uneconomic for maker-only" | null
+            }, ...
+          ]
+        }
+
+    Read-only and cheap: 1 small query against
+    ``fast_path_maker_attempts`` aggregated per ticker.
+    """
+    from ...services.trading.fast_path import settings as fp_settings_mod
+    fp_settings = fp_settings_mod.load()
+
+    out: dict[str, Any] = {
+        "ok": True,
+        "settings": {
+            "execution_mode": fp_settings.execution_mode,
+            "cost_aware_maker_fee_bps": float(
+                fp_settings.cost_aware_maker_fee_bps
+            ),
+            "maker_cancel_on_timeout_s": int(
+                fp_settings.maker_cancel_on_timeout_s
+            ),
+            "maker_first_taker_fallback_s": int(
+                fp_settings.maker_first_taker_fallback_s
+            ),
+        },
+        "window_hours": MAKER_STATS_WINDOW_HOURS,
+        "totals": {
+            "attempts": 0, "fills": 0, "cancels": 0,
+            "replaced": 0, "fill_rate": None,
+        },
+        "per_pair": [],
+    }
+
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT
+                    ticker,
+                    COUNT(*) AS attempts,
+                    COUNT(*) FILTER (
+                        WHERE fill_outcome IN ('filled', 'partial')
+                    ) AS fills,
+                    COUNT(*) FILTER (
+                        WHERE fill_outcome = 'cancelled'
+                    ) AS cancels,
+                    COUNT(*) FILTER (
+                        WHERE fill_outcome = 'replaced'
+                    ) AS replaced,
+                    COUNT(*) FILTER (
+                        WHERE fill_outcome = 'rejected'
+                    ) AS rejected
+                FROM fast_path_maker_attempts
+                WHERE placed_at >= NOW() - (:hours || ' hours')::interval
+                GROUP BY ticker
+                ORDER BY attempts DESC
+                LIMIT :limit
+            """), {
+                "hours": int(MAKER_STATS_WINDOW_HOURS),
+                "limit": int(MAKER_STATS_PAIR_LIMIT),
+            }).mappings().all()
+
+        total_attempts = 0
+        total_fills = 0
+        total_cancels = 0
+        total_replaced = 0
+        for r in rows:
+            attempts = int(r["attempts"] or 0)
+            fills = int(r["fills"] or 0)
+            cancels = int(r["cancels"] or 0)
+            replaced = int(r["replaced"] or 0)
+            fill_rate = (fills / attempts) if attempts > 0 else None
+            advisory = None
+            if fill_rate is not None and fill_rate < MAKER_FILL_RATE_UNECONOMIC_THRESHOLD:
+                advisory = "uneconomic for maker-only"
+            out["per_pair"].append({
+                "ticker": str(r["ticker"]),
+                "attempts": attempts,
+                "fills": fills,
+                "cancels": cancels,
+                "replaced": replaced,
+                "rejected": int(r["rejected"] or 0),
+                "fill_rate": fill_rate,
+                "advisory": advisory,
+            })
+            total_attempts += attempts
+            total_fills += fills
+            total_cancels += cancels
+            total_replaced += replaced
+
+        if total_attempts > 0:
+            out["totals"] = {
+                "attempts": total_attempts,
+                "fills": total_fills,
+                "cancels": total_cancels,
+                "replaced": total_replaced,
+                "fill_rate": total_fills / total_attempts,
+            }
+    except Exception as exc:
+        out["ok"] = False
+        out["error"] = f"maker_stats_query_failed: {exc!s:.200}"
+
+    return JSONResponse(out)
+
+
 __all__ = ["router"]
