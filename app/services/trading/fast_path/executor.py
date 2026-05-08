@@ -1080,8 +1080,148 @@ class FastPathExecutor:
                     exc, exc_info=True,
                 )
 
+        # f-fastpath-maker-only-executor (2026-05-08): hybrid taker
+        # fallback. When the maker leg is being replaced (no fill
+        # within `maker_first_taker_fallback_s`), place a sibling
+        # taker. We do this BEFORE dropping the (ticker, side) entry
+        # from the outstanding cap so the cap doesn't permit a fresh
+        # maker to race the fallback.
+        if (
+            attempt.get("execution_mode") == "maker_first_then_taker"
+            and outcome == "replaced"
+        ):
+            try:
+                await self._taker_fallback_after_maker_replaced(
+                    attempt=attempt, ctx=ctx, alert=alert, gate_run=gate_run,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[fast_path] taker fallback after maker_replaced failed "
+                    "ticker=%s side=%s: %s",
+                    ticker, side, exc, exc_info=True,
+                )
+
         # Drop our entry from the outstanding cap.
         self._outstanding_maker.pop(cap_key, None)
+
+    async def _taker_fallback_after_maker_replaced(
+        self,
+        *,
+        attempt: dict,
+        ctx: ExecContext,
+        alert: dict,
+        gate_run: GateRunResult,
+    ) -> None:
+        """Hybrid mode (`maker_first_then_taker`): the resting maker
+        leg didn't fill within `maker_first_taker_fallback_s`, so we
+        cross the spread with a taker. Mirrors the original taker
+        path's fill-price + decision-row + state-bookkeeping logic
+        but re-reads the in-memory book for a fresh fill price (the
+        book may have moved during the maker wait).
+
+        Live: same authorization belts and broker-error handling as
+        ``_process_alert``'s taker branch.
+        Paper: synthesises at the current best ask (long) / best bid
+        (short).
+        """
+        ticker = attempt["ticker"]
+        side = attempt["side"]
+        quantity = float(attempt.get("quantity") or 0.0)
+        notional_usd = float(attempt.get("notional_usd") or 0.0)
+        if quantity <= 0 or notional_usd <= 0:
+            return  # malformed; skip rather than emit a phantom row
+
+        # Re-read top-of-book — book may have moved since placement.
+        peek_ctx = self._build_context(ticker)
+        if side == "buy":
+            fill_price = peek_ctx.best_ask
+        else:
+            fill_price = peek_ctx.best_bid
+        if fill_price <= 0:
+            # Can't price; record a rejection row so the audit trail
+            # shows the fallback was attempted and failed.
+            decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            await self._write_decision(
+                alert, peek_ctx, decision="rejected",
+                reject_reason="maker_replaced_taker_no_fill_price",
+                gate_run=gate_run, side=side,
+                quantity=quantity, fill_price=None, notional_usd=notional_usd,
+                broker_order_id=None, decided_at=decided_at,
+                latency_ms=0.0,
+            )
+            self._metrics.decisions_rejected += 1
+            return
+
+        decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        if peek_ctx.mode == "live":
+            if not is_live_authorized():
+                await self._write_decision(
+                    alert, peek_ctx, decision="rejected",
+                    reject_reason="maker_replaced_taker_not_authorized",
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=0.0,
+                )
+                self._metrics.decisions_rejected += 1
+                return
+            try:
+                broker_order_id = await self._place_live_order(
+                    ticker, side, quantity, fill_price, notional_usd,
+                )
+            except LiveExecutionNotAuthorized as exc:
+                await self._write_decision(
+                    alert, peek_ctx, decision="rejected",
+                    reject_reason=f"maker_replaced_taker_blocked:{str(exc)[:32]}",
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=0.0,
+                )
+                self._metrics.decisions_rejected += 1
+                return
+            except Exception as exc:
+                logger.exception(
+                    "[fast_path] taker fallback after maker_replaced live placement "
+                    "failed ticker=%s side=%s qty=%.8f: %s",
+                    ticker, side, quantity, exc,
+                )
+                await self._write_decision(
+                    alert, peek_ctx, decision="rejected",
+                    reject_reason=f"maker_replaced_taker_error:{str(exc)[:32]}",
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=0.0,
+                )
+                self._metrics.decisions_rejected += 1
+                return
+            await self._write_decision(
+                alert, peek_ctx, decision="live_placed",
+                reject_reason=None,
+                gate_run=gate_run, side=side,
+                quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                broker_order_id=broker_order_id, decided_at=decided_at,
+                latency_ms=0.0,
+            )
+            self._metrics.decisions_live_placed += 1
+        else:
+            await self._write_decision(
+                alert, peek_ctx, decision="paper_fill",
+                reject_reason=None,
+                gate_run=gate_run, side=side,
+                quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                broker_order_id=None, decided_at=decided_at,
+                latency_ms=0.0,
+            )
+            self._metrics.decisions_paper_fill += 1
+
+        # Update in-memory state — same accounting as the taker path
+        # so daily caps and per-ticker open positions stay correct.
+        self._open_positions[ticker] = self._open_positions.get(ticker, 0) + 1
+        self._daily_notional_used_usd += notional_usd
+        self._metrics.last_decision_at = decided_at
 
     def _insert_maker_attempt_sync(self, payload: dict) -> int:
         """INSERT a fast_path_maker_attempts row, return the new id."""
