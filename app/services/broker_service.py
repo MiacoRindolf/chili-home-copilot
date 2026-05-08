@@ -99,6 +99,96 @@ _CHALLENGE_POLL_TIMEOUT = int(getattr(settings, "broker_challenge_poll_timeout",
 _RECONCILE_CONFIRM_WINDOW = int(getattr(settings, "broker_reconcile_confirm_seconds", 300))
 
 
+# ── f-equity-broker-reconcile-wipeout-protection (2026-05-08) ────────────
+#
+# Wipeout-burst breaker trip. The 2026-04-30 incident showed that when
+# the equity reconciler manufactures multiple synthetic closes in
+# rapid succession (broker auth flap or transient API failure that R32
+# didn't catch), the consecutive-loss breaker (R31) excludes them on
+# PnL grounds — but the row-burst pattern itself IS the wipeout
+# signature. We trip on cardinality, not realized PnL.
+#
+# The threshold is 3-in-5s: under healthy operation the reconciler
+# closes 0–1 stale rows per cycle. Three closes inside one 5s window
+# is a wipeout-class event the operator must investigate manually
+# (auth lapse, broker outage, etc). Tripping is conservative — better
+# to spuriously freeze entries for the operator to reset than to let
+# the cascade continue.
+_WIPEOUT_BURST_BUCKET_S = 5
+_WIPEOUT_BURST_THRESHOLD = 3
+_wipeout_burst_buckets: dict[int, int] = {}
+_wipeout_burst_tripped_buckets: set[int] = set()
+_WIPEOUT_BURST_BUCKET_RETENTION_S = 300  # 5min; bound the dict
+_RECONCILE_CLOSE_TOTAL = 0  # observability counter; module-grep'd by ops
+
+
+def _record_reconcile_close_burst(
+    ticker: str,
+    trade_id: int | None,
+    *,
+    _now: float | None = None,
+    _breaker_persister=None,
+) -> None:
+    """Bucket the current ``broker_reconcile_position_gone`` close and
+    trip the drawdown breaker if cardinality crosses
+    ``_WIPEOUT_BURST_THRESHOLD`` inside a single
+    ``_WIPEOUT_BURST_BUCKET_S`` second window.
+
+    Called from the stale-close loop in ``sync_positions_to_db``. The
+    function is single-process bound — module-level dict is fine for
+    the broker-sync worker (one process, one tick at a time). If a
+    follow-up brief moves broker-sync to multi-worker, replace the
+    dict with a Redis SETNX or DB-backed counter.
+
+    The two leading-underscore kwargs are injection seams for tests:
+    ``_now`` substitutes the wall clock (production callers leave it
+    None → ``time.time()``); ``_breaker_persister`` replaces the lazy
+    import of :func:`portfolio_risk._persist_breaker_state` so the
+    burst-trip logic can be asserted without DB IO.
+    """
+    global _RECONCILE_CLOSE_TOTAL
+    _RECONCILE_CLOSE_TOTAL += 1
+    now = float(_now) if _now is not None else time.time()
+    bucket = int(now // _WIPEOUT_BURST_BUCKET_S)
+    _wipeout_burst_buckets[bucket] = _wipeout_burst_buckets.get(bucket, 0) + 1
+
+    # GC old buckets so the dict can't grow without bound.
+    cutoff = bucket - (_WIPEOUT_BURST_BUCKET_RETENTION_S // _WIPEOUT_BURST_BUCKET_S)
+    for old in list(_wipeout_burst_buckets.keys()):
+        if old < cutoff:
+            _wipeout_burst_buckets.pop(old, None)
+            _wipeout_burst_tripped_buckets.discard(old)
+
+    if (
+        _wipeout_burst_buckets[bucket] >= _WIPEOUT_BURST_THRESHOLD
+        and bucket not in _wipeout_burst_tripped_buckets
+    ):
+        _wipeout_burst_tripped_buckets.add(bucket)
+        reason = (
+            f"wipeout_burst_{_WIPEOUT_BURST_THRESHOLD}_in_"
+            f"{_WIPEOUT_BURST_BUCKET_S}s"
+        )
+        logger.critical(
+            "[broker_sync] WIPEOUT BURST DETECTED — %d reconcile-closes in "
+            "<=%ds (latest: ticker=%s trade_id=%s); TRIPPING DRAWDOWN BREAKER "
+            "with reason=%r",
+            _wipeout_burst_buckets[bucket], _WIPEOUT_BURST_BUCKET_S,
+            ticker, trade_id, reason,
+        )
+        try:
+            persister = _breaker_persister
+            if persister is None:
+                from .trading.portfolio_risk import _persist_breaker_state
+                persister = _persist_breaker_state
+            persister(True, reason)
+        except Exception:
+            logger.warning(
+                "[broker_sync] failed to persist breaker trip from wipeout "
+                "burst — operator should manually trip and investigate",
+                exc_info=True,
+            )
+
+
 # ── DB-backed session token storage ──────────────────────────────────────
 
 def _save_session_to_db(broker: str, username: str, token_data: dict, device_token: str | None = None) -> None:
@@ -2122,6 +2212,25 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     # Default to safety: refuse to mass-close. If the operator really
     # zeroed their account, repeated warnings will tell them to manually
     # reconcile the stale local rows.
+    #
+    # Phase B (f-equity-broker-reconcile-wipeout-protection, 2026-05-08):
+    # the operator audit on the equity book found 14 phantom rows that
+    # accreted PRE-R32. R32's empty-list guard has held since deploy;
+    # this brief layered three additional defences:
+    #   * ``_record_reconcile_close_burst`` (module-level above) trips
+    #     the drawdown breaker on a 3-in-5s row-burst pattern even if
+    #     R32's empty-list condition isn't met -- a wipeout signature
+    #     by cardinality, distinct from R31's consecutive-loss check.
+    #   * Per-close ``[broker_sync] RECONCILE_CLOSE`` warning replaces
+    #     the prior ``logger.debug`` so ops can grep close events from
+    #     the broker-sync worker logs in real time.
+    #   * ``test_r32_empty_broker_positions_guard`` pins the
+    #     ``skipped_reason='empty_broker_positions_with_open_local_trades'``
+    #     return shape so a regression flips visibly red.
+    # Phase A (f-pdt-count-broker-confirmed-only, commit 60c26f8) is
+    # the symptom-side fix that filters the phantom rows out of the
+    # PDT count; this guard + Phase B's defences together prevent new
+    # phantoms from accreting.
     if not rh_tickers:
         open_local_count = (
             db.query(Trade)
@@ -2287,6 +2396,21 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             pass
         if not trade.management_scope:
             trade.management_scope = MANAGEMENT_SCOPE_BROKER_SYNC
+        # f-equity-broker-reconcile-wipeout-protection (2026-05-08):
+        # structured close-event observability + wipeout-burst record.
+        # Observability fires for BOTH exit-reason branches
+        # (broker_reconcile_position_gone and
+        # broker_reconcile_no_exit_price) so ops can grep the full
+        # close stream. Burst-record fires only on the
+        # position_gone reason since that is the wipeout signature
+        # the breaker trips on.
+        logger.warning(
+            "[broker_sync] RECONCILE_CLOSE: ticker=%s trade_id=%s "
+            "exit_reason=%s rh_tickers_size=%d",
+            trade.ticker, trade.id, trade.exit_reason, len(rh_tickers),
+        )
+        if trade.exit_reason == "broker_reconcile_position_gone":
+            _record_reconcile_close_burst(trade.ticker, trade.id)
         closed += 1
 
     db.commit()
