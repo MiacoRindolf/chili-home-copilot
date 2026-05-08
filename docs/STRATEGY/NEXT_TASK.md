@@ -1,6 +1,6 @@
 # NEXT_TASK: f-equity-reconcile-partial-list-guard
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
