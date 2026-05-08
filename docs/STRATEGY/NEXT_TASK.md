@@ -1,6 +1,6 @@
 # NEXT_TASK: f-fastpath-rotator-http-retry
 
-STATUS: PENDING
+STATUS: DONE
 
 **Bumps `f-fastpath-maker-only-executor`** which was the prior NEXT_TASK. The maker-only executor work cannot soak meaningfully without rows in `fast_path_universe`, and the rotator currently produces zero rows due to a 94% per-call HTTP failure rate at the TCP layer. **This brief is the cheap unblock** (~30 min for CC) that lets the rotator actually populate the table; once it does, the executor brief comes back online with real soak data.
 

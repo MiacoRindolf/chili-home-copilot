@@ -102,8 +102,25 @@ class _PairCandidate:
         return self.volume_24h_usd / max(self.spread_bps, 0.5)
 
 
+# f-fastpath-rotator-http-retry (2026-05-08): retry policy for the
+# per-pair Coinbase REST calls. Live observation (2026-05-08 06:57 UTC)
+# saw 371/394 pairs fail with Errno 101 ('Network is unreachable') --
+# Docker Desktop NAT flakiness, NOT Coinbase rate-limiting (verified by
+# /products in the same pass succeeding). Without retry, those drops =
+# None = snapshot fail. The 23 pairs that succeeded were the early-
+# dispatch majors -- exactly the wrong cohort vs the alpha-replay
+# mid-tier targets (RENDER/ICP/ARB/INJ/TAO/FET).
+#
+# Backoff: 0.5s -> 1.0s -> 2.0s. Worst-case per call ~12s
+# (8s timeout * 3 attempts plus backoff sleeps); total rotator pass
+# stays under 10 min for 394 pairs.
+_HTTP_RETRY_BACKOFFS_S = (0.5, 1.0, 2.0)
+_HTTP_RETRYABLE_STATUS = frozenset({429, 503})
+
+
 def _http_get_json(url: str, *, params: Optional[dict] = None) -> Optional[Any]:
-    """Public-API GET with timeout. Returns None on any error.
+    """Public-API GET with timeout + 3-attempt retry. Returns None
+    only after all retries exhaust.
 
     Uses the ``requests`` library's default User-Agent
     (``python-requests/X.Y.Z``) -- the same client + UA that
@@ -112,19 +129,81 @@ def _http_get_json(url: str, *, params: Optional[dict] = None) -> Optional[Any]:
     UA) was returning HTTP 403 from inside Docker containers because
     Cloudflare's bot-detection blocks unrecognized UAs; the default
     requests UA is on the allowlist.
+
+    Retry policy (f-fastpath-rotator-http-retry, 2026-05-08):
+
+      * Retryable: ``ConnectionError`` (wraps Errno 101 / TCP drop),
+        ``Timeout``, HTTP 503 (service unavailable), HTTP 429 (rate
+        limited).
+      * Non-retryable (give up immediately): HTTP 4xx other than 429
+        (the request itself is bad; retrying won't help), JSON decode
+        errors (server returned non-JSON; retrying won't help).
+      * Backoff: 0.5s, 1.0s, 2.0s between attempts.
     """
-    try:
-        resp = requests.get(url, params=params, timeout=_HTTP_TIMEOUT_S)
-        resp.raise_for_status()
-        return resp.json()
-    except (requests.RequestException, ValueError) as e:
-        logger.debug("[fast_path_rotator] GET %s failed: %s", url, e)
-        return None
-    except Exception as e:
-        logger.warning(
-            "[fast_path_rotator] GET %s unexpected failure: %s", url, e
-        )
-        return None
+    last_err: Optional[str] = None
+    for attempt, backoff in enumerate((0.0, *_HTTP_RETRY_BACKOFFS_S)):
+        if backoff > 0:
+            time.sleep(backoff)
+        try:
+            resp = requests.get(url, params=params, timeout=_HTTP_TIMEOUT_S)
+        except requests.exceptions.ConnectionError as e:
+            last_err = f"ConnectionError: {e}"
+            logger.debug(
+                "[fast_path_rotator] GET %s attempt=%d connection_error=%s",
+                url, attempt + 1, e,
+            )
+            continue
+        except requests.exceptions.Timeout as e:
+            last_err = f"Timeout: {e}"
+            logger.debug(
+                "[fast_path_rotator] GET %s attempt=%d timeout=%s",
+                url, attempt + 1, e,
+            )
+            continue
+        except requests.RequestException as e:
+            last_err = f"RequestException: {e}"
+            logger.debug(
+                "[fast_path_rotator] GET %s attempt=%d request_exception=%s",
+                url, attempt + 1, e,
+            )
+            return None
+        except Exception as e:
+            last_err = f"unexpected: {e}"
+            logger.warning(
+                "[fast_path_rotator] GET %s unexpected failure: %s", url, e,
+            )
+            return None
+
+        # Got a response object. Check status code for retryable HTTP errors.
+        if resp.status_code in _HTTP_RETRYABLE_STATUS:
+            last_err = f"HTTP {resp.status_code}"
+            logger.debug(
+                "[fast_path_rotator] GET %s attempt=%d retryable_status=%d",
+                url, attempt + 1, resp.status_code,
+            )
+            continue
+        if resp.status_code >= 400:
+            # 4xx (except 429) and unhandled 5xx -> give up.
+            logger.debug(
+                "[fast_path_rotator] GET %s non_retryable_status=%d",
+                url, resp.status_code,
+            )
+            return None
+
+        # 2xx/3xx response. Try to parse JSON.
+        try:
+            return resp.json()
+        except ValueError as e:
+            logger.debug(
+                "[fast_path_rotator] GET %s json_decode_failed=%s", url, e,
+            )
+            return None
+
+    logger.debug(
+        "[fast_path_rotator] GET %s exhausted retries last_err=%s",
+        url, last_err,
+    )
+    return None
 
 
 def _list_usd_products() -> list[str]:
