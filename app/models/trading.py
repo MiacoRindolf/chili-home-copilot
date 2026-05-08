@@ -68,6 +68,15 @@ class Trade(Base):
     acknowledged_at: Optional[datetime] = Column(DateTime, nullable=True)
     first_fill_at: Optional[datetime] = Column(DateTime, nullable=True)
     last_fill_at: Optional[datetime] = Column(DateTime, nullable=True)
+    # f-equity-reconcile-partial-list-guard (2026-05-08, mig 233):
+    # consecutive sync_positions_to_db cycles this trade has been missing
+    # from rh_tickers. Resets to 0 when the trade reappears. The stale-
+    # close path requires this to reach
+    # CHILI_RECONCILE_PARTIAL_LIST_STREAK_MIN before allowing a close,
+    # so a single truncated broker response can't manufacture a phantom.
+    broker_sync_missing_streak: int = Column(
+        Integer, nullable=False, server_default="0", default=0,
+    )
     # TCA: reference = signal/proposal limit at submit; slippage set when fill is known
     tca_reference_entry_price: Optional[float] = Column(Float, nullable=True)
     tca_entry_slippage_bps: Optional[float] = Column(Float, nullable=True)

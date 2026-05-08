@@ -97,6 +97,15 @@ _ORDER_POLL_TIMEOUT = int(getattr(settings, "broker_order_poll_timeout", 30))
 _ORDER_POLL_INTERVAL = float(getattr(settings, "broker_order_poll_interval", 2.0))
 _CHALLENGE_POLL_TIMEOUT = int(getattr(settings, "broker_challenge_poll_timeout", 15))
 _RECONCILE_CONFIRM_WINDOW = int(getattr(settings, "broker_reconcile_confirm_seconds", 300))
+# f-equity-reconcile-partial-list-guard (2026-05-08): minimum number of
+# consecutive sync_positions_to_db cycles a position must be missing
+# from ``rh_tickers`` before the stale-close path may close it. Default
+# 2 -- one missing cycle increments the streak; the second consecutive
+# miss confirms. Setting CHILI_RECONCILE_PARTIAL_LIST_STREAK_MIN=0
+# disables the guard without a code revert.
+_RECONCILE_PARTIAL_LIST_STREAK_MIN = int(
+    getattr(settings, "chili_reconcile_partial_list_streak_min", 2)
+)
 
 
 # ── f-equity-broker-reconcile-wipeout-protection (2026-05-08) ────────────
@@ -2258,6 +2267,47 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 "skipped_reason": "empty_broker_positions_with_open_local_trades",
             }
 
+    # f-equity-reconcile-partial-list-guard (2026-05-08): per-trade
+    # consecutive-cycle counter. Increment for trades whose ticker is
+    # NOT in this cycle's ``rh_tickers``; reset for those that ARE
+    # present. Two bulk UPDATE statements per cycle -- the increment
+    # query is gated on a non-empty ``rh_tickers`` because R32 already
+    # short-circuits the empty-list case above and unconditional
+    # increment-when-empty would defeat that guard. Streak is consumed
+    # by the stale-close gate further down.
+    if rh_tickers:
+        try:
+            db.query(Trade).filter(
+                Trade.user_id == user_id,
+                Trade.broker_source == "robinhood",
+                Trade.status == "open",
+                Trade.ticker.notin_(rh_tickers),
+            ).update(
+                {Trade.broker_sync_missing_streak:
+                    Trade.broker_sync_missing_streak + 1},
+                synchronize_session=False,
+            )
+            db.query(Trade).filter(
+                Trade.user_id == user_id,
+                Trade.broker_source == "robinhood",
+                Trade.status == "open",
+                Trade.ticker.in_(rh_tickers),
+            ).update(
+                {Trade.broker_sync_missing_streak: 0},
+                synchronize_session=False,
+            )
+            logger.debug(
+                "[broker_sync] partial-list streak updated; "
+                "rh_tickers_size=%d threshold=%d",
+                len(rh_tickers), _RECONCILE_PARTIAL_LIST_STREAK_MIN,
+            )
+        except Exception:
+            logger.warning(
+                "[broker_sync] partial-list streak bulk UPDATE failed; "
+                "stale-close gate will fall back to time-window only",
+                exc_info=True,
+            )
+
     # position-identity-phase-1 (2026-05-04): close-detection in shadow
     # mode. For each trading_positions row currently state='open' for
     # this (user, broker) where the ticker is NOT in this cycle's
@@ -2309,6 +2359,24 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         logger.debug("[broker_sync] MMM filter failed", exc_info=True)
 
     for trade in stale:
+        # f-equity-reconcile-partial-list-guard (2026-05-08): require
+        # the per-trade consecutive-missing streak to have reached
+        # ``_RECONCILE_PARTIAL_LIST_STREAK_MIN`` before allowing the
+        # stale-close path. With the default N=2, a single truncated
+        # broker response increments the streak to 1 but defers the
+        # close; only after a SECOND consecutive cycle missing is the
+        # close authorized. Setting the threshold to 0 (env override)
+        # disables this guard cleanly. The streak counter itself is
+        # maintained by the bulk UPDATE above this loop.
+        streak = getattr(trade, "broker_sync_missing_streak", 0) or 0
+        if streak < _RECONCILE_PARTIAL_LIST_STREAK_MIN:
+            logger.debug(
+                "[broker_sync] %s missing from RH but streak=%d < threshold=%d "
+                "(partial-list guard) -- deferring close",
+                trade.ticker, streak, _RECONCILE_PARTIAL_LIST_STREAK_MIN,
+            )
+            continue
+
         # Reconciliation confirmation window: only auto-close if the position
         # has been missing for longer than _RECONCILE_CONFIRM_WINDOW seconds.
         # This prevents premature closes during transient API glitches AND

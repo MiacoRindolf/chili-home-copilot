@@ -2274,6 +2274,18 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_BRACKET_INTENT_MIRROR_ENABLED"),
     )
+    # f-equity-reconcile-partial-list-guard (2026-05-08) — minimum number
+    # of consecutive ``sync_positions_to_db`` cycles a position must be
+    # missing from ``rh_tickers`` before the stale-close path may close
+    # it. Default 2: one missing cycle increments the streak; the second
+    # consecutive miss confirms the position is genuinely gone (not a
+    # truncated broker response). Setting this to 0 disables the guard
+    # without a code revert (the gate becomes a no-op since any streak
+    # >= 0 always allows the close).
+    chili_reconcile_partial_list_streak_min: int = Field(
+        default=2,
+        validation_alias=AliasChoices("CHILI_RECONCILE_PARTIAL_LIST_STREAK_MIN"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

@@ -14764,6 +14764,36 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_233_reconcile_partial_list_streak(conn) -> None:
+    """f-equity-reconcile-partial-list-guard (2026-05-08).
+
+    Phase B audit confirmed Case C from the parent brief: 2 post-R32
+    phantom closes in the equity book over 30 days, both single-row
+    events with the same fingerprint (one broker_sync cycle gap
+    between ``last_broker_sync`` and ``exit_date``). R32 catches the
+    empty-``rh_tickers`` case but the partial-list failure mode --
+    broker returns most positions but truncates one -- bypasses it.
+
+    This migration adds a per-trade consecutive-cycle counter that
+    sits ahead of the existing ``_RECONCILE_CONFIRM_WINDOW`` time
+    guard. The counter increments when the ticker is missing from
+    a non-empty ``rh_tickers`` snapshot and resets to 0 when the
+    ticker is present. The stale-close path requires the counter to
+    have reached ``CHILI_RECONCILE_PARTIAL_LIST_STREAK_MIN`` (default 2)
+    in addition to the time guard.
+
+    Idempotent: ``ADD COLUMN IF NOT EXISTS`` so re-runs are no-ops.
+    Default 0 so existing trades start clean -- the first cycle that
+    finds them missing increments to 1; the second confirms.
+    """
+    conn.execute(text("""
+        ALTER TABLE trading_trades
+            ADD COLUMN IF NOT EXISTS broker_sync_missing_streak
+                INTEGER NOT NULL DEFAULT 0
+    """))
+    conn.commit()
+
+
 def _migration_232_fast_path_maker_only(conn) -> None:
     """f-fastpath-maker-only (2026-05-08).
 
@@ -15757,6 +15787,8 @@ MIGRATIONS = [
      _migration_231_fast_path_universe),
     ("232_fast_path_maker_only",
      _migration_232_fast_path_maker_only),
+    ("233_reconcile_partial_list_streak",
+     _migration_233_reconcile_partial_list_streak),
 ]
 
 
