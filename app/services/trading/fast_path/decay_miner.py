@@ -126,7 +126,16 @@ def _alert_direction(alert_type: str) -> str:
 
 @dataclass(order=True)
 class _PendingObs:
-    """One pending forward-return observation."""
+    """One pending forward-return observation.
+
+    ``is_maker_filled`` (added 2026-05-08, f-fastpath-maker-only-executor)
+    routes finalization to the adverse-selection-aware
+    ``fast_signal_decay_maker_filled`` table instead of the default
+    ``fast_signal_decay``. Schedules made via
+    :meth:`FastPathDecayMiner.record_maker_outcome` set this True; the
+    standard ``fp_alert_inserted`` channel keeps the default False so
+    existing taker-mode behavior is bit-identical.
+    """
 
     deadline_unix: float
     # Tie-breaker so the heap doesn't try to compare dicts:
@@ -139,6 +148,7 @@ class _PendingObs:
     entry_at_alert: float = field(compare=False)
     direction: str = field(compare=False)  # 'long' / 'short' / 'neutral'
     fired_at: datetime = field(compare=False)
+    is_maker_filled: bool = field(compare=False, default=False)
 
 
 @dataclass
@@ -160,6 +170,11 @@ class _DecayMetrics:
     backfilled_rows_written: int = 0
     db_errors: int = 0
     last_finalize_at: datetime | None = None
+    # f-fastpath-maker-only-executor (2026-05-08).
+    maker_outcomes_received: int = 0
+    maker_obs_scheduled: int = 0
+    maker_obs_finalized: int = 0
+    maker_obs_dropped_overcap: int = 0
 
 
 # ── Miner ────────────────────────────────────────────────────────────
@@ -701,13 +716,23 @@ class FastPathDecayMiner:
             exit_side_price = best_bid  # long close = sell at bid
             forward_return = (exit_side_price - obs.entry_at_alert) / obs.entry_at_alert
 
-        self._welford_upsert(
-            ticker=obs.ticker,
-            alert_type=obs.alert_type,
-            score_bucket_value=obs.score_bucket_value,
-            horizon_s=obs.horizon_s,
-            x=forward_return,
-        )
+        if obs.is_maker_filled:
+            self._welford_upsert_maker_filled(
+                ticker=obs.ticker,
+                alert_type=obs.alert_type,
+                score_bucket_value=obs.score_bucket_value,
+                horizon_s=obs.horizon_s,
+                x=forward_return,
+            )
+            self._metrics.maker_obs_finalized += 1
+        else:
+            self._welford_upsert(
+                ticker=obs.ticker,
+                alert_type=obs.alert_type,
+                score_bucket_value=obs.score_bucket_value,
+                horizon_s=obs.horizon_s,
+                x=forward_return,
+            )
         self._metrics.obs_finalized_per_horizon[obs.horizon_s] = (
             self._metrics.obs_finalized_per_horizon.get(obs.horizon_s, 0) + 1
         )
@@ -759,6 +784,124 @@ class FastPathDecayMiner:
                 "h": int(horizon_s), "x": float(x),
             })
 
+    # ── Maker-only writer (f-fastpath-maker-only-executor, 2026-05-08) ──
+
+    def _welford_upsert_maker_filled(
+        self, *,
+        ticker: str,
+        alert_type: str,
+        score_bucket_value: str,
+        horizon_s: int,
+        x: float,
+    ) -> None:
+        """Atomic Welford update for the adverse-selection-aware
+        ``fast_signal_decay_maker_filled`` table.
+
+        Same SQL shape as :meth:`_welford_upsert` but writes to the
+        sibling table created in migration 232. The two tables are
+        intentionally not merged: the maker-filled set is biased by
+        adverse selection (the price came TO the limit, often because
+        an aggressive cross ate through it), so a separate Welford
+        accumulator keeps the calibration honest. Consumers read
+        whichever matches the operator's ``execution_mode``.
+        """
+        with self._engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO fast_signal_decay_maker_filled (
+                    ticker, alert_type, score_bucket, horizon_s,
+                    sample_count, mean_return, m2_return, updated_at
+                ) VALUES (
+                    :t, :at, :sb, :h, 1, :x, 0, NOW()
+                )
+                ON CONFLICT (ticker, alert_type, score_bucket, horizon_s)
+                DO UPDATE SET
+                    sample_count = fast_signal_decay_maker_filled.sample_count + 1,
+                    mean_return =
+                        fast_signal_decay_maker_filled.mean_return
+                        + (:x - fast_signal_decay_maker_filled.mean_return)
+                          / (fast_signal_decay_maker_filled.sample_count + 1),
+                    m2_return =
+                        fast_signal_decay_maker_filled.m2_return
+                        + (:x - fast_signal_decay_maker_filled.mean_return)
+                        * (:x - (
+                            fast_signal_decay_maker_filled.mean_return
+                            + (:x - fast_signal_decay_maker_filled.mean_return)
+                              / (fast_signal_decay_maker_filled.sample_count + 1)
+                          )),
+                    updated_at = NOW()
+            """), {
+                "t": ticker, "at": alert_type, "sb": score_bucket_value,
+                "h": int(horizon_s), "x": float(x),
+            })
+
+    def record_maker_outcome(
+        self,
+        *,
+        alert_id: int,
+        ticker: str,
+        alert_type: str,
+        signal_score: float,
+        fired_at: datetime,
+        fill_outcome: str,
+        entry_at_alert: float,
+    ) -> None:
+        """Called by the executor when a maker order fills (or doesn't).
+
+        For ``fill_outcome='filled'`` (or ``'partial'``) we schedule the
+        same 8-horizon forward-return observations that
+        :meth:`_handle_alert_inserted` would, but tagged
+        ``is_maker_filled=True`` so :meth:`_finalize_one_obs`
+        dispatches them into ``fast_signal_decay_maker_filled``.
+
+        For ``fill_outcome`` of ``cancelled`` / ``replaced`` /
+        ``rejected`` no obs is scheduled — the per-pair fill rate
+        metric reads from ``fast_path_maker_attempts`` directly via the
+        status endpoint, so the executor's INSERT into that table is
+        the source of truth for fill-rate denominators. The miner is
+        the source of truth only for the realized forward-return
+        distribution conditional on a fill.
+
+        Safe to call from a thread other than the one running the
+        miner's asyncio task — the heap mutation is non-atomic but the
+        executor and miner run inside the same supervisor event loop
+        and both touch the heap from the loop's thread, so no lock is
+        required (mirror of the existing ``_handle_alert_inserted``
+        path).
+        """
+        self._metrics.maker_outcomes_received += 1
+        if fill_outcome not in ("filled", "partial"):
+            return
+        if not ticker or not alert_type or alert_id <= 0 or entry_at_alert <= 0:
+            return
+
+        bucket = score_bucket(signal_score)
+        direction = _alert_direction(alert_type)
+        fired_unix = (
+            fired_at.replace(tzinfo=timezone.utc).timestamp()
+            if fired_at.tzinfo is None else fired_at.timestamp()
+        )
+
+        if len(self._pending) + len(HORIZONS_S) > self._max_pending_obs:
+            self._metrics.maker_obs_dropped_overcap += len(HORIZONS_S)
+            return
+        for horizon in HORIZONS_S:
+            self._seq_counter += 1
+            obs = _PendingObs(
+                deadline_unix=fired_unix + horizon,
+                seq=self._seq_counter,
+                alert_id=alert_id,
+                ticker=ticker,
+                alert_type=alert_type,
+                score_bucket_value=bucket,
+                horizon_s=horizon,
+                entry_at_alert=float(entry_at_alert),
+                direction=direction,
+                fired_at=fired_at,
+                is_maker_filled=True,
+            )
+            heapq.heappush(self._pending, obs)
+            self._metrics.maker_obs_scheduled += 1
+
     # ── Watchdog accessor ─────────────────────────────────────────────
 
     def get_task(self) -> asyncio.Task | None:
@@ -795,6 +938,11 @@ class FastPathDecayMiner:
                 self._metrics.last_finalize_at.isoformat()
                 if self._metrics.last_finalize_at else None
             ),
+            # f-fastpath-maker-only-executor (2026-05-08).
+            "maker_outcomes_received": self._metrics.maker_outcomes_received,
+            "maker_obs_scheduled": self._metrics.maker_obs_scheduled,
+            "maker_obs_finalized": self._metrics.maker_obs_finalized,
+            "maker_obs_dropped_overcap": self._metrics.maker_obs_dropped_overcap,
         }
 
 

@@ -344,6 +344,7 @@ def place_buy_order(
     quantity: float,
     order_type: str = "market",
     limit_price: float | None = None,
+    post_only: bool = False,
 ) -> dict[str, Any]:
     client = _get_client()
     if not client:
@@ -359,12 +360,27 @@ def place_buy_order(
             # Phase 1 (2026-05-01): venue-aware tick + qty normalization.
             # Coinbase pairs are crypto; the previous round(price, 2) silently
             # truncated sub-penny prices like 0.10984 → 0.11.
-            resp = client.limit_order_gtc_buy(
+            #
+            # f-fastpath-maker-only-executor (2026-05-08): when post_only is
+            # set, prefer the SDK's *_post_only variant if present (so the
+            # order is rejected by the venue rather than crossing as a
+            # taker). Some SDK versions expose post_only as a kwarg on the
+            # standard variant; we try the dedicated method first and fall
+            # back to the kwarg path.
+            buy_kwargs = dict(
                 client_order_id=client_order_id,
                 product_id=product_id,
                 base_size=str(normalize_quantity(quantity, ticker)),
                 limit_price=str(normalize_price(limit_price, ticker, asset_class="crypto")),
             )
+            if post_only:
+                post_only_fn = getattr(client, "limit_order_gtc_buy_post_only", None)
+                if callable(post_only_fn):
+                    resp = post_only_fn(**buy_kwargs)
+                else:
+                    resp = client.limit_order_gtc_buy(post_only=True, **buy_kwargs)
+            else:
+                resp = client.limit_order_gtc_buy(**buy_kwargs)
         else:
             resp = client.market_order_buy(
                 client_order_id=client_order_id,
@@ -406,6 +422,7 @@ def place_sell_order(
     quantity: float,
     order_type: str = "market",
     limit_price: float | None = None,
+    post_only: bool = False,
 ) -> dict[str, Any]:
     client = _get_client()
     if not client:
@@ -419,12 +436,22 @@ def place_sell_order(
     try:
         if order_type == "limit" and limit_price:
             # Phase 1 (2026-05-01): see place_buy_order for context.
-            resp = client.limit_order_gtc_sell(
+            # f-fastpath-maker-only-executor (2026-05-08): post_only support
+            # — see place_buy_order for the SDK-variant dispatch rationale.
+            sell_kwargs = dict(
                 client_order_id=client_order_id,
                 product_id=product_id,
                 base_size=str(normalize_quantity(quantity, ticker)),
                 limit_price=str(normalize_price(limit_price, ticker, asset_class="crypto")),
             )
+            if post_only:
+                post_only_fn = getattr(client, "limit_order_gtc_sell_post_only", None)
+                if callable(post_only_fn):
+                    resp = post_only_fn(**sell_kwargs)
+                else:
+                    resp = client.limit_order_gtc_sell(post_only=True, **sell_kwargs)
+            else:
+                resp = client.limit_order_gtc_sell(**sell_kwargs)
         else:
             resp = client.market_order_sell(
                 client_order_id=client_order_id,
@@ -475,6 +502,46 @@ def get_order_by_id(order_id: str) -> dict[str, Any] | None:
     except Exception as e:
         logger.debug(f"[coinbase] get_order_by_id({order_id}) failed: {e}")
         return None
+
+
+def cancel_order_by_id(order_id: str) -> dict[str, Any]:
+    """Cancel a single open Coinbase order by id.
+
+    f-fastpath-maker-only-executor (2026-05-08): the maker-only
+    executor schedules a cancel-on-timeout asyncio task that calls
+    this helper when the resting limit hasn't filled within
+    ``settings.maker_cancel_on_timeout_s`` seconds. Returns
+    ``{"ok": True}`` on success, ``{"ok": False, "error": ...}`` on
+    any failure path so the caller can record the outcome regardless.
+
+    The Coinbase Advanced Trade SDK takes a list of order_ids
+    (``cancel_orders``) and returns a response with per-order
+    success flags. We single-id this for executor simplicity; if a
+    future brief needs batch-cancel, lift the wrapper accordingly.
+    """
+    client = _get_client()
+    if not client:
+        return {"ok": False, "error": "Coinbase client not available"}
+    if not order_id:
+        return {"ok": False, "error": "missing order_id"}
+    try:
+        resp = client.cancel_orders(order_ids=[order_id])
+        rd = resp if isinstance(resp, dict) else resp.__dict__ if hasattr(resp, "__dict__") else {}
+        results = rd.get("results") or rd.get("orders") or []
+        if isinstance(results, list) and results:
+            r0 = results[0] if isinstance(results[0], dict) else getattr(results[0], "__dict__", {})
+            if r0.get("success"):
+                logger.info(f"[coinbase] CANCEL accepted order_id={order_id}")
+                return {"ok": True, "order_id": order_id, "raw": rd}
+            err = r0.get("failure_reason") or r0.get("error") or str(r0)
+            return {"ok": False, "error": str(err)}
+        # SDK shape variant: top-level success bool.
+        if rd.get("success"):
+            return {"ok": True, "order_id": order_id, "raw": rd}
+        return {"ok": False, "error": str(rd) or "unknown_cancel_failure"}
+    except Exception as e:
+        logger.warning(f"[coinbase] cancel_order_by_id({order_id}) exception: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 # ── Status mapping ───────────────────────────────────────────────────
