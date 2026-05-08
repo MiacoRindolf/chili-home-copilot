@@ -1,6 +1,6 @@
 # NEXT_TASK: f-fastpath-maker-only-executor
 
-STATUS: PENDING
+STATUS: DONE
 
 **Re-promoted 2026-05-08** after `f-fastpath-rotator-http-retry` shipped (commit `db34f5d`). The retry layer is in place; egress to Coinbase is currently 100% blocked but that's environmental and self-resolving. The maker-only executor work is independent of the rotator's runtime output — it depends on the foundation-layer *code* (already in HEAD), not on `fast_path_universe` having rows right now.
 
