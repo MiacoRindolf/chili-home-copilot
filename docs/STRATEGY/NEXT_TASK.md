@@ -1,6 +1,6 @@
 # NEXT_TASK: f-pdt-count-broker-confirmed-only
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
