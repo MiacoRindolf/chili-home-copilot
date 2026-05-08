@@ -1,167 +1,169 @@
-# NEXT_TASK: f-pdt-count-broker-confirmed-only
+# NEXT_TASK: f-equity-broker-reconcile-wipeout-protection
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-Patch `pdt_guard._count_day_trades_5d` so it counts ONLY broker-confirmed
-day-trades — not reconcile artifacts. Drops the live PDT count from 14 to
-~0–4 immediately on deploy. Stock entries resume on the next
-`pattern_breakout_imminent` alert (pattern-quality permitting).
+Close the structural gap behind 2026-04-30's equity-book wipeout cascade.
+R32 (commit `539e1c2`, 2026-04-30) added an empty-`rh_tickers` guard so
+the reconciler refuses to mass-close when `get_positions()` returns 0
+positions while local trades remain open. This brief verifies — through
+data, not assumption — that R32 actually prevents NEW phantom rows from
+forming under all wipeout-class failure modes, then ships always-on
+observability + breaker burst-trip + the regression test that pins R32's
+behaviour.
 
-The full brief is at `docs/STRATEGY/QUEUED/f-pdt-count-broker-confirmed-only.md`
+The full brief is at
+`docs/STRATEGY/QUEUED/f-equity-broker-reconcile-wipeout-protection.md`
 — read it first.
 
 ## Why now
 
-Operator audit 2026-05-08 caught my earlier diagnosis (autotrader rapid-fire
-round-trips) as wrong. Row-detail re-pull on the 14 PDT-counted trades:
+Phase A (`f-pdt-count-broker-confirmed-only`, commit `60c26f8`) shipped
+today and verified live: PDT count dropped from 14 to 2 immediately on
+restart. That's the symptom fix — operator's stock entries are unblocked
+right now.
 
-- All 14 have `exit_reason = 'broker_reconcile_position_gone'`
-- All 14 have `broker_order_id IS NULL`
-- All 14 have `filled_at IS NULL` and `last_fill_at IS NULL`
-- 9 of them "exited" at exact same second `00:56:01` on 2026-04-30
-- Broker now reports `qty=0` for the May-1 re-opens of the same tickers
-  (visible in `bracket_reconciliation_service` ongoing logs)
+Phase A excludes the 14 phantom rows from the PDT count but does NOT
+prevent new phantoms from accreting. The next wipeout-class event would
+re-create the same self-lock. Phase B is the cause fix.
 
-These are NOT day-trades by any FINRA definition. They're chili synthesizing
-closes when its reconciler couldn't find positions at the broker — the same
-wipeout pattern that R31/R32 (commits `539e1c2` + `7af3d49`, 2026-04-30)
-fixed for the **crypto** book. The equity book never got the parallel fix,
-so the operator's account self-locked from these phantom rows.
+## Audit-first protocol
 
-## The change
+The brief explicitly forbids pre-writing a partial-list extension. The
+audit decides scope:
 
-Single SQL change to the day-trade count query. Add three exclusions:
+* **Case A** (zero post-R32 phantoms in equity book) → R32 is
+  structurally complete. Brief becomes always-on observability only.
+* **Case B** (post-R32 phantoms in empty-list mode) → R32 is bypassed
+  somehow; find why and fix.
+* **Case C** (post-R32 phantoms in partial-list mode) → R32 needs the
+  partial-list extension; ship the option (A/B/C in the brief) the
+  audit data supports.
+* **Case D** (post-R32 phantoms via a different code path) → identify
+  and patch.
 
-```sql
-WHERE status = 'closed'
-  AND DATE(entry_date) = DATE(exit_date)
-  AND exit_date > :cutoff
-  AND ticker NOT LIKE '%-USD'                  -- existing crypto bypass (R35)
-  AND broker_order_id IS NOT NULL              -- NEW: exit was a real broker order
-  AND last_fill_at IS NOT NULL                 -- NEW: broker actually filled it
-  AND COALESCE(exit_reason, '') NOT IN (       -- NEW: exclude reconcile artifacts
-      'broker_reconcile_position_gone',
-      'forced_unwind_reconcile'
-  )
-```
+CC's first deliverable is the audit categorization. Code follows from
+that.
 
-This is the shortest path to unblock stock entries today.
+## Always-on deliverables (regardless of audit findings)
+
+These ship in every case:
+
+1. **Reconcile-close observability.** Today
+   `broker_service.py:2202+` (the stale-close `for trade in stale:`
+   loop) closes trades with only a `logger.debug`. Add a structured
+   `[broker_sync] RECONCILE_CLOSE: ticker=X reason=Y` warning per
+   close + a counter the operator can grep. Operator-facing.
+2. **Bucket-coalesced wipeout-burst breaker trip.** When ≥3 rows
+   close in the same 5-second bucket via
+   `broker_reconcile_position_gone`, call `breaker.trip()` with
+   reason `wipeout_burst_3_in_5s`. R31 already excludes synthetic
+   reconcile losses from the consecutive-loss rule, so this trip
+   fires on the row-burst pattern (a wipeout signature), not on
+   aggregate PnL.
+3. **Module-docstring update.** Extend the existing R32 docstring at
+   `broker_service.py:2109+` with the Phase B linkage.
+4. **R32 regression test.** Pin the empty-`rh_tickers` guard's
+   return shape (`skipped_reason='empty_broker_positions_with_open_local_trades'`)
+   and assert open trades stay open.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `app/services/trading/pdt_guard.py:115-160` — `_count_day_trades_5d`. The
-  only function that needs editing.
-- Existing `can_open_intraday_round_trip` short-circuits stay as-is.
-- Existing R35 crypto bypass (ticker pattern) stays as-is.
-- The migration framework is NOT needed — this is a SQL filter change in
-  Python, no schema delta.
+- `app/services/broker_service.py:2109-2150` — R32 empty-list guard.
+  EXTEND or DOCUMENT; don't rewrite.
+- `app/services/broker_service.py:2171-2280` — stale-close path. ADD
+  observability; don't change close logic.
+- `app/services/trading/portfolio_risk.py:1016` — already excludes
+  `broker_reconcile_position_gone` from R31's consecutive-loss rule.
+  Don't touch.
+- The breaker's existing `trip()` method (kill-switch infrastructure)
+  is reused for the wipeout-burst signal.
 
 ## Acceptance criteria
 
-1. `_count_day_trades_5d` SQL adds the three new clauses (broker_order_id,
-   last_fill_at, exit_reason NOT IN reconcile-set).
-2. The three exclusion strings (`'broker_reconcile_position_gone'`,
-   `'forced_unwind_reconcile'`) are module-level constants with a docstring
-   pointing back to this brief and to R31/R32.
-3. New helper-level tests in `tests/test_pdt_count_broker_confirmed_only.py`
-   pinning each exclusion path:
-   - Trade with `broker_order_id=NULL` → not counted.
-   - Trade with `last_fill_at=NULL` → not counted.
-   - Trade with `exit_reason='broker_reconcile_position_gone'` → not counted.
-   - Trade with `exit_reason='forced_unwind_reconcile'` → not counted.
-   - Real broker-confirmed same-day round-trip → still counted.
-4. Existing `pdt_guard` tests still pass.
-5. Live verification (post-deploy): `_count_day_trades_5d` returns ≤ 4 for
-   the operator's account (was 14). Capture the value in the CC report.
-6. CC report at `docs/STRATEGY/CC_REPORTS/2026-05-08_f-pdt-count-broker-confirmed-only.md`.
+1. **Audit deliverable**: CC report's "Audit" section lists every
+   `broker_reconcile_position_gone` row in the equity book in the
+   last 30 days, classified as pre-R32 (before
+   `2026-05-01T04:08:57Z`) or post-R32. For each post-R32 row:
+   `exit_date`, `last_broker_sync`, the size of `rh_tickers` at
+   close-time (from logs if available), and which case (A/B/C/D).
+2. **Always-on deliverables shipped** (observability + breaker
+   burst-trip + R32 regression test + module docstring) regardless
+   of audit findings.
+3. **If audit Case C**: one of options A/B/C from the brief shipped
+   with full test coverage; the chosen option is the one the data
+   supports, NOT a default pick.
+4. **If audit Case A**: brief closes at observability; no new code on
+   the reconcile path.
+5. CC report at
+   `docs/STRATEGY/CC_REPORTS/2026-05-08_f-equity-broker-reconcile-wipeout-protection.md`.
 
 ## Constraints / do not touch
 
-- **Hard Rule 1**: live-placement safety belts unchanged. Real day-trades
-  still count. Threshold stays 3-in-5 for sub-$25k accounts.
+- **Hard Rule 1**: live-placement safety belts unchanged.
 - **Hard Rule 5**: prediction-mirror authority untouched.
-- **Edit-tool truncation discipline (HARD).** Six rounds yesterday across
-  the codebase. Splice pattern only. `wc -l + ast.parse` post-edit
-  verification mandatory. See memory `reference_2026_05_07_widespread_truncation.md`.
+- **Hard Rule 3**: data-first. If the audit surfaces Case D, fix
+  the data path; don't paper over with a router/service filter.
+- **Edit-tool truncation discipline (HARD).** `broker_service.py`
+  is large (>2300 lines). Splice pattern only. `wc -l + ast.parse`
+  post-edit verification mandatory. See memory
+  `reference_2026_05_07_widespread_truncation.md`.
 - **Tests use `_test`-suffixed DB.**
-- **No magic strings**: the two reconcile exit-reasons go into a module-level
-  constant `_RECONCILE_ARTIFACT_EXIT_REASONS = frozenset({...})`.
-- **No changes outside `pdt_guard.py` + the new test file.** Particularly:
-  do NOT touch `auto_trader.py`, `auto_trader_monitor.py`, `bracket_*.py`,
-  or anything related to the equity reconciler in this brief — those are
-  the Phase B follow-up brief (`f-equity-broker-reconcile-wipeout-protection`).
+- **Audit-first.** Do NOT pre-write the partial-list extension. The
+  audit data decides.
+- **Don't touch `pdt_guard.py`** (Phase A's filter is the durable
+  defence even after Phase B ships).
 
 ## Out of scope
 
-- The crypto bypass cleanup (separate brief: `f-pdt-crypto-bypass-cleanup`).
-  That now becomes a follow-up; this brief unblocks the operator first.
-- The PDT-aware exit deferral (separate brief:
-  `f-autotrader-pdt-aware-exit-deferral`). That's a structural fix for a
-  different problem (real day-trades from the autotrader); it's not the
-  current blocker.
-- The pattern-demote-on-thin-evidence work (separate brief:
-  `f-pattern-demote-on-thin-evidence`).
-- Equity reconciler R31/R32 parallel (separate Phase B brief, to be written
-  after this ships).
-- Backfilling old phantom rows. They'll roll out of the 5-day window
-  naturally; the SQL filter handles them while they're in the window.
+- Crypto reconciler (separate brief if needed).
+- Options reconciler (already MMM-filtered out of the stale-close
+  path).
+- The PDT count itself.
+- Backfilling old phantom rows.
+- Pattern-quality demotion / autotrader exit deferral / crypto
+  bypass cleanup (separate briefs already queued).
 
 ## Sequencing
 
-1. Truncation scan on `app/services/trading/pdt_guard.py` (read full file +
-   `wc -l` + `ast.parse`).
-2. Splice-edit: add the constant + the three SQL clauses.
-3. Post-edit: `wc -l + ast.parse` verify.
-4. Add tests in `tests/test_pdt_count_broker_confirmed_only.py`.
-5. Run `pytest tests/test_pdt_count_broker_confirmed_only.py -v` — must pass.
-6. Run existing `pdt_guard` tests if any — must still pass.
-7. Commit with message referencing the slug + R31/R32 commits.
-8. Write CC report.
-9. Mark this NEXT_TASK as `STATUS: DONE`.
+1. Truncation scan on `app/services/broker_service.py`.
+2. Audit query: pull `broker_reconcile_position_gone` rows for the
+   equity book grouped by 5-second buckets; cross-reference with
+   2026-05-01T04:08:57Z (R32 deploy).
+3. Categorize as Case A/B/C/D in the CC report.
+4. Always-on deliverables (observability + burst-trip + regression
+   test + docstring).
+5. Conditional partial-list extension only if Case C surfaces.
+6. Tests for everything shipped.
+7. Commit + push + CC report + mark NEXT_TASK DONE.
 
 ## Operator-side after CC ships
 
 1. Pull + truncation scan.
-2. `docker compose up -d --force-recreate chili autotrader-worker`
-3. Verify the live count:
-   ```bash
-   docker exec chili-home-copilot-chili-1 python -c "
-   from app.db.session import SessionLocal
-   from app.services.trading.pdt_guard import _count_day_trades_5d
-   db = SessionLocal()
-   print('day-trade count:', _count_day_trades_5d(db, '<operator_user_id>'))
-   "
-   ```
-   Expected: ≤ 4 (was 14).
-4. Watch for the next stock `pattern_breakout_imminent` alert; verify
-   autotrader no longer rejects with `pdt_limit_reached`.
+2. `docker compose up -d --force-recreate chili broker-sync-worker
+   autotrader-worker`.
+3. Verify `[broker_sync] RECONCILE_CLOSE` warnings appear (or
+   correctly don't) in normal operation.
+4. Wait 24h; confirm zero new phantom rows accumulate.
 
 ## Rollback plan
 
-`git revert` the commit. The change is purely additive SQL filters; revert
-restores prior behavior bit-identically. The new test file is removed by
-the revert, so existing tests stay green.
-
-## Open questions
-
-1. **What about old-phantom forensic value?** The phantom rows with
-   `broker_reconcile_position_gone` are diagnostically valuable — they tell
-   us the equity reconciler had a wipeout event. Do NOT delete them; just
-   exclude from the PDT count. They'll surface again when we write the
-   Phase B equity-reconciler-protection brief.
-2. **`last_fill_at` vs `filled_at`.** The audit shows BOTH are NULL on the
-   phantom rows. Use `last_fill_at` (broker-truth column) for the filter;
-   `filled_at` is the older entry-side timestamp and may be set on
-   non-fill paths.
-3. **Audit-counter alignment.** If there's an external metric or dashboard
-   that surfaces the day-trade count separately from this function, surface
-   it in the CC report so the operator can sanity-check. Don't fix it in
-   this brief.
+`git revert` the commit. Always-on deliverables are additive
+(metrics + warnings + tests + docstring). Partial-list extensions
+(if shipped) are gated by a settings flag
+(`CHILI_RECONCILE_PARTIAL_LIST_GUARD_ENABLED`) defaulting to ON; flip
+OFF to revert just the new guard while keeping the observability
+changes.
 
 ## What CC should do if it's unsure
 
-Flag in the CC report and ask. Specifically: if the SQL change ends up
-touching more than `_count_day_trades_5d`, stop and surface — the brief
-expects a single-function edit.
+1. If the audit data is ambiguous (e.g., no logs available from the
+   relevant window), ship the always-on deliverables and the
+   regression test, write the audit limitations into the CC report,
+   and skip the conditional extension. Phase B can be re-opened
+   later with better instrumentation.
+2. If the audit surfaces a third code path that emits
+   `broker_reconcile_position_gone` outside `broker_service.py`,
+   stop and surface — the brief expects the writer to be at
+   `broker_service.py:2247` only.
