@@ -142,8 +142,11 @@ def _list_usd_products() -> list[str]:
             continue
         if p.get("trading_disabled"):
             continue
-        if p.get("auction_mode"):
-            continue
+        # 2026-05-08: Coinbase changed auction_mode semantics -- now set on
+        # ~all online products (393 of 394 USD pairs in May 2026 obs).
+        # Was previously a "this product is auction-only, can't market-trade"
+        # flag; now it's effectively meaningless. Removed from the filter.
+        # Status='online' + trading_disabled=False + valid book is enough.
         pid = p.get("id")
         if isinstance(pid, str) and pid:
             out.append(pid.upper())
