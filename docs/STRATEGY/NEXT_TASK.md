@@ -1,6 +1,6 @@
 # NEXT_TASK: f-pattern-demote-on-thin-evidence
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
