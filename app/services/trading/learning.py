@@ -849,6 +849,181 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
     return {"ok": True, "demoted": demoted, "decay_monitor_updated": touched, "retired_stale": retired}
 
 
+# ── Thin-evidence demote (f-pattern-demote-on-thin-evidence) ──────────
+#
+# Per the brief: a pattern that was promoted via the
+# ``provisional_small_paths`` gate AND has a tiny live sample AND has
+# a sub-random win rate AND was never OOS-validated is not a tradeable
+# edge. The realized_avg_return_pct is intentionally NOT considered --
+# on tiny samples it can be inflated by a single outlier winner (the
+# audit case for pattern 585: 1W / 3L = 25% WR, but
+# avg_return_pct=+6.71 because the winner was a 30% trade).
+#
+# This sweep runs every ``execution_feedback_digest`` cycle (same
+# trigger as ``run_live_pattern_depromotion``). It DOES NOT replace
+# the existing depromotion logic -- they are complementary: this
+# brief's criteria target thin-evidence-from-promotion-time;
+# ``run_live_pattern_depromotion`` targets live-vs-OOS divergence
+# AFTER a sufficient sample has accumulated. Both can fire in the
+# same cycle; the early-return on ``lifecycle_stage != 'promoted'``
+# prevents double-demotion.
+
+THIN_EVIDENCE_MIN_TRADES = 10
+"""Below this trade count, the live sample is too small for the
+realized win rate to be statistically meaningful. The brief picked
+10 as the floor; tighten in a follow-up if 10 still admits noise."""
+
+THIN_EVIDENCE_WIN_RATE_FLOOR = 0.33
+"""Below this win rate (one third), the pattern is performing worse
+than a random 50/50 binary classifier even allowing for asymmetric
+payoffs. Combined with a tiny sample, this is the wrong direction."""
+
+THIN_EVIDENCE_PROVISIONAL_GATE_REASON = "provisional_small_paths"
+"""The promotion-gate reason tag the brain itself emits when the
+CPCV evidence count is below the standard floor. Patterns promoted
+via this admission must clear a higher bar to stay promoted; this
+sweep enforces that bar."""
+
+THIN_EVIDENCE_DEMOTE_REASON = "thin_evidence_low_realized_wr"
+"""Written to ``scan_patterns.promotion_demote_reason`` so post-hoc
+audits can distinguish thin-evidence demotions from the live-vs-OOS
+demotions emitted by ``run_live_pattern_depromotion``."""
+
+
+def _matches_thin_evidence_criteria(p) -> bool:
+    """Pure predicate: returns True iff the pattern matches all five
+    thin-evidence demote criteria from the brief.
+
+    Helper-level testable -- accepts any object with the expected
+    attributes, so unit tests can pass `SimpleNamespace(...)` without
+    standing up a DB row.
+    """
+    lc = (getattr(p, "lifecycle_stage", "") or "").strip()
+    if lc != "promoted":
+        return False
+
+    n = int(getattr(p, "trade_count", 0) or 0)
+    if n >= THIN_EVIDENCE_MIN_TRADES:
+        return False
+
+    wr = getattr(p, "win_rate", None)
+    if wr is None:
+        return False
+    try:
+        if float(wr) >= THIN_EVIDENCE_WIN_RATE_FLOOR:
+            return False
+    except (TypeError, ValueError):
+        return False
+
+    if getattr(p, "oos_win_rate", None) is not None:
+        return False
+
+    reasons = getattr(p, "promotion_gate_reasons", None) or []
+    # JSONB columns may surface as list (ORM-decoded) or str (raw).
+    if isinstance(reasons, str):
+        try:
+            import json as _json
+            parsed = _json.loads(reasons)
+            reasons = parsed if isinstance(parsed, (list, tuple)) else [parsed]
+        except Exception:
+            reasons = [reasons]
+    if not isinstance(reasons, (list, tuple, set)):
+        return False
+    if THIN_EVIDENCE_PROVISIONAL_GATE_REASON not in reasons:
+        return False
+
+    return True
+
+
+def run_thin_evidence_demote(db: Session) -> dict[str, Any]:
+    """Demote promoted patterns matching the thin-evidence criteria.
+
+    Returns ``{"ok": True, "demoted": int, "demoted_ids": list[int]}``
+    Idempotent: a pattern is only ever demoted once because the
+    ``lifecycle_stage != 'promoted'`` short-circuit fires on every
+    subsequent cycle.
+
+    Uses raw SQL for the UPDATE because ``demoted_at`` and
+    ``promotion_demote_reason`` are present in the schema (migration
+    history) but are not declared on the ``ScanPattern`` ORM class --
+    rather than touch the ORM, write directly via ``text()``.
+    """
+    from sqlalchemy import text as _sql_text
+    from ...models.trading import ScanPattern
+
+    promoted = (
+        db.query(ScanPattern)
+        .filter(ScanPattern.lifecycle_stage == "promoted")
+        .all()
+    )
+
+    demoted_ids: list[int] = []
+    for p in promoted:
+        if not _matches_thin_evidence_criteria(p):
+            continue
+
+        old_lc = (p.lifecycle_stage or "").strip()
+        old_promo = (p.promotion_status or "").strip()
+
+        try:
+            db.execute(_sql_text("""
+                UPDATE scan_patterns
+                   SET lifecycle_stage = 'challenged',
+                       lifecycle_changed_at = NOW(),
+                       demoted_at = NOW(),
+                       promotion_demote_reason = :reason
+                 WHERE id = :pid
+            """), {
+                "pid": int(p.id),
+                "reason": THIN_EVIDENCE_DEMOTE_REASON,
+            })
+        except Exception as exc:
+            logger.warning(
+                "[learning] thin_evidence_demote UPDATE failed pid=%s: %s",
+                p.id, exc, exc_info=True,
+            )
+            continue
+
+        demoted_ids.append(int(p.id))
+
+        try:
+            from .brain_work.promotion_surface import emit_promotion_surface_change
+
+            emit_promotion_surface_change(
+                db,
+                scan_pattern_id=int(p.id),
+                old_promotion_status=old_promo,
+                old_lifecycle_stage=old_lc,
+                new_promotion_status=old_promo,  # promotion_status unchanged
+                new_lifecycle_stage="challenged",
+                source="thin_evidence_demote",
+                extra={
+                    "demote_reason": THIN_EVIDENCE_DEMOTE_REASON,
+                    "trade_count": int(getattr(p, "trade_count", 0) or 0),
+                    "win_rate": (
+                        float(p.win_rate) if p.win_rate is not None else None
+                    ),
+                    "oos_win_rate": (
+                        float(p.oos_win_rate) if p.oos_win_rate is not None else None
+                    ),
+                },
+            )
+        except Exception:
+            logger.debug(
+                "[learning] thin_evidence_demote promotion_surface emit failed",
+                exc_info=True,
+            )
+
+    if demoted_ids:
+        db.commit()
+        logger.info(
+            "[learning] thin_evidence_demote: demoted %d pattern(s) ids=%s",
+            len(demoted_ids), demoted_ids,
+        )
+
+    return {"ok": True, "demoted": len(demoted_ids), "demoted_ids": demoted_ids}
+
+
 # ── Learning Event Logger (extracted to learning_events.py) ───────────
 from .learning_events import log_learning_event, get_learning_events  # noqa: F401 — re-export for backward compat
 

@@ -112,7 +112,7 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
 def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> None:
     """Debounced: execution stats, adaptive spread hint, live depromotion sweep."""
     from ..execution_quality import compute_execution_stats, suggest_adaptive_spread
-    from ..learning import run_live_pattern_depromotion
+    from ..learning import run_live_pattern_depromotion, run_thin_evidence_demote
 
     payload = ev.payload if isinstance(ev.payload, dict) else {}
     uid = payload.get("user_id")
@@ -124,6 +124,23 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
     stats = compute_execution_stats(db, int(uid), lookback_days=90)
     spread = suggest_adaptive_spread(db, int(uid), lookback_days=60)
     dep = run_live_pattern_depromotion(db)
+    # f-pattern-demote-on-thin-evidence (2026-05-08): per-cycle sweep
+    # that demotes promoted patterns matching the brief's 5-criteria
+    # filter (lifecycle=promoted, trade_count<10, win_rate<0.33,
+    # oos_win_rate IS NULL, 'provisional_small_paths' in
+    # promotion_gate_reasons). Complementary to run_live_pattern_depromotion
+    # above -- that one handles live-vs-OOS gap on accumulated samples;
+    # this one handles thin-evidence-from-promotion-time. Both can fire
+    # in the same cycle; the lifecycle=promoted short-circuit prevents
+    # double-demotion.
+    try:
+        thin = run_thin_evidence_demote(db)
+    except Exception as exc:
+        logger.warning(
+            "%s thin_evidence_demote sweep failed ev_id=%s: %s",
+            LOG_PREFIX, ev.id, exc, exc_info=True,
+        )
+        thin = {"ok": False, "demoted": 0, "demoted_ids": []}
 
     stats_summary = {
         "trades_analyzed": stats.get("trades_analyzed", 0),
@@ -160,12 +177,22 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
     except Exception:
         logger.debug("%s attribution snapshot skipped", LOG_PREFIX, exc_info=True)
 
+    # f-pattern-demote-on-thin-evidence (2026-05-08): merge thin-
+    # evidence sweep counts into the existing depromotion payload so
+    # the execution_quality_updated outcome carries both signals.
+    dep_payload = dep if isinstance(dep, dict) else {"raw": dep}
+    if isinstance(dep_payload, dict):
+        dep_payload["thin_evidence_demoted"] = int(thin.get("demoted", 0))
+        dep_payload["thin_evidence_demoted_ids"] = list(
+            thin.get("demoted_ids", []) or []
+        )
+
     emit_execution_quality_updated_outcome(
         db,
         user_id=int(uid),
         stats_summary=stats_summary,
         spread_hint=spread_hint,
-        depromotion=dep if isinstance(dep, dict) else {"raw": dep},
+        depromotion=dep_payload,
         parent_work_event_id=int(ev.id),
         attribution_summary=attribution_summary,
     )
