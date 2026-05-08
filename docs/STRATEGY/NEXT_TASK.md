@@ -1,6 +1,6 @@
 # NEXT_TASK: f-equity-broker-reconcile-wipeout-protection
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
