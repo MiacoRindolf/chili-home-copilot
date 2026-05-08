@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,22 @@ logger = logging.getLogger(__name__)
 # SEC PDT rule constants (not configurable; these come from regulation):
 PDT_EQUITY_THRESHOLD_USD = 25_000.0
 PDT_MAX_DAY_TRADES_5D = 3   # 4th would trigger PDT designation
+
+
+# f-pdt-count-broker-confirmed-only (2026-05-08): exit reasons that mark a
+# trade row as a reconciliation artifact rather than a broker-confirmed
+# day-trade. Operator audit 2026-05-08 found 14 phantom rows with
+# ``exit_reason='broker_reconcile_position_gone'`` AND ``broker_order_id
+# IS NULL`` AND ``last_fill_at IS NULL`` -- chili synthesized closes
+# when its reconciler couldn't find positions at the broker. R31/R32
+# (commits 539e1c2 + 7af3d49, 2026-04-30) fixed this for the crypto book;
+# the equity reconciler is the Phase B follow-up. In the meantime, the
+# PDT count must exclude these rows so the operator's account doesn't
+# self-lock from non-FINRA-day-trade artifacts.
+_RECONCILE_ARTIFACT_EXIT_REASONS = frozenset({
+    "broker_reconcile_position_gone",
+    "forced_unwind_reconcile",
+})
 
 
 # Local cache for the broker portfolio fetch (60s TTL). The cache key is
@@ -134,6 +150,17 @@ def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | No
         # canonical PDT determination; this is a conservative pre-check
         # that errs on the side of refusing.
         cutoff = datetime.utcnow() - timedelta(days=9)
+        # f-pdt-count-broker-confirmed-only (2026-05-08): three new
+        # exclusions so the count covers ONLY broker-confirmed day-trades.
+        #   * ``broker_order_id IS NOT NULL``: the exit was a real
+        #     broker-issued order (not a chili-synthesized close).
+        #   * ``last_fill_at IS NOT NULL``: the broker actually reported
+        #     a fill. ``filled_at`` is the older entry-side timestamp and
+        #     can be set on non-fill paths -- ``last_fill_at`` is the
+        #     authoritative broker-truth column.
+        #   * ``exit_reason NOT IN`` reconcile-artifact set: rows whose
+        #     close was driven by the reconciler not finding the position
+        #     are R31/R32-style wipeouts, not FINRA day-trades.
         sql = """
             SELECT COUNT(*) AS n
             FROM trading_trades
@@ -143,12 +170,22 @@ def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | No
               AND DATE(entry_date) = DATE(exit_date)
               AND exit_date > :cutoff
               AND ticker NOT LIKE '%-USD'
+              AND broker_order_id IS NOT NULL
+              AND last_fill_at IS NOT NULL
+              AND COALESCE(exit_reason, '') NOT IN :reconcile_reasons
         """
-        params: dict[str, Any] = {"cutoff": cutoff}
+        params: dict[str, Any] = {
+            "cutoff": cutoff,
+            "reconcile_reasons": tuple(_RECONCILE_ARTIFACT_EXIT_REASONS),
+        }
         if user_id is not None:
             sql += " AND user_id = :uid"
             params["uid"] = int(user_id)
-        row = db.execute(text(sql), params).fetchone()
+        # ``expanding=True`` lets sqlalchemy bind the IN-list tuple safely.
+        stmt = text(sql).bindparams(
+            bindparam("reconcile_reasons", expanding=True),
+        )
+        row = db.execute(stmt, params).fetchone()
         if row is None:
             return None
         return int(row.n or 0)
