@@ -297,12 +297,24 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
     alert_type = str(alert.get("alert_type") or "")
     signal_score = float(alert.get("signal_score") or 0.0)
 
-    # Cost = round-trip in bps: 2 * (taker_fee + spread). Spread comes
-    # from the LIVE book (ctx) so a momentarily-wide top-of-book gates
-    # the trade even if the calibrated mean cleared a static threshold.
-    taker_fee_bps = float(fp_settings.cost_aware_taker_fee_bps or 0.0)
+    # f-fastpath-maker-only (2026-05-08): switch the fee + decay-table
+    # source on execution_mode. Maker-only modes pay the maker fee and
+    # need to read the adverse-selection-aware decay table; taker pays
+    # the taker fee and reads the no-friction decay table. Default
+    # (taker) is bit-identical to the prior behaviour.
+    exec_mode = str(getattr(fp_settings, "execution_mode", "taker") or "taker").strip().lower()
+    if exec_mode in ("maker_only", "maker_first_then_taker"):
+        fee_bps = float(getattr(fp_settings, "cost_aware_maker_fee_bps", 0.0) or 0.0)
+        decay_table = "fast_signal_decay_maker_filled"
+    else:
+        fee_bps = float(fp_settings.cost_aware_taker_fee_bps or 0.0)
+        decay_table = "fast_signal_decay"
+
+    # Cost = round-trip in bps: 2 * (fee + spread). Spread comes from
+    # the LIVE book (ctx) so a momentarily-wide top-of-book gates the
+    # trade even if the calibrated mean cleared a static threshold.
     spread_bps = float(ctx.spread_bps or 0.0)
-    cost_bps = 2.0 * (taker_fee_bps + spread_bps)
+    cost_bps = 2.0 * (fee_bps + spread_bps)
     cost_return = cost_bps / 10000.0  # bps -> return units (mean_return is fraction)
 
     try:
@@ -312,19 +324,22 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
         bucket = _score_bucket(signal_score)
         rows = _fetch_bucket_rows(
             ctx.engine, ticker=ticker, alert_type=alert_type, bucket=bucket,
+            table=decay_table,
         )
     except Exception as exc:
         # Lookup failures shouldn't block; mirrors gate_calibrated_tradeability.
         return GateResult(
             "cost_aware_admission", True, "",
-            {"verdict": "lookup_failed", "error": str(exc)[:120]},
+            {"verdict": "lookup_failed", "error": str(exc)[:120],
+             "execution_mode": exec_mode, "decay_table": decay_table},
         )
 
     if not rows:
         return GateResult(
             "cost_aware_admission", True, "",
             {"verdict": "no_data", "score_bucket": bucket,
-             "cost_bps": cost_bps},
+             "cost_bps": cost_bps, "execution_mode": exec_mode,
+             "decay_table": decay_table},
         )
 
     best_row = _best_sharpe_row(rows)
@@ -332,7 +347,8 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
         return GateResult(
             "cost_aware_admission", True, "",
             {"verdict": "insufficient_data", "score_bucket": bucket,
-             "cost_bps": cost_bps},
+             "cost_bps": cost_bps, "execution_mode": exec_mode,
+             "decay_table": decay_table},
         )
 
     mean_return = float(best_row.get("mean_return") or 0.0)
@@ -348,8 +364,10 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
         "sample_count": sample_count,
         "mean_return_bps": round(mean_bps, 4),
         "cost_bps": round(cost_bps, 4),
-        "taker_fee_bps": round(taker_fee_bps, 4),
+        "fee_bps": round(fee_bps, 4),
         "spread_bps": round(spread_bps, 4),
+        "execution_mode": exec_mode,
+        "decay_table": decay_table,
     }
     if not cleared:
         return GateResult(

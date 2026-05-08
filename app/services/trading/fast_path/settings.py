@@ -167,11 +167,54 @@ class FastPathSettings:
     tier 1 = 60, tier 2 = 40, tier 3 = 25, tier 4 = 15, tier 5 = 10,
     tier 6 = 8, tier 7 = 5, tier 8 = 4, tier 9 = 4. Coinbase One
     subscribers may have different rates -- check the live fee schedule
-    on the operator's account.
+    on the operator's account."""
 
-    Maker-only mode (separate brief: ``f-fastpath-maker-only``) replaces
-    this default with the maker fee for the active tier; that brief
-    will introduce a separate ``cost_aware_maker_fee_bps`` setting."""
+    # ── Maker-only execution mode (f-fastpath-maker-only, 2026-05-08) ─
+    execution_mode: str = "taker"
+    """Fast-path execution mode. One of:
+      * ``taker`` (default) -- crosses the spread with market orders.
+        Existing behaviour; retained as benchmark.
+      * ``maker_only`` -- places ``post_only=true`` limit orders inside
+        the spread. Per the 2026-05-07 alpha replay, the only economic
+        path on Coinbase at retail tier (taker round-trip cost
+        dominates the realized edge).
+      * ``maker_first_then_taker`` -- tries maker for
+        ``maker_first_taker_fallback_s`` seconds, then crosses to taker
+        if unfilled. Operator-controlled compromise.
+
+    Default is ``taker`` so behaviour at switchover is bit-identical
+    to today. Override via ``CHILI_FAST_PATH_EXECUTION_MODE``."""
+
+    cost_aware_maker_fee_bps: float = 40.0
+    """Coinbase Advanced Trade **maker** fee, per-side, in bps. Default
+    is **40 bps** = retail volume tier 1 maker, per the same fee schedule
+    as the taker fee above. Maker rebate eligibility (POST_ONLY orders
+    that don't cross) can effectively bring this to 0-10 bps in
+    practice, but the worst-case retail tier 1 maker is the safe
+    default for the cost-aware gate.
+
+    The cost-aware gate uses this when ``execution_mode == 'maker_only'``
+    or ``'maker_first_then_taker'``; uses ``cost_aware_taker_fee_bps``
+    otherwise. Override via ``CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS``.
+    Reference values: tier 1 = 40, tier 2 = 25, tier 3 = 15, tier 4 = 8,
+    tier 5 = 6, tier 6 = 4, tier 7 = 0, tier 8 = 0, tier 9 = 0
+    (rebate-eligible at higher tiers; check the live schedule for the
+    operator's account)."""
+
+    maker_cancel_on_timeout_s: int = 10
+    """Cancel a resting maker order after this many seconds if unfilled.
+    The trade-off: longer = higher fill rate but more adverse-selection
+    risk; shorter = lower fill rate but cleaner signal. 10s is a
+    starting point per the alpha-replay's mean signal half-life;
+    operators tune via ``CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S``."""
+
+    maker_first_taker_fallback_s: int = 5
+    """Under ``execution_mode='maker_first_then_taker'``, after this
+    many seconds with no fill, cancel the maker order and place a
+    taker (market) order. Default 5s -- shorter than
+    ``maker_cancel_on_timeout_s`` because the fallback path commits to
+    paying the taker fee, so the operator wants the maker chance brief.
+    Override via ``CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S``."""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -221,6 +264,16 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED", False),
         cost_aware_taker_fee_bps=_env_float(
             "CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS", 60.0),
+        # f-fastpath-maker-only (2026-05-08)
+        execution_mode=(
+            os.environ.get("CHILI_FAST_PATH_EXECUTION_MODE") or "taker"
+        ).strip().lower(),
+        cost_aware_maker_fee_bps=_env_float(
+            "CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS", 40.0),
+        maker_cancel_on_timeout_s=_env_int(
+            "CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S", 10),
+        maker_first_taker_fallback_s=_env_int(
+            "CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S", 5),
     )
 
 

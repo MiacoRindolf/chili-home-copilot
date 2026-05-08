@@ -113,12 +113,32 @@ def _sharpe_like(mean_return: float, stdev: float) -> float | None:
 
 def _fetch_bucket_rows(
     engine: Engine, *, ticker: str, alert_type: str, bucket: str,
+    table: str = "fast_signal_decay",
 ) -> list[dict[str, Any]]:
-    """All horizon rows for one (ticker, alert_type, bucket) tuple."""
-    sql = text("""
+    """All horizon rows for one (ticker, alert_type, bucket) tuple.
+
+    f-fastpath-maker-only (2026-05-08): the ``table`` parameter
+    selects between the two decay tables:
+
+      * ``fast_signal_decay`` (default) -- no-friction decay; assumes
+        immediate fill at best price. Used by taker-mode gates.
+      * ``fast_signal_decay_maker_filled`` -- adverse-selection-aware
+        decay; only counts events where a maker order WOULD have
+        filled. Used by maker-only gates so the cost-bar check is
+        against the right realized distribution.
+
+    The SQL is parameterized via f-string interpolation rather than a
+    bound parameter because Postgres doesn't accept bound parameters
+    for table names. Caller is responsible for passing only the two
+    allow-listed values; ``gates.py`` enforces this.
+    """
+    if table not in ("fast_signal_decay", "fast_signal_decay_maker_filled"):
+        # Defensive: never trust caller-provided strings as raw SQL.
+        raise ValueError(f"unsupported decay table: {table!r}")
+    sql = text(f"""
         SELECT horizon_s, sample_count, mean_return, m2_return,
                realized_validation_count, realized_validation_residual
-        FROM fast_signal_decay
+        FROM {table}
         WHERE ticker = :t
           AND alert_type = :at
           AND score_bucket = :sb

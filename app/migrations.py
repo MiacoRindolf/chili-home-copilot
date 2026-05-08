@@ -14764,6 +14764,110 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_232_fast_path_maker_only(conn) -> None:
+    """f-fastpath-maker-only (2026-05-08).
+
+    Adds two tables for the maker-only execution mode:
+
+    ``fast_path_maker_attempts`` -- per-attempt audit row recording
+    every limit-order placement under ``execution_mode='maker_only'``
+    (or ``'maker_first_then_taker'`` while still in the maker leg). One
+    row per placement, updated when the order fills / cancels /
+    expires. ``fill_outcome`` CHECK-constrained to
+    {'filled', 'cancelled', 'partial', 'replaced', 'rejected'}.
+
+    ``fast_signal_decay_maker_filled`` -- adverse-selection-aware
+    decay table. The existing ``fast_signal_decay`` assumes immediate
+    fill at best price; for maker-only the realized fill set is
+    biased toward adverse selection (price came TO the limit, often
+    because someone aggressive ate through it). A separate decay table
+    that only records events where the maker order WOULD have filled
+    keeps the calibration honest. Same Welford schema as
+    ``fast_signal_decay`` so the existing reader patterns transfer.
+
+    Idempotent: ``CREATE TABLE IF NOT EXISTS`` + ``CREATE INDEX IF NOT
+    EXISTS`` + DO-block existence guard for the CHECK constraint.
+    Purely additive -- no destructive ALTERs.
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fast_path_maker_attempts (
+            id                       BIGSERIAL PRIMARY KEY,
+            alert_id                 BIGINT NULL,
+            ticker                   VARCHAR(32) NOT NULL,
+            side                     VARCHAR(8) NOT NULL,
+            limit_price              DOUBLE PRECISION NOT NULL,
+            placed_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            filled_at                TIMESTAMP NULL,
+            cancelled_at             TIMESTAMP NULL,
+            final_price              DOUBLE PRECISION NULL,
+            fill_outcome             VARCHAR(16) NULL,
+            time_to_fill_ms          INTEGER NULL,
+            spread_at_placement_bps  DOUBLE PRECISION NULL,
+            spread_at_fill_bps       DOUBLE PRECISION NULL,
+            mid_drift_bps            DOUBLE PRECISION NULL,
+            broker_order_id          VARCHAR(128) NULL,
+            execution_mode           VARCHAR(32) NOT NULL DEFAULT 'maker_only',
+            details_json             JSONB NULL
+        )
+    """))
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'fast_path_maker_attempts_fill_outcome_check'
+            ) THEN
+                ALTER TABLE fast_path_maker_attempts
+                    ADD CONSTRAINT fast_path_maker_attempts_fill_outcome_check
+                    CHECK (fill_outcome IS NULL OR fill_outcome IN (
+                        'filled', 'cancelled', 'partial', 'replaced', 'rejected'
+                    ));
+            END IF;
+        END$$;
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_path_maker_attempts_ticker_placed
+            ON fast_path_maker_attempts (ticker, placed_at DESC)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_path_maker_attempts_outcome_placed
+            ON fast_path_maker_attempts (fill_outcome, placed_at DESC)
+            WHERE fill_outcome IS NOT NULL
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_path_maker_attempts_alert
+            ON fast_path_maker_attempts (alert_id)
+            WHERE alert_id IS NOT NULL
+    """))
+
+    # Adverse-selection-aware decay table. Mirrors fast_signal_decay's
+    # Welford schema so the existing _fetch_bucket_rows / calibration
+    # patterns translate by parameterizing the table name.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fast_signal_decay_maker_filled (
+            id                            BIGSERIAL PRIMARY KEY,
+            ticker                        VARCHAR(32) NOT NULL,
+            alert_type                    VARCHAR(64) NOT NULL,
+            score_bucket                  VARCHAR(8) NOT NULL,
+            horizon_s                     INTEGER NOT NULL,
+            sample_count                  INTEGER NOT NULL DEFAULT 0,
+            mean_return                   DOUBLE PRECISION NOT NULL DEFAULT 0,
+            m2_return                     DOUBLE PRECISION NOT NULL DEFAULT 0,
+            realized_validation_count     INTEGER NOT NULL DEFAULT 0,
+            realized_validation_residual  DOUBLE PRECISION NULL,
+            updated_at                    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fast_signal_decay_maker_filled_unique
+                UNIQUE (ticker, alert_type, score_bucket, horizon_s)
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_signal_decay_maker_filled_lookup
+            ON fast_signal_decay_maker_filled
+                (ticker, alert_type, score_bucket, horizon_s)
+    """))
+    conn.commit()
+
+
 def _migration_231_fast_path_universe(conn) -> None:
     """f-fastpath-universe-rotation (2026-05-07).
 
@@ -15651,6 +15755,8 @@ MIGRATIONS = [
      _migration_230_exit_parity_metric_v2),
     ("231_fast_path_universe",
      _migration_231_fast_path_universe),
+    ("232_fast_path_maker_only",
+     _migration_232_fast_path_maker_only),
 ]
 
 

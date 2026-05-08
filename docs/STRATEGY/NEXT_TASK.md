@@ -1,6 +1,6 @@
 # NEXT_TASK: f-fastpath-maker-only
 
-STATUS: PENDING
+STATUS: DONE
 
 **Re-promoted 2026-05-08** after `f-fastpath-rotator-coinbase-fixes-bundle` shipped (commit `727456e`). The rotator is now functional in HEAD; the deploy-side verification is operator-track. This brief lays the maker-only execution path so it's ready when the rotator's shadow rows accumulate.
 
