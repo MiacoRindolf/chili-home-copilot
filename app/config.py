@@ -2286,6 +2286,20 @@ class Settings(BaseSettings):
         default=2,
         validation_alias=AliasChoices("CHILI_RECONCILE_PARTIAL_LIST_STREAK_MIN"),
     )
+    # f-phase-e-revert-and-bracket-writer-crash-fix (2026-05-08):
+    # cooldown in seconds applied to a bracket_intent after ANY
+    # exception (not just broker terminal-reject) raised inside
+    # place_missing_stop. The active crash loop on ADA/SOL exposed
+    # that the existing terminal-reject cooldown only fires on known
+    # broker-side reject codes; code bugs (e.g. IndexError inside the
+    # broker SDK from get_instruments_by_symbols('ADA')[0]) did NOT
+    # arm the cooldown and re-fired every 60s sweep. Default 300s.
+    chili_bracket_writer_exception_cooldown_secs: int = Field(
+        default=300,
+        validation_alias=AliasChoices(
+            "CHILI_BRACKET_WRITER_EXCEPTION_COOLDOWN_SECS"
+        ),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

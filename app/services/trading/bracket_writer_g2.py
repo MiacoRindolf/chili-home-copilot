@@ -158,6 +158,40 @@ def _arm_reject_cooldown(bracket_intent_id: int) -> None:
     )
 
 
+# f-phase-e-revert-and-bracket-writer-crash-fix (2026-05-08):
+# per-intent cooldown after ANY exception inside place_missing_stop.
+# The existing _intent_reject_cooldown only fires on known broker-
+# side reject codes; code bugs (IndexError inside rh.orders for
+# crypto tickers, etc.) did NOT arm any cooldown and re-fired every
+# 60s sweep. Active crash loop on ADA/SOL since 2026-05-09 01:57 UTC
+# was the audit fingerprint. Settings-tunable via
+# CHILI_BRACKET_WRITER_EXCEPTION_COOLDOWN_SECS (default 300).
+_intent_exception_cooldown: dict[int, float] = {}
+
+
+def _exception_cooldown_secs() -> int:
+    """Read at call-time so env overrides take effect on next sweep."""
+    return int(
+        getattr(settings, "chili_bracket_writer_exception_cooldown_secs", 300)
+    )
+
+
+def _is_in_exception_cooldown(bracket_intent_id: int) -> bool:
+    until = _intent_exception_cooldown.get(int(bracket_intent_id))
+    if until is None:
+        return False
+    if time.time() >= until:
+        _intent_exception_cooldown.pop(int(bracket_intent_id), None)
+        return False
+    return True
+
+
+def _arm_exception_cooldown(bracket_intent_id: int) -> None:
+    _intent_exception_cooldown[int(bracket_intent_id)] = (
+        time.time() + _exception_cooldown_secs()
+    )
+
+
 # FIX 53 (2026-05-01) — post-placement cooldown.
 #
 # When the broker accepts a stop placement (returns ok=true with an
@@ -912,6 +946,23 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
+    # f-phase-e-revert-and-bracket-writer-crash-fix (2026-05-08):
+    # short-circuit if this intent had ANY exception in the last
+    # _exception_cooldown_secs() seconds. Sits before the FIX 52
+    # reject-cooldown so a code-bug crash doesn't even attempt to
+    # re-evaluate the prior reject state.
+    if _is_in_exception_cooldown(bracket_intent_id):
+        logger.info(
+            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+            "ticker=%s reason=in_exception_cooldown",
+            bracket_intent_id, ticker,
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False,
+            reason="in_exception_cooldown",
+            broker_source=broker_source, ticker=ticker,
+        )
+
     # FIX 52 (2026-05-01) — short-circuit if this intent had a
     # terminal-class rejection recently. See module docstring.
     if _is_in_reject_cooldown(bracket_intent_id):
@@ -961,34 +1012,45 @@ def place_missing_stop(
         )
 
     # audit-unsupported-crypto-prefilter (2026-05-04) — venue-capability
-    # gate before any broker call. ZEC-USD is the canonical case: an open
-    # Trade row with broker_source='robinhood' but ticker='ZEC-USD' (a
-    # crypto pair Robinhood doesn't list). Without this check, the writer
-    # routes to ``broker_service.place_sell_stop_loss_order``, which calls
+    # gate before any broker call. ZEC-USD was the original canonical
+    # case: an open Trade row with broker_source='robinhood' but
+    # ticker='ZEC-USD' (a crypto pair Robinhood doesn't list). Without
+    # this check, the writer routes to
+    # ``broker_service.place_sell_stop_loss_order``, which calls
     # ``rh.orders.order(...)`` -> ``get_instruments_by_symbols("ZEC")[0]``
     # -> ``IndexError: list index out of range`` (no equity instrument).
-    # The traceback storm fires every minute on the open ZEC-USD position.
-    # Static-whitelist filter routes the unsupported case to a clean
-    # SKIPPED audit row instead. Defense-in-depth: the existing post-call
-    # error handling at the autotrader stays in place for any future pair
-    # Robinhood lists that we haven't added to the whitelist yet.
+    #
+    # f-phase-e-revert-and-bracket-writer-crash-fix (2026-05-08):
+    # extended to refuse ALL crypto tickers, not just bases off the
+    # supported-trading whitelist. The 2026-05-09 01:57 UTC ADA/SOL
+    # crash loop showed that EVEN listed crypto bases (ADA / SOL are
+    # in ROBINHOOD_SUPPORTED_CRYPTO_BASES) blow up the same way: the
+    # equity-stop-loss path (`rh.orders.order(symbol='ADA', ...)`)
+    # asks for an EQUITY instrument record and Robinhood crypto bases
+    # have none, so `get_instruments_by_symbols('ADA')` returns [] and
+    # the [0] crashes. Listed-vs-unlisted is irrelevant; the equity
+    # API is the wrong primitive for ALL crypto. A future brief can
+    # wire the actual crypto stop-loss primitive
+    # (`rh.crypto.order_*`) and remove this guard, but until then the
+    # safe behaviour is to SKIPPED-audit and let an operator-side
+    # follow-up address the missing crypto stop coverage.
     _t_upper = (ticker or "").upper()
     if _t_upper.endswith("-USD"):
-        from .. import broker_service as _bs
-
-        base = _bs._to_crypto_base(ticker)
-        if not _bs.is_robinhood_supported_crypto(base):
-            logger.warning(
-                f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
-                "ticker=%s reason=venue_unsupported_crypto base=%s "
-                "(Robinhood does not trade this crypto pair; static whitelist)",
-                bracket_intent_id, ticker, base,
-            )
-            return WriterAction(
-                action="place_missing_stop", ok=False,
-                reason="venue_unsupported_crypto",
-                broker_source=broker_source, ticker=ticker,
-            )
+        logger.warning(
+            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+            "ticker=%s reason=venue_unsupported_crypto_path "
+            "(Robinhood crypto stop-loss is not supported via the equity "
+            "rh.orders.order primitive; the equity instrument lookup "
+            "returns [] for crypto bases and the SDK crashes on [0]). "
+            "Skipping placement; operator-side follow-up to wire a "
+            "crypto-native stop primitive when needed.",
+            bracket_intent_id, ticker,
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False,
+            reason="venue_unsupported_crypto_path",
+            broker_source=broker_source, ticker=ticker,
+        )
 
     # FIX 55 (2026-05-01) — covered-by-existing-sell pre-flight.
     #
@@ -1198,9 +1260,17 @@ def place_missing_stop(
             client_order_id=client_oid,
         )
     except Exception as exc:
+        # f-phase-e-revert-and-bracket-writer-crash-fix (2026-05-08):
+        # arm a 5-min cooldown (settings-tunable) so a code-side crash
+        # like the ADA/SOL IndexError doesn't loop at sweep cadence.
+        # The existing FIX 52 reject-cooldown only arms on known
+        # terminal-class broker error strings; pure exceptions never
+        # made it into that path.
+        _arm_exception_cooldown(bracket_intent_id)
         logger.warning(
-            f"{BRACKET_WRITER_G2} place_missing_stop raised for intent=%s: %s",
-            bracket_intent_id, exc, exc_info=True,
+            f"{BRACKET_WRITER_G2} place_missing_stop raised for intent=%s: %s "
+            "(arming %ss exception cooldown)",
+            bracket_intent_id, exc, _exception_cooldown_secs(), exc_info=True,
         )
         _g2_event(
             db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
@@ -1208,6 +1278,7 @@ def place_missing_stop(
             event_type="g2_place_missing_stop_rejected", status="rejected",
             qty=float(local_quantity), stop_price=float(stop_price),
             error=str(exc)[:500],
+            extra={"exception_cooldown_armed_secs": _exception_cooldown_secs()},
         )
         return WriterAction(
             action="place_missing_stop", ok=False, reason="place_failed",

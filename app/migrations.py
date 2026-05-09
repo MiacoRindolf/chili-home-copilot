@@ -14764,6 +14764,34 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_234_crypto_broker_zero_qty_streak(conn) -> None:
+    """f-crypto-stale-trade-closer (2026-05-08, Phase E) -- RETAINED
+    POST-REVERT.
+
+    The Phase E feature commit (`c8aec21`) was reverted on
+    2026-05-08 (see `f-phase-e-revert-and-bracket-writer-crash-fix`)
+    because the heuristic took broker silent-empty as ground truth
+    and falsely cancelled 14 crypto trades. The migration ITSELF is
+    purely additive (an INTEGER NOT NULL DEFAULT 0 column) and is
+    intentionally retained so:
+
+      1. Deployed DBs that already applied this migration keep a
+         consistent ``schema_version`` registry entry.
+      2. A future, structurally-correct crypto-reconcile path can
+         re-use this column without needing a new migration ID.
+      3. Dropping the column is more risky than leaving it (any
+         stray reader would crash; the unused column is silent).
+
+    Idempotent: ``ADD COLUMN IF NOT EXISTS``.
+    """
+    conn.execute(text("""
+        ALTER TABLE trading_trades
+            ADD COLUMN IF NOT EXISTS crypto_broker_zero_qty_streak
+                INTEGER NOT NULL DEFAULT 0
+    """))
+    conn.commit()
+
+
 def _migration_233_reconcile_partial_list_streak(conn) -> None:
     """f-equity-reconcile-partial-list-guard (2026-05-08).
 
@@ -15789,6 +15817,8 @@ MIGRATIONS = [
      _migration_232_fast_path_maker_only),
     ("233_reconcile_partial_list_streak",
      _migration_233_reconcile_partial_list_streak),
+    ("234_crypto_broker_zero_qty_streak",
+     _migration_234_crypto_broker_zero_qty_streak),
 ]
 
 

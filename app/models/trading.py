@@ -77,6 +77,15 @@ class Trade(Base):
     broker_sync_missing_streak: int = Column(
         Integer, nullable=False, server_default="0", default=0,
     )
+    # f-crypto-stale-trade-closer (2026-05-08, mig 234) -- RETAINED
+    # POST-REVERT. The Phase E feature commit was reverted (see
+    # f-phase-e-revert-and-bracket-writer-crash-fix); this column is
+    # purely additive and retained so a future structurally-correct
+    # crypto-reconcile path can reuse it without a new migration ID.
+    # Currently unused -- never read or written by any production code.
+    crypto_broker_zero_qty_streak: int = Column(
+        Integer, nullable=False, server_default="0", default=0,
+    )
     # TCA: reference = signal/proposal limit at submit; slippage set when fill is known
     tca_reference_entry_price: Optional[float] = Column(Float, nullable=True)
     tca_entry_slippage_bps: Optional[float] = Column(Float, nullable=True)
