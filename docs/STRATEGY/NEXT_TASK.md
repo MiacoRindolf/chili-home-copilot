@@ -1,202 +1,179 @@
-# NEXT_TASK: f-phase-e-revert-and-bracket-writer-crash-fix
+# NEXT_TASK: f-prefilter-bypass-and-cooldown-investigation
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-Two tightly-scoped fixes that remove ACTIVE risks tonight without
-biting off the multi-week architectural rebuild:
+Tonight's bracket_writer crash fix (commit `3be20ea`) shipped with
+all tests passing but **doesn't take in the live system**. ADA-USD
+continues to fire `[broker] SELL_STOP exception for ADA: list
+index out of range` every minute post-restart, identical to
+pre-fix. CC's new prefilter at line 1037 of `bracket_writer_g2.py`
+IS in the loaded module — verified via `inspect.getsource()` —
+but ADA bypasses it. The new exception cooldown also doesn't
+engage.
 
-1. **Revert Phase E** (`f-crypto-stale-trade-closer`, commit `c8aec21`).
-   The brief was wrong — it took broker silent-empty as ground
-   truth. The disable flags in `.env` are belt-and-suspenders;
-   the actual code is still a footgun. One mechanical `git revert`.
+This brief is a focused diagnostic + fix.
 
-2. **Fix the `bracket_writer.place_missing_stop` IndexError**
-   (`error: "list index out of range"`). Active crash loop on
-   ADA/SOL since 2026-05-09 01:57 UTC. Every minute, two events:
-   `g2_place_missing_stop_submitting` then
-   `g2_place_missing_stop_rejected` with the exception. Real-money
-   risk: stops have NOT been placed for those crypto positions
-   for hours.
+The full brief is at
+`docs/STRATEGY/QUEUED/f-prefilter-bypass-and-cooldown-investigation.md`
+— read it first.
 
-The full root-cause analysis is at
-`docs/STRATEGY/QUEUED/f-crypto-reconcile-architectural-rebuild.md`
-(read for context). This brief addresses Anomalies 6 (crash) and
-also clears the codebase of Phase E (which the architectural
-rebuild calls out as "to be reverted, not extended").
+## Why now
 
-## Why now (algo-trader-architect framing)
+Real-money state unchanged from earlier today: the 12 open crypto
+positions have no working broker stops/targets. ADA's crash loop is
+log noise, not active capital loss — but it's burning RH API budget
+and cluttering the audit trail every 60s. More importantly, this
+indicates that tonight's fix has a hole that needs to close before
+relying on the cooldown infrastructure for any future safety work.
 
-Tonight's incident: Phase E falsely cancelled 14 crypto trades.
-None lost capital because the broker still held them and the
-revert-restore was within 22 minutes. But the architectural audit
-revealed Phase E is structurally unsafe AND there's an active code
-crash loop in the bracket writer that's been preventing stop
-placement on ADA/SOL.
+## Audit fingerprint (post-deploy)
 
-These two are the highest-leverage moves before the multi-week
-rebuild:
-* Removing Phase E source removes the chance of accidental
-  re-enable + repeat false-cancellation incident.
-* Fixing the IndexError lets the bracket-writer's recovery path
-  actually execute, restoring stop-loss protection on at least
-  ADA/SOL (the two trades with bracket_intents that the writer
-  is repeatedly trying to repair).
+```
+2026-05-09 02:50:24 UTC
+  [broker] stop_price rounded to broker tick: ticker=ADA 0.25663137 -> 0.2566
+  [broker] SELL_STOP submitting: ticker=ADA qty=3621.0 stopPrice=0.2566
+  [broker] SELL_STOP exception for ADA: list index out of range
+  [bracket_writer_g2] place_missing_stop broker error intent=237: list index out of range
+  reason=place_failed
 
-## Why this scope (vs. the alternatives)
+[same pattern at 02:51, 02:52, 02:53, ... every minute]
+```
 
-* **Vs. Phase 1 of the architectural rebuild (auth liveness +
-  typed result):** Phase 1 is a week of careful work that touches
-  many call sites. Doing it tired is a recipe for the same class
-  of mistake as Phase E. Defer to fresh-start tomorrow.
-* **Vs. Anomaly 4 (crypto exit_monitor deterministic close):**
-  Currently mitigated — auth is restored, exit_monitor's sells
-  are filling at the broker, broker_sync stale-close eventually
-  flips status='closed'. Loses exit_reason fidelity but doesn't
-  lose money. Schedule for the rebuild's Phase 2.
-* **Vs. Anomaly 5 (sync_pending_exit_order dead code):** Same
-  as Anomaly 4 — wired into Phase 2 of the rebuild.
-* **Vs. the missing bracket_intents on 10 crypto trades:**
-  Schedule for Phase 3 of the rebuild. Today's IndexError fix
-  doesn't address the missing-intents (those trades have NO
-  intents at all, so place_missing_stop wouldn't run for them
-  even with the crash fixed).
+Compare to TRUMP-USD which IS correctly skipped:
+```
+[bracket_writer_g2] place_missing_stop SKIPPED intent=235 ticker=TRUMP-USD
+   reason=venue_unsupported_crypto base=TRUMP (...static whitelist)
+```
+
+TRUMP's reason is `venue_unsupported_crypto` (the OLD whitelist
+filter, no `_path` suffix). The NEW prefilter reason
+`venue_unsupported_crypto_path` is what we expected ADA to hit but
+isn't appearing.
+
+## Hypotheses to test (in order)
+
+1. **Earlier exit before line 1037 prefilter**. There's a code path
+   between `decision.kind` check (line 943) and the new prefilter
+   that returns early for ADA but still routes to a downstream
+   broker call.
+2. **Second entry point**. Maybe `place_missing_stop` is called
+   from multiple sites and ONE bypasses the prefilter via a
+   different code path.
+3. **Ticker stripped before prefilter check**. The `[broker]` log
+   shows `ticker=ADA` (no `-USD`), so something strips the suffix.
+   If the prefilter runs after that stripping... actually the
+   prefilter is INSIDE place_missing_stop which receives the full
+   `ticker=ADA-USD`. But worth tracing.
+4. **`place_missing_stop_replacement` variant**. There's a function
+   at bracket_writer_g2.py around line 870 that may be a separate
+   crypto entry point lacking the prefilter.
 
 ## The change
 
-### Part 1: Revert Phase E
-
-```bash
-git revert c8aec21 --no-edit
-```
-
-Migration 234 (added `crypto_broker_zero_qty_streak` column)
-should remain — the column is additive, doesn't hurt anything,
-and a forward migration to drop a column is more risky than
-leaving it. Document in the revert commit message that mig 234
-is intentionally retained.
-
-`.env` disable flags can stay (idempotent if the code is gone)
-OR be removed — operator's choice. Recommend keeping them for
-forensic clarity ("Phase E was here").
-
-### Part 2: Fix `bracket_writer.place_missing_stop` IndexError
-
-**Step 1**: Find the IndexError site. Trigger a controlled crash
-in chili_test by calling `place_missing_stop` directly with the
-audit fingerprint (qty=3621, stop_price=0.25663137, ticker='ADA-USD',
-trade_id=1808 — but a chili_test seeded copy). Capture the full
-traceback from the exception.
-
-**Step 2**: Patch the IndexError site. Likely culprits:
-- `cost_bases[0]` without `if cost_bases:` check
-- `executions[0]` similar
-- A list-comprehension result indexed without bounds check
-
-**Step 3**: Add a 5-min cooldown after ANY exception (not just
-broker terminal-rejects). The current cooldown only fires on
-known-retryable broker errors; code bugs hammer in a tight
-loop. The cooldown should be:
-```python
-except Exception as e:
-    logger.exception("[bracket_writer_g2] place_missing_stop crashed: %s", e)
-    _set_reject_cooldown(intent_id, seconds=300, reason="exception_cooldown")
-    raise  # for the audit event to record
-```
-
-**Step 4**: Tests:
-- Reproduce the IndexError shape (mock the crashing branch to
-  return empty list).
-- Verify the patch returns a clean rejected-result with a
-  meaningful error string instead of "list index out of range."
-- Verify the 5-min cooldown is set.
+1. **Diagnostic step**: write a script that exercises the LIVE
+   `place_missing_stop` path with ADA's audit fingerprint. Compare
+   the result against the in-process direct-call result. If they
+   differ, there's a different entry point.
+2. **Fix the bypass**: either patch the bypassing code path to also
+   route through the prefilter, OR add a second prefilter at the
+   bypassing entry point.
+3. **Belt-and-suspenders**: add a defensive crypto check inside
+   `broker_service.place_sell_stop_loss_order` itself, so even if
+   the upstream prefilter is bypassed, the broker function refuses
+   crypto tickers up front. This is defence-in-depth.
+4. **Verify exception cooldown**: write a test that arms the
+   cooldown via a single direct call with a mocked broker that
+   raises, then verify a subsequent call returns
+   `reason=in_exception_cooldown` without invoking the broker.
+5. **Integration test (LIVE path)**: trigger the full chain from
+   `bracket_reconciliation_service` down to the broker call, and
+   assert the prefilter fires.
 
 ## Acceptance criteria
 
-1. Phase E feature commit (`c8aec21`) is reverted via
-   `git revert`. Migration 234 retained.
-2. The IndexError crash on `place_missing_stop` is patched with
-   bounds-checked indexing.
-3. A 5-min cooldown engages on any exception (not just broker
-   rejects).
-4. Tests for both:
-   - `tests/test_bracket_writer_place_missing_stop_resilience.py`
-     (or extend existing `tests/test_bracket_writer_g2.py`).
-5. Live verification:
-   - After deploy, watch ADA's `g2_place_missing_stop_submitting`
-     events for 10 min. Either successfully places a stop OR
-     fails with a meaningful broker-error reason (not "list index
-     out of range").
-   - Verify Phase E sweep is gone (`grep -r run_crypto_stale_trade_close
-     app/` returns zero).
-6. CC report at
-   `docs/STRATEGY/CC_REPORTS/2026-05-08_f-phase-e-revert-and-bracket-writer-crash-fix.md`.
+1. Diagnostic complete: identify which code path bypasses the
+   prefilter for ADA. Document in CC report.
+2. Fix the bypass.
+3. Defence-in-depth: `broker_service.place_sell_stop_loss_order`
+   refuses crypto tickers up front (returns a meaningful
+   error like `crypto_ticker_unsupported_via_equity_primitive`).
+4. Verify the new exception cooldown ACTUALLY engages.
+5. Integration test in
+   `tests/test_bracket_writer_crash_loop_repro.py` — exercises
+   the FULL call chain, not just the helper functions.
+6. Live verification post-deploy: watch ADA's bracket_writer for
+   5 min. Either real stop placed (prefilter triggered correctly
+   logs `venue_unsupported_crypto_path` via the bypass path) OR a
+   clean `in_exception_cooldown` SKIP after the first crash. NOT
+   another `list index out of range` cycle.
+7. CC report at
+   `docs/STRATEGY/CC_REPORTS/2026-05-08_f-prefilter-bypass-and-cooldown-investigation.md`.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `app/services/trading/bracket_writer_g2.py:876+`
-  (`place_missing_stop`). Patch the IndexError site only.
-- Existing reject-cooldown infrastructure in `bracket_writer_g2`.
-  Extend to fire on `except Exception` not just on broker-reject
-  branch.
-- Equity book (Phases A+B+C) untouched.
+- `app/services/trading/bracket_writer_g2.py` — add bypass-path
+  patches; the new prefilter and cooldown helpers stay.
+- `app/services/trading/bracket_reconciliation_service.py` — audit
+  for any other entry to `place_missing_stop` or its variants.
+- `app/services/broker_service.place_sell_stop_loss_order` — add
+  defensive crypto check at the BROKER layer too as a backstop.
 
 ## Constraints / do not touch
 
 - **Hard Rule 1**: live-placement safety belts unchanged.
 - **Hard Rule 5**: prediction-mirror authority untouched.
-- **Don't touch the equity-side reconciler.**
-- **Don't add Phase E logic back.** The revert removes the file;
-  don't re-introduce the heuristic anywhere else.
-- **Don't widen scope to the architectural rebuild.** That's a
-  separate brief.
-- **No magic numbers**: cooldown duration lifts from settings.
-- **Edit-tool truncation discipline (HARD).** `bracket_writer_g2.py`
-  is large.
+- **Don't revert tonight's commits.** The Phase E removal and
+  cooldown-helper code are correct; just need to fix the bypass.
+- **Edit-tool truncation discipline (HARD).**
 - **Tests use `_test`-suffixed DB.**
+- **No magic numbers.**
 
 ## Out of scope
 
-- Phase 1+ of the architectural rebuild
-  (`f-crypto-reconcile-architectural-rebuild`).
-- Anomaly 4 (crypto exit_monitor deterministic close).
-- Anomaly 5 (`sync_pending_exit_order` wiring).
-- Missing bracket_intents on 10 crypto trades.
-- Auth-cache liveness (Anomaly 1).
+- Architectural rebuild Phase 1 (auth liveness).
+- Wiring crypto-native stop-loss primitive (`rh.crypto.order_*`).
+  Tonight's brief just makes ADA cleanly skip instead of crashing.
+- Any of the other queued briefs.
 
 ## Sequencing
 
-1. Truncation scan on `bracket_writer_g2.py`.
-2. **Part 1**: `git revert c8aec21` with documented commit
-   message. Verify imports don't break elsewhere.
-3. **Part 2**: Reproduce IndexError; patch; add tests; verify.
-4. Commit + push + CC report + mark NEXT_TASK DONE.
+1. Truncation scan.
+2. Diagnostic: direct-call repro vs live-path observation.
+3. Fix the bypass.
+4. Add belt-and-suspenders backstop in `broker_service`.
+5. Verify exception cooldown engagement.
+6. Add integration test (LIVE path).
+7. Commit + push + CC report + mark NEXT_TASK DONE.
 
 ## Operator-side after CC ships
 
 1. Pull + truncation scan.
 2. `docker compose up -d --force-recreate chili autotrader-worker
-   scheduler-worker`.
-3. Watch ADA's bracket_writer activity for 10 min. Either a real
-   stop gets placed (or a real broker rejection surfaces) — not
-   another IndexError.
-4. Optionally remove Phase E disable flags from `.env` (the code
-   is gone, the flags are no-ops now).
+   scheduler-worker broker-sync-worker`.
+3. Watch ADA's bracket_writer activity for 5 min. Expected: either
+   NO `[broker] SELL_STOP exception for ADA` lines OR ONE crash
+   followed by `in_exception_cooldown` SKIP messages for the next
+   ~5 min.
 
 ## Rollback plan
 
-`git revert` of this commit re-introduces both Phase E AND the
-IndexError. Don't do it.
+`git revert` the commit. The bypass continues; same as the current
+state.
 
 ## What CC should do if it's unsure
 
-1. **If the IndexError site is non-obvious**, surface in the CC
-   report with the full traceback and propose a fix the operator
-   can review before commit.
-2. **If `git revert c8aec21` produces conflicts** (e.g., because
-   later commits touched related files), surface and request
-   guidance — don't force-resolve.
-3. **If migration 234 retention causes ORM warnings** (e.g.,
-   the column is on the model but the writer is gone), strip the
-   ORM column reference too — but keep the DB column.
+1. **If the bypass path can't be located via grep + log tracing**,
+   add a `logger.debug` line at every branch point in
+   `place_missing_stop` and observe ONE cycle. The branch ADA
+   takes will be obvious.
+2. **If the IndexError is genuinely deep in third-party
+   `robin_stocks` code**, the broker_service backstop becomes the
+   primary fix; the bracket_writer prefilter becomes
+   defence-in-depth.
+3. **If the integration test setup is too complex** (e.g., requires
+   mocking the entire broker stack), surface in CC report and
+   propose a smaller-scope test that exercises the
+   bracket_reconciliation → bracket_writer → broker_service chain
+   with a mock broker that raises.
