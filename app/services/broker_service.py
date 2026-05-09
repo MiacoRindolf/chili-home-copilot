@@ -2996,6 +2996,37 @@ def place_sell_stop_loss_order(
     if quantity is None or float(quantity) <= 0:
         return {"ok": False, "error": f"invalid quantity: {quantity!r}"}
 
+    # f-prefilter-bypass-and-cooldown-investigation (2026-05-08):
+    # defence-in-depth backstop for the ADA/SOL crash loop. The
+    # bracket_writer_g2 prefilter at place_missing_stop already
+    # refuses crypto, but a stale-container deploy (or any other
+    # bypass path that lands here) was still hitting the IndexError
+    # inside rh.orders.order -> get_instruments_by_symbols('ADA')[0].
+    # Refusing here too means the equity primitive cannot reach the
+    # SDK for ANY crypto base regardless of upstream gating.
+    #
+    # Detection: if the (already-stripped) ticker matches a known
+    # Robinhood crypto base, refuse. Robinhood's equity instruments
+    # endpoint returns [] for crypto bases, so the [0] indexing inside
+    # the SDK crashes; refusing here is the surgical alternative to
+    # patching third-party code.
+    base_for_check = (ticker or "").strip().upper()
+    if (
+        base_for_check
+        and base_for_check in ROBINHOOD_SUPPORTED_CRYPTO_BASES
+    ):
+        logger.warning(
+            "[broker] SELL_STOP refused: ticker=%s is a Robinhood crypto "
+            "base; the equity rh.orders.order primitive crashes inside "
+            "get_instruments_by_symbols('%s')[0]. Use a crypto-native "
+            "stop primitive when one is wired.",
+            ticker, base_for_check,
+        )
+        return {
+            "ok": False,
+            "error": "crypto_ticker_unsupported_via_equity_primitive",
+        }
+
     try:
         import robin_stocks.robinhood as rh
         session_kwargs = _rh_order_session_kwargs(

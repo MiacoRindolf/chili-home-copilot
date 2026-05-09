@@ -140,6 +140,41 @@ def _is_terminal_reject(error_text: str | None) -> bool:
     return any(pat in needle for pat in _TERMINAL_REJECT_PATTERNS)
 
 
+# f-prefilter-bypass-and-cooldown-investigation (2026-05-08):
+# substrings that indicate an upstream code bug surfaced via the
+# broker layer's `except Exception` -> `{"ok": False, "error": ...}`
+# packaging path. The 2026-05-09 ADA/SOL crash loop showed the
+# exception cooldown DIDN'T arm for these because the IndexError
+# never escaped the broker call -- it was caught and returned as a
+# normal-looking ok=False reject. Matching on the error string
+# instead lets the bracket_writer arm the cooldown anyway.
+#
+# Conservative: only patterns that are unambiguously crash signatures
+# (Python exception class names + the canonical IndexError text), not
+# generic words like "error" or "fail" that could match legitimate
+# broker rejects.
+_CODE_BUG_ERROR_PATTERNS = (
+    "list index out of range",
+    "indexerror",
+    "typeerror",
+    "attributeerror",
+    "keyerror",
+    "nameerror",
+    "valueerror",
+    "crypto_ticker_unsupported_via_equity_primitive",
+)
+
+
+def _is_code_bug_error(error_text: str | None) -> bool:
+    """Return True if the broker error string looks like a swallowed
+    upstream exception (IndexError caught and packaged as ok=False).
+    """
+    if not error_text:
+        return False
+    needle = str(error_text).lower()
+    return any(pat in needle for pat in _CODE_BUG_ERROR_PATTERNS)
+
+
 def _is_in_reject_cooldown(bracket_intent_id: int) -> bool:
     """Return True if this intent is within the terminal-reject cooldown."""
     until = _intent_reject_cooldown.get(int(bracket_intent_id))
@@ -1287,6 +1322,15 @@ def place_missing_stop(
     if not place_res.get("ok"):
         err_text = str(place_res.get("error") or "")
         terminal = _is_terminal_reject(err_text)
+        # f-prefilter-bypass-and-cooldown-investigation (2026-05-08):
+        # detect code-bug-class errors that the broker layer caught
+        # and packaged as `ok=False` instead of letting the exception
+        # escape (the exact bypass that prevented the prior
+        # exception cooldown from arming on the ADA/SOL crash). Any
+        # such match arms the same exception cooldown so the next
+        # 60s sweep skips for `_exception_cooldown_secs()` instead of
+        # re-firing.
+        code_bug = _is_code_bug_error(err_text)
         if terminal:
             # Phase 3.3 (2026-05-01): persist the terminal reject in the
             # state machine, not just the in-process dict. The reconciler
@@ -1310,6 +1354,16 @@ def place_missing_stop(
                 _TERMINAL_REJECT_COOLDOWN_SECS, bracket_intent_id, ticker,
                 err_text[:200],
             )
+        elif code_bug:
+            _arm_exception_cooldown(bracket_intent_id)
+            logger.warning(
+                f"{BRACKET_WRITER_G2} place_missing_stop broker error matches "
+                "code-bug class (likely an upstream IndexError caught and "
+                "packaged as ok=False); arming %ss exception cooldown "
+                "intent=%s ticker=%s err=%s",
+                _exception_cooldown_secs(), bracket_intent_id, ticker,
+                err_text[:200],
+            )
         else:
             logger.warning(
                 f"{BRACKET_WRITER_G2} place_missing_stop broker error intent=%s: %s",
@@ -1321,7 +1375,10 @@ def place_missing_stop(
             event_type="g2_place_missing_stop_rejected", status="rejected",
             qty=float(local_quantity), stop_price=float(stop_price),
             error=err_text[:500],
-            extra={"terminal_reject": terminal},
+            extra={
+                "terminal_reject": terminal,
+                "code_bug_cooldown_armed": code_bug,
+            },
         )
         return WriterAction(
             action="place_missing_stop", ok=False,
