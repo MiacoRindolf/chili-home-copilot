@@ -77,16 +77,6 @@ class Trade(Base):
     broker_sync_missing_streak: int = Column(
         Integer, nullable=False, server_default="0", default=0,
     )
-    # f-crypto-stale-trade-closer (2026-05-08, mig 234, Phase E):
-    # consecutive bracket-reconciler sweeps in which the broker reported
-    # zero quantity for this crypto trade. Resets to 0 when the position
-    # reappears. The crypto-stale sweep authorizes a close only when
-    # the streak crosses CHILI_CRYPTO_BROKER_ZERO_QTY_STREAK_MIN, so a
-    # single truncated get_crypto_positions() response can't manufacture
-    # a phantom-cancel. Crypto-only — equity uses broker_sync_missing_streak.
-    crypto_broker_zero_qty_streak: int = Column(
-        Integer, nullable=False, server_default="0", default=0,
-    )
     # TCA: reference = signal/proposal limit at submit; slippage set when fill is known
     tca_reference_entry_price: Optional[float] = Column(Float, nullable=True)
     tca_entry_slippage_bps: Optional[float] = Column(Float, nullable=True)

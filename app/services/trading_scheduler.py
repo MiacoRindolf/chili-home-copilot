@@ -564,34 +564,12 @@ def _run_bracket_reconciliation_job():
         from ..db import SessionLocal
         from .trading.bracket_reconciliation_service import (
             broker_manager_view_fn,
-            run_crypto_stale_trade_close,
             run_reconciliation_sweep,
         )
 
         db = SessionLocal()
         try:
             summary = run_reconciliation_sweep(db, broker_view_fn=broker_manager_view_fn)
-            # f-crypto-stale-trade-closer (2026-05-08, Phase E): crypto-
-            # side sweep rides the same ~60s cadence as the bracket
-            # reconciler. Wrapped in try/except so a sweep failure
-            # doesn't poison the bracket-reconciliation log path.
-            try:
-                crypto_stale = run_crypto_stale_trade_close(db)
-                if crypto_stale.get("layer1_cancelled") or crypto_stale.get(
-                    "layer2_closed"
-                ):
-                    logger.info(
-                        "[scheduler] crypto_stale_trade sweep closed "
-                        "layer1=%d layer2=%d ids=%s",
-                        crypto_stale.get("layer1_cancelled", 0),
-                        crypto_stale.get("layer2_closed", 0),
-                        crypto_stale.get("trade_ids", []),
-                    )
-            except Exception as _cs_err:
-                logger.warning(
-                    "[scheduler] crypto_stale_trade sweep failed: %s",
-                    _cs_err, exc_info=True,
-                )
             logger.info(
                 "[scheduler] bracket_reconciliation sweep done: "
                 "trades=%d brackets=%d agree=%d drift=%d took_ms=%.1f",
