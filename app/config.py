@@ -2327,6 +2327,26 @@ class Settings(BaseSettings):
             "CHILI_BRAIN_DISPATCH_MARKET_SNAPSHOTS_INTERVAL_SECS"
         ),
     )
+    # f-coinbase-autotrader-enablement-phase-3-broker-selector (2026-05-09):
+    # GLOBAL kill-switch for the autotrader entry path. When True, the
+    # broker_selector returns venue='skip' with reason='kill_switch_global'
+    # for every alert -- both venues halt. Operator-pulled lever; the
+    # in-process governance.is_kill_switch_active() is the second
+    # (process-local) trip layer. Multi-process visibility comes from
+    # the env var (each worker reads on next round).
+    chili_autotrader_kill_switch: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_KILL_SWITCH"),
+    )
+    # Phase 3 LIVE flag for Coinbase routing. Default OFF: when the
+    # selector returns venue='coinbase', the autotrader writes a
+    # shadow-log row to trading_venue_routing_log but DOES NOT call the
+    # broker. Flip to True to enable real Coinbase orders. Operator
+    # approval required per Phase 3 sequencing step 9.
+    chili_coinbase_autotrader_live: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_COINBASE_AUTOTRADER_LIVE"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

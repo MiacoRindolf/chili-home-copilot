@@ -1084,6 +1084,101 @@ def _execute_broker_buy(
             return None
         return res
 
+    # f-coinbase-autotrader-enablement-phase-3-broker-selector
+    # (2026-05-09): broker selector. RH path is BYTE-IDENTICAL
+    # post-Phase-3; the selector decides which venue to use, then
+    # either falls through to the existing RH code (decision.venue ==
+    # 'rh') or routes to Coinbase (decision.venue == 'coinbase',
+    # gated on CHILI_COINBASE_AUTOTRADER_LIVE — default OFF = shadow-
+    # log only). Skip decisions audit + return early.
+    from .broker_selector import select_venue
+    _venue_decision = select_venue(ticker=alert.ticker)
+
+    if _venue_decision.venue == "skip":
+        _selector_reason = f"selector:{_venue_decision.reason}"
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="blocked",
+            reason=_selector_reason,
+            rule_snapshot=snap,
+            llm_snapshot=llm_snap,
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(
+            out, kind="blocked", reason=_selector_reason, alert=alert,
+        )
+        return None
+
+    if _venue_decision.venue == "coinbase":
+        # Phase 3: Coinbase routing is SHADOW-LOG only by default.
+        # Operator flips CHILI_COINBASE_AUTOTRADER_LIVE=1 once
+        # Phase 4 bracket writer + Phase 5 cost-aware sizing are
+        # ready. The shadow-log path audits the routing decision so
+        # the operator can grep "would have routed Coinbase" rows
+        # without any broker call risk.
+        from ...config import settings as _cfg_p3
+        _coinbase_live = bool(
+            getattr(_cfg_p3, "chili_coinbase_autotrader_live", False)
+        )
+        if not _coinbase_live:
+            _shadow_reason = "selector:coinbase_routing_shadow_log"
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="blocked", reason=_shadow_reason,
+                rule_snapshot=snap, llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="blocked", reason=_shadow_reason, alert=alert,
+            )
+            logger.info(
+                "[autotrader] selector routed alert ticker=%s to Coinbase "
+                "but CHILI_COINBASE_AUTOTRADER_LIVE=0; SHADOW-LOG only "
+                "(reason=%s)",
+                alert.ticker, _venue_decision.reason,
+            )
+            return None
+
+        cb_ad = get_adapter("coinbase")
+        if cb_ad is None or not cb_ad.is_enabled():
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="blocked", reason="coinbase_adapter_off",
+                rule_snapshot=snap, llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="blocked", reason="coinbase_adapter_off",
+                alert=alert,
+            )
+            return None
+        cb_res = cb_ad.place_market_order(
+            product_id=alert.ticker,
+            side="buy",
+            base_size=str(qty),
+            client_order_id=client_order_id,
+        )
+        if not cb_res.get("ok"):
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="blocked",
+                reason=f"broker:{cb_res.get('error')}",
+                rule_snapshot=snap, llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="blocked",
+                reason=f"broker:{cb_res.get('error')}", alert=alert,
+            )
+            return None
+        return cb_res
+
+    # decision.venue == 'rh' -- fall through to the existing RH path
+    # BYTE-IDENTICAL. The selector adds a pre-route hop but does NOT
+    # change any of the call args below; the RH adapter receives
+    # exactly the same arguments it did pre-Phase-3.
     ad = get_adapter("robinhood")
     if ad is None or not ad.is_enabled():
         _audit(
