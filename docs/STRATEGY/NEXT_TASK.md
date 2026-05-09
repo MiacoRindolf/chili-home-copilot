@@ -1,6 +1,6 @@
 # NEXT_TASK: f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
