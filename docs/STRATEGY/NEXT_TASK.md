@@ -1,6 +1,6 @@
 # NEXT_TASK: f-pattern-demote-sweep-wiring-fix
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
