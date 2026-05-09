@@ -1,178 +1,169 @@
-# NEXT_TASK: f-pattern-demote-sweep-wiring-fix
+# NEXT_TASK: f-pattern-pipeline-eligibility-audit
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-Re-wire `run_thin_evidence_demote` from the event-driven
-`_handle_execution_feedback_digest` (which fires only a few times
-per day in this operating state) into the per-cycle
-`run_brain_work_dispatch_round` loop (~75-90s cadence). Pattern
-585 was manually hand-kicked tonight via direct invocation;
-without the wiring fix, future thin-evidence patterns won't be
-auto-demoted on a meaningful timeline.
+Read-only research audit. **No code changes shipped from this brief.**
+
+Operator framing: "the recent crypto entries have been good so far,
+they have been up... I don't want you to mess up the current working
+system but just enhance it."
+
+The system is finding real edge today (DOT + SOL closed at target,
++$99.55 realized; 12 open crypto positions net up unrealized). The
+issue isn't quality — it's that the eligibility funnel is producing
+only one effective pattern (Reddit IBS mean reversion in two
+evidence cohorts: id=1011 + id=1016). The audit identifies WHY the
+funnel is narrow, then proposes additive enhancements as separate
+follow-up briefs — never gate-loosening.
 
 The full brief is at
-`docs/STRATEGY/QUEUED/f-pattern-demote-sweep-wiring-fix.md`
+`docs/STRATEGY/QUEUED/f-pattern-pipeline-eligibility-audit.md`
 — read it first.
 
-## Why now (algo-trader-architect framing)
+## Why now
 
-Phase D (`f-pattern-demote-on-thin-evidence`, commit `dfb39f0`)
-shipped earlier today. The sweep code is correct: 15 tests pass,
-hand-kick demoted pattern 585 cleanly. But the wiring depends on
-the brain-worker's `execution_feedback_digest` event, which fires
-on `live_trade_closed` triggers — sparse in current state (24h
-ledger showed 3 events).
+End-of-day 2026-05-08 brain_work_events 24h totals:
+- `backtest_completed: 268`
+- **`pattern_eligible_promotion: 0`**
 
-Real algo impact: when the next thin-evidence pattern gets
-promoted via `provisional_small_paths`, it won't auto-demote until
-either (a) live_trade_closed fires, or (b) operator runs a manual
-sweep. That's not the durable solution.
+268 backtests ran today; zero patterns crossed the eligibility bar.
+Either the gate is correctly tight (rejecting genuinely-poor
+candidates) or pathologically tight (rejecting good candidates).
+Without an audit we can't tell. The two scenarios call for
+different responses:
+- Correctly tight → expand discovery (broader universe,
+  multi-timeframe mining, additive enhancements)
+- Pathologically tight → fix the gate calibration
 
-**Why this is the right next move tonight:**
+This audit is the diagnostic that tells us which.
 
-- **Small scope** (~30–60 min CC). Late-night-friendly.
-- **Tightly-bounded surface** (`brain_work/dispatcher.py` +
-  optional gate flag). No multi-week architectural risk.
-- **Hard integration-verification gate** in acceptance
-  criteria — the lesson from tonight's three "tests-pass-but-
-  system-fails" instances bakes in here.
-- **Closes Phase D's intent.** Without this, Phase D is a
-  partial fix.
+## Why this scope
 
-## Why this scope (vs. the alternatives)
+* **Vs. Phase 1 of the architectural rebuild**: that's a week of
+  reconciler work; this is one read-only audit producing one
+  report.
+* **Vs. directly loosening the gate**: dangerous. Operator's
+  current trades work because the gate is tight. Don't loosen
+  blindly.
+* **Vs. directly expanding the universe**: tempting but blind —
+  if the gate is correctly tight, more universe = more rejected
+  candidates with no observable benefit. Audit FIRST.
+* **Vs. wiring f-pattern-oos-revalidation**: the natural next
+  brief if Section F surfaces it; depends on the audit data.
 
-* **Vs. architectural rebuild Phase 1** (auth liveness + typed
-  result): week of work touching many call sites. Doing tired is
-  exactly the recipe for tonight's failure modes. Defer to fresh
-  morning.
-* **Vs. `f-pdt-crypto-bypass-cleanup`** (hygiene): small but no
-  observable benefit. Less leverage.
-* **Vs. `f-autotrader-pdt-aware-exit-deferral`**: premise was
-  flawed; needs rewriting before it can ship.
-* **Vs. wiring `rh.crypto.order_*` for actual crypto stops**:
-  larger scope, real-money risk, NOT for tonight.
+## The change (audit produces report only)
 
-## The change
+Read-only SQL queries against `scan_patterns`, `brain_work_events`,
+and source-code reads of `learning.py` + `brain_work/dispatcher.py`.
 
-Per the queued brief
-(`docs/STRATEGY/QUEUED/f-pattern-demote-sweep-wiring-fix.md`):
+Six sections in the output report:
 
-1. Wire `run_thin_evidence_demote` into
-   `run_brain_work_dispatch_round` (the per-cycle dispatcher
-   loop in `app/services/trading/brain_work/dispatcher.py`).
-   Sweep runs once per round (~75-90s) regardless of
-   work-ledger state.
-2. Either remove the existing `_handle_execution_feedback_digest`
-   sweep call (single source of truth), OR gate it behind
-   `if not _PER_CYCLE_SWEEP_ENABLED:` so only one path fires.
-3. Wrap the new per-cycle call in `try/except` so a sweep
-   failure doesn't poison the round.
-4. Log demoted IDs at INFO level for grep visibility:
-   `[learning] thin_evidence sweep: demoted=N ids=[...]`.
+* **A**: gate-rejection telemetry — bucket the 268 backtests by
+  rejection reason. The dominant rejector is the smoking gun.
+* **B**: human calibration — sample 20 rejected patterns; algo-
+  trader read on whether each looks promotable. Tells us if the
+  gate is correctly or pathologically tight.
+* **C**: distribution audits — `evidence_count`, OOS-NULL count,
+  `lifecycle_stage` histogram, `promotion_gate_reasons` breakdown.
+* **D**: pipeline-cadence audits — when did mining last run, was
+  pattern_eligible_promotion always 0, etc.
+* **E**: universe + timeframe audit — what tickers + timeframes
+  are mined today; obvious gaps?
+* **F**: prioritized recommendations — ranked follow-up briefs
+  with scope + risk to existing-working-system + prerequisites.
 
-## Acceptance criteria (with integration-verification baked in)
+## Acceptance criteria
 
-1. Per-cycle hook fires on every `run_brain_work_dispatch_round`
-   invocation, NOT on `execution_feedback_digest` event.
-2. `_handle_execution_feedback_digest`'s sweep call removed OR
-   gated.
-3. Tests in `tests/test_pattern_demote_sweep_wiring.py`:
-   - **Helper-level**: dispatcher mocked, assert
-     `run_thin_evidence_demote` is called per round.
-   - **Helper-level**: sweep raises an exception, assert the
-     round still completes and other dispatch work runs.
-   - **INTEGRATION (LIVE PATH)**: seed a fresh thin-evidence
-     pattern in chili_test (4 trades / 25% WR / no OOS /
-     `provisional_small_paths`); call
-     `run_brain_work_dispatch_round` directly; assert the
-     pattern is `lifecycle_stage='challenged'` after the round
-     completes. NOT just `run_thin_evidence_demote(db)` in
-     isolation — the FULL CHAIN.
-4. Existing 15 thin-evidence-demote tests still pass.
-5. Live verification: post-deploy, watch brain-worker logs for
-   `[learning] thin_evidence sweep` INFO line at expected
-   cadence (~75-90s). Pattern 585 stays demoted.
-6. CC report at
-   `docs/STRATEGY/CC_REPORTS/2026-05-09_f-pattern-demote-sweep-wiring-fix.md`.
+1. Single report at
+   `docs/STRATEGY/CC_REPORTS/2026-05-09_f-pattern-pipeline-eligibility-audit.md`
+   with all six sections populated with concrete data.
+2. **NO code changes** shipped from this brief. Any
+   while-I'm-here fix temptations get surfaced in Section F as
+   recommendations, not commits.
+3. Report includes raw query SQL for each section so the operator
+   can re-run.
+4. Section F lists at least 3 prioritized follow-up briefs ranked
+   by risk-adjusted impact, each with explicit risk-to-existing-
+   system rating.
+5. No mutation of any pattern row, work_ledger event, or DB
+   state. Read-only.
 
-## Brain integration (reuse, don't rewrite)
+## Brain integration (read-only)
 
-- `app/services/trading/brain_work/dispatcher.py` —
-  `run_brain_work_dispatch_round`. Add the sweep call after the
-  existing fanout, in try/except.
-- `app/services/trading/learning.py:run_thin_evidence_demote` —
-  unchanged. Already idempotent and cheap.
-- `app/services/trading/brain_work/dispatcher.py:_handle_execution_feedback_digest`
-  — remove the sweep call OR gate it behind the new flag.
+- `scan_patterns` — direct SQL.
+- `brain_work_events` — direct SQL (CC's tonight: this table is
+  named `brain_work_events`, not `work_ledger`; verified earlier
+  today).
+- `app/services/trading/learning.py` — read for gate thresholds.
+- `app/services/trading/brain_work/dispatcher.py` — read for
+  eligibility-promotion flow.
 
 ## Constraints / do not touch
 
 - **Hard Rule 1**: live-placement safety belts unchanged.
 - **Hard Rule 5**: prediction-mirror authority untouched.
-- **Don't touch the sweep predicate or the SQL UPDATE.** They're
-  correct; only the wiring is broken.
-- **Don't touch the four threshold constants.**
-- **Don't widen scope** to the architectural rebuild or to other
-  Phase 2/3/4 work.
-- **No magic numbers** — dispatcher cadence stays whatever the
-  existing loop gives.
+- **NO CODE CHANGES.** Read-only research.
+- **DO NOT LOOSEN ANY GATE THRESHOLD.** Current gates produce the
+  trades that are working today.
+- **DO NOT DELETE OR MODIFY** any pattern row, work_ledger event,
+  or DB state.
+- **DO NOT WIDEN SCOPE** to actually fix anything surfaced — even
+  if the fix looks obvious. Surface as Section F recommendation.
 - **Edit-tool truncation discipline (HARD).**
-- **Tests use `_test`-suffixed DB.**
 
 ## Out of scope
 
-- Re-promotion path for demoted patterns.
-- Other lifecycle gaps (consecutive-loss-demote, regime-mismatch).
-- Phase 2/3/4 of the architectural rebuild.
-- The architectural rebuild Phase 1 (auth liveness).
+- Any actual fix.
+- Loosening any gate or threshold.
+- Universe expansion (if recommended, it's a separate brief).
+- Multi-timeframe mining (if recommended, separate brief).
+- OOS revalidation (if recommended, separate brief).
+- The architectural rebuild Phase 1.
+- Any change to entry-decision logic.
 
 ## Sequencing
 
-1. Truncation scan on `brain_work/dispatcher.py` and `learning.py`.
-2. Locate `run_brain_work_dispatch_round` and confirm round
-   cadence in current logs.
-3. Add the post-fanout sweep call inside try/except.
-4. Remove or gate the `_handle_execution_feedback_digest` sweep
-   call.
-5. Tests (3 minimum: helper x2 + integration x1).
-6. **Run the integration test ALONE** — it must pass before the
-   next step. This is the lesson from tonight.
-7. Commit + push + CC report + mark NEXT_TASK DONE.
+1. Section A first — it's the smoking gun (where do the 268
+   backtests die?).
+2. Section B next — calibration check on whether the gate is
+   correct or wrong.
+3. Sections C-E in parallel — fact-gathering.
+4. Section F last — the synthesis (with at least 3 ranked
+   follow-up briefs).
+5. Commit + push the report.
 
 ## Operator-side after CC ships
 
-1. Pull + truncation scan.
-2. `docker compose up -d --force-recreate brain-worker scheduler-worker`.
-3. Watch brain-worker logs for ~3 min:
-   ```
-   docker logs -f --tail 0 chili-home-copilot-brain-worker-1 | grep -i thin_evidence
-   ```
-   Expected: a `[learning] thin_evidence sweep: demoted=0 ids=[]`
-   line every dispatcher round (~75-90s) once pattern 585 is
-   already demoted (no new candidates).
-4. (Optional smoke) Insert a fake thin-evidence pattern in
-   chili_test, run one dispatcher round, verify it gets demoted.
+1. Read the report.
+2. If Section A reveals a clear dominant rejector and Section B
+   shows it's pathologically rejecting good patterns, queue a
+   targeted fix brief.
+3. If Section A reveals correctly-tight rejection but Section E
+   shows obvious universe gaps, queue an additive-discovery
+   brief (universe expansion, multi-timeframe).
+4. If everything looks healthy and the funnel is just genuinely
+   narrow because the universe of edges is narrow, accept the
+   current state and pick a different priority.
 
 ## Rollback plan
 
-`git revert` the commit. Restores prior event-driven hook (still
-present and correct, just dormant). Pattern 585 stays
-`challenged` regardless because lifecycle_stage doesn't
-auto-revert.
+N/A — read-only audit. Report can be deleted if the operator
+wants it gone.
 
 ## What CC should do if it's unsure
 
-1. **If the dispatcher cadence is unstable** (e.g., scales with
-   work-ledger backlog), add a minimum-cadence guard so the sweep
-   doesn't run more than once every 60s. Tunable via settings.
-2. **If the integration test seed-fixture is hard to construct**
-   (chili_test schema mismatch with prod scan_patterns),
-   surface the gap and propose a smaller integration test that
-   uses a real `scan_patterns` row but mocks the dispatcher
-   round.
-3. **If removing the `_handle_execution_feedback_digest` sweep
-   call has broader implications** (e.g., the function is called
-   from a code path I missed), gate it instead of remove. Surface
-   the choice in the CC report.
+1. **If a query is too expensive** (>30s scanning a large table),
+   surface the cost and propose a sampled approach.
+2. **If the audit reveals an unambiguous bug**, surface in
+   Section F's #1 recommendation as a hot-fix candidate, but DO
+   NOT ship the fix from this brief.
+3. **If the report grows beyond 500 lines**, split into a summary
+   (≤300 lines, all 6 sections) + a separate appendix file with
+   detailed query output. Operator readability first.
+4. **If the brain_work_events table or the pattern_eligible_
+   promotion event-type doesn't exist** as expected, document the
+   schema discrepancy in the report and propose how to verify
+   the eligibility funnel anyway (e.g., via timestamps on
+   `scan_patterns.lifecycle_changed_at` or similar).
