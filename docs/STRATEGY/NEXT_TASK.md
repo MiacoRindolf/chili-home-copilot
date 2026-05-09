@@ -1,6 +1,6 @@
 # NEXT_TASK: f-phase-e-revert-and-bracket-writer-crash-fix
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
