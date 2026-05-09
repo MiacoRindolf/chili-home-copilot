@@ -1,6 +1,6 @@
 # NEXT_TASK: f-coinbase-autotrader-enablement-phase-2-auth-verification
 
-STATUS: PENDING
+STATUS: BLOCKED (credentials missing — see CC report)
 
 ## Goal
 
