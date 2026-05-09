@@ -1,6 +1,6 @@
 # NEXT_TASK: f-pattern-pipeline-eligibility-audit
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
