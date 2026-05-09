@@ -1,6 +1,6 @@
 # NEXT_TASK: f-coinbase-autotrader-enablement (Phase 1: audit)
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
