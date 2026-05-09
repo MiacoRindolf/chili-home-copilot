@@ -1,6 +1,34 @@
 # NEXT_TASK: f-coinbase-autotrader-enablement-phase-2-auth-verification
 
-STATUS: BLOCKED (credentials missing — see CC report)
+STATUS: DONE (2026-05-09 — credentials added, all 6 items verified;
+see CC report at
+`docs/STRATEGY/CC_REPORTS/2026-05-09_f-coinbase-autotrader-enablement-phase-2-auth-verification.md`)
+
+## Phase 2 result summary
+
+- Auth: 4/4 worker containers (`is_connected=True`)
+- Portfolio: queryable; $2.2k held as USDC stablecoin (NOT USD cash)
+- Positions: 32 (1× USDC + 31× pre-existing dust)
+- Paper-test: broker correctly rejected ($5 BTC-USD limit-buy at 50%
+  below spot) — "Insufficient balance in source account" — because
+  USD wallet=$0; funds are in USDC wallet
+- Recent orders post-test: 0 residual
+- Cash unchanged: $0 USD, $2200 USDC
+
+**Phase 3 unblocked**, but one operator decision needed first
+(see G1 in the CC report):
+
+> Quote-currency convention for Coinbase: route `-USD` (requires
+> manual USDC→USD conversion before each entry) or `-USDC`
+> (requires CHILI ticker convention update). Phase 3 brief should
+> bake in whichever you choose.
+
+## Operator's next move
+
+1. Read the CC report (especially G1, G2, G3 gotchas).
+2. Decide quote-currency strategy for Coinbase Phase 3.
+3. Tell Cowork to write Phase 3 brief with that decision baked in.
+4. Promote Phase 3 brief as new NEXT_TASK.
 
 ## Goal
 
