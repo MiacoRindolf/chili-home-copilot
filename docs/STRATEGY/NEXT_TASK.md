@@ -1,202 +1,180 @@
-# NEXT_TASK: f-coinbase-autotrader-enablement (Phase 1: audit)
+# NEXT_TASK: f-coinbase-autotrader-enablement-phase-2-auth-verification
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-Phase 1 of a multi-phase initiative to wire the autotrader for
-Coinbase alongside Robinhood. Operator funded $2.2k cash on
-Coinbase; wants the broader crypto universe + native crypto
-stop-loss primitive that Coinbase provides.
-
-**Phase 1 is read-only audit.** Zero code changes shipped. Outputs
-a thorough report covering capability, RH-implicit assumptions,
-cost economics with real numbers, risk-infrastructure gaps, and a
-proposed venue abstraction design for Phase 3.
+Phase 2 of the Coinbase enablement initiative. **Audit-mostly,
+with ONE paper-test order** (place a $5 BTC limit-buy at 50%
+below current spot — won't fill — and immediately cancel) to
+prove auth + order-placement works end-to-end. <1h CC scope.
+LOW risk to existing system.
 
 The full multi-phase brief is at
-`docs/STRATEGY/QUEUED/f-coinbase-autotrader-enablement.md`
-— **read it first.** This NEXT_TASK is Phase 1 only; the brief
-covers Phases 1-7.
+`docs/STRATEGY/QUEUED/f-coinbase-autotrader-enablement.md`.
+This phase's brief is at
+`docs/STRATEGY/QUEUED/f-coinbase-autotrader-enablement-phase-2-auth-verification.md`
+— **read it first.**
 
 ## Why now
 
-Today shipped:
-- Brain Phase 2 producer completion (mining is back online via
-  watchdog hook) — new crypto patterns will start flowing in 24h
-- 11 RH crypto positions still open + working; pattern lifecycle
-  durable; reconciler chain (A+B+C) solid
-- Bracket-writer crash dead
+Phase 1 audit (commit `39e9807`) confirmed the architectural plan.
+Phase 2 is the prerequisite check before Phase 3 (broker selector
++ entry routing) can ship. Without auth verification, Phase 3
+would silently route entries that fail at the broker call — the
+same class of failure mode as tonight's silent-broker-empty
+incident.
 
-The system is ready to receive a new venue. Coinbase enablement
-is the highest-leverage growth move: wider universe, lower
-operational risk per crypto trade (no IndexError class issues,
-native stop primitive, no PDT conflation), and the operator's
-$2.2k cash is sitting idle.
+## Operator-decided design constraints (locked, binding for Phases 3-7)
 
-But — operator's directive is **"don't band-aid; properly
-integrate."** Phase 1 is the load-bearing audit that prevents a
-band-aid. It demands explicit design choices for venue
-abstraction, multi-venue risk aggregation, position-correlation
-across venues, and cutover strategy for the 11 currently-open RH
-positions.
+After reading Phase 1's audit, the operator made the following
+decisions. These are NOT in scope to implement in Phase 2 — they
+are documented here so Phase 3+ briefs cite them as binding
+constraints:
 
-## Why this scope (Phase 1 only, audit-first)
+1. **Cross-venue position cap: SEPARATE per-venue caps.** No
+   cross-venue position aggregation. Each venue has independent
+   caps.
+2. **Kill switch: GLOBAL.** One operator-pulled lever stops both
+   venues.
+3. **Selector preference for tickers in BOTH whitelists:
+   RH-first** (cost-cheaper). Coinbase routes only for the long
+   tail (tickers RH doesn't list).
+4. **Fast-path overlap: skip-on-fast-path-active.** Autotrader
+   skips Coinbase routing if fast-path is currently active for
+   that ticker.
 
-* **Vs. shipping all 7 phases at once**: would be a multi-week
-  effort done at midnight — the exact dangerous mode that
-  produced tonight's Phase E false-cancel mistake. Phase 1
-  surfaces the integration plan; subsequent phases ship on
-  fresh-start days with explicit operator approval.
-* **Vs. CC's "just wire Coinbase auth and add an if/else"
-  approach**: that's the band-aid the operator explicitly
-  rejected. Phase 1 demands a venue abstraction design.
-* **Vs. starting with Phase 2 (auth verification)**: Phase 1 is
-  cheaper (<1 hour CC, read-only), and its audit might reveal
-  Coinbase auth is actually working — saving a Phase 2 round-trip.
-* **Vs. queued briefs (cpcv-gate-emit, oos-revalidation,
-  pattern-discovery)**: Coinbase enablement is higher-leverage.
-  Operator's funded cash + tonight's mining producer fix mean
-  pattern flow is restoring; the binding constraint becomes
-  venue capacity.
+## Why this scope (Phase 2 only, audit-with-one-paper-test)
 
-## The change (Phase 1 deliverable)
+* **Vs. Phase 3 (broker selector) directly**: Phase 3 needs to
+  know auth works. If we ship Phase 3 first and auth is broken,
+  every Coinbase entry fails silently — exactly tonight's failure
+  pattern.
+* **Vs. read-only audit only (no paper-test)**: a read-only audit
+  can verify `is_connected()` returns True but can't prove
+  `place_buy_order` actually round-trips with the API correctly.
+  A $5-far-below-market-immediately-canceled order is the cheapest
+  way to prove the full chain.
+* **Vs. multi-paper-test or paper-soak**: that's Phase 6's
+  responsibility. Phase 2 is single-test prove-it-works.
 
-Read-only audit producing one report at
-`docs/STRATEGY/CC_REPORTS/2026-05-09_f-coinbase-autotrader-enablement-phase-1-audit.md`.
+## The change
 
-The report MUST cover (per the brief's expanded acceptance
-criteria — sections A through H):
+Per the brief's 6 verification items:
 
-* **A. Capability inventory** of `coinbase_spot.py` +
-  `coinbase_service.py` with line refs.
-* **B. Autotrader RH-implicit assumption inventory** — every call
-  site that hardcodes RH; the refactor surface for Phase 3.
-* **C. Cost economics with REAL numbers** — Coinbase fee tier,
-  round-trip cost at taker/maker mix, minimum-edge calc per
-  fee path, comparison to patterns 1011/1016's realized edge.
-* **D. Risk infrastructure audit** — drawdown breaker
-  cross-venue or per-venue, PDT confirms-skip-Coinbase, kill
-  switch cross-venue support, position-correlation risk for
-  same-ticker on both venues.
-* **E. Venue-abstraction design** — propose ONE design (adapter
-  pattern, function dispatch, polymorphic Trade — pick) with
-  cutover strategy that doesn't break the 11 currently-open RH
-  crypto positions.
-* **F. Reconciler + lifecycle audit** for Coinbase — webhook vs
-  polling architecture, fast-path overlap with autotrader.
-* **G. Phase 2-7 scope + prerequisite chain + risk-to-existing-
-  system per phase**.
-* **H. Hard constraints honored** — zero code changes from
-  Phase 1.
+1. Credentials configured (`CHILI_COINBASE_API_KEY` /
+   `CHILI_COINBASE_API_SECRET` or equivalent in `.env`).
+2. `is_connected()` returns True in chili, autotrader-worker,
+   scheduler-worker, broker-sync-worker. **Multi-process auth
+   liveness verified up front** (lesson from tonight's RH
+   silent-empty incident).
+3. `get_portfolio()` returns the funded $2.2k cash.
+4. `get_positions()` returns Coinbase holdings (initially
+   expected empty).
+5. **Paper-test**: $5 BTC-USD limit-buy at 50% below spot,
+   immediately cancel. `try/finally` guarantees zero residual
+   orders. Hard 10s timeout on the cancel; if exceeded, CRITICAL
+   surface.
+6. CC report at
+   `docs/STRATEGY/CC_REPORTS/2026-05-09_f-coinbase-autotrader-enablement-phase-2-auth-verification.md`.
 
 ## Acceptance criteria
 
-See full brief for the demanding 23-criterion list (sections
-A-H). Summary:
+See full brief for the 8-item list. Summary:
 
-1. Read-only audit report committed.
-2. Capability + assumption inventories with line-ref citations.
-3. Cost economics with real numbers tied to Coinbase tier.
-4. Risk-infra audit covering breaker, PDT, kill-switch, and
-   cross-venue position-correlation.
-5. ONE venue-abstraction design recommendation with cutover plan.
-6. Per-phase risk-to-existing-system ratings.
-7. NO code changes shipped.
+1. Items 1-4 (audit-only) pass before item 5 (paper-test) is
+   attempted.
+2. Multi-process auth check across all 4 worker processes.
+3. Paper-test placement + cancellation within 5s (10s hard
+   timeout); zero residual orders confirmed via
+   `list_open_orders`.
+4. Operator's $2.2k unchanged post-test (modulo trivial fees if
+   accidental fill — which shouldn't happen but document if it
+   does).
+5. CC report covers: pass/fail per item, response shapes for
+   `get_portfolio()` + `get_positions()`, full paper-test order
+   payload, gotchas surfaced for Phase 3.
+6. NO code changes to `coinbase_service.py` or
+   `coinbase_spot.py`. If a bug surfaces, surface in the report;
+   fix is Phase 2.5 or Phase 3.
 
-## Brain integration (read-only)
+## Brain integration (read-only except for the paper-test)
 
-- `app/services/trading/venue/coinbase_spot.py` — read.
-- `app/services/coinbase_service.py` — read; identify canonical
-  vs shim surface.
-- `app/services/trading/auto_trader.py` + `auto_trader_monitor.py`
-  — read; catalogue RH-implicit calls.
-- `app/services/trading/pdt_guard.py` + `portfolio_risk.py` —
-  read; venue-aware?
-- `app/services/trading/bracket_writer_g2.py` +
-  `bracket_reconciliation_service.py` — read; venue-aware?
-- `app/services/trading/crypto/exit_monitor.py` — read.
-- Fast-path code (`fast_path/executor.py`, etc.) for the existing
-  Coinbase patterns.
+- `app/services/coinbase_service.py` — read; call public surface.
+- `app/services/trading/venue/coinbase_spot.py` — read; optional
+  parallel adapter check.
+- `.env` — read variable presence (not values).
 
 ## Constraints / do not touch
 
 - **Hard Rule 1**: live-placement safety belts unchanged.
 - **Hard Rule 5**: prediction-mirror authority untouched.
-- **Operator's directive: don't band-aid; properly integrate.**
-  Phase 1 forces architectural rigor in the audit; Phases 2-7
-  ship the integration in measured steps with operator approval
-  per phase.
-- **Operator's directive: don't break what works.** RH autotrader
-  + RH crypto reconciler chain (Phases A+B+C) untouched. The 11
-  open RH crypto positions and patterns 1011/1016 must continue
-  to work exactly as today.
-- **NO live Coinbase trades from Phase 1.** Audit only.
-- **NO code changes from Phase 1.** Surfacing a fix is Phase 2+
-  territory.
-- **DO NOT remove tonight's
-  `crypto_ticker_unsupported_via_equity_primitive` backstop** for
-  RH. The backstop is correct for RH; Coinbase gets a different
-  primitive (Phase 4).
+- **Operator's directive: don't break what works.** RH path
+  untouched.
+- **Paper-test order ONLY.** $5 notional, far-below-market limit,
+  immediately canceled. NO market orders, NO live entry.
+- **Hard 10s timeout on cancel.** If exceeded, CRITICAL surface +
+  stop.
+- **`try/finally`** around order placement; cancel runs
+  unconditionally on any exception.
+- **DO NOT auto-promote Phase 3.** Operator approves Phase 3
+  after reading Phase 2 report.
+- **DO NOT touch the operator-decided design constraints.** They
+  are documented here as binding for Phase 3+; Phase 2 doesn't
+  implement them.
 - **Edit-tool truncation discipline (HARD).**
+- **No magic numbers** — paper-test prices/notional come from
+  settings or documented constants.
 
-## Out of scope (Phase 1 — covered by later phases)
+## Out of scope (Phase 2 — covered by later phases)
 
-- Coinbase auth verification (Phase 2).
-- Broker selection logic (Phase 3).
+- Broker selector logic (Phase 3).
 - Bracket writer Coinbase paths (Phase 4).
 - Cost-aware sizing (Phase 5).
-- Paper-trade soak (Phase 6).
+- Paper-trade soak (Phase 6 — different from Phase 2's single
+  paper-test).
 - Live verification (Phase 7).
-- Universe expansion beyond Coinbase (separate brief).
-- Multi-broker support beyond RH+Coinbase (separate brief).
+- Any code changes to `coinbase_service.py` or the adapter.
+- Any RH path changes.
 
-## Sequencing (within Phase 1)
+## Sequencing
 
-1. Truncation scan on the read-target files.
-2. **Section A**: capability inventory of Coinbase adapters.
-3. **Section B**: autotrader RH-implicit assumption inventory.
-4. **Section D**: risk infrastructure audit FIRST among the
-   remaining sections (it's the load-bearing one — if cross-venue
-   position-correlation is broken, every later phase has to
-   account for it).
-5. **Section C**: cost economics with real numbers.
-6. **Section F**: reconciler + lifecycle.
-7. **Section E**: venue-abstraction design recommendation.
-8. **Section G**: phase recommendations + scope.
-9. Commit + push the audit report.
+1. Truncation scan on `coinbase_service.py` +
+   `coinbase_spot.py`.
+2. Item 1: credentials probe.
+3. Item 2: multi-process `is_connected()` probe via
+   `docker exec` into each container.
+4. Item 3: `get_portfolio()` probe; verify cash = $2.2k.
+5. Item 4: `get_positions()` probe.
+6. **STOP and surface** if items 1-4 don't all pass. Operator
+   decides whether to proceed to item 5.
+7. Item 5: paper-test order. `try/finally`. Cancel within 5s.
+8. Item 6: CC report.
+9. Commit + push.
 
-## Operator-side after Phase 1 ships
+## Operator-side after Phase 2 ships
 
-1. Read the audit report.
-2. Verify the venue-abstraction design proposal makes sense for
-   how the operator wants chili to evolve. Reject if it's a
-   band-aid disguised as architecture.
-3. Approve the next phase brief; CC ships it (typically Phase 2
-   = auth verification).
-4. Per-phase operator approval continues through Phase 7 (live
-   small-size).
+1. Read the report.
+2. If auth + order-placement work cleanly, Phase 3 (broker
+   selector) becomes next NEXT_TASK.
+3. If auth gaps surface, Phase 2.5 fixes them BEFORE Phase 3.
 
 ## Rollback plan
 
-N/A — Phase 1 is read-only.
+Paper-test order canceled before this brief returns. If cancel
+fails, rollback = operator-side manual cancel via Coinbase web UI;
+report surfaces the order ID for traceability.
 
 ## What CC should do if it's unsure
 
-1. **If `coinbase_spot.py` is incomplete relative to needs**,
-   document the gaps in the audit report — those become Phase 4
-   subtasks. Don't try to extend the adapter from Phase 1.
-2. **If the autotrader's RH-assumptions are deeper than expected**
-   (>20 sites), surface the cost in the report; Phase 3 may need
-   to be split into multiple briefs.
-3. **If Coinbase API authentication is broken out of the box**,
-   surface the gap; Phase 2 becomes urgent before Phase 3.
-4. **If the venue-abstraction design choice has multiple
-   reasonable paths**, document all of them but recommend ONE
-   with reasoning — operator's "don't band-aid" directive demands
-   a clear architectural choice, not a punt.
-5. **If Phase 1 surfaces a critical bug** (e.g., the existing
-   fast-path Coinbase code already has an architectural mistake
-   that would compound in autotrader-Coinbase wiring), surface
-   in the report's Section G as a prerequisite-fix brief, but
-   DO NOT ship the fix from Phase 1.
+1. **Credentials missing**: STOP, surface env var names. No auth
+   probe without credentials.
+2. **Multi-process auth divergence**: CRITICAL surface — same
+   class as tonight's RH silent-empty bug.
+3. **`get_portfolio()` cash mismatch with $2.2k**: STOP and
+   surface for operator. Could be pending-deposit not settled,
+   sub-account / wrong-currency view, or parsing bug.
+4. **Cancel timeout**: CRITICAL. Operator manual cleanup
+   required.
+5. **Paper-test accidentally fills**: CRITICAL. Document
+   resulting position; operator manual close required.
