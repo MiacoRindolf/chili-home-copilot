@@ -2286,6 +2286,27 @@ class Settings(BaseSettings):
         default=2,
         validation_alias=AliasChoices("CHILI_RECONCILE_PARTIAL_LIST_STREAK_MIN"),
     )
+    # f-crypto-stale-trade-closer (2026-05-08, Phase E) — crypto-side
+    # phantom-open detection. Layer 1: an ``open`` crypto trade with
+    # ``last_fill_at IS NULL`` whose ``entry_date`` is older than this
+    # window gets cancelled (the broker never reported a fill).
+    # Default 2 hours: long enough to absorb broker latency on the
+    # entry confirmation; short enough that a true phantom doesn't
+    # accumulate days of audit noise the way trade 1810 did.
+    chili_crypto_entry_fill_window_hours: int = Field(
+        default=2,
+        validation_alias=AliasChoices("CHILI_CRYPTO_ENTRY_FILL_WINDOW_HOURS"),
+    )
+    # Layer 2: per-trade consecutive-cycle counter — broker reports
+    # zero quantity for the trade's ticker for N consecutive sweeps
+    # before the close fires. Default 3 (parallel to Phase C's N=2 on
+    # equity but one tick higher because the crypto reconciler runs
+    # at ~60s and the operator wants extra confirmation given the
+    # 24/7 market). Setting to 0 disables the layer.
+    chili_crypto_broker_zero_qty_streak_min: int = Field(
+        default=3,
+        validation_alias=AliasChoices("CHILI_CRYPTO_BROKER_ZERO_QTY_STREAK_MIN"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

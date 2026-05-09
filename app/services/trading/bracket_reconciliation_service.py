@@ -2356,6 +2356,241 @@ def run_missing_stop_watchdog(
     )
 
 
+# ── f-crypto-stale-trade-closer (2026-05-08, Phase E) ─────────────────
+#
+# Audit fingerprint: trade 1810 DOT-USD has been status='open' for 7.6
+# days with last_fill_at IS NULL and broker reports zero DOT.
+# missing_stop:warn fires every 60s but no path acts on it.
+#
+# Two layers, both gated on settings (env-tunable, default-on at the
+# brief's thresholds):
+#
+#   Layer 1 (entry-never-filled): an open crypto trade with
+#     last_fill_at IS NULL whose entry_date is older than
+#     `chili_crypto_entry_fill_window_hours` -> mark cancelled.
+#
+#   Layer 2 (broker-zero-qty streak): per-trade consecutive-cycle
+#     counter (mig 234 column ``crypto_broker_zero_qty_streak``)
+#     mirrors Phase C's equity-side streak. Increment when broker
+#     reports zero qty for the trade's ticker; reset to 0 when
+#     present. Close when the streak crosses
+#     `chili_crypto_broker_zero_qty_streak_min`.
+#
+# Both layer-1 and layer-2 closes call Phase B's
+# `_record_reconcile_close_burst` so the same 3-in-5s breaker trip
+# semantics apply.
+
+CRYPTO_STALE_RECONCILE = "[crypto_reconcile]"
+
+CRYPTO_EXIT_REASON_ENTRY_NEVER_FILLED = "entry_never_filled"
+CRYPTO_EXIT_REASON_BROKER_ZERO_QTY = "broker_position_reconciled_to_zero"
+
+
+def _crypto_entry_fill_window_seconds() -> int:
+    """Layer 1 cutoff in seconds. Read at call-time so env overrides
+    take effect on the next sweep without restart."""
+    hours = int(getattr(settings, "chili_crypto_entry_fill_window_hours", 2))
+    return max(hours, 0) * 3600
+
+
+def _crypto_broker_zero_qty_streak_min() -> int:
+    return int(getattr(settings, "chili_crypto_broker_zero_qty_streak_min", 3))
+
+
+def _is_crypto_ticker(ticker: str) -> bool:
+    """Crypto convention: tickers ending in ``-USD``."""
+    return bool(ticker) and ticker.upper().endswith("-USD")
+
+
+def run_crypto_stale_trade_close(
+    db: Session,
+    *,
+    broker_crypto_tickers: list[str] | None = None,
+    user_id: int | None = None,
+) -> dict[str, Any]:
+    """Sweep + close phantom-open crypto trades.
+
+    ``broker_crypto_tickers`` is the set of tickers the broker
+    currently reports a non-zero position for. When None we call
+    ``coinbase_service.get_crypto_positions`` ourselves; tests inject
+    a fixed list to avoid the live call.
+
+    Returns ``{"layer1_cancelled": int, "layer2_closed": int,
+    "layer2_streak_incremented": int, "layer2_streak_reset": int,
+    "trade_ids": list[int]}``. The aggregate ``trade_ids`` only lists
+    *closed* rows; streak movements are counted but not enumerated.
+    """
+    from datetime import datetime, timedelta
+    from ...models.trading import Trade
+
+    result: dict[str, Any] = {
+        "layer1_cancelled": 0,
+        "layer2_closed": 0,
+        "layer2_streak_incremented": 0,
+        "layer2_streak_reset": 0,
+        "trade_ids": [],
+    }
+
+    # Resolve the broker view if not injected.
+    if broker_crypto_tickers is None:
+        try:
+            from ...services.broker_service import get_crypto_positions
+            positions = get_crypto_positions() or []
+            broker_crypto_tickers = [
+                str(p.get("ticker") or "").upper()
+                for p in positions
+                if (p.get("quantity") or 0) > 0
+            ]
+        except Exception as exc:
+            logger.warning(
+                "%s broker view fetch failed; skipping cycle: %s",
+                CRYPTO_STALE_RECONCILE, exc, exc_info=True,
+            )
+            return result
+    else:
+        broker_crypto_tickers = [
+            str(t).upper() for t in broker_crypto_tickers
+        ]
+    broker_set = set(broker_crypto_tickers)
+
+    open_q = db.query(Trade).filter(Trade.status == "open")
+    if user_id is not None:
+        open_q = open_q.filter(Trade.user_id == user_id)
+    open_trades = open_q.all()
+    crypto_open = [
+        t for t in open_trades if _is_crypto_ticker(t.ticker or "")
+    ]
+    if not crypto_open:
+        return result
+
+    now = datetime.utcnow()
+    layer1_window_s = _crypto_entry_fill_window_seconds()
+    layer2_threshold = _crypto_broker_zero_qty_streak_min()
+
+    # Reuse Phase B's burst breaker -- we record bursts for crypto
+    # closes too so a runaway phantom-cancel cascade trips the
+    # drawdown breaker just like the equity wipeout-burst.
+    try:
+        from ...services.broker_service import _record_reconcile_close_burst
+    except Exception:
+        _record_reconcile_close_burst = None  # type: ignore
+
+    for t in crypto_open:
+        present = (t.ticker or "").upper() in broker_set
+
+        # ── Layer 1: entry-never-filled ──────────────────────────
+        last_fill_at = getattr(t, "last_fill_at", None)
+        entry_date = getattr(t, "entry_date", None)
+        if (
+            last_fill_at is None
+            and entry_date is not None
+            and layer1_window_s > 0
+            and (now - entry_date).total_seconds() > layer1_window_s
+        ):
+            t.status = "cancelled"
+            t.exit_date = now
+            t.exit_price = None
+            t.pnl = None
+            t.exit_reason = CRYPTO_EXIT_REASON_ENTRY_NEVER_FILLED
+            t.notes = (
+                (t.notes or "")
+                + f"\nCrypto stale-sweep cancelled: entry_date "
+                f"{entry_date.isoformat()} older than "
+                f"{layer1_window_s // 3600}h fill window; "
+                f"last_fill_at IS NULL."
+            )
+            result["layer1_cancelled"] += 1
+            result["trade_ids"].append(int(t.id))
+            logger.warning(
+                "%s STALE_TRADE_CLOSE: trade_id=%s ticker=%s "
+                "exit_reason=%s broker_present=%s",
+                CRYPTO_STALE_RECONCILE, t.id, t.ticker,
+                CRYPTO_EXIT_REASON_ENTRY_NEVER_FILLED, present,
+            )
+            if _record_reconcile_close_burst is not None:
+                try:
+                    _record_reconcile_close_burst(
+                        t.ticker or "", int(t.id),
+                    )
+                except Exception:
+                    logger.debug(
+                        "%s burst record failed", CRYPTO_STALE_RECONCILE,
+                        exc_info=True,
+                    )
+            continue  # closed; don't re-evaluate layer 2
+
+        # ── Layer 2: broker-zero-qty streak ──────────────────────
+        # Streak only progresses for trades that DID fill (otherwise
+        # layer 1 should be the one closing them).
+        streak = int(getattr(t, "crypto_broker_zero_qty_streak", 0) or 0)
+        if present:
+            if streak != 0:
+                t.crypto_broker_zero_qty_streak = 0
+                result["layer2_streak_reset"] += 1
+            continue
+
+        # Not present.
+        new_streak = streak + 1
+        t.crypto_broker_zero_qty_streak = new_streak
+        result["layer2_streak_incremented"] += 1
+
+        if layer2_threshold > 0 and new_streak >= layer2_threshold:
+            t.status = "cancelled"
+            t.exit_date = now
+            t.exit_price = None
+            t.pnl = None
+            t.exit_reason = CRYPTO_EXIT_REASON_BROKER_ZERO_QTY
+            t.notes = (
+                (t.notes or "")
+                + f"\nCrypto stale-sweep closed: broker reported "
+                f"zero quantity for {new_streak} consecutive sweeps "
+                f"(threshold={layer2_threshold})."
+            )
+            result["layer2_closed"] += 1
+            result["trade_ids"].append(int(t.id))
+            logger.warning(
+                "%s STALE_TRADE_CLOSE: trade_id=%s ticker=%s "
+                "exit_reason=%s streak=%d broker_present=False",
+                CRYPTO_STALE_RECONCILE, t.id, t.ticker,
+                CRYPTO_EXIT_REASON_BROKER_ZERO_QTY, new_streak,
+            )
+            if _record_reconcile_close_burst is not None:
+                try:
+                    _record_reconcile_close_burst(
+                        t.ticker or "", int(t.id),
+                    )
+                except Exception:
+                    logger.debug(
+                        "%s burst record failed", CRYPTO_STALE_RECONCILE,
+                        exc_info=True,
+                    )
+
+    if (
+        result["layer1_cancelled"]
+        or result["layer2_closed"]
+        or result["layer2_streak_incremented"]
+        or result["layer2_streak_reset"]
+    ):
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.warning(
+                "%s commit failed", CRYPTO_STALE_RECONCILE, exc_info=True,
+            )
+
+    if result["layer1_cancelled"] or result["layer2_closed"]:
+        logger.info(
+            "%s sweep closed %d trade(s): layer1=%d layer2=%d ids=%s",
+            CRYPTO_STALE_RECONCILE,
+            result["layer1_cancelled"] + result["layer2_closed"],
+            result["layer1_cancelled"], result["layer2_closed"],
+            result["trade_ids"],
+        )
+
+    return result
+
+
 __all__ = [
     "SweepBatch",
     "SweepSummary",
@@ -2364,4 +2599,7 @@ __all__ = [
     "bracket_reconciliation_summary",
     "run_missing_stop_watchdog",
     "run_reconciliation_sweep",
+    "run_crypto_stale_trade_close",
+    "CRYPTO_EXIT_REASON_ENTRY_NEVER_FILLED",
+    "CRYPTO_EXIT_REASON_BROKER_ZERO_QTY",
 ]

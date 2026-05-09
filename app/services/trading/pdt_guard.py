@@ -66,6 +66,16 @@ PDT_MAX_DAY_TRADES_5D = 3   # 4th would trigger PDT designation
 _RECONCILE_ARTIFACT_EXIT_REASONS = frozenset({
     "broker_reconcile_position_gone",
     "forced_unwind_reconcile",
+    # f-crypto-stale-trade-closer (2026-05-08, Phase E): two new exit
+    # reasons emitted by the crypto-stale sweep (mirror of R31/R32 for
+    # the crypto book). Both are reconciliation artifacts, NOT FINRA
+    # day-trades: layer 1 cancels orders that never filled at the
+    # broker; layer 2 closes positions the broker has reported at zero
+    # quantity for N consecutive sweeps. Excluding them from the PDT
+    # count keeps the operator's account from self-locking the same
+    # way the equity-book wipeout did pre-R32.
+    "entry_never_filled",
+    "broker_position_reconciled_to_zero",
 })
 
 

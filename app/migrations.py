@@ -14764,6 +14764,35 @@ def _migration_224_position_identity_phase_1(conn) -> None:
     conn.commit()
 
 
+def _migration_234_crypto_broker_zero_qty_streak(conn) -> None:
+    """f-crypto-stale-trade-closer (2026-05-08).
+
+    Phase E of the wipeout-cascade chain — crypto-side mirror of
+    Phase C's per-trade consecutive-cycle confirmation. Adds a
+    counter that the bracket reconciler's crypto-sweep increments
+    when ``get_crypto_positions()`` reports zero quantity for an
+    open crypto trade, and resets when the position reappears.
+    The sweep authorizes a stale-close only when the streak
+    crosses ``CHILI_CRYPTO_BROKER_ZERO_QTY_STREAK_MIN`` (default 3).
+
+    Trade 1810 DOT-USD audit fingerprint: status='open', quantity=248,
+    last_fill_at IS NULL, broker reports zero DOT — bracket
+    reconciler logs missing_stop:warn every 60s for 7 days but has
+    no path to act. This column is the mechanism that lets the
+    crypto sweep close those rows safely (one truncated broker
+    response can't trigger a wipe; only N consecutive can).
+
+    Idempotent: ``ADD COLUMN IF NOT EXISTS`` so re-runs are no-ops.
+    Default 0 so existing trades start clean.
+    """
+    conn.execute(text("""
+        ALTER TABLE trading_trades
+            ADD COLUMN IF NOT EXISTS crypto_broker_zero_qty_streak
+                INTEGER NOT NULL DEFAULT 0
+    """))
+    conn.commit()
+
+
 def _migration_233_reconcile_partial_list_streak(conn) -> None:
     """f-equity-reconcile-partial-list-guard (2026-05-08).
 
@@ -15789,6 +15818,8 @@ MIGRATIONS = [
      _migration_232_fast_path_maker_only),
     ("233_reconcile_partial_list_streak",
      _migration_233_reconcile_partial_list_streak),
+    ("234_crypto_broker_zero_qty_streak",
+     _migration_234_crypto_broker_zero_qty_streak),
 ]
 
 
