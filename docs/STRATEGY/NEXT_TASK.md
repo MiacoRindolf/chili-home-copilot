@@ -1,208 +1,146 @@
-# NEXT_TASK: f-coinbase-autotrader-enablement-phase-2-auth-verification
+# NEXT_TASK: f-coinbase-autotrader-enablement-phase-3-broker-selector
 
-STATUS: DONE (2026-05-09 — credentials added, all 6 items verified;
-see CC report at
-`docs/STRATEGY/CC_REPORTS/2026-05-09_f-coinbase-autotrader-enablement-phase-2-auth-verification.md`)
-
-## Phase 2 result summary
-
-- Auth: 4/4 worker containers (`is_connected=True`)
-- Portfolio: queryable; $2.2k held as USDC stablecoin (NOT USD cash)
-- Positions: 32 (1× USDC + 31× pre-existing dust)
-- Paper-test: broker correctly rejected ($5 BTC-USD limit-buy at 50%
-  below spot) — "Insufficient balance in source account" — because
-  USD wallet=$0; funds are in USDC wallet
-- Recent orders post-test: 0 residual
-- Cash unchanged: $0 USD, $2200 USDC
-
-**Phase 3 unblocked**, but one operator decision needed first
-(see G1 in the CC report):
-
-> Quote-currency convention for Coinbase: route `-USD` (requires
-> manual USDC→USD conversion before each entry) or `-USDC`
-> (requires CHILI ticker convention update). Phase 3 brief should
-> bake in whichever you choose.
-
-## Operator's next move
-
-1. Read the CC report (especially G1, G2, G3 gotchas).
-2. Decide quote-currency strategy for Coinbase Phase 3.
-3. Tell Cowork to write Phase 3 brief with that decision baked in.
-4. Promote Phase 3 brief as new NEXT_TASK.
+STATUS: PENDING
 
 ## Goal
 
-Phase 2 of the Coinbase enablement initiative. **Audit-mostly,
-with ONE paper-test order** (place a $5 BTC limit-buy at 50%
-below current spot — won't fill — and immediately cancel) to
-prove auth + order-placement works end-to-end. <1h CC scope.
-LOW risk to existing system.
+Phase 3 of the Coinbase enablement initiative. Build the **broker
+selector** that routes autotrader entries to RH or Coinbase based
+on ticker + operator-locked design constraints. RH path stays
+byte-identical; Coinbase path is gated behind a LIVE flag that
+defaults OFF.
 
-The full multi-phase brief is at
-`docs/STRATEGY/QUEUED/f-coinbase-autotrader-enablement.md`.
-This phase's brief is at
-`docs/STRATEGY/QUEUED/f-coinbase-autotrader-enablement-phase-2-auth-verification.md`
-— **read it first.**
+The full brief is at
+`docs/STRATEGY/QUEUED/f-coinbase-autotrader-enablement-phase-3-broker-selector.md`
+— **read it first.** ~2-3h CC scope. MEDIUM risk (touches
+autotrader entry-routing).
 
 ## Why now
 
-Phase 1 audit (commit `39e9807`) confirmed the architectural plan.
-Phase 2 is the prerequisite check before Phase 3 (broker selector
-+ entry routing) can ship. Without auth verification, Phase 3
-would silently route entries that fail at the broker call — the
-same class of failure mode as tonight's silent-broker-empty
-incident.
+Phase 2 verified end-to-end (commit `6cce057`):
+- Auth across all 4 worker containers ✅
+- Portfolio + positions queryable ✅
+- Paper-test redux: order placed (0.45s), cancelled (0.14s), zero
+  residual, cash unchanged ($2200.01 → $2200.01) ✅
+- `-USD` ticker convention works (operator converted USDC → USD)
 
-## Operator-decided design constraints (locked, binding for Phases 3-7)
+Phase 3 is the gate to actually trading on Coinbase. Without it,
+the $2.2k sits idle.
 
-After reading Phase 1's audit, the operator made the following
-decisions. These are NOT in scope to implement in Phase 2 — they
-are documented here so Phase 3+ briefs cite them as binding
-constraints:
+## Operator-locked design constraints (binding from Phase 1)
 
-1. **Cross-venue position cap: SEPARATE per-venue caps.** No
-   cross-venue position aggregation. Each venue has independent
-   caps.
-2. **Kill switch: GLOBAL.** One operator-pulled lever stops both
-   venues.
-3. **Selector preference for tickers in BOTH whitelists:
-   RH-first** (cost-cheaper). Coinbase routes only for the long
-   tail (tickers RH doesn't list).
-4. **Fast-path overlap: skip-on-fast-path-active.** Autotrader
-   skips Coinbase routing if fast-path is currently active for
-   that ticker.
+1. **Cross-venue position cap: SEPARATE per-venue caps** (no
+   aggregation).
+2. **Kill switch: GLOBAL** — one operator lever stops both
+   venues (`CHILI_AUTOTRADER_KILL_SWITCH=1`).
+3. **Selector preference for both-listed tickers: RH-first**
+   (cost-cheaper; RH is fee-free, Coinbase is 60bps taker).
+   Coinbase routes only the long tail (tickers RH doesn't list).
+4. **Fast-path overlap: skip-on-fast-path-active**. Autotrader
+   skips Coinbase routing if fast-path holds the ticker.
 
-## Why this scope (Phase 2 only, audit-with-one-paper-test)
+## Quote-currency convention (from Phase 2)
 
-* **Vs. Phase 3 (broker selector) directly**: Phase 3 needs to
-  know auth works. If we ship Phase 3 first and auth is broken,
-  every Coinbase entry fails silently — exactly tonight's failure
-  pattern.
-* **Vs. read-only audit only (no paper-test)**: a read-only audit
-  can verify `is_connected()` returns True but can't prove
-  `place_buy_order` actually round-trips with the API correctly.
-  A $5-far-below-market-immediately-canceled order is the cheapest
-  way to prove the full chain.
-* **Vs. multi-paper-test or paper-soak**: that's Phase 6's
-  responsibility. Phase 2 is single-test prove-it-works.
+Coinbase tickers route as `-USD` pairs. Matches CHILI's existing
+`coinbase_service.py` calls. If operator funds future deposits as
+USDC, they must convert to USD in the Coinbase UI before
+autotrader BUYs will succeed (Phase 2 G1 — operator runbook
+responsibility).
 
-## The change
+## The change (3 components)
 
-Per the brief's 6 verification items:
+1. **`broker_selector.py`** — pure function that returns
+   `{venue: 'rh'|'coinbase'|'skip', reason: str}` with a 5-branch
+   decision tree (kill switch, fast-path overlap, RH whitelist,
+   Coinbase whitelist, no match).
+2. **Whitelist resolvers** — `resolve_rh_whitelist` and
+   `resolve_coinbase_whitelist` (latter filters out the 31 dust
+   positions and uses Coinbase product-list filtered to active
+   USD-quoted spot products).
+3. **`auto_trader.py` splice** — replace the existing direct
+   broker call with a `select_venue` call; route by `decision.venue`.
+   RH path BYTE-IDENTICAL. Coinbase path gated on
+   `CHILI_COINBASE_AUTOTRADER_LIVE=1` (default OFF; OFF = shadow
+   log only).
 
-1. Credentials configured (`CHILI_COINBASE_API_KEY` /
-   `CHILI_COINBASE_API_SECRET` or equivalent in `.env`).
-2. `is_connected()` returns True in chili, autotrader-worker,
-   scheduler-worker, broker-sync-worker. **Multi-process auth
-   liveness verified up front** (lesson from tonight's RH
-   silent-empty incident).
-3. `get_portfolio()` returns the funded $2.2k cash.
-4. `get_positions()` returns Coinbase holdings (initially
-   expected empty).
-5. **Paper-test**: $5 BTC-USD limit-buy at 50% below spot,
-   immediately cancel. `try/finally` guarantees zero residual
-   orders. Hard 10s timeout on the cancel; if exceeded, CRITICAL
-   surface.
-6. CC report at
-   `docs/STRATEGY/CC_REPORTS/2026-05-09_f-coinbase-autotrader-enablement-phase-2-auth-verification.md`.
+## Acceptance criteria (8-item list)
 
-## Acceptance criteria
+See full brief. Headline:
 
-See full brief for the 8-item list. Summary:
-
-1. Items 1-4 (audit-only) pass before item 5 (paper-test) is
-   attempted.
-2. Multi-process auth check across all 4 worker processes.
-3. Paper-test placement + cancellation within 5s (10s hard
-   timeout); zero residual orders confirmed via
-   `list_open_orders`.
-4. Operator's $2.2k unchanged post-test (modulo trivial fees if
-   accidental fill — which shouldn't happen but document if it
-   does).
-5. CC report covers: pass/fail per item, response shapes for
-   `get_portfolio()` + `get_positions()`, full paper-test order
-   payload, gotchas surfaced for Phase 3.
-6. NO code changes to `coinbase_service.py` or
-   `coinbase_spot.py`. If a bug surfaces, surface in the report;
-   fix is Phase 2.5 or Phase 3.
-
-## Brain integration (read-only except for the paper-test)
-
-- `app/services/coinbase_service.py` — read; call public surface.
-- `app/services/trading/venue/coinbase_spot.py` — read; optional
-  parallel adapter check.
-- `.env` — read variable presence (not values).
+1. RH path BYTE-IDENTICAL post-Phase-3.
+2. Selector returns correct venue for 5 ticker classes (RH-only,
+   Coinbase-only, both-listed, fast-path-active, kill-switch-on).
+3. `LIVE=0` (default) → Coinbase routes shadow-log only; no broker
+   call.
+4. `LIVE=1` + tiny limit-far-below-spot → places + cancels via
+   existing autotrader bracket cancellation. Operator approval
+   required for this step.
+5. Multi-process kill-switch pickup verified across all 4
+   workers.
+6. Cost log preserved (writes to existing `trading_venue_truth_log`
+   or new `trading_venue_routing_log`).
+7. New tests in `tests/test_broker_selector.py` cover all 5
+   decision branches + LIVE-flag gate.
+8. CC report at
+   `docs/STRATEGY/CC_REPORTS/<YYYY-MM-DD>_f-coinbase-autotrader-enablement-phase-3-broker-selector.md`.
 
 ## Constraints / do not touch
 
-- **Hard Rule 1**: live-placement safety belts unchanged.
-- **Hard Rule 5**: prediction-mirror authority untouched.
-- **Operator's directive: don't break what works.** RH path
-  untouched.
-- **Paper-test order ONLY.** $5 notional, far-below-market limit,
-  immediately canceled. NO market orders, NO live entry.
-- **Hard 10s timeout on cancel.** If exceeded, CRITICAL surface +
-  stop.
-- **`try/finally`** around order placement; cancel runs
-  unconditionally on any exception.
-- **DO NOT auto-promote Phase 3.** Operator approves Phase 3
-  after reading Phase 2 report.
-- **DO NOT touch the operator-decided design constraints.** They
-  are documented here as binding for Phase 3+; Phase 2 doesn't
-  implement them.
-- **Edit-tool truncation discipline (HARD).**
-- **No magic numbers** — paper-test prices/notional come from
-  settings or documented constants.
+- **Hard Rule 1**: live-placement safety belts unchanged. Kill
+  switch + drawdown breaker + ensemble promotion check PRECEDE
+  selector in entry path.
+- **RH path BYTE-IDENTICAL**. Verified by parity unit test that
+  captures RH call args before+after.
+- **No paper-soak in Phase 3** (Phase 6's job).
+- **No cost-aware sizing in Phase 3** (Phase 5's job).
+- **No bracket writer Coinbase paths in Phase 3** (Phase 4's
+  job). Document any exit-path gaps in CC report.
+- **No autotrader scope expansion**. Phase 3 only adds routing
+  decision; it does NOT relax any existing entry-eligibility
+  rules.
+- **Edit-tool truncation discipline (HARD).** `auto_trader.py` is
+  >2000 lines. After every edit: `wc -l` + `git diff --stat` and
+  confirm no silent truncation.
 
-## Out of scope (Phase 2 — covered by later phases)
+## Out of scope (Phase 3 — later phases)
 
-- Broker selector logic (Phase 3).
 - Bracket writer Coinbase paths (Phase 4).
 - Cost-aware sizing (Phase 5).
-- Paper-trade soak (Phase 6 — different from Phase 2's single
-  paper-test).
-- Live verification (Phase 7).
-- Any code changes to `coinbase_service.py` or the adapter.
-- Any RH path changes.
+- Paper-trade soak (Phase 6).
+- Live verification + capital ramp (Phase 7).
+- Coinbase WebSocket order updates.
+- USDC-quoted (`-USDC`) tickers.
 
 ## Sequencing
 
-1. Truncation scan on `coinbase_service.py` +
-   `coinbase_spot.py`.
-2. Item 1: credentials probe.
-3. Item 2: multi-process `is_connected()` probe via
-   `docker exec` into each container.
-4. Item 3: `get_portfolio()` probe; verify cash = $2.2k.
-5. Item 4: `get_positions()` probe.
-6. **STOP and surface** if items 1-4 don't all pass. Operator
-   decides whether to proceed to item 5.
-7. Item 5: paper-test order. `try/finally`. Cancel within 5s.
-8. Item 6: CC report.
-9. Commit + push.
-
-## Operator-side after Phase 2 ships
-
-1. Read the report.
-2. If auth + order-placement work cleanly, Phase 3 (broker
-   selector) becomes next NEXT_TASK.
-3. If auth gaps surface, Phase 2.5 fixes them BEFORE Phase 3.
+1. Truncation scan on `auto_trader.py` + `coinbase_service.py`.
+2. Read `auto_trader.py` to find entry-placement callsite +
+   capture RH-path call signature for parity test.
+3. Write `broker_selector.py`.
+4. Write `tests/test_broker_selector.py`.
+5. Splice into `auto_trader.py` (RH unchanged; Coinbase gated).
+6. Add 2 env vars to `app/config.py`.
+7. Run pytest.
+8. Force-recreate workers; verify multi-process kill-switch
+   pickup.
+9. Single live test (`LIVE=1` + tiny limit-far-below-spot +
+   cancel). **Operator approval required for this step.**
+10. CC report.
+11. Commit + push.
 
 ## Rollback plan
 
-Paper-test order canceled before this brief returns. If cancel
-fails, rollback = operator-side manual cancel via Coinbase web UI;
-report surfaces the order ID for traceability.
+- Selector misbehaves → `CHILI_AUTOTRADER_KILL_SWITCH=1`
+  (30-second mitigation; blocks both venues).
+- Coinbase routing unsafe → `CHILI_COINBASE_AUTOTRADER_LIVE=0`
+  (30-second mitigation; RH unaffected).
+- Selector wrong venue → git revert the `auto_trader.py`
+  splice (selector module + tests stay).
 
-## What CC should do if it's unsure
+## What CC should do if unsure
 
-1. **Credentials missing**: STOP, surface env var names. No auth
-   probe without credentials.
-2. **Multi-process auth divergence**: CRITICAL surface — same
-   class as tonight's RH silent-empty bug.
-3. **`get_portfolio()` cash mismatch with $2.2k**: STOP and
-   surface for operator. Could be pending-deposit not settled,
-   sub-account / wrong-currency view, or parsing bug.
-4. **Cancel timeout**: CRITICAL. Operator manual cleanup
-   required.
-5. **Paper-test accidentally fills**: CRITICAL. Document
-   resulting position; operator manual close required.
+See full brief §"What CC should do if it's unsure". Key one:
+
+> **Test parity violation** (RH path call args change for any
+> reason): STOP. Surface for operator. RH path is byte-identical
+> or nothing ships.

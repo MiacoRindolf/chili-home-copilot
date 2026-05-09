@@ -253,3 +253,107 @@ N/A — no state changed. The report is the only artifact.
 3. **Promote Phase 3** (broker selector + venue abstraction) once
    the quote-currency decision is made. Phase 3 brief should bake
    in whichever convention you choose.
+
+## ADDENDUM (Phase 2 redux — 2026-05-09 22:43 UTC)
+
+**Operator manually converted USDC → USD in the Coinbase UI.** Re-ran
+items 3-6 of the verification with the converted balance to prove
+the full place+cancel chain works end-to-end with non-zero buying
+power.
+
+### Portfolio post-conversion
+
+```
+cash:           $2200.01
+buying_power:   $2200.01
+equity:         $2973.92  (cash + dust)
+USDC quantity:  0.005893  (residual dust from conversion)
+```
+
+### Paper-test REDUX (full place + cancel)
+
+Plan executed:
+```
+BTC-USD spot:  $80,794.41
+limit-buy:     0.00012377 BTC @ $40,397.20 (50% below spot)
+notional:      $5.00
+```
+
+**Place result** (0.45s round-trip):
+```json
+{
+  "ok": true,
+  "order_id": "149b388f-1b62-400e-9047-1b36b701ee75",
+  "state": "pending",
+  "raw": {
+    "success": true,
+    "success_response": {
+      "order_id": "149b388f-1b62-400e-9047-1b36b701ee75",
+      "product_id": "BTC-USD",
+      "side": "BUY",
+      "client_order_id": "f2392b62-fffb-4394-81be-205c6d39fff8"
+    },
+    "order_configuration": "{'limit_limit_gtc': {'base_size': '0.00012377', 'limit_price': '40397.2', 'post_only': False, 'rfq_disabled': False, 'reduce_only': False}}"
+  }
+}
+```
+
+**Cancel result** (0.14s round-trip — well under the 10s hard
+timeout):
+```json
+{
+  "ok": true,
+  "order_id": "149b388f-1b62-400e-9047-1b36b701ee75",
+  "raw": {"results": ["{'success': True, 'failure_reason': 'UNKNOWN_CANCEL_FAILURE_REASON', 'order_id': '149b388f-1b62-400e-9047-1b36b701ee75'}"]}
+}
+```
+
+The `failure_reason: 'UNKNOWN_CANCEL_FAILURE_REASON'` is a Coinbase
+SDK quirk on a *successful* cancel — `success: True` is the
+authoritative field.
+
+### Post-redux sanity checks
+
+```
+post-test open orders: 0
+post-test cash:        $2200.01  (identical to pre-test)
+post-test equity:      $2973.92  (identical to pre-test)
+```
+
+### What the redux proved
+
+- ✅ **Order placement signed + accepted** by Coinbase (broker
+  returned `order_id` and `state: pending`).
+- ✅ **`coinbase_service.place_buy_order` response shape** as
+  expected: `{ok, order_id, state, raw}`. Phase 3+ code can rely
+  on this shape.
+- ✅ **`coinbase_service.cancel_order_by_id` response shape** as
+  expected: `{ok, order_id, raw}`. Same.
+- ✅ **Round-trip latency**: place 0.45s + cancel 0.14s = 0.59s
+  total. Well under operator-set 5s soft / 10s hard cancel
+  timeout.
+- ✅ **Zero residual orders** post-cancel. Cancel is reliable.
+- ✅ **No fill, no fee, no capital impact**: cash + equity
+  identical pre and post.
+
+### Phase 3 quote-currency decision — RESOLVED
+
+Operator converted USDC → USD manually, so cash is now in the USD
+wallet. Phase 3 can ship the simpler `-USD` convention (matches
+CHILI's existing `coinbase_service.py:place_buy_order(ticker='BTC-USD')`
+calls). G1 from the original report is downgraded to:
+
+> **G1 — quote-currency convention LOCKED to `-USD`.** CHILI sends
+> `BTC-USD`, `ETH-USD`, etc. Funds debit the USD wallet. If the
+> operator funds future deposits as USDC, they must convert to USD
+> in the Coinbase UI before autotrader BUYs will succeed. Phase 5
+> cost-aware sizing reads `portfolio.cash` (USD wallet) directly.
+
+G2 (31 dust positions filter) and G3 (`total_balance_usd: None`)
+remain as documented above.
+
+### Phase 2 final verdict
+
+**FULL PASS.** Auth + portfolio + positions + place + cancel + zero
+residual + cash invariant — all six items green, end-to-end. Phase
+3 unblocked with `-USD` convention locked.
