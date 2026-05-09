@@ -112,7 +112,7 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
 def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> None:
     """Debounced: execution stats, adaptive spread hint, live depromotion sweep."""
     from ..execution_quality import compute_execution_stats, suggest_adaptive_spread
-    from ..learning import run_live_pattern_depromotion, run_thin_evidence_demote
+    from ..learning import run_live_pattern_depromotion
 
     payload = ev.payload if isinstance(ev.payload, dict) else {}
     uid = payload.get("user_id")
@@ -124,23 +124,12 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
     stats = compute_execution_stats(db, int(uid), lookback_days=90)
     spread = suggest_adaptive_spread(db, int(uid), lookback_days=60)
     dep = run_live_pattern_depromotion(db)
-    # f-pattern-demote-on-thin-evidence (2026-05-08): per-cycle sweep
-    # that demotes promoted patterns matching the brief's 5-criteria
-    # filter (lifecycle=promoted, trade_count<10, win_rate<0.33,
-    # oos_win_rate IS NULL, 'provisional_small_paths' in
-    # promotion_gate_reasons). Complementary to run_live_pattern_depromotion
-    # above -- that one handles live-vs-OOS gap on accumulated samples;
-    # this one handles thin-evidence-from-promotion-time. Both can fire
-    # in the same cycle; the lifecycle=promoted short-circuit prevents
-    # double-demotion.
-    try:
-        thin = run_thin_evidence_demote(db)
-    except Exception as exc:
-        logger.warning(
-            "%s thin_evidence_demote sweep failed ev_id=%s: %s",
-            LOG_PREFIX, ev.id, exc, exc_info=True,
-        )
-        thin = {"ok": False, "demoted": 0, "demoted_ids": []}
+    # f-pattern-demote-sweep-wiring-fix (2026-05-09): the
+    # `run_thin_evidence_demote` sweep used to live here, but
+    # this hook fires only on `live_trade_closed` events
+    # (~3 per 24h in the current operating state). Wired into
+    # `run_brain_work_dispatch_round` directly so it fires every
+    # ~75-90s round regardless of work-ledger state.
 
     stats_summary = {
         "trades_analyzed": stats.get("trades_analyzed", 0),
@@ -177,15 +166,10 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
     except Exception:
         logger.debug("%s attribution snapshot skipped", LOG_PREFIX, exc_info=True)
 
-    # f-pattern-demote-on-thin-evidence (2026-05-08): merge thin-
-    # evidence sweep counts into the existing depromotion payload so
-    # the execution_quality_updated outcome carries both signals.
+    # f-pattern-demote-sweep-wiring-fix (2026-05-09): the thin-
+    # evidence merge moved out -- the per-cycle sweep at the end of
+    # `run_brain_work_dispatch_round` is now the source of truth.
     dep_payload = dep if isinstance(dep, dict) else {"raw": dep}
-    if isinstance(dep_payload, dict):
-        dep_payload["thin_evidence_demoted"] = int(thin.get("demoted", 0))
-        dep_payload["thin_evidence_demoted_ids"] = list(
-            thin.get("demoted_ids", []) or []
-        )
 
     emit_execution_quality_updated_outcome(
         db,
@@ -464,12 +448,51 @@ def run_brain_work_dispatch_round(
                 errors.append(f"id={ev.id}:{event_type}:{e!s}")
         per_type[event_type] = n_done
 
+    # f-pattern-demote-sweep-wiring-fix (2026-05-09): per-cycle
+    # thin-evidence sweep. Runs once per dispatch round (~75-90s) so
+    # newly-promoted thin-evidence patterns get demoted on a
+    # meaningful timeline, not only when an `execution_feedback_digest`
+    # event happens to fire (which depends on `live_trade_closed`
+    # triggers -- ~3 events per 24h in the current operating state).
+    #
+    # Wrapped in try/except so a sweep failure surfaces in the result
+    # dict's `thin_evidence_sweep.ok=False` rather than poisoning the
+    # round (other dispatch work has already completed at this point).
+    thin_evidence_sweep: dict[str, Any]
+    try:
+        from ..learning import run_thin_evidence_demote
+        thin_evidence_sweep = run_thin_evidence_demote(db) or {}
+        if thin_evidence_sweep.get("demoted_ids"):
+            logger.info(
+                "%s thin_evidence sweep: demoted=%d ids=%s",
+                LOG_PREFIX,
+                int(thin_evidence_sweep.get("demoted", 0)),
+                list(thin_evidence_sweep.get("demoted_ids", []) or []),
+            )
+        else:
+            logger.debug(
+                "%s thin_evidence sweep: demoted=0 ids=[]",
+                LOG_PREFIX,
+            )
+    except Exception as _tied:
+        logger.warning(
+            "%s thin_evidence sweep failed: %s",
+            LOG_PREFIX, _tied, exc_info=True,
+        )
+        thin_evidence_sweep = {
+            "ok": False,
+            "demoted": 0,
+            "demoted_ids": [],
+            "error": str(_tied)[:500],
+        }
+
     return {
         "ok": True,
         "processed": processed,
         "claimed": claimed_total,
         "per_type": per_type,
         "errors": errors,
+        "thin_evidence_sweep": thin_evidence_sweep,
     }
 
 
