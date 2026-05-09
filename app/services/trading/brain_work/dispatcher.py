@@ -24,6 +24,17 @@ from .promotion_surface import emit_promotion_surface_change
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work_dispatch]"
 
+# f-brain-phase2-producer-completion (2026-05-09): watchdog-style
+# mining producer. The APScheduler brain_market_snapshots job is
+# wired in trading_scheduler.py:262 but stopped firing 2026-05-05;
+# the audit confirmed zero market_snapshots_batch events in 4 days.
+# This in-process timestamp tracks the last dispatch-round emit so
+# we can space them out at the configured interval. Module-level so
+# all rounds share state within a brain-worker process. Cleared on
+# container restart (intentional: the next round emits immediately
+# after a restart, which is the right behaviour for catch-up).
+_LAST_DISPATCH_MARKET_SNAPSHOTS_AT: float = 0.0
+
 
 def _holder_id() -> str:
     try:
@@ -486,6 +497,28 @@ def run_brain_work_dispatch_round(
             "error": str(_tied)[:500],
         }
 
+    # f-brain-phase2-producer-completion (2026-05-09): watchdog-style
+    # mining producer. Emits market_snapshots_batch + writes
+    # trading_snapshots if no dispatch-round emit has fired in the
+    # last interval_secs. The APScheduler job is unaffected; if it is
+    # healthy, the per-minute dedupe bucket in
+    # emit_market_snapshots_batch_outcome merges duplicates.
+    market_snapshots: dict[str, Any]
+    try:
+        market_snapshots = _maybe_run_dispatch_market_snapshots(
+            db, user_id=user_id,
+        )
+    except Exception as _ms_err:
+        logger.warning(
+            "%s dispatch market_snapshots watchdog failed: %s",
+            LOG_PREFIX, _ms_err, exc_info=True,
+        )
+        market_snapshots = {
+            "ok": False,
+            "skipped": False,
+            "error": str(_ms_err)[:500],
+        }
+
     return {
         "ok": True,
         "processed": processed,
@@ -493,6 +526,100 @@ def run_brain_work_dispatch_round(
         "per_type": per_type,
         "errors": errors,
         "thin_evidence_sweep": thin_evidence_sweep,
+        "market_snapshots": market_snapshots,
+    }
+
+
+def _maybe_run_dispatch_market_snapshots(
+    db: Session,
+    *,
+    user_id: int | None = None,
+) -> dict[str, Any]:
+    """Watchdog: emit a market_snapshots_batch if the last dispatch-
+    round emit was longer than ``chili_brain_dispatch_market_snapshots_interval_secs``
+    seconds ago.
+
+    Returns a result dict surfaced in the round's return payload so ops
+    can grep dispatch behaviour (e.g.
+    ``[brain_work_dispatch] dispatch_market_snapshots emitted daily=N
+    intra=M universe_size=K``).
+
+    Skips with ``skipped=True`` and a reason when:
+      * The watchdog is disabled via
+        ``chili_brain_dispatch_market_snapshots_enabled=False``.
+      * The interval gate hasn't expired yet.
+    """
+    global _LAST_DISPATCH_MARKET_SNAPSHOTS_AT
+
+    enabled = bool(
+        getattr(settings, "chili_brain_dispatch_market_snapshots_enabled", True)
+    )
+    if not enabled:
+        return {"ok": True, "skipped": True, "reason": "disabled_by_setting"}
+
+    interval_secs = max(0, int(
+        getattr(settings, "chili_brain_dispatch_market_snapshots_interval_secs", 900)
+    ))
+
+    import time as _time
+    now = _time.time()
+    if interval_secs > 0 and (now - _LAST_DISPATCH_MARKET_SNAPSHOTS_AT) < interval_secs:
+        remaining = int(interval_secs - (now - _LAST_DISPATCH_MARKET_SNAPSHOTS_AT))
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "interval_gate",
+            "remaining_secs": remaining,
+        }
+
+    # Mark ATTEMPTED-at before the call so a crash doesn't hot-loop the
+    # dispatch round trying to re-run a heavy snapshot job.
+    _LAST_DISPATCH_MARKET_SNAPSHOTS_AT = now
+
+    try:
+        from ..learning import run_scheduled_market_snapshots
+        from .emitters import emit_market_snapshots_batch_outcome
+    except Exception as exc:
+        return {"ok": False, "skipped": False, "error": f"import_failed: {exc!s:.200}"}
+
+    uid = user_id
+    if uid is None:
+        uid = getattr(settings, "brain_default_user_id", None)
+
+    out = run_scheduled_market_snapshots(db, uid)
+
+    daily = int(out.get("snapshots_taken_daily") or 0)
+    intra = int(out.get("intraday_snapshots_taken") or 0)
+    universe_size = int(out.get("universe_size") or 0)
+
+    try:
+        emit_market_snapshots_batch_outcome(
+            db,
+            daily=daily,
+            intraday=intra,
+            universe_size=universe_size,
+            job_id=None,  # dispatch path -- per-minute dedupe bucket key
+            snapshot_driver=out.get("snapshot_driver"),
+        )
+        db.commit()
+    except Exception as exc:
+        logger.warning(
+            "%s dispatch market_snapshots emit failed: %s",
+            LOG_PREFIX, exc, exc_info=True,
+        )
+
+    logger.info(
+        "%s dispatch_market_snapshots emitted daily=%d intra=%d universe_size=%d",
+        LOG_PREFIX, daily, intra, universe_size,
+    )
+
+    return {
+        "ok": True,
+        "skipped": False,
+        "snapshots_taken_daily": daily,
+        "intraday_snapshots_taken": intra,
+        "universe_size": universe_size,
+        "snapshot_driver": out.get("snapshot_driver"),
     }
 
 

@@ -2300,6 +2300,33 @@ class Settings(BaseSettings):
             "CHILI_BRACKET_WRITER_EXCEPTION_COOLDOWN_SECS"
         ),
     )
+    # f-brain-phase2-producer-completion (2026-05-09) -- watchdog-style
+    # mining producer wired into run_brain_work_dispatch_round. The
+    # APScheduler-based brain_market_snapshots job exists at
+    # trading_scheduler.py:262 but stopped firing 2026-05-05 (zero events
+    # in 4 days at audit time). Rather than rebuild the scheduler stack,
+    # we add a fallback emit inside the dispatch round; if the scheduler
+    # is dead the dispatch hook keeps the candidate pipeline alive.
+    # Disable here only if the scheduler is confirmed healthy AND
+    # operator wants single-path operation.
+    chili_brain_dispatch_market_snapshots_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_BRAIN_DISPATCH_MARKET_SNAPSHOTS_ENABLED"
+        ),
+    )
+    # Minimum spacing between dispatch-round mining emits (seconds).
+    # Default 900 (15min) -- matches the APScheduler job's cadence so a
+    # healthy scheduler + healthy dispatch hook both producing in the
+    # same minute self-dedup via the per-minute bucket key in
+    # emit_market_snapshots_batch_outcome. Setting to 0 disables the
+    # interval gate entirely (sweep runs every dispatch round).
+    chili_brain_dispatch_market_snapshots_interval_secs: int = Field(
+        default=900,
+        validation_alias=AliasChoices(
+            "CHILI_BRAIN_DISPATCH_MARKET_SNAPSHOTS_INTERVAL_SECS"
+        ),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),
