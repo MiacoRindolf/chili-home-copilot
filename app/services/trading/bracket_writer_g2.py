@@ -364,7 +364,7 @@ def warn_if_silent_exposure(*, log: "logging.Logger | None" = None) -> bool:
 # module docstring). Guarding explicitly means a change that adds
 # Coinbase later can't accidentally trip on a stale Robinhood code path.
 
-_SUPPORTED_VENUES = frozenset({"robinhood"})
+_SUPPORTED_VENUES = frozenset({"robinhood", "coinbase"})
 
 
 @dataclass(frozen=True)
@@ -1069,8 +1069,17 @@ def place_missing_stop(
     # (`rh.crypto.order_*`) and remove this guard, but until then the
     # safe behaviour is to SKIPPED-audit and let an operator-side
     # follow-up address the missing crypto stop coverage.
+    # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
+    # (2026-05-09): the crypto refusal narrows to RH only. Coinbase
+    # has a native stop-limit primitive (place_stop_limit_order_gtc
+    # in venue/coinbase_spot.py) so crypto-via-Coinbase reaches the
+    # placement code below. The RH equity-API path (rh.orders.order)
+    # still crashes on crypto bases via the SDK's
+    # get_instruments_by_symbols([])[0] failure, so RH crypto still
+    # SKIPPED-audits with the original reason string.
     _t_upper = (ticker or "").upper()
-    if _t_upper.endswith("-USD"):
+    _bs_lower = (broker_source or "").strip().lower()
+    if _t_upper.endswith("-USD") and _bs_lower == "robinhood":
         logger.warning(
             f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
             "ticker=%s reason=venue_unsupported_crypto_path "
@@ -1287,13 +1296,35 @@ def place_missing_stop(
         qty=float(local_quantity), stop_price=float(stop_price),
         decision_kind=decision.kind, decision_severity=decision.severity,
     )
+    # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
+    # (2026-05-09): venue-routed stop placement. RH path is
+    # BYTE-IDENTICAL — the place_stop_loss_sell_order call args are
+    # exactly the same as before this brief. Coinbase path uses the
+    # new place_stop_limit_order_gtc primitive with limit_price set
+    # to stop_price * (1 - chili_coinbase_stop_limit_buffer_pct).
     try:
-        place_res = adapter.place_stop_loss_sell_order(
-            product_id=ticker,
-            base_size=str(float(local_quantity)),
-            trigger_price=str(float(stop_price)),
-            client_order_id=client_oid,
-        )
+        if _bs_lower == "coinbase":
+            from ...config import settings as _cfg_p4
+            _buffer_pct = float(
+                getattr(_cfg_p4, "chili_coinbase_stop_limit_buffer_pct", 0.005)
+            )
+            _stop_px = float(stop_price)
+            _limit_px = _stop_px * (1.0 - max(_buffer_pct, 0.0))
+            place_res = adapter.place_stop_limit_order_gtc(
+                product_id=ticker,
+                side="sell",
+                base_size=str(float(local_quantity)),
+                stop_price=str(_stop_px),
+                limit_price=str(_limit_px),
+                client_order_id=client_oid,
+            )
+        else:
+            place_res = adapter.place_stop_loss_sell_order(
+                product_id=ticker,
+                base_size=str(float(local_quantity)),
+                trigger_price=str(float(stop_price)),
+                client_order_id=client_oid,
+            )
     except Exception as exc:
         # f-phase-e-revert-and-bracket-writer-crash-fix (2026-05-08):
         # arm a 5-min cooldown (settings-tunable) so a code-side crash

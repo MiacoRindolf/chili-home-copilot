@@ -2347,6 +2347,18 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_COINBASE_AUTOTRADER_LIVE"),
     )
+    # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
+    # (2026-05-09): bracket writer's Coinbase SELL stop-limit places
+    # `limit_price = stop_price * (1 - buffer_pct)` so the limit
+    # accepts a fill on the trigger move. Default 0.005 = 0.5% below
+    # stop. Tighter than RH's stop-loss-MARKET (which fills at any
+    # price) but bounded so a fast gap-down can't sell at $0. If the
+    # operator wants tighter (e.g. 0.001 = 10bps below) or looser
+    # (e.g. 0.02), env-override.
+    chili_coinbase_stop_limit_buffer_pct: float = Field(
+        default=0.005,
+        validation_alias=AliasChoices("CHILI_COINBASE_STOP_LIMIT_BUFFER_PCT"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

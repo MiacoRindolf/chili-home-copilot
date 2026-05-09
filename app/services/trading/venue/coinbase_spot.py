@@ -659,6 +659,162 @@ class CoinbaseSpotAdapter(VenueAdapter):
             _log.exception("[coinbase_spot] place_limit_order_gtc failed")
             return {"ok": False, "error": str(e), "client_order_id": cid}
 
+    def place_stop_limit_order_gtc(
+        self,
+        *,
+        product_id: str,
+        side: str,
+        base_size: str,
+        stop_price: str,
+        limit_price: str,
+        client_order_id: Optional[str] = None,
+        stop_direction: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """f-coinbase-autotrader-enablement-phase-4 (2026-05-09).
+
+        Place a stop-limit GTC order via Coinbase Advanced Trade.
+
+        Mirrors :meth:`place_limit_order_gtc`'s envelope shape so the
+        bracket writer can dispatch uniformly:
+            {"ok": True,  "order_id": "...", "client_order_id": "...", "raw": {...}}
+            {"ok": False, "error": "...", "client_order_id": "..."}
+
+        SDK call: ``stop_limit_order_gtc_buy`` /
+        ``stop_limit_order_gtc_sell`` per
+        https://docs.cdp.coinbase.com/advanced-trade/reference/createorder
+        (config_key=``stop_limit_stop_limit_gtc``). The bracket writer's
+        SELL stop-loss case uses ``side='sell'`` +
+        ``stop_direction='STOP_DIRECTION_STOP_DOWN'`` (default when
+        side='sell' and ``stop_direction is None``).
+
+        ``limit_price`` should be set slightly below ``stop_price`` for
+        SELL stops so the limit accepts a fill on the trigger move.
+        Caller responsibility (the bracket writer applies a
+        settings-tunable buffer).
+        """
+        if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
+            return {"ok": False, "error": "adapter disabled"}
+        cid = client_order_id or str(uuid.uuid4())
+        if idempotency_store.is_duplicate(cid, venue=_VENUE):
+            return {
+                "ok": False,
+                "error": "duplicate client_order_id (recent)",
+                "client_order_id": cid,
+            }
+        allowed, retry_after = rate_limiter.try_acquire(_VENUE)
+        if not allowed:
+            try:
+                venue_health.record_rate_limit_event(
+                    venue=_VENUE, ticker=product_id, source="cb_place_stop_limit",
+                )
+            except Exception:
+                pass
+            return rate_limiter.rate_limited_response(
+                _VENUE, retry_after, client_order_id=cid,
+            )
+        pid = _to_product_id(product_id)
+        side_l = side.lower()
+        if side_l not in ("buy", "sell"):
+            return {"ok": False, "error": f"invalid side: {side}", "client_order_id": cid}
+        # Default stop_direction: SELL stop-loss triggers on price-DOWN;
+        # BUY stop (less common) triggers on price-UP. Per Coinbase
+        # Advanced Trade docs.
+        sd = (stop_direction or "").strip().upper()
+        if not sd:
+            sd = (
+                "STOP_DIRECTION_STOP_DOWN"
+                if side_l == "sell"
+                else "STOP_DIRECTION_STOP_UP"
+            )
+
+        try:
+            order_state_machine.record_transition_standalone(
+                to_state=order_state_machine.OrderState.SUBMITTING,
+                venue=_VENUE,
+                source="cb_place_stop_limit",
+                client_order_id=cid,
+                raw_payload={
+                    "product_id": pid,
+                    "side": side_l,
+                    "base_size": str(base_size),
+                    "stop_price": str(stop_price),
+                    "limit_price": str(limit_price),
+                    "stop_direction": sd,
+                },
+            )
+        except Exception:
+            pass
+
+        try:
+            c = self._require_client()
+            kwargs = dict(
+                client_order_id=cid,
+                product_id=pid,
+                base_size=str(base_size),
+                limit_price=str(limit_price),
+                stop_price=str(stop_price),
+                stop_direction=sd,
+            )
+            if side_l == "buy":
+                resp = c.stop_limit_order_gtc_buy(**kwargs)
+            else:
+                resp = c.stop_limit_order_gtc_sell(**kwargs)
+            rd = _as_dict(resp)
+            ok = bool(rd.get("success"))
+            sr = _as_dict(rd.get("success_response"))
+            oid = sr.get("order_id") or cid
+            if ok or (oid and oid != cid):
+                idempotency_store.remember(
+                    cid,
+                    venue=_VENUE,
+                    symbol=pid,
+                    side=side_l,
+                    qty=float(base_size or 0.0),
+                    broker_order_id=oid if oid != cid else None,
+                    status="submitted",
+                )
+                try:
+                    order_state_machine.record_transition_standalone(
+                        to_state=order_state_machine.OrderState.ACK,
+                        venue=_VENUE,
+                        source="cb_place_stop_limit",
+                        order_id=oid if oid != cid else None,
+                        client_order_id=cid,
+                        broker_status="accepted",
+                        raw_payload={"product_id": pid, "order_id": oid},
+                    )
+                except Exception:
+                    pass
+                cb.clear_cache()
+                return {
+                    "ok": True, "order_id": oid,
+                    "client_order_id": cid, "raw": rd,
+                }
+            er = _as_dict(rd.get("error_response"))
+            try:
+                order_state_machine.record_transition_standalone(
+                    to_state=order_state_machine.OrderState.REJECTED,
+                    venue=_VENUE,
+                    source="cb_place_stop_limit",
+                    client_order_id=cid,
+                    broker_status="rejected",
+                    raw_payload={
+                        "error": er.get("message") or er.get("error") or "",
+                    },
+                )
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "error": er.get("message") or er.get("error") or str(rd),
+                "client_order_id": cid,
+            }
+        except VenueAdapterError as e:
+            return {"ok": False, "error": str(e), "client_order_id": cid}
+        except Exception as e:
+            _log.exception("[coinbase_spot] place_stop_limit_order_gtc failed")
+            return {"ok": False, "error": str(e), "client_order_id": cid}
+
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         if not self.is_enabled():
             return {"ok": False, "error": "adapter disabled"}

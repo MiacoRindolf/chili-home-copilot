@@ -1173,6 +1173,15 @@ def _execute_broker_buy(
                 reason=f"broker:{cb_res.get('error')}", alert=alert,
             )
             return None
+        # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
+        # (2026-05-09): tag the broker response so the downstream Trade
+        # row gets `broker_source='coinbase'` instead of the
+        # hard-coded 'robinhood' default. The bracket reconciler reads
+        # broker_source to dispatch venue-aware repair sweeps; without
+        # this tag a Coinbase entry would land with broker_source=
+        # 'robinhood' and the RH reconciler would try to use the equity
+        # API on it (regression of the ADA/SOL crash class).
+        cb_res["_chili_broker_source"] = "coinbase"
         return cb_res
 
     # decision.venue == 'rh' -- fall through to the existing RH path
@@ -1605,6 +1614,13 @@ def _execute_new_entry(
         except (TypeError, ValueError):
             fill = px
 
+        # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
+        # (2026-05-09): broker_source from the response side-channel.
+        # Phase 3 + 4 Coinbase routing tags the response with
+        # `_chili_broker_source='coinbase'`; everything else
+        # (RH, options) defaults to 'robinhood' (BYTE-IDENTICAL with
+        # the prior hardcoded value).
+        _broker_source_for_trade = res.get("_chili_broker_source") or "robinhood"
         tr = Trade(
             user_id=uid,
             ticker=alert.ticker.upper(),
@@ -1617,7 +1633,7 @@ def _execute_new_entry(
             take_profit=float(alert.target_price) if alert.target_price is not None else None,
             scan_pattern_id=alert.scan_pattern_id,
             related_alert_id=alert.id,
-            broker_source="robinhood",
+            broker_source=_broker_source_for_trade,
             management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
             broker_order_id=str(order_id_raw).strip(),
             indicator_snapshot={
