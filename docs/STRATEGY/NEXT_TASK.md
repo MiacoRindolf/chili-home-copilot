@@ -1,6 +1,6 @@
 # NEXT_TASK: f-prefilter-bypass-and-cooldown-investigation
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
