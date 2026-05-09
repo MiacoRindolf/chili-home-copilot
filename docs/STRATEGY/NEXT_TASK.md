@@ -1,201 +1,202 @@
-# NEXT_TASK: f-crypto-stale-trade-closer
+# NEXT_TASK: f-phase-e-revert-and-bracket-writer-crash-fix
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-Close the crypto-side reconciler gap: add a sweep that auto-closes
-phantom-open crypto trades (entry never filled OR broker reports
-zero quantity for N consecutive cycles). Mirrors the equity-side
-Phase A+B+C protection chain. **Trade 1810 DOT-USD is the audit
-fingerprint** — it's been `status='open'` for 7.6 days with
-`last_fill_at IS NULL` and broker reporting `position_quantity=0`,
-and the bracket reconciler has been logging `missing_stop:warn`
-every 60s with no path to act.
+Two tightly-scoped fixes that remove ACTIVE risks tonight without
+biting off the multi-week architectural rebuild:
 
-The full brief is at
-`docs/STRATEGY/QUEUED/f-crypto-stale-trade-closer.md`
-— read it first.
+1. **Revert Phase E** (`f-crypto-stale-trade-closer`, commit `c8aec21`).
+   The brief was wrong — it took broker silent-empty as ground
+   truth. The disable flags in `.env` are belt-and-suspenders;
+   the actual code is still a footgun. One mechanical `git revert`.
 
-## Why now (real-money exposure)
+2. **Fix the `bracket_writer.place_missing_stop` IndexError**
+   (`error: "list index out of range"`). Active crash loop on
+   ADA/SOL since 2026-05-09 01:57 UTC. Every minute, two events:
+   `g2_place_missing_stop_submitting` then
+   `g2_place_missing_stop_rejected` with the exception. Real-money
+   risk: stops have NOT been placed for those crypto positions
+   for hours.
 
-Operator surfaced 2026-05-08 17:13 PDT: "DOT-USD position hit its
-target earlier but chili didn't exit it." Forensic investigation
-(see brief for full table):
+The full root-cause analysis is at
+`docs/STRATEGY/QUEUED/f-crypto-reconcile-architectural-rebuild.md`
+(read for context). This brief addresses Anomalies 6 (crash) and
+also clears the codebase of Phase E (which the architectural
+rebuild calls out as "to be reverted, not extended").
 
-* Trade 1810 DOT-USD: entry $1.21568548, target intent $1.39803830,
-  current Coinbase spot $1.3705 (above and below target intermittently
-  in last hours).
-* Trade row says `status='open'` with `quantity=248`.
-* `last_fill_at IS NULL` despite `broker_order_id` being set —
-  the entry order was placed but **the broker never reported a fill**.
-* `get_crypto_positions()` returns `[]`. Broker has zero DOT.
-* Bracket reconciler has logged `missing_stop:warn` every minute
-  for 7 days. Nothing acts on these warnings — there's no
-  crypto-side stale-close path.
+## Why now (algo-trader-architect framing)
 
-The "missed exit" is misframed: chili can't exit a position the
-broker doesn't have. The real bug is that chili thinks it has
-the position when it doesn't. Equity book has R31/R32 + Phase B
-wipeout-burst breaker + Phase C streak counter for this exact
-class of phantom; crypto book has nothing.
+Tonight's incident: Phase E falsely cancelled 14 crypto trades.
+None lost capital because the broker still held them and the
+revert-restore was within 22 minutes. But the architectural audit
+revealed Phase E is structurally unsafe AND there's an active code
+crash loop in the bracket writer that's been preventing stop
+placement on ADA/SOL.
 
-## Why this is the right next move
+These two are the highest-leverage moves before the multi-week
+rebuild:
+* Removing Phase E source removes the chance of accidental
+  re-enable + repeat false-cancellation incident.
+* Fixing the IndexError lets the bracket-writer's recovery path
+  actually execute, restoring stop-loss protection on at least
+  ADA/SOL (the two trades with bracket_intents that the writer
+  is repeatedly trying to repair).
 
-* **Phase E (this brief)** vs `f-pattern-demote-sweep-wiring-fix`:
-  pattern-demote sweep DOES run a few times per day on its
-  current event-driven hook (24h ledger shows 3
-  `execution_feedback_digest` events) — not fully dead, just
-  intermittent. The wiring fix is correct but not urgent.
-  Crypto-stale-trade-closer addresses real-money exposure that's
-  active right now.
-* **vs `f-pdt-crypto-bypass-cleanup`**: hygiene only; doesn't
-  change observable behavior.
-* **vs `f-autotrader-pdt-aware-exit-deferral`**: based on a
-  flawed premise; needs rewriting.
-* **vs new alpha work**: capital efficiency improvement before
-  signal-quality work; phantom-opens are unaccounted exposure.
+## Why this scope (vs. the alternatives)
+
+* **Vs. Phase 1 of the architectural rebuild (auth liveness +
+  typed result):** Phase 1 is a week of careful work that touches
+  many call sites. Doing it tired is a recipe for the same class
+  of mistake as Phase E. Defer to fresh-start tomorrow.
+* **Vs. Anomaly 4 (crypto exit_monitor deterministic close):**
+  Currently mitigated — auth is restored, exit_monitor's sells
+  are filling at the broker, broker_sync stale-close eventually
+  flips status='closed'. Loses exit_reason fidelity but doesn't
+  lose money. Schedule for the rebuild's Phase 2.
+* **Vs. Anomaly 5 (sync_pending_exit_order dead code):** Same
+  as Anomaly 4 — wired into Phase 2 of the rebuild.
+* **Vs. the missing bracket_intents on 10 crypto trades:**
+  Schedule for Phase 3 of the rebuild. Today's IndexError fix
+  doesn't address the missing-intents (those trades have NO
+  intents at all, so place_missing_stop wouldn't run for them
+  even with the crash fixed).
 
 ## The change
 
-### Layer 1 — entry-never-filled detection
+### Part 1: Revert Phase E
 
-Trade with `status='open'` AND `last_fill_at IS NULL` AND
-`entry_date < NOW() - INTERVAL <N> hours` (default
-`CHILI_CRYPTO_ENTRY_FILL_WINDOW_HOURS=2`) → mark as `cancelled`,
-`exit_reason='entry_never_filled'`, `pnl=NULL`, `exit_price=NULL`.
+```bash
+git revert c8aec21 --no-edit
+```
 
-### Layer 2 — broker-quantity-zero confirmation streak
+Migration 234 (added `crypto_broker_zero_qty_streak` column)
+should remain — the column is additive, doesn't hurt anything,
+and a forward migration to drop a column is more risky than
+leaving it. Document in the revert commit message that mig 234
+is intentionally retained.
 
-Mirrors Phase C (equity). New column
-`trading_trades.crypto_broker_zero_qty_streak INT NOT NULL DEFAULT 0`.
-Increment when broker reports `position_quantity=0` for an open
-crypto trade; reset to 0 when present. Close at
-`streak >= CHILI_CRYPTO_BROKER_ZERO_QTY_STREAK_MIN` (default 3) with
-`exit_reason='broker_position_reconciled_to_zero'`.
+`.env` disable flags can stay (idempotent if the code is gone)
+OR be removed — operator's choice. Recommend keeping them for
+forensic clarity ("Phase E was here").
 
-### Layer 3 — observability + reuse Phase B's burst-breaker
+### Part 2: Fix `bracket_writer.place_missing_stop` IndexError
 
-`[crypto_reconcile] STALE_TRADE_CLOSE` warning per close. ≥3 in
-5s trips the breaker (reuse Phase B's
-`_record_reconcile_close_burst`).
+**Step 1**: Find the IndexError site. Trigger a controlled crash
+in chili_test by calling `place_missing_stop` directly with the
+audit fingerprint (qty=3621, stop_price=0.25663137, ticker='ADA-USD',
+trade_id=1808 — but a chili_test seeded copy). Capture the full
+traceback from the exception.
 
-### Phase A integration
+**Step 2**: Patch the IndexError site. Likely culprits:
+- `cost_bases[0]` without `if cost_bases:` check
+- `executions[0]` similar
+- A list-comprehension result indexed without bounds check
 
-Extend `_RECONCILE_ARTIFACT_EXIT_REASONS` in `pdt_guard.py` to
-include `'entry_never_filled'` and
-`'broker_position_reconciled_to_zero'` so they don't pollute the
-PDT count (these are not FINRA day-trades any more than
-`broker_reconcile_position_gone` was).
+**Step 3**: Add a 5-min cooldown after ANY exception (not just
+broker terminal-rejects). The current cooldown only fires on
+known-retryable broker errors; code bugs hammer in a tight
+loop. The cooldown should be:
+```python
+except Exception as e:
+    logger.exception("[bracket_writer_g2] place_missing_stop crashed: %s", e)
+    _set_reject_cooldown(intent_id, seconds=300, reason="exception_cooldown")
+    raise  # for the audit event to record
+```
 
-## Acceptance criteria (per brief)
+**Step 4**: Tests:
+- Reproduce the IndexError shape (mock the crashing branch to
+  return empty list).
+- Verify the patch returns a clean rejected-result with a
+  meaningful error string instead of "list index out of range."
+- Verify the 5-min cooldown is set.
 
-1. New module/sweep `run_crypto_stale_trade_close(db)` shipped.
-2. Migration NNN (next free) adds the streak column.
-3. Settings constants for both window/threshold.
-4. Wired into bracket-reconciliation cycle (~60s cadence).
-5. Reuses Phase B's burst breaker.
-6. Phase A's `_RECONCILE_ARTIFACT_EXIT_REASONS` extended.
-7. Tests in `tests/test_crypto_stale_trade_closer.py`:
-   - entry-never-filled window not expired → no close
-   - entry-never-filled window expired → cancel
-   - broker qty=0, streak < N → no close
-   - broker qty=0, streak >= N → close
-   - broker qty > 0 → reset streak
-   - **Trade 1810 audit replay** → cancelled with right reason
-8. Live verification: trade 1810 cleaned up on first sweep
-   (or earlier via operator's manual SQL fix from
-   `scripts/d-fix-1810.ps1`).
-9. CC report at
-   `docs/STRATEGY/CC_REPORTS/2026-05-08_f-crypto-stale-trade-closer.md`.
+## Acceptance criteria
+
+1. Phase E feature commit (`c8aec21`) is reverted via
+   `git revert`. Migration 234 retained.
+2. The IndexError crash on `place_missing_stop` is patched with
+   bounds-checked indexing.
+3. A 5-min cooldown engages on any exception (not just broker
+   rejects).
+4. Tests for both:
+   - `tests/test_bracket_writer_place_missing_stop_resilience.py`
+     (or extend existing `tests/test_bracket_writer_g2.py`).
+5. Live verification:
+   - After deploy, watch ADA's `g2_place_missing_stop_submitting`
+     events for 10 min. Either successfully places a stop OR
+     fails with a meaningful broker-error reason (not "list index
+     out of range").
+   - Verify Phase E sweep is gone (`grep -r run_crypto_stale_trade_close
+     app/` returns zero).
+6. CC report at
+   `docs/STRATEGY/CC_REPORTS/2026-05-08_f-phase-e-revert-and-bracket-writer-crash-fix.md`.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `app/services/trading/bracket_reconciliation_service.py` —
-  natural sibling for the new sweep. Already runs every 60s and
-  is the source of the `missing_stop:warn` audit data.
-- Phase B's `_record_reconcile_close_burst` — reuse for
-  cardinality-based breaker trip.
-- Phase A's `_RECONCILE_ARTIFACT_EXIT_REASONS` — extend to
-  include the two new reasons.
-- Phase C's `broker_sync_missing_streak` — pattern only;
-  the crypto column is parallel, not shared (different reconciler
-  cadence and different broker source).
+- `app/services/trading/bracket_writer_g2.py:876+`
+  (`place_missing_stop`). Patch the IndexError site only.
+- Existing reject-cooldown infrastructure in `bracket_writer_g2`.
+  Extend to fire on `except Exception` not just on broker-reject
+  branch.
+- Equity book (Phases A+B+C) untouched.
 
 ## Constraints / do not touch
 
 - **Hard Rule 1**: live-placement safety belts unchanged.
 - **Hard Rule 5**: prediction-mirror authority untouched.
-- **Hard Rule 3**: data-first. New column via migration; no
-  off-schema state.
-- **Don't touch the equity-side reconciler** (Phases A+B+C are
-  load-bearing).
-- **Don't touch Phase B's burst helper** (reuse only).
-- **Don't touch `pdt_guard.py`'s SQL filter** (Phase A is durable);
-  ONLY extend the constant set.
-- **No magic numbers**: both windows lift from settings.
-- **Edit-tool truncation discipline (HARD).** Splice pattern.
-  `wc -l + ast.parse` post-edit verification mandatory.
+- **Don't touch the equity-side reconciler.**
+- **Don't add Phase E logic back.** The revert removes the file;
+  don't re-introduce the heuristic anywhere else.
+- **Don't widen scope to the architectural rebuild.** That's a
+  separate brief.
+- **No magic numbers**: cooldown duration lifts from settings.
+- **Edit-tool truncation discipline (HARD).** `bracket_writer_g2.py`
+  is large.
 - **Tests use `_test`-suffixed DB.**
 
 ## Out of scope
 
-- Equity book (Phases A+B+C cover it).
-- Options reconciler.
-- Manual position-recovery for trade 1810 — operator runs
-  `scripts/d-fix-1810.ps1` (uncomment Path A or B based on
-  Robinhood app evidence) before this brief ships, OR the first
-  sweep handles it post-deploy. Either is fine.
-- Other stale-detection criteria beyond the two layers.
-- Re-promotion of pattern 585.
-- The pattern-demote sweep wiring fix
-  (`f-pattern-demote-sweep-wiring-fix`) — separate brief, can
-  ship after this.
+- Phase 1+ of the architectural rebuild
+  (`f-crypto-reconcile-architectural-rebuild`).
+- Anomaly 4 (crypto exit_monitor deterministic close).
+- Anomaly 5 (`sync_pending_exit_order` wiring).
+- Missing bracket_intents on 10 crypto trades.
+- Auth-cache liveness (Anomaly 1).
 
 ## Sequencing
 
-1. Truncation scan on
-   `app/services/trading/bracket_reconciliation_service.py` and
-   `app/services/trading/pdt_guard.py` (the latter for the
-   constant extension).
-2. **Pre-deploy audit**: how many crypto trades currently match
-   each layer's criteria? Surface in CC report. Trade 1810 is
-   the known one; there may be others.
-3. Migration NNN + new column.
-4. Settings + module-level constants.
-5. New sweep + helpers + Phase A constant extension.
-6. Wire into bracket-reconciliation cycle.
-7. Tests including trade 1810 replay.
-8. Commit + push + CC report + mark NEXT_TASK DONE.
+1. Truncation scan on `bracket_writer_g2.py`.
+2. **Part 1**: `git revert c8aec21` with documented commit
+   message. Verify imports don't break elsewhere.
+3. **Part 2**: Reproduce IndexError; patch; add tests; verify.
+4. Commit + push + CC report + mark NEXT_TASK DONE.
 
 ## Operator-side after CC ships
 
 1. Pull + truncation scan.
-2. **Pre-flight: review the CC report's audit list of trades
-   that will be auto-closed by the first sweep.** If any are
-   unexpected (e.g., a trade you DO have at the broker but chili
-   thinks is stale), surface BEFORE deploy.
-3. `docker compose up -d --force-recreate chili autotrader-worker`.
-4. Watch for `[crypto_reconcile] STALE_TRADE_CLOSE` warnings.
-5. Verify trade 1810 is now `status='cancelled'` (or whatever
-   manual cleanup the operator did).
+2. `docker compose up -d --force-recreate chili autotrader-worker
+   scheduler-worker`.
+3. Watch ADA's bracket_writer activity for 10 min. Either a real
+   stop gets placed (or a real broker rejection surfaces) — not
+   another IndexError.
+4. Optionally remove Phase E disable flags from `.env` (the code
+   is gone, the flags are no-ops now).
 
 ## Rollback plan
 
-`git revert` the commit. New column stays (additive). Sweep is
-gated on the settings flags being non-zero;
-`CHILI_CRYPTO_ENTRY_FILL_WINDOW_HOURS=0` disables Layer 1,
-`CHILI_CRYPTO_BROKER_ZERO_QTY_STREAK_MIN=0` disables Layer 2.
+`git revert` of this commit re-introduces both Phase E AND the
+IndexError. Don't do it.
 
 ## What CC should do if it's unsure
 
-1. **If the audit shows >5 trades that would be auto-cancelled**,
-   STOP and surface — that volume suggests a deeper problem
-   (e.g., a recent broker outage producing many entry-never-filled
-   rows) and the operator needs to review before any sweep runs.
-2. **If the bracket-reconciliation-service cycle cadence is not
-   a stable ~60s** (e.g., it depends on backlog), surface and
-   propose a scheduler-cron alternative.
-3. **If the trade 1810 audit replay test won't run cleanly**
-   (e.g., due to FK constraints similar to Phase B's R32 test),
-   use `user_id=NULL` seed pattern as Phase B did.
+1. **If the IndexError site is non-obvious**, surface in the CC
+   report with the full traceback and propose a fix the operator
+   can review before commit.
+2. **If `git revert c8aec21` produces conflicts** (e.g., because
+   later commits touched related files), surface and request
+   guidance — don't force-resolve.
+3. **If migration 234 retention causes ORM warnings** (e.g.,
+   the column is on the model but the writer is gone), strip the
+   ORM column reference too — but keep the DB column.
