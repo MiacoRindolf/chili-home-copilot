@@ -1,6 +1,6 @@
 # NEXT_TASK: f-coinbase-autotrader-enablement-phase-3-broker-selector
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
