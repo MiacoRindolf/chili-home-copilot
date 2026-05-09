@@ -1,6 +1,6 @@
 # NEXT_TASK: f-crypto-stale-trade-closer
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
