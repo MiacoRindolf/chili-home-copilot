@@ -1,169 +1,193 @@
-# NEXT_TASK: f-pattern-pipeline-eligibility-audit
+# NEXT_TASK: f-brain-phase2-producer-completion
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-Read-only research audit. **No code changes shipped from this brief.**
-
-Operator framing: "the recent crypto entries have been good so far,
-they have been up... I don't want you to mess up the current working
-system but just enhance it."
-
-The system is finding real edge today (DOT + SOL closed at target,
-+$99.55 realized; 12 open crypto positions net up unrealized). The
-issue isn't quality — it's that the eligibility funnel is producing
-only one effective pattern (Reddit IBS mean reversion in two
-evidence cohorts: id=1011 + id=1016). The audit identifies WHY the
-funnel is narrow, then proposes additive enhancements as separate
-follow-up briefs — never gate-loosening.
+Complete the Phase 2 brain migration. Operator's diagnostic
+confirmed by tonight's audit: the execution layer (event-driven
+handlers) migrated cleanly on 2026-05-05, but the production
+layer (things that EMIT work-ledger events) didn't. Some
+producers were in the legacy `run_learning_cycle` body; when
+that cycle was gated off via `CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0`,
+the producers stopped firing. **Mining stopped 2026-05-05** (same
+day Phase 2 became operational — not coincidence).
 
 The full brief is at
-`docs/STRATEGY/QUEUED/f-pattern-pipeline-eligibility-audit.md`
+`docs/STRATEGY/QUEUED/f-brain-phase2-producer-completion.md`
 — read it first.
 
 ## Why now
 
-End-of-day 2026-05-08 brain_work_events 24h totals:
-- `backtest_completed: 268`
-- **`pattern_eligible_promotion: 0`**
+End-of-day 2026-05-08 audit data:
+- `market_snapshots_batch` events: **0 in 4 days** (last fired 5/5)
+- New `scan_patterns` rows: **0 in 4 days** (last created 5/5)
+- `pattern_eligible_promotion`: **0 in 30 days**
 
-268 backtests ran today; zero patterns crossed the eligibility bar.
-Either the gate is correctly tight (rejecting genuinely-poor
-candidates) or pathologically tight (rejecting good candidates).
-Without an audit we can't tell. The two scenarios call for
-different responses:
-- Correctly tight → expand discovery (broader universe,
-  multi-timeframe mining, additive enhancements)
-- Pathologically tight → fix the gate calibration
+The "narrow funnel" is **not narrow — it's stopped**. Backtest
+cadence is healthy (~200-400/day) but it's walking a static pool
+of patterns that hasn't changed in a week. Without restoring the
+producers, every other improvement is dead air.
 
-This audit is the diagnostic that tells us which.
+## Scope (operator-friendly two-stage)
+
+**Stage 1 (read-only audit, ~30 min)**: map every handler in
+`brain_work/handlers/` to its producer. Identify gaps. Output: a
+mapping table in the CC report.
+
+**Stage 2 (targeted wiring, ~1-2 hours)**: for each missing
+producer, ship a fix. Mining is the load-bearing first fix.
+Others may be surfaced and either fixed in this brief OR split
+into follow-ups (operator decides after stage 1).
 
 ## Why this scope
 
-* **Vs. Phase 1 of the architectural rebuild**: that's a week of
-  reconciler work; this is one read-only audit producing one
-  report.
-* **Vs. directly loosening the gate**: dangerous. Operator's
-  current trades work because the gate is tight. Don't loosen
-  blindly.
-* **Vs. directly expanding the universe**: tempting but blind —
-  if the gate is correctly tight, more universe = more rejected
-  candidates with no observable benefit. Audit FIRST.
-* **Vs. wiring f-pattern-oos-revalidation**: the natural next
-  brief if Section F surfaces it; depends on the audit data.
+* **Vs. CC's "just restart mining cron" recommendation**: that
+  would fix the symptom but not the architectural mechanism. If
+  there are OTHER silent producers besides mining (operator's
+  hypothesis suggests this), targeted-mining-fix would leave
+  them broken.
+* **Vs. broader architectural rebuild Phase 1** (auth liveness):
+  multi-week scope; doing tired is dangerous. This brief is
+  bounded.
+* **Vs. directly expanding the universe**: pointless until the
+  producer pipeline can convert candidates to PTRs.
+* **Vs. directly loosening the 30-trade gate**: wrong fix —
+  Section B of tonight's audit confirmed the gate is correctly
+  tight; the trade-accumulation pipeline is upstream-starved.
 
-## The change (audit produces report only)
+## The change
 
-Read-only SQL queries against `scan_patterns`, `brain_work_events`,
-and source-code reads of `learning.py` + `brain_work/dispatcher.py`.
+Per the brief, two stages:
 
-Six sections in the output report:
+1. **Stage 1 — handler trigger mapping**:
+   For each file in `app/services/trading/brain_work/handlers/`,
+   document handler-name, consumed-event, producer-location,
+   producer-type (event-driven / scheduled / hybrid / MISSING),
+   last-event-seen, status. Surface MISSING producers.
 
-* **A**: gate-rejection telemetry — bucket the 268 backtests by
-  rejection reason. The dominant rejector is the smoking gun.
-* **B**: human calibration — sample 20 rejected patterns; algo-
-  trader read on whether each looks promotable. Tells us if the
-  gate is correctly or pathologically tight.
-* **C**: distribution audits — `evidence_count`, OOS-NULL count,
-  `lifecycle_stage` histogram, `promotion_gate_reasons` breakdown.
-* **D**: pipeline-cadence audits — when did mining last run, was
-  pattern_eligible_promotion always 0, etc.
-* **E**: universe + timeframe audit — what tickers + timeframes
-  are mined today; obvious gaps?
-* **F**: prioritized recommendations — ranked follow-up briefs
-  with scope + risk to existing-working-system + prerequisites.
+2. **Stage 2 — wire missing producers**:
+   - Mining first (the visible bottleneck): restore the producer
+     under the new architecture (per-cycle hook in
+     `run_brain_work_dispatch_round` preferred).
+   - Other MISSING producers (if any): wire in same brief OR
+     split to follow-up briefs based on operator's call after
+     stage 1.
 
 ## Acceptance criteria
 
-1. Single report at
-   `docs/STRATEGY/CC_REPORTS/2026-05-09_f-pattern-pipeline-eligibility-audit.md`
-   with all six sections populated with concrete data.
-2. **NO code changes** shipped from this brief. Any
-   while-I'm-here fix temptations get surfaced in Section F as
-   recommendations, not commits.
-3. Report includes raw query SQL for each section so the operator
-   can re-run.
-4. Section F lists at least 3 prioritized follow-up briefs ranked
-   by risk-adjusted impact, each with explicit risk-to-existing-
-   system rating.
-5. No mutation of any pattern row, work_ledger event, or DB
-   state. Read-only.
+1. **Stage 1 mapping table** in the CC report covering every
+   handler in `brain_work/handlers/`.
+2. **Stage 2 fix for mining** shipped: producer wired, post-deploy
+   `market_snapshots_batch` events flow.
+3. **Integration test (LIVE PATH, hard requirement)**:
+   `tests/test_brain_producer_wiring.py` exercises the full chain
+   (trigger → producer → event lands → handler consumes → new
+   `scan_patterns` row created). Run ALONE first (lesson from
+   tonight's three "tests-pass-but-system-fails" instances).
+4. Existing test suite (15+6+12+9 = 42 prior tests) still passes.
+5. Live verification post-deploy: brain-worker logs show
+   `market_snapshots_batch` events at the chosen cadence; new
+   `scan_patterns` rows appear within 24h.
+6. CC report at
+   `docs/STRATEGY/CC_REPORTS/2026-05-09_f-brain-phase2-producer-completion.md`
+   with stage 1 mapping + stage 2 fix details.
 
-## Brain integration (read-only)
+## Brain integration (reuse, don't rewrite)
 
-- `scan_patterns` — direct SQL.
-- `brain_work_events` — direct SQL (CC's tonight: this table is
-  named `brain_work_events`, not `work_ledger`; verified earlier
-  today).
-- `app/services/trading/learning.py` — read for gate thresholds.
-- `app/services/trading/brain_work/dispatcher.py` — read for
-  eligibility-promotion flow.
+- `app/services/trading/brain_work/handlers/` — read every file.
+- `app/services/trading/brain_work/dispatcher.py:run_brain_work_dispatch_round`
+  — the per-cycle hook target (already running; tonight's
+  pattern-demote wiring is the model).
+- `app/services/trading/brain_work/ledger.py:enqueue_work_event` —
+  the canonical emit primitive.
+- `app/services/trading/learning.py` — read legacy
+  `run_learning_cycle` to find what it USED to emit.
+- `scripts/scheduler-worker.py` + `app/services/trading_scheduler.py`
+  — alternative wiring targets for cron-class periodic work.
 
 ## Constraints / do not touch
 
 - **Hard Rule 1**: live-placement safety belts unchanged.
 - **Hard Rule 5**: prediction-mirror authority untouched.
-- **NO CODE CHANGES.** Read-only research.
-- **DO NOT LOOSEN ANY GATE THRESHOLD.** Current gates produce the
-  trades that are working today.
-- **DO NOT DELETE OR MODIFY** any pattern row, work_ledger event,
-  or DB state.
-- **DO NOT WIDEN SCOPE** to actually fix anything surfaced — even
-  if the fix looks obvious. Surface as Section F recommendation.
+- **Operator's directive: don't break what works.** Patterns 1011
+  + 1016 and their entry-decision logic must be untouched.
+  Autotrader, exit_monitor, bracket_writer must be untouched.
+- **DO NOT loosen any gate threshold.** The gate is correctly
+  tight; the funnel is upstream-starved, not gate-blocked.
+- **DO NOT re-enable** `CHILI_BRAIN_LEGACY_CYCLE_ENABLED`. The
+  legacy cycle stays gated off; the fix is to wire producers
+  correctly under the NEW architecture.
 - **Edit-tool truncation discipline (HARD).**
+- **Tests use `_test`-suffixed DB.**
+- **No magic numbers** — any new cadence lifts from settings.
 
 ## Out of scope
 
-- Any actual fix.
-- Loosening any gate or threshold.
-- Universe expansion (if recommended, it's a separate brief).
-- Multi-timeframe mining (if recommended, separate brief).
-- OOS revalidation (if recommended, separate brief).
-- The architectural rebuild Phase 1.
-- Any change to entry-decision logic.
+- Universe expansion (separate brief if surfaced).
+- Multi-timeframe mining (separate brief if surfaced).
+- OOS revalidation as a NEW feature (but in-scope to restore an
+  existing OOS-revalidation producer if Stage 1 finds it
+  missing).
+- The `5-patterns-passed-gate-but-never-emitted` anomaly —
+  separate brief (`f-cpcv-gate-emit-anomaly-investigation`).
+- Architectural rebuild Phase 1 (auth liveness — multi-week).
+- Any change to entry-decision logic, autotrader, exit_monitor,
+  or bracket_writer.
 
 ## Sequencing
 
-1. Section A first — it's the smoking gun (where do the 268
-   backtests die?).
-2. Section B next — calibration check on whether the gate is
-   correct or wrong.
-3. Sections C-E in parallel — fact-gathering.
-4. Section F last — the synthesis (with at least 3 ranked
-   follow-up briefs).
-5. Commit + push the report.
+1. Truncation scan.
+2. **Stage 1 (read-only)**: produce the mapping table.
+3. **Surface to operator**: BEFORE shipping any wiring fix,
+   include the mapping table in the CC report draft and surface
+   the list of MISSING producers. Operator confirms scope (which
+   missing producers to fix in this brief vs spin off).
+4. **Stage 2**: ship the wiring fix(es) operator confirmed.
+   Mining first.
+5. **Integration test FIRST**: write the test, run ALONE, prove
+   it fails before fix then passes after fix.
+6. Helper-level tests.
+7. Commit + push + CC report + mark NEXT_TASK DONE.
 
 ## Operator-side after CC ships
 
-1. Read the report.
-2. If Section A reveals a clear dominant rejector and Section B
-   shows it's pathologically rejecting good patterns, queue a
-   targeted fix brief.
-3. If Section A reveals correctly-tight rejection but Section E
-   shows obvious universe gaps, queue an additive-discovery
-   brief (universe expansion, multi-timeframe).
-4. If everything looks healthy and the funnel is just genuinely
-   narrow because the universe of edges is narrow, accept the
-   current state and pick a different priority.
+1. Pull + truncation scan.
+2. `docker compose up -d --force-recreate brain-worker scheduler-worker`.
+3. Watch brain-worker logs for ~10 min:
+   ```
+   docker logs -f --tail 0 chili-home-copilot-brain-worker-1 \
+     | grep -E 'market_snapshots_batch|new scan_patterns|brain_work_dispatch'
+   ```
+   Expected: `market_snapshots_batch` events firing at the chosen
+   cadence (every 5-15 min, depending on the legacy cycle's
+   value).
+4. Wait 24h. Run the audit's Section D query — expected: new
+   `scan_patterns` rows with `created_at > 2026-05-09`.
+5. After 7 days: re-run the eligibility audit's Section A query.
+   Expected: `pattern_eligible_promotion` count > 0 in trailing
+   7d (assuming any new pattern crosses the 30-PTR floor).
 
 ## Rollback plan
 
-N/A — read-only audit. Report can be deleted if the operator
-wants it gone.
+`git revert` the commit. Producer wiring is purely additive;
+revert removes new emit calls and restores the silent state. No
+data loss. Settings flag (whatever name CC chose) disables the
+cron without code revert.
 
 ## What CC should do if it's unsure
 
-1. **If a query is too expensive** (>30s scanning a large table),
-   surface the cost and propose a sampled approach.
-2. **If the audit reveals an unambiguous bug**, surface in
-   Section F's #1 recommendation as a hot-fix candidate, but DO
-   NOT ship the fix from this brief.
-3. **If the report grows beyond 500 lines**, split into a summary
-   (≤300 lines, all 6 sections) + a separate appendix file with
-   detailed query output. Operator readability first.
-4. **If the brain_work_events table or the pattern_eligible_
-   promotion event-type doesn't exist** as expected, document the
-   schema discrepancy in the report and propose how to verify
-   the eligibility funnel anyway (e.g., via timestamps on
-   `scan_patterns.lifecycle_changed_at` or similar).
+1. **If Stage 1 surfaces multiple missing producers besides
+   mining**, surface ALL of them in the CC report draft and
+   propose split-vs-bundle. Operator decides after stage 1.
+2. **If the legacy mining-emit code is tangled with gate logic
+   in `run_learning_cycle`**, surface the entanglement and
+   propose how to extract a clean producer function. DO NOT
+   modify gate logic to extract.
+3. **If the integration test requires real broker / external
+   data**, surface the gap and propose a smaller-scope test
+   that mocks the data layer but exercises the full event chain.
+4. **If wiring the mining producer would require modifying the
+   entry-decision side or the autotrader**, STOP — operator's
+   "don't break what works" directive forbids it. Surface for
+   re-scoping.
