@@ -1,193 +1,202 @@
-# NEXT_TASK: f-brain-phase2-producer-completion
+# NEXT_TASK: f-coinbase-autotrader-enablement (Phase 1: audit)
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-Complete the Phase 2 brain migration. Operator's diagnostic
-confirmed by tonight's audit: the execution layer (event-driven
-handlers) migrated cleanly on 2026-05-05, but the production
-layer (things that EMIT work-ledger events) didn't. Some
-producers were in the legacy `run_learning_cycle` body; when
-that cycle was gated off via `CHILI_BRAIN_LEGACY_CYCLE_ENABLED=0`,
-the producers stopped firing. **Mining stopped 2026-05-05** (same
-day Phase 2 became operational — not coincidence).
+Phase 1 of a multi-phase initiative to wire the autotrader for
+Coinbase alongside Robinhood. Operator funded $2.2k cash on
+Coinbase; wants the broader crypto universe + native crypto
+stop-loss primitive that Coinbase provides.
 
-The full brief is at
-`docs/STRATEGY/QUEUED/f-brain-phase2-producer-completion.md`
-— read it first.
+**Phase 1 is read-only audit.** Zero code changes shipped. Outputs
+a thorough report covering capability, RH-implicit assumptions,
+cost economics with real numbers, risk-infrastructure gaps, and a
+proposed venue abstraction design for Phase 3.
+
+The full multi-phase brief is at
+`docs/STRATEGY/QUEUED/f-coinbase-autotrader-enablement.md`
+— **read it first.** This NEXT_TASK is Phase 1 only; the brief
+covers Phases 1-7.
 
 ## Why now
 
-End-of-day 2026-05-08 audit data:
-- `market_snapshots_batch` events: **0 in 4 days** (last fired 5/5)
-- New `scan_patterns` rows: **0 in 4 days** (last created 5/5)
-- `pattern_eligible_promotion`: **0 in 30 days**
+Today shipped:
+- Brain Phase 2 producer completion (mining is back online via
+  watchdog hook) — new crypto patterns will start flowing in 24h
+- 11 RH crypto positions still open + working; pattern lifecycle
+  durable; reconciler chain (A+B+C) solid
+- Bracket-writer crash dead
 
-The "narrow funnel" is **not narrow — it's stopped**. Backtest
-cadence is healthy (~200-400/day) but it's walking a static pool
-of patterns that hasn't changed in a week. Without restoring the
-producers, every other improvement is dead air.
+The system is ready to receive a new venue. Coinbase enablement
+is the highest-leverage growth move: wider universe, lower
+operational risk per crypto trade (no IndexError class issues,
+native stop primitive, no PDT conflation), and the operator's
+$2.2k cash is sitting idle.
 
-## Scope (operator-friendly two-stage)
+But — operator's directive is **"don't band-aid; properly
+integrate."** Phase 1 is the load-bearing audit that prevents a
+band-aid. It demands explicit design choices for venue
+abstraction, multi-venue risk aggregation, position-correlation
+across venues, and cutover strategy for the 11 currently-open RH
+positions.
 
-**Stage 1 (read-only audit, ~30 min)**: map every handler in
-`brain_work/handlers/` to its producer. Identify gaps. Output: a
-mapping table in the CC report.
+## Why this scope (Phase 1 only, audit-first)
 
-**Stage 2 (targeted wiring, ~1-2 hours)**: for each missing
-producer, ship a fix. Mining is the load-bearing first fix.
-Others may be surfaced and either fixed in this brief OR split
-into follow-ups (operator decides after stage 1).
+* **Vs. shipping all 7 phases at once**: would be a multi-week
+  effort done at midnight — the exact dangerous mode that
+  produced tonight's Phase E false-cancel mistake. Phase 1
+  surfaces the integration plan; subsequent phases ship on
+  fresh-start days with explicit operator approval.
+* **Vs. CC's "just wire Coinbase auth and add an if/else"
+  approach**: that's the band-aid the operator explicitly
+  rejected. Phase 1 demands a venue abstraction design.
+* **Vs. starting with Phase 2 (auth verification)**: Phase 1 is
+  cheaper (<1 hour CC, read-only), and its audit might reveal
+  Coinbase auth is actually working — saving a Phase 2 round-trip.
+* **Vs. queued briefs (cpcv-gate-emit, oos-revalidation,
+  pattern-discovery)**: Coinbase enablement is higher-leverage.
+  Operator's funded cash + tonight's mining producer fix mean
+  pattern flow is restoring; the binding constraint becomes
+  venue capacity.
 
-## Why this scope
+## The change (Phase 1 deliverable)
 
-* **Vs. CC's "just restart mining cron" recommendation**: that
-  would fix the symptom but not the architectural mechanism. If
-  there are OTHER silent producers besides mining (operator's
-  hypothesis suggests this), targeted-mining-fix would leave
-  them broken.
-* **Vs. broader architectural rebuild Phase 1** (auth liveness):
-  multi-week scope; doing tired is dangerous. This brief is
-  bounded.
-* **Vs. directly expanding the universe**: pointless until the
-  producer pipeline can convert candidates to PTRs.
-* **Vs. directly loosening the 30-trade gate**: wrong fix —
-  Section B of tonight's audit confirmed the gate is correctly
-  tight; the trade-accumulation pipeline is upstream-starved.
+Read-only audit producing one report at
+`docs/STRATEGY/CC_REPORTS/2026-05-09_f-coinbase-autotrader-enablement-phase-1-audit.md`.
 
-## The change
+The report MUST cover (per the brief's expanded acceptance
+criteria — sections A through H):
 
-Per the brief, two stages:
-
-1. **Stage 1 — handler trigger mapping**:
-   For each file in `app/services/trading/brain_work/handlers/`,
-   document handler-name, consumed-event, producer-location,
-   producer-type (event-driven / scheduled / hybrid / MISSING),
-   last-event-seen, status. Surface MISSING producers.
-
-2. **Stage 2 — wire missing producers**:
-   - Mining first (the visible bottleneck): restore the producer
-     under the new architecture (per-cycle hook in
-     `run_brain_work_dispatch_round` preferred).
-   - Other MISSING producers (if any): wire in same brief OR
-     split to follow-up briefs based on operator's call after
-     stage 1.
+* **A. Capability inventory** of `coinbase_spot.py` +
+  `coinbase_service.py` with line refs.
+* **B. Autotrader RH-implicit assumption inventory** — every call
+  site that hardcodes RH; the refactor surface for Phase 3.
+* **C. Cost economics with REAL numbers** — Coinbase fee tier,
+  round-trip cost at taker/maker mix, minimum-edge calc per
+  fee path, comparison to patterns 1011/1016's realized edge.
+* **D. Risk infrastructure audit** — drawdown breaker
+  cross-venue or per-venue, PDT confirms-skip-Coinbase, kill
+  switch cross-venue support, position-correlation risk for
+  same-ticker on both venues.
+* **E. Venue-abstraction design** — propose ONE design (adapter
+  pattern, function dispatch, polymorphic Trade — pick) with
+  cutover strategy that doesn't break the 11 currently-open RH
+  crypto positions.
+* **F. Reconciler + lifecycle audit** for Coinbase — webhook vs
+  polling architecture, fast-path overlap with autotrader.
+* **G. Phase 2-7 scope + prerequisite chain + risk-to-existing-
+  system per phase**.
+* **H. Hard constraints honored** — zero code changes from
+  Phase 1.
 
 ## Acceptance criteria
 
-1. **Stage 1 mapping table** in the CC report covering every
-   handler in `brain_work/handlers/`.
-2. **Stage 2 fix for mining** shipped: producer wired, post-deploy
-   `market_snapshots_batch` events flow.
-3. **Integration test (LIVE PATH, hard requirement)**:
-   `tests/test_brain_producer_wiring.py` exercises the full chain
-   (trigger → producer → event lands → handler consumes → new
-   `scan_patterns` row created). Run ALONE first (lesson from
-   tonight's three "tests-pass-but-system-fails" instances).
-4. Existing test suite (15+6+12+9 = 42 prior tests) still passes.
-5. Live verification post-deploy: brain-worker logs show
-   `market_snapshots_batch` events at the chosen cadence; new
-   `scan_patterns` rows appear within 24h.
-6. CC report at
-   `docs/STRATEGY/CC_REPORTS/2026-05-09_f-brain-phase2-producer-completion.md`
-   with stage 1 mapping + stage 2 fix details.
+See full brief for the demanding 23-criterion list (sections
+A-H). Summary:
 
-## Brain integration (reuse, don't rewrite)
+1. Read-only audit report committed.
+2. Capability + assumption inventories with line-ref citations.
+3. Cost economics with real numbers tied to Coinbase tier.
+4. Risk-infra audit covering breaker, PDT, kill-switch, and
+   cross-venue position-correlation.
+5. ONE venue-abstraction design recommendation with cutover plan.
+6. Per-phase risk-to-existing-system ratings.
+7. NO code changes shipped.
 
-- `app/services/trading/brain_work/handlers/` — read every file.
-- `app/services/trading/brain_work/dispatcher.py:run_brain_work_dispatch_round`
-  — the per-cycle hook target (already running; tonight's
-  pattern-demote wiring is the model).
-- `app/services/trading/brain_work/ledger.py:enqueue_work_event` —
-  the canonical emit primitive.
-- `app/services/trading/learning.py` — read legacy
-  `run_learning_cycle` to find what it USED to emit.
-- `scripts/scheduler-worker.py` + `app/services/trading_scheduler.py`
-  — alternative wiring targets for cron-class periodic work.
+## Brain integration (read-only)
+
+- `app/services/trading/venue/coinbase_spot.py` — read.
+- `app/services/coinbase_service.py` — read; identify canonical
+  vs shim surface.
+- `app/services/trading/auto_trader.py` + `auto_trader_monitor.py`
+  — read; catalogue RH-implicit calls.
+- `app/services/trading/pdt_guard.py` + `portfolio_risk.py` —
+  read; venue-aware?
+- `app/services/trading/bracket_writer_g2.py` +
+  `bracket_reconciliation_service.py` — read; venue-aware?
+- `app/services/trading/crypto/exit_monitor.py` — read.
+- Fast-path code (`fast_path/executor.py`, etc.) for the existing
+  Coinbase patterns.
 
 ## Constraints / do not touch
 
 - **Hard Rule 1**: live-placement safety belts unchanged.
 - **Hard Rule 5**: prediction-mirror authority untouched.
-- **Operator's directive: don't break what works.** Patterns 1011
-  + 1016 and their entry-decision logic must be untouched.
-  Autotrader, exit_monitor, bracket_writer must be untouched.
-- **DO NOT loosen any gate threshold.** The gate is correctly
-  tight; the funnel is upstream-starved, not gate-blocked.
-- **DO NOT re-enable** `CHILI_BRAIN_LEGACY_CYCLE_ENABLED`. The
-  legacy cycle stays gated off; the fix is to wire producers
-  correctly under the NEW architecture.
+- **Operator's directive: don't band-aid; properly integrate.**
+  Phase 1 forces architectural rigor in the audit; Phases 2-7
+  ship the integration in measured steps with operator approval
+  per phase.
+- **Operator's directive: don't break what works.** RH autotrader
+  + RH crypto reconciler chain (Phases A+B+C) untouched. The 11
+  open RH crypto positions and patterns 1011/1016 must continue
+  to work exactly as today.
+- **NO live Coinbase trades from Phase 1.** Audit only.
+- **NO code changes from Phase 1.** Surfacing a fix is Phase 2+
+  territory.
+- **DO NOT remove tonight's
+  `crypto_ticker_unsupported_via_equity_primitive` backstop** for
+  RH. The backstop is correct for RH; Coinbase gets a different
+  primitive (Phase 4).
 - **Edit-tool truncation discipline (HARD).**
-- **Tests use `_test`-suffixed DB.**
-- **No magic numbers** — any new cadence lifts from settings.
 
-## Out of scope
+## Out of scope (Phase 1 — covered by later phases)
 
-- Universe expansion (separate brief if surfaced).
-- Multi-timeframe mining (separate brief if surfaced).
-- OOS revalidation as a NEW feature (but in-scope to restore an
-  existing OOS-revalidation producer if Stage 1 finds it
-  missing).
-- The `5-patterns-passed-gate-but-never-emitted` anomaly —
-  separate brief (`f-cpcv-gate-emit-anomaly-investigation`).
-- Architectural rebuild Phase 1 (auth liveness — multi-week).
-- Any change to entry-decision logic, autotrader, exit_monitor,
-  or bracket_writer.
+- Coinbase auth verification (Phase 2).
+- Broker selection logic (Phase 3).
+- Bracket writer Coinbase paths (Phase 4).
+- Cost-aware sizing (Phase 5).
+- Paper-trade soak (Phase 6).
+- Live verification (Phase 7).
+- Universe expansion beyond Coinbase (separate brief).
+- Multi-broker support beyond RH+Coinbase (separate brief).
 
-## Sequencing
+## Sequencing (within Phase 1)
 
-1. Truncation scan.
-2. **Stage 1 (read-only)**: produce the mapping table.
-3. **Surface to operator**: BEFORE shipping any wiring fix,
-   include the mapping table in the CC report draft and surface
-   the list of MISSING producers. Operator confirms scope (which
-   missing producers to fix in this brief vs spin off).
-4. **Stage 2**: ship the wiring fix(es) operator confirmed.
-   Mining first.
-5. **Integration test FIRST**: write the test, run ALONE, prove
-   it fails before fix then passes after fix.
-6. Helper-level tests.
-7. Commit + push + CC report + mark NEXT_TASK DONE.
+1. Truncation scan on the read-target files.
+2. **Section A**: capability inventory of Coinbase adapters.
+3. **Section B**: autotrader RH-implicit assumption inventory.
+4. **Section D**: risk infrastructure audit FIRST among the
+   remaining sections (it's the load-bearing one — if cross-venue
+   position-correlation is broken, every later phase has to
+   account for it).
+5. **Section C**: cost economics with real numbers.
+6. **Section F**: reconciler + lifecycle.
+7. **Section E**: venue-abstraction design recommendation.
+8. **Section G**: phase recommendations + scope.
+9. Commit + push the audit report.
 
-## Operator-side after CC ships
+## Operator-side after Phase 1 ships
 
-1. Pull + truncation scan.
-2. `docker compose up -d --force-recreate brain-worker scheduler-worker`.
-3. Watch brain-worker logs for ~10 min:
-   ```
-   docker logs -f --tail 0 chili-home-copilot-brain-worker-1 \
-     | grep -E 'market_snapshots_batch|new scan_patterns|brain_work_dispatch'
-   ```
-   Expected: `market_snapshots_batch` events firing at the chosen
-   cadence (every 5-15 min, depending on the legacy cycle's
-   value).
-4. Wait 24h. Run the audit's Section D query — expected: new
-   `scan_patterns` rows with `created_at > 2026-05-09`.
-5. After 7 days: re-run the eligibility audit's Section A query.
-   Expected: `pattern_eligible_promotion` count > 0 in trailing
-   7d (assuming any new pattern crosses the 30-PTR floor).
+1. Read the audit report.
+2. Verify the venue-abstraction design proposal makes sense for
+   how the operator wants chili to evolve. Reject if it's a
+   band-aid disguised as architecture.
+3. Approve the next phase brief; CC ships it (typically Phase 2
+   = auth verification).
+4. Per-phase operator approval continues through Phase 7 (live
+   small-size).
 
 ## Rollback plan
 
-`git revert` the commit. Producer wiring is purely additive;
-revert removes new emit calls and restores the silent state. No
-data loss. Settings flag (whatever name CC chose) disables the
-cron without code revert.
+N/A — Phase 1 is read-only.
 
 ## What CC should do if it's unsure
 
-1. **If Stage 1 surfaces multiple missing producers besides
-   mining**, surface ALL of them in the CC report draft and
-   propose split-vs-bundle. Operator decides after stage 1.
-2. **If the legacy mining-emit code is tangled with gate logic
-   in `run_learning_cycle`**, surface the entanglement and
-   propose how to extract a clean producer function. DO NOT
-   modify gate logic to extract.
-3. **If the integration test requires real broker / external
-   data**, surface the gap and propose a smaller-scope test
-   that mocks the data layer but exercises the full event chain.
-4. **If wiring the mining producer would require modifying the
-   entry-decision side or the autotrader**, STOP — operator's
-   "don't break what works" directive forbids it. Surface for
-   re-scoping.
+1. **If `coinbase_spot.py` is incomplete relative to needs**,
+   document the gaps in the audit report — those become Phase 4
+   subtasks. Don't try to extend the adapter from Phase 1.
+2. **If the autotrader's RH-assumptions are deeper than expected**
+   (>20 sites), surface the cost in the report; Phase 3 may need
+   to be split into multiple briefs.
+3. **If Coinbase API authentication is broken out of the box**,
+   surface the gap; Phase 2 becomes urgent before Phase 3.
+4. **If the venue-abstraction design choice has multiple
+   reasonable paths**, document all of them but recommend ONE
+   with reasoning — operator's "don't band-aid" directive demands
+   a clear architectural choice, not a punt.
+5. **If Phase 1 surfaces a critical bug** (e.g., the existing
+   fast-path Coinbase code already has an architectural mistake
+   that would compound in autotrader-Coinbase wiring), surface
+   in the report's Section G as a prerequisite-fix brief, but
+   DO NOT ship the fix from Phase 1.
