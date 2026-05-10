@@ -1,6 +1,8 @@
 # NEXT_TASK: f-coinbase-orphan-stop-adoption
 
-STATUS: PENDING
+STATUS: DONE
+
+CC_REPORT: `docs/STRATEGY/CC_REPORTS/2026-05-10_f-coinbase-orphan-stop-adoption.md`
 
 ## Goal
 
