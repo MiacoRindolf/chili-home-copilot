@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-07, after the exit-monitor-quote-guard-unification review (Phase 1 shipped + multiple architectural-correctness landings; refresh removes stale architectural-questions block now that operator answered them and the design doc absorbed the answers).
+**Last update:** 2026-05-10, after Phase 6 of f-promotion-pipeline-rebalance (parallel initiative, Phases 1-4 shipped, Phase 5 deferred). Promotion-rebalance section added below the Coinbase autotrader block; position-identity-refactor sections unchanged.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -116,6 +116,95 @@ At T+48h operator re-promotes Phase 6 to NEXT_TASK and CC
 generates the soak report at
 `docs/STRATEGY/CC_REPORTS/2026-05-{N}_f-coinbase-autotrader-enablement-phase-6-paper-soak.md`
 with green-light Phase 7 OR Phase 5.5/6.5 fix recommendations.
+
+## Parallel initiative — Promotion-pipeline rebalance (Phases 1-4 SHIPPED)
+
+f-promotion-pipeline-rebalance is a parallel multi-phase initiative
+addressing the brain's promotion pipeline — orchestrated outside the
+position-identity refactor and the Coinbase autotrader rollout
+(disjoint surfaces; this initiative reshapes lifecycle transitions and
+quality scoring on `scan_patterns`, no broker code touched).
+
+**Final architecture (post-Phase-4)**:
+
+* **Two-ladder lifecycle** with new `shadow_promoted` stage (Phase 3,
+  mig 236). Patterns at `shadow_promoted` fire imminent alerts but
+  autotrader routes their alerts to shadow-log only. `promoted/live`
+  remains the trade-eligibility ladder; `shadow_promoted` is the
+  alert-eligibility-only ladder.
+* **Gate-noise-free directional signal** (Phase 2, mig 235). New table
+  `pattern_alert_directional_outcome` + view
+  `pattern_directional_quality_v` measure "did price move ≥1.5% in
+  predicted direction within 24h" on every imminent alert (not just
+  gate-survivors). Rolling-30 per-pattern WR is the clean signal.
+* **AND-logic auto-demote with sample-size floor** (Phase 1).
+  Patterns with `trade_count < 30` are protected from realized-stat
+  demotes; patterns with `cpcv_median_sharpe ≥ 1.0` are protected even
+  at higher n (CPCV must agree before demote). Settings:
+  `chili_pattern_demote_min_realized_trades` (=30),
+  `chili_pattern_demote_require_cpcv_degrade` (=True).
+* **Composite quality score** (Phase 4, mig 237). Per-pattern
+  `quality_composite_score ∈ [0,1]` =
+  0.30·clip(cpcv_sharpe/2.0) + 0.20·clip(deflated_sharpe/1.0)
+  + 0.15·(1−pbo) + 0.25·directional_wr + 0.10·(1−decay),
+  computed nightly at 23:30 PT.
+* **Weekly cohort auto-promote** (Phase 4). Sunday 22:00 PT job
+  selects top-N candidates (capped at 10/rolling-7-day) by composite
+  score and advances them to `shadow_promoted`. Eligibility requires
+  `promotion_gate_passed=True`, `cpcv_median_sharpe≥1.0`,
+  `rolling_sample_n≥30` (decay computable), and excludes
+  already-promoted/shadow_promoted/live patterns. **Ships DORMANT**:
+  `chili_cohort_promote_enabled=False` until operator opts in.
+
+**Status (2026-05-10)**:
+
+* Phase 1 SHIPPED (commit `b00edec`): sample-size floor + CPCV
+  protection. 16/16 tests PASS.
+* Phase 2 SHIPPED (commit `e480d9f`): directional outcome + view +
+  evaluator + 30-min scheduler. 19/19 tests PASS.
+* Phase 3 SHIPPED (commit `ba05195`): shadow_promoted lifecycle +
+  byte-identical autotrader parity gate held.
+* Phase 4 SHIPPED (commit `893e73c`): composite scoring + cohort job
+  (dormant by default). 21 tests written; some deferred to operator
+  pre-opt-in run due to DB contention.
+* Phase 5 DEFERRED: per-pattern universe via `scope_tickers`. Session
+  errored at daemon launch; no commit. Brief preserved at
+  `docs/STRATEGY/QUEUED/f-promotion-pipeline-rebalance.md` for future
+  re-queue.
+* Phase 6 DOC-AND-VERIFY (this section + CC_REPORT
+  `docs/STRATEGY/CC_REPORTS/2026-05-10_f-promotion-pipeline-rebalance-phase6-final-summary.md`).
+
+**Calibration evidence** (the data point the brief was betting on):
+
+Pattern 585 was the marquee case. Pre-Phase-1 it was auto-demoted on
+n=8 gate-laundered trades (realized WR 25%); after the rebalance:
+
+| Metric                  | Value | Source                            |
+|-------------------------|-------|-----------------------------------|
+| CPCV median Sharpe      | 1.405 | pre-existing                      |
+| Deflated Sharpe         | 1.0   | pre-existing                      |
+| PBO                     | 0.0   | pre-existing                      |
+| Directional WR (rolling-30) | 0.967 | Phase 2 view, captured 2026-05-10 |
+| Composite score (calibration) | 0.843 | Phase 4 formula             |
+
+The realized WR (gate-laundered noise) and the directional WR (clean
+signal) diverge by ~70 percentage points on this pattern. That is the
+quantified justification for the entire initiative.
+
+**Operator opt-in (when ready)**:
+
+1. Run pytest on the cohort suite:
+   `pytest tests/test_pattern_cohort_promote.py -v -p no:asyncio`.
+2. Set `CHILI_COHORT_PROMOTE_ENABLED=true` in `.env`.
+3. `docker compose up -d --force-recreate chili scheduler-worker
+   brain-worker autotrader-worker broker-sync-worker`.
+4. Wait for next Sunday 22:00 PT cohort job; inspect:
+   `SELECT id, name, lifecycle_stage, quality_composite_score FROM scan_patterns WHERE quality_composite_score IS NOT NULL ORDER BY quality_composite_score DESC LIMIT 20;`
+
+**Kill switch**: `CHILI_COHORT_PROMOTE_ENABLED=false` halts the weekly
+job at the flag check; nightly score refresh continues
+(non-destructive). Code revert: `git revert` Phase 4 commit; mig 237
+(`ADD COLUMN IF NOT EXISTS`) intentionally left in place — harmless.
 
 ## What's deferred / parallel
 
