@@ -1,6 +1,6 @@
 # NEXT_TASK: f-coinbase-autotrader-enablement-phase-6-paper-soak
 
-STATUS: PENDING
+STATUS: PART_1_DONE_AWAITING_T+48 (re-promote to PENDING after T+48h for Part 2 soak report)
 
 ## Goal
 

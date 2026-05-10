@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-04, after the broker-truth-self-heal review and the EKSO/ELTX investigation.
+**Last update:** 2026-05-07, after the exit-monitor-quote-guard-unification review (Phase 1 shipped + multiple architectural-correctness landings; refresh removes stale architectural-questions block now that operator answered them and the design doc absorbed the answers).
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -42,24 +42,88 @@ See `docs/DESIGN/POSITION_IDENTITY.md` § 8 for the authoritative phase plan + p
 - **Backwards-compat with existing close-reason strings.** Reporting code, dashboards, audit queries assume those strings exist. The refactor adds a new authoritative source; it does NOT remove the old one for at least N phases of soak.
 - **Tests use `_test`-suffixed DB.** Standard PROTOCOL Hard Rule.
 
-## Open architectural questions for operator decision
+## Architectural questions (closed)
 
-1. **Account type granularity.** Robinhood has cash/margin/IRA accounts. Coinbase has spot/portfolio. Should `trading_positions` key on account-type (decoupling per-account positions) or aggregate? Choice affects how the existing single-user, single-account model generalizes.
-2. **Crypto positions on Robinhood vs Coinbase.** Same ticker (e.g., BTC-USD) can be held at both. Position identity needs broker_source in the key. Is that already the design intent or do we need an explicit conversation about cross-broker aggregation reporting?
-3. **Snapshot table or event-sourced?** `trading_positions.current_quantity` is a snapshot (overwritten each broker_sync). Alternative: event-sourced `position_events` with current state derived. Snapshot is simpler; event-sourcing is more honest about "this is what the broker said at time T." Recommend snapshot for v1, event-sourcing as future enhancement if needed.
-4. **What does Trade row identity become?** Today a Trade row IS a position management envelope but also the entry-decision unit (pattern, scan_pattern_id, entry_reason, etc.). Refactor splits these conceptually. Should the Trade row stay the entry-decision unit (and a position can have multiple historical Trade rows representing decisions to enter/manage at different times), or do we introduce yet another layer ("trade_decision" → "management_envelope" → "position")? Three-layer is cleaner; two-layer is less churn.
-5. **Migration ordering relative to schema_version 223 orphan column.** That column is unused dead code from the magic-number flap-guard task. Bundle its removal with Phase 1 of this refactor or do separately?
+The five open questions on this page were answered by the operator 2026-05-04 and integrated into `docs/DESIGN/POSITION_IDENTITY.md`. Decisions in summary:
 
-## Expected output of the next strategy step
+1. **Account type granularity** — per-account keys (Robinhood `cash`/`margin`/`ira`, Coinbase `spot`/`portfolio`); position identity tuple is `(user_id, broker_source, account_type, ticker, direction)`.
+2. **Cross-broker positions** — `broker_source` is in the identity key; same ticker held at two brokers is two positions. Aggregation lives in reporting, not the position model.
+3. **Snapshot vs event-sourced** — event-sourced. `trading_position_events` is the authoritative timeline; `trading_positions` carries derived current state plus a self-healing reconciler.
+4. **Trade-row identity layering** — three-layer split. `trading_decisions` (immutable entry intent) → `trading_management_envelopes` (rename of today's `trading_trades`, mutable management state) → `trading_positions` (broker-authoritative identity).
+5. **Migration ordering** — Phase 1 drops the schema_version 223 orphan column (`phantom_close_consecutive_zero_qty_sweeps`) as part of the same migration that creates the new tables.
 
-The next NEXT_TASK should NOT be Phase 1 implementation — it should be a **design doc** that answers the five open questions above, sketches the precise schema for `trading_positions`, and proposes the migration plan. Operator reviews; iterations happen at the doc level (cheap) rather than the code level (expensive); only after the design lands do we queue Phase 1 implementation.
+Phase 5 soak duration was also tightened from one quarter to **2 weeks** at operator's instruction.
+
+## Status of the initiative
+
+- **Design doc shipped 2026-05-04.** Locked at `docs/DESIGN/POSITION_IDENTITY.md`. Six phases enumerated with per-phase exit criteria.
+- **Phase 1 shipped 2026-05-04.** Migration 224 created `trading_positions` + `trading_position_events`; `sync_positions_to_db` writes shadow-mode (try/except wrapped, never raises, zero readers depend on it); backfill walked both `trading_trades` and `trading_paper_trades`. Audit query post-deploy: 19/19 parity, 0 discrepancies.
+- **Phase 1 1-week soak in progress.** Soak window closes 2026-05-11. Passive monitoring via `scripts/audit_position_layer_parity.py`.
+- **Phase 2 queues after soak.** `trading_execution_events.position_id` backfill — link every fill row in history to its position. Read-side stays pointed at trade_id; this is the foundation for Phase 3's authority flip.
+- **Phases 3–6 sketched in design doc.** Authority flip (3), close-path consolidation (4), envelope-rename + decision-layer split (5, with 2-week soak), bracket_intent re-key + cleanup (6).
+
+## Parallel initiative — Coinbase autotrader enablement
+
+f-coinbase-autotrader-enablement is a parallel multi-phase
+initiative orchestrated outside this position-identity refactor
+(both touch trading code, but on disjoint surfaces — Coinbase
+adds a new venue path; the refactor reshapes the in-process
+position model).
+
+**Current status (2026-05-09 24h):**
+
+* Phases 1-5 SHIPPED. See per-phase CC reports under
+  `docs/STRATEGY/CC_REPORTS/2026-05-09_f-coinbase-autotrader-enablement-phase-{1-5}-*.md`.
+* Phase 6 (paper soak) START — operator flips
+  `CHILI_COINBASE_AUTOTRADER_LIVE=1` then runs the soak window.
+  Conservative caps in effect: `CHILI_COINBASE_MAX_NOTIONAL_USD=50`
+  + `CHILI_COINBASE_MAX_CONCURRENT_POSITIONS=3` + Tier-1 cost-aware
+  gate (120bps fee + 30bps buffer = 150bps min projected edge).
+  Worst-case exposure ~$152.
+
+**Soak observability:** `scripts/d-cb-phase6-soak-probe.py`
+(read-only) summarizes seven sections — routing distribution,
+cost-gate decisions, cap-gate decisions, Coinbase fills, bracket
+coverage, cash drift vs $2200.01 baseline, anomaly summary.
+
+Operator runs at T+1h, T+12h, T+24h, T+48h:
+
+```
+python scripts/d-cb-phase6-soak-probe.py --window-hours 12
+```
+
+**Anomaly thresholds:**
+
+* Bracket coverage <100% → RED, queue Phase 6.5.
+* Cash drift > $25 → RED.
+* Cash drift > $5 → AMBER (monitor).
+* Coinbase entry without an intent within 60s → RED.
+* 0 Coinbase entries during soak → INFO (path not exercised; not a
+  failure — operator may extend the window or seed a synthetic
+  alert helper).
+
+**Kill switch ready:** `CHILI_AUTOTRADER_KILL_SWITCH=1` halts BOTH
+venues globally in 30s. Coinbase-only halt:
+`CHILI_COINBASE_AUTOTRADER_LIVE=0` (~30s; RH unaffected).
+
+**Phase 6 promotion criteria** (to Phase 7 — live with capital
+ramp): all of: ≥1 Coinbase route attempt observed (success OR
+block — proves path exercised); 100% bracket coverage on any
+fills; no silent failures; cash drift ≤ $5; RH equity entries
+continue routing+placing identically.
+
+At T+48h operator re-promotes Phase 6 to NEXT_TASK and CC
+generates the soak report at
+`docs/STRATEGY/CC_REPORTS/2026-05-{N}_f-coinbase-autotrader-enablement-phase-6-paper-soak.md`
+with green-light Phase 7 OR Phase 5.5/6.5 fix recommendations.
 
 ## What's deferred / parallel
 
 - **Bug 4** (`emergency_close_all` should submit broker SELLs or be retired). No urgency now (no auto-callers); fits within Phase 5 of this refactor naturally — auto-callers are gone, manual usage gets handled via the position-state-transition machinery.
-- **Schema hygiene** (drop migration 223's orphan column). Bundle with Phase 1 if convenient.
+- **Schema hygiene** — Phase 1 dropped migration 223's orphan column (`phantom_close_consecutive_zero_qty_sweeps`) in mig 224. Done.
 - **Fast-path crypto scalping initiative.** Paused. The fast-path stack writes to the same `trading_execution_events` and (eventually) `trading_trades` tables; building more on the unstable foundation compounds the problem. Resume after Phase 4 lands.
-- **The lying P/L on EKSO trade 1815 ($0 vs actual −$38.80) and ELTX trade 1816 ($0 vs −$33.00).** One-time data backfill. Operator decision whether to clean now or accept as a one-time scar.
+- **The lying P/L on EKSO trade 1815 ($0 vs actual −$38.80) and ELTX trade 1816 ($0 vs −$33.00).** One-time data backfill, still pending. Operator decision whether to clean now (two SQL UPDATEs) or accept as a one-time scar.
+- **Open Q from `f-exit-monitor-quote-guard-unification` review (2026-05-07):** per-ticker volatility-derived implausibility thresholds (`f-implausible-quote-per-ticker-vol`) — surface only when production data shows the structural 0.1x/10x bounds rejecting a real meme-stock move. Until then, the structural constants are correct-by-construction.
 
 ## Out of scope right now
 
