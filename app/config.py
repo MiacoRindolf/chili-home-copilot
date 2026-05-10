@@ -2472,6 +2472,24 @@ class Settings(BaseSettings):
             "CHILI_PATTERN_DIRECTIONAL_MAX_ALERTS_PER_RUN"
         ),
     )
+    # f-promotion-pipeline-rebalance Phase 3 (2026-05-10):
+    # shadow_promoted lifecycle stage. When True (default), patterns
+    # with lifecycle_stage='shadow_promoted' are eligible for imminent
+    # alerts (so the Phase 2 directional-correctness evaluator scores
+    # them) but the autotrader routes their alerts to shadow-log only —
+    # no broker call, no Trade row. Decouples observation from
+    # execution: we measure pattern accuracy without taking on capital
+    # risk during evaluation. When False, shadow_promoted patterns are
+    # NOT eligible for imminent alerts AND any in-flight shadow_promoted
+    # alerts that reach the autotrader fall through to the existing
+    # pattern_lifecycle_not_eligible:shadow_promoted reject path
+    # (pre-Phase-3 behavior). The flag is the per-phase rollback lever.
+    chili_shadow_promoted_lifecycle_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_PROMOTED_LIFECYCLE_ENABLED"
+        ),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

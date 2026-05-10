@@ -240,10 +240,23 @@ def compute_composite_score(
 
 
 def scan_pattern_eligible_main_imminent(pat: ScanPattern) -> bool:
-    """Promoted / live quality for Telegram main channel (legacy promotion_status OR)."""
+    """Promoted / live quality for Telegram main channel (legacy promotion_status OR).
+
+    f-promotion-pipeline-rebalance Phase 3 (2026-05-10):
+    ``shadow_promoted`` patterns are also eligible when
+    ``chili_shadow_promoted_lifecycle_enabled`` is True (default). The
+    autotrader routes their alerts to shadow-log only, so eligibility
+    here grants observability (Phase 2's directional-correctness
+    evaluator scores them) without capital risk. Flipping the flag to
+    False reverts to pre-Phase-3 behavior.
+    """
     life = (getattr(pat, "lifecycle_stage", None) or "").strip().lower()
     promo = (getattr(pat, "promotion_status", None) or "").strip().lower()
     if life in ("promoted", "live"):
+        return True
+    if life == "shadow_promoted" and bool(
+        getattr(settings, "chili_shadow_promoted_lifecycle_enabled", True)
+    ):
         return True
     if promo == "promoted":
         return True

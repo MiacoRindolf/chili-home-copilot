@@ -15683,6 +15683,43 @@ def _migration_235_pattern_alert_directional_outcome(conn) -> None:
     conn.commit()
 
 
+def _migration_236_scan_pattern_lifecycle_shadow_promoted(conn) -> None:
+    """f-promotion-pipeline-rebalance Phase 3 (2026-05-10).
+
+    Add ``shadow_promoted`` to the valid set of ``lifecycle_stage``
+    values. ``shadow_promoted`` patterns fire imminent alerts (so the
+    Phase 2 directional-correctness evaluator can score them) but the
+    autotrader routes their alerts to shadow-log only — no broker call,
+    no Trade row. The lifecycle stage decouples observation from
+    execution.
+
+    Idempotent — DROP + ADD NOT VALID + VALIDATE pattern matches the
+    earlier ``challenged`` addition (mig 097). Strict superset of the
+    pre-existing constraint, so no enforcement weakening.
+    """
+    tbl = "scan_patterns"
+    if tbl not in _tables(conn):
+        return
+    try:
+        conn.execute(text(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS chk_sp_lifecycle"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    try:
+        conn.execute(
+            text(
+                f"ALTER TABLE {tbl} ADD CONSTRAINT chk_sp_lifecycle CHECK (lifecycle_stage IN ("
+                f"'candidate','backtested','validated','challenged','shadow_promoted',"
+                f"'promoted','live','decayed','retired'"
+                f")) NOT VALID"
+            )
+        )
+        conn.execute(text(f"ALTER TABLE {tbl} VALIDATE CONSTRAINT chk_sp_lifecycle"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -15942,6 +15979,8 @@ MIGRATIONS = [
      _migration_234_crypto_broker_zero_qty_streak),
     ("235_pattern_alert_directional_outcome",
      _migration_235_pattern_alert_directional_outcome),
+    ("236_scan_pattern_lifecycle_shadow_promoted",
+     _migration_236_scan_pattern_lifecycle_shadow_promoted),
 ]
 
 

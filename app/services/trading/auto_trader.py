@@ -626,6 +626,27 @@ def _eligible_lifecycle_stages() -> set[str]:
     return {s.strip().lower() for s in raw.split(",") if s.strip()}
 
 
+def is_shadow_promoted_pattern(pat: ScanPattern) -> bool:
+    """f-promotion-pipeline-rebalance Phase 3 (2026-05-10):
+    True iff *pat* is at lifecycle_stage 'shadow_promoted' AND the
+    flag chili_shadow_promoted_lifecycle_enabled is True. Pure read on
+    the already-loaded ORM row — no DB query, no side effects.
+
+    When True, the autotrader's _process_one_alert routes the alert to
+    shadow-log only (audit row with reason
+    'selector:shadow_promoted_pattern_eval'); no broker call, no Trade
+    row. When False (flag off, or stage != 'shadow_promoted'), control
+    falls through to the existing eligible-lifecycle gate, which
+    continues to enforce {promoted, live} for live entries.
+    """
+    if pat is None:
+        return False
+    stage = (getattr(pat, "lifecycle_stage", None) or "").strip().lower()
+    if stage != "shadow_promoted":
+        return False
+    return bool(getattr(settings, "chili_shadow_promoted_lifecycle_enabled", True))
+
+
 def _process_one_alert(
     db: Session,
     uid: int,
@@ -642,6 +663,23 @@ def _process_one_alert(
         _pat = db.query(ScanPattern).filter(ScanPattern.id == int(alert.scan_pattern_id)).first()
         if _pat is not None:
             _stage = (_pat.lifecycle_stage or "").strip().lower()
+            # f-promotion-pipeline-rebalance Phase 3 (2026-05-10):
+            # shadow_promoted patterns fire imminent alerts but are
+            # routed to shadow-log only — no broker call, no Trade row.
+            # Gated on chili_shadow_promoted_lifecycle_enabled (default
+            # True). When False, falls through to the lifecycle-not-
+            # eligible gate below (pre-Phase-3 behavior). Helper returns
+            # False for any stage != 'shadow_promoted', preserving
+            # byte-identical behavior for promoted/live/challenged/etc.
+            if is_shadow_promoted_pattern(_pat):
+                _shadow_reason = "selector:shadow_promoted_pattern_eval"
+                _audit(db, user_id=uid, alert=alert,
+                       decision="blocked", reason=_shadow_reason)
+                out["skipped"] += 1
+                _autotrader_tick_note(
+                    out, kind="blocked", reason=_shadow_reason, alert=alert,
+                )
+                return
             _allowed = _eligible_lifecycle_stages()
             if _stage not in _allowed:
                 _reason = f"pattern_lifecycle_not_eligible:{_stage or 'none'}"
