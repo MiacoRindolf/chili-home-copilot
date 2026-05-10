@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from typing import Any, Callable, Optional
 
 from ....config import settings
@@ -23,6 +26,63 @@ from .protocol import (
 _log = logging.getLogger(__name__)
 
 _VENUE = "coinbase"
+
+
+# Product-info cache (f-coinbase-tick-size-precision-fix, 2026-05-10).
+# Coinbase rejects orders whose stop_price / limit_price / base_size carry
+# more decimals than the product's quote_increment / base_increment. Cache
+# the per-product NormalizedProduct in-process with a 1-hour TTL so the
+# REST round-trip happens at most once per hour per symbol.
+_PRODUCT_INFO_CACHE: "dict[str, tuple[NormalizedProduct, float]]" = {}
+_PRODUCT_INFO_CACHE_LOCK = threading.Lock()
+_PRODUCT_INFO_TTL_SEC = 3600.0
+
+
+def reset_product_info_cache_for_tests() -> None:
+    """Clear product-info cache (pytest only)."""
+    with _PRODUCT_INFO_CACHE_LOCK:
+        _PRODUCT_INFO_CACHE.clear()
+
+
+def _quantize_price(value: float, increment: float, *, mode: str) -> str:
+    """Quantize *value* to *increment* using exact Decimal arithmetic.
+
+    mode='down' → ROUND_DOWN (SELL stops: trigger sits at-or-below intent —
+                              wider stop band, more conservative for longs)
+    mode='up'   → ROUND_UP   (BUY stops: trigger sits at-or-above intent —
+                              more conservative for shorts/breakout entries)
+
+    Returns a string formatted to *increment*'s decimal precision so the
+    Coinbase SDK does not re-introduce trailing-zero noise via float repr.
+
+    Raises ValueError on non-positive increment, non-finite value, or
+    invalid mode.
+    """
+    if mode not in ("down", "up"):
+        raise ValueError(f"mode must be 'down' or 'up', got {mode!r}")
+    try:
+        d_val = Decimal(str(value))
+        d_inc = Decimal(str(increment))
+    except (InvalidOperation, TypeError, ValueError) as e:
+        raise ValueError(
+            f"non-decimal input: value={value!r} increment={increment!r}: {e}"
+        )
+    if not d_val.is_finite():
+        raise ValueError(f"value must be finite, got {value!r}")
+    if not d_inc.is_finite() or d_inc <= 0:
+        raise ValueError(f"increment must be > 0, got {increment!r}")
+    rounding = ROUND_DOWN if mode == "down" else ROUND_UP
+    quotient = (d_val / d_inc).to_integral_value(rounding=rounding)
+    snapped = (quotient * d_inc).quantize(d_inc)
+    return format(snapped, "f")
+
+
+def _quantize_size(value: float, increment: float) -> str:
+    """Quantize *value* DOWN to *increment* (never order more than intended).
+
+    Returns a decimal string. Raises ValueError on bad input.
+    """
+    return _quantize_price(value, increment, mode="down")
 
 
 def reset_duplicate_client_order_guard_for_tests() -> None:
@@ -289,6 +349,40 @@ class CoinbaseSpotAdapter(VenueAdapter):
         except Exception as e:
             _log.warning("[coinbase_spot] get_product failed: %s", e)
             return None, fresh
+
+    def _get_product_info_cached(self, product_id: str) -> NormalizedProduct:
+        """Return cached NormalizedProduct or fetch fresh.
+
+        Raises VenueAdapterError if fetch fails or returns invalid
+        increments. NEVER falls back to a guessed tick_size — per
+        COWORK_ADVISOR_BRIEF §2.6 (no magic-fallback values).
+        """
+        pid = _to_product_id(product_id)
+        now = time.time()
+        with _PRODUCT_INFO_CACHE_LOCK:
+            hit = _PRODUCT_INFO_CACHE.get(pid)
+            if hit and hit[1] > now:
+                return hit[0]
+        prod, _fresh = self.get_product(pid)
+        if prod is None:
+            raise VenueAdapterError(
+                f"product info fetch failed for {pid} — refusing to place "
+                f"stop with unquantized price (no magic-fallback policy)",
+                code="product_info_unavailable",
+            )
+        if (
+            prod.quote_increment is None or prod.quote_increment <= 0
+            or prod.base_increment is None or prod.base_increment <= 0
+        ):
+            raise VenueAdapterError(
+                f"product {pid} returned invalid increments: "
+                f"quote_increment={prod.quote_increment} "
+                f"base_increment={prod.base_increment} — refusing to place",
+                code="product_info_invalid",
+            )
+        with _PRODUCT_INFO_CACHE_LOCK:
+            _PRODUCT_INFO_CACHE[pid] = (prod, now + _PRODUCT_INFO_TTL_SEC)
+        return prod
 
     def get_products(self) -> tuple[list[NormalizedProduct], FreshnessMeta]:
         fresh = _now_freshness()
