@@ -20,18 +20,42 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.trading.venue.coinbase_spot import CoinbaseSpotAdapter
+from app.services.trading.venue.protocol import NormalizedProduct
+
+
+_PERMISSIVE_PRODUCT = NormalizedProduct(
+    product_id="ADA-USD",
+    base_currency="ADA",
+    quote_currency="USD",
+    status="online",
+    trading_disabled=False,
+    cancel_only=False,
+    limit_only=False,
+    post_only=False,
+    auction_mode=False,
+    base_increment=0.1,
+    quote_increment=0.0001,
+    min_market_funds=None,
+)
 
 
 def _make_adapter(*, sdk_response):
     """Build an adapter with the SDK methods mocked to return
     `sdk_response`. Bypass the gating helpers (rate-limiter,
     idempotency-store, state-machine) that don't matter for the
-    primitive's contract."""
+    primitive's contract.
+
+    Also stubs ``_get_product_info_cached`` to a permissive product so
+    quantization round-trips the existing test prices unchanged
+    (0.4500, 0.4400, 100.0). Tick-size-specific behavior is covered in
+    tests/test_coinbase_tick_size_precision.py.
+    """
     adapter = CoinbaseSpotAdapter()
     fake_client = MagicMock()
     fake_client.stop_limit_order_gtc_buy.return_value = sdk_response
     fake_client.stop_limit_order_gtc_sell.return_value = sdk_response
     adapter._client = lambda: fake_client  # type: ignore[assignment]
+    adapter._get_product_info_cached = lambda pid: _PERMISSIVE_PRODUCT  # type: ignore[assignment]
     return adapter, fake_client
 
 
@@ -176,6 +200,7 @@ def test_sdk_raises_caught_and_packaged_as_ok_false(monkeypatch):
         "list index out of range"
     )
     adapter._client = lambda: fake_client  # type: ignore[assignment]
+    adapter._get_product_info_cached = lambda pid: _PERMISSIVE_PRODUCT  # type: ignore[assignment]
 
     monkeypatch.setattr(
         "app.services.trading.venue.coinbase_spot.idempotency_store"

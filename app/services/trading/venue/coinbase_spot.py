@@ -821,6 +821,90 @@ class CoinbaseSpotAdapter(VenueAdapter):
                 else "STOP_DIRECTION_STOP_UP"
             )
 
+        # Quantize prices and size to product increments. Coinbase rejects
+        # any field finer than the product's quote_increment / base_increment
+        # (smoking gun: ALEPH-USD "Too many decimals in order price",
+        # 2026-05-10). Fetch via cached helper; if product info is
+        # unavailable or invalid, refuse rather than guess (no
+        # magic-fallback per COWORK_ADVISOR_BRIEF §2.6).
+        try:
+            prod = self._get_product_info_cached(pid)
+        except VenueAdapterError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "client_order_id": cid,
+                "code": getattr(e, "code", None),
+            }
+        try:
+            base_size_in = float(base_size)
+            stop_price_in = float(stop_price)
+            limit_price_in = float(limit_price)
+        except (TypeError, ValueError) as e:
+            return {
+                "ok": False,
+                "error": f"non-numeric input: {e}",
+                "client_order_id": cid,
+            }
+        try:
+            price_mode = "down" if side_l == "sell" else "up"
+            q_size = _quantize_size(base_size_in, prod.base_increment)
+            q_stop = _quantize_price(stop_price_in, prod.quote_increment, mode=price_mode)
+            q_limit = _quantize_price(limit_price_in, prod.quote_increment, mode=price_mode)
+        except ValueError as e:
+            return {
+                "ok": False,
+                "error": f"quantization failed: {e}",
+                "client_order_id": cid,
+            }
+        if Decimal(q_stop) <= 0:
+            return {
+                "ok": False,
+                "error": f"quantized stop_price <= 0 ({q_stop})",
+                "client_order_id": cid,
+            }
+        # Preserve SELL: limit ≤ stop; BUY: limit ≥ stop. If quantization
+        # collapsed the buffer, step limit one increment further from stop.
+        d_stop = Decimal(q_stop)
+        d_limit = Decimal(q_limit)
+        d_inc = Decimal(str(prod.quote_increment))
+        if side_l == "sell" and d_limit > d_stop:
+            nudged = (d_stop - d_inc).quantize(d_inc)
+            _log.debug(
+                "[coinbase_spot] sell stop nudged limit %s → %s (one tick "
+                "below stop %s) for %s", q_limit, format(nudged, "f"), q_stop, pid,
+            )
+            q_limit = format(nudged, "f")
+        elif side_l == "buy" and d_limit < d_stop:
+            nudged = (d_stop + d_inc).quantize(d_inc)
+            _log.debug(
+                "[coinbase_spot] buy stop nudged limit %s → %s (one tick "
+                "above stop %s) for %s", q_limit, format(nudged, "f"), q_stop, pid,
+            )
+            q_limit = format(nudged, "f")
+        # min_market_funds enforcement: reject below-minimum notional with
+        # explicit log (cap-to-min would silently mutate intent; that's a
+        # data-integrity violation per the no-magic-fallback rule).
+        notional = float(Decimal(q_size) * Decimal(q_stop))
+        if prod.min_market_funds is not None and notional < prod.min_market_funds:
+            _log.warning(
+                "[coinbase_spot] place_stop_limit_order_gtc rejected: "
+                "notional %.6f USD < min_market_funds %.6f USD for %s "
+                "(size=%s × stop=%s)",
+                notional, prod.min_market_funds, pid, q_size, q_stop,
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"notional {notional:.6f} below product min_market_funds "
+                    f"{prod.min_market_funds:.6f}"
+                ),
+                "client_order_id": cid,
+            }
+        base_size = q_size
+        stop_price = q_stop
+        limit_price = q_limit
+
         try:
             order_state_machine.record_transition_standalone(
                 to_state=order_state_machine.OrderState.SUBMITTING,
