@@ -2490,6 +2490,66 @@ class Settings(BaseSettings):
             "CHILI_SHADOW_PROMOTED_LIFECYCLE_ENABLED"
         ),
     )
+    # f-promotion-pipeline-rebalance Phase 4 (2026-05-10): composite
+    # quality scoring + weekly cohort auto-promote. Composite score is
+    # the convex combination of five normalized components:
+    #   composite = w1*clip(cpcv_sharpe/2.0)
+    #             + w2*clip(deflated_sharpe/1.0)
+    #             + w3*(1-clip(pbo))
+    #             + w4*directional_wr
+    #             + w5*(1-decay)
+    # — all clipped to [0,1] so composite ∈ [0,1] given weights sum to 1.
+    # Decay = max(0, older_wr - newer_wr) computed from the rolling-30
+    # split of pattern_alert_directional_outcome (newer-15 vs older-15);
+    # patterns with rolling_sample_n < 30 are NOT eligible (no decay
+    # information; they wait until enough outcomes accumulate). The
+    # cohort job promotes top-N by composite score to ``shadow_promoted``
+    # (Phase 3's lifecycle stage) — NOT directly to promoted/live —
+    # capped at max_per_week per rolling 7-day window. Phase 4 ships
+    # dormant: chili_cohort_promote_enabled defaults False until the
+    # operator opts in.
+    chili_cohort_promote_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_ENABLED"),
+    )
+    chili_cohort_score_weight_cpcv_sharpe: float = Field(
+        default=0.30,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_WEIGHT_CPCV_SHARPE"
+        ),
+    )
+    chili_cohort_score_weight_deflated_sharpe: float = Field(
+        default=0.20,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_WEIGHT_DEFLATED_SHARPE"
+        ),
+    )
+    chili_cohort_score_weight_pbo_inverse: float = Field(
+        default=0.15,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_WEIGHT_PBO_INVERSE"
+        ),
+    )
+    chili_cohort_score_weight_directional_wr: float = Field(
+        default=0.25,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_WEIGHT_DIRECTIONAL_WR"
+        ),
+    )
+    chili_cohort_score_weight_decay_inverse: float = Field(
+        default=0.10,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_WEIGHT_DECAY_INVERSE"
+        ),
+    )
+    chili_cohort_promote_top_n: int = Field(
+        default=20,
+        validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_TOP_N"),
+    )
+    chili_cohort_promote_max_per_week: int = Field(
+        default=10,
+        validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_MAX_PER_WEEK"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

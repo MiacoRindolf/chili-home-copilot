@@ -15720,6 +15720,32 @@ def _migration_236_scan_pattern_lifecycle_shadow_promoted(conn) -> None:
         conn.rollback()
 
 
+def _migration_237_scan_pattern_quality_composite_score(conn) -> None:
+    """f-promotion-pipeline-rebalance Phase 4 (2026-05-10).
+
+    Add ``scan_patterns.quality_composite_score`` (DOUBLE PRECISION NULL).
+    Computed nightly by ``pattern_quality_score_refresh`` from CPCV /
+    DSR / PBO / directional-WR / decay components and ranked by the
+    weekly cohort promote job.
+
+    NULL is the correct initial state — patterns lacking the required
+    evidence (cpcv/dsr/pbo NULL, or directional rolling_sample_n < 30)
+    stay NULL and are excluded from cohort eligibility by the score
+    column's NULL-check, NOT by any magic default value.
+    """
+    tbl = "scan_patterns"
+    if tbl not in _tables(conn):
+        return
+    try:
+        conn.execute(text(
+            f"ALTER TABLE {tbl} "
+            f"ADD COLUMN IF NOT EXISTS quality_composite_score DOUBLE PRECISION"
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -15981,6 +16007,8 @@ MIGRATIONS = [
      _migration_235_pattern_alert_directional_outcome),
     ("236_scan_pattern_lifecycle_shadow_promoted",
      _migration_236_scan_pattern_lifecycle_shadow_promoted),
+    ("237_scan_pattern_quality_composite_score",
+     _migration_237_scan_pattern_quality_composite_score),
 ]
 
 

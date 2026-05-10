@@ -919,6 +919,11 @@ class ScanPattern(Base):
         String(20), nullable=False, default="realized_pnl",
     )
 
+    # f-promotion-pipeline-rebalance Phase 4 (mig 237): composite quality
+    # score in [0,1] computed nightly from CPCV / DSR / PBO / directional-WR
+    # / decay components; ranked by the weekly cohort-promote job.
+    quality_composite_score: Optional[float] = Column(Float, nullable=True)
+
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 
 

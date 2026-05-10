@@ -3229,6 +3229,70 @@ def _run_brain_batch_reconciler_job() -> None:
         logger.warning("[scheduler_job] brain_batch_reconciler failed: %s", e)
 
 
+def _run_pattern_quality_score_refresh_job() -> None:
+    """f-promotion-pipeline-rebalance Phase 4: nightly composite quality
+    score refresh.
+
+    Computes and persists ``scan_patterns.quality_composite_score`` for
+    all active patterns. ALWAYS runs (no kill switch) — the score is
+    informational. Operators can ``SELECT id, name, quality_composite_score
+    FROM scan_patterns ORDER BY quality_composite_score DESC LIMIT 20``
+    to dry-run-inspect what the cohort-promote job would select before
+    flipping ``CHILI_COHORT_PROMOTE_ENABLED``.
+    """
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.pattern_quality_score import compute_and_persist_scores
+        sess = SessionLocal()
+        try:
+            compute_and_persist_scores(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("pattern_quality_score_refresh", _work)
+
+
+def _run_pattern_cohort_promote_job() -> None:
+    """f-promotion-pipeline-rebalance Phase 4: weekly cohort
+    auto-promote.
+
+    Selects top-N eligible patterns by ``quality_composite_score``
+    (populated by the nightly refresh) and advances them to
+    ``shadow_promoted`` (Phase 3's lifecycle stage). Capped at
+    ``chili_cohort_promote_max_per_week`` per rolling 7-day window.
+
+    Flag-disable via ``CHILI_COHORT_PROMOTE_ENABLED=false`` (default).
+    Phase 4 ships dormant; the operator opts in.
+    """
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_cohort_promote_enabled", False)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.pattern_cohort_promote import run_cohort_promote_cycle
+        sess = SessionLocal()
+        try:
+            run_cohort_promote_cycle(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("pattern_cohort_promote", _work)
+
+
 def _run_pattern_directional_outcome_evaluator_job() -> None:
     """f-promotion-pipeline-rebalance Phase 2: evaluate directional
     correctness for closed-window pattern_breakout_imminent alerts.
@@ -4005,6 +4069,32 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=75),
+                )
+
+                # f-promotion-pipeline-rebalance Phase 4 (2026-05-10):
+                # nightly composite quality score refresh + weekly
+                # cohort auto-promote to shadow_promoted.
+                _scheduler.add_job(
+                    _run_pattern_quality_score_refresh_job,
+                    trigger=CronTrigger(
+                        hour=23, minute=30,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_quality_score_refresh",
+                    name="Pattern quality composite score refresh (daily 23:30 PT)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+                _scheduler.add_job(
+                    _run_pattern_cohort_promote_job,
+                    trigger=CronTrigger(
+                        day_of_week="sun", hour=22, minute=0,
+                        timezone="America/Los_Angeles",
+                    ),
+                    id="pattern_cohort_promote",
+                    name="Pattern cohort auto-promote to shadow_promoted (Sun 22:00 PT)",
+                    replace_existing=True,
+                    max_instances=1,
                 )
 
         if include_heavy:
