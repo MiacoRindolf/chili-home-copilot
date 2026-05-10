@@ -1,6 +1,6 @@
 # NEXT_TASK: f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
