@@ -401,6 +401,139 @@ def _stage_load_local(
     batch.local_views = [_row_to_local_view(r) for r in rows]
 
 
+# ── Stage 1.5: backfill_missing_intents ────────────────────────────────
+# f-coinbase-bracket-coverage-fix (2026-05-10) — Bug B safety net.
+
+
+def _stage_backfill_missing_intents(
+    db: Session,
+    local_rows_or_views: list[Any],
+    *,
+    mode: str,
+) -> int:
+    """Create ``trading_bracket_intents`` rows for open live trades that
+    have a ``stop_loss > 0`` but no intent row.
+
+    Why this exists:
+      Pre-Bug-A, ``stop_engine._maybe_emit_bracket_intent`` was only
+      called on alert events. A freshly-entered Coinbase trade whose
+      price had not yet approached the stop never produced an intent
+      row, so the writer-invocation gate at
+      ``_invoke_writer_for_decision`` (which requires a
+      bracket_intent_id) silently returned None and the position
+      remained unprotected at the venue. Bug A fixes the common path;
+      this stage is the safety net for trades created via code paths
+      that don't run through stop_engine, or that were persisted
+      before Bug A landed.
+
+    Behavior:
+      * Mode-gated by ``brain_live_brackets_mode != 'off'`` (same gate
+        as ``_maybe_emit_bracket_intent``).
+      * Operates on rows from ``_load_local_view`` (legacy loop) OR a
+        list of ``LocalView`` (staged loop) — accessor adapts.
+      * Skips paper trades (broker_source unset), non-open trades,
+        rows that already have an intent, and trades with no
+        ``stop_loss`` (None or <= 0). The no-magic-fallback rule
+        applies: a trade without a stop_loss has no information for
+        the brain to write, so we do nothing.
+      * Idempotent on re-entry: ``upsert_bracket_intent`` rejects
+        terminal/legacy-authoritative states and updates rather than
+        inserts when a row already exists.
+
+    Returns the number of intents *created* (not updated). A non-zero
+    count is the caller's signal to re-load the local view so the
+    rest of the sweep sees the new bracket_intent_id values.
+    """
+    bl_mode = (getattr(settings, "brain_live_brackets_mode", "off") or "off").lower()
+    if bl_mode == "off":
+        return 0
+
+    # Local imports keep module-import cost low and avoid widening the
+    # import surface for callers that don't trigger the backfill path.
+    import json as _json
+    from .bracket_intent import BracketIntentInput
+    from .bracket_intent_writer import upsert_bracket_intent
+    from ...models.trading import Trade as _Trade
+
+    backfilled = 0
+    for entry in local_rows_or_views:
+        if isinstance(entry, dict):
+            trade_id = entry.get("trade_id")
+            bracket_intent_id = entry.get("bracket_intent_id")
+            broker_source = entry.get("broker_source")
+            trade_status = entry.get("trade_status")
+        else:
+            trade_id = getattr(entry, "trade_id", None)
+            bracket_intent_id = getattr(entry, "bracket_intent_id", None)
+            broker_source = getattr(entry, "broker_source", None)
+            trade_status = getattr(entry, "trade_status", None)
+
+        if trade_id is None:
+            continue
+        if bracket_intent_id is not None:
+            continue
+        if not broker_source:
+            continue
+        if (trade_status or "").lower() != "open":
+            continue
+
+        try:
+            trade = db.get(_Trade, int(trade_id))
+            if trade is None:
+                continue
+            sl = getattr(trade, "stop_loss", None)
+            if sl is None or float(sl) <= 0:
+                continue
+
+            atr_val = None
+            try:
+                snapshot = getattr(trade, "indicator_snapshot", None)
+                if isinstance(snapshot, str) and snapshot:
+                    snap = _json.loads(snapshot)
+                    if isinstance(snap, dict):
+                        atr_val = snap.get("atr") or snap.get("ATR")
+                elif isinstance(snapshot, dict):
+                    atr_val = snapshot.get("atr") or snapshot.get("ATR")
+            except Exception:
+                atr_val = None
+
+            bracket_input = BracketIntentInput(
+                ticker=trade.ticker,
+                direction=(trade.direction or "long").lower(),
+                entry_price=float(trade.entry_price or 0.0),
+                quantity=float(trade.quantity or 0.0),
+                atr=float(atr_val) if atr_val else None,
+                stop_model=getattr(trade, "stop_model", None),
+                pattern_id=getattr(trade, "scan_pattern_id", None),
+                lifecycle_stage=None,
+                regime="cautious",
+                pattern_win_rate=None,
+                pattern_name=None,
+            )
+            upsert_result = upsert_bracket_intent(
+                db,
+                trade_id=int(trade.id),
+                user_id=getattr(trade, "user_id", None),
+                bracket_input=bracket_input,
+                broker_source=str(trade.broker_source),
+            )
+            if upsert_result is not None and upsert_result.created:
+                backfilled += 1
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} backfill_intent "
+                    "trade=%s ticker=%s broker=%s intent_id=%s stop_price=%s "
+                    "(mode=%s, sweep-time backfill — bug B safety net)",
+                    trade.id, trade.ticker, trade.broker_source,
+                    upsert_result.intent_id, upsert_result.stop_price, mode,
+                )
+        except Exception:
+            logger.warning(
+                f"{BRACKET_RECONCILIATION} backfill_intent failed for trade %s",
+                trade_id, exc_info=True,
+            )
+    return backfilled
+
+
 # ── Stage 2: fetch_broker ──────────────────────────────────────────────
 
 
@@ -1429,10 +1562,46 @@ def _invoke_writer_for_decision(
     exceptions reaching the sweep loop.
     """
     if mode != "authoritative":
+        # Mode-gate is sweep-cadence (every 60s in prod) and reflects
+        # config, not a structural problem — debug-level is appropriate.
+        logger.debug(
+            f"{BRACKET_RECONCILIATION} writer SKIPPED mode-gated "
+            "trade=%s intent=%s ticker=%s mode=%s",
+            local.trade_id, local.bracket_intent_id, local.ticker, mode,
+        )
         return None
     if local.trade_id is None or local.bracket_intent_id is None:
+        # f-coinbase-bracket-coverage-fix (2026-05-10) — was a silent
+        # return None pre-Bug-B. Post-Bug-B the backfill stage creates
+        # missing intents at sweep load time, so this should rarely
+        # fire. If it does, the intent creation failed (logged at
+        # warning by _stage_backfill_missing_intents) and we want
+        # operator visibility on the downstream skip.
+        logger.info(
+            f"{BRACKET_RECONCILIATION} writer SKIPPED no-intent-row "
+            "trade=%s ticker=%s broker=%s "
+            "(post-backfill this should be rare; investigate the "
+            "preceding backfill_intent warning if present)",
+            local.trade_id, local.ticker, local.broker_source,
+        )
         return None
-    if (local.broker_source or "").lower() != "robinhood":
+    # f-coinbase-bracket-coverage-fix (2026-05-10) — Bug C smoking gun.
+    # The previous code had a hardcoded ``!= "robinhood"`` filter that
+    # silently returned None for every Coinbase trade. Phase 4 wired
+    # Coinbase into ``bracket_writer_g2._SUPPORTED_VENUES`` and
+    # ``place_missing_stop`` already routes Coinbase via
+    # ``place_stop_limit_order_gtc`` — but this gate prevented the
+    # call from ever reaching the writer. Delegate the venue check
+    # to the writer's authoritative venue list and emit a log on skip.
+    from .bracket_writer_g2 import _SUPPORTED_VENUES as _SUPPORTED_VENUES_G2
+    broker_lower = (local.broker_source or "").lower()
+    if broker_lower not in _SUPPORTED_VENUES_G2:
+        logger.info(
+            f"{BRACKET_RECONCILIATION} writer SKIPPED venue-unsupported "
+            "trade=%s intent=%s ticker=%s broker=%s supported=%s",
+            local.trade_id, local.bracket_intent_id, local.ticker,
+            local.broker_source, sorted(_SUPPORTED_VENUES_G2),
+        )
         return None
 
     # bracket-writer-respect-upside-targets (2026-05-04): pending-decision
@@ -1624,6 +1793,31 @@ def _invoke_writer_for_decision(
                 return None
             if local.stop_price is None:
                 return None
+            # f-coinbase-bracket-coverage-fix (2026-05-10) — explicit
+            # Coinbase skip in resize path. ``resize_stop_for_partial_fill``
+            # in bracket_writer_g2 calls ``adapter.place_stop_loss_sell_order``
+            # directly, which the Coinbase adapter does not implement (its
+            # primitive is ``place_stop_limit_order_gtc``). Wiring Coinbase
+            # into the resize path is a separate fix; for now, surface the
+            # skip with an info log instead of letting it crash inside the
+            # writer.
+            if broker_lower == "coinbase":
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} resize_stop SKIPPED "
+                    "trade=%s intent=%s ticker=%s broker=coinbase "
+                    "reason=resize_not_yet_wired_for_coinbase "
+                    "(place_stop_limit_order_gtc has no resize peer; "
+                    "follow-up brief required to wire it)",
+                    local.trade_id, local.bracket_intent_id, local.ticker,
+                )
+                return {
+                    "writer": "resize_stop_for_partial_fill",
+                    "ok": False,
+                    "reason": "resize_not_yet_wired_for_coinbase",
+                    "new_stop_order_id": None,
+                    "qty": None,
+                    "stop_price": None,
+                }
             prior_id = (
                 broker.stop_order_id
                 if broker is not None and broker.stop_order_id
@@ -1678,6 +1872,15 @@ def _run_sweep_staged(
     start = time.perf_counter()
     batch = SweepBatch(sweep_id=sweep_id, mode=mode, tolerances=tolerances)
     _stage_load_local(db, batch, user_id=user_id)
+    # f-coinbase-bracket-coverage-fix (2026-05-10) — Bug B safety net.
+    # Create intent rows for open live trades that have stop_loss > 0
+    # but no intent yet, then re-load so the rest of the sweep sees
+    # the freshly-created bracket_intent_id values.
+    backfilled = _stage_backfill_missing_intents(
+        db, batch.local_views, mode=mode,
+    )
+    if backfilled:
+        _stage_load_local(db, batch, user_id=user_id)
     _stage_fetch_broker(batch, broker_view_fn)
     _stage_classify_all(batch)
     _stage_log_all(db, batch)
@@ -1698,6 +1901,13 @@ def _run_sweep_legacy(
     start = time.perf_counter()
 
     local_rows = _load_local_view(db, user_id=user_id)
+    # f-coinbase-bracket-coverage-fix (2026-05-10) — Bug B safety net.
+    # Same as the staged path: create intent rows for open live trades
+    # with stop_loss > 0 but no intent, then re-load so the rest of the
+    # loop sees the new bracket_intent_id values.
+    backfilled = _stage_backfill_missing_intents(db, local_rows, mode=mode)
+    if backfilled:
+        local_rows = _load_local_view(db, user_id=user_id)
     broker_input: list[dict[str, Any]] = [
         {"ticker": r["ticker"], "broker_source": r["broker_source"]}
         for r in local_rows
