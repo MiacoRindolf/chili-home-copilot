@@ -142,12 +142,26 @@ function Run-Session {
         queue_depth = (Get-ChildItem $queueDir -Filter '*.session' -ErrorAction SilentlyContinue | Measure-Object).Count
     }
 
-    # Launch claude
+    # Persist claude args as JSON so the launcher can read them without
+    # cross-process arg-quoting headaches (multi-line prompts with quotes
+    # etc. survive JSON intact).
+    $argsFilePath = Join-Path $sessionLogDir "args.json"
+    ConvertTo-Json -InputObject $claudeArgs -Compress | Out-File $argsFilePath -Encoding utf8 -Force
+
+    # Launch claude via _claude_session_launcher.ps1 -- same powershell.exe
+    # wrapper pattern _claude_daemon.ps1 uses for .ps1 commands. The
+    # launcher uses PowerShell's `&` operator which natively resolves the
+    # claude.cmd shim. Start-Process -FilePath 'claude' does NOT auto-
+    # resolve .cmd extensions, which is why a direct invocation fails
+    # with "system cannot find the file specified".
+    $launcherPath = Join-Path $PSScriptRoot "_claude_session_launcher.ps1"
+    $psInner = "& '$launcherPath' -ArgsFile '$argsFilePath' *>&1"
+
     $exitCode = -1
     $timedOut = $false
     try {
-        $proc = Start-Process -FilePath 'claude' `
-            -ArgumentList $claudeArgs `
+        $proc = Start-Process -FilePath "powershell.exe" `
+            -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $psInner `
             -RedirectStandardOutput $stdoutPath `
             -RedirectStandardError $stderrPath `
             -NoNewWindow -PassThru
