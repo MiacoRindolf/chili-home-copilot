@@ -35,13 +35,22 @@ from app.services.trading.learning import (
 
 
 def _stub_promoted_thin():
-    """Stub matching ALL five criteria → predicate True."""
+    """Stub matching ALL Phase-1-current criteria → predicate True.
+
+    f-promotion-pipeline-rebalance Phase 1 (2026-05-09) inverted the
+    sample-size floor: patterns with n<30 are now PROTECTED (the
+    realized signal is gate-laundered noise). Stub bumped to n=30
+    with cpcv_median_sharpe=None so the criteria still match for
+    these tests; pattern 585's actual n=8 fingerprint is now in
+    test_pattern_585_protected_*  (Phase 1 file).
+    """
     return SimpleNamespace(
         id=585,
         lifecycle_stage="promoted",
-        trade_count=4,
+        trade_count=30,
         win_rate=0.25,
         oos_win_rate=None,
+        cpcv_median_sharpe=None,  # no CPCV → no Phase 1 escape
         promotion_gate_reasons=["provisional_small_paths"],
         promotion_status="promoted",
     )
@@ -58,11 +67,14 @@ def test_lifecycle_not_promoted_excludes():
 
 
 def test_trade_count_at_or_above_min_excludes():
-    """trade_count >= 10 (the brief's `< 10` floor)."""
+    """f-promotion-pipeline-rebalance Phase 1 inverts: now patterns
+    BELOW the (settings) floor are protected. Test pin: n at 10/11
+    is below the post-Phase-1 floor (30) → predicate returns False
+    (protected), same outcome as the pre-Phase-1 assertion."""
     p = _stub_promoted_thin()
-    p.trade_count = THIN_EVIDENCE_MIN_TRADES  # exactly 10
+    p.trade_count = THIN_EVIDENCE_MIN_TRADES  # 10 (deprecated constant)
     assert _matches_thin_evidence_criteria(p) is False
-    p.trade_count = THIN_EVIDENCE_MIN_TRADES + 1  # 11 — also excluded
+    p.trade_count = THIN_EVIDENCE_MIN_TRADES + 1  # 11
     assert _matches_thin_evidence_criteria(p) is False
 
 
@@ -111,11 +123,15 @@ def test_promotion_gate_reasons_str_json_decoded():
     assert _matches_thin_evidence_criteria(p) is True
 
 
-def test_pattern_585_audit_fingerprint_matches():
-    """Replay of the 2026-05-08 audit's pattern-585 fingerprint.
-
-    The brief lists this exact shape as the canonical case:
-    promoted + 4 trades + 25% WR + no OOS + provisional gate.
+def test_pattern_585_audit_fingerprint_protected_after_phase_1():
+    """f-promotion-pipeline-rebalance Phase 1 (2026-05-09): the
+    pattern-585 fingerprint (4 trades / 25% WR / no OOS /
+    provisional gate) is NOW PROTECTED by the inverted sample-size
+    floor — n=4 is below the post-Phase-1 default of 30, so the
+    realized-stat signal is treated as gate-laundered noise and
+    the predicate returns False. Pre-Phase-1 the same fingerprint
+    asserted True (demote); the assertion flipped because the
+    semantic flipped.
     """
     p = SimpleNamespace(
         id=585,
@@ -123,10 +139,11 @@ def test_pattern_585_audit_fingerprint_matches():
         trade_count=4,
         win_rate=0.25,
         oos_win_rate=None,
+        cpcv_median_sharpe=1.40,  # also CPCV-passing; double-protected
         promotion_gate_reasons=["provisional_small_paths"],
         promotion_status="promoted",
     )
-    assert _matches_thin_evidence_criteria(p) is True
+    assert _matches_thin_evidence_criteria(p) is False
 
 
 def test_pattern_1011_audit_fingerprint_kept():
@@ -153,7 +170,7 @@ def _seed_scan_pattern(
     *,
     pid: int,
     lifecycle_stage: str = "promoted",
-    trade_count: int = 4,
+    trade_count: int = 30,  # Phase 1: bumped from 4 to clear the n>=30 floor
     win_rate: float = 0.25,
     oos_win_rate=None,
     promotion_gate_reasons=("provisional_small_paths",),

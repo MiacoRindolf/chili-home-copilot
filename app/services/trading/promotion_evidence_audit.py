@@ -132,6 +132,15 @@ def audit_promoted_pattern_evidence(db: Session) -> dict[str, Any]:
                 "lifecycle_stage": r.lifecycle_stage,
                 "promotion_status": r.promotion_status,
                 "missing": missing,
+                # f-promotion-pipeline-rebalance Phase 1 (2026-05-09):
+                # surface CPCV median sharpe so the auto-demote
+                # filter can protect CPCV-passing patterns even when
+                # their OOS evidence is missing.
+                "cpcv_median_sharpe": (
+                    float(r.cpcv_median_sharpe)
+                    if r.cpcv_median_sharpe is not None
+                    else None
+                ),
             })
         else:
             complete += 1
@@ -159,6 +168,51 @@ def _auto_demote_dry_run() -> bool:
     return bool(getattr(settings, "chili_pattern_evidence_auto_demote_dry_run", False))
 
 
+# f-promotion-pipeline-rebalance Phase 1 (2026-05-09): CPCV-passing
+# threshold parallel to learning.THIN_EVIDENCE_CPCV_PASSING_SHARPE_FLOOR.
+# A pattern with CPCV median sharpe >= this value is protected from
+# the 02:15 PT auto-demote audit even if its OOS evidence rows are
+# NULL — CPCV is the higher-information signal and the missing-OOS
+# state is a separate evidence-completeness gap, not a CPCV-degrade.
+_CPCV_PASSING_SHARPE_FLOOR_FOR_AUDIT = 1.0
+
+
+def _filter_cpcv_passing(incomplete_details: list[dict[str, Any]]) -> tuple[
+    list[int], list[dict[str, Any]],
+]:
+    """Strip out patterns whose CPCV median sharpe is still passing
+    (>= 1.0). Returns ``(actionable_ids, retained_details)`` where
+    ``actionable_ids`` is the set the audit may demote, and
+    ``retained_details`` is the full row payload (with a per-row
+    ``cpcv_protected: bool`` flag) for the surfaced report.
+
+    Reads ``chili_pattern_demote_require_cpcv_degrade`` (default True);
+    when False, returns the input untouched (legacy semantics).
+    """
+    require = bool(
+        getattr(
+            settings, "chili_pattern_demote_require_cpcv_degrade", True,
+        )
+    )
+    actionable_ids: list[int] = []
+    retained: list[dict[str, Any]] = []
+    for row in incomplete_details:
+        cpcv_sharpe = row.get("cpcv_median_sharpe")
+        protected = False
+        if require and cpcv_sharpe is not None:
+            try:
+                if float(cpcv_sharpe) >= _CPCV_PASSING_SHARPE_FLOOR_FOR_AUDIT:
+                    protected = True
+            except (TypeError, ValueError):
+                protected = False
+        row_with_flag = dict(row)
+        row_with_flag["cpcv_protected"] = protected
+        retained.append(row_with_flag)
+        if not protected:
+            actionable_ids.append(int(row["id"]))
+    return actionable_ids, retained
+
+
 def run_promotion_evidence_audit(db: Session) -> dict[str, Any]:
     """Scheduler entrypoint. Runs the audit; optionally auto-demotes."""
     summary = audit_promoted_pattern_evidence(db)
@@ -182,8 +236,23 @@ def run_promotion_evidence_audit(db: Session) -> dict[str, Any]:
     summary["auto_demote_dry_run"] = _auto_demote_dry_run()
     summary["auto_demote_actions"] = []
 
-    if _auto_demote_enabled() and summary["incomplete_ids"]:
-        ids = summary["incomplete_ids"]
+    # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): filter the
+    # actionable demote set through the CPCV-passing protection. The
+    # full incomplete set is preserved in summary["incomplete_ids"] +
+    # summary["incomplete_details"] (now annotated with
+    # cpcv_protected); the actionable set is what we'd actually
+    # demote.
+    actionable_ids, annotated_details = _filter_cpcv_passing(
+        summary["incomplete_details"]
+    )
+    summary["incomplete_details"] = annotated_details
+    summary["cpcv_protected_count"] = sum(
+        1 for r in annotated_details if r.get("cpcv_protected")
+    )
+    summary["actionable_demote_ids"] = actionable_ids
+
+    if _auto_demote_enabled() and actionable_ids:
+        ids = actionable_ids
         if _auto_demote_dry_run():
             logger.warning(
                 "%s DRY-RUN: would demote %d patterns to 'challenged' (ids=%s)",

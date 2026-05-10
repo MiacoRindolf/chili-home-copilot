@@ -2391,6 +2391,35 @@ class Settings(BaseSettings):
         default=3,
         validation_alias=AliasChoices("CHILI_COINBASE_MAX_CONCURRENT_POSITIONS"),
     )
+    # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size
+    # floor for the thin-evidence demote sweep. The original Phase D
+    # threshold (10 trades) was wrong-sense: a pattern with 8 realized
+    # trades isn't a "thin-evidence demote candidate" — its 8 trades
+    # are the autotrader's 7-stage-gate-laundered noise sample, not a
+    # statistically valid signal. Pattern 585 with CPCV sharpe 1.40
+    # was killed by this exact path on 2026-05-09. The corrected
+    # semantic: do NOT demote when n < min_realized_trades; require
+    # >=N realized trades before the realized-WR signal is allowed to
+    # flip lifecycle.
+    chili_pattern_demote_min_realized_trades: int = Field(
+        default=30,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DEMOTE_MIN_REALIZED_TRADES"
+        ),
+    )
+    # When True (default), demote sweeps + the 02:15 PT
+    # promotion_evidence_audit MUST also confirm CPCV-degrade before
+    # demoting. A pattern with cpcv_median_sharpe >= 1.0 (passing
+    # threshold) is protected even if its realized WR is poor or its
+    # OOS evidence is incomplete — CPCV is the higher-information
+    # signal and should not be overridden by gate-laundered realized
+    # noise.
+    chili_pattern_demote_require_cpcv_degrade: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DEMOTE_REQUIRE_CPCV_DEGRADE"
+        ),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

@@ -869,9 +869,11 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
 # prevents double-demotion.
 
 THIN_EVIDENCE_MIN_TRADES = 10
-"""Below this trade count, the live sample is too small for the
-realized win rate to be statistically meaningful. The brief picked
-10 as the floor; tighten in a follow-up if 10 still admits noise."""
+"""DEPRECATED constant retained for backwards compat. The runtime
+floor reads from ``settings.chili_pattern_demote_min_realized_trades``
+(default 30) per f-promotion-pipeline-rebalance Phase 1
+(2026-05-09). Constant is kept so existing tests can import it
+without breakage; new code paths read the setting directly."""
 
 THIN_EVIDENCE_WIN_RATE_FLOOR = 0.33
 """Below this win rate (one third), the pattern is performing worse
@@ -889,21 +891,58 @@ THIN_EVIDENCE_DEMOTE_REASON = "thin_evidence_low_realized_wr"
 audits can distinguish thin-evidence demotions from the live-vs-OOS
 demotions emitted by ``run_live_pattern_depromotion``."""
 
+# f-promotion-pipeline-rebalance Phase 1 (2026-05-09): CPCV-passing
+# threshold. A pattern with median Sharpe >= this value is treated as
+# "CPCV is still passing" and protected from demote regardless of
+# realized-stat noise. Matches the threshold the cohort-promote
+# eligibility uses (Phase 4) so the two sides of the lifecycle agree.
+THIN_EVIDENCE_CPCV_PASSING_SHARPE_FLOOR = 1.0
 
-def _matches_thin_evidence_criteria(p) -> bool:
-    """Pure predicate: returns True iff the pattern matches all five
-    thin-evidence demote criteria from the brief.
+
+def _matches_thin_evidence_criteria(p, *, settings_=None) -> bool:
+    """Pure predicate: returns True iff the pattern matches the
+    thin-evidence demote criteria.
+
+    Phase 1 (f-promotion-pipeline-rebalance, 2026-05-09):
+
+      * **Sample-size floor INVERTED.** Pre-Phase-1: demote when
+        ``n < THIN_EVIDENCE_MIN_TRADES`` (=10). Post-Phase-1:
+        demote ONLY when ``n >= chili_pattern_demote_min_realized_trades``
+        (default 30). Patterns with fewer realized trades are
+        gate-laundered noise — not enough signal to flip lifecycle.
+      * **CPCV-passing protection.** When
+        ``chili_pattern_demote_require_cpcv_degrade=True`` (default),
+        any pattern with ``cpcv_median_sharpe >=
+        THIN_EVIDENCE_CPCV_PASSING_SHARPE_FLOOR`` (=1.0) is protected
+        — CPCV is the higher-information signal and should not be
+        overridden by sub-floor realized WR.
 
     Helper-level testable -- accepts any object with the expected
     attributes, so unit tests can pass `SimpleNamespace(...)` without
-    standing up a DB row.
+    standing up a DB row. ``settings_`` is the test-injection seam.
     """
     lc = (getattr(p, "lifecycle_stage", "") or "").strip()
     if lc != "promoted":
         return False
 
+    s = settings_
+    if s is None:
+        try:
+            from ...config import settings as _s
+            s = _s
+        except Exception:
+            s = None
+
+    min_realized = int(
+        getattr(s, "chili_pattern_demote_min_realized_trades", 30)
+    )
+    require_cpcv_degrade = bool(
+        getattr(s, "chili_pattern_demote_require_cpcv_degrade", True)
+    )
+
     n = int(getattr(p, "trade_count", 0) or 0)
-    if n >= THIN_EVIDENCE_MIN_TRADES:
+    # Phase 1 inversion: don't demote on realized stats with n < min_realized.
+    if n < min_realized:
         return False
 
     wr = getattr(p, "win_rate", None)
@@ -931,6 +970,16 @@ def _matches_thin_evidence_criteria(p) -> bool:
         return False
     if THIN_EVIDENCE_PROVISIONAL_GATE_REASON not in reasons:
         return False
+
+    # Phase 1 AND-logic: don't demote on realized when CPCV is still passing.
+    if require_cpcv_degrade:
+        cpcv_sharpe = getattr(p, "cpcv_median_sharpe", None)
+        if cpcv_sharpe is not None:
+            try:
+                if float(cpcv_sharpe) >= THIN_EVIDENCE_CPCV_PASSING_SHARPE_FLOOR:
+                    return False
+            except (TypeError, ValueError):
+                pass
 
     return True
 
