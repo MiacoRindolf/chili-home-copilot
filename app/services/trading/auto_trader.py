@@ -1084,6 +1084,47 @@ def _execute_broker_buy(
             return None
         return res
 
+    # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
+    # (2026-05-09): cost-aware min-edge gate runs BEFORE the broker
+    # selector. RH-eligible tickers get fee=0 (no behavior change vs
+    # pre-Phase-5; the gate is a no-op). Coinbase-only tickers must
+    # have projected_profit_pct that clears the Tier-1 fee floor
+    # (default 120bps round-trip + 30bps buffer = 150bps min).
+    try:
+        from .cost_aware_gate import cost_aware_min_edge_gate as _cost_gate
+        _cost_decision = _cost_gate(
+            ticker=alert.ticker,
+            projected_profit_pct=snap.get("projected_profit_pct"),
+        )
+    except Exception:
+        # Defensive: cost gate failure must not block RH legacy path.
+        # Default to allowed=True for RH and let downstream rule-gate
+        # handle min_projected_profit_pct.
+        _cost_decision = None
+    if _cost_decision is not None and not _cost_decision.allowed:
+        _cost_reason = f"cost_gate:{_cost_decision.reason}"
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="blocked",
+            reason=_cost_reason,
+            rule_snapshot=snap,
+            llm_snapshot=llm_snap,
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(
+            out, kind="blocked", reason=_cost_reason, alert=alert,
+        )
+        logger.info(
+            "[autotrader] cost gate blocked alert ticker=%s "
+            "edge_bps=%d threshold_bps=%d fee_bps=%d reason=%s",
+            alert.ticker, _cost_decision.edge_bps,
+            _cost_decision.threshold_bps, _cost_decision.fee_bps,
+            _cost_decision.reason,
+        )
+        return None
+
     # f-coinbase-autotrader-enablement-phase-3-broker-selector
     # (2026-05-09): broker selector. RH path is BYTE-IDENTICAL
     # post-Phase-3; the selector decides which venue to use, then
@@ -1138,6 +1179,38 @@ def _execute_broker_buy(
                 "but CHILI_COINBASE_AUTOTRADER_LIVE=0; SHADOW-LOG only "
                 "(reason=%s)",
                 alert.ticker, _venue_decision.reason,
+            )
+            return None
+
+        # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
+        # (2026-05-09): per-venue notional + concurrent-position cap.
+        # Independent from RH cap per Phase 1 design constraint #1.
+        try:
+            from .cost_aware_gate import per_venue_cap_check as _cap_check
+            _proposed_notional = float(qty) * float(px or 0.0)
+            _cap = _cap_check(
+                venue="coinbase",
+                proposed_notional_usd=_proposed_notional,
+                db=db, user_id=uid,
+            )
+        except Exception:
+            _cap = None
+        if _cap is not None and not _cap.allowed:
+            _cap_reason = f"coinbase_cap:{_cap.reason}"
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="blocked", reason=_cap_reason,
+                rule_snapshot=snap, llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="blocked", reason=_cap_reason, alert=alert,
+            )
+            logger.info(
+                "[autotrader] Coinbase cap blocked alert ticker=%s "
+                "current_positions=%d current_notional_usd=%.2f reason=%s",
+                alert.ticker, _cap.current_positions,
+                _cap.current_notional_usd, _cap.reason,
             )
             return None
 

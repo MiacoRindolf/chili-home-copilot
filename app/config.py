@@ -2359,6 +2359,38 @@ class Settings(BaseSettings):
         default=0.005,
         validation_alias=AliasChoices("CHILI_COINBASE_STOP_LIMIT_BUFFER_PCT"),
     )
+    # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
+    # (2026-05-09): Coinbase Advanced Trade Tier 1 fees per
+    # docs.cdp.coinbase.com/exchange/docs/fees:
+    # 60bps taker per-side -> 120bps round-trip. The cost-aware
+    # gate refuses Coinbase entries whose projected edge does not
+    # clear (this fee + the safety buffer below). Operator on a
+    # different tier overrides via env.
+    chili_coinbase_taker_fee_bps_round_trip: int = Field(
+        default=120,
+        validation_alias=AliasChoices("CHILI_COINBASE_TAKER_FEE_BPS_ROUND_TRIP"),
+    )
+    # Cushion above the raw fee floor — covers spread + slippage
+    # plus a small margin for execution drift. 30bps is conservative
+    # for Tier 1 retail; tighter at higher tiers.
+    chili_min_edge_safety_buffer_bps: int = Field(
+        default=30,
+        validation_alias=AliasChoices("CHILI_MIN_EDGE_SAFETY_BUFFER_BPS"),
+    )
+    # Per-venue notional cap (USD). Enforced INDEPENDENTLY of RH
+    # cap per Phase 1 design constraint #1 (separate per-venue caps,
+    # no aggregation). Default 50 -- conservative paper-soak floor;
+    # operator raises after Phase 6 paper soak validates the chain.
+    chili_coinbase_max_notional_usd: float = Field(
+        default=50.0,
+        validation_alias=AliasChoices("CHILI_COINBASE_MAX_NOTIONAL_USD"),
+    )
+    # Per-venue concurrent-positions cap. 3 is the conservative
+    # paper-soak default; raises post-Phase-6 with operator review.
+    chili_coinbase_max_concurrent_positions: int = Field(
+        default=3,
+        validation_alias=AliasChoices("CHILI_COINBASE_MAX_CONCURRENT_POSITIONS"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),
