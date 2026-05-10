@@ -935,7 +935,16 @@ def evaluate_all(
                 if result.alert_event and result.alert_event != "DATA_STALE":
                     _record_stop_decision(db, trade.id, result)
                     _apply_stop_to_trade(db, trade, result)
-                    _maybe_emit_bracket_intent(db, trade, brain)
+                # f-coinbase-bracket-coverage-fix (2026-05-10): emit
+                # bracket intent on every sweep, not gated on alert_event.
+                # The previous gate meant a freshly-entered Coinbase trade
+                # whose price had not yet approached the stop never
+                # produced an intent row, so the reconciler/writer never
+                # saw it. The emitter is broker-source-gated, mode-gated,
+                # and idempotent (upsert), so calling unconditionally is
+                # safe; it short-circuits internally for paper trades and
+                # mode=off.
+                _maybe_emit_bracket_intent(db, trade, brain)
                 # bracket-intent-stop-price-live-sync (2026-05-03):
                 # Mirror trade.stop_loss into bracket_intents.stop_price
                 # on EVERY sweep (not just alert sweeps). Other writers
