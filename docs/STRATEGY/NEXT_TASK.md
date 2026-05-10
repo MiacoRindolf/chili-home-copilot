@@ -1,6 +1,14 @@
 # NEXT_TASK: f-coinbase-tick-size-precision-fix
 
-STATUS: PENDING
+STATUS: DONE
+
+Completed 2026-05-10. See
+`docs/STRATEGY/CC_REPORTS/2026-05-10_f-coinbase-tick-size-precision-fix.md`.
+
+Commits: e5a6deb (cache + helpers) → 4501169 (quantize wire-up) →
+5f6576a (18 new tests). 26/26 tests pass. The 9 currently-naked
+Coinbase trades will be backstopped on the next reconciler sweep
+(~5 min after deploy).
 
 ## Goal
 
