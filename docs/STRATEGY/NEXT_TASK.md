@@ -1,6 +1,8 @@
 # NEXT_TASK: f-coinbase-bracket-coverage-fix
 
-STATUS: PENDING
+STATUS: DONE
+
+CC_REPORT: `docs/STRATEGY/CC_REPORTS/2026-05-10_f-coinbase-bracket-coverage-fix.md`
 
 ## Goal
 
