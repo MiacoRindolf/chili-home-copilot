@@ -2420,6 +2420,58 @@ class Settings(BaseSettings):
             "CHILI_PATTERN_DEMOTE_REQUIRE_CPCV_DEGRADE"
         ),
     )
+    # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
+    # directional-correctness signal — gate-noise-free pattern eval.
+    # The autotrader's 7-stage gate chain laundered pattern 585's 1284
+    # imminent-alerts down to 8 realized trades; Phase 2 measures
+    # directional accuracy on EVERY imminent alert (not just the gate
+    # survivors). Default ON so the evaluator starts populating
+    # pattern_alert_directional_outcome immediately after Phase 2
+    # ships; flag-disable reverts to no eval.
+    chili_pattern_directional_outcome_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_OUTCOME_ENABLED"
+        ),
+    )
+    # Threshold for the directional_correct verdict (percent move in
+    # the predicted direction within the hold window). 1.5% is a
+    # standard "real move" floor for intraday/swing breakouts; the
+    # snapshot is persisted on each row for audit when this is tuned.
+    chili_pattern_directional_threshold_pct: float = Field(
+        default=1.5,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_THRESHOLD_PCT"
+        ),
+    )
+    # Default hold window in hours when the alert row carries no
+    # explicit duration estimate. 24h covers the typical
+    # intraday-to-overnight breakout cycle; operator can shorten for
+    # scalp-heavy regimes.
+    chili_pattern_directional_default_hold_hours: int = Field(
+        default=24,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS"
+        ),
+    )
+    # How far back to look for unevaluated alerts. Keeps the evaluator
+    # from sweeping the entire alerts table when it first runs; one
+    # week of lookback is enough to populate the rolling-30 view per
+    # active pattern.
+    chili_pattern_directional_max_lookback_hours: int = Field(
+        default=168,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_MAX_LOOKBACK_HOURS"
+        ),
+    )
+    # Per-cycle cap on alerts evaluated. Bounds OHLC fetch fan-out so
+    # a single tick never overwhelms the market-data providers.
+    chili_pattern_directional_max_alerts_per_run: int = Field(
+        default=200,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_MAX_ALERTS_PER_RUN"
+        ),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),

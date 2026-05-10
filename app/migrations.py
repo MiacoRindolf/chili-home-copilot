@@ -15562,6 +15562,127 @@ def _migration_216_fast_alerts(conn) -> None:
     conn.commit()
 
 
+def _migration_235_pattern_alert_directional_outcome(conn) -> None:
+    """f-promotion-pipeline-rebalance Phase 2 (2026-05-09).
+
+    Adds the gate-noise-free pattern-eval signal: did the price actually
+    move in the predicted direction within the hold window of an
+    imminent alert?
+
+    This is the eval signal Phases 3 and 4 depend on. The 7-stage
+    autotrader gate chain (kill switch / drawdown breaker / rule floor /
+    LLM / cost-gate / cap-check / bracket writer) means realized P/L on
+    a tiny gate-survivor sample answers the wrong question. The right
+    question is: "given an imminent-alert prediction, did price move at
+    least directional_threshold_pct in the predicted direction within
+    hold_window_hours?" — measured on every imminent alert, not just
+    the gate-survivors.
+
+    Schema:
+
+    ``pattern_alert_directional_outcome``
+      - ``alert_id``        FK to ``trading_alerts(id)`` (UNIQUE — at
+        most one outcome row per alert).
+      - ``scan_pattern_id`` indexed for per-pattern aggregation.
+      - ``ticker``          for ad-hoc per-ticker slices.
+      - ``alert_at``        timestamp of the source alert (copied so
+        the evaluator can sweep without joining ``trading_alerts``).
+      - ``predicted_direction`` 'up' or 'down' (CHECK constrained).
+      - ``entry_price``     nominal entry at alert_at (close of last
+        bar at-or-before alert_at; nullable when OHLC unavailable).
+      - ``hold_window_hours`` typically 4-24, configurable via setting.
+      - ``window_close_at`` alert_at + hold_window_hours (computed).
+      - ``window_max_favorable_pct`` best move toward prediction
+        direction over the window (signed positive).
+      - ``window_max_adverse_pct`` worst move against prediction
+        direction over the window (signed negative).
+      - ``directional_threshold_pct`` the threshold used for the
+        directional_correct verdict (snapshot for audit when the
+        operator-tunable setting changes mid-soak).
+      - ``directional_correct`` boolean: max_favorable >= threshold.
+      - ``evaluated_at``    when the evaluator wrote this row.
+
+    Aggregate view:
+
+    ``pattern_directional_quality_v`` per-pattern rolling-30
+    directional WR (computed as the fraction of the 30 most recent
+    directional outcomes for the pattern that are correct), rolling
+    sample size (capped at 30), last_evaluated_at, last_alert_at.
+    Phase 4's composite quality score reads from this view.
+
+    Idempotent: ``CREATE TABLE IF NOT EXISTS``, ``CREATE INDEX IF NOT
+    EXISTS``, ``CREATE OR REPLACE VIEW``.
+
+    NOTE on FK type: ``trading_alerts.id`` is INTEGER (INT4); we use
+    INTEGER for ``alert_id`` so the FK matches column types exactly
+    even though the brief's draft schema spelled it BIGINT. Postgres
+    permits cross-type FKs but the index won't be optimal.
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS pattern_alert_directional_outcome (
+            id BIGSERIAL PRIMARY KEY,
+            alert_id INTEGER NOT NULL REFERENCES trading_alerts(id) ON DELETE CASCADE,
+            scan_pattern_id INTEGER NOT NULL,
+            ticker VARCHAR(32) NOT NULL,
+            alert_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+            predicted_direction VARCHAR(8) NOT NULL,
+            entry_price NUMERIC,
+            hold_window_hours INTEGER NOT NULL,
+            window_close_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+            window_max_favorable_pct NUMERIC,
+            window_max_adverse_pct NUMERIC,
+            directional_threshold_pct NUMERIC NOT NULL,
+            directional_correct BOOLEAN,
+            evaluated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+            CONSTRAINT pattern_alert_directional_outcome_alert_id_uniq UNIQUE (alert_id),
+            CONSTRAINT pattern_alert_directional_outcome_dir_chk CHECK (
+                predicted_direction IN ('up', 'down')
+            )
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_padc_pattern "
+        "ON pattern_alert_directional_outcome (scan_pattern_id)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_padc_alert_at "
+        "ON pattern_alert_directional_outcome (alert_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_padc_pattern_alert_at "
+        "ON pattern_alert_directional_outcome (scan_pattern_id, alert_at DESC)"
+    ))
+    # Per-pattern rolling-30 directional WR + sample size. The window
+    # function selects the 30 most-recent rows per pattern; the
+    # aggregator collapses to one row per pattern.
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW pattern_directional_quality_v AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*) AS rolling_sample_n,
+            SUM(CASE WHEN directional_correct IS TRUE THEN 1 ELSE 0 END)::numeric
+              / NULLIF(COUNT(*), 0) AS rolling_directional_wr,
+            MAX(alert_at) AS last_alert_at,
+            MAX(evaluated_at) AS last_evaluated_at
+        FROM (
+            SELECT
+                scan_pattern_id,
+                directional_correct,
+                alert_at,
+                evaluated_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY scan_pattern_id
+                    ORDER BY alert_at DESC
+                ) AS rn
+            FROM pattern_alert_directional_outcome
+            WHERE directional_correct IS NOT NULL
+        ) ranked
+        WHERE rn <= 30
+        GROUP BY scan_pattern_id
+    """))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -15819,6 +15940,8 @@ MIGRATIONS = [
      _migration_233_reconcile_partial_list_streak),
     ("234_crypto_broker_zero_qty_streak",
      _migration_234_crypto_broker_zero_qty_streak),
+    ("235_pattern_alert_directional_outcome",
+     _migration_235_pattern_alert_directional_outcome),
 ]
 
 

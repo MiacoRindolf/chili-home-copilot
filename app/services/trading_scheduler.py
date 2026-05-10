@@ -3229,6 +3229,43 @@ def _run_brain_batch_reconciler_job() -> None:
         logger.warning("[scheduler_job] brain_batch_reconciler failed: %s", e)
 
 
+def _run_pattern_directional_outcome_evaluator_job() -> None:
+    """f-promotion-pipeline-rebalance Phase 2: evaluate directional
+    correctness for closed-window pattern_breakout_imminent alerts.
+
+    Runs every 30 minutes (after most hold windows close) and inserts
+    one row per evaluated alert into ``pattern_alert_directional_outcome``.
+    The rolling-30 directional WR view feeds Phase 4's composite
+    quality scoring. Pure-write of the new table; no effect on
+    existing pattern stats or autotrader behavior.
+
+    Flag-disable via ``CHILI_PATTERN_DIRECTIONAL_OUTCOME_ENABLED=false``.
+    """
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_pattern_directional_outcome_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.pattern_directional_outcome import (
+            evaluate_directional_outcomes,
+        )
+        sess = SessionLocal()
+        try:
+            evaluate_directional_outcomes(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("pattern_directional_outcome_evaluator", _work)
+
+
 def _run_promotion_evidence_audit_job() -> None:
     """Daily promotion-evidence audit (logs summary; auto-demote is opt-in).
 
@@ -3956,6 +3993,18 @@ def start_scheduler():
                     name="Promotion-evidence audit (daily, 02:15 PT)",
                     replace_existing=True,
                     max_instances=1,
+                )
+
+                # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
+                # gate-noise-free directional-correctness eval.
+                _scheduler.add_job(
+                    _run_pattern_directional_outcome_evaluator_job,
+                    trigger=IntervalTrigger(minutes=30),
+                    id="pattern_directional_outcome_evaluator",
+                    name="Pattern directional-correctness evaluator (every 30min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=75),
                 )
 
         if include_heavy:

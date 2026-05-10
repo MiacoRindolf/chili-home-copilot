@@ -1,6 +1,6 @@
 # NEXT_TASK: f-promotion-pipeline-rebalance
 
-STATUS: PHASE_1_DONE (Phases 2-6 ship in subsequent CC sessions per brief sequencing)
+STATUS: PHASE_2_DONE (Phases 3-6 ship in subsequent CC sessions per brief sequencing)
 
 ## Goal
 
