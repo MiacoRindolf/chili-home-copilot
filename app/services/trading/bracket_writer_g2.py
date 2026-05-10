@@ -402,6 +402,128 @@ def _default_adapter_factory(broker_source: str) -> Any:
     return adapter
 
 
+# f-coinbase-post-place-verify-routing-fix (2026-05-10): vocabulary
+# mirror of broker_service.verify_order_landed. The Robinhood path
+# uses these exact state strings; the Coinbase adapter's
+# get_order_status emits the same normalized vocabulary so the verify
+# verdict mapping is identical between venues.
+_VERIFY_RESTING_STATES = frozenset(
+    {"confirmed", "queued", "partially_filled", "filled"}
+)
+_VERIFY_REJECTED_STATES = frozenset({"rejected", "cancelled", "failed"})
+
+
+def _verify_via_coinbase(
+    adapter: Any,
+    order_id: str,
+    *,
+    max_wait_s: float = 3.0,
+    poll_interval_s: float = 0.5,
+) -> tuple[str, Optional[str]]:
+    """Coinbase-side mirror of broker_service.verify_order_landed.
+
+    Polls ``adapter.get_order_status(order_id)`` every ``poll_interval_s``
+    for at most ``max_wait_s``; maps the normalized state vocabulary to
+    ``(verdict, observed_state)`` tuples with the same contract:
+
+      * ``("resting",  state)`` on OPEN / FILLED / partially_filled /
+                                 queued / confirmed
+      * ``("rejected", state)`` on CANCELLED / EXPIRED / FAILED /
+                                 REJECTED
+      * ``("unknown",  last_state_or_None)`` on timeout
+
+    Pre-fix bug (2026-05-10): the writer was calling
+    ``broker_service.verify_order_landed`` for Coinbase orders, which
+    polled api.robinhood.com for a Coinbase UUID and 404'd every cycle.
+    This helper closes that routing gap.
+    """
+    if not order_id:
+        return ("unknown", None)
+    deadline = time.time() + float(max_wait_s)
+    observed: Optional[str] = None
+    while time.time() < deadline:
+        try:
+            res = adapter.get_order_status(order_id) or {}
+        except Exception:
+            res = {}
+        state = res.get("state") if isinstance(res, dict) else None
+        if isinstance(state, str):
+            observed = state.strip().lower() or None
+        if observed in _VERIFY_REJECTED_STATES:
+            return ("rejected", observed)
+        if observed in _VERIFY_RESTING_STATES:
+            return ("resting", observed)
+        # state likely None (404 / not-yet-acked) or "unconfirmed" / "new"
+        # — keep polling
+        time.sleep(float(poll_interval_s))
+    return ("unknown", observed)
+
+
+def _try_adopt_unverified_coinbase_order(
+    db: Session,
+    *,
+    bracket_intent_id: int,
+    adapter: Any,
+    lookback_seconds: int = 24 * 3600,
+) -> Optional[str]:
+    """Coinbase-only orphan recovery.
+
+    Pre-fix sweeps marked Coinbase intents 'unverified' because the
+    verify call hit api.robinhood.com for a Coinbase UUID and 404'd —
+    the order may STILL be resting at Coinbase. Look up the most
+    recent ``g2_place_missing_stop_unverified`` event for this intent
+    within ``lookback_seconds``; if the recorded broker order id is
+    still in a resting state at Coinbase, return the order id so the
+    caller can adopt it instead of placing a duplicate stop.
+
+    Returns ``None`` when there's no prior unverified attempt, the DB
+    lookup fails, the adapter is unreachable, or the previous order is
+    in any non-resting state. Best-effort: any failure falls through
+    to normal placement (safer than blocking a fresh attempt).
+
+    Coinbase-only. Robinhood does NOT have this bug (verify routing
+    was always correct for RH) and callers should gate accordingly.
+    """
+    sql = text(
+        "SELECT payload->>'new_stop_order_id' AS oid "
+        "FROM trading_execution_events "
+        "WHERE event_type = 'g2_place_missing_stop_unverified' "
+        "  AND payload->>'bracket_intent_id' = :bid "
+        "  AND created_at >= NOW() - (:lb || ' seconds')::interval "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    try:
+        row = db.execute(
+            sql,
+            {"bid": str(int(bracket_intent_id)), "lb": str(int(lookback_seconds))},
+        ).fetchone()
+    except Exception:
+        logger.debug(
+            f"{BRACKET_WRITER_G2} orphan-recovery lookup raised intent=%s",
+            bracket_intent_id, exc_info=True,
+        )
+        return None
+    if row is None or not row[0]:
+        return None
+    prev_oid = str(row[0])
+    try:
+        res = adapter.get_order_status(prev_oid) or {}
+    except Exception:
+        logger.debug(
+            f"{BRACKET_WRITER_G2} orphan-recovery get_order_status raised "
+            "intent=%s prev_oid=%s",
+            bracket_intent_id, prev_oid[:8], exc_info=True,
+        )
+        return None
+    state = (
+        res.get("state") if isinstance(res, dict) and isinstance(res.get("state"), str)
+        else None
+    )
+    if isinstance(state, str) and state.strip().lower() in _VERIFY_RESTING_STATES:
+        return prev_oid
+    return None
+
+
 # Audit helper
 
 def _g2_event(
@@ -1124,6 +1246,68 @@ def place_missing_stop(
     # cancel the limit, place the stop. See operator runbook in
     # docs/STRATEGY/CC_REPORTS/2026-05-03_bracket-writer-cover-policy-clarify.md.
     adapter = adapter_factory(broker_source)
+
+    # f-coinbase-post-place-verify-routing-fix (2026-05-10): Coinbase
+    # orphan recovery. Pre-fix sweeps marked intents 'unverified'
+    # because the verify call hit api.robinhood.com for a Coinbase
+    # UUID and 404'd — but the order may still be resting at Coinbase.
+    # Before placing a fresh stop, check the most recent unverified
+    # event row; if the prior order is still OPEN at Coinbase, adopt
+    # it instead of duplicating. Coinbase-only — RH verify routing was
+    # always correct so RH doesn't have stranded orders to recover.
+    if _bs_lower == "coinbase":
+        adopted_oid = _try_adopt_unverified_coinbase_order(
+            db,
+            bracket_intent_id=bracket_intent_id,
+            adapter=adapter,
+        )
+        if adopted_oid:
+            logger.info(
+                f"{BRACKET_WRITER_G2} place_missing_stop ORPHAN-RECOVERED "
+                "intent=%s ticker=%s order=%s — prior unverified order "
+                "is still resting at Coinbase; adopting instead of placing "
+                "a duplicate stop.",
+                bracket_intent_id, ticker, adopted_oid[:8],
+            )
+            # Arm the post-place cooldown so the next sweep doesn't
+            # immediately re-classify (mirrors the post-success path).
+            _arm_post_place_cooldown(bracket_intent_id)
+            # Transition intent_state -> CONFIRMED_AT_BROKER. Best-effort:
+            # failure to transition doesn't undo the recovery (the order
+            # is real at the broker either way).
+            try:
+                from .bracket_intent_writer import (
+                    IntentState as _IS,
+                    transition as _tr,
+                )
+                _tr(
+                    db, int(bracket_intent_id),
+                    to_state=_IS.CONFIRMED_AT_BROKER,
+                    reason=f"orphan_recovered:{adopted_oid[:8]}",
+                )
+            except Exception:
+                logger.debug(
+                    f"{BRACKET_WRITER_G2} orphan-recovered transition to "
+                    "confirmed_at_broker failed",
+                    exc_info=True,
+                )
+            _g2_event(
+                db, trade_id=trade_id, bracket_intent_id=bracket_intent_id,
+                ticker=ticker, broker_source=broker_source,
+                event_type="g2_place_missing_stop_orphan_recovered",
+                status="orphan_recovered",
+                new_stop_order_id=adopted_oid,
+                qty=float(local_quantity), stop_price=float(stop_price),
+                decision_kind=decision.kind,
+                decision_severity=decision.severity,
+            )
+            return WriterAction(
+                action="place_missing_stop", ok=True,
+                reason="orphan_recovered",
+                broker_source=broker_source, ticker=ticker,
+                new_stop_order_id=adopted_oid,
+            )
+
     try:
         # Direct broker_service call (cleaner than adapter.get_positions
         # which has a different shape). 60s cache built into the helper.
@@ -1439,9 +1623,19 @@ def place_missing_stop(
     #                 the FIX 56 threshold tracker.
     #   * unknown   → verify window timed out; conservative — log a
     #                 WARNING, arm post-place cooldown, leave state alone.
+    # f-coinbase-post-place-verify-routing-fix (2026-05-10): venue-route
+    # the verify step. The Robinhood path (broker_service.
+    # verify_order_landed) hardcoded api.robinhood.com, which 404'd for
+    # Coinbase UUIDs and caused 9 Coinbase positions to go DB-naked
+    # while their stops actually rested at Coinbase. Coinbase orders
+    # now poll via the adapter's get_order_status; RH path is byte-
+    # identical to the prior behaviour.
     try:
-        from .. import broker_service as _bs
-        verdict, obs_state = _bs.verify_order_landed(new_oid)
+        if _bs_lower == "coinbase":
+            verdict, obs_state = _verify_via_coinbase(adapter, new_oid)
+        else:
+            from .. import broker_service as _bs
+            verdict, obs_state = _bs.verify_order_landed(new_oid)
     except Exception:
         verdict, obs_state = ("unknown", None)
         logger.debug(
