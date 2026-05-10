@@ -1,34 +1,22 @@
-# NEXT_TASK: f-coinbase-tick-size-precision-fix
+# NEXT_TASK: f-coinbase-post-place-verify-routing-fix
 
-STATUS: DONE
-
-Completed 2026-05-10. See
-`docs/STRATEGY/CC_REPORTS/2026-05-10_f-coinbase-tick-size-precision-fix.md`.
-
-Commits: e5a6deb (cache + helpers) → 4501169 (quantize wire-up) →
-5f6576a (18 new tests). 26/26 tests pass. The 9 currently-naked
-Coinbase trades will be backstopped on the next reconciler sweep
-(~5 min after deploy).
+STATUS: PENDING
 
 ## Goal
 
-The bracket-coverage fix (commit 77d9a5e) sealed Bugs A/B/C — every
-open Coinbase trade now has an intent row, the reconciler routes to
-Coinbase, and the writer calls `place_stop_limit_order_gtc`. But
-Coinbase REST is rejecting all 9 stop placements:
+Tick-size fix (commit 5f6576a) sealed price quantization — Coinbase REST
+now ACCEPTS stop orders and returns order IDs. But the post-place
+verification step calls Robinhood's API for Coinbase orders, gets 404,
+marks intent 'unverified', and never persists `broker_stop_order_id`.
 
-```
-ALEPH-USD: "Too many decimals in order price"
-8 others: UNKNOWN_FAILURE_REASON
-```
+The 4 Coinbase orders that got valid IDs (AERGO, 1INCH, ACX, RARE) may
+actually be sitting at Coinbase as live stops — DB just doesn't see
+them. Each sweep may be attempting re-placement (cooldown is largely
+preventing duplicates).
 
-The Coinbase venue adapter doesn't quantize prices to product-level
-`quote_increment` before submitting. Real-money exposure ≈ $2,700
-remains.
+## Brief
 
-## Brief (full)
-
-`docs/STRATEGY/QUEUED/f-coinbase-tick-size-precision-fix.md`.
+`docs/STRATEGY/QUEUED/f-coinbase-post-place-verify-routing-fix.md`.
 
 ## Phases
 
@@ -36,17 +24,19 @@ Single-shot fix.
 
 ## Deliverables
 
-- Product-info cache (tick_size, base_increment, quote_increment,
-  min_market_funds) with TTL in `coinbase_spot.py`
-- Price + size quantization before `place_stop_limit_order_gtc`
-- Tests in `tests/test_coinbase_tick_size_precision.py` (new)
+- Verify-routing fix in `bracket_writer_g2.py` (mirror the place-side
+  `_SUPPORTED_VENUES` pattern)
+- `get_order_status` primitive on Coinbase adapter if missing
+- Tests in `tests/test_coinbase_post_place_verify.py`
+- Orphan-recovery: how the next sweep auto-confirms the 4+ already-placed
+  Coinbase orders without re-placing
 - CC_REPORT
-- Updated NEXT_TASK to STATUS: DONE
+- NEXT_TASK → STATUS: DONE
 
 ## Hard constraints
 
-- Coinbase venue adapter only. No bracket / reconciler / writer / stop_engine changes.
-- Edit-tool truncation discipline (Write for files >500 lines).
-- Coinbase Phase 6 LIVE soak active — don't weaken existing gates.
-- No magic-fallback values for missing product info — raise, don't guess.
-- Plan-gate protocol active.
+- `bracket_writer_g2.py` + `coinbase_spot.py` only.
+- Edit-tool truncation discipline.
+- Phase 6 LIVE soak active — additive routing branch.
+- No magic-fallback values.
+- Plan-gate active.
