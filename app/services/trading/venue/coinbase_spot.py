@@ -518,6 +518,98 @@ class CoinbaseSpotAdapter(VenueAdapter):
             _log.debug("[coinbase_spot] get_order failed: %s", e)
             return None, fresh
 
+    # f-coinbase-post-place-verify-routing-fix (2026-05-10): single-shot
+    # broker-side state read for the bracket writer's post-place verify
+    # loop. Coinbase Advanced Trade order states normalize to the same
+    # vocabulary broker_service.verify_order_landed uses for Robinhood,
+    # so the writer's verify state machine doesn't fork by venue.
+    #
+    # Mapping (Coinbase upper-case -> normalized lower-case):
+    #
+    #   PENDING   -> "unconfirmed"   (broker has not yet acked)
+    #   OPEN      -> "confirmed"     (resting at broker; this is success)
+    #   FILLED    -> "filled"
+    #   CANCELLED -> "cancelled"
+    #   EXPIRED   -> "cancelled"
+    #   FAILED    -> "failed"
+    #   (anything else) -> raw lower-cased so the caller can decide
+    #
+    # Adapter-disabled / 404 / transport errors return ok=False with
+    # state=None; the writer treats that the same as a polled "no
+    # observation" tick (matches Robinhood verify_order_landed's
+    # behaviour while state is still "unconfirmed"). No magic-fallback
+    # values: we never fabricate a "resting" state on missing data.
+    _COINBASE_STATE_MAP = {
+        "pending": "unconfirmed",
+        "open": "confirmed",
+        "filled": "filled",
+        "cancelled": "cancelled",
+        "canceled": "cancelled",
+        "expired": "cancelled",
+        "failed": "failed",
+        "rejected": "rejected",
+    }
+
+    def get_order_status(self, order_id: str) -> dict[str, Any]:
+        """Return current broker-side state of *order_id* in the
+        normalized Robinhood-compatible vocabulary.
+
+        Returns:
+            {"ok": True,  "state": "<normalized>", "raw": {...}}
+            {"ok": False, "error": "not_found",    "state": None}
+            {"ok": False, "error": "<reason>",     "state": None}
+
+        Never raises into the caller for known broker-side errors; the
+        Coinbase SDK's exceptions are caught and packaged so the
+        writer's verify loop can keep polling. Hard adapter-config
+        failures (no client / missing creds) come back as ok=False
+        with an error string, NOT a fabricated state.
+        """
+        if not self.is_enabled():
+            return {"ok": False, "error": "adapter_disabled", "state": None}
+        if not order_id:
+            return {"ok": False, "error": "empty_order_id", "state": None}
+        allowed, retry_after = rate_limiter.try_acquire(_VENUE)
+        if not allowed:
+            try:
+                venue_health.record_rate_limit_event(
+                    venue=_VENUE, source="cb_get_order_status",
+                )
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "error": f"rate_limited:retry_after={retry_after}",
+                "state": None,
+            }
+        try:
+            c = self._require_client()
+            resp = c.get_order(order_id=order_id)
+            d = _as_dict(resp)
+            inner = d.get("order") if isinstance(d.get("order"), dict) else d
+            if not isinstance(inner, dict) or not inner:
+                return {"ok": False, "error": "not_found", "state": None}
+            # SDK is inconsistent across versions: newer surfaces use
+            # `status`, older use `state`. Try `status` first, fall
+            # back to `state`. Lower-case for vocabulary mapping.
+            raw_state = inner.get("status") or inner.get("state")
+            if not isinstance(raw_state, str) or not raw_state.strip():
+                return {"ok": False, "error": "not_found", "state": None}
+            key = raw_state.strip().lower()
+            normalized = self._COINBASE_STATE_MAP.get(key, key)
+            return {"ok": True, "state": normalized, "raw": inner}
+        except VenueAdapterError as e:
+            err = str(e)
+            if "not found" in err.lower() or "404" in err:
+                return {"ok": False, "error": "not_found", "state": None}
+            return {"ok": False, "error": err, "state": None}
+        except Exception as e:
+            err = str(e)
+            if "not found" in err.lower() or "404" in err:
+                return {"ok": False, "error": "not_found", "state": None}
+            _log.debug("[coinbase_spot] get_order_status failed: %s", e)
+            return {"ok": False, "error": err, "state": None}
+
     def get_fills(
         self,
         *,
