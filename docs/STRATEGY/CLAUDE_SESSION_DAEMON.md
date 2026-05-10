@@ -15,9 +15,6 @@ fast dispatches (docker / git / psql).
 | Scheduling | execute now | queue + `not_before` timestamp |
 | Caller | ad-hoc, mostly Cowork | Cowork queueing CC phases |
 
-If they shared one daemon, every CC session (2–4 h) would freeze every dev
-dispatch behind it.
-
 ## Start it
 
 ```powershell
@@ -25,7 +22,7 @@ dispatch behind it.
 .\scripts\_claude_session_daemon.ps1
 ```
 
-It logs to `scripts/_claude_session_daemon.log` and writes machine-readable
+Logs to `scripts/_claude_session_daemon.log`, writes machine-readable
 state to `scripts/_claude_session_status.json` after every transition.
 
 ## Layout
@@ -33,29 +30,29 @@ state to `scripts/_claude_session_status.json` after every transition.
 ```
 scripts/
   _claude_session_daemon.ps1            # the daemon
+  _claude_session_launcher.ps1          # bridge that runs `claude` (handles .cmd shim)
   _claude_session_queue/                # PENDING sessions, sorted by priority + not_before
-    100-foo.session
-    200-bar.session
   _claude_session_running/              # CURRENT session (presence == lock)
   _claude_session_done/                 # COMPLETED, prefixed FAILED_ on non-pass
-  _claude_session_log/<id>/             # per-session stdout.log + stderr.log + meta.json
+  _claude_session_log/<id>/             # per-session stdout.log + stderr.log + meta.json + args.json
+  _claude_session_consult/<id>/         # plan-gate consultation files (request/response)
   _claude_session_status.json           # machine-readable current state
   _claude_session_stop.flag             # operator: graceful exit
-  _claude_session_pause.flag            # operator: idle until removed (also auto-set on failure)
+  _claude_session_pause.flag            # operator: idle until removed
 ```
 
 ## Session file (.session)
 
-Drop a JSON file into `scripts/_claude_session_queue/`. Filename is
-arbitrary; convention is `<priority>-<slug>.session`.
+Drop a JSON file into `scripts/_claude_session_queue/`. Filename convention:
+`<priority>-<slug>.session`.
 
 ```json
 {
-  "id": "promotion-rebalance-phase2-2026-05-09",
-  "description": "human-readable; surfaces in status.json and meta.json",
+  "id": "promotion-rebalance-phase3-2026-05-10",
+  "description": "...human readable...",
   "priority": 100,
   "not_before": null,
-  "prompt": "Read docs/STRATEGY/PROTOCOL.md and docs/STRATEGY/NEXT_TASK.md, then ...",
+  "prompt": "...full prompt text...",
   "claude_args": ["--dangerously-skip-permissions"],
   "timeout_min": 240,
   "post_verify": null,
@@ -65,36 +62,62 @@ arbitrary; convention is `<priority>-<slug>.session`.
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `id` | no | defaults to filename stem; used for log subdir + meta filename |
-| `description` | no | echoed in status.json so polling tells you what's running |
+| `id` | no | defaults to filename stem |
+| `description` | no | echoed in status.json |
 | `priority` | no | int; lower runs first; defaults to 1000 |
-| `not_before` | no | ISO 8601 timestamp; session won't start before this; null = immediately |
-| `prompt` | no | passed via `-p`; defaults to a generic "read NEXT_TASK and execute" |
+| `not_before` | no | ISO 8601; null = immediately |
+| `prompt` | no | passed via `-p` |
 | `claude_args` | no | extra args; `--dangerously-skip-permissions` is auto-added |
 | `timeout_min` | no | wall-clock kill timer; defaults to 240 (4 h) |
 | `post_verify` | no | optional `.ps1` path; non-zero exit marks the session FAILED |
 | `on_fail` | no | `pause` (default) / `continue` / `abort_chain` |
 
-`pause` writes `_claude_session_pause.flag` so the chain idles until
-operator review. `abort_chain` flushes the rest of the queue. `continue`
-just records FAILED and moves to the next.
+## Plan-gate consultation protocol
 
-## How Cowork uses it
+Sessions can include a "review checkpoint" where CC pauses, posts an
+implementation plan, and waits for Cowork's approval before coding.
+This catches design errors at the highest-leverage moment.
 
-1. Cowork writes a `.session` file when a phase is ready to ship.
-2. Daemon polls every 30s, picks the highest-priority eligible session,
-   moves it to `_claude_session_running/`, launches `claude -p "<prompt>" --dangerously-skip-permissions`.
-3. CC reads `NEXT_TASK.md`, executes, writes its CC_REPORT, updates
-   `NEXT_TASK.md` status, commits, pushes — all per the existing protocol.
-4. Daemon captures stdout/stderr to `_claude_session_log/<id>/` and exit
-   code to `meta.json`.
-5. If `post_verify` is set, runs it and combines exit codes.
-6. On pass, session moves to `_claude_session_done/` and the daemon
-   advances to the next queued session.
-7. On fail with `on_fail: pause`, the daemon writes the pause flag and
-   idles. Cowork sees this on next session (queue_depth + last in
-   `status.json`), reviews the failed session's logs + CC_REPORT, decides
-   whether to fix-and-resume (delete pause flag) or `abort_chain`.
+**How it works at the daemon level:**
+
+1. Daemon creates `scripts/_claude_session_consult/<id>/` at session start.
+2. Daemon sets `$env:CHILI_SESSION_ID = <id>` so the spawned CC inherits it.
+3. While CC runs, daemon polls the consult dir every 5 seconds for `*.request.md` files lacking matching `*.response.md`.
+4. When a pending request is detected, status.json flips to `state: "awaiting_review"` with the request file path. The daemon log notes it.
+5. When all requests have responses, status.json reverts to `state: "running"`.
+
+**How CC participates (only when the prompt opts in):**
+
+Including the plan-gate in a session prompt looks like:
+
+> Step 1: Read CLAUDE.md, docs/STRATEGY/PROTOCOL.md, docs/STRATEGY/COWORK_ADVISOR_BRIEF.md, docs/STRATEGY/NEXT_TASK.md, and the QUEUED brief.
+>
+> Step 2: Develop your implementation plan covering: file paths, migration ID, test cases, edge cases, deviations from the brief.
+>
+> Step 3: Write the plan to `scripts/_claude_session_consult/$env:CHILI_SESSION_ID/plan.request.md`.
+>
+> Step 4: Poll for `plan.response.md` in the same directory every 30s, up to 2h. Use Bash: `while [ ! -f scripts/_claude_session_consult/$CHILI_SESSION_ID/plan.response.md ]; do sleep 30; done`
+>
+> Step 5: Read the response. It will contain one of:
+>   - `APPROVED` — proceed with the plan exactly as written
+>   - `REVISE: <feedback>` — revise the plan, overwrite plan.request.md, delete the response, wait again
+>   - `ABORT: <reason>` — write a brief CC_REPORT explaining and exit code 7
+>
+> Step 6: After APPROVED: implement, test, commit, push, write CC_REPORT, update NEXT_TASK.
+
+**How Cowork (operator-mediated) responds:**
+
+When operator notices `state: "awaiting_review"` in status.json (or pings
+the assistant explicitly), the assistant:
+1. Reads the request file directly (Read tool with absolute path).
+2. Reviews the plan against the brief, codebase context, and lore.
+3. Writes the response file (Write tool).
+
+Daemon detects the response within 5 seconds and CC's polling loop sees it.
+
+**Pre-Phase-3 sessions (legacy):** sessions whose prompts don't reference
+the consult dir simply ignore it. The daemon creates the dir but stays
+out of the way.
 
 ## Operator controls
 
@@ -111,8 +134,8 @@ echo stop > scripts/_claude_session_stop.flag
 # Inspect current state
 Get-Content scripts/_claude_session_status.json | ConvertFrom-Json | Format-List
 
-# See running session output
-Get-Content scripts/_claude_session_log/<id>/stdout.log -Tail 50 -Wait
+# Watch log
+Get-Content scripts/_claude_session_daemon.log -Tail 30 -Wait
 ```
 
 ## Recovery
@@ -120,13 +143,14 @@ Get-Content scripts/_claude_session_log/<id>/stdout.log -Tail 50 -Wait
 If the daemon crashes mid-session, the .session file stays in
 `_claude_session_running/`. On next startup, the daemon recovers stale
 running files by moving them to `_claude_session_done/` with a
-`FAILED_RECOVERED_` prefix. Inspect the log dir for that ID to see how
-far CC got before the daemon died.
+`FAILED_RECOVERED_` prefix.
 
 ## Hard constraints
 
 - Only ONE session runs at a time (single-host file lock via `running/`).
-- The dev daemon is unaffected — keep using `_claude_pending.txt` for
+- Dev daemon is unaffected — keep using `_claude_pending.txt` for
   fast dispatches; they queue independently.
-- A `pause` flag set by the daemon on failure stays set until you remove
+- Pause flag set by daemon on session failure stays until you remove
   it. Don't clear it without reviewing the failed session's CC report.
+- Plan-gate stalls the chain when neither operator nor Cowork is
+  reachable. That's by design — better a stall than wrong code.

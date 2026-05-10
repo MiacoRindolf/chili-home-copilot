@@ -21,12 +21,13 @@ $queueDir   = "scripts/_claude_session_queue"
 $runningDir = "scripts/_claude_session_running"
 $doneDir    = "scripts/_claude_session_done"
 $logDir     = "scripts/_claude_session_log"
+$consultDir = "scripts/_claude_session_consult"
 $statusFile = "scripts/_claude_session_status.json"
 $stopFlag   = "scripts/_claude_session_stop.flag"
 $pauseFlag  = "scripts/_claude_session_pause.flag"
 $daemonLog  = "scripts/_claude_session_daemon.log"
 
-foreach ($d in @($queueDir, $runningDir, $doneDir, $logDir)) {
+foreach ($d in @($queueDir, $runningDir, $doneDir, $logDir, $consultDir)) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
 
@@ -47,14 +48,10 @@ function Write-Status {
 }
 
 function Resolve-ClaudeExe {
-    # Resolved here while the daemon's PowerShell still has $PROFILE-set PATH.
-    # When Run-Session spawns powershell.exe -NoProfile, that PATH is gone, so
-    # the launcher cannot reliably Get-Command 'claude' itself.
     try {
         $cmd = Get-Command claude -ErrorAction Stop
         if ($cmd -and $cmd.Source) { return $cmd.Source }
     } catch {}
-    # Fallback: probe common npm-global install locations.
     $candidates = @(
         (Join-Path $env:APPDATA "npm\claude.cmd"),
         (Join-Path $env:APPDATA "npm\claude.exe"),
@@ -69,8 +66,6 @@ function Resolve-ClaudeExe {
 }
 
 function Recover-Stale-Running {
-    # If daemon died mid-session, .session files can be left in running/.
-    # Mark them FAILED_RECOVERED and move to done/ so the queue can advance.
     Get-ChildItem $runningDir -Filter '*.session' -ErrorAction SilentlyContinue | ForEach-Object {
         $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
         $dest = Join-Path $doneDir "FAILED_RECOVERED_${stamp}_$($_.Name)"
@@ -102,6 +97,23 @@ function Get-EligibleSession {
     $candidates | Sort-Object Priority, NotBefore, Name | Select-Object -First 1
 }
 
+function Get-ConsultState {
+    # Returns @{ has_request = bool; pending_files = @() } based on whether
+    # any *.request.md files in the consult dir lack a matching *.response.md.
+    param([string]$SessionConsultDir)
+    $result = @{ has_request = $false; pending_files = @() }
+    if (-not (Test-Path $SessionConsultDir)) { return $result }
+    Get-ChildItem $SessionConsultDir -Filter '*.request.md' -ErrorAction SilentlyContinue | ForEach-Object {
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($_.Name) -replace '\.request$', ''
+        $responsePath = Join-Path $SessionConsultDir "$stem.response.md"
+        if (-not (Test-Path $responsePath)) {
+            $result.has_request = $true
+            $result.pending_files += $_.FullName
+        }
+    }
+    return $result
+}
+
 function Run-Session {
     param($candidate, $claudeExe)
 
@@ -111,11 +123,14 @@ function Run-Session {
     $sessionLogDir = Join-Path $logDir $id
     if (-not (Test-Path $sessionLogDir)) { New-Item -ItemType Directory -Path $sessionLogDir -Force | Out-Null }
 
+    # Per-session consult dir for the plan-gate protocol.
+    $sessionConsultDir = Join-Path $consultDir $id
+    if (-not (Test-Path $sessionConsultDir)) { New-Item -ItemType Directory -Path $sessionConsultDir -Force | Out-Null }
+
     $stdoutPath = Join-Path $sessionLogDir "stdout.log"
     $stderrPath = Join-Path $sessionLogDir "stderr.log"
     $metaPath   = Join-Path $sessionLogDir "meta.json"
 
-    # Atomic move queue -> running. The presence of a file in running/ is the lock.
     $runningPath = Join-Path $runningDir $candidate.Name
     Move-Item $candidate.File $runningPath -Force
 
@@ -123,7 +138,6 @@ function Run-Session {
     $timeoutMin = if ($s.timeout_min) { [int]$s.timeout_min } else { 240 }
     $timeoutSec = $timeoutMin * 60
 
-    # Build claude args
     $claudeArgs = @()
     if ($s.claude_args) { foreach ($a in $s.claude_args) { $claudeArgs += [string]$a } }
 
@@ -146,57 +160,103 @@ function Run-Session {
     Log "session $id starting (timeout=${timeoutMin}m, claude=$claudeExe)"
 
     @{
-        id          = $id
-        started_at  = $startedAt.ToString('o')
-        timeout_min = $timeoutMin
-        args_count  = $claudeArgs.Count
-        description = $s.description
-        claude_exe  = $claudeExe
+        id            = $id
+        started_at    = $startedAt.ToString('o')
+        timeout_min   = $timeoutMin
+        args_count    = $claudeArgs.Count
+        description   = $s.description
+        claude_exe    = $claudeExe
+        consult_dir   = $sessionConsultDir
     } | ConvertTo-Json -Depth 5 | Out-File $metaPath -Encoding utf8 -Force
 
     Write-Status @{
         state = "running"
         current = @{
-            id          = $id
-            started_at  = $startedAt.ToString('o')
-            timeout_min = $timeoutMin
-            description = $s.description
+            id           = $id
+            started_at   = $startedAt.ToString('o')
+            timeout_min  = $timeoutMin
+            description  = $s.description
+            consult_dir  = $sessionConsultDir
         }
         queue_depth = (Get-ChildItem $queueDir -Filter '*.session' -ErrorAction SilentlyContinue | Measure-Object).Count
     }
 
-    # Persist claude args as JSON so the launcher can read them without
-    # cross-process arg-quoting headaches.
     $argsFilePath = Join-Path $sessionLogDir "args.json"
     ConvertTo-Json -InputObject $claudeArgs -Compress | Out-File $argsFilePath -Encoding utf8 -Force
 
-    # Launch claude via _claude_session_launcher.ps1. The launcher uses
-    # the absolute claude path resolved at daemon startup so PATH issues
-    # in -NoProfile-spawned shells don't bite us.
+    # Set CHILI_SESSION_ID for the spawned process tree so CC can derive
+    # its consult dir as scripts/_claude_session_consult/$env:CHILI_SESSION_ID/.
+    $env:CHILI_SESSION_ID = $id
+
     $launcherPath = Join-Path $PSScriptRoot "_claude_session_launcher.ps1"
     $psInner = "& '$launcherPath' -ArgsFile '$argsFilePath' -ClaudeExe '$claudeExe' *>&1"
 
     $exitCode = -1
     $timedOut = $false
+    $consultPolledLast = $startedAt
     try {
         $proc = Start-Process -FilePath "powershell.exe" `
             -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $psInner `
             -RedirectStandardOutput $stdoutPath `
             -RedirectStandardError $stderrPath `
             -NoNewWindow -PassThru
-        $finished = $proc.WaitForExit($timeoutSec * 1000)
-        if (-not $finished) {
-            try {
-                $tkOut = & taskkill.exe /T /F /PID $proc.Id 2>&1
-                Log "  taskkill /T /F /PID $($proc.Id): $tkOut"
-            } catch {
-                Log "  taskkill failed: $_"
-                try { $proc.Kill() } catch {}
+
+        # Poll every 5s. Three exit conditions: process finished, timeout,
+        # or external signals. Mid-poll, also surface consult requests as
+        # "awaiting_review" in status.json so the operator can see them.
+        $deadline = $startedAt.AddSeconds($timeoutSec)
+        $lastConsultState = $false
+        while ($true) {
+            if ($proc.WaitForExit(5000)) { break }
+            if ((Get-Date) -ge $deadline) {
+                Log "  session $id exceeded timeout ${timeoutMin}m, killing"
+                try {
+                    $tkOut = & taskkill.exe /T /F /PID $proc.Id 2>&1
+                    Log "    taskkill /T /F /PID $($proc.Id): $tkOut"
+                } catch {
+                    try { $proc.Kill() } catch {}
+                }
+                Start-Sleep -Milliseconds 500
+                $timedOut = $true
+                $exitCode = -1
+                break
             }
-            Start-Sleep -Milliseconds 500
-            $timedOut = $true
-            $exitCode = -1
-        } else {
+            # Consult-state polling. Only update status.json when state changes
+            # to avoid log spam.
+            $consult = Get-ConsultState $sessionConsultDir
+            if ($consult.has_request -ne $lastConsultState) {
+                $lastConsultState = $consult.has_request
+                if ($consult.has_request) {
+                    Log "  session $id awaiting consult review: $($consult.pending_files -join ', ')"
+                    Write-Status @{
+                        state = "awaiting_review"
+                        current = @{
+                            id              = $id
+                            started_at      = $startedAt.ToString('o')
+                            timeout_min     = $timeoutMin
+                            description     = $s.description
+                            consult_dir     = $sessionConsultDir
+                            pending_consult = $consult.pending_files
+                        }
+                        queue_depth = (Get-ChildItem $queueDir -Filter '*.session' -ErrorAction SilentlyContinue | Measure-Object).Count
+                    }
+                } else {
+                    Log "  session $id consult resolved, resumed"
+                    Write-Status @{
+                        state = "running"
+                        current = @{
+                            id          = $id
+                            started_at  = $startedAt.ToString('o')
+                            timeout_min = $timeoutMin
+                            description = $s.description
+                            consult_dir = $sessionConsultDir
+                        }
+                        queue_depth = (Get-ChildItem $queueDir -Filter '*.session' -ErrorAction SilentlyContinue | Measure-Object).Count
+                    }
+                }
+            }
+        }
+        if (-not $timedOut) {
             try { $exitCode = [int]$proc.ExitCode } catch { $exitCode = 0 }
         }
     } catch {
@@ -208,7 +268,6 @@ function Run-Session {
     $duration = ($endedAt - $startedAt).TotalSeconds
     Log "session $id exit=$exitCode timed_out=$timedOut duration=$([Math]::Round($duration,1))s"
 
-    # Optional post_verify script -- second exit-code that gates pass/fail
     $verifyExit = 0
     if ($s.post_verify) {
         $verifyOutPath = Join-Path $sessionLogDir "verify.log"
@@ -227,10 +286,7 @@ function Run-Session {
         Log "post_verify exit=$verifyExit"
     }
 
-    # Defense-in-depth pass/fail check: exit 0 from the launcher is necessary
-    # but not sufficient. If stderr.log has content AND duration was suspiciously
-    # short (< 5s), treat as failed even if exit code says 0 -- this catches
-    # the case where claude itself errored without setting LASTEXITCODE.
+    # Defense-in-depth: short duration + non-empty stderr = false positive.
     $stderrSize = 0
     if (Test-Path $stderrPath) { $stderrSize = (Get-Item $stderrPath).Length }
     $suspiciouslyShort = ($duration -lt 5) -and ($stderrSize -gt 0)
@@ -249,10 +305,10 @@ function Run-Session {
         passed              = $sessionPassed
         description         = $s.description
         claude_exe          = $claudeExe
+        consult_dir         = $sessionConsultDir
     }
     $resultMeta | ConvertTo-Json -Depth 5 | Out-File $metaPath -Encoding utf8 -Force
 
-    # Failure handling
     $onFail = if ($s.on_fail) { $s.on_fail } else { 'pause' }
     if (-not $sessionPassed) {
         Log "session $id FAILED; on_fail=$onFail (suspicious_short=$suspiciouslyShort)"
@@ -266,10 +322,8 @@ function Run-Session {
             }
             Log "abort_chain: cleared remaining queue"
         }
-        # 'continue' falls through
     }
 
-    # Move running -> done
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $doneName = "${stamp}_$($candidate.Name)"
     if (-not $sessionPassed) { $doneName = "FAILED_$doneName" }
@@ -284,7 +338,6 @@ function Run-Session {
 
 Log "session daemon started, pid=$PID, pwd=$(Get-Location)"
 
-# Resolve claude exe once at startup using the operator's PATH context.
 $ClaudeExe = Resolve-ClaudeExe
 if (-not $ClaudeExe) {
     Log "FATAL: cannot resolve 'claude' on PATH or common npm prefixes."
