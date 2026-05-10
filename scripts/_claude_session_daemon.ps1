@@ -46,6 +46,28 @@ function Write-Status {
     }
 }
 
+function Resolve-ClaudeExe {
+    # Resolved here while the daemon's PowerShell still has $PROFILE-set PATH.
+    # When Run-Session spawns powershell.exe -NoProfile, that PATH is gone, so
+    # the launcher cannot reliably Get-Command 'claude' itself.
+    try {
+        $cmd = Get-Command claude -ErrorAction Stop
+        if ($cmd -and $cmd.Source) { return $cmd.Source }
+    } catch {}
+    # Fallback: probe common npm-global install locations.
+    $candidates = @(
+        (Join-Path $env:APPDATA "npm\claude.cmd"),
+        (Join-Path $env:APPDATA "npm\claude.exe"),
+        (Join-Path $env:LOCALAPPDATA "npm\claude.cmd"),
+        (Join-Path $env:USERPROFILE ".local\bin\claude.exe"),
+        (Join-Path $env:USERPROFILE "AppData\Roaming\npm\claude.cmd")
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return (Resolve-Path $c).Path }
+    }
+    return $null
+}
+
 function Recover-Stale-Running {
     # If daemon died mid-session, .session files can be left in running/.
     # Mark them FAILED_RECOVERED and move to done/ so the queue can advance.
@@ -81,7 +103,7 @@ function Get-EligibleSession {
 }
 
 function Run-Session {
-    param($candidate)
+    param($candidate, $claudeExe)
 
     $s = $candidate.Session
     $id = if ($s.id) { $s.id } else { [System.IO.Path]::GetFileNameWithoutExtension($candidate.Name) }
@@ -121,7 +143,7 @@ function Run-Session {
         $claudeArgs += '--dangerously-skip-permissions'
     }
 
-    Log "session $id starting (timeout=${timeoutMin}m)"
+    Log "session $id starting (timeout=${timeoutMin}m, claude=$claudeExe)"
 
     @{
         id          = $id
@@ -129,6 +151,7 @@ function Run-Session {
         timeout_min = $timeoutMin
         args_count  = $claudeArgs.Count
         description = $s.description
+        claude_exe  = $claudeExe
     } | ConvertTo-Json -Depth 5 | Out-File $metaPath -Encoding utf8 -Force
 
     Write-Status @{
@@ -143,19 +166,15 @@ function Run-Session {
     }
 
     # Persist claude args as JSON so the launcher can read them without
-    # cross-process arg-quoting headaches (multi-line prompts with quotes
-    # etc. survive JSON intact).
+    # cross-process arg-quoting headaches.
     $argsFilePath = Join-Path $sessionLogDir "args.json"
     ConvertTo-Json -InputObject $claudeArgs -Compress | Out-File $argsFilePath -Encoding utf8 -Force
 
-    # Launch claude via _claude_session_launcher.ps1 -- same powershell.exe
-    # wrapper pattern _claude_daemon.ps1 uses for .ps1 commands. The
-    # launcher uses PowerShell's `&` operator which natively resolves the
-    # claude.cmd shim. Start-Process -FilePath 'claude' does NOT auto-
-    # resolve .cmd extensions, which is why a direct invocation fails
-    # with "system cannot find the file specified".
+    # Launch claude via _claude_session_launcher.ps1. The launcher uses
+    # the absolute claude path resolved at daemon startup so PATH issues
+    # in -NoProfile-spawned shells don't bite us.
     $launcherPath = Join-Path $PSScriptRoot "_claude_session_launcher.ps1"
-    $psInner = "& '$launcherPath' -ArgsFile '$argsFilePath' *>&1"
+    $psInner = "& '$launcherPath' -ArgsFile '$argsFilePath' -ClaudeExe '$claudeExe' *>&1"
 
     $exitCode = -1
     $timedOut = $false
@@ -208,24 +227,35 @@ function Run-Session {
         Log "post_verify exit=$verifyExit"
     }
 
-    $sessionPassed = ($exitCode -eq 0 -and $verifyExit -eq 0 -and -not $timedOut)
+    # Defense-in-depth pass/fail check: exit 0 from the launcher is necessary
+    # but not sufficient. If stderr.log has content AND duration was suspiciously
+    # short (< 5s), treat as failed even if exit code says 0 -- this catches
+    # the case where claude itself errored without setting LASTEXITCODE.
+    $stderrSize = 0
+    if (Test-Path $stderrPath) { $stderrSize = (Get-Item $stderrPath).Length }
+    $suspiciouslyShort = ($duration -lt 5) -and ($stderrSize -gt 0)
+
+    $sessionPassed = ($exitCode -eq 0 -and $verifyExit -eq 0 -and -not $timedOut -and -not $suspiciouslyShort)
     $resultMeta = @{
-        id           = $id
-        started_at   = $startedAt.ToString('o')
-        ended_at     = $endedAt.ToString('o')
-        duration_sec = [Math]::Round($duration, 1)
-        exit_code    = $exitCode
-        timed_out    = $timedOut
-        verify_exit  = $verifyExit
-        passed       = $sessionPassed
-        description  = $s.description
+        id                  = $id
+        started_at          = $startedAt.ToString('o')
+        ended_at            = $endedAt.ToString('o')
+        duration_sec        = [Math]::Round($duration, 1)
+        exit_code           = $exitCode
+        timed_out           = $timedOut
+        verify_exit         = $verifyExit
+        suspiciously_short  = $suspiciouslyShort
+        stderr_bytes        = $stderrSize
+        passed              = $sessionPassed
+        description         = $s.description
+        claude_exe          = $claudeExe
     }
     $resultMeta | ConvertTo-Json -Depth 5 | Out-File $metaPath -Encoding utf8 -Force
 
     # Failure handling
     $onFail = if ($s.on_fail) { $s.on_fail } else { 'pause' }
     if (-not $sessionPassed) {
-        Log "session $id FAILED; on_fail=$onFail"
+        Log "session $id FAILED; on_fail=$onFail (suspicious_short=$suspiciouslyShort)"
         if ($onFail -eq 'pause') {
             "session $id failed at $(Get-Date -Format o); operator review required" | Out-File $pauseFlag -Encoding utf8 -Force
             Log "pause flag set; daemon will idle until flag is removed"
@@ -253,10 +283,22 @@ function Run-Session {
 }
 
 Log "session daemon started, pid=$PID, pwd=$(Get-Location)"
+
+# Resolve claude exe once at startup using the operator's PATH context.
+$ClaudeExe = Resolve-ClaudeExe
+if (-not $ClaudeExe) {
+    Log "FATAL: cannot resolve 'claude' on PATH or common npm prefixes."
+    Log "       Run '(Get-Command claude).Source' in your interactive shell"
+    Log "       and ensure that path is reachable from this daemon's session."
+    Write-Status @{ state = "error"; error = "claude not resolved at startup"; queue_depth = 0; last = $null }
+    exit 1
+}
+Log "claude resolved to: $ClaudeExe"
+
 Recover-Stale-Running
 Log "watching $queueDir (poll=30s); stop with $stopFlag"
 
-Write-Status @{ state = "idle"; queue_depth = 0; last = $null }
+Write-Status @{ state = "idle"; queue_depth = 0; last = $null; claude_exe = $ClaudeExe }
 
 while ($true) {
     if (Test-Path $stopFlag) {
@@ -273,7 +315,7 @@ while ($true) {
         Start-Sleep -Seconds 30
         continue
     }
-    Run-Session $cand
+    Run-Session $cand $ClaudeExe
 }
 
 Log "session daemon stopped"
