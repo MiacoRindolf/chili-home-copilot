@@ -188,6 +188,12 @@ function Run-Session {
     # its consult dir as scripts/_claude_session_consult/$env:CHILI_SESSION_ID/.
     $env:CHILI_SESSION_ID = $id
 
+    # Set CHILI_SESSION_FILE + CHILI_SESSION_STDOUT so the launcher can
+    # read the session JSON (for fallback_policy / task_complexity /
+    # prompt) and grep the redirected stdout for limit-hit signals.
+    $env:CHILI_SESSION_FILE = $runningPath
+    $env:CHILI_SESSION_STDOUT = $stdoutPath
+
     $launcherPath = Join-Path $PSScriptRoot "_claude_session_launcher.ps1"
     $psInner = "& '$launcherPath' -ArgsFile '$argsFilePath' -ClaudeExe '$claudeExe' *>&1"
 
