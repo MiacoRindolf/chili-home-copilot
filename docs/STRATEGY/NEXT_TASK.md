@@ -1,81 +1,101 @@
-# NEXT_TASK: f-cpcv-gate-dispatcher-silence-audit
+# NEXT_TASK: f-brain-event-kind-unify
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-**Phase 1a of the adaptive-promotion-architecture initiative.**
-Read-only audit to find why `run_brain_work_dispatch_round` has logged
-zero `[brain_work:dispatch]` lines in full brain-worker history, AND
-identify the writer marking 205 `backtest_completed` events/24h as
-`done` without invoking the cpcv_gate handler.
+**Phase 1b of the adaptive-promotion-architecture initiative.** Fix the
+architectural defect Phase 1a found: unify the brain_work event queue
+so outcome-kind events are claimable and processed by handlers. Behind
+a feature flag, default off, byte-identical behavior until the operator
+flips it.
 
 ## Why this is next
 
-Phase 0 (commit `738a72d`, memo
-`docs/AUDITS/2026-05-11_cpcv_gate_coverage.md`) found two stacked
-breaks in the promotion funnel:
+Phase 1a (commit `4c1e46e`, memo
+`docs/AUDITS/2026-05-11_dispatcher_silence.md`) found:
 
-1. **Dispatcher silence (100% of sampled patterns).** The handler that
-   should produce CPCV verdicts has never logged a single verdict in
-   container history. Yet `brain_work_events` shows 205 events/24h
-   marked `done` — some other writer is silently marking them done.
-2. **Ensemble pre-gate.** Force-eval against patterns 731 + 1212 (both
-   with 7K+ PTR rows) shows `check_promotion_ready` short-circuits at
-   `mining_validation.py:341` before CPCV runs, leaving
-   `cpcv_n_paths` NULL even when the handler IS reached.
+- The dispatcher was NOT silent (Phase 0 grep used colon; dispatcher
+  declares its prefix with underscore — `[brain_work_dispatch]`).
+- The real defect: `enqueue_outcome_event` (`ledger.py:103`) writes
+  `event_kind='outcome', status='done', processed_at=now()` in one
+  INSERT, but `claim_work_batch` (`ledger.py:184`) filters
+  `event_kind='work'`. Result: rows born terminal, never claimed.
+- 7 of 9 handler-targeted event types are affected. ~4,000 events sit
+  as pure audit trail across `backtest_completed` (1055),
+  `breakout_alert_resolved` (2659), `broker_fill_closed` (131),
+  `market_snapshots_batch` (179), and others. The cpcv_gate, mine,
+  promote, demote, regime_ledger, pattern_stats, breakout_outcomes,
+  live_drift, and execution_robustness handlers have never fired
+  against production traffic.
 
-The original Phase 1 (synthetic-event backfill) is unsafe to ship
-until we identify the rogue done-writer. If the new events get
-silently marked done without handler invocation, the backfill is a
-no-op that looks successful.
+Operator architect-call: wire the unified queue. Both `event_kind`
+become claimable through the same lifecycle; `claim_work_batch` filters
+by event_type + status (not kind). Flag-gated for safety.
 
 ## Brief
 
-`docs/STRATEGY/QUEUED/f-cpcv-gate-dispatcher-silence-audit.md`
+`docs/STRATEGY/QUEUED/f-brain-event-kind-unify.md`
 
 Parent architectural brief:
 `docs/STRATEGY/QUEUED/f-adaptive-promotion-architecture-2026-05-11.md`
 
-Phase 0 memo (read first):
+Phase 1a memo:
+`docs/AUDITS/2026-05-11_dispatcher_silence.md`
+
+Phase 0 memo:
 `docs/AUDITS/2026-05-11_cpcv_gate_coverage.md`
 
-## Deliverables (all in scripts/ or docs/ — NO code under app/)
+## Deliverables
 
-1. `scripts/audit-dispatcher-silence.ps1` — tests 6 hypotheses
-   (H1–H6) about why the dispatcher is silent + locates the rogue
-   done-writer by file:line.
-2. `scripts/audit-dispatcher-silence-out.txt` — committed run output.
-3. `docs/AUDITS/2026-05-11_dispatcher_silence.md` — one-page memo
-   with H1–H6 verdicts + rogue-writer identification + Phase 1b
-   safety recommendation.
-4. `docs/STRATEGY/CC_REPORTS/2026-05-11_cpcv-gate-dispatcher-silence-audit.md`
+1. **app/services/trading/brain_work/ledger.py** — gated changes to
+   `enqueue_outcome_event` (`status='pending'`, `processed_at=NULL`)
+   and `claim_work_batch` (drop `event_kind='work'` filter). All
+   behind `chili_brain_outcome_claimable_enabled`.
+2. **app/config.py** — new pydantic Settings field (default False).
+3. **app/migrations.py** — new migration N adding partial index
+   `ix_brain_work_events_claim_v2` (no data mutation, no column ops).
+4. **tests/test_brain_work_event_kind_unify.py** — flag-off parity,
+   flag-on claim, flag-on backward-compat-for-historical-rows.
+5. **tests/test_brain_work_handler_idempotency.py** — each of 9
+   handlers called twice with same payload, no duplicate
+   side-effects. **Hard gate for Phase 1c.**
+6. **docs/runbooks/BRAIN_WORK_EVENT_KIND.md** — operator runbook.
+7. **docs/STRATEGY/CC_REPORTS/2026-05-11_brain-event-kind-unify.md**
 
 ## Hard constraints
 
-- **READ-ONLY.** No DB writes. No `app/` code changes. No restarts.
-  No new migrations / tables / columns. No env edits.
-- `psql -c` SELECT-only; any `docker exec python -c` must `rollback()`
-  in finally.
+- Flag defaults `False`. Merge produces zero behavior change.
+- Reversible. Flag-off restores byte-identical previous behavior.
+- Historical `status='done'` rows stay ineligible to claim (Phase 1c
+  is the controlled mechanism to bring them forward).
 - No changes to `dispatcher.py`, any handler, or
-  `backtest_queue_worker.py` — read them, don't edit them.
-- Memo D2 must name the rogue done-writer by file:line. If
-  inconclusive, recommend additional probe — don't speculate.
+  `backtest_queue_worker.py`. Pure ledger + flag + tests.
+- No autotrader / venue / broker touched.
+- Migration is index-only.
+- Handlers must be proven idempotent (test_brain_work_handler_idempotency
+  is a hard gate for Phase 1c).
+
+## Open question requiring consult
+
+When the flag is True and the dispatcher processes an outcome event
+successfully, should `mark_work_done` update `processed_at` (Option 1,
+recommended) or leave it at the original outcome timestamp (Option 2)?
+The brief assumes Option 1 — CC should surface the choice in consult.
 
 ## Next in queue
 
-- `f-cpcv-gate-event-backfill` (Phase 1b) — written after Phase 1a
-  lands, calibrated to whether the dispatcher needs to be restored
-  first.
-- `f-supervisor-auto-relaunch-investigation` (priority 220) —
-  partially relieved by commit `f71fdf1` (supervisor parameterized
-  for `-Mode session`); brief still useful for documenting the
-  expected operational pattern.
+- **Phase 1c** (`f-brain-event-kind-backfill.md`) — controlled
+  resurrection of 4,000 historical orphans after Phase 1b is stable
+  in prod for 24h. Already queued.
+- **Phase 2** (the original adaptive CPCV gate redesign) — proceeds
+  in parallel once Phase 1b prod flip is clean for 24h.
 
-## Side-shipped this session
+## Side-shipped earlier this session
 
 - `f-cowork-watcher-truncation-fix` (commit `e13c7d9`) — operator
   override.
 - Supervisor parameterization (commit `f71fdf1`) — `-Mode session`
-  added; operator runs the same supervisor in a second window for
-  the session daemon.
+  added.
+- Phase 0 audit (commit `738a72d`).
+- Phase 1a audit (commit `4c1e46e`).
