@@ -1,0 +1,56 @@
+﻿# dispatch-drought-probe-5 2026-05-11T05:08:04.5209946-07:00
+=== 5A. PatternTradeRow population per pattern ??? the CPCV gate consumes THIS, not trade_count ===
+=== 5B. Distribution of PTR-row counts per pattern (the CPCV
+docker.exe : psql:/tmp/qdrought5.sql:13: ERROR:  relation "trading_pattern_trade_rows" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-drought-probe-5.ps1:120 char:1
++ & docker exec chili-home-copilot-postgres-1 psql -U chili -d chili -f ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (psql:/tmp/qdrou... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 9:     FROM trading_pattern_trade_rows
+                 ^
+=== 5C. JOIN scan_patterns with PTR counts ??? top patterns by trade_count but PTR below 30 ===
+=== 5D. Find who writes to trading_pattern_trade_rows ??? is it backtest_engine or learning_cycle? ===
+=== 5E. The 3 promoted patterns: their PTR row counts and CPCV metrics ===
+=== 5F. Backtest queue ???
+psql:/tmp/qdrought5.sql:15: error: unterminated quoted string
+psql:/tmp/qdrought5.sql:32: ERROR:  relation "trading_pattern_trade_rows" does not exist
+LINE 13:     FROM trading_pattern_trade_rows
+                  ^
+psql:/tmp/qdrought5.sql:49: ERROR:  relation "trading_pattern_trade_rows" does not exist
+LINE 7:       FROM trading_pattern_trade_rows
+                   ^
+psql:/tmp/qdrought5.sql:61: ERROR:  relation "trading_pattern_trade_rows" does not exist
+LINE 7:   FROM trading_pattern_trade_rows
+               ^
+psql:/tmp/qdrought5.sql:76: ERROR:  relation "trading_pattern_trade_rows" does not exist
+LINE 9:       FROM trading_pattern_trade_rows
+                   ^
+psql:/tmp/qdrought5.sql:78: error: unterminated quoted string
+ lifecycle_stage | queue_tier |  n  |         last_bt_at         
+-----------------+------------+-----+----------------------------
+ backtested      | full       |  50 | 2026-05-09 01:55:42.035208
+ candidate       | full       | 511 | 2026-05-11 12:06:02.850858
+ challenged      | full       |  19 | 2026-05-11 02:16:00.826214
+ decayed         | full       |   3 | 2026-05-07 16:45:39.581128
+ promoted        | full       |   3 | 2026-05-10 15:31:42.824917
+(5 rows)
+
+=== 5G. EV-passing patterns: which have PTR data vs which
+=== 5H. brain_work_events: what fires pattern_stats events? Look at handler emitters ===
+psql:/tmp/qdrought5.sql:86: error: unterminated quoted string
+psql:/tmp/qdrought5.sql:102: ERROR:  relation "trading_pattern_trade_rows" does not exist
+LINE 7:     FROM trading_pattern_trade_rows
+                 ^
+ event_type | n | first_ts | last_ts 
+------------+---+----------+---------
+(0 rows)
+
+
+
+## brain-worker recent [brain_work:cpcv_gate] activity last 30m
+  match count: 0 (last 25)
+
+## brain-worker handler firing summary - count by handler
+# end

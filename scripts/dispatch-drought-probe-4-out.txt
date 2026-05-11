@@ -1,0 +1,175 @@
+﻿# dispatch-drought-probe-4 2026-05-11T05:06:19.7830107-07:00
+=== 4A. All CPCV/DSR/PBO columns ANYWHERE in DB ===
+                table_name                |         column_name          |          data_type          
+------------------------------------------+------------------------------+-----------------------------
+ cpcv_shadow_eval_log                     | cpcv_n_paths                 | integer
+ cpcv_shadow_eval_log                     | deflated_sharpe              | double precision
+ cpcv_shadow_eval_log                     | pbo                          | double precision
+ cpcv_shadow_eval_log                     | would_pass_cpcv              | boolean
+ cpcv_shadow_funnel_v                     | median_cpcv_paths            | double precision
+ cpcv_shadow_funnel_v                     | median_dsr                   | double precision
+ cpcv_shadow_funnel_v                     | median_pbo                   | double precision
+ cpcv_shadow_funnel_v                     | n_would_pass_cpcv            | bigint
+ pattern_survival_features                | cpcv_dsr                     | double precision
+ pattern_survival_features                | cpcv_n_paths                 | integer
+ pattern_survival_features                | cpcv_pbo                     | double precision
+ pattern_survival_features                | cpcv_promotion_confident     | boolean
+ pattern_survival_features                | sharpe_30d                   | double precision
+ pattern_survival_promote_review_queue    | cpcv_passed_at               | timestamp without time zone
+ scan_patterns                            | cpcv_median_sharpe           | double precision
+ scan_patterns                            | cpcv_median_sharpe_by_regime | jsonb
+ scan_patterns                            | cpcv_n_paths                 | integer
+ scan_patterns                            | deflated_sharpe              | double precision
+ scan_patterns                            | pbo                          | double precision
+ trading_backtests                        | sharpe                       | double precision
+ trading_pattern_regime_performance_daily | sharpe_proxy                 | double precision
+ unified_signals                          | deflated_sharpe              | double precision
+ unified_signals                          | pbo                          | double precision
+(23 rows)
+
+=== 4B. all columns on scan_patterns that look promotion-related ===
+       column_name        |          data_type          
+--------------------------+-----------------------------
+ backtest_commission_used | double precision
+ backtest_count           | integer
+ backtest_priority        | integer
+ backtest_spread_used     | double precision
+ cpcv_n_paths             | integer
+ last_backtest_at         | timestamp without time zone
+ oos_avg_return_pct       | double precision
+ oos_evaluated_at         | timestamp without time zone
+ oos_trade_count          | integer
+ oos_validation_json      | jsonb
+ oos_win_rate             | double precision
+ promotion_demote_reason  | text
+ promotion_gate_passed    | boolean
+ promotion_gate_reasons   | jsonb
+ promotion_status         | character varying
+ score_boost              | double precision
+(16 rows)
+
+=== 4C. promotion-gate tables ===
+              table_name              
+--------------------------------------
+ cpcv_shadow_eval_log
+ cpcv_shadow_funnel_v
+ gateway_learning_run
+ gateway_pattern
+ llm_gateway_log
+ trading_pattern_regime_promotion_log
+(6 rows)
+
+=== 4D. sample row from any cpcv result table (look at top 2 patterns) ===
+      table_name      
+----------------------
+ cpcv_shadow_funnel_v
+ cpcv_shadow_eval_log
+(2 rows)
+
+=== 4E. brain_work_events: types fired in last 24h ===
+        event_type         |  n  |          first_ts          |          last_ts           
+---------------------------+-----+----------------------------+----------------------------
+ breakout_alert_resolved   | 277 | 2026-05-10 12:38:12.089712 | 2026-05-11 10:28:48.686352
+ backtest_completed        | 175 | 2026-05-10 15:28:15.930117 | 2026-05-11 12:06:05.795359
+ market_snapshots_batch    |  19 | 2026-05-10 13:30:47.989501 | 2026-05-11 12:00:26.521284
+ execution_feedback_digest |   2 | 2026-05-10 19:50:21.625127 | 2026-05-11 11:09:06.422629
+ execution_quality_updated |   2 | 2026-05-10 21:07:23.629671 | 2026-05-11 11:36:09.608838
+ live_trade_closed         |   1 | 2026-05-11 11:09:05.858371 | 2026-05-11 11:09:05.858371
+(6 rows)
+
+=== 4F. brain_work_events: lifecycle of one promoted pattern (585) - has it received any events ever? ===
+        event_type         |  n  |          last_ts           
+---------------------------+-----+----------------------------
+ breakout_alert_resolved   | 832 | 2026-05-11 10:28:48.686352
+ broker_fill_closed        |  15 | 2026-05-09 20:03:21.469706
+ execution_quality_updated |  10 | 2026-05-11 11:36:09.608838
+ backtest_completed        |   5 | 2026-05-10 15:31:44.654835
+ promotion_changed         |   1 | 2026-05-09 00:04:25.525416
+(5 rows)
+
+=== 4G. pattern 731 (10341 trades, never OOS-evaluated): why? ===
+  id  |                          name                           | lifecycle_stage | trade_count |      win_rate       |    avg_return_pct    | oos_evaluated_at |         created_at         |         updated_at         | active 
+------+---------------------------------------------------------+-----------------+-------------+---------------------+----------------------+------------------+----------------------------+----------------------------+--------
+  731 | Intraday Squeeze + Declining Volume [1m] [BOS-tight]    | candidate       |       10341 |                   0 |   -0.280983463881635 |                  | 2026-04-19 05:37:24.241787 | 2026-05-05 11:12:35.235852 | t
+  732 | Intraday Squeeze + Declining Volume [1m] [BOS-moderate] | candidate       |        9589 |                   0 | -0.28835332151423404 |                  | 2026-04-19 05:37:24.248755 | 2026-05-05 11:12:36.144328 | t
+  733 | Intraday Squeeze + Declining Volume [1m] [BOS-wide]     | candidate       |        8700 | 0.06597701149425288 | -0.28913908045977005 |                  | 2026-04-19 05:37:24.25227  | 2026-05-05 11:50:59.331206 | t
+  749 | Intraday Squeeze + Declining Volume [5m] [BOS-wide]     | candidate       |        6733 |              0.0769 |  -0.2749160849547031 |                  | 2026-04-19 05:37:24.593712 | 2026-05-05 11:12:36.70454  | t
+  763 | Intraday Squeeze + Declining Volume [15m] [BOS-tight]   | candidate       |        6394 | 0.21864247732248984 |  -0.2538708163903662 |                  | 2026-04-19 05:37:25.010107 | 2026-05-05 11:29:17.974818 | t
+ 1054 | rsi_bullish_divergence_reversal_breakout [tf-15m]       | candidate       |        4625 | 0.44475675675675674 | -0.10039783783783764 |                  | 2026-04-19 12:37:58.653629 | 2026-05-04 10:20:39.229355 | t
+(6 rows)
+
+=== 4H. Phase 2 handlers - check what handlers are loaded (from brain_worker_control) ===
+ id | wake_requested |         updated_at         | stop_requested |     last_heartbeat_at      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               last_cycle_digest_json                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |                                                                   last_proposal_skips_json                                                                   |                                                                                                                                                                                  learning_live_json                                                                                                                                                                                  
+----+----------------+----------------------------+----------------+----------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  1 | f              | 2026-05-11 12:02:26.843107 | f              | 2026-05-11 12:01:25.213244 | {"updated_at": "2026-04-19T13:02:59.691428Z", "real_trade_adjustments": 0, "queue_backtests_run": 3747, "hypotheses_challenged": 0, "live_depromotion": {"ok": true, "skipped": true, "reason": "no_brain_default_user_id", "decay_monitor_updated": 0}, "patterns_refined": 6, "queue_empty": false, "hypotheses_tested": 1, "proposals_generated": 0, "backtests_run": 3747, "data_provider": "Massive", "promoted_fast_eval": {"ok": true, "tickers": 116, "promoted_patterns": 2, "predictions": 94}, "weights_evolved": 6, "queue_pending": 153, "tickers_scored": 3711, "snapshots_taken": 0, "prescreen_candidates": 2213, "funnel_snapshot": {"prescreen_candidates": 2213, "tickers_scored": 3711, "snapshots_taken": 0, "patterns_discovered": 0, "returns_backfilled": 1695, "queue_backtests_run": 3747, "backtests_run": 3747, "live_depromotion": {"ok": true, "skipped": true, "reason": "no_brain_default_user_id", "decay_monitor_updated": 0}, "promotion_active": {"legacy": 422, "promoted": 2}, "queue_pending": 170}, "patterns_boosted": 15, "returns_backfilled": 1695, "ml_trained": true, "patterns_discovered": 0, "signal_events": 0, "elapsed_s": 15397.4, "brain_resource_budget": {"ohlcv_cap": 280, "ohlcv_used": 270, "miner_rows_cap": 100000, "miner_rows_used": 100000, "pattern_inject_cap": 32, "pattern_inject_used": 0, "miner_errors": {}, "circuit_open": [], "exhausted": {"miner_rows": "cap=100000"}}} | {"updated_at": "2026-05-11T12:02:26.840948Z", "user_id": 1, "picks_total": 15, "created": 0, "skips": {"no_scan_pattern_id": 11, "pattern_not_promoted": 4}} | {"running": true, "phase": "mining", "current_step": "Mining patterns", "graph_node_id": "nm_lc_mine", "current_cluster_id": "c_discovery", "current_step_sid": "mine", "current_cluster_index": 2, "current_step_index": 0, "nodes_completed": 2, "total_nodes": 30, "clusters_completed": 0, "total_clusters": 12, "started_at": "2026-05-05T22:30:42.894644", "elapsed_s": 466.7}
+(1 row)
+
+=== 4I. CHECK: do ANY scan_patterns have ANY CPCV-related field populated? ===
+         column_name          
+------------------------------
+ active
+ asset_class
+ avg_return_pct
+ backtest_commission_used
+ backtest_count
+ backtest_priority
+ backtest_spread_used
+ bench_walk_forward_json
+ condition_signature
+ confidence
+ consecutive_zero_trade_runs
+ cpcv_median_sharpe
+ cpcv_median_sharpe_by_regime
+ cpcv_n_paths
+ created_at
+ deflated_sharpe
+ demoted_at
+ description
+ evidence_count
+ exit_config
+ generation
+ hypothesis_family
+ id
+ last_backtest_at
+ lifecycle_changed_at
+ lifecycle_stage
+ min_base_score
+ n_effective_trials
+ name
+ oos_avg_return_pct
+ oos_evaluated_at
+ oos_trade_count
+ oos_validation_json
+ oos_win_rate
+ origin
+ paper_book_json
+ parent_id
+ pattern_evidence_kind
+ pbo
+ promotion_demote_reason
+ promotion_gate_passed
+ promotion_gate_reasons
+ promotion_status
+ quality_composite_score
+ queue_tier
+ regime_affinity_json
+ rules_json
+ scope_tickers
+ score_boost
+ survival_at_risk_streak_days
+ ticker_scope
+ timeframe
+ trade_count
+ updated_at
+ user_id
+ variant_label
+ win_rate
+(57 rows)
+
+
+
+## handler activity in brain-worker last 30m (mine, cpcv_gate, promote, demote, pattern_stats, regime_ledger)
+  match count: 0 (last 30)
+
+## handler firing summary - count by handler name
+# end

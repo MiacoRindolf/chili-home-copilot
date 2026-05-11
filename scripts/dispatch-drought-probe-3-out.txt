@@ -1,0 +1,156 @@
+﻿# dispatch-drought-probe-3 2026-05-11T05:05:12.3941392-07:00
+=== 1A. Empirical distribution of CPCV metrics across patterns (for adaptive thresholds) ===
+docker.exe : psql:/tmp/qdrought3.sql:13: ERROR:  column "cpcv_dsr" does not exist
+At C:\dev\chili-home-copilot\scripts\dispatch-drought-probe-3.ps1:140 char:1
++ & docker exec chili-home-copilot-postgres-1 psql -U chili -d chili -f ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (psql:/tmp/qdrou... does not exist:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+LINE 3:   COUNT(cpcv_dsr) AS n_with_dsr,
+                ^
+=== 1B. Percentile distribution of each CPCV metric (target the actual population, not hardcoded) ===
+=== 1C. The 24 EV-passing-but-not-promoted patterns: WHY did CPCV reject them? ===
+psql:/tmp/qdrought3.sql:40: ERROR:  column "cpcv_dsr" does not exist
+LINE 3: ...OUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY cpcv_dsr):...
+                                                             ^
+psql:/tmp/qdrought3.sql:62: ERROR:  column "cpcv_dsr" does not exist
+LINE 3:        cpcv_dsr, cpcv_pbo, cpcv_median_sharpe, cpcv_n_paths,
+               ^
+=== 2A. composite quality score: schema + what columns exist? ===
+       column_name       |    data_type     
+-------------------------+------------------
+ min_base_score          | double precision
+ quality_composite_score | double precision
+ score_boost             | double precision
+(3 rows)
+
+=== 2B. The 2 patterns WITH a composite score: who are they + when computed? ===
+ id  |                                   name                                    | lifecycle_stage | quality_composite_score | trade_count |      win_rate      |  avg_return_pct   
+-----+---------------------------------------------------------------------------+-----------------+-------------------------+-------------+--------------------+-------------------
+ 585 | Intraday Squeeze + Declining Volume [guided-drop-bb_squeeze]              | promoted        |      0.8774360754936908 |          11 | 0.6363636363636364 | 8.040420840368236
+ 586 | Intraday Squeeze + Declining Volume [guided-tweak-volume_ratio-0.8->0.71] | decayed         |      0.6237899623961446 |           2 |                0.5 | 7.191607351404048
+(2 rows)
+
+=== 3A. Backtest pipeline: distribution of last-evaluation timestamps ===
+  bucket  |  n  
+----------+-----
+ last_30d |  10
+ never    | 567
+ older    |   9
+(3 rows)
+
+=== 3B. mined_at distribution (when were active patterns last mined?) ===
+ column_name |          data_type          
+-------------+-----------------------------
+ created_at  | timestamp without time zone
+ updated_at  | timestamp without time zone
+(2 rows)
+
+=== 3C. Recent (last 7d) scan_patterns updated_at distribution ===
+         day         |  n  
+---------------------+-----
+ 2026-05-11 00:00:00 | 163
+ 2026-05-10 00:00:00 |  49
+ 2026-05-09 00:00:00 | 181
+ 2026-05-07 00:00:00 |   6
+ 2026-05-06 00:00:00 |  50
+ 2026-05-05 00:00:00 | 121
+ 2026-05-04 00:00:00 |  16
+(7 rows)
+
+=== 3D. trading_backtest_param_sets recent volume (last 24h) ===
+        hour         |  n  
+---------------------+-----
+ 2026-05-11 12:00:00 | 123
+ 2026-05-11 11:00:00 | 458
+ 2026-05-11 10:00:00 | 503
+ 2026-05-11 09:00:00 | 100
+ 2026-05-11 08:00:00 |   9
+ 2026-05-11 07:00:00 |   5
+ 2026-05-11 02:00:00 | 138
+ 2026-05-11 01:00:00 |  13
+ 2026-05-11 00:00:00 |  12
+ 2026-05-10 23:00:00 |   6
+ 2026-05-10 20:00:00 |   1
+ 2026-05-10 19:00:00 | 109
+ 2026-05-10 18:00:00 |  61
+ 2026-05-10 17:00:00 |  32
+ 2026-05-10 16:00:00 |  23
+ 2026-05-10 15:00:00 | 185
+(16 rows)
+
+=== 3E. UI runtime-tab anomaly: patterns with trades but no recent backtest ===
+  id  |                           name                           | lifecycle_stage | trade_count | oos_evaluated_at | days_since_oos_eval 
+------+----------------------------------------------------------+-----------------+-------------+------------------+---------------------
+  731 | Intraday Squeeze + Declining Volume [1m] [BOS-tight]     | candidate       |       10341 |                  |                    
+  732 | Intraday Squeeze + Declining Volume [1m] [BOS-moderate]  | candidate       |        9589 |                  |                    
+  733 | Intraday Squeeze + Declining Volume [1m] [BOS-wide]      | candidate       |        8700 |                  |                    
+  749 | Intraday Squeeze + Declining Volume [5m] [BOS-wide]      | candidate       |        6733 |                  |                    
+  763 | Intraday Squeeze + Declining Volume [15m] [BOS-tight]    | candidate       |        6394 |                  |                    
+  764 | Intraday Squeeze + Declining Volume [15m] [BOS-moderate] | candidate       |        6272 |                  |                    
+  978 | Intraday BB Squeeze -> 4h Return [tf-4h]                 | candidate       |        5554 |                  |                    
+  765 | Intraday Squeeze + Declining Volume [15m] [BOS-wide]     | candidate       |        5319 |                  |                    
+  928 | 15m BB Squeeze + ADX < 20 [BOS-tight]                    | candidate       |        5212 |                  |                    
+    2 | BB Squeeze Breakout                                      | candidate       |        5072 |                  |                    
+ 1054 | rsi_bullish_divergence_reversal_breakout [tf-15m]        | candidate       |        4625 |                  |                    
+  747 | Intraday Squeeze + Declining Volume [5m] [BOS-tight]     | candidate       |        4619 |                  |                    
+  748 | Intraday Squeeze + Declining Volume [5m] [BOS-moderate]  | candidate       |        4603 |                  |                    
+  929 | 15m BB Squeeze + ADX < 20 [BOS-moderate]                 | candidate       |        4534 |                  |                    
+  798 | 1m Tape-Speed Burst [entry-tweak-macd_hist-0->-3.25]     | candidate       |        4477 |                  |                    
+(15 rows)
+
+=== 3F. promotion-pipeline event handlers ??? are they actually firing? ===
+      table_name      
+----------------------
+ brain_work_events
+ brain_worker_control
+(2 rows)
+
+
+
+## brain-worker mining + backtest cycle activity last 1h
+  match count: 40563 (last 25)
+
+2026-05-11 12:05:03,755 [INFO] [exit_engine_ops] mode=shadow source=backtest position_id=none ticker=ETH-USD 
+legacy_action=exit_bos canonical_action=exit_bos agree=true config_hash=28f0fd0342097e31 sample_pct=1.000
+2026-05-11 12:05:03,755 [INFO] [exit_engine_ops] mode=shadow source=backtest position_id=none ticker=ETH-USD 
+legacy_action=exit_bos canonical_action=exit_bos agree=true config_hash=28f0fd0342097e31 sample_pct=1.000
+2026-05-11 12:05:03,756 [INFO] [exit_engine_ops] mode=shadow source=backtest position_id=none ticker=ETH-USD 
+legacy_action=exit_bos canonical_action=exit_bos agree=true config_hash=28f0fd0342097e31 sample_pct=1.000
+2026-05-11 12:05:03,833 [INFO] [exit_parity] persisted 78 backtest parity rows ticker=ETH-USD
+2026-05-11 12:05:09,503 [INFO] [backtest_queue] stored_refresh_priority pattern_id=1122 insight_id=1592 n=19 sample=['TXN', 'UNH', 
+'CMG', 'NKE', 'CVX', 'EOG', 'XLF', 'CELH']
+2026-05-11 12:05:10,923 [INFO] [backtest_engine] Pattern-aware BT for 'Daily IBS<0.2 + Bull Engulf — 1-2d Mean Reversion [tf-1h]' 
+— 36 tickers (exit_config=custom, tf=1h, scope=universal, asset=stocks)
+FractionalBacktest.run:   0%|          | 0/1420 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1064 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/355 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1578 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1786 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1929 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1738 [00:00<?, ?bar/s]2026-05-11 12:05:13,798 [INFO] [exit_engine_ops] mode=shadow 
+source=backtest position_id=none ticker=UPS legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true 
+config_hash=cffab1f6b88f2b00 sample_pct=1.000
+FractionalBacktest.run:   0%|          | 0/1578 [00:00<?, ?bar/s][A
+FractionalBacktest.run:   0%|          | 0/1873 [00:00<?, ?bar/s][A[A
+FractionalBacktest.run:   0%|          | 0/1927 [00:00<?, ?bar/s]
+                                                                 2026-05-11 12:05:13,994 [INFO] [exit_engine_ops] mode=shadow 
+source=backtest position_id=none ticker=T legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true 
+config_hash=cffab1f6b88f2b00 sample_pct=1.000
+FractionalBacktest.run:   0%|          | 0/1861 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1795 [00:00<?, ?bar/s]
+FractionalBacktest.run:   0%|          | 0/1930 [00:00<?, ?bar/s]2026-05-11 12:05:14,276 [INFO] [exit_engine_ops] mode=shadow 
+source=backtest position_id=none ticker=SMCI legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true 
+config_hash=cffab1f6b88f2b00 sample_pct=1.000
+FractionalBacktest.run:   0%|          | 0/1930 [00:00<?, ?bar/s]
+2026-05-11 12:05:14,481 [INFO] [exit_parity] persisted 2 backtest parity rows ticker=UPS
+2026-05-11 12:05:14,935 [INFO] [exit_parity] persisted 2 backtest parity rows ticker=T
+2026-05-11 12:05:15,685 [INFO] [exit_parity] persisted 2 backtest parity rows ticker=SMCI
+FractionalBacktest.run:   0%|          | 0/1929 [00:00<?, ?bar/s]2026-05-11 12:05:16,046 [INFO] [exit_engine_ops] mode=shadow 
+source=backtest position_id=none ticker=NEM legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true 
+config_hash=cffab1f6b88f2b00 sample_pct=1.000
+
+
+
+# end

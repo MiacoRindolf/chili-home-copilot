@@ -1,0 +1,89 @@
+﻿# dispatch-drought-probe-6 2026-05-11T05:09:12.8768702-07:00
+=== 6A. PatternTradeRow population per pattern - the CPCV gate consumes THIS ===
+ patterns_with_ptr_rows | total_ptr_rows | avg_ptr_per_pat | max_ptr_per_pat | min_ptr_per_pat 
+------------------------+----------------+-----------------+-----------------+-----------------
+                    341 |            342 |          2414.2 |          177771 |               1
+(1 row)
+
+=== 6B. Distribution of PTR-row counts per pattern (CPCV gate min=30) ===
+        bucket         | n_patterns 
+-----------------------+------------
+ b_1_to_4              |          4
+ c_5_to_14             |         12
+ d_15_to_29_below_gate |         12
+ e_30_to_99_gate_ok    |         27
+ f_100plus             |        287
+(5 rows)
+
+=== 6C. patterns with high trade_count but no PTR rows / few PTR rows ===
+  id  |                                      name                                      | lifecycle_stage | trades_table | ptr_rows | cpcv_n_paths | dsr | pbo 
+------+--------------------------------------------------------------------------------+-----------------+--------------+----------+--------------+-----+-----
+  731 | Intraday Squeeze + Declining Volume [1m] [BOS-tight]                           | candidate       |        10341 |    13696 |              |     |    
+  732 | Intraday Squeeze + Declining Volume [1m] [BOS-moderate]                        | candidate       |         9589 |    12621 |              |     |    
+  733 | Intraday Squeeze + Declining Volume [1m] [BOS-wide]                            | candidate       |         8700 |     8700 |              |     |    
+  749 | Intraday Squeeze + Declining Volume [5m] [BOS-wide]                            | candidate       |         6733 |     8677 |              |     |    
+  763 | Intraday Squeeze + Declining Volume [15m] [BOS-tight]                          | candidate       |         6394 |     6394 |              |     |    
+  764 | Intraday Squeeze + Declining Volume [15m] [BOS-moderate]                       | candidate       |         6272 |     6542 |              |     |    
+  978 | Intraday BB Squeeze -> 4h Return [tf-4h]                                       | candidate       |         5554 |     5555 |              |     |    
+  765 | Intraday Squeeze + Declining Volume [15m] [BOS-wide]                           | candidate       |         5319 |     5319 |              |     |    
+  928 | 15m BB Squeeze + ADX < 20 [BOS-tight]                                          | candidate       |         5212 |     5212 |              |     |    
+    2 | BB Squeeze Breakout                                                            | candidate       |         5072 |     5388 |              |     |    
+ 1054 | rsi_bullish_divergence_reversal_breakout [tf-15m]                              | candidate       |         4625 |     5995 |              |     |    
+  747 | Intraday Squeeze + Declining Volume [5m] [BOS-tight]                           | candidate       |         4619 |     4619 |              |     |    
+  748 | Intraday Squeeze + Declining Volume [5m] [BOS-moderate]                        | candidate       |         4603 |     4603 |              |     |    
+  929 | 15m BB Squeeze + ADX < 20 [BOS-moderate]                                       | candidate       |         4534 |     4545 |              |     |    
+  798 | 1m Tape-Speed Burst [entry-tweak-macd_hist-0->-3.25]                           | candidate       |         4477 |     6862 |              |     |    
+  735 | Intraday Squeeze + Declining Volume [1m] [entry-cross-pullback_stretch_entry]  | candidate       |         4413 |     6622 |              |     |    
+  767 | Intraday Squeeze + Declining Volume [15m] [entry-tweak-volume_ratio-0.8->0.91] | candidate       |         4072 |     4199 |              |     |    
+  930 | 15m BB Squeeze + ADX < 20 [BOS-wide]                                           | candidate       |         3843 |     3859 |              |     |    
+    3 | VWAP Reclaim + Volume                                                          | candidate       |         3485 |     3782 |              |     |    
+  762 | Intraday Squeeze + Declining Volume [15m] [No-BOS-breakout]                    | candidate       |         3452 |     4021 |              |     |    
+(20 rows)
+
+=== 6D. trading_pattern_trades recent write activity (last 14d) ===
+         day         | n_rows | n_patterns 
+---------------------+--------+------------
+ 2026-05-11 00:00:00 |    656 |         31
+ 2026-05-10 00:00:00 |   2872 |         34
+ 2026-05-09 00:00:00 |   1588 |         30
+ 2026-05-08 00:00:00 |  18147 |         87
+ 2026-05-07 00:00:00 |  25028 |        138
+ 2026-05-06 00:00:00 |  24310 |        146
+ 2026-05-05 00:00:00 |  26052 |        119
+ 2026-05-04 00:00:00 |  14729 |        122
+ 2026-05-03 00:00:00 |   6870 |        114
+ 2026-05-02 00:00:00 |   7360 |        109
+ 2026-05-01 00:00:00 |  24853 |        185
+ 2026-04-30 00:00:00 |  21568 |        189
+ 2026-04-29 00:00:00 |  14117 |        203
+ 2026-04-28 00:00:00 |  26336 |        214
+ 2026-04-27 00:00:00 |   9644 |        130
+(15 rows)
+
+=== 6E. The 3 promoted patterns: their PTR row counts + CPCV ===
+  id  |                                   name                                   | lifecycle_stage | trade_count | ptr_rows | cpcv_n_paths |  dsr  |  pbo  | med_sharpe 
+------+--------------------------------------------------------------------------+-----------------+-------------+----------+--------------+-------+-------+------------
+  585 | Intraday Squeeze + Declining Volume [guided-drop-bb_squeeze]             | promoted        |          11 |      368 |           35 | 1.000 | 0.000 |      1.405
+ 1011 | Reddit r/Daytrading — IBS mean reversion (vaanam-dev) [No-BOS-breakout]  | promoted        |         409 |     1122 |           84 | 1.000 | 0.000 |      1.990
+ 1016 | Reddit r/Daytrading — IBS mean reversion (vaanam-dev) [entry-add-bb_pct] | promoted        |         565 |     2024 |          105 | 1.000 | 0.000 |      1.429
+(3 rows)
+
+=== 6F. EV-passing patterns: how many cross the PTR>=30 threshold? ===
+       bucket       | n  
+--------------------+----
+ a_has_30plus_ptr   | 22
+ b_below_gate_floor |  2
+(2 rows)
+
+=== 6G. Empirical CPCV metric distribution (the 19 patterns that DO have data) ===
+       metric       |  minv  |  p25  |  p50  |  p75   |  maxv   | n_with_value 
+--------------------+--------+-------+-------+--------+---------+--------------
+ cpcv_n_paths       |   8.00 | 20.00 | 56.00 | 105.00 | 5050.00 |           39
+ deflated_sharpe    |  0.000 | 1.000 | 1.000 |  1.000 |   1.000 |           39
+ pbo                |  0.000 | 0.000 | 0.000 |  0.000 |   0.000 |           39
+ cpcv_median_sharpe | -2.525 | 1.103 | 3.906 |  6.055 |  45.126 |           39
+(4 rows)
+
+
+
+# end
