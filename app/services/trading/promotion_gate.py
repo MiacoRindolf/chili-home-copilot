@@ -979,6 +979,25 @@ def finalize_promotion_with_cpcv(
             **cap_kw,
         )
     ok_metrics, reasons = promotion_gate_passes(eval_payload)
+    # f-adaptive-cpcv-gate (Phase 2). Single call site. The wrapper writes
+    # a shadow log of legacy vs adaptive verdicts and returns the adaptive
+    # verdict only when ``chili_cpcv_adaptive_gate_enabled`` is True
+    # (default False → byte-identical legacy behavior).
+    try:
+        from .cpcv_adaptive_gate import maybe_apply_adaptive_gate
+        ok_metrics, reasons = maybe_apply_adaptive_gate(
+            eval_payload,
+            scan_pattern_id=(
+                getattr(scan_pattern, "id", None) if scan_pattern is not None else None
+            ),
+            legacy_pass=ok_metrics,
+            legacy_reasons=reasons,
+        )
+    except Exception as _adp_exc:
+        logger.warning(
+            "[cpcv_adaptive_gate] wrapper failed (continuing on legacy verdict): %s",
+            _adp_exc,
+        )
     eval_payload["promotion_gate_passed"] = ok_metrics
     eval_payload["promotion_gate_reasons"] = reasons
     detail["cpcv_promotion_gate"] = eval_payload

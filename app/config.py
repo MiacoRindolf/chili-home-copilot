@@ -972,6 +972,22 @@ class Settings(BaseSettings):
     # When True, scheduler-worker runs ``scripts/backfill_cpcv_metrics.py --commit`` weekly (Sun 04:00 ET).
     # Default OFF until operator validates a manual backfill run.
     chili_cpcv_weekly_backfill_enabled: bool = True
+    # f-adaptive-cpcv-gate (Phase 2 of f-adaptive-promotion-architecture, 2026-05-11).
+    # Adaptive CPCV gate wraps promotion_gate_passes with sample-size-aware,
+    # pool-relative thresholds (Bayesian shrinkage + lower-CI percentiles +
+    # Pareto frontier + portfolio marginal Sharpe). Default OFF — wrapper is
+    # a byte-identical no-op. Documented in docs/runbooks/CPCV_ADAPTIVE_GATE.md
+    # under the "operator policy, not magic" framing.
+    chili_cpcv_adaptive_gate_enabled: bool = False
+    # Target promotion pool size as a fraction of the active pattern pool.
+    # 0.05 = top 5% by each metric (empirical q=0.95 percentile threshold).
+    chili_cpcv_target_promotion_pool_pct: float = 0.05
+    # Confidence-interval level for the sample-size-aware lower/upper bound.
+    # Higher (0.95) = stricter promotion / smaller pool; lower (0.80) = looser.
+    chili_cpcv_ci_level: float = 0.90
+    # Portfolio marginal Sharpe contribution required to admit, in basis points.
+    # 0.0 = any positive marginal contribution admits (effective no-op floor).
+    chili_portfolio_marginal_sharpe_min_bps: float = 0.0
     # Q1.T3 phase 1: INSERT into ``unified_signals`` alongside existing payloads (default OFF).
     chili_unified_signal_enabled: bool = True
     # Q1.T3 phase 2: shadow-consume unified_signals from autotrader and log

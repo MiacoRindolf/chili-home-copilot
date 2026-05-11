@@ -1,6 +1,9 @@
 # NEXT_TASK: f-adaptive-cpcv-gate
 
-STATUS: PENDING
+STATUS: DONE
+
+Shipped 2026-05-11. All 7 deliverables. 20 tests pass.
+CC_REPORT: `docs/STRATEGY/CC_REPORTS/2026-05-11_adaptive-cpcv-gate.md`.
 
 ## Goal
 

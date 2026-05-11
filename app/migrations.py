@@ -15777,6 +15777,63 @@ def _migration_238_brain_work_events_claim_v2_index(conn) -> None:
         conn.rollback()
 
 
+def _migration_239_cpcv_adaptive_eval_log(conn) -> None:
+    """Phase 2 of f-adaptive-promotion-architecture (2026-05-11).
+
+    Shadow + post-hoc audit log for the adaptive CPCV gate
+    (``cpcv_adaptive_gate.maybe_apply_adaptive_gate``). Each evaluation
+    writes one row per metric (``dsr``, ``pbo``, ``median_sharpe``) plus
+    one ``summary`` row carrying the legacy / adaptive verdicts and the
+    portfolio-marginal-Sharpe proxy. The flag
+    ``chili_cpcv_adaptive_gate_enabled`` defaults False — the wrapper is
+    a byte-identical no-op at merge time but still writes the shadow log
+    so operators can opt into observation before flipping authority.
+
+    Additive only: new table + index. No ``scan_patterns`` column adds,
+    no DML on existing tables. Idempotent (CREATE ... IF NOT EXISTS).
+    No-op when ``scan_patterns`` is absent (FK target).
+
+    ``evaluated_at`` is ``TIMESTAMPTZ`` to match mig 164
+    (``cpcv_shadow_eval_log``) so operator-query patterns line up.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    try:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS cpcv_adaptive_eval_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    scan_pattern_id INTEGER NOT NULL
+                        REFERENCES scan_patterns(id) ON DELETE CASCADE,
+                    evaluated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    metric_name TEXT NOT NULL,
+                    raw_value DOUBLE PRECISION,
+                    shrunken_value DOUBLE PRECISION,
+                    lower_ci DOUBLE PRECISION,
+                    pool_percentile DOUBLE PRECISION,
+                    pool_threshold DOUBLE PRECISION,
+                    eligible BOOLEAN,
+                    pareto_dominant BOOLEAN,
+                    marginal_portfolio_sharpe_bps DOUBLE PRECISION,
+                    legacy_verdict_pass BOOLEAN,
+                    adaptive_verdict_pass BOOLEAN
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cpcv_adaptive_eval_log_pat "
+                "ON cpcv_adaptive_eval_log (scan_pattern_id, evaluated_at DESC)"
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16042,6 +16099,8 @@ MIGRATIONS = [
      _migration_237_scan_pattern_quality_composite_score),
     ("238_brain_work_events_claim_v2_index",
      _migration_238_brain_work_events_claim_v2_index),
+    ("239_cpcv_adaptive_eval_log",
+     _migration_239_cpcv_adaptive_eval_log),
 ]
 
 
