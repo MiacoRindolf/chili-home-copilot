@@ -53,9 +53,24 @@ Parent architectural brief:
 
 ## Next in queue
 
-- `f-cowork-watcher-truncation-fix` (priority 210) — daemon
-  infrastructure; was previously NEXT_TASK, moved back to queue
+- ~~`f-cowork-watcher-truncation-fix` (priority 210)~~ — SHIPPED out
+  of band on 2026-05-11 via operator override. CC_REPORT at
+  `docs/STRATEGY/CC_REPORTS/2026-05-11_f-cowork-watcher-truncation-fix.md`.
+  Canonical watcher prompt now at
+  `docs/STRATEGY/COWORK_WATCHER_PROMPT.md`; helper at
+  `scripts/watcher-check-truncation.ps1`; runbook at
+  `docs/runbooks/WATCHER_TRUNCATION_HEURISTIC.md`. Operator needs to
+  paste the canonical prompt into the live routine at
+  https://claude.ai/code/routines.
 - `f-supervisor-auto-relaunch-investigation` (priority 220) — daemon
   supervisor didn't auto-relaunch after the 4h self-restart
 - `f-cpcv-gate-backfill` (Phase 1) — written after Phase 0 lands and the
   memo informs Phase 1 design
+
+## Side-shipped this session
+
+`f-cowork-watcher-truncation-fix` was completed under operator
+override at 2026-05-11T15:13-15:26Z (plan-gate APPROVED autonomous
+at 15:20Z). No `app/` files, DB, or shared tooling touched — the
+fix is additive (one helper PS1, one canonical prompt doc, one
+runbook, one reference JSON sample, one CC_REPORT).

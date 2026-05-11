@@ -1,0 +1,66 @@
+{
+    "schema_version":  1,
+    "host_time":  "2026-05-11T15:24:14.3785974Z",
+    "repo_root":  "C:\\dev\\chili-home-copilot",
+    "debounce_seconds":  60,
+    "any_truncated":  false,
+    "any_env_error":  false,
+    "results":  [
+                    {
+                        "path":  "app\\services\\trading\\stop_engine.py",
+                        "abs_path":  "C:\\dev\\chili-home-copilot\\app\\services\\trading\\stop_engine.py",
+                        "verdict":  "OK",
+                        "lines":  1317,
+                        "bytes":  50597,
+                        "sha256":  "BCB6CE8595CEC49E666104AFB425E626DB0E900DBBC585E6363AB710424D3196",
+                        "parse_exit":  0,
+                        "parse_stderr":  "",
+                        "marker_present":  false,
+                        "first_fail_at":  null,
+                        "seconds_since_first_fail":  null,
+                        "notes":  ""
+                    },
+                    {
+                        "path":  "app\\services\\trading\\bracket_reconciliation_service.py",
+                        "abs_path":  "C:\\dev\\chili-home-copilot\\app\\services\\trading\\bracket_reconciliation_service.py",
+                        "verdict":  "OK",
+                        "lines":  2578,
+                        "bytes":  101697,
+                        "sha256":  "F6ED455A07BF37402CC33939F01571E356C5EBAFE53C45FA30149B08FFAAD9EA",
+                        "parse_exit":  0,
+                        "parse_stderr":  "",
+                        "marker_present":  false,
+                        "first_fail_at":  null,
+                        "seconds_since_first_fail":  null,
+                        "notes":  ""
+                    },
+                    {
+                        "path":  "app\\services\\trading\\venue\\coinbase_spot.py",
+                        "abs_path":  "C:\\dev\\chili-home-copilot\\app\\services\\trading\\venue\\coinbase_spot.py",
+                        "verdict":  "OK",
+                        "lines":  1456,
+                        "bytes":  61391,
+                        "sha256":  "7C445D427A425FFBD579569400F3B0FDC52F2CCF2E18EA2F5B3F6F90F572CCEA",
+                        "parse_exit":  0,
+                        "parse_stderr":  "",
+                        "marker_present":  false,
+                        "first_fail_at":  null,
+                        "seconds_since_first_fail":  null,
+                        "notes":  ""
+                    },
+                    {
+                        "path":  "app\\services\\trading\\bracket_writer_g2.py",
+                        "abs_path":  "C:\\dev\\chili-home-copilot\\app\\services\\trading\\bracket_writer_g2.py",
+                        "verdict":  "OK",
+                        "lines":  1798,
+                        "bytes":  77880,
+                        "sha256":  "4C267438A74199CA705CE23148FFAEE1E68B9F5F8870BF25D1E34BF2B393C260",
+                        "parse_exit":  0,
+                        "parse_stderr":  "",
+                        "marker_present":  false,
+                        "first_fail_at":  null,
+                        "seconds_since_first_fail":  null,
+                        "notes":  ""
+                    }
+                ]
+}
