@@ -3,32 +3,69 @@
 > **Type:** Architect proposal (READ-ONLY analysis + multi-phase implementation plan)
 > **Priority:** P0 — the brain has gone from ~31 promoted patterns (pre-2026-04-27 audit) down to 3, and only one of them (585) is the actual workhorse. Live alert volume is concentrated on a single pattern. Promotion drought is the binding constraint on autonomous trading.
 > **Scope:** Diagnose the drought, redesign the CPCV promotion gate with dynamic / data-driven thresholds, activate composite quality scoring as an event-driven node, and fix the backtest pipeline staleness the UI runtime tab is surfacing.
-> **Status:** QUEUED — operator review pending.
+> **Status:** Phases 0 and 1a SHIPPED. Phase 1b in flight (CC session running). Phase 1c queued. Phases 2-4 still queued.
+> **Last updated:** 2026-05-11 (post Phase 1a — corrected diagnosis below).
 
-## TL;DR
+## TL;DR (updated 2026-05-11 after Phase 1a)
 
-**The drought is not a threshold problem.** I went into this expecting to tune
-CPCV thresholds (DSR ≥ 0.95, PBO ≤ 0.2, median_sharpe ≥ 0.5). Empirical probe
-of the 39 patterns that *do* have CPCV data shows DSR pegged at 1.000 and PBO
-pegged at 0.000 across every percentile — these thresholds are not gating
-anyone. The real bottleneck is upstream: of 586 active patterns, **547 have
-NULL `cpcv_n_paths`** — the CPCV gate has never produced a verdict for them.
+**The drought is an event-routing bug, not a threshold problem and not a
+dispatcher-silence problem.** My initial diagnosis (Phase 0) said the dispatcher
+was silent — that was wrong. Phase 0's grep used `brain_work:dispatch` (colon)
+but the dispatcher's `LOG_PREFIX` is `[brain_work_dispatch]` (underscore). The
+dispatcher has been running normally on a 25–90 min cadence the whole time.
 
-The proposal is therefore in two pieces:
+Phase 1a (`docs/AUDITS/2026-05-11_dispatcher_silence.md`) found the actual
+defect: **`enqueue_outcome_event` (`ledger.py:103`) writes `event_kind='outcome',
+status='done', processed_at=now()` in a single INSERT, but `claim_work_batch`
+(`ledger.py:184`) filters `event_kind='work' AND status IN ('pending','retry_wait')`**.
+Rows enqueued via the outcome helper are born terminal and can never be
+claimed. 7 of 9 handler-targeted event types route through this path:
 
-1. **Restart the funnel.** Backfill cpcv_gate evaluations for the 314 patterns
-   that have ≥ 30 PTR rows (the gate's existing minimum), and identify why the
-   handler is not firing on `backtest_completed` for them today.
-2. **Replace the hardcoded gate thresholds with data-driven, sample-size-aware
-   ones** that adapt to the empirical distribution of the active pattern pool
-   and never veto on a single magic number. Wire **composite quality score** as
-   an event-driven node that updates on `pattern_stats_updated` /
-   `backtest_completed` rather than a once-per-cycle batch.
+| event_type                  | historical done rows | dispatched? | target handler        |
+|-----------------------------|---------------------:|:-----------:|-----------------------|
+| `backtest_completed`        | 1,055                | NO          | `cpcv_gate`           |
+| `breakout_alert_resolved`   | 2,659                | NO          | `breakout_outcomes`   |
+| `market_snapshots_batch`    | 179                  | NO          | `regime_ledger`       |
+| `broker_fill_closed`        | 131                  | NO          | `execution_robustness`|
+| `live_trade_closed`         | 4                    | NO          | `live_drift`          |
+| `paper_trade_closed`        | 1                    | NO          | `live_drift`          |
+| `pattern_eligible_promotion`| 0                    | NO          | `promote`             |
+| `backtest_requested`        | 32                   | **YES**     | (dispatcher itself)   |
+| `execution_feedback_digest` | 28                   | **YES**     | various               |
 
-The runtime-tab UI anomaly ("patterns with trades but no recent backtest") is
-the same root cause: PTR rows fall into `trading_pattern_trades` via mining
-backtests, but `scan_patterns.oos_evaluated_at` only gets set when the CPCV
-gate handler completes — and the handler isn't completing for those patterns.
+**~4,000 orphaned events. Nine handlers have never fired against production
+traffic of their target event types.** The cpcv_gate, mine, promote, demote,
+regime_ledger, pattern_stats, breakout_outcomes, live_drift, and
+execution_robustness handlers exist, import cleanly at startup
+(`[handler_verify] OK 6/6`), but nothing has ever called them. That's why
+547 of 586 patterns have NULL `cpcv_n_paths`.
+
+The CPCV threshold issue still exists — for the 39 patterns that DO have data,
+DSR is pegged at 1.000 and PBO at 0.000 across every percentile, so the
+hardcoded thresholds (DSR ≥ 0.95, PBO ≤ 0.2, median_sharpe ≥ 0.5) admit
+everything that reaches them. But fixing thresholds doesn't matter until the
+handler runs in the first place.
+
+The proposal is now in three pieces (was two):
+
+1. **Phase 1b — Architectural fix to the event queue.** Unify outcome and
+   work event semantics so handlers actually fire. Behind a feature flag,
+   reversible, byte-identical at flag-off. Ships before any backfill.
+2. **Phase 1c — Controlled backfill of the 4,000 historical orphans.**
+   Operator-rate-limited, per-event-type, kill switch. Ships only after
+   Phase 1b is stable for 24h in prod.
+3. **Phase 2 — Replace hardcoded gate thresholds with empirical,
+   sample-size-aware ones** (Bayesian shrinkage + lower-CI percentiles +
+   Pareto frontier multi-objective + portfolio marginal-Sharpe lift). Wire
+   composite quality score as event-driven on `pattern_stats_updated` /
+   `backtest_completed`. Ships in parallel with Phase 1c once Phase 1b prod
+   flip is clean.
+
+The runtime-tab UI anomaly ("patterns with trades but no recent backtest")
+has the same root cause: PTR rows fall into `trading_pattern_trades` via
+mining backtests, but `scan_patterns.oos_evaluated_at` only gets set when
+the CPCV gate handler completes — and the handler never completes because
+`backtest_completed` events are born terminal.
 
 ---
 
@@ -159,60 +196,168 @@ also down to a small effective working set.
 
 ## Architecture proposal
 
-### Phase 0 — Diagnose the silent CPCV gate (READ-ONLY, ~2h)
+### Phase 0 — Diagnose the silent CPCV gate (READ-ONLY) — **SHIPPED commit `738a72d`**
 
-Before any threshold redesign, prove or disprove the handler-coverage
-hypothesis. Three concrete artifacts:
+Read-only audit: 50 of the 275 candidate patterns sampled, classified by
+where the funnel breaks. Memo at `docs/AUDITS/2026-05-11_cpcv_gate_coverage.md`.
 
-1. **Audit script** `scripts/audit-cpcv-gate-coverage.ps1` that, for each
-   pattern with PTR ≥ 30 but `cpcv_n_paths IS NULL`, looks up the last
-   `backtest_completed` event in `brain_work_events` and reports:
-   - event payload (`scan_pattern_id`, `parent_event_id`)
-   - whether the cpcv_gate handler logged a verdict (search `[brain_work:cpcv_gate]` for that event id)
-   - last `[handler_verify] OK` line (handlers reload weekly)
+Initial finding: 100% of audited patterns had no `[brain_work:cpcv_gate]`
+log line; conclusion was the dispatcher was silent. **That conclusion turned
+out to be wrong** (see Phase 1a below) — but the audit also surfaced a
+second-order finding that stood up: the ensemble pre-gate inside
+`check_promotion_ready` (`mining_validation.py:341`) short-circuits BEFORE
+CPCV runs for high-trade-count patterns, leaving `cpcv_n_paths` NULL even
+when the handler would have been reached. Two force-eval samples (731 with
+13,696 PTR rows; 1212 with 7,095) confirmed `detail.blocked='ensemble_failed'`
+and `scan_pattern_patch={}`.
 
-2. **Per-pattern force-evaluate** path so the operator can pick a single
-   pattern (e.g. 731) and trigger the cpcv_gate handler against it
-   synchronously via a brain-worker shell. Used to confirm the gate
-   *would* produce a verdict if it were reached.
+Phase 0 cost: 1 brief, 2 audit scripts, 1 memo, 1 CC_REPORT. Zero code
+changes.
 
-3. **Phase 2 handler queue depth** — count distinct
-   `(event_type, scan_pattern_id)` pairs where no downstream handler log
-   exists within 60s. This tells us whether events are dropping on the floor
-   or never being emitted in the first place.
+### Phase 1a — Find the real dispatcher state — **SHIPPED commit `4c1e46e`**
 
-Output: a one-page "where the funnel breaks" memo + the audit script,
-committed under `docs/AUDITS/2026-05-11_cpcv_gate_coverage.md`. **No code
-changes** in this phase — diagnostic only.
+Read-only follow-up because Phase 0's "dispatcher silent" conclusion didn't
+match other evidence (handlers imported clean at startup; 205 events/24h
+marked `done`). Tested six hypotheses (H1–H6). Memo at
+`docs/AUDITS/2026-05-11_dispatcher_silence.md`.
 
-### Phase 1 — Backfill the 275 missing CPCV verdicts (controlled, idempotent)
+Verdicts:
+- **H1 (dispatcher not running):** RULED OUT. Five dispatch rounds in the
+  current 4.5h uptime, on the expected 25–90 min cadence.
+- **H2 (logger filtered):** CONFIRMED as the cause of Phase 0's grep
+  artifact (`dispatcher.py:25` uses `LOG_PREFIX = "[brain_work_dispatch]"`
+  with underscore; Phase 0 grepped colon). RULED OUT as the cause of
+  handler silence — handler prefixes are correctly colon-formed, and they
+  still produced zero log lines because the handlers genuinely never run.
+- **H3 (ledger flag off):** RULED OUT. `brain_work_ledger_enabled=True`,
+  batch sizes sane.
+- **H4 (legacy `run_learning_cycle` writing):** RULED OUT.
+  `learning.py` doesn't touch `brain_work_events` at all.
+- **H5 (`backtest_queue_worker.py` self-marking):** CONFIRMED with
+  precision — the actual rogue writer is one level deeper:
+  **`app/services/trading/brain_work/ledger.py:103`**, inside
+  `enqueue_outcome_event` (lines 72–113). It INSERTs with
+  `event_kind='outcome'`, `status='done'`, `processed_at=now()` —
+  the row is born terminal.
+- **H6 (different handler / different prefix):** RULED OUT. Zero handler
+  log lines across all six worker containers.
 
-Once Phase 0 confirms the hypothesis, the fix is mechanical: for each pattern
-with ≥ 30 PTR rows and NULL cpcv_n_paths, enqueue a synthetic
-`backtest_completed` event whose payload references the pattern, so the
-existing `cpcv_gate.handler_backtest_completed` runs.
+The architectural defect: `claim_work_batch` (`ledger.py:184`) filters
+`event_kind='work' AND status IN ('pending','retry_wait')`. The seven
+emitters in `emitters.py` that produce handler-targeted outcome events all
+route through `enqueue_outcome_event`, so their rows can never be claimed.
 
-Safety properties:
-- **Idempotent** — re-running re-evaluates with current PTR data; the gate
-  handler's `lifecycle_stage NOT IN ('promoted','retired')` guard prevents
-  re-litigating decided patterns.
-- **Rate-limited** — one batch of N (config) per minute, so we don't stampede
-  the brain-worker.
-- **Audit-logged** — every synthetic event tagged
-  `source='cpcv_backfill_2026_05_11'` in payload for later analysis.
-- **No autotrader side effects** — handler #3 (`promote.handler`) requires
-  `chili_cohort_promote_enabled` AND the existing CPCV gate-pass flag. As
-  long as the cohort flag stays OFF, backfill cannot place a trade. Only
-  surfaces *eligibility*.
+Phase 1a cost: 1 brief, 1 audit script, 1 memo, 1 CC_REPORT. Zero code
+changes.
 
-Operator decision gate after Phase 1: how many of the 275 actually pass the
-gate? That number drives whether we ramp `chili_cohort_promote_enabled` on,
-or whether the gate itself needs redesign first (Phase 2).
+### Phase 1b — Architectural fix: unify the event queue — **IN FLIGHT (CC session running 2026-05-11)**
+
+Behind feature flag `chili_brain_outcome_claimable_enabled` (default False,
+reversible):
+
+1. **`enqueue_outcome_event`** writes `status='pending'`, `processed_at=NULL`
+   when flag True. `event_kind='outcome'` is preserved as a tag (audit
+   semantics intact).
+2. **`claim_work_batch`** drops the `event_kind='work'` filter when flag
+   True. Both kinds become claimable through the same lifecycle
+   (`pending → in_progress → done`).
+3. **Partial index** `ix_brain_work_events_claim_v2` on
+   `(domain, event_type, status, scheduled_at) WHERE status IN ('pending','retry_wait')`
+   added proactively so the broadened claim path doesn't hot-spot.
+4. **Handler idempotency test suite** — each of the 9 handlers called
+   twice with the same event payload, no duplicate side-effects. Hard
+   gate for Phase 1c.
+5. **Consult gate** for operator: when the dispatcher processes an
+   outcome event, should `processed_at` reflect handler-completion time
+   (Option 1, recommended) or stay at the original outcome timestamp
+   (Option 2)?
+
+Default OFF at merge. Operator-controlled rollout via `trading_settings`.
+
+Brief: `docs/STRATEGY/QUEUED/f-brain-event-kind-unify.md`.
+
+### Phase 1c — Controlled backfill of the 4,000 historical orphans — **QUEUED**
+
+Hard prereq: Phase 1b shipped, flag True in prod, 24h of clean handler
+activity observed.
+
+The Phase 1b flag does NOT touch historical rows — legacy `status='done'`
+keeps them ineligible to claim. Phase 1c is the controlled mechanism to
+bring them forward.
+
+Per-event-type, operator-rate-limited, kill switch. Recommended order
+(smallest blast radius first):
+1. `paper_trade_closed` (1 row) — smoke test
+2. `live_trade_closed` (4 rows) — confidence builder
+3. `market_snapshots_batch` (179 rows) — populates regime_ledger baseline
+   for Phase 2's adaptive gate
+4. `broker_fill_closed` (131 rows) — post-hoc execution audit
+5. `backtest_completed` (1,055 rows) — **the actual drought relief**
+6. `breakout_alert_resolved` (2,659 rows) — largest; last
+
+The cpcv_gate handler's lifecycle guard
+(`lifecycle_stage NOT IN ('promoted','retired')`) prevents
+re-litigating decided patterns. Inter-batch sleep of 30s prevents
+monopolizing the dispatcher.
+
+Brief: `docs/STRATEGY/QUEUED/f-brain-event-kind-backfill.md`.
+
+Operator decision gate after Phase 1c: how many of the 1,055 backfilled
+`backtest_completed` events produce a CPCV verdict, how many short-circuit
+at the ensemble pre-gate, and how many reach `pattern_eligible_promotion`?
+Those numbers calibrate Phase 2's adaptive thresholds against the *real*
+empirical distribution of the active pool, not the 39-pattern sample we
+have now.
+
+**Expected pattern emergence (post Phase 1c, before Phase 2 ships):**
+
+Realistic estimate: 5–30 new patterns reach `promoted` lifecycle over the
+first 24–48h after Phase 1c lands. Quality protection in that interim
+window comes from three layers that are unaffected by the CPCV defect:
+- **Ensemble pre-gate** (`mining_validation.py:341`) — proven to reject
+  high-trade-count patterns in Phase 0 force-eval.
+- **Realized-EV gate** — `avg_return_pct > 0 AND win_rate > 0 AND
+  trade_count >= 5` filters before CPCV.
+- **Autotrader gate stack** — rule gate, LLM revalidation, drawdown
+  breaker, regime gate, PDT, cost-aware sizing, kill switch. Promotion
+  ≠ trading; each new alert still has to clear these.
+
+Caveat: with CPCV's hardcoded thresholds pegged at admit-all (DSR=1.000,
+PBO=0.000 across all 39 patterns that have data), the new promotions
+clear a gate that has zero discriminatory power. The downstream layers
+catch bad ones, but the *brain's* promotion gate is doing rubber-stamping,
+not gating. **Phase 2 should not lag Phase 1c by more than a few days.**
 
 ### Phase 2 — Replace hardcoded thresholds with empirical, sample-size-aware ones
 
 This is the operator's "make it dynamic, adaptive, still profitable" ask.
-Concrete redesign:
+The honest framing: Phase 2 doesn't eliminate ALL numbers — it eliminates
+**arbitrary** numbers (the kind that bug us) and replaces them with
+**operator-policy** numbers (the kind that have semantic meaning).
+
+**Numbers that go away (arbitrary, no project-specific justification):**
+```python
+dsr      >= 0.95     # promotion_gate.py:903 — Lopez de Prado convention, inherited
+pbo      <=  0.2     # promotion_gate.py:909 — same
+med_sh   >=  0.5     # promotion_gate.py:921 — same
+n_paths  >= 20       # paths_provisional_min — inherited
+min_trades >= 30     # full_confidence_min — inherited
+```
+
+**Numbers that remain (operator policy, genuinely meaningful):**
+```python
+chili_cpcv_target_promotion_pool_pct  = 0.05   # "I want top ~5% of patterns live"
+chili_cpcv_ci_level                   = 0.90   # "I want 90% confidence in lower-bound"
+chili_portfolio_marginal_sharpe_min_bps = 0.0  # "any positive marginal contribution admits"
+```
+
+These express risk appetite and statistical strength. They could be
+defaulted to standard conventions or tuned to express explicit
+preferences. The math (Bayesian shrinkage, empirical percentile, Pareto
+frontier) is computed from the active pool's distribution, so the gate
+adapts as the pattern population evolves.
+
+**Concrete redesign:**
 
 **Current (hardcoded magic numbers):**
 ```python
@@ -356,14 +501,16 @@ mining is undercapacity.
 
 ---
 
-## Sequencing & operator decision points
+## Sequencing & operator decision points (updated 2026-05-11)
 
 ```
-Phase 0 (diag, ~2h)             → operator green-lights Phase 1
-Phase 1 (backfill, ~1d)         → operator reviews "how many passed?"; green-lights Phase 2 if drought relieves
-Phase 2 (adaptive gate, ~3d)    → shadow-log 7d; operator reviews; flip
-Phase 3 (composite event-driven, ~2d) → backfill + handler + cohort flag flip
-Phase 4 (UI surfacing, ~1d)
+Phase 0  diagnose CPCV gate coverage         SHIPPED commit 738a72d
+Phase 1a find real dispatcher state          SHIPPED commit 4c1e46e
+Phase 1b architectural fix (event-kind unify)  IN FLIGHT (CC session running)
+Phase 1c controlled backfill of 4000 orphans QUEUED — gated on 1b stable 24h
+Phase 2  adaptive CPCV gate                  QUEUED — parallel with 1c
+Phase 3  composite quality as event-driven   QUEUED
+Phase 4  UI runtime-tab staleness fix        QUEUED
 ```
 
 Each phase is a separate `f-*` brief promoted through the normal Cowork /
@@ -376,12 +523,42 @@ Claude Code loop. This file is the architect rationale that anchors them.
    dilutes portfolio attention and complicates the regime gate.
 2. **Acceptable CI level.** Phase 2 uses 90% CI by default. Higher (95%) →
    stricter promotion → smaller pool. Lower (80%) → looser → larger pool.
-3. **PortfolioSharpe gate.** Phase 2's portfolio risk-budget step is the
-   most aggressive piece. Operator may want it OFF for first iteration —
-   it adds a coupling between pattern promotions that the rest of the
-   brain doesn't currently model.
+3. **Portfolio risk-budget gate.** Phase 2's portfolio marginal-Sharpe step
+   is the most aggressive piece. Operator may want it OFF for first
+   iteration — it adds a coupling between pattern promotions that the
+   rest of the brain doesn't currently model.
+4. **Phase 1b consult: `processed_at` semantics.** When the dispatcher
+   processes an outcome event under the unified queue, should
+   `processed_at` reflect handler-completion time (Option 1, recommended;
+   gives latency-of-reaction observability) or stay at the original
+   outcome timestamp (Option 2; preserves the "instant terminal" semantic
+   of legacy rows)?
+
+## Optional follow-ups Phase 1a surfaced
+
+- **Normalize the dispatcher LOG_PREFIX.** `dispatcher.py:25` uses
+  `[brain_work_dispatch]` (underscore); every handler uses
+  `[brain_work:<name>]` (colon). The inconsistency caused Phase 0's grep
+  mismatch. One-line cleanup. Defer until Phase 1b lands so the diff stays
+  isolated.
+- **Outcome vs work as a TAG, not a queue split.** With Phase 1b shipped,
+  `event_kind` becomes pure metadata. The dispatcher's
+  `_dispatch_limits` iteration shouldn't gate on it. Worth documenting
+  in the runbook so future contributors don't reintroduce the split.
+- **`breakout_alert_resolved` evidence path.** 2,659 historical events
+  imply a massive missed-evidence opportunity. The
+  `breakout_outcomes` handler aggregates this into the secondary-evidence
+  scoring path. Worth a separate "what did we learn?" memo after Phase 1c
+  drains the backlog through it.
 
 ---
 
-*Author: Cowork (algo-trader architect hat), 2026-05-11.*
+*Author: Cowork (algo-trader architect hat).*
+*First written 2026-05-11. Updated 2026-05-11 after Phase 1a corrected
+the diagnosis.*
 *Probes:* `dispatch-promotion-drought-probe`, `dispatch-drought-probe-{2..6}`.
+*Phase 0 evidence:* `docs/AUDITS/2026-05-11_cpcv_gate_coverage.md`,
+`scripts/audit-cpcv-gate-coverage-out.txt`,
+`scripts/audit-cpcv-gate-force-eval-{731,1212}-out.txt`.
+*Phase 1a evidence:* `docs/AUDITS/2026-05-11_dispatcher_silence.md`,
+`scripts/audit-dispatcher-silence-out.txt`.
