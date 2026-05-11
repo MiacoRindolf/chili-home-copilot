@@ -1,6 +1,6 @@
 # NEXT_TASK: f-cpcv-gate-dispatcher-silence-audit
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 

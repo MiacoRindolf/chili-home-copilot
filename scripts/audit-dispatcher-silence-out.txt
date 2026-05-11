@@ -1,0 +1,244 @@
+﻿audit-dispatcher-silence  2026-05-11T08:41:19Z
+host=DESKTOP-CQBI9ST  user=rindo
+
+========================================================================
+H1 -- Is run_brain_work_dispatch_round running at all?
+========================================================================
+
+Brain-worker container state:
+  2026-05-11T11:08:53.522153546Z status=running
+
+Dispatcher log lines (since worker boot, both prefix variants):
+  total matching lines = 10
+  --- first 3 ---
+    2026-05-11 11:34:59,040 [INFO] [brain_work_dispatch] dispatch_market_snapshots emitted daily=999 intra=1868 universe_size=1000
+    2026-05-11 11:34:59,072 [INFO] [brain] work ledger dispatch round processed=0 claimed=0 per_type={'execution_feedback_digest': 0, 'market_snapshots_batch': 0, 'backtest_requested': 0, 'backtest_completed': 0, 'pattern_eligible_promotion': 0, 'live_trade_closed': 0, 'paper_trade_closed': 0, 'broker_fill_closed': 0, 'breakout_alert_resolved': 0} errors=[]
+    2026-05-11 12:00:26,629 [INFO] [brain_work_dispatch] dispatch_market_snapshots emitted daily=997 intra=1876 universe_size=1000
+  --- last 3 ---
+    2026-05-11 13:06:42,077 [INFO] [brain] work ledger dispatch round processed=0 claimed=0 per_type={'execution_feedback_digest': 0, 'market_snapshots_batch': 0, 'backtest_requested': 0, 'backtest_completed': 0, 'pattern_eligible_promotion': 0, 'live_trade_closed': 0, 'paper_trade_closed': 0, 'broker_fill_closed': 0, 'breakout_alert_resolved': 0} errors=[]
+    2026-05-11 14:24:27,587 [INFO] [brain_work_dispatch] dispatch_market_snapshots emitted daily=999 intra=1872 universe_size=1000
+    2026-05-11 14:24:27,598 [INFO] [brain] work ledger dispatch round processed=0 claimed=0 per_type={'execution_feedback_digest': 0, 'market_snapshots_batch': 0, 'backtest_requested': 0, 'backtest_completed': 0, 'pattern_eligible_promotion': 0, 'live_trade_closed': 0, 'paper_trade_closed': 0, 'broker_fill_closed': 0, 'breakout_alert_resolved': 0} errors=[]
+
+Bootstrap call sites for run_brain_work_dispatch_round / run_brain_work_batch:
+  brain_worker.py:1082: def _maybe_run_brain_work_batch() -> None:
+  brain_worker.py:1090: summary = run_brain_work_batch(db, user_id=_uid)
+  brain_worker.py:1308: _maybe_run_brain_work_batch()
+  brain_worker.py:1591: _maybe_run_brain_work_batch()
+  brain_worker.py:1681: _maybe_run_brain_work_batch()
+
+========================================================================
+H2 -- Logger filtered? Prefix mismatch?
+========================================================================
+
+Per-module LOG_PREFIX values (grepped):
+  dispatcher.py: LOG_PREFIX = "[brain_work_dispatch]"
+  ledger.py: LOG_PREFIX = "[brain_work_ledger]"
+  breakout_outcomes.py: LOG_PREFIX = "[brain_work:breakout_outcomes]"
+  cpcv_gate.py: LOG_PREFIX = "[brain_work:cpcv_gate]"
+  demote.py: LOG_PREFIX = "[brain_work:demote]"
+  execution_robustness.py: LOG_PREFIX = "[brain_work:execution_robustness]"
+  live_drift.py: LOG_PREFIX = "[brain_work:live_drift]"
+  mine.py: LOG_PREFIX = "[brain_work:mine]"
+  pattern_stats.py: LOG_PREFIX = "[brain_work:pattern_stats]"
+  promote.py: LOG_PREFIX = "[brain_work:promote]"
+  regime_ledger.py: LOG_PREFIX = "[brain_work:regime_ledger]"
+
+Observation: dispatcher LOG_PREFIX = "[brain_work_dispatch]" (UNDERSCORE)
+while every handler uses "[brain_work:<name>]" (COLON).
+Phase 0 audit grepped "brain_work:dispatch" -- the wrong separator.
+
+Recount with underscore variant:
+  grep 'brain_work_dispatch' (underscore)  -> 5
+  grep 'brain_work:dispatch' (colon, Ph0)  -> 0
+
+========================================================================
+H3 -- brain_work_ledger_enabled() False?
+========================================================================
+
+  brain_work_ledger_enabled_setting=True
+  brain_work_ledger_enabled_call=True
+  brain_work_dispatch_batch_size=8
+  brain_work_cpcv_gate_batch_size=8
+
+========================================================================
+H4 -- learning.py marking events done directly?
+========================================================================
+
+Searching app/services/trading/learning.py for BrainWorkEvent / brain_work_events refs:
+  (no matches -- learning.py does not touch brain_work_events)
+
+Repository-wide BrainWorkEvent / brain_work_events references (app/ only):
+  __init__.py: 4 hit(s)
+  dispatcher.py: 1 hit(s)
+  ledger.py: 58 hit(s)
+  migrations.py: 19 hit(s)
+  trading.py: 3 hit(s)
+
+========================================================================
+H5 -- backtest_queue_worker emitting done directly?
+========================================================================
+
+Direct writes of brain_work_events.status outside ledger.py:
+  (none -- only ledger.py touches brain_work_events.status)
+
+enqueue_outcome_event INSERT writing status="done" directly (ledger.py):
+  ledger.py:L103: status="done",
+
+Callers of enqueue_outcome_event / emit_backtest_completed_outcome:
+  backtest_queue_worker.py:L201: from .brain_work.emitters import emit_backtest_completed_outcome
+  backtest_queue_worker.py:L202: emit_backtest_completed_outcome(
+  dispatcher.py:L17: enqueue_outcome_event,
+  dispatcher.py:L80: enqueue_outcome_event(
+  emitters.py:L10: from .ledger import enqueue_outcome_event, enqueue_work_event
+  emitters.py:L57: return enqueue_outcome_event(
+  emitters.py:L80: return enqueue_outcome_event(
+  emitters.py:L105: return enqueue_outcome_event(
+  emitters.py:L131: return enqueue_outcome_event(
+  emitters.py:L166: return enqueue_outcome_event(
+  emitters.py:L195: return enqueue_outcome_event(
+  emitters.py:L209: def emit_backtest_completed_outcome(
+  emitters.py:L246: return enqueue_outcome_event(
+  emitters.py:L278: return enqueue_outcome_event(
+  ledger.py:L72: def enqueue_outcome_event(
+  __init__.py:L6: enqueue_outcome_event,
+  __init__.py:L13: "enqueue_outcome_event",
+  cpcv_gate.py:L144: from ..emitters import enqueue_outcome_event
+  cpcv_gate.py:L149: enqueue_outcome_event(
+  mine.py:L51: from ..ledger import enqueue_outcome_event  # noqa: F401  (planned: emit pattern_added)
+
+DB evidence -- backtest_completed event_kind distribution (full history):
+  backtest_completed|outcome|done|1055|2026-04-18 23:16:33.035814|2026-05-11 15:33:35.768813
+
+DB evidence -- recent backtest_completed rows (last 24h, 5 most recent):
+  4258|backtest_completed|outcome|done|2026-05-11 15:33:35.768813|2026-05-11 15:33:35.768285||0|649
+  4237|backtest_completed|outcome|done|2026-05-11 15:08:43.330162|2026-05-11 15:08:43.329744||0|875
+  4234|backtest_completed|outcome|done|2026-05-11 14:42:30.549862|2026-05-11 14:42:30.549515||0|640
+  4232|backtest_completed|outcome|done|2026-05-11 14:23:59.143237|2026-05-11 14:23:59.142866||0|646
+  4211|backtest_completed|outcome|done|2026-05-11 14:07:30.536336|2026-05-11 14:07:30.536029||0|4
+
+========================================================================
+H6 -- Different handler consuming under different prefix?
+========================================================================
+
+Per-container handler log counts (since 24h):
+  brain-worker           brain_work_dispatch                  = 5
+  brain-worker           brain_work:cpcv_gate                 = 0
+  brain-worker           brain_work:mine                      = 0
+  brain-worker           brain_work:promote                   = 0
+  brain-worker           brain_work:demote                    = 0
+  brain-worker           brain_work:regime_ledger             = 0
+  brain-worker           brain_work:pattern_stats             = 0
+  brain-worker           brain_work:breakout_outcomes         = 0
+  brain-worker           brain_work:live_drift                = 0
+  brain-worker           brain_work:execution_robustness      = 0
+  scheduler-worker       brain_work_dispatch                  = 0
+  scheduler-worker       brain_work:cpcv_gate                 = 0
+  scheduler-worker       brain_work:mine                      = 0
+  scheduler-worker       brain_work:promote                   = 0
+  scheduler-worker       brain_work:demote                    = 0
+  scheduler-worker       brain_work:regime_ledger             = 0
+  scheduler-worker       brain_work:pattern_stats             = 0
+  scheduler-worker       brain_work:breakout_outcomes         = 0
+  scheduler-worker       brain_work:live_drift                = 0
+  scheduler-worker       brain_work:execution_robustness      = 0
+  autotrader-worker      brain_work_dispatch                  = 0
+  autotrader-worker      brain_work:cpcv_gate                 = 0
+  autotrader-worker      brain_work:mine                      = 0
+  autotrader-worker      brain_work:promote                   = 0
+  autotrader-worker      brain_work:demote                    = 0
+  autotrader-worker      brain_work:regime_ledger             = 0
+  autotrader-worker      brain_work:pattern_stats             = 0
+  autotrader-worker      brain_work:breakout_outcomes         = 0
+  autotrader-worker      brain_work:live_drift                = 0
+  autotrader-worker      brain_work:execution_robustness      = 0
+  broker-sync-worker     brain_work_dispatch                  = 0
+  broker-sync-worker     brain_work:cpcv_gate                 = 0
+  broker-sync-worker     brain_work:mine                      = 0
+  broker-sync-worker     brain_work:promote                   = 0
+  broker-sync-worker     brain_work:demote                    = 0
+  broker-sync-worker     brain_work:regime_ledger             = 0
+  broker-sync-worker     brain_work:pattern_stats             = 0
+  broker-sync-worker     brain_work:breakout_outcomes         = 0
+  broker-sync-worker     brain_work:live_drift                = 0
+  broker-sync-worker     brain_work:execution_robustness      = 0
+  fast-data-worker       brain_work_dispatch                  = 0
+  fast-data-worker       brain_work:cpcv_gate                 = 0
+  fast-data-worker       brain_work:mine                      = 0
+  fast-data-worker       brain_work:promote                   = 0
+  fast-data-worker       brain_work:demote                    = 0
+  fast-data-worker       brain_work:regime_ledger             = 0
+  fast-data-worker       brain_work:pattern_stats             = 0
+  fast-data-worker       brain_work:breakout_outcomes         = 0
+  fast-data-worker       brain_work:live_drift                = 0
+  fast-data-worker       brain_work:execution_robustness      = 0
+  chili                  brain_work_dispatch                  = 0
+  chili                  brain_work:cpcv_gate                 = 0
+  chili                  brain_work:mine                      = 0
+  chili                  brain_work:promote                   = 0
+  chili                  brain_work:demote                    = 0
+  chili                  brain_work:regime_ledger             = 0
+  chili                  brain_work:pattern_stats             = 0
+  chili                  brain_work:breakout_outcomes         = 0
+  chili                  brain_work:live_drift                = 0
+  chili                  brain_work:execution_robustness      = 0
+
+Registered handler functions in dispatcher.py:
+  L314: elif event_type == "execution_feedback_digest":
+  L316: elif event_type == "market_snapshots_batch":
+  L319: from .handlers.mine import handle_market_snapshots_batch
+  L321: elif event_type == "backtest_completed":
+  L324: from .handlers.cpcv_gate import handle_backtest_completed
+  L326: elif event_type == "pattern_eligible_promotion":
+  L329: from .handlers.promote import handle_pattern_eligible_promotion
+  L345: from .handlers.pattern_stats import (
+  L352: elif event_type == "live_trade_closed":
+  L367: from .handlers.demote import handle_trade_closed
+  L382: from .handlers.live_drift import (
+  L389: elif event_type == "live_trade_closed":
+  L399: from .handlers.execution_robustness import (
+  L406: elif event_type == "live_trade_closed":
+  L417: from .handlers.regime_ledger import handle_trade_closed_for_ledger
+  L430: elif event_type == "breakout_alert_resolved":
+  L434: from .handlers.breakout_outcomes import (
+
+========================================================================
+Per-event-type drain summary (all event_types, 24h)
+========================================================================
+  backtest_completed|outcome|done|201
+  breakout_alert_resolved|outcome|done|323
+  broker_fill_closed|outcome|done|1
+  execution_feedback_digest|work|done|2
+  execution_feedback_digest|work|pending|1
+  execution_quality_updated|outcome|done|2
+  live_trade_closed|outcome|done|2
+  market_snapshots_batch|outcome|done|21
+
+========================================================================
+Per-event-type drain summary (all event_types, ALL TIME)
+========================================================================
+  backtest_completed|outcome|done|1055
+  backtest_requested|work|done|32
+  breakout_alert_resolved|outcome|done|2659
+  broker_fill_closed|outcome|done|131
+  execution_feedback_digest|work|done|28
+  execution_feedback_digest|work|pending|1
+  execution_quality_updated|outcome|done|25
+  live_trade_closed|outcome|done|4
+  market_snapshots_batch|outcome|done|179
+  paper_trade_closed|outcome|done|1
+  promotion_changed|outcome|done|21
+
+========================================================================
+claim_work_batch SQL filter (proves work-only)
+========================================================================
+
+  ledger.py:               AND event_kind = 'work'
+  ledger.py:               AND event_kind = 'work'
+
+========================================================================
+Verdict summary
+========================================================================
+
+See docs/AUDITS/2026-05-11_dispatcher_silence.md for full memo with H1-H6 verdicts.
+
+Audit run complete: 2026-05-11T08:43:46Z
