@@ -491,7 +491,12 @@ class CoinbaseSpotAdapter(VenueAdapter):
             return [], fresh
         try:
             c = self._require_client()
-            kwargs: dict[str, Any] = {"order_status": ["OPEN", "PENDING"], "limit": limit}
+            # f-coinbase-list-open-orders-status-fix (2026-05-10): Coinbase
+            # Advanced Trade rejects multi-status queries with "Cannot pass
+            # multiple statuses with OPEN" (400 INVALID_ARGUMENT). Single
+            # OPEN is what we want for the orphan-adoption + verify paths;
+            # PENDING orders flip to OPEN within seconds of submission.
+            kwargs: dict[str, Any] = {"order_status": ["OPEN"], "limit": limit}
             if product_id:
                 kwargs["product_ids"] = [_to_product_id(product_id)]
             resp = c.list_orders(**kwargs)
