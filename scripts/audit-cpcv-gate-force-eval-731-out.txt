@@ -1,0 +1,38 @@
+﻿# audit-cpcv-gate-force-eval  pid=731  start=2026-05-11T15:19:11.5149972Z
+## docker exec brain-worker python /tmp/audit_force_eval.py
+{
+  "pattern_id": 731,
+  "ok": false,
+  "stage": "done",
+  "found": true,
+  "pattern_name": "Intraday Squeeze + Declining Volume [1m] [BOS-tight]",
+  "lifecycle_stage": "candidate",
+  "promotion_status": "legacy",
+  "pattern_evidence_kind": "realized_pnl",
+  "timeframe": "1m",
+  "ptr_rows_loaded": 13696,
+  "detail_blocked": "ensemble_failed",
+  "detail_keys": [
+    "blocked",
+    "ensemble"
+  ],
+  "cpcv_promotion_gate": {
+    "skipped": null,
+    "reason": null,
+    "cpcv_n_paths": null,
+    "cpcv_median_sharpe": null,
+    "cpcv_median_sharpe_by_regime": null,
+    "deflated_sharpe": null,
+    "pbo": null,
+    "promotion_gate_passed": null,
+    "promotion_gate_reasons": null,
+    "evaluator": null,
+    "n_labeled_samples": null,
+    "n_trades": null,
+    "n_effective_trials": null
+  },
+  "scan_pattern_patch": {},
+  "realized_ev_gate": null
+}
+
+# end  finish=2026-05-11T15:19:18.9250150Z

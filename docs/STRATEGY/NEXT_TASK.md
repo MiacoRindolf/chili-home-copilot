@@ -1,6 +1,6 @@
 # NEXT_TASK: f-cpcv-gate-coverage-audit
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 

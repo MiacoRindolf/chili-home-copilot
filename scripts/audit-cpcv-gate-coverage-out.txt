@@ -1,0 +1,120 @@
+﻿# audit-cpcv-gate-coverage  start=2026-05-11T15:16:18.5895177Z
+## psql exec
+COPY 50
+
+## Candidates examined: 50 (cap=50)
+## Pulling brain-worker logs (last 24h) for handler-log scan
+   brain-worker log line count (24h):   178633
+   [brain_work:cpcv_gate] lines (24h):  0
+   first log line (head):  [docker-entrypoint-chili] CHILI_SCHEDULER_ROLE=unset (non-web command)
+   last  log line (tail):  source=backtest position_id=none ticker=SBUX legacy_action=exit_time_decay canonical_action=exit_time_decay agree=true 
+
+## SUMMARY (50 of 275 candidate patterns audited; cap=50)
+
+| classification                  | count | pct    |
+|---------------------------------|-------|--------|
+| event_missing                   |    26 |    52% |
+| event_pending_or_retry          |     0 |     0% |
+| event_dead                      |     0 |     0% |
+| event_done_but_no_handler_log   |    24 |    48% |
+| handler_logged_but_no_persist   |     0 |     0% |
+| unknown                         |     0 |     0% |
+| TOTAL                           |    50 |   100% |
+
+## TOP 10 EXAMPLES per non-empty bucket
+
+### [event_missing] count=26
+
+pid ptr_rows lifecycle_stage event_id event_status event_attempts event_created_at event_processed_at
+--- -------- --------------- -------- ------------ -------------- ---------------- ------------------
+731    13696 candidate                                                                               
+732    12621 candidate                                                                               
+733     8700 candidate                                                                               
+749     8677 candidate                                                                               
+709     7145 candidate                                                                               
+798     6862 candidate                                                                               
+663     6762 candidate                                                                               
+735     6622 candidate                                                                               
+764     6542 candidate                                                                               
+763     6394 candidate                                                                               
+
+
+
+
+### [event_done_but_no_handler_log] count=24
+
+ pid ptr_rows lifecycle_stage event_id event_status event_attempts event_created_at           event_processed_at        
+ --- -------- --------------- -------- ------------ -------------- ----------------           ------------------        
+1212     7095 candidate       4097     done         0              2026-05-11 10:51:17.883954 2026-05-11 10:51:17.883523
+1213     6717 candidate       4114     done         0              2026-05-11 11:21:43.82037  2026-05-11 11:21:43.819613
+1041     6545 candidate       2992     done         0              2026-05-09 02:37:10.932599 2026-05-09 02:37:10.932142
+ 623     6544 candidate       2897     done         0              2026-05-08 22:32:45.958411 2026-05-08 22:32:45.958168
+ 622     6533 backtested      2908     done         0              2026-05-08 23:38:59.215636 2026-05-08 23:38:59.215396
+1240     6440 candidate       4138     done         0              2026-05-11 12:01:23.768057 2026-05-11 12:01:23.767666
+1042     6217 candidate       2987     done         0              2026-05-09 02:28:40.081001 2026-05-09 02:28:40.080577
+ 533     5982 backtested      2906     done         0              2026-05-08 23:36:31.827913 2026-05-08 23:36:31.8276  
+1234     5704 candidate       4102     done         0              2026-05-11 11:03:36.73365  2026-05-11 11:03:36.73336 
+ 621     5468 candidate       2957     done         0              2026-05-09 01:32:51.74282  2026-05-09 01:32:51.742446
+
+
+
+
+## ALL 50 CLASSIFIED ROWS
+
+ pid ptr_rows classification                event_id event_status event_attempts lifecycle_stage event_last_error
+ --- -------- --------------                -------- ------------ -------------- --------------- ----------------
+ 731    13696 event_missing                                                      candidate                       
+ 732    12621 event_missing                                                      candidate                       
+ 733     8700 event_missing                                                      candidate                       
+ 749     8677 event_missing                                                      candidate                       
+ 709     7145 event_missing                                                      candidate                       
+1212     7095 event_done_but_no_handler_log 4097     done         0              candidate                       
+ 798     6862 event_missing                                                      candidate                       
+ 663     6762 event_missing                                                      candidate                       
+1213     6717 event_done_but_no_handler_log 4114     done         0              candidate                       
+ 735     6622 event_missing                                                      candidate                       
+1041     6545 event_done_but_no_handler_log 2992     done         0              candidate                       
+ 623     6544 event_done_but_no_handler_log 2897     done         0              candidate                       
+ 764     6542 event_missing                                                      candidate                       
+ 622     6533 event_done_but_no_handler_log 2908     done         0              backtested                      
+1240     6440 event_done_but_no_handler_log 4138     done         0              candidate                       
+ 763     6394 event_missing                                                      candidate                       
+1042     6217 event_done_but_no_handler_log 2987     done         0              candidate                       
+1054     5995 event_missing                                                      candidate                       
+ 533     5982 event_done_but_no_handler_log 2906     done         0              backtested                      
+1234     5704 event_done_but_no_handler_log 4102     done         0              candidate                       
+ 978     5555 event_missing                                                      candidate                       
+ 660     5530 event_missing                                                      backtested                      
+1051     5499 event_missing                                                      backtested                      
+ 621     5468 event_done_but_no_handler_log 2957     done         0              candidate                       
+   2     5388 event_missing                                                      candidate                       
+ 765     5319 event_missing                                                      candidate                       
+1207     5264 event_done_but_no_handler_log 4091     done         0              candidate                       
+1226     5262 event_done_but_no_handler_log 4130     done         0              candidate                       
+ 928     5212 event_missing                                                      candidate                       
+ 547     4850 event_done_but_no_handler_log 2896     done         0              backtested                      
+1092     4766 event_done_but_no_handler_log 703      done         0              backtested                      
+ 747     4619 event_missing                                                      candidate                       
+1232     4604 event_done_but_no_handler_log 4170     done         0              candidate                       
+ 748     4603 event_missing                                                      candidate                       
+ 929     4545 event_missing                                                      candidate                       
+1187     4510 event_done_but_no_handler_log 2834     done         0              candidate                       
+1236     4463 event_done_but_no_handler_log 4098     done         0              candidate                       
+1186     4231 event_done_but_no_handler_log 2862     done         0              candidate                       
+ 767     4199 event_missing                                                      candidate                       
+ 795     4191 event_missing                                                      candidate                       
+1188     4109 event_done_but_no_handler_log 2839     done         0              candidate                       
+ 762     4021 event_missing                                                      candidate                       
+1223     4013 event_done_but_no_handler_log 4172     done         0              candidate                       
+1235     3932 event_done_but_no_handler_log 4129     done         0              candidate                       
+1227     3910 event_done_but_no_handler_log 4057     done         0              candidate                       
+ 930     3859 event_missing                                                      candidate                       
+ 797     3801 event_missing                                                      candidate                       
+1171     3789 event_done_but_no_handler_log 2840     done         0              candidate                       
+   3     3782 event_missing                                                      candidate                       
+1170     3777 event_done_but_no_handler_log 2841     done         0              candidate                       
+
+
+
+
+# end  finish=2026-05-11T15:18:25.4095003Z

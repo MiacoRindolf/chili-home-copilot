@@ -1,0 +1,38 @@
+﻿# audit-cpcv-gate-force-eval  pid=1212  start=2026-05-11T15:19:41.7520737Z
+## docker exec brain-worker python /tmp/audit_force_eval.py
+{
+  "pattern_id": 1212,
+  "ok": false,
+  "stage": "done",
+  "found": true,
+  "pattern_name": "Above SMA20 + RSI>50 + ADX>20 (healthy uptrend) [tf-4h]",
+  "lifecycle_stage": "candidate",
+  "promotion_status": "legacy",
+  "pattern_evidence_kind": "realized_pnl",
+  "timeframe": "4h",
+  "ptr_rows_loaded": 7095,
+  "detail_blocked": "ensemble_failed",
+  "detail_keys": [
+    "blocked",
+    "ensemble"
+  ],
+  "cpcv_promotion_gate": {
+    "skipped": null,
+    "reason": null,
+    "cpcv_n_paths": null,
+    "cpcv_median_sharpe": null,
+    "cpcv_median_sharpe_by_regime": null,
+    "deflated_sharpe": null,
+    "pbo": null,
+    "promotion_gate_passed": null,
+    "promotion_gate_reasons": null,
+    "evaluator": null,
+    "n_labeled_samples": null,
+    "n_trades": null,
+    "n_effective_trials": null
+  },
+  "scan_pattern_patch": {},
+  "realized_ev_gate": null
+}
+
+# end  finish=2026-05-11T15:19:47.7023138Z
