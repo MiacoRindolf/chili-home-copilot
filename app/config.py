@@ -254,6 +254,16 @@ class Settings(BaseSettings):
     brain_work_exec_feedback_debounce_seconds: int = 45
     # Emit ``market_snapshots_batch`` outcome when scheduler snapshot job finishes.
     brain_work_snapshots_outcome_enabled: bool = True
+    # Phase 1b of f-adaptive-promotion-architecture (2026-05-11).
+    # When True: enqueue_outcome_event writes status='pending' (claimable)
+    # instead of status='done' (terminal-at-insert); claim_work_batch and
+    # release_stale_leases drop the event_kind='work' filter so outcomes
+    # transit the same lifecycle as work events.
+    # Historical status='done' rows stay ineligible. Default False — merge
+    # produces zero behavior change. Flip via trading_settings.
+    # Brief: docs/STRATEGY/QUEUED/f-brain-event-kind-unify.md
+    # Memo:  docs/AUDITS/2026-05-11_dispatcher_silence.md
+    chili_brain_outcome_claimable_enabled: bool = False
     brain_smart_bt_max_workers: int | None = 28  # max threads per insight ticker pool (None = max(8, cpu*2))
 
     # Brain I/O thread pools: cgroup / CHILI_CONTAINER_CPU_LIMIT aware (see brain_io_concurrency).

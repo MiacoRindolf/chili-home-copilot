@@ -1,6 +1,12 @@
 # NEXT_TASK: f-brain-event-kind-unify
 
-STATUS: PENDING
+STATUS: DONE
+
+Completed 2026-05-11 — see
+`docs/STRATEGY/CC_REPORTS/2026-05-11_brain-event-kind-unify.md` for the
+full report (4 consult-gated deviations applied, 17 tests passing,
+migration 238 landed, flag default-off so merge produces zero behaviour
+change).
 
 ## Goal
 

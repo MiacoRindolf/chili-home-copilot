@@ -78,7 +78,15 @@ def enqueue_outcome_event(
     correlation_id: Optional[str] = None,
     parent_event_id: Optional[int] = None,
 ) -> int | None:
-    """Insert a completed outcome row (audit / UI). Idempotent on dedupe_key for outcomes."""
+    """Insert an outcome row (audit / UI). Idempotent on dedupe_key for outcomes.
+
+    Phase 1b of f-adaptive-promotion-architecture (2026-05-11):
+    When ``settings.chili_brain_outcome_claimable_enabled`` is True, new
+    outcome rows are born as ``status='pending'`` / ``processed_at=NULL``
+    so the unified ``claim_work_batch`` (event_kind-agnostic) can pick
+    them up and run handler logic. Default-off: legacy terminal-at-insert
+    behaviour preserved byte-identical.
+    """
     if not brain_work_ledger_enabled():
         return None
     ex = (
@@ -93,6 +101,14 @@ def enqueue_outcome_event(
         return int(ex[0])
     cid = correlation_id or str(uuid.uuid4())
     now = datetime.utcnow()
+    if getattr(settings, "chili_brain_outcome_claimable_enabled", False):
+        status = "pending"
+        processed_at = None
+        max_attempts = int(getattr(settings, "brain_work_max_attempts_default", 5))
+    else:
+        status = "done"
+        processed_at = now
+        max_attempts = 0
     ev = BrainWorkEvent(
         domain="trading",
         event_type=event_type,
@@ -100,13 +116,13 @@ def enqueue_outcome_event(
         payload=dict(payload or {}),
         dedupe_key=dedupe_key,
         lease_scope="general",
-        status="done",
+        status=status,
         attempts=0,
-        max_attempts=0,
+        max_attempts=max_attempts,
         next_run_at=now,
         correlation_id=cid,
         parent_event_id=parent_event_id,
-        processed_at=now,
+        processed_at=processed_at,
     )
     db.add(ev)
     db.flush()
@@ -157,6 +173,57 @@ def enqueue_or_refresh_debounced_work(
     )
 
 
+_CLAIM_SQL_WORK_ONLY = text(
+    """
+    UPDATE brain_work_events AS w
+    SET status = 'processing',
+        lease_holder = :holder,
+        lease_expires_at = :lease_until,
+        attempts = w.attempts + 1,
+        updated_at = CURRENT_TIMESTAMP
+    FROM (
+        SELECT id FROM brain_work_events
+        WHERE domain = 'trading'
+          AND event_kind = 'work'
+          AND event_type = :etype
+          AND status IN ('pending', 'retry_wait')
+          AND next_run_at <= CURRENT_TIMESTAMP
+        ORDER BY created_at ASC
+        LIMIT :lim
+        FOR UPDATE SKIP LOCKED
+    ) AS sub
+    WHERE w.id = sub.id
+    RETURNING w.id
+    """
+)
+
+# Phase 1b of f-adaptive-promotion-architecture (2026-05-11): broadens
+# the claim path so ``event_kind='outcome'`` rows born as pending are
+# eligible too. Activated by chili_brain_outcome_claimable_enabled.
+_CLAIM_SQL_ANY_KIND = text(
+    """
+    UPDATE brain_work_events AS w
+    SET status = 'processing',
+        lease_holder = :holder,
+        lease_expires_at = :lease_until,
+        attempts = w.attempts + 1,
+        updated_at = CURRENT_TIMESTAMP
+    FROM (
+        SELECT id FROM brain_work_events
+        WHERE domain = 'trading'
+          AND event_type = :etype
+          AND status IN ('pending', 'retry_wait')
+          AND next_run_at <= CURRENT_TIMESTAMP
+        ORDER BY created_at ASC
+        LIMIT :lim
+        FOR UPDATE SKIP LOCKED
+    ) AS sub
+    WHERE w.id = sub.id
+    RETURNING w.id
+    """
+)
+
+
 def claim_work_batch(
     db: Session,
     *,
@@ -169,29 +236,10 @@ def claim_work_batch(
     if limit <= 0:
         return []
     lease_until = datetime.utcnow() + timedelta(seconds=max(5, lease_seconds))
-    sql = text(
-        """
-        UPDATE brain_work_events AS w
-        SET status = 'processing',
-            lease_holder = :holder,
-            lease_expires_at = :lease_until,
-            attempts = w.attempts + 1,
-            updated_at = CURRENT_TIMESTAMP
-        FROM (
-            SELECT id FROM brain_work_events
-            WHERE domain = 'trading'
-              AND event_kind = 'work'
-              AND event_type = :etype
-              AND status IN ('pending', 'retry_wait')
-              AND next_run_at <= CURRENT_TIMESTAMP
-            ORDER BY created_at ASC
-            LIMIT :lim
-            FOR UPDATE SKIP LOCKED
-        ) AS sub
-        WHERE w.id = sub.id
-        RETURNING w.id
-        """
-    )
+    if getattr(settings, "chili_brain_outcome_claimable_enabled", False):
+        sql = _CLAIM_SQL_ANY_KIND
+    else:
+        sql = _CLAIM_SQL_WORK_ONLY
     ids = [
         r[0]
         for r in db.execute(
@@ -209,25 +257,49 @@ def claim_work_batch(
     )
 
 
+_RELEASE_STALE_SQL_WORK_ONLY = text(
+    """
+    UPDATE brain_work_events
+    SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'retry_wait' END,
+        lease_holder = NULL,
+        lease_expires_at = NULL,
+        next_run_at = CURRENT_TIMESTAMP,
+        processed_at = CASE WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP ELSE processed_at END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'processing'
+      AND event_kind = 'work'
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at < CURRENT_TIMESTAMP
+    """
+)
+
+# Phase 1b of f-adaptive-promotion-architecture (2026-05-11): symmetric
+# with the flag-on claim path. Without this, outcome rows claimed under
+# the broadened path could strand in 'processing' if the lease expires
+# (handler hang / container restart). Flag-off: byte-identical.
+_RELEASE_STALE_SQL_ANY_KIND = text(
+    """
+    UPDATE brain_work_events
+    SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'retry_wait' END,
+        lease_holder = NULL,
+        lease_expires_at = NULL,
+        next_run_at = CURRENT_TIMESTAMP,
+        processed_at = CASE WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP ELSE processed_at END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'processing'
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at < CURRENT_TIMESTAMP
+    """
+)
+
+
 def release_stale_leases(db: Session) -> int:
     """Reset expired processing leases to retry_wait or dead."""
-    r = db.execute(
-        text(
-            """
-            UPDATE brain_work_events
-            SET status = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'retry_wait' END,
-                lease_holder = NULL,
-                lease_expires_at = NULL,
-                next_run_at = CURRENT_TIMESTAMP,
-                processed_at = CASE WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP ELSE processed_at END,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE status = 'processing'
-              AND event_kind = 'work'
-              AND lease_expires_at IS NOT NULL
-              AND lease_expires_at < CURRENT_TIMESTAMP
-            """
-        )
-    )
+    if getattr(settings, "chili_brain_outcome_claimable_enabled", False):
+        sql = _RELEASE_STALE_SQL_ANY_KIND
+    else:
+        sql = _RELEASE_STALE_SQL_WORK_ONLY
+    r = db.execute(sql)
     db.flush()
     return int(r.rowcount or 0)
 

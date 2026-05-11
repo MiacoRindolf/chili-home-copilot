@@ -15746,6 +15746,37 @@ def _migration_237_scan_pattern_quality_composite_score(conn) -> None:
         conn.rollback()
 
 
+def _migration_238_brain_work_events_claim_v2_index(conn) -> None:
+    """Phase 1b of f-adaptive-promotion-architecture (2026-05-11).
+
+    Partial index for the broadened claim path
+    (``chili_brain_outcome_claimable_enabled=True``). The existing
+    ``ix_brain_work_events_domain_status_next`` still serves the
+    work-only claim path; this one indexes the columns used by the
+    event_kind-agnostic claim SQL so the flag-on cycle doesn't sequential-
+    scan when outcome rows become claimable.
+
+    Index columns mirror the claim SQL's predicate columns —
+    ``(domain, event_type, status, next_run_at)`` filtered by
+    ``status IN ('pending','retry_wait')``.
+
+    Index-only. No column adds, no data mutation. No-op when
+    brain_work_events is absent (the table is created in mig 109).
+    """
+    if "brain_work_events" not in _tables(conn):
+        conn.commit()
+        return
+    try:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_brain_work_events_claim_v2 "
+            "ON brain_work_events (domain, event_type, status, next_run_at) "
+            "WHERE status IN ('pending', 'retry_wait')"
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16009,6 +16040,8 @@ MIGRATIONS = [
      _migration_236_scan_pattern_lifecycle_shadow_promoted),
     ("237_scan_pattern_quality_composite_score",
      _migration_237_scan_pattern_quality_composite_score),
+    ("238_brain_work_events_claim_v2_index",
+     _migration_238_brain_work_events_claim_v2_index),
 ]
 
 
