@@ -1,6 +1,6 @@
 # NEXT_TASK: f-brain-event-kind-backfill
 
-STATUS: PENDING
+STATUS: DONE
 
 ## Goal
 
