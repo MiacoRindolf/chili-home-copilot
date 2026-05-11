@@ -1,31 +1,57 @@
-# Outer supervisor for _claude_daemon.ps1.
+# Outer supervisor for either _claude_daemon.ps1 (dispatch daemon, default)
+# OR _claude_session_daemon.ps1 (session daemon) -- parameterized.
 #
-# Run THIS instead of _claude_daemon.ps1 directly. It launches the daemon as
-# a child process; if the daemon exits cleanly (heartbeat state = "restarting"
+# Run THIS instead of the bare daemon. It launches the daemon as a child
+# process; if the daemon exits cleanly (heartbeat state = "restarting"
 # or "exited"), the supervisor relaunches it. Hard exit (Ctrl+C, OS kill,
 # script unhandled exception) is also caught and the supervisor relaunches
 # with backoff.
 #
-# Stop the whole system: touch scripts/_claude_supervisor_stop.flag
-# Stop just one daemon iteration: touch scripts/_claude_restart.flag
+# Default mode (dispatch daemon):
+#   .\scripts\_claude_daemon_supervisor.ps1
+#
+# Session-daemon mode (run in a SECOND PowerShell window):
+#   .\scripts\_claude_daemon_supervisor.ps1 -Mode session
+#
+# Stop one supervisor: touch the stop flag named in $stopFlag below
+#   (dispatch: scripts/_claude_supervisor_stop.flag
+#    session:  scripts/_claude_session_supervisor_stop.flag)
 #
 # This is the architect-grade fix for "daemon keeps hanging" -- the daemon
-# itself self-restarts every 4h or 1000 commands, and the supervisor
-# relaunches if something nukes the daemon entirely.
+# self-restarts every 4h or 1000 commands, and the supervisor relaunches
+# if something nukes the daemon entirely.
+#
+# 2026-05-11: parameterized to also supervise the session daemon (which
+# died yesterday 18:29 and was never relaunched; brief #286 / this commit).
+
+[CmdletBinding()]
+param(
+    [ValidateSet("dispatch", "session")]
+    [string]$Mode = "dispatch"
+)
 
 $ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot\..
 
-$stopFlag        = "scripts/_claude_supervisor_stop.flag"
-$daemonScript    = "$PSScriptRoot\_claude_daemon.ps1"
-$supervisorLog   = "scripts/_claude_supervisor.log"
-$heartbeatFile   = "scripts/_claude_daemon_heartbeat.json"
+if ($Mode -eq "session") {
+    $daemonScript    = "$PSScriptRoot\_claude_session_daemon.ps1"
+    $stopFlag        = "scripts/_claude_session_supervisor_stop.flag"
+    $supervisorLog   = "scripts/_claude_session_supervisor.log"
+    $pauseFlag       = "scripts/_claude_session_pause.flag"
+    $tag             = "session-supervisor"
+} else {
+    $daemonScript    = "$PSScriptRoot\_claude_daemon.ps1"
+    $stopFlag        = "scripts/_claude_supervisor_stop.flag"
+    $supervisorLog   = "scripts/_claude_supervisor.log"
+    $pauseFlag       = $null
+    $tag             = "supervisor"
+}
 
 function SLog {
     param([string]$Line)
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$ts [supervisor] $Line" | Add-Content $supervisorLog
-    Write-Host "$ts [supervisor] $Line"
+    "$ts [$tag] $Line" | Add-Content $supervisorLog
+    Write-Host "$ts [$tag] $Line"
 }
 
 if (-not (Test-Path $daemonScript)) {
@@ -33,7 +59,14 @@ if (-not (Test-Path $daemonScript)) {
     exit 1
 }
 
-SLog "supervisor started, pid=$PID; will relaunch daemon on clean exit"
+# Session mode: clear stale pause flag on startup -- the operator starting
+# the supervisor is the resolution to whatever paused it.
+if ($pauseFlag -and (Test-Path $pauseFlag)) {
+    Remove-Item $pauseFlag -Force -ErrorAction SilentlyContinue
+    SLog "cleared stale pause flag at supervisor startup"
+}
+
+SLog "supervisor started, pid=$PID, mode=$Mode, daemon=$daemonScript"
 $attemptCount = 0
 $lastLaunchAt = $null
 $consecutiveFastExits = 0
@@ -66,6 +99,14 @@ while ($true) {
         SLog "supervisor stop flag set during run, exiting"
         Remove-Item $stopFlag -Force -ErrorAction SilentlyContinue
         break
+    }
+
+    # Session mode: clear pause flag at relaunch boundary so a transient
+    # timeout doesn't leave the queue jammed forever. The flag is a useful
+    # tool for manual pause but should not survive a supervisor relaunch.
+    if ($pauseFlag -and (Test-Path $pauseFlag)) {
+        Remove-Item $pauseFlag -Force -ErrorAction SilentlyContinue
+        SLog "cleared pause flag at relaunch boundary"
     }
 
     # Backoff: if the daemon dies in <30s repeatedly, it's broken; back off.
