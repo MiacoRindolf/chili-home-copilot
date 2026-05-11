@@ -1,0 +1,10 @@
+{
+  "id": "cowork-watcher-truncation-fix-2026-05-11",
+  "description": "Fix the cowork-watcher's false-positive truncation detection. Use AST parse (not line counts) and read fresh host filesystem view (not stale bash mount). Add 60s re-check debounce.",
+  "priority": 210,
+  "not_before": null,
+  "prompt": "PLAN-GATE PROTOCOL ACTIVE. Watcher set 4 false-positive truncation pause flags on 2026-05-10 that halted the autonomous loop. Real files were clean on the host; watcher reads from stale bash-mount view and uses buggy line-count comparison.\n\nFULL rules + brief in markdown. Read in this order:\n  1. CLAUDE.md\n  2. docs/STRATEGY/PROTOCOL.md\n  3. docs/STRATEGY/COWORK_ADVISOR_BRIEF.md\n  4. docs/STRATEGY/QUEUED/f-cowork-watcher-truncation-fix.md (the brief)\n  5. docs/STRATEGY/NEXT_TASK.md\n\nThen follow the brief: locate the watcher's truncation-detection logic, replace line-count comparison with AST parse against fresh host filesystem reads, add 60s re-check debounce. Write CC_REPORT. Update NEXT_TASK to DONE.\n\nHARD CONSTRAINTS:\n  - Watcher only. No daemon or trading code changes.\n  - AST parse oracle, NOT line counts.\n  - Use fresh host filesystem read (PowerShell + python ast.parse against C:\\dev\\chili-home-copilot\\app\\...), not the bash sandbox mount.\n  - 60s re-check debounce: only set pause flag if AST parse fails twice in a row.\n  - Plan-gate active.",
+  "claude_args": ["--dangerously-skip-permissions"],
+  "timeout_min": 120,
+  "on_fail": "pause"
+}

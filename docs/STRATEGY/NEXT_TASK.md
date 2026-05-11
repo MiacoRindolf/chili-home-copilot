@@ -1,40 +1,26 @@
-# NEXT_TASK: f-coinbase-orphan-stop-adoption
+# NEXT_TASK: f-cowork-watcher-truncation-fix
 
-STATUS: DONE
-
-CC_REPORT: `docs/STRATEGY/CC_REPORTS/2026-05-10_f-coinbase-orphan-stop-adoption.md`
+STATUS: PENDING
 
 ## Goal
 
-Verify-routing fix (commit `c8a3ff3`) sealed the Robinhood-404 problem
-but exposed that 4 Coinbase trades (AERGO, 1INCH, ACX, RARE) have
-orphan stops live at the venue holding qty in reserve. New placement
-attempts now fail with "Insufficient balance in source account".
-
-Build a one-shot adoption pass that lists Coinbase open stops, matches
-them to bracket_intent rows by ticker, and persists `broker_stop_order_id`
-so the system adopts the orphans without canceling them.
+Watcher set 4 false-positive truncation pause flags yesterday using a
+buggy line-count heuristic against a stale bash-mount view. Replace
+with AST parse against fresh host filesystem reads + 60s re-check
+debounce.
 
 ## Brief
 
-`docs/STRATEGY/QUEUED/f-coinbase-orphan-stop-adoption.md`.
+`docs/STRATEGY/QUEUED/f-cowork-watcher-truncation-fix.md`.
 
-## Phases
+## Next in queue
 
-Single-shot.
-
-## Deliverables
-
-- Adoption-pass module (Coinbase venue adapter neighborhood)
-- `dispatch-coinbase-orphan-adopt.ps1` if option A picked
-- Tests in `tests/test_coinbase_orphan_adopt.py`
-- CC_REPORT
-- NEXT_TASK → STATUS: DONE
+`f-supervisor-auto-relaunch-investigation` (priority 220) — daemon
+supervisor didn't auto-relaunch after the 4h self-restart.
 
 ## Hard constraints
 
-- Coinbase venue adapter + new adoption module + new test only.
-- Edit-tool truncation discipline.
-- Phase 6 LIVE soak active — purely additive.
-- No magic-fallback qty/ticker matching. Ambiguous = skip + log.
+- Watcher only. No daemon or trading code changes.
+- AST parse oracle, not line counts.
+- 60s re-check debounce on false positives.
 - Plan-gate active.
