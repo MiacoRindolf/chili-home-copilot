@@ -331,45 +331,6 @@ def test_pattern_stats_handler_idempotent(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Handler 7: breakout_outcomes (handle_breakout_alert_resolved)
-# ---------------------------------------------------------------------------
-
-
-def test_breakout_outcomes_handler_idempotent(monkeypatch) -> None:
-    """learn_from_breakout_outcomes called twice with same args."""
-    inner_mock = MagicMock(return_value={"patterns_learned": 0})
-
-    sessions: list[Any] = []
-
-    def _patched_factory() -> Any:
-        s = MagicMock()
-        sessions.append(s)
-        return s
-
-    fake_app_db = types.ModuleType("app.db")
-    fake_app_db.SessionLocal = _patched_factory  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "app.db", fake_app_db)
-
-    import app.services.trading.learning as learning
-
-    monkeypatch.setattr(learning, "learn_from_breakout_outcomes", inner_mock)
-
-    from app.services.trading.brain_work.handlers.breakout_outcomes import (
-        handle_breakout_alert_resolved,
-    )
-
-    ev = _FakeEvent(event_id=7, payload={"user_id": 99})
-
-    handle_breakout_alert_resolved(MagicMock(), ev, None)
-    handle_breakout_alert_resolved(MagicMock(), ev, None)
-
-    assert inner_mock.call_count == 2
-    for call in inner_mock.call_args_list:
-        sess_arg, uid_arg = call.args
-        assert uid_arg == 99
-
-
-# ---------------------------------------------------------------------------
 # Handler 8: live_drift (3 entry functions)
 # ---------------------------------------------------------------------------
 

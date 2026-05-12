@@ -92,8 +92,8 @@ def test_scheduler_all_emits_heartbeat_only_when_env(monkeypatch):
         monkeypatch.setattr(settings, "chili_scheduler_role", "all")
 
 
-def test_scheduler_worker_role_registers_heavy_not_broker(monkeypatch):
-    """CHILI_SCHEDULER_ROLE=worker should omit web-light jobs (e.g. broker_sync)."""
+def test_scheduler_worker_role_registers_heavy_without_legacy_breakout(monkeypatch):
+    """CHILI_SCHEDULER_ROLE=worker keeps active CHILI jobs, not v1 breakout scanners."""
     from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
 
     stop_scheduler()
@@ -102,10 +102,10 @@ def test_scheduler_worker_role_registers_heavy_not_broker(monkeypatch):
         start_scheduler()
         info = get_scheduler_info()
         job_ids = {j["id"] for j in info.get("jobs", [])}
-        assert "crypto_breakout_scanner" in job_ids
+        assert "crypto_breakout_scanner" not in job_ids
+        assert "stock_breakout_scanner" not in job_ids
         assert "brain_market_snapshots" in job_ids
         assert "scheduler_worker_heartbeat" in job_ids
-        assert "broker_sync" not in job_ids
     finally:
         stop_scheduler()
         monkeypatch.setattr(settings, "chili_scheduler_role", "all")

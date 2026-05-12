@@ -205,3 +205,64 @@ def test_round_result_dict_has_market_snapshots_key(
     assert isinstance(res["market_snapshots"], dict)
     assert "ok" in res["market_snapshots"]
     assert "skipped" in res["market_snapshots"]
+
+
+def test_fast_lane_can_disable_heavy_producers(
+    db, reset_dispatch_state, monkeypatch,
+):
+    """Fast-lane dispatcher processes lightweight queues only.
+
+    It must not emit market snapshots or run the thin-evidence sweep;
+    those stay on the main brain-worker.
+    """
+    sweep_called = []
+    thin_called = []
+
+    def _spy_snapshots(db, user_id):
+        sweep_called.append(True)
+        return {
+            "ok": True,
+            "snapshots_taken_daily": 1,
+            "intraday_snapshots_taken": 1,
+            "snapshots_taken": 2,
+            "universe_size": 1,
+            "snapshot_driver": "spy",
+            "tickers": [],
+            "vitals_refresh": {},
+        }
+
+    def _spy_thin(db):
+        thin_called.append(True)
+        return {"ok": True, "demoted": 0, "demoted_ids": []}
+
+    monkeypatch.setattr(
+        "app.services.trading.learning.run_scheduled_market_snapshots",
+        _spy_snapshots,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.learning.run_thin_evidence_demote",
+        _spy_thin,
+    )
+
+    res = run_brain_work_dispatch_round(
+        db,
+        user_id=None,
+        max_backtest=0,
+        max_exec_feedback=0,
+        max_mine=0,
+        max_cpcv_gate=0,
+        max_promote=0,
+        max_trade_close=0,
+        run_thin_evidence_sweep=False,
+        run_market_snapshots_watchdog=False,
+    )
+
+    assert res.get("ok") is True
+    assert res["market_snapshots"] == {
+        "ok": True,
+        "skipped": True,
+        "reason": "disabled_by_caller",
+    }
+    assert res["thin_evidence_sweep"]["skipped"] is True
+    assert sweep_called == []
+    assert thin_called == []

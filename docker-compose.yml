@@ -293,6 +293,52 @@ services:
       retries: 3
       start_period: 15s
 
+  # Lightweight brain_work_events fast lane. Keeps CPCV, promotion, and
+  # evidence handlers draining even when the main brain-worker is busy in
+  # mining/backtest/OHLCV work. Heavy producers stay on brain-worker.
+  brain-work-dispatcher:
+    image: chili-app:local
+    restart: unless-stopped
+    command: ["python", "scripts/brain_work_fast_lane.py", "--interval", "10"]
+    env_file:
+      - path: .env
+        required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - OLLAMA_HOST=http://ollama:11434
+      - DATABASE_POOL_SIZE=4
+      - DATABASE_MAX_OVERFLOW=6
+      - CHILI_RUNNING_IN_DOCKER=1
+      - CHILI_CONTAINER_CPU_LIMIT=1
+    volumes:
+      - D:/CHILI-Docker/chili-data:/app/data
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+    depends_on:
+      chili:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
   # Continuous pattern mining worker. Discovers new ScanPatterns and feeds the backtest queue.
   mining-worker:
     image: chili-app:local

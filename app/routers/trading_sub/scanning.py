@@ -34,6 +34,16 @@ def api_crypto_breakouts(
     refresh: bool = Query(False),
 ):
     """Return cached crypto breakout scan or trigger a fresh scan."""
+    return JSONResponse(
+        {
+            "ok": False,
+            "disabled": True,
+            "reason": "legacy_breakout_scanner_removed",
+            "message": "Generic breakout scanners are retired; use ScanPattern imminent alerts.",
+            "results": [],
+        },
+        status_code=410,
+    )
     from ...services.trading.public_api import run_crypto_breakout_scan, get_crypto_breakout_cache
 
     cache = get_crypto_breakout_cache()
@@ -60,6 +70,15 @@ def api_trigger_crypto_scan(
     background_tasks: BackgroundTasks,
 ):
     """Manually trigger a crypto breakout scan."""
+    return JSONResponse(
+        {
+            "ok": False,
+            "disabled": True,
+            "reason": "legacy_breakout_scanner_removed",
+            "message": "Generic breakout scanners are retired; use ScanPattern imminent alerts.",
+        },
+        status_code=410,
+    )
     from ...services.trading.public_api import run_crypto_breakout_scan
     background_tasks.add_task(run_crypto_breakout_scan, 20)
     return JSONResponse({"ok": True, "message": "Crypto breakout scan started"})
@@ -163,6 +182,18 @@ def api_run_daytrade_scan(background_tasks: BackgroundTasks):
 @router.post("/scan/breakouts")
 def api_run_breakout_scan(background_tasks: BackgroundTasks):
     """Return cached breakout results if fresh, else kick off BG scan and return fast."""
+    return JSONResponse(
+        {
+            "ok": False,
+            "disabled": True,
+            "reason": "legacy_breakout_scanner_removed",
+            "message": "Generic breakout scanners are retired; use ScanPattern imminent alerts.",
+            "scan_type": "breakout",
+            "matches": 0,
+            "results": [],
+        },
+        status_code=410,
+    )
     from ...services.trading.scanner import (
         get_breakout_cache, run_breakout_scan, run_crypto_breakout_scan, _brain_meta,
     )

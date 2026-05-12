@@ -4864,13 +4864,19 @@ def mine_high_vol_regime_patterns(
 # ── Breakout Outcome Learning ──────────────────────────────────────────
 
 def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Compute per-pattern win rates from resolved BreakoutAlert outcomes
-    and feed them back into both TradingInsight and ScanPattern records.
-    
-    Updates:
-    - TradingInsight: win_count, loss_count, confidence
-    - ScanPattern: win_rate, avg_return_pct (real trade feedback)
+    """Legacy no-op.
+
+    BreakoutAlert rows came from CHILI v1 heuristic scanners. They are alert
+    telemetry, not validated pattern evidence, so they must not update
+    TradingInsight or ScanPattern promotion metrics.
     """
+    logger.info("[learning] legacy breakout outcome learning retired; skipped")
+    return {
+        "patterns_learned": 0,
+        "scan_patterns_updated": 0,
+        "total_resolved": 0,
+        "skipped": "legacy_breakout_outcomes_removed",
+    }
     from ...models.trading import BreakoutAlert, ScanPattern
 
     try:
@@ -4907,7 +4913,10 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
     patterns_created = 0
     patterns_updated = 0
     
-    # Update ScanPattern stats directly with real trade outcomes
+    # Breakout outcomes are alert telemetry, not CHILI research validation.
+    # Keep ScanPattern.{win_rate, avg_return_pct, trade_count} owned by
+    # backtests/CPCV and closed-trade evidence; otherwise generic alert
+    # excursions can distort promotion and sizing gates.
     for pattern_id, outcomes in pattern_outcomes.items():
         if len(outcomes) < 3:
             continue
@@ -4922,6 +4931,13 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
         ):
             continue
 
+        logger.info(
+            "[learning] Ignored breakout outcome stats for ScanPattern '%s' (id=%d): "
+            "alerts=%d source=alert_telemetry_not_promotion_evidence",
+            pattern.name, pattern.id, len(outcomes),
+        )
+        continue
+
         winners = sum(1 for o in outcomes if o["outcome"] == "winner")
         total = len(outcomes)
         if total <= 0:
@@ -4930,7 +4946,36 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
             # 2026-04-28 NaN sweep showed 11 rows corrupted by exactly this).
             continue
         new_win_rate = winners / total
-        avg_gain = sum(o["gain_pct"] for o in outcomes) / total
+        bounded_gains = []
+        rejected_gain_count = 0
+        for o in outcomes:
+            try:
+                gain = float(o["gain_pct"] or 0.0)
+            except (TypeError, ValueError):
+                rejected_gain_count += 1
+                continue
+            if math.isfinite(gain) and abs(gain) <= 100.0:
+                bounded_gains.append(gain)
+            else:
+                rejected_gain_count += 1
+        avg_gain = (sum(bounded_gains) / len(bounded_gains)) if bounded_gains else None
+
+        actual_trade_count = db.query(func.count(Trade.id)).filter(
+            Trade.scan_pattern_id == pattern.id
+        ).scalar() or 0
+        if actual_trade_count > 0:
+            # BreakoutAlert.max_gain_pct is peak excursion, not realized EV.
+            # Preserve primary trade stats once concrete trades exist because
+            # these fields feed promotion and sizing gates.
+            if int(pattern.trade_count or 0) != int(actual_trade_count):
+                pattern.trade_count = actual_trade_count
+                pattern.updated_at = datetime.utcnow()
+            logger.info(
+                "[learning] Preserved ScanPattern '%s' (id=%d) primary trade stats "
+                "while learning breakout outcomes: alerts=%d rejected_gain_pct=%d trades=%d",
+                pattern.name, pattern.id, total, rejected_gain_count, actual_trade_count,
+            )
+            continue
 
         # Old values for log only. Avoid `or` falsy default — a real stored
         # 0.0 would silently fall through and contaminate the new write.
@@ -4942,11 +4987,8 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
         # will be noisy, but stored win_rate matches `wins/total` directly.
         if math.isfinite(new_win_rate) and 0.0 <= new_win_rate <= 1.0:
             pattern.win_rate = round(new_win_rate, 4)
-        if math.isfinite(avg_gain):
+        if avg_gain is not None and math.isfinite(avg_gain):
             pattern.avg_return_pct = round(avg_gain, 2)
-        actual_trade_count = db.query(func.count(Trade.id)).filter(
-            Trade.scan_pattern_id == pattern.id
-        ).scalar() or 0
         pattern.trade_count = actual_trade_count
         pattern.updated_at = datetime.utcnow()
 
@@ -4962,6 +5004,11 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
             f"{old_ret:.2f}" if math.isfinite(old_ret) else "n/a",
             actual_trade_count,
         )
+        if rejected_gain_count:
+            logger.info(
+                "[learning] Rejected %d out-of-contract breakout gain_pct values for ScanPattern '%s' (id=%d)",
+                rejected_gain_count, pattern.name, pattern.id,
+            )
 
     # Also create/update TradingInsight summaries by asset_type/tier (existing logic)
     for key, alerts in groups.items():
@@ -9967,14 +10014,15 @@ def run_learning_cycle(
             f"{evolve_result.get('weights_evolved', 0)} weights evolved",
         )
 
-        # Step 11: Breakout outcome learning
+        # Step 11: Closed-trade pattern feedback. Legacy breakout outcome
+        # learning is retired because BreakoutAlert telemetry is not CHILI
+        # validation evidence.
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start_bo = time.time()
-        # graph-node: c_evolution/breakout
-        apply_learning_cycle_step_status(_learning_status, "c_evolution", "breakout")
-        bo_result = learn_from_breakout_outcomes(db, user_id)
-        report["breakout_patterns_learned"] = bo_result.get("patterns_learned", 0)
+        # graph-node: c_evolution/trade_feedback
+        apply_learning_cycle_step_status(_learning_status, "c_evolution", "trade_feedback")
+        report["breakout_patterns_learned"] = 0
 
         # Closed-trade → ScanPattern feedback (runs in same step; fast query)
         try:
@@ -9993,16 +10041,12 @@ def run_learning_cycle(
             report["monitor_decisions_reviewed"] = 0
 
         _bump_node("c_evolution")
-        _step_time("breakout_outcomes", step_start_bo,
-                    f"{bo_result.get('patterns_learned', 0)} patterns from "
-                    f"{bo_result.get('total_resolved', 0)} resolved alerts, "
+        _step_time("trade_feedback", step_start_bo,
                     f"{report.get('trade_feedback_patterns', 0)} trade-feedback updates")
         _finish_lc_step(
             "c_evolution",
-            "breakout",
+            "trade_feedback",
             step_start_bo,
-            f"{bo_result.get('patterns_learned', 0)} patterns from "
-            f"{bo_result.get('total_resolved', 0)} resolved alerts, "
             f"{report.get('trade_feedback_patterns', 0)} trade-feedback updates",
         )
 

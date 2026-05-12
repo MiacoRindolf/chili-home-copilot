@@ -12,7 +12,6 @@ from ..services.trading.brain_batch_job_log import (
     fetch_batch_jobs_page,
     fetch_latest_ok_payload,
 )
-from ..services.trading.scanner import run_crypto_breakout_scan
 
 router = APIRouter(tags=["jobs"])
 
@@ -121,13 +120,14 @@ def api_trigger_crypto_breakout(
 ):
     """Queue a crypto breakout scan in the web process (writes brain_batch_jobs when done)."""
     _require_user(request, db)
-
-    def _run():
-        run_crypto_breakout_scan(max_results=20, batch_job_id=None, skip_db_ttl_check=True)
-
-    background_tasks.add_task(_run)
     return JSONResponse(
-        {"ok": True, "message": "Crypto breakout scan queued; check Jobs for a new batch row."}
+        {
+            "ok": False,
+            "disabled": True,
+            "reason": "legacy_breakout_scanner_removed",
+            "message": "Generic crypto breakout scans are retired; use ScanPattern imminent alerts.",
+        },
+        status_code=410,
     )
 
 

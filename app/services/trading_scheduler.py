@@ -2421,7 +2421,18 @@ def _record_breakout_alert(
     scan_cycle_id: str | None = None,
     timeframe: str | None = None,
 ) -> None:
-    """Write a BreakoutAlert row for outcome tracking."""
+    """Legacy no-op.
+
+    Generic breakout scanners were CHILI v1 heuristics. They are retired as
+    active signal sources; ScanPattern-driven imminent alerts remain on their
+    own path because current trades still reference those rows.
+    """
+    logger.info(
+        "[scheduler] legacy breakout alert persistence retired; skipped ticker=%s tier=%s",
+        setup.get("ticker") or setup.get("symbol"),
+        alert_tier,
+    )
+    return
     import json as _json
     try:
         from ..config import settings as _settings
@@ -2551,6 +2562,8 @@ def _run_crypto_breakout_job():
 
     All thresholds are brain-adaptive and evolve via the learning cycle.
     """
+    logger.info("[scheduler] legacy crypto breakout scanner retired; skipped")
+    return
     import time as _t
     import uuid as _uuid
     from ..config import settings as _settings
@@ -2815,6 +2828,8 @@ def _run_stock_breakout_job():
     Uses the same tier logic as crypto but with stock-specific thresholds.
     All thresholds are brain-adaptive.
     """
+    logger.info("[scheduler] legacy stock breakout scanner retired; skipped")
+    return
     import time as _t
     import uuid as _uuid
     from ..config import settings as _settings
@@ -3379,13 +3394,9 @@ def _run_monitor_decision_review_job():
 
 
 def _check_breakout_outcomes():
-    """Hourly job: check price outcomes for pending breakout alerts.
-
-    For each pending BreakoutAlert:
-      - If >=1h old: fill price_1h, compute gain
-      - If >=4h old: fill price_4h
-      - If >=24h old: fill price_24h, classify outcome, close the record
-    """
+    """Legacy no-op; generic breakout outcome learning is retired."""
+    logger.info("[scheduler] legacy breakout outcome checker retired; skipped")
+    return
     from datetime import timedelta
     import time as _t
     from ..db import SessionLocal
@@ -4113,16 +4124,6 @@ def start_scheduler():
             )
 
             _scheduler.add_job(
-                _run_crypto_breakout_job,
-                trigger=IntervalTrigger(minutes=15),
-                id="crypto_breakout_scanner",
-                name="Crypto breakout scanner (every 15min, 24/7)",
-                replace_existing=True,
-                max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=10),
-            )
-
-            _scheduler.add_job(
                 _run_crypto_viability_refresh_job,
                 trigger=IntervalTrigger(minutes=30),
                 id="crypto_viability_refresh",
@@ -4140,21 +4141,6 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=120),
-            )
-
-            _scheduler.add_job(
-                _run_stock_breakout_job,
-                trigger=CronTrigger(
-                    day_of_week="mon-fri",
-                    hour="9-15",
-                    minute="*/15",
-                    timezone="US/Eastern",
-                ),
-                id="stock_breakout_scanner",
-                name="Stock breakout scanner (market hours every 15min)",
-                replace_existing=True,
-                max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=15),
             )
 
             _scheduler.add_job(
@@ -4256,15 +4242,6 @@ def start_scheduler():
             )
 
         if include_web_light:
-            _scheduler.add_job(
-                _check_breakout_outcomes,
-                trigger=IntervalTrigger(hours=1),
-                id="breakout_outcome_checker",
-                name="Breakout outcome checker (hourly)",
-                replace_existing=True,
-                max_instances=1,
-            )
-
             _scheduler.add_job(
                 _run_monitor_decision_review_job,
                 trigger=IntervalTrigger(hours=1),
@@ -5366,4 +5343,3 @@ def get_scheduler_info() -> dict:
         "running": _scheduler.running,
         "jobs": jobs,
     }
-

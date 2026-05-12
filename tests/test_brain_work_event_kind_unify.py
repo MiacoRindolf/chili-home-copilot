@@ -170,3 +170,34 @@ def test_flag_on_legacy_done_row_not_reclaimed(db, monkeypatch) -> None:
     assert rows == [], (
         "historical status='done' rows must remain ineligible under flag-on"
     )
+
+
+def test_flag_on_explicit_audit_outcome_stays_terminal(db, monkeypatch) -> None:
+    """Audit-only outcomes can opt out of unified claiming under flag-on."""
+    monkeypatch.setattr(settings, "chili_brain_outcome_claimable_enabled", True)
+
+    eid = enqueue_outcome_event(
+        db,
+        event_type="promotion_changed",
+        dedupe_key="phase1b_audit:promotion_changed:1",
+        payload={"scan_pattern_id": 7010},
+        claimable=False,
+    )
+    db.commit()
+    assert eid is not None
+
+    row = _outcome_row(db, eid)
+    assert row.event_kind == "outcome"
+    assert row.status == "done"
+    assert row.processed_at is not None
+    assert row.max_attempts == 0
+
+    rows = claim_work_batch(
+        db,
+        limit=4,
+        lease_seconds=60,
+        holder_id="pytest:phase1b_audit",
+        event_type="promotion_changed",
+    )
+    db.commit()
+    assert rows == []

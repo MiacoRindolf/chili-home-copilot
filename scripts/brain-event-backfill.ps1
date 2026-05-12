@@ -37,7 +37,6 @@ $STOP_FLAG = Join-Path $PSScriptRoot 'brain-event-backfill-stop.flag'
 $PROGRESS_LOG = Join-Path $PSScriptRoot 'brain-event-backfill-progress.log'
 
 $KNOWN_EVENT_TYPES = @(
-    'breakout_alert_resolved',
     'backtest_completed',
     'market_snapshots_batch',
     'broker_fill_closed',

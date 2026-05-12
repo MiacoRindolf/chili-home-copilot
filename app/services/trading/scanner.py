@@ -2573,6 +2573,15 @@ def run_crypto_breakout_scan(
     When ``batch_job_id`` is set, the caller must ``brain_batch_job_finish`` with payload;
     otherwise this function records a completed row (API-triggered runs).
     """
+    return {
+        "ok": False,
+        "disabled": True,
+        "reason": "legacy_breakout_scanner_removed",
+        "results": [],
+        "all_results": [],
+        "total_scanned": 0,
+        "errors": 0,
+    }
     global _crypto_scan_running
 
     if not skip_db_ttl_check:
@@ -3596,6 +3605,18 @@ def run_breakout_scan(
     skip_db_ttl_check: bool = False,
 ) -> dict[str, Any]:
     """Full-universe breakout scan: prescreen -> batch-quote filter -> breakout scoring."""
+    return {
+        "ok": False,
+        "disabled": True,
+        "reason": "legacy_breakout_scanner_removed",
+        "scan_type": "breakout",
+        "matches": 0,
+        "results": [],
+        "all_results": [],
+        "candidates_scanned": 0,
+        "total_sourced": 0,
+        "brain": _brain_meta(),
+    }
     global _breakout_scan_running
 
     if not skip_db_ttl_check:
@@ -5216,4 +5237,3 @@ End with portfolio allocation advice and any general market context warnings.
             for p in top_picks
         ],
     }
-

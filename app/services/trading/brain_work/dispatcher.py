@@ -254,13 +254,6 @@ def _dispatch_limits(
         if max_trade_close is not None
         else getattr(settings, "brain_work_trade_close_batch_size", 16)
     )
-    # f-handler-breakout-outcomes (2026-05-06): breakout_alert_resolved
-    # event drives the secondary-evidence path. Modest cap; alerts
-    # resolve on the breakout-outcome-check sweep (default every few
-    # minutes), so a small batch per dispatch round suffices.
-    bo = int(
-        getattr(settings, "brain_work_breakout_outcomes_batch_size", 4)
-    )
     return [
         ("execution_feedback_digest", max(0, ex)),
         ("market_snapshots_batch", max(0, mn)),
@@ -270,7 +263,6 @@ def _dispatch_limits(
         ("live_trade_closed", max(0, tc)),
         ("paper_trade_closed", max(0, tc)),
         ("broker_fill_closed", max(0, tc)),
-        ("breakout_alert_resolved", max(0, bo)),
     ]
 
 
@@ -280,6 +272,12 @@ def run_brain_work_dispatch_round(
     user_id: int | None = None,
     max_backtest: int | None = None,
     max_exec_feedback: int | None = None,
+    max_mine: int | None = None,
+    max_cpcv_gate: int | None = None,
+    max_promote: int | None = None,
+    max_trade_close: int | None = None,
+    run_thin_evidence_sweep: bool = True,
+    run_market_snapshots_watchdog: bool = True,
 ) -> dict[str, Any]:
     """Release stale leases, then claim+process work by handler family (bounded per type)."""
     if not brain_work_ledger_enabled():
@@ -297,7 +295,12 @@ def run_brain_work_dispatch_round(
     per_type: dict[str, int] = {}
 
     for event_type, lim in _dispatch_limits(
-        max_backtest=max_backtest, max_exec_feedback=max_exec_feedback
+        max_backtest=max_backtest,
+        max_exec_feedback=max_exec_feedback,
+        max_mine=max_mine,
+        max_cpcv_gate=max_cpcv_gate,
+        max_promote=max_promote,
+        max_trade_close=max_trade_close,
     ):
         if lim <= 0:
             continue
@@ -461,14 +464,6 @@ def run_brain_work_dispatch_round(
                         )
                     if demote_err is not None:
                         raise demote_err
-                elif event_type == "breakout_alert_resolved":
-                    # f-handler-breakout-outcomes (2026-05-06): aggregate
-                    # alert outcomes into pattern evidence (secondary path
-                    # for patterns with no closed trades).
-                    from .handlers.breakout_outcomes import (
-                        handle_breakout_alert_resolved,
-                    )
-                    handle_breakout_alert_resolved(db, ev, user_id)
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
                 mark_work_done(db, int(ev.id))
@@ -504,31 +499,40 @@ def run_brain_work_dispatch_round(
     # dict's `thin_evidence_sweep.ok=False` rather than poisoning the
     # round (other dispatch work has already completed at this point).
     thin_evidence_sweep: dict[str, Any]
-    try:
-        from ..learning import run_thin_evidence_demote
-        thin_evidence_sweep = run_thin_evidence_demote(db) or {}
-        if thin_evidence_sweep.get("demoted_ids"):
-            logger.info(
-                "%s thin_evidence sweep: demoted=%d ids=%s",
-                LOG_PREFIX,
-                int(thin_evidence_sweep.get("demoted", 0)),
-                list(thin_evidence_sweep.get("demoted_ids", []) or []),
+    if run_thin_evidence_sweep:
+        try:
+            from ..learning import run_thin_evidence_demote
+            thin_evidence_sweep = run_thin_evidence_demote(db) or {}
+            if thin_evidence_sweep.get("demoted_ids"):
+                logger.info(
+                    "%s thin_evidence sweep: demoted=%d ids=%s",
+                    LOG_PREFIX,
+                    int(thin_evidence_sweep.get("demoted", 0)),
+                    list(thin_evidence_sweep.get("demoted_ids", []) or []),
+                )
+            else:
+                logger.debug(
+                    "%s thin_evidence sweep: demoted=0 ids=[]",
+                    LOG_PREFIX,
+                )
+        except Exception as _tied:
+            logger.warning(
+                "%s thin_evidence sweep failed: %s",
+                LOG_PREFIX, _tied, exc_info=True,
             )
-        else:
-            logger.debug(
-                "%s thin_evidence sweep: demoted=0 ids=[]",
-                LOG_PREFIX,
-            )
-    except Exception as _tied:
-        logger.warning(
-            "%s thin_evidence sweep failed: %s",
-            LOG_PREFIX, _tied, exc_info=True,
-        )
+            thin_evidence_sweep = {
+                "ok": False,
+                "demoted": 0,
+                "demoted_ids": [],
+                "error": str(_tied)[:500],
+            }
+    else:
         thin_evidence_sweep = {
-            "ok": False,
+            "ok": True,
+            "skipped": True,
+            "reason": "disabled_by_caller",
             "demoted": 0,
             "demoted_ids": [],
-            "error": str(_tied)[:500],
         }
 
     # f-brain-phase2-producer-completion (2026-05-09): watchdog-style
@@ -538,19 +542,26 @@ def run_brain_work_dispatch_round(
     # healthy, the per-minute dedupe bucket in
     # emit_market_snapshots_batch_outcome merges duplicates.
     market_snapshots: dict[str, Any]
-    try:
-        market_snapshots = _maybe_run_dispatch_market_snapshots(
-            db, user_id=user_id,
-        )
-    except Exception as _ms_err:
-        logger.warning(
-            "%s dispatch market_snapshots watchdog failed: %s",
-            LOG_PREFIX, _ms_err, exc_info=True,
-        )
+    if run_market_snapshots_watchdog:
+        try:
+            market_snapshots = _maybe_run_dispatch_market_snapshots(
+                db, user_id=user_id,
+            )
+        except Exception as _ms_err:
+            logger.warning(
+                "%s dispatch market_snapshots watchdog failed: %s",
+                LOG_PREFIX, _ms_err, exc_info=True,
+            )
+            market_snapshots = {
+                "ok": False,
+                "skipped": False,
+                "error": str(_ms_err)[:500],
+            }
+    else:
         market_snapshots = {
-            "ok": False,
-            "skipped": False,
-            "error": str(_ms_err)[:500],
+            "ok": True,
+            "skipped": True,
+            "reason": "disabled_by_caller",
         }
 
     return {

@@ -77,6 +77,7 @@ def enqueue_outcome_event(
     payload: Optional[dict[str, Any]] = None,
     correlation_id: Optional[str] = None,
     parent_event_id: Optional[int] = None,
+    claimable: Optional[bool] = None,
 ) -> int | None:
     """Insert an outcome row (audit / UI). Idempotent on dedupe_key for outcomes.
 
@@ -101,7 +102,12 @@ def enqueue_outcome_event(
         return int(ex[0])
     cid = correlation_id or str(uuid.uuid4())
     now = datetime.utcnow()
-    if getattr(settings, "chili_brain_outcome_claimable_enabled", False):
+    should_claim = (
+        bool(getattr(settings, "chili_brain_outcome_claimable_enabled", False))
+        if claimable is None
+        else bool(claimable)
+    )
+    if should_claim:
         status = "pending"
         processed_at = None
         max_attempts = int(getattr(settings, "brain_work_max_attempts_default", 5))

@@ -59,6 +59,7 @@ def emit_promotion_changed_outcome(
         event_type="promotion_changed",
         dedupe_key=dedupe_key,
         payload=payload,
+        claimable=False,
     )
 
 
@@ -171,41 +172,6 @@ def emit_broker_fill_closed_outcome(
     )
 
 
-def emit_breakout_alert_resolved_outcome(
-    db: Session,
-    *,
-    alert_id: int,
-    scan_pattern_id: int | None,
-    ticker: str,
-    outcome: str,
-    user_id: int | None = None,
-) -> int | None:
-    """f-handler-breakout-outcomes (2026-05-06): emit when a
-    BreakoutAlert's outcome flips from 'pending' to a final value
-    ('winner' / 'loser' / 'fakeout' / 'expired').
-
-    Subscribed by ``handlers/breakout_outcomes.py::handle_breakout_alert_resolved``,
-    which calls ``learn_from_breakout_outcomes`` to update pattern
-    evidence from accumulated alert outcomes (the secondary-evidence
-    path for patterns with no closed trades yet).
-
-    Dedup is per alert_id since each alert resolves exactly once.
-    """
-    dedupe_key = f"breakout_resolved:{int(alert_id)}:{outcome[:16]}"
-    return enqueue_outcome_event(
-        db,
-        event_type="breakout_alert_resolved",
-        dedupe_key=dedupe_key,
-        payload={
-            "alert_id": int(alert_id),
-            "scan_pattern_id": scan_pattern_id,
-            "ticker": ticker,
-            "outcome": outcome,
-            "user_id": user_id,
-        },
-    )
-
-
 def emit_backtest_completed_outcome(
     db: Session,
     *,
@@ -280,4 +246,5 @@ def emit_execution_quality_updated_outcome(
         event_type="execution_quality_updated",
         dedupe_key=dedupe_key,
         payload=pl,
+        claimable=False,
     )

@@ -13,8 +13,7 @@ Phase 2 ship order (smallest blast radius first):
   3. ``promote`` / ``demote`` — react to gate decisions.
   4. ``regime_ledger`` — reacts to trade close events.
   5. ``pattern_stats`` — canonical evidence recompute on trade close.
-  6. ``breakout_outcomes`` — secondary-evidence path on alert resolve.
-  7. ``quality_score`` — recompute ``quality_composite_score`` after
+  6. ``quality_score`` — recompute ``quality_composite_score`` after
      CPCV / pattern_stats / regime_ledger commit. Phase 3 of
      ``f-adaptive-promotion-architecture``; runs LAST in the per-event
      chain so upstream writes are visible.

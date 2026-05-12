@@ -11,10 +11,8 @@ from sqlalchemy.orm import Session
 from ...models.core import BrainWorkerControl, BrokerSession
 from ...models.trading import BrainBatchJob
 from .batch_job_constants import (
-    JOB_CRYPTO_BREAKOUT_SCANNER,
     JOB_MOMENTUM_SCANNER,
     JOB_PATTERN_IMMINENT_SCANNER,
-    JOB_STOCK_BREAKOUT_SCANNER,
 )
 from .runtime_surface_state import read_runtime_surface_state
 
@@ -29,8 +27,6 @@ _STALE_REGIME = 900
 _SCANNER_JOB_TYPES = (
     JOB_PATTERN_IMMINENT_SCANNER,
     JOB_MOMENTUM_SCANNER,
-    JOB_STOCK_BREAKOUT_SCANNER,
-    JOB_CRYPTO_BREAKOUT_SCANNER,
 )
 
 

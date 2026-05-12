@@ -1987,13 +1987,6 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_ENABLED"),
     )
-    # f-handler-breakout-outcomes (Phase 2 #7, 2026-05-06): event-driven
-    # pattern-evidence update from BreakoutAlert outcomes (secondary
-    # path for patterns with no closed trades). Subscribes to
-    # ``breakout_alert_resolved``. Modest cap; alerts resolve on the
-    # breakout-outcome-check sweep (default every few minutes).
-    brain_work_breakout_outcomes_batch_size: int = 4
-
     # f-handler-live-drift + f-handler-execution-robustness (Phase 2
     # #8/#9, 2026-05-06): trade-close-driven observability. Both share
     # the trade-close batch size with demote/regime_ledger via

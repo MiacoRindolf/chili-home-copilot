@@ -329,6 +329,7 @@ def _emit_recomputed_outcome(
             dedupe_key=dedupe_key,
             payload=payload,
             parent_event_id=parent_id,
+            claimable=False,
         )
     except Exception as exc:
         logger.debug(

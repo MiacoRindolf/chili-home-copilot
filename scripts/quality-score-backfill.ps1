@@ -124,7 +124,7 @@ try {
         throw "docker compose exec failed staging script (exit=$LASTEXITCODE)"
     }
 
-    $cmdline = "python $containerTmp"
+    $cmdline = "cd /app && PYTHONPATH=/app python $containerTmp"
     Write-Host "  -> $cmdline"
 
     & docker compose exec -T chili bash -lc $cmdline 2>&1 | ForEach-Object {
