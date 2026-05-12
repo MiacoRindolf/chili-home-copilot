@@ -56,7 +56,7 @@ from ...config import settings
 logger = logging.getLogger(__name__)
 
 
-_METRIC_NAMES = ("dsr", "pbo", "median_sharpe")
+_METRIC_NAMES = ("dsr", "pbo", "median_sharpe", "composite")
 
 
 def adaptive_gate_enabled() -> bool:
@@ -153,17 +153,30 @@ def _isnan(x: Any) -> bool:
 
 
 def _pareto_dominated(
-    pat: tuple[float, float, float],
-    pool: Iterable[tuple[float, float, float]],
+    pat: tuple[float, ...],
+    pool: Iterable[tuple[float, ...]],
 ) -> bool:
     """True if ``pat`` is strictly dominated by any pool member.
 
     Convention: higher is better on every axis. PBO is passed in as its
-    *negation* so the dominance semantic stays consistent.
+    *negation* so the dominance semantic stays consistent. Generic over
+    tuple width via ``zip`` so Phase 3's 4-tuple (with composite as the
+    4th axis) drops in without a math rewrite.
     """
-    p0, p1, p2 = pat
-    for q0, q1, q2 in pool:
-        if (q0 >= p0 and q1 >= p1 and q2 >= p2) and (q0 > p0 or q1 > p1 or q2 > p2):
+    pat_t = tuple(float(x) for x in pat)
+    for q in pool:
+        q_t = tuple(float(x) for x in q)
+        if len(q_t) != len(pat_t):
+            continue
+        ge_all = True
+        gt_any = False
+        for q_i, p_i in zip(q_t, pat_t):
+            if q_i < p_i:
+                ge_all = False
+                break
+            if q_i > p_i:
+                gt_any = True
+        if ge_all and gt_any:
             return True
     return False
 
@@ -202,6 +215,7 @@ def _load_pool_metrics(db, *, exclude_pattern_id: int | None) -> dict[str, Any]:
         "dsr": [],
         "pbo": [],
         "median_sharpe": [],
+        "composite": [],
         "lifecycle_promoted_sharpes": [],
         "prior_n": 60,
         "pool_size": 0,
@@ -219,7 +233,8 @@ def _load_pool_metrics(db, *, exclude_pattern_id: int | None) -> dict[str, Any]:
                     deflated_sharpe,
                     pbo,
                     cpcv_median_sharpe,
-                    lifecycle_stage
+                    lifecycle_stage,
+                    quality_composite_score
                 FROM scan_patterns
                 WHERE cpcv_n_paths IS NOT NULL
                 """
@@ -238,6 +253,7 @@ def _load_pool_metrics(db, *, exclude_pattern_id: int | None) -> dict[str, Any]:
         pbo = row[3]
         med_sh = row[4]
         stage = (row[5] or "").lower() if row[5] is not None else ""
+        comp = row[6] if len(row) > 6 else None
         pool["n_trades"].append(nt)
         if dsr is not None and not _isnan(dsr):
             pool["dsr"].append(float(dsr))
@@ -247,6 +263,11 @@ def _load_pool_metrics(db, *, exclude_pattern_id: int | None) -> dict[str, Any]:
             pool["median_sharpe"].append(float(med_sh))
             if stage == "promoted":
                 pool["lifecycle_promoted_sharpes"].append(float(med_sh))
+        # f-composite-quality-event-driven (Phase 3, 2026-05-11): 4th
+        # Pareto axis. NULL composite is excluded from the pool array
+        # — the evaluator imputes pool_mean when the candidate is NULL.
+        if comp is not None and not _isnan(comp):
+            pool["composite"].append(float(comp))
 
     pool["pool_size"] = len(pool["n_trades"])
     if pool["n_trades"]:
@@ -378,14 +399,27 @@ def _evaluate_adaptive(
     raw_dsr = eval_payload.get("deflated_sharpe")
     raw_pbo = eval_payload.get("pbo")
     raw_med_sh = eval_payload.get("cpcv_median_sharpe")
+    # f-composite-quality-event-driven (Phase 3): 4th axis. The wrapper
+    # reads this from ``scan_patterns.quality_composite_score`` and
+    # threads it via ``eval_payload`` to avoid touching promotion_gate.
+    raw_composite = eval_payload.get("quality_composite_score")
 
     pool_dsr = list(pool.get("dsr") or [])
     pool_pbo = list(pool.get("pbo") or [])
     pool_med = list(pool.get("median_sharpe") or [])
+    pool_comp = list(pool.get("composite") or [])
 
     dsr_pool_mean = sum(pool_dsr) / len(pool_dsr) if pool_dsr else (raw_dsr or 0.5)
     pbo_pool_mean = sum(pool_pbo) / len(pool_pbo) if pool_pbo else (raw_pbo or 0.5)
     med_pool_mean = sum(pool_med) / len(pool_med) if pool_med else (raw_med_sh or 0.0)
+    # Composite pool_mean: Bayesian-shrunken neutral for NULL composites.
+    # When the pool is empty (pre-backfill state), fall back to 0.5 so
+    # the neutral value sits at the [0,1] midpoint.
+    comp_pool_mean = (
+        sum(pool_comp) / len(pool_comp)
+        if pool_comp
+        else (float(raw_composite) if raw_composite is not None else 0.5)
+    )
 
     metric_rows: list[dict[str, Any]] = []
     reasons: list[str] = []
@@ -506,13 +540,71 @@ def _evaluate_adaptive(
         eligibles.append(bool(eligible))
     metric_rows.append(med_row)
 
-    # Pareto frontier across (shrunk_dsr, -shrunk_pbo, shrunk_med).
-    pool_triplets: list[tuple[float, float, float]] = []
+    # f-composite-quality-event-driven (Phase 3, 2026-05-11): 4th
+    # Pareto axis. Composite is already a derived summary in [0,1];
+    # we don't apply Hansen / Wilson CI to it, but we DO compare to
+    # the empirical pool q-percentile so candidates that score below
+    # the active pool's top tier are flagged.
+    comp_row: dict[str, Any] = {"metric_name": "composite"}
+    composite_present = raw_composite is not None
+    if not composite_present:
+        # NULL composite → impute pool_mean (Q1 default; brief §"NULL
+        # composite handling"). Mark as eligible by default so a missing
+        # composite doesn't block promotion during the backfill window.
+        if pool_comp:
+            shrunk_comp = float(comp_pool_mean)
+        else:
+            shrunk_comp = float(comp_pool_mean)
+        thr = _empirical_percentile(pool_comp, q) if pool_comp else None
+        comp_row.update({
+            "raw_value": None,
+            "shrunken_value": float(shrunk_comp),
+            "lower_ci": None,
+            "pool_percentile": q,
+            "pool_threshold": (float(thr) if thr is not None else None),
+            "eligible": True,
+        })
+        eligibles.append(True)
+        if not pool_comp:
+            # Log once per evaluation when both candidate and pool are
+            # NULL — pre-backfill graceful degradation.
+            logger.debug(
+                "[cpcv_adaptive_gate] composite axis is empty (pre-backfill); "
+                "treating candidate as eligible on this axis"
+            )
+    else:
+        # Raw composite is already a normalized summary in [0,1]; no
+        # n-aware shrinkage needed (the underlying components were
+        # shrunk when the composite was computed). Keep as-is.
+        shrunk_comp = float(raw_composite)
+        thr = _empirical_percentile(pool_comp, q) if pool_comp else None
+        eligible = thr is None or shrunk_comp >= float(thr)
+        comp_row.update({
+            "raw_value": float(raw_composite),
+            "shrunken_value": float(shrunk_comp),
+            "lower_ci": None,
+            "pool_percentile": q,
+            "pool_threshold": (float(thr) if thr is not None else None),
+            "eligible": bool(eligible),
+        })
+        if not eligible:
+            reasons.append("adaptive_composite_below_pool_threshold")
+        eligibles.append(bool(eligible))
+    metric_rows.append(comp_row)
+
+    # Pareto frontier across (shrunk_dsr, -shrunk_pbo, shrunk_med,
+    # shrunk_comp). Pool members with NULL composite take pool_mean so
+    # the 4-D comparison is well-defined; matches the candidate's NULL
+    # treatment.
+    pool_quads: list[tuple[float, float, float, float]] = []
     n_pool = min(len(pool_dsr), len(pool_pbo), len(pool_med))
     for i in range(n_pool):
-        pool_triplets.append((pool_dsr[i], -pool_pbo[i], pool_med[i]))
-    candidate_triplet = (shrunk_dsr, -shrunk_pbo, shrunk_med)
-    dominated = _pareto_dominated(candidate_triplet, pool_triplets)
+        comp_i = pool_comp[i] if i < len(pool_comp) else float(comp_pool_mean)
+        pool_quads.append(
+            (pool_dsr[i], -pool_pbo[i], pool_med[i], float(comp_i))
+        )
+    candidate_quad = (shrunk_dsr, -shrunk_pbo, shrunk_med, float(shrunk_comp))
+    dominated = _pareto_dominated(candidate_quad, pool_quads)
     if dominated:
         reasons.append("adaptive_pareto_dominated")
 
@@ -604,10 +696,38 @@ def maybe_apply_adaptive_gate(
             "dsr": [],
             "pbo": [],
             "median_sharpe": [],
+            "composite": [],
             "lifecycle_promoted_sharpes": [],
             "prior_n": 60,
             "pool_size": 0,
         }
+        # f-composite-quality-event-driven (Phase 3, 2026-05-11): the
+        # wrapper reads ``quality_composite_score`` from the DB for the
+        # candidate pattern and threads it into ``eval_payload``. This
+        # keeps ``promotion_gate.py`` untouched per the brief's hard
+        # constraint. Reads on the candidate row only (one indexed
+        # lookup); no joins, no batch.
+        if db is not None and scan_pattern_id is not None and (
+            eval_payload.get("quality_composite_score") is None
+        ):
+            try:
+                from sqlalchemy import text as _text
+                row = db.execute(
+                    _text(
+                        "SELECT quality_composite_score FROM scan_patterns "
+                        "WHERE id = :pid"
+                    ),
+                    {"pid": int(scan_pattern_id)},
+                ).fetchone()
+                if row is not None and row[0] is not None and not _isnan(row[0]):
+                    eval_payload = dict(eval_payload)
+                    eval_payload["quality_composite_score"] = float(row[0])
+            except Exception as exc:
+                logger.debug(
+                    "[cpcv_adaptive_gate] candidate composite read failed "
+                    "pid=%s: %s — falling back to pool_mean",
+                    scan_pattern_id, exc,
+                )
         adaptive_ok, adaptive_reasons, metric_rows, summary_row = _evaluate_adaptive(
             eval_payload, pool=pool
         )

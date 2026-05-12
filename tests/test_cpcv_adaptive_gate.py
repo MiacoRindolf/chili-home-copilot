@@ -256,7 +256,10 @@ def test_shadow_log_writes_metric_and_summary_rows(db, monkeypatch):
         {"pid": pat.id},
     ).fetchall()
     metric_names = [r[0] for r in rows]
-    assert metric_names == ["dsr", "pbo", "median_sharpe", "summary"]
+    # f-composite-quality-event-driven (Phase 3, 2026-05-11): composite
+    # is now a 4th Pareto axis. The shadow log writes one extra metric
+    # row between median_sharpe and summary.
+    assert metric_names == ["dsr", "pbo", "median_sharpe", "composite", "summary"]
 
     summary_row = rows[-1]
     assert summary_row[6] is True  # legacy_verdict_pass
@@ -348,3 +351,160 @@ def test_adaptive_gate_enabled_predicate_default_off():
     assert gate.adaptive_gate_enabled() is False or gate.adaptive_gate_enabled() is True
     # The point: the predicate returns a bool without side effects.
     assert isinstance(gate.adaptive_gate_enabled(), bool)
+
+
+# ── 11. Composite as 4th Pareto axis (Phase 3) ────────────────────────
+
+
+def test_adaptive_gate_pareto_with_composite_axis(db, monkeypatch):
+    """Candidate wins on (DSR, PBO, med_sh) but loses on composite.
+
+    Pareto dominance is strict ≥ on every axis AND strict > on at least
+    one. If the candidate has a strictly LOWER composite than every
+    pool member, then any pool member that ties or beats on the other 3
+    axes wins via the composite-axis tiebreaker.
+    """
+    from app.models.trading import ScanPattern
+
+    monkeypatch.setattr(settings, "chili_cpcv_adaptive_gate_enabled", True)
+
+    # Candidate: strong DSR / low PBO / high med_sh, but WEAK composite.
+    pat = ScanPattern(
+        name="weak_composite_candidate",
+        origin="user",
+        rules_json={},
+        lifecycle_stage="candidate",
+        trade_count=100,
+        cpcv_n_paths=40,
+        cpcv_median_sharpe=2.0,
+        deflated_sharpe=0.99,
+        pbo=0.05,
+        quality_composite_score=0.20,  # well below pool top quartile
+    )
+    db.add(pat)
+    db.flush()
+
+    # Pool of 3 dominators: each ties candidate on DSR/PBO/med_sh AND
+    # beats on composite → strict 4-D domination.
+    for i in range(3):
+        db.add(
+            ScanPattern(
+                name=f"comp_pool_{i}",
+                origin="user",
+                rules_json={},
+                lifecycle_stage="promoted",
+                trade_count=100,
+                cpcv_n_paths=40,
+                cpcv_median_sharpe=2.0,
+                deflated_sharpe=0.99,
+                pbo=0.05,
+                quality_composite_score=0.85 + 0.01 * i,
+            )
+        )
+    db.commit()
+
+    eval_payload = {
+        "skipped": False,
+        "n_trades": 100,
+        "deflated_sharpe": 0.99,
+        "pbo": 0.05,
+        "cpcv_n_paths": 40,
+        "cpcv_median_sharpe": 2.0,
+        "n_effective_trials": 4,
+    }
+    ok, reasons = maybe_apply_adaptive_gate(
+        eval_payload,
+        scan_pattern_id=pat.id,
+        legacy_pass=True,
+        legacy_reasons=[],
+        db_session=db,
+    )
+    assert ok is False
+    assert any(
+        r in ("adaptive_pareto_dominated", "adaptive_composite_below_pool_threshold")
+        for r in reasons
+    )
+
+
+def test_adaptive_gate_null_composite_falls_back_to_pool_mean(db, monkeypatch):
+    """NULL candidate composite is imputed to pool_mean (Q1 default).
+
+    Candidate row has ``quality_composite_score=NULL``; the pool has
+    non-NULL composites. The wrapper imputes pool_mean for the
+    candidate so the 4-axis evaluation is well-defined and the
+    candidate is eligible on the composite axis by default.
+    """
+    from app.models.trading import ScanPattern
+
+    monkeypatch.setattr(settings, "chili_cpcv_adaptive_gate_enabled", True)
+
+    pat = ScanPattern(
+        name="null_composite_candidate",
+        origin="user",
+        rules_json={},
+        lifecycle_stage="candidate",
+        trade_count=80,
+        cpcv_n_paths=35,
+        cpcv_median_sharpe=1.5,
+        deflated_sharpe=0.97,
+        pbo=0.10,
+        quality_composite_score=None,
+    )
+    db.add(pat)
+    db.flush()
+
+    # Pool with non-NULL composites at the moderate range. Pool's other
+    # metrics are similar to the candidate so the Pareto comparison is
+    # decided primarily on the composite tiebreaker.
+    for i in range(5):
+        db.add(
+            ScanPattern(
+                name=f"null_pool_{i}",
+                origin="user",
+                rules_json={},
+                lifecycle_stage="promoted",
+                trade_count=80,
+                cpcv_n_paths=35,
+                cpcv_median_sharpe=1.5,
+                deflated_sharpe=0.97,
+                pbo=0.10,
+                quality_composite_score=0.55 + 0.01 * i,
+            )
+        )
+    db.commit()
+
+    eval_payload = {
+        "skipped": False,
+        "n_trades": 80,
+        "deflated_sharpe": 0.97,
+        "pbo": 0.10,
+        "cpcv_n_paths": 35,
+        "cpcv_median_sharpe": 1.5,
+        "n_effective_trials": 4,
+    }
+    ok, reasons = maybe_apply_adaptive_gate(
+        eval_payload,
+        scan_pattern_id=pat.id,
+        legacy_pass=True,
+        legacy_reasons=[],
+        db_session=db,
+    )
+    # The shadow-log row for the composite metric must show the imputed
+    # shrunken value and eligible=True for the NULL candidate.
+    rows = db.execute(
+        text(
+            "SELECT metric_name, raw_value, shrunken_value, eligible "
+            "FROM cpcv_adaptive_eval_log WHERE scan_pattern_id = :pid "
+            "AND metric_name = 'composite' ORDER BY id DESC LIMIT 1"
+        ),
+        {"pid": pat.id},
+    ).fetchone()
+    assert rows is not None
+    assert rows[0] == "composite"
+    assert rows[1] is None  # raw_value preserved as NULL
+    assert rows[2] is not None  # shrunken_value imputed to pool_mean
+    assert rows[3] is True  # eligible by default for NULL candidates
+    # The wrapper does not raise; verdict may be True or False based on
+    # the other 3 axes — we only assert the composite-axis semantics.
+    assert isinstance(ok, bool)
+    assert isinstance(reasons, list)
