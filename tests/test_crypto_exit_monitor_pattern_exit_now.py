@@ -46,7 +46,11 @@ def test_crypto_local_alias_resolves_to_shared_callable():
 # ---------------------------------------------------------------------------
 
 def _seed_open_crypto_trade(
-    db, *, ticker: str = "TRUMP-USD", name_suffix: str
+    db,
+    *,
+    ticker: str = "TRUMP-USD",
+    name_suffix: str,
+    broker_source: str = "robinhood",
 ) -> Trade:
     """Seed an open crypto Trade. ``name_suffix`` makes the User name
     per-test-unique so collisions don't cascade across cases when a
@@ -64,7 +68,7 @@ def _seed_open_crypto_trade(
         status="open",
         stop_loss=9.0,
         take_profit=14.0,
-        broker_source="robinhood",
+        broker_source=broker_source,
     )
     db.add(t)
     db.commit()
@@ -202,6 +206,130 @@ def test_case4_native_stop_trigger_wins_on_tie(db):
     assert t.pending_exit_reason.startswith("stop_loss_hit")
     assert "pattern_exit_now" not in (t.pending_exit_reason or "")
     sell_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Coinbase venue routing -- stop hit exits on Coinbase, not Robinhood
+# ---------------------------------------------------------------------------
+
+def test_coinbase_stop_hit_uses_coinbase_position_and_sell(db):
+    """Regression for 2026-05-12 live issue: a Coinbase-owned crypto
+    trade that hits its stop must use Coinbase position truth and a
+    Coinbase market sell. The prior monitor routed every crypto exit
+    through Robinhood, so Coinbase stop hits were visible as alerts but
+    never exited."""
+    t = _seed_open_crypto_trade(
+        db,
+        ticker="ADA-USD",
+        name_suffix="coinbase_stop",
+        broker_source="coinbase",
+    )
+
+    cb_positions = MagicMock(
+        return_value=[{"ticker": "ADA-USD", "quantity": 3.0}]
+    )
+    cb_sell = MagicMock(
+        return_value={"ok": True, "order_id": "cb-exit-1", "raw": {}}
+    )
+    rh_positions = MagicMock(
+        return_value=[{"ticker": "ADA-USD", "quantity": 5.0}]
+    )
+    rh_sell = MagicMock(return_value={"ok": True, "raw": {"id": "rh-wrong"}})
+
+    with patch(
+        "app.services.trading.crypto.exit_monitor._current_crypto_price",
+        return_value=8.50,
+    ), patch(
+        "app.services.coinbase_service.get_positions",
+        cb_positions,
+    ), patch(
+        "app.services.coinbase_service.place_sell_order",
+        cb_sell,
+    ), patch(
+        "app.services.broker_service.get_crypto_positions",
+        rh_positions,
+    ), patch(
+        "app.services.broker_service.place_crypto_sell_order",
+        rh_sell,
+    ), patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ):
+        from app.services.trading.crypto.exit_monitor import run_crypto_exit_pass
+        out = run_crypto_exit_pass(db)
+
+    assert out.get("closed") == 1
+    db.refresh(t)
+    assert t.pending_exit_order_id == "cb-exit-1"
+    assert t.pending_exit_reason is not None
+    assert t.pending_exit_reason.startswith("stop_loss_hit")
+    cb_positions.assert_called_once()
+    cb_sell.assert_called_once_with(
+        ticker=t.ticker,
+        quantity=3.0,
+        order_type="market",
+    )
+    rh_positions.assert_not_called()
+    rh_sell.assert_not_called()
+
+
+def test_coinbase_stop_hit_cancels_stale_sell_hold_and_retries(db):
+    """Coinbase open stop-limit orders hold base currency. When the
+    monitor promotes an exit to market, it must cancel stale open sells
+    and retry instead of looping on insufficient available balance."""
+    t = _seed_open_crypto_trade(
+        db,
+        ticker="ADA-USD",
+        name_suffix="coinbase_stop_retry",
+        broker_source="coinbase",
+    )
+
+    cb_sell = MagicMock(
+        side_effect=[
+            {"ok": False, "error": "Insufficient balance in source account"},
+            {"ok": True, "order_id": "cb-exit-retry", "raw": {}},
+        ]
+    )
+    get_open_orders = MagicMock(
+        return_value=[
+            {
+                "order_id": "cb-old-stop",
+                "product_id": "ADA-USD",
+                "side": "SELL",
+                "status": "OPEN",
+            }
+        ]
+    )
+    cancel_order = MagicMock(return_value={"ok": True, "order_id": "cb-old-stop"})
+
+    with patch(
+        "app.services.trading.crypto.exit_monitor._current_crypto_price",
+        return_value=8.50,
+    ), patch(
+        "app.services.coinbase_service.get_positions",
+        return_value=[{"ticker": "ADA-USD", "quantity": 3.0}],
+    ), patch(
+        "app.services.coinbase_service.place_sell_order",
+        cb_sell,
+    ), patch(
+        "app.services.coinbase_service.get_open_orders",
+        get_open_orders,
+    ), patch(
+        "app.services.coinbase_service.cancel_order_by_id",
+        cancel_order,
+    ), patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ):
+        from app.services.trading.crypto.exit_monitor import run_crypto_exit_pass
+        out = run_crypto_exit_pass(db)
+
+    assert out.get("closed") == 1
+    db.refresh(t)
+    assert t.pending_exit_order_id == "cb-exit-retry"
+    assert cb_sell.call_count == 2
+    get_open_orders.assert_called_once_with(product_ids=["ADA-USD"])
+    cancel_order.assert_called_once_with("cb-old-stop")
 
 
 # ---------------------------------------------------------------------------
