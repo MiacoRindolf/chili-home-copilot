@@ -194,7 +194,7 @@ _CLAIM_SQL_WORK_ONLY = text(
           AND event_type = :etype
           AND status IN ('pending', 'retry_wait')
           AND next_run_at <= CURRENT_TIMESTAMP
-        ORDER BY created_at ASC
+        ORDER BY next_run_at ASC, created_at ASC
         LIMIT :lim
         FOR UPDATE SKIP LOCKED
     ) AS sub
@@ -220,7 +220,7 @@ _CLAIM_SQL_ANY_KIND = text(
           AND event_type = :etype
           AND status IN ('pending', 'retry_wait')
           AND next_run_at <= CURRENT_TIMESTAMP
-        ORDER BY created_at ASC
+        ORDER BY next_run_at ASC, created_at ASC
         LIMIT :lim
         FOR UPDATE SKIP LOCKED
     ) AS sub
@@ -258,7 +258,7 @@ def claim_work_batch(
     return (
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.id.in_(ids))
-        .order_by(BrainWorkEvent.created_at.asc())
+        .order_by(BrainWorkEvent.next_run_at.asc(), BrainWorkEvent.created_at.asc())
         .all()
     )
 

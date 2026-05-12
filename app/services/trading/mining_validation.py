@@ -320,6 +320,16 @@ def _finalize_cpcv_promotion_ready(
     return True, detail
 
 
+def _adaptive_cpcv_gate_authoritative() -> bool:
+    """True when adaptive CPCV should replace legacy ensemble hard-blocking."""
+    try:
+        from .cpcv_adaptive_gate import adaptive_gate_enabled
+
+        return bool(adaptive_gate_enabled())
+    except Exception:
+        return False
+
+
 def check_promotion_ready(
     filtered: list[dict[str, Any]],
     *,
@@ -344,6 +354,15 @@ def check_promotion_ready(
         n_hypotheses_tested=n_hypotheses_tested,
     )
     if not ok:
+        if detail.get("blocked") == "ensemble_failed" and _adaptive_cpcv_gate_authoritative():
+            detail["ensemble_shadow_blocked"] = True
+            detail["ensemble_shadow_reason"] = detail.pop("blocked", None)
+            return _finalize_cpcv_promotion_ready(
+                detail,
+                filtered,
+                n_hypotheses_tested=n_hypotheses_tested,
+                scan_pattern=scan_pattern,
+            )
         return False, detail
     return _finalize_cpcv_promotion_ready(
         detail,
@@ -578,7 +597,20 @@ def check_promotion_ready_v2(
         n_hypotheses_tested=n_hypotheses_tested,
     )
     if not ok_base:
-        return False, detail
+        if detail.get("blocked") == "ensemble_failed" and _adaptive_cpcv_gate_authoritative():
+            detail["ensemble_shadow_blocked"] = True
+            detail["ensemble_shadow_reason"] = detail.pop("blocked", None)
+        else:
+            return False, detail
+
+    if detail.get("ensemble_shadow_blocked"):
+        detail["promotion_version"] = "v2_adaptive_ensemble_shadow"
+        return _finalize_cpcv_promotion_ready(
+            detail,
+            filtered,
+            n_hypotheses_tested=n_hypotheses_tested,
+            scan_pattern=scan_pattern,
+        )
 
     # DSR gate (hard when data available)
     if returns_for_dsr and len(returns_for_dsr) >= 10:

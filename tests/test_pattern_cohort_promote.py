@@ -11,8 +11,8 @@ Pure / unit (no DB):
 Integration (DB; ``_test``-suffixed):
   - kill switch off → no advances
   - first-week cycle promotes top-N capped by max_per_week
-  - eligibility excludes thin directional evidence (< 30)
-  - eligibility excludes below cpcv floor (< 1.0)
+  - eligibility allows thin/no directional evidence for shadow-observation bootstrap
+  - eligibility trusts the adaptive CPCV verdict instead of a median-sharpe floor
   - eligibility excludes promotion_gate_passed False
   - eligibility excludes already-shadow_promoted / promoted / live
   - cap enforcement within rolling 7-day window
@@ -373,47 +373,52 @@ def test_first_week_promotes_top_n_capped_by_max_per_week(db):
         assert p.lifecycle_stage == "candidate"
 
 
-def test_eligibility_filter_excludes_thin_directional_evidence(db):
-    """j.1 binding: rolling_sample_n < 30 → not eligible."""
+def test_eligibility_allows_thin_directional_for_shadow_observation_bootstrap(db):
+    """Shadow promotion is how a candidate collects directional outcomes."""
     _truncate_phase4_state(db)
-    p_eligible = _make_pattern(
-        db, name="eligible_30", quality_score=0.9,
-    )
-    _seed_directional_outcomes(
-        db, pattern_id=p_eligible.id, n_correct=20, n_incorrect=10,
-    )
     p_thin = _make_pattern(
-        db, name="thin_29", quality_score=0.95,
+        db, name="thin_29", quality_score=None, cpcv=2.0,
     )
     _seed_directional_outcomes(
         db, pattern_id=p_thin.id, n_correct=20, n_incorrect=9,  # 29 total
     )
+    p_none = _make_pattern(
+        db, name="no_directional_yet", quality_score=None, cpcv=1.8,
+    )
     cfg = _settings_stub()
     candidates = select_cohort_candidates(db, settings_=cfg)
     cand_ids = {p.id for p in candidates}
-    assert p_eligible.id in cand_ids
-    assert p_thin.id not in cand_ids
+    assert p_thin.id in cand_ids
+    assert p_none.id in cand_ids
 
 
-def test_eligibility_filter_excludes_below_cpcv_floor(db):
+def test_scored_candidates_rank_ahead_of_cpcv_only_candidates(db):
     _truncate_phase4_state(db)
-    p_at_floor = _make_pattern(
-        db, name="at_floor", cpcv=1.0, quality_score=0.7,
+    p_scored = _make_pattern(
+        db, name="scored", quality_score=0.7, cpcv=1.2,
     )
     _seed_directional_outcomes(
-        db, pattern_id=p_at_floor.id, n_correct=20, n_incorrect=10,
+        db, pattern_id=p_scored.id, n_correct=20, n_incorrect=10,
     )
-    p_below = _make_pattern(
-        db, name="below_floor", cpcv=0.95, quality_score=0.7,
-    )
-    _seed_directional_outcomes(
-        db, pattern_id=p_below.id, n_correct=20, n_incorrect=10,
+    p_cpcv_only = _make_pattern(
+        db, name="cpcv_only_higher_sharpe", quality_score=None, cpcv=9.0,
     )
     cfg = _settings_stub()
     candidates = select_cohort_candidates(db, settings_=cfg)
-    cand_ids = {p.id for p in candidates}
-    assert p_at_floor.id in cand_ids
-    assert p_below.id not in cand_ids
+    assert [p.id for p in candidates[:2]] == [p_scored.id, p_cpcv_only.id]
+
+
+def test_eligibility_trusts_adaptive_cpcv_verdict_without_median_floor(db):
+    _truncate_phase4_state(db)
+    p_lower_cpcv = _make_pattern(
+        db, name="adaptive_pass_lower_cpcv", cpcv=0.95, quality_score=None,
+    )
+    p_higher_cpcv = _make_pattern(db, name="higher_cpcv", cpcv=1.5, quality_score=None)
+    cfg = _settings_stub()
+    candidates = select_cohort_candidates(db, settings_=cfg)
+    cand_ids = [p.id for p in candidates]
+    assert p_lower_cpcv.id in cand_ids
+    assert cand_ids.index(p_higher_cpcv.id) < cand_ids.index(p_lower_cpcv.id)
 
 
 def test_eligibility_filter_excludes_promotion_gate_failed(db):

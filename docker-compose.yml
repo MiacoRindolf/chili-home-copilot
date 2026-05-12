@@ -299,7 +299,7 @@ services:
   brain-work-dispatcher:
     image: chili-app:local
     restart: unless-stopped
-    command: ["python", "scripts/brain_work_fast_lane.py", "--interval", "10"]
+    command: ["python", "scripts/brain_work_fast_lane.py", "--interval", "10", "--max-cpcv-gate", "4"]
     env_file:
       - path: .env
         required: false

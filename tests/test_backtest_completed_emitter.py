@@ -60,6 +60,7 @@ def test_cpcv_gate_still_subscribes_to_backtest_completed():
         REPO / "app/services/trading/brain_work/handlers/cpcv_gate.py"
     ).read_text()
     assert "handle_backtest_completed" in src2
+    assert "promotion_gate_passed" in src2
 
 
 # ---------------------------------------------------------------------------

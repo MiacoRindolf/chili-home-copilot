@@ -15,7 +15,7 @@ Brief: docs/STRATEGY/QUEUED/f-brain-event-kind-unify.md
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
@@ -125,6 +125,72 @@ def test_flag_on_outcome_pending_then_claimable(db, monkeypatch) -> None:
     )
     db.commit()
     assert eid2 == eid
+
+
+def test_claim_orders_due_rows_by_next_run_at_before_created_at(db, monkeypatch) -> None:
+    """A backfill can pace claim order via next_run_at without rewriting history."""
+    monkeypatch.setattr(settings, "chili_brain_outcome_claimable_enabled", True)
+
+    older = enqueue_outcome_event(
+        db,
+        event_type="backtest_completed",
+        dedupe_key="phase1b_order:older_created_later_due",
+        payload={"scan_pattern_id": 7101},
+    )
+    newer = enqueue_outcome_event(
+        db,
+        event_type="backtest_completed",
+        dedupe_key="phase1b_order:newer_created_earlier_due",
+        payload={"scan_pattern_id": 7102},
+    )
+    db.commit()
+    assert older is not None
+    assert newer is not None
+
+    now = datetime.utcnow()
+    db.execute(
+        text(
+            """
+            UPDATE brain_work_events
+               SET created_at = :older_created,
+                   updated_at = :older_created,
+                   next_run_at = :older_due
+             WHERE id = :older_id
+            """
+        ),
+        {
+            "older_id": int(older),
+            "older_created": now - timedelta(minutes=10),
+            "older_due": now + timedelta(minutes=5),
+        },
+    )
+    db.execute(
+        text(
+            """
+            UPDATE brain_work_events
+               SET created_at = :newer_created,
+                   updated_at = :newer_created,
+                   next_run_at = :newer_due
+             WHERE id = :newer_id
+            """
+        ),
+        {
+            "newer_id": int(newer),
+            "newer_created": now,
+            "newer_due": now - timedelta(seconds=1),
+        },
+    )
+    db.commit()
+
+    rows = claim_work_batch(
+        db,
+        limit=1,
+        lease_seconds=60,
+        holder_id="pytest:phase1b_order",
+        event_type="backtest_completed",
+    )
+    db.commit()
+    assert [int(r.id) for r in rows] == [int(newer)]
 
 
 def test_flag_on_legacy_done_row_not_reclaimed(db, monkeypatch) -> None:

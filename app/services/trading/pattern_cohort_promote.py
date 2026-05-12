@@ -1,8 +1,8 @@
 """f-promotion-pipeline-rebalance Phase 4 (2026-05-10).
 
-Weekly cohort auto-promote. Reads ``scan_patterns.quality_composite_score``
-(populated nightly by ``pattern_quality_score.compute_and_persist_scores``)
-and advances the top-N candidates per rolling 7-day window to the
+Weekly cohort auto-promote. Ranks eligible candidates by composite score when
+available, then CPCV strength, and advances the top-N candidates per rolling
+7-day window to the
 ``shadow_promoted`` lifecycle stage (Phase 3). NOT to ``promoted`` /
 ``live`` — the risk-asymmetric ramp is the whole point of Phase 4.
 
@@ -14,20 +14,20 @@ A pattern is eligible if and ONLY if:
 - ``active=True``
 - ``lifecycle_stage IN ('backtested', 'candidate')``
 - ``promotion_gate_passed=True``
-- ``cpcv_median_sharpe`` is non-NULL and ``>= 1.0``
+- ``cpcv_median_sharpe`` is non-NULL
 - ``deflated_sharpe`` is non-NULL
 - ``pbo`` is non-NULL
-- ``rolling_sample_n >= 30`` (joined from ``pattern_directional_quality_v``)
-- ``quality_composite_score`` is non-NULL (means scoring succeeded for
-  the pattern — all five components were computable)
-
-NULL propagation, never magic-fallback (advisor brief §2.6).
+- directional outcomes are NOT required; ``shadow_promoted`` is the
+  broker-blocked observation stage that collects them
+- ``quality_composite_score`` is optional; scored candidates rank first,
+  CPCV-only candidates can bootstrap observation
 
 Selection + cap
 ---------------
 
-Sort eligible patterns by ``quality_composite_score`` DESC, then ``id``
-ASC (deterministic tiebreaker). Take top-N (default 20). Cap at
+Sort eligible patterns by ``quality_composite_score`` DESC NULLS LAST, then
+CPCV strength and ``id`` ASC (deterministic tiebreaker). Take top-N (default
+20). Cap at
 ``max_per_week`` minus the count of cohort-recent transitions to
 ``shadow_promoted`` in the last 7 days; if zero spots remain,
 short-circuit. Idempotent on re-run within the same week.
@@ -58,7 +58,6 @@ logger = logging.getLogger(__name__)
 
 
 COHORT_ELIGIBLE_LIFECYCLE_STAGES = ("backtested", "candidate")
-DIRECTIONAL_SAMPLE_FLOOR = 30
 
 
 def select_cohort_candidates(
@@ -77,29 +76,29 @@ def select_cohort_candidates(
 
     top_n = int(getattr(settings_, "chili_cohort_promote_top_n", 20))
 
+    # Do not require directional outcomes here. shadow_promoted is the
+    # observation stage that lets a pattern collect those outcomes without
+    # broker exposure; requiring them here creates a bootstrap deadlock.
     sql = text(
         """
         SELECT sp.id
         FROM scan_patterns sp
-        INNER JOIN pattern_directional_quality_v pdq
-                ON pdq.scan_pattern_id = sp.id
         WHERE sp.active IS TRUE
           AND sp.lifecycle_stage IN ('backtested', 'candidate')
           AND sp.promotion_gate_passed IS TRUE
           AND sp.cpcv_median_sharpe IS NOT NULL
-          AND sp.cpcv_median_sharpe >= 1.0
           AND sp.deflated_sharpe IS NOT NULL
           AND sp.pbo IS NOT NULL
-          AND sp.quality_composite_score IS NOT NULL
-          AND pdq.rolling_sample_n >= :sample_floor
-        ORDER BY sp.quality_composite_score DESC, sp.id ASC
+        ORDER BY
+          sp.quality_composite_score DESC NULLS LAST,
+          sp.cpcv_median_sharpe DESC NULLS LAST,
+          sp.deflated_sharpe DESC NULLS LAST,
+          sp.pbo ASC NULLS LAST,
+          sp.id ASC
         LIMIT :top_n
         """
     )
-    rows = db.execute(sql, {
-        "sample_floor": DIRECTIONAL_SAMPLE_FLOOR,
-        "top_n": top_n,
-    }).fetchall()
+    rows = db.execute(sql, {"top_n": top_n}).fetchall()
     ids = [int(r[0]) for r in rows]
     if not ids:
         return []

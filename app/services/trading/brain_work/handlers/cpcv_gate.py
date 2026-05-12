@@ -135,7 +135,12 @@ def handle_backtest_completed(db: "Session", ev, user_id: int | None) -> None:
 
         # Lifecycle decision. Promotion happens in handler #3, not here.
         gate_payload = detail.get("cpcv_promotion_gate") or {}
-        gate_pass = bool(gate_payload.get("pass"))
+        gate_pass = bool(
+            gate_payload.get(
+                "promotion_gate_passed",
+                gate_payload.get("pass", False),
+            )
+        )
         if ok and gate_pass:
             pattern.lifecycle_stage = "backtested"
             pattern.lifecycle_changed_at = datetime.utcnow()
@@ -170,7 +175,14 @@ def handle_backtest_completed(db: "Session", ev, user_id: int | None) -> None:
             # deflated_sharpe_below_threshold). Move to challenged.
             pattern.lifecycle_stage = "challenged"
             pattern.lifecycle_changed_at = datetime.utcnow()
-            reasons = gate_payload.get("reasons") or []
+            reasons = (
+                detail.get("cpcv_gate_reasons")
+                or gate_payload.get("promotion_gate_reasons")
+                or gate_payload.get("reasons")
+                or []
+            )
+            if not reasons and detail.get("blocked"):
+                reasons = [str(detail.get("blocked"))]
             short_reason = (reasons[0] if reasons else "cpcv_gate_failed")[:32]
             pattern.promotion_status = f"challenged_cpcv_{short_reason[:12]}"
             logger.info(

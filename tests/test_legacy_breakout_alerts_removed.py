@@ -50,3 +50,13 @@ def test_legacy_scanner_entrypoints_return_disabled() -> None:
     assert stock["disabled"] is True
     assert crypto["reason"] == "legacy_breakout_scanner_removed"
     assert stock["reason"] == "legacy_breakout_scanner_removed"
+
+
+def test_adaptive_cpcv_bypasses_legacy_ensemble_hard_block() -> None:
+    src = (ROOT / "app" / "services" / "trading" / "mining_validation.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "_adaptive_cpcv_gate_authoritative" in src
+    assert "ensemble_shadow_blocked" in src
+    assert "ensemble_shadow_reason" in src
