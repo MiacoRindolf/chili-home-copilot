@@ -9,8 +9,9 @@ exit side was never wired.
 
 Design choices, in line with the equity / options paths:
 
-  - Uses ``broker_service.place_crypto_sell_order`` (mirrors crypto
-    buys), not the spot adapter (which is share-based).
+  - Submits the exit through the trade's broker venue. Robinhood crypto
+    uses ``broker_service.place_crypto_sell_order``; Coinbase spot uses
+    ``coinbase_service.place_sell_order``.
   - Reads thresholds directly from ``Trade.stop_loss`` /
     ``Trade.take_profit`` -- the per-trade levels, not a strategy
     parameter -- because those came from the alert / pattern that
@@ -57,6 +58,14 @@ from .._exit_monitor_common import (
 def _is_crypto_ticker(ticker: str) -> bool:
     """RH crypto convention: 'BTC-USD', 'RAY-USD', etc."""
     return bool((ticker or "").upper().endswith("-USD"))
+
+
+def _to_usd_product_id(ticker: str | None) -> str:
+    """Normalize crypto symbols for cross-broker position matching."""
+    t = (ticker or "").strip().upper()
+    if t and not t.endswith("-USD"):
+        t = f"{t}-USD"
+    return t
 
 
 def _current_crypto_price(ticker: str) -> Optional[float]:
@@ -151,6 +160,99 @@ def _is_crypto_trade(trade: Trade) -> bool:
     if src == "coinbase":
         return True
     return False
+
+
+def _broker_source_for_trade(trade: Trade) -> str:
+    src = (trade.broker_source or "").strip().lower()
+    return "coinbase" if src == "coinbase" else "robinhood"
+
+
+def _position_qty_for_trade(trade: Trade) -> tuple[float | None, str]:
+    """Return broker-truth quantity for *trade* from the trade's own venue."""
+    broker_source = _broker_source_for_trade(trade)
+    try:
+        if broker_source == "coinbase":
+            from ... import coinbase_service
+
+            positions = coinbase_service.get_positions() or []
+        else:
+            from ... import broker_service
+
+            positions = broker_service.get_crypto_positions() or []
+    except Exception:
+        logger.debug(
+            "[crypto_exit] broker-position fetch failed for %s via %s",
+            trade.ticker, broker_source, exc_info=True,
+        )
+        return None, broker_source
+
+    ticker_up = _to_usd_product_id(trade.ticker)
+    for pos in positions:
+        pos_ticker = (
+            pos.get("ticker")
+            or pos.get("symbol")
+            or pos.get("product_id")
+            or pos.get("currency")
+        )
+        if _to_usd_product_id(str(pos_ticker or "")) != ticker_up:
+            continue
+        try:
+            return float(pos.get("quantity") or 0.0), broker_source
+        except (TypeError, ValueError):
+            return None, broker_source
+    return None, broker_source
+
+
+def _place_market_sell_for_trade(trade: Trade, qty: float) -> dict[str, Any]:
+    """Submit the exit order to the venue that owns the open position."""
+    broker_source = _broker_source_for_trade(trade)
+    if broker_source == "coinbase":
+        from ... import coinbase_service
+
+        return coinbase_service.place_sell_order(
+            ticker=trade.ticker,
+            quantity=qty,
+            order_type="market",
+        )
+
+    from ... import broker_service
+
+    return broker_service.place_crypto_sell_order(
+        ticker=trade.ticker,
+        quantity=qty,
+        order_type="market",
+    )
+
+
+def _coinbase_insufficient_balance(error: str | None) -> bool:
+    return "insufficient balance" in str(error or "").strip().lower()
+
+
+def _cancel_coinbase_open_sell_orders(ticker: str) -> list[str]:
+    """Release base-asset holds from stale Coinbase exits before market exit."""
+    from ... import coinbase_service
+
+    product_id = _to_usd_product_id(ticker)
+    cancelled: list[str] = []
+    for order in coinbase_service.get_open_orders(product_ids=[product_id]):
+        side = str(order.get("side") or "").upper()
+        if side != "SELL":
+            continue
+        order_id = str(order.get("order_id") or order.get("id") or "")
+        if not order_id:
+            continue
+        result = coinbase_service.cancel_order_by_id(order_id)
+        if isinstance(result, dict) and result.get("ok"):
+            cancelled.append(order_id)
+        else:
+            logger.warning(
+                "[crypto_exit] Coinbase cancel failed before market exit "
+                "ticker=%s order_id=%s err=%s",
+                product_id,
+                order_id,
+                (result or {}).get("error") if isinstance(result, dict) else result,
+            )
+    return cancelled
 
 
 def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
@@ -250,78 +352,81 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
 
         # Place the sell.
         try:
-            from ... import broker_service
             qty = float(t.quantity or 0.0)
             if qty <= 0:
                 out["errors"].append(f"bad_qty:{t.ticker}")
                 continue
 
             # Round-13 FIX (2026-04-30): clamp the sell qty to broker
-            # truth via get_crypto_positions(). Mirrors the A-5 stock fix
-            # in robinhood_exit_execution.py. Without this, a partial
-            # fill, manual sale, or stale broker_sync gives Robinhood a
-            # qty larger than what's actually held -- the broker rejects
-            # the sell and the monitor retries forever. Per the
-            # no-hardcoded-fallback rule: if broker truth is unknown,
-            # defer (do NOT silently widen the local qty).
-            try:
-                _crypto_positions = broker_service.get_crypto_positions() or []
-                _ticker_up = (t.ticker or "").upper()
-                _broker_qty = None
-                for _p in _crypto_positions:
-                    if (_p.get("ticker") or "").upper() == _ticker_up:
-                        try:
-                            _broker_qty = float(_p.get("quantity") or 0.0)
-                        except (TypeError, ValueError):
-                            _broker_qty = None
-                        break
-            except Exception:
-                logger.debug(
-                    "[crypto_exit] FIX A-5b broker-position fetch failed for %s",
-                    t.ticker, exc_info=True,
-                )
-                _broker_qty = None
+            # truth. f-coinbase-stop-hit-exit-routing (2026-05-12):
+            # broker truth must come from the trade's venue. Coinbase
+            # trades used to hit Robinhood's crypto position API here,
+            # which left valid Coinbase stop hits deferred forever.
+            _broker_qty, _broker_source = _position_qty_for_trade(t)
 
             if _broker_qty is None:
                 logger.warning(
-                    "[crypto_exit] FIX A-5b: cannot resolve broker qty for "
+                    "[crypto_exit] cannot resolve %s broker qty for "
                     "trade#%s %s (local_qty=%s); deferring sell to next pass.",
-                    t.id, t.ticker, qty,
+                    _broker_source, t.id, t.ticker, qty,
                 )
                 out["deferred"] += 1
                 continue
             if _broker_qty <= 0:
                 logger.warning(
-                    "[crypto_exit] FIX A-5b: broker holds 0 of %s "
+                    "[crypto_exit] %s broker holds 0 of %s "
                     "(trade#%s local_qty=%s); position already closed externally. "
                     "Marking trade with no_position; broker_sync close path "
                     "will reconcile.",
-                    t.ticker, t.id, qty,
+                    _broker_source, t.ticker, t.id, qty,
                 )
                 out["skipped"] += 1
                 out["errors"].append(f"broker_holds_zero:{t.ticker}")
                 continue
             if _broker_qty < qty:
                 logger.warning(
-                    "[crypto_exit] FIX A-5b: clamping sell qty for "
-                    "trade#%s %s (local=%s -> broker=%s)",
-                    t.id, t.ticker, qty, _broker_qty,
+                    "[crypto_exit] clamping sell qty for trade#%s %s via %s "
+                    "(local=%s -> broker=%s)",
+                    t.id, t.ticker, _broker_source, qty, _broker_qty,
                 )
                 qty = _broker_qty
 
-            res = broker_service.place_crypto_sell_order(
-                ticker=t.ticker,
-                quantity=qty,
-                order_type="market",
-            )
+            res = _place_market_sell_for_trade(t, qty)
             if not (isinstance(res, dict) and res.get("ok")):
                 err = (res or {}).get("error") if isinstance(res, dict) else "unknown"
-                logger.warning(
-                    "[crypto_exit] sell failed trade#%s ticker=%s reason=%s err=%s",
-                    t.id, t.ticker, reason, err,
-                )
-                out["errors"].append(f"sell_failed:{t.ticker}:{err}")
-                continue
+                if _broker_source == "coinbase" and _coinbase_insufficient_balance(err):
+                    cancelled_orders = _cancel_coinbase_open_sell_orders(t.ticker)
+                    if cancelled_orders:
+                        logger.warning(
+                            "[crypto_exit] cancelled %s open Coinbase sell order(s) "
+                            "for trade#%s %s before retrying market exit",
+                            len(cancelled_orders), t.id, t.ticker,
+                        )
+                        res = _place_market_sell_for_trade(t, qty)
+                        if isinstance(res, dict) and res.get("ok"):
+                            err = None
+                        else:
+                            err = (
+                                (res or {}).get("error")
+                                if isinstance(res, dict)
+                                else "unknown"
+                            )
+                    else:
+                        logger.warning(
+                            "[crypto_exit] Coinbase insufficient balance for trade#%s "
+                            "%s but no open sell order could be cancelled",
+                            t.id, t.ticker,
+                        )
+                if isinstance(res, dict) and res.get("ok"):
+                    pass
+                else:
+                    logger.warning(
+                        "[crypto_exit] sell failed trade#%s ticker=%s broker=%s "
+                        "reason=%s err=%s",
+                        t.id, t.ticker, _broker_source, reason, err,
+                    )
+                    out["errors"].append(f"sell_failed:{t.ticker}:{err}")
+                    continue
             order_id = (res.get("raw") or {}).get("id") or res.get("order_id") or ""
             t.pending_exit_order_id = str(order_id)
             t.pending_exit_reason = reason[:50]

@@ -329,6 +329,27 @@ def get_recent_orders(limit: int = 20) -> list[dict[str, Any]]:
         return []
 
 
+def get_open_orders(product_ids: list[str] | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    """Open Coinbase Advanced Trade orders, optionally scoped to products."""
+    client = _get_client()
+    if not client or not is_connected():
+        return []
+    try:
+        resp = client.list_orders(
+            product_ids=product_ids,
+            order_status=["OPEN"],
+            limit=limit,
+        )
+        raw_orders = resp.get("orders", []) if isinstance(resp, dict) else getattr(resp, "orders", [])
+        out: list[dict[str, Any]] = []
+        for order in raw_orders or []:
+            out.append(order if isinstance(order, dict) else getattr(order, "__dict__", {}))
+        return out
+    except Exception as e:
+        logger.warning(f"[coinbase] get_open_orders failed: {e}")
+        return []
+
+
 # ── Order Placement ──────────────────────────────────────────────────
 
 def _to_product_id(ticker: str) -> str:
@@ -498,7 +519,11 @@ def get_order_by_id(order_id: str) -> dict[str, Any] | None:
         resp = client.get_order(order_id=order_id)
         od = resp if isinstance(resp, dict) else resp.__dict__ if hasattr(resp, "__dict__") else {}
         order_data = od.get("order", od)
-        return order_data if isinstance(order_data, dict) else {}
+        if isinstance(order_data, dict):
+            return order_data
+        if hasattr(order_data, "__dict__"):
+            return dict(order_data.__dict__)
+        return {}
     except Exception as e:
         logger.debug(f"[coinbase] get_order_by_id({order_id}) failed: {e}")
         return None
@@ -568,6 +593,86 @@ def is_cb_terminal(cb_state: str | None) -> bool:
     return (cb_state or "").lower() in _CB_TERMINAL_STATES
 
 
+def _parse_cb_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
+
+
+def _clear_pending_exit_fields(trade: Any) -> None:
+    trade.pending_exit_order_id = None
+    trade.pending_exit_status = None
+    trade.pending_exit_requested_at = None
+    trade.pending_exit_reason = None
+    trade.pending_exit_limit_price = None
+
+
+def _finalize_coinbase_pending_exit(db: Session, trade: Any, order: dict[str, Any]) -> float:
+    filled_qty = _safe_float(order.get("filled_size") or order.get("base_size"))
+    qty = filled_qty if filled_qty and filled_qty > 0 else float(trade.quantity or 0.0)
+    exit_px = (
+        _safe_float(order.get("average_filled_price"))
+        or _safe_float(order.get("average_price"))
+        or _safe_float(order.get("price"))
+        or _safe_float(trade.pending_exit_limit_price)
+        or float(trade.entry_price or 0.0)
+    )
+    exit_at = (
+        _parse_cb_datetime(order.get("last_fill_time"))
+        or _parse_cb_datetime(order.get("completion_time"))
+        or _parse_cb_datetime(order.get("filled_at"))
+        or datetime.utcnow()
+    )
+    exit_reason = str(trade.pending_exit_reason or "pending_exit")
+    entry = float(trade.entry_price or 0.0)
+    pnl = (float(exit_px) - entry) * float(qty or 0.0)
+
+    trade.status = "closed"
+    if qty and qty > 0:
+        trade.quantity = float(qty)
+    trade.exit_price = float(exit_px)
+    trade.exit_date = exit_at
+    trade.pnl = round(pnl, 4)
+    trade.exit_reason = exit_reason
+    trade.broker_status = str(order.get("status") or order.get("state") or "filled").lower()
+    trade.last_broker_sync = exit_at
+    _clear_pending_exit_fields(trade)
+    db.add(trade)
+    db.commit()
+
+    try:
+        from .trading.brain_work.execution_hooks import on_live_trade_closed
+
+        on_live_trade_closed(db, trade, source="coinbase_exit_execution")
+    except Exception:
+        logger.debug(
+            "[coinbase] on_live_trade_closed failed for trade=%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+    try:
+        from .trading.auto_trader_position_overrides import clear_position_overrides
+
+        clear_position_overrides(db, "trade", int(trade.id))
+    except Exception:
+        logger.debug(
+            "[coinbase] clear_position_overrides failed for trade=%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+    return round(pnl, 4)
+
+
 # ── Order sync (Coinbase → local DB) ────────────────────────────────
 
 def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
@@ -585,6 +690,16 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             Trade.broker_source == "coinbase",
             Trade.broker_order_id.isnot(None),
             Trade.status.in_(["working"]),
+        )
+        .all()
+    )
+    open_with_pending_exit = (
+        db.query(Trade)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.broker_source == "coinbase",
+            Trade.pending_exit_order_id.isnot(None),
+            Trade.status == "open",
         )
         .all()
     )
@@ -633,6 +748,49 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
         except Exception as e:
             logger.warning(f"[coinbase] Order sync failed for {trade.ticker}: {e}")
+            errors += 1
+
+    for trade in open_with_pending_exit:
+        try:
+            pending_order_id = str(trade.pending_exit_order_id or "")
+            cb_order = get_order_by_id(pending_order_id)
+            if not cb_order:
+                errors += 1
+                continue
+
+            cb_state = (cb_order.get("status") or cb_order.get("state") or "").lower()
+            now = datetime.utcnow()
+            trade.pending_exit_status = cb_state or trade.pending_exit_status
+            trade.last_broker_sync = now
+            db.add(trade)
+
+            if cb_state == "filled":
+                order_payload = {**cb_order, "order_id": pending_order_id}
+                pnl = _finalize_coinbase_pending_exit(db, trade, order_payload)
+                filled += 1
+                logger.info(
+                    "[coinbase] Pending exit %s for %s FILLED pnl=%s",
+                    pending_order_id,
+                    trade.ticker,
+                    pnl,
+                )
+            elif cb_state in _CB_TERMINAL_STATES and cb_state != "filled":
+                _clear_pending_exit_fields(trade)
+                trade.broker_status = cb_state
+                trade.last_broker_sync = now
+                db.add(trade)
+                cancelled += 1
+                logger.info(
+                    "[coinbase] Pending exit %s for %s %s; cleared pending exit",
+                    pending_order_id,
+                    trade.ticker,
+                    cb_state,
+                )
+
+            synced += 1
+
+        except Exception as e:
+            logger.warning(f"[coinbase] Pending exit sync failed for {trade.ticker}: {e}")
             errors += 1
 
     if synced:
@@ -716,6 +874,12 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             updated += 1
         else:
             avg_price = pos.get("average_buy_price", 0)
+            if not avg_price or avg_price <= 0:
+                logger.warning(
+                    "[coinbase] Skipping auto-create for %s: cost basis unavailable",
+                    ticker,
+                )
+                continue
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,

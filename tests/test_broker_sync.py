@@ -275,6 +275,128 @@ class TestSyncOrdersToDb:
 # ── Execute proposal status ──────────────────────────────────────────
 
 
+class TestCoinbaseSyncOrdersToDb:
+    """Coinbase order sync should also finalize monitor-submitted exits."""
+
+    @staticmethod
+    def _seed_open_coinbase_trade(db, **overrides):
+        from app.models.trading import Trade
+
+        now = datetime.utcnow()
+        fields: dict = dict(
+            user_id=None,
+            ticker="ADA-USD",
+            direction="long",
+            entry_price=10.0,
+            quantity=3.0,
+            status="open",
+            broker_source="coinbase",
+            pending_exit_order_id="cb-exit-1",
+            pending_exit_status="submitted",
+            pending_exit_requested_at=now,
+            pending_exit_reason="stop_loss_hit",
+            pending_exit_limit_price=8.5,
+        )
+        fields.update(overrides)
+        trade = Trade(**fields)
+        db.add(trade)
+        db.commit()
+        db.refresh(trade)
+        return trade
+
+    @patch("app.services.trading.auto_trader_position_overrides.clear_position_overrides")
+    @patch("app.services.trading.brain_work.execution_hooks.on_live_trade_closed")
+    @patch("app.services.coinbase_service.is_connected", return_value=True)
+    @patch("app.services.coinbase_service.get_order_by_id")
+    def test_pending_exit_fill_closes_coinbase_trade(
+        self, mock_get_order, mock_connected, mock_closed_hook, mock_clear_overrides, db,
+    ):
+        from app.services.coinbase_service import sync_orders_to_db
+
+        now = datetime.utcnow()
+        trade = self._seed_open_coinbase_trade(db)
+        mock_get_order.return_value = {
+            "order_id": "cb-exit-1",
+            "status": "FILLED",
+            "product_id": "ADA-USD",
+            "base_size": "3.0",
+            "filled_size": "3.0",
+            "average_filled_price": "8.50",
+            "completion_time": now.isoformat() + "Z",
+        }
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        db.refresh(trade)
+        assert result["filled"] == 1
+        assert trade.status == "closed"
+        assert trade.exit_reason == "stop_loss_hit"
+        assert trade.exit_price == 8.5
+        assert trade.quantity == 3.0
+        assert trade.pnl == -4.5
+        assert trade.pending_exit_order_id is None
+        assert trade.pending_exit_status is None
+        mock_closed_hook.assert_called_once()
+        mock_clear_overrides.assert_called_once()
+
+
+class TestCoinbaseOrderLookup:
+    def test_get_order_by_id_unwraps_sdk_order_object(self):
+        from app.services.coinbase_service import get_order_by_id
+
+        class OrderObj:
+            def __init__(self):
+                self.order_id = "cb-filled-1"
+                self.status = "FILLED"
+                self.filled_size = "3"
+                self.average_filled_price = "8.50"
+
+        class ResponseObj:
+            def __init__(self):
+                self.order = OrderObj()
+
+        class Client:
+            def get_order(self, order_id):
+                assert order_id == "cb-filled-1"
+                return ResponseObj()
+
+        with patch("app.services.coinbase_service._get_client", return_value=Client()):
+            order = get_order_by_id("cb-filled-1")
+
+        assert order == {
+            "order_id": "cb-filled-1",
+            "status": "FILLED",
+            "filled_size": "3",
+            "average_filled_price": "8.50",
+        }
+
+
+class TestCoinbasePositionSync:
+    @patch("app.services.coinbase_service.collapse_open_broker_position_duplicates")
+    @patch("app.services.coinbase_service.acquire_broker_position_sync_lock")
+    @patch("app.services.coinbase_service.is_connected", return_value=True)
+    @patch("app.services.coinbase_service.get_positions")
+    def test_zero_cost_basis_position_is_not_auto_created(
+        self, mock_positions, mock_connected, mock_lock, mock_collapse, db,
+    ):
+        from app.models.trading import Trade
+        from app.services.coinbase_service import sync_positions_to_db
+
+        mock_positions.return_value = [
+            {
+                "ticker": "AMP-USD",
+                "quantity": 10.0,
+                "average_buy_price": 0.0,
+            }
+        ]
+        mock_collapse.return_value = {"cancelled": 0}
+
+        result = sync_positions_to_db(db, user_id=None)
+
+        assert result["created"] == 0
+        assert db.query(Trade).filter(Trade.ticker == "AMP-USD").count() == 0
+
+
 class TestExecuteProposalStatus:
     """Verify _execute_proposal sets correct statuses against the real DB.
 
