@@ -93,12 +93,26 @@ Phases 0–3 built the machinery. Phase 4 makes it observable. Without
 Phase 4 the operator has to SQL the DB to know what the new gates are
 doing. With Phase 4 the runtime tab tells the story.
 
-## Open questions for plan-gate consult
+## CONFIRMED PATHS (no more searching needed)
 
-1. Locate the actual runtime-tab template. Brief assumes
-   `app/templates/brain_runtime.html` but CC should confirm and adjust.
-2. Polling cadence. Brief assumes 10s for queue-depth and on-demand
-   refresh for the pattern tables. Operator may want faster/slower.
+The prior session (260-runtime-tab-surfacing.session) timed out at 120min
+because CC went down a docker-exec investigation tangent instead of
+locating the template. Cowork located the paths via grep:
 
-Brief defaults: locate-template-first; 10s queue poll, on-demand refresh
-for tables.
+- **Runtime tab template:** `app/templates/brain/_trading_network.html`
+  (line 3 has `data-tb-tab="runtime"` button — this is the trading-domain
+  runtime sub-tab)
+- **Broader brain template (parent):** `app/templates/brain.html` (line
+  170: `Runtime` section heading)
+- **Operator desk subsection:** `app/templates/brain/_trading_operator_desk.html`
+  (has "Runtime & worker controls" details element)
+- **Router for endpoints:** `app/routers/brain.py` (also handles brain
+  project; `brain.py` is the more general one — confirm with `import`
+  patterns)
+
+DO NOT spend cycles re-discovering. Use these paths.
+
+## Polling cadence
+
+10s for queue-depth panel, on-demand refresh button for the pattern
+tables. Operator can change defaults in template if needed.
