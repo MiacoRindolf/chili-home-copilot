@@ -12,7 +12,18 @@ Phase 2 ship order (smallest blast radius first):
      promotion gate, sets pattern lifecycle stage.
   3. ``promote`` / ``demote`` — react to gate decisions.
   4. ``regime_ledger`` — reacts to trade close events.
+  5. ``pattern_stats`` — canonical evidence recompute on trade close.
+  6. ``breakout_outcomes`` — secondary-evidence path on alert resolve.
+  7. ``quality_score`` — recompute ``quality_composite_score`` after
+     CPCV / pattern_stats / regime_ledger commit. Phase 3 of
+     ``f-adaptive-promotion-architecture``; runs LAST in the per-event
+     chain so upstream writes are visible.
 
 Once handlers 1-4 ship and prove out in shadow, ``run_learning_cycle`` and
 the FIX 31 reconcile-pass gate are deleted.
 """
+
+from .quality_score import (  # noqa: F401
+    handle_backtest_completed_quality,
+    handle_trade_closed_quality,
+)

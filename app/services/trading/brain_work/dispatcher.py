@@ -323,6 +323,23 @@ def run_brain_work_dispatch_round(
                     # Replaces the OOS validation step of run_learning_cycle.
                     from .handlers.cpcv_gate import handle_backtest_completed
                     handle_backtest_completed(db, ev, user_id)
+                    # f-composite-quality-event-driven (Phase 3,
+                    # 2026-05-11): recompute quality_composite_score for
+                    # the pattern after cpcv_gate has committed the
+                    # fresh CPCV / DSR / PBO numbers. Swallowed exception
+                    # so a broken composite doesn't poison the CPCV
+                    # gate's lifecycle write.
+                    try:
+                        from .handlers.quality_score import (
+                            handle_backtest_completed_quality,
+                        )
+                        handle_backtest_completed_quality(db, ev, user_id)
+                    except Exception as _qs_err:
+                        logger.warning(
+                            "%s quality_score (backtest_completed) handler "
+                            "failed ev_id=%s: %s",
+                            LOG_PREFIX, ev.id, _qs_err,
+                        )
                 elif event_type == "pattern_eligible_promotion":
                     # FIX 38 (Phase 2 #3, 2026-04-29): promote handler.
                     # Sole authority for flipping lifecycle to 'promoted'.
@@ -425,6 +442,23 @@ def run_brain_work_dispatch_round(
                             LOG_PREFIX, ev.id, _re,
                         )
                         raise demote_err
+                    # f-composite-quality-event-driven (Phase 3,
+                    # 2026-05-11): recompute quality_composite_score
+                    # AFTER pattern_stats + regime_ledger have written
+                    # fresh win_rate / avg_return / directional-WR
+                    # inputs. Swallowed exception so a broken composite
+                    # doesn't poison the demote / regime chain.
+                    try:
+                        from .handlers.quality_score import (
+                            handle_trade_closed_quality,
+                        )
+                        handle_trade_closed_quality(db, ev, user_id)
+                    except Exception as _qs_err:
+                        logger.warning(
+                            "%s quality_score (trade_closed) handler "
+                            "failed ev_id=%s: %s",
+                            LOG_PREFIX, ev.id, _qs_err,
+                        )
                     if demote_err is not None:
                         raise demote_err
                 elif event_type == "breakout_alert_resolved":
