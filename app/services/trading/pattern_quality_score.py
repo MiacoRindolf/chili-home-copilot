@@ -304,3 +304,156 @@ def compute_and_persist_scores(
     }
     logger.info("[pattern_quality_score] refresh: %s", result)
     return result
+
+
+def compute_and_persist_scores_streaming(
+    db: Session,
+    *,
+    settings_: Any = None,
+    batch_size: int = 50,
+    stop_flag_path: Optional[str] = None,
+    dry_run: bool = False,
+    on_pattern: Any = None,
+) -> dict:
+    """Phase 3 backfill helper. Iterates active patterns in batches,
+    commits per batch, polls a stop-flag file between batches.
+
+    Same math as :func:`compute_and_persist_scores` — reuses the
+    pure :func:`compute_quality_composite_score`. The streaming
+    wrapper exists so the one-shot backfill script can:
+
+    * emit per-pattern progress to stdout (via ``on_pattern``);
+    * honor a kill switch (``stop_flag_path`` — a file whose
+      presence interrupts the loop between batches);
+    * roll back rather than commit when ``dry_run=True`` so the
+      operator can inspect the would-write distribution.
+
+    Returns a summary dict.
+    """
+    import os as _os
+
+    if settings_ is None:
+        from ...config import settings as _settings
+        settings_ = _settings
+
+    weights = _resolve_weights(settings_)
+    weight_sum = sum(weights.values())
+    if not (0.99 <= weight_sum <= 1.01):
+        logger.warning(
+            "[pattern_quality_score] streaming weights sum to %.4f "
+            "(expected ~1.0)",
+            weight_sum,
+        )
+
+    dq_map = _load_directional_quality_map(db)
+    decay_map = _load_decay_map(db)
+
+    patterns = (
+        db.query(ScanPattern)
+          .filter(ScanPattern.active.is_(True))
+          .order_by(ScanPattern.id.asc())
+          .all()
+    )
+
+    scored = 0
+    skipped_null_evidence = 0
+    skipped_thin_directional = 0
+    cleared = 0
+    written = 0
+    stopped = False
+    processed = 0
+
+    pending_changes: list[dict] = []
+
+    for idx, pat in enumerate(patterns):
+        dq = dq_map.get(int(pat.id))
+        wr = dq["directional_wr"] if dq else None
+        sample_n = dq["rolling_sample_n"] if dq else 0
+        decay = decay_map.get(int(pat.id))
+
+        if sample_n < 30 or decay is None:
+            new_score: Optional[float] = None
+            skipped_thin_directional += 1
+        else:
+            new_score = compute_quality_composite_score(
+                pat, wr, decay, weights,
+            )
+            if new_score is None:
+                skipped_null_evidence += 1
+            else:
+                scored += 1
+
+        prev = pat.quality_composite_score
+        changed = new_score != prev
+        if changed:
+            pending_changes.append({
+                "id": int(pat.id),
+                "old": prev,
+                "new": new_score,
+            })
+            if not dry_run:
+                pat.quality_composite_score = new_score
+            written += 1
+            if prev is not None and new_score is None:
+                cleared += 1
+
+        processed += 1
+        if on_pattern is not None:
+            try:
+                on_pattern({
+                    "id": int(pat.id),
+                    "old_score": prev,
+                    "new_score": new_score,
+                    "changed": changed,
+                    "directional_wr": wr,
+                    "rolling_sample_n": sample_n,
+                    "decay": decay,
+                })
+            except Exception:
+                # Operator callback is best-effort; never block the loop.
+                pass
+
+        # End of batch — commit (or rollback in dry-run) and check
+        # the stop flag before continuing.
+        if (idx + 1) % max(1, int(batch_size)) == 0 or idx == len(patterns) - 1:
+            if dry_run:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            else:
+                try:
+                    db.flush()
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+            if stop_flag_path and _os.path.exists(stop_flag_path):
+                stopped = True
+                logger.warning(
+                    "[pattern_quality_score] stop flag detected at %s — "
+                    "halting streaming backfill at pattern_id=%d "
+                    "(processed=%d/%d)",
+                    stop_flag_path, int(pat.id), processed, len(patterns),
+                )
+                break
+
+    result = {
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "patterns_examined": len(patterns),
+        "processed": processed,
+        "scored": scored,
+        "skipped_thin_directional": skipped_thin_directional,
+        "skipped_null_evidence": skipped_null_evidence,
+        "cleared_to_null": cleared,
+        "would_write": written if dry_run else None,
+        "wrote": (0 if dry_run else written),
+        "stopped_by_flag": stopped,
+        "weight_sum": round(weight_sum, 4),
+        "pending_changes_sample": pending_changes[:8],
+    }
+    logger.info(
+        "[pattern_quality_score] streaming refresh: %s", result,
+    )
+    return result

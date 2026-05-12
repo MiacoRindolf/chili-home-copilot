@@ -1,70 +1,44 @@
-# NEXT_TASK: f-brain-event-kind-backfill
+# NEXT_TASK: f-composite-quality-event-driven
 
 STATUS: DONE
 
 ## Goal
 
-**Phase 1c of the adaptive-promotion-architecture initiative.**
-Controlled backfill of the ~4,000 historical outcome/done orphans
-through the unified queue so handlers process them.
-
-## Why this is next
-
-Phase 0, 1a, 1b code, Phase 1b prod flag flip + verification, and
-Phase 2 (adaptive gate) all shipped. Handlers are firing in prod
-(verified: 20 pending rows + dispatcher claimed market_snapshots_batch
-+ `[brain_work:mine] ev_id=4335`). Phase 1c is the controlled mechanism
-to bring the 4,000 historical orphans forward so the cpcv_gate produces
-verdicts for the 1,055 historical `backtest_completed` events — that's
-the actual drought relief payload.
+**Phase 3 of the adaptive-promotion-architecture initiative.** Wire
+`quality_composite_score` as an event-driven node + one-shot backfill
+of the 584 NULL scores + add composite as a 4th Pareto axis in Phase 2's
+adaptive gate.
 
 ## Brief
 
-`docs/STRATEGY/QUEUED/f-brain-event-kind-backfill.md`
+`docs/STRATEGY/QUEUED/f-composite-quality-event-driven.md`
 
-Parent: `docs/STRATEGY/QUEUED/f-adaptive-promotion-architecture-2026-05-11.md`
-Phase 1a memo: `docs/AUDITS/2026-05-11_dispatcher_silence.md`
-Phase 1b CC_REPORT: `docs/STRATEGY/CC_REPORTS/2026-05-11_brain-event-kind-unify.md`
+## Why this is next
+
+Phases 0, 1a, 1b, 1c, 2 all shipped. Composite quality score is dormant
+(584/586 patterns NULL — Phase 0 finding). Phase 3 makes it live without
+new model — just event-driven recompute + backfill + Phase 2 integration.
 
 ## Deliverables (per brief)
 
-1. `scripts/brain-event-backfill.ps1` — operator-controlled script,
-   per-event-type, dry-run default, 30s inter-batch sleep, kill switch
-2. Per-event-type pre-flight memos under `docs/AUDITS/` for the two
-   large event types (backtest_completed, breakout_alert_resolved)
-3. `docs/runbooks/BRAIN_EVENT_BACKFILL.md`
-4. `docs/STRATEGY/CC_REPORTS/2026-05-11_brain-event-kind-backfill.md`
-
-## Recommended execution order (per brief)
-
-Smallest blast radius first:
-1. paper_trade_closed (1 row) — smoke test
-2. live_trade_closed (4 rows) — confidence builder
-3. broker_fill_closed (131 rows) — post-hoc execution audit
-4. market_snapshots_batch (179 rows) — populates regime_ledger
-5. **backtest_completed (1055 rows) — the actual drought relief**
-6. breakout_alert_resolved (2659 rows) — last, largest
-
-CC should ship the script + memos + runbook + report. The actual
-backfill UPDATE runs are operator-controlled via the script.
+1. `app/services/trading/brain_work/handlers/quality_score.py` — new handler
+2. Register in `handlers/__init__.py`
+3. `scripts/quality-score-backfill.ps1` — one-shot, `-DryRun` default
+4. Wire composite as 4th Pareto axis in `cpcv_adaptive_gate.py`
+5. `tests/test_handler_quality_score.py`
+6. `docs/runbooks/QUALITY_SCORE_HANDLER.md`
+7. `docs/STRATEGY/CC_REPORTS/2026-05-11_composite-quality-event-driven.md`
 
 ## Hard constraints
 
-- No `app/` code changes. Pure script + docs.
-- No new migrations / schema changes.
-- Per-event-type scoping required (no `-EventType` default).
-- DryRun default.
-- 30s inter-batch sleep hardcoded.
-- Mining handler `mine_patterns` has no event-level dedupe — DO NOT
-  enable retroactive replay of `market_snapshots_batch` rows without
-  inner-contract verification first.
-- TEST_DATABASE_URL must end in _test if any tests are added.
+- Handler must be idempotent (Phase 1b's hard-gate test pattern applies)
+- No changes to existing handlers, promotion_gate, or autotrader/broker/venue
+- Adaptive gate edit is additive (treat NULL composite as pool_mean during rollout)
+- Backfill `-DryRun` default + kill switch + per-pattern progress log
 
-## Side-shipped this session
+## Consult gate (2 design questions)
 
-- Phase 0 (`738a72d`)
-- Phase 1a (`4c1e46e`)
-- Phase 1b code (`2e9365c`) + prod flag flip + verified
-- Phase 2 adaptive gate (`fd2e687`)
-- Watcher truncation fix (`e13c7d9`)
-- Supervisor parameterization (`f71fdf1`)
+1. NULL composite → pool_mean (default) vs skip dimension entirely?
+2. `pattern_quality_recomputed` as outcome (default) vs work event kind?
+
+CC should surface in plan-gate consult.
