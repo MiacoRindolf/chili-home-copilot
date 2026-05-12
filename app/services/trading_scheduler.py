@@ -5291,10 +5291,9 @@ def start_scheduler():
             f"reasoning brain every {_reasoning_hours}h, "
             f"project brain every {_pb_minutes}min, "
             "weekly review Sun 6PM, broker sync market hours every 2min, price monitor every 5min, "
-            "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
+            "momentum scanner 9:30-11AM ET, "
             "crypto viability refresh every 30min 24/7, "
-            "stock breakout scanner market hours every 15min, "
-            "pattern imminent scanner every 15min; "
+            "pattern imminent scanner every 15min; legacy generic breakout scanners retired; "
             "web pattern research + variant evolution run inside the brain worker learning cycle)"
         )
 
