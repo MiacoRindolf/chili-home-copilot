@@ -1,44 +1,44 @@
-# NEXT_TASK: f-composite-quality-event-driven
+# NEXT_TASK: f-runtime-tab-surfacing
 
-STATUS: DONE
+STATUS: PENDING
 
 ## Goal
 
-**Phase 3 of the adaptive-promotion-architecture initiative.** Wire
-`quality_composite_score` as an event-driven node + one-shot backfill
-of the 584 NULL scores + add composite as a 4th Pareto axis in Phase 2's
-adaptive gate.
+**Phase 4 of the adaptive-promotion-architecture initiative (FINAL).**
+Surface the new gate machinery in the brain runtime tab: PTR-ready-but-ungated
+patterns, adaptive vs legacy CPCV verdict diff, composite quality scores,
+and brain_work_events queue depth.
 
 ## Brief
 
-`docs/STRATEGY/QUEUED/f-composite-quality-event-driven.md`
+`docs/STRATEGY/QUEUED/f-runtime-tab-surfacing.md`
 
-## Why this is next
+## Deliverables
 
-Phases 0, 1a, 1b, 1c, 2 all shipped. Composite quality score is dormant
-(584/586 patterns NULL — Phase 0 finding). Phase 3 makes it live without
-new model — just event-driven recompute + backfill + Phase 2 integration.
-
-## Deliverables (per brief)
-
-1. `app/services/trading/brain_work/handlers/quality_score.py` — new handler
-2. Register in `handlers/__init__.py`
-3. `scripts/quality-score-backfill.ps1` — one-shot, `-DryRun` default
-4. Wire composite as 4th Pareto axis in `cpcv_adaptive_gate.py`
-5. `tests/test_handler_quality_score.py`
-6. `docs/runbooks/QUALITY_SCORE_HANDLER.md`
-7. `docs/STRATEGY/CC_REPORTS/2026-05-11_composite-quality-event-driven.md`
+1. 3 new read-only FastAPI endpoints in brain router
+2. 2 new sections in the runtime tab template
+3. Endpoint tests
+4. CC_REPORT
 
 ## Hard constraints
 
-- Handler must be idempotent (Phase 1b's hard-gate test pattern applies)
-- No changes to existing handlers, promotion_gate, or autotrader/broker/venue
-- Adaptive gate edit is additive (treat NULL composite as pool_mean during rollout)
-- Backfill `-DryRun` default + kill switch + per-pattern progress log
+- Read-only endpoints, no DB writes
+- No autotrader / venue / broker / promotion_gate touched
+- No new tables or migrations
+- HTMX/vanilla JS only
 
-## Consult gate (2 design questions)
+## Consult gate
 
-1. NULL composite → pool_mean (default) vs skip dimension entirely?
-2. `pattern_quality_recomputed` as outcome (default) vs work event kind?
+1. Confirm actual runtime-tab template path (brief assumes
+   `app/templates/brain_runtime.html`)
+2. Polling cadence (brief assumes 10s queue, on-demand for tables)
 
 CC should surface in plan-gate consult.
+
+## After this
+
+Original architecture arc complete. Optional follow-ups (operator-directed):
+- Run Phase 1c backfill (`scripts/brain-event-backfill.ps1`)
+- Run Phase 3 backfill (`scripts/quality-score-backfill.ps1`)
+- Flip `chili_cpcv_adaptive_gate_enabled=1`
+- Dev-system reliability fixes (5 items I flagged separately)
