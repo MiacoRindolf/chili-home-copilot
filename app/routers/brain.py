@@ -1099,6 +1099,294 @@ def api_brain_network_graph_compat(db: Session = Depends(get_db)):
     return JSONResponse(build_neural_graph_projection(db))
 
 
+# ── Runtime tab surfacing: Phase 4 of adaptive-promotion-architecture ──
+# Read-only observability for the new gate machinery. No DB writes.
+
+_PTR_READY_MIN_ROWS = 30  # alignment with promotion_gate.py CPCV n_trades threshold
+
+
+@router.get("/api/brain/patterns/ptr-ready-but-ungated")
+def api_brain_patterns_ptr_ready_but_ungated(db: Session = Depends(get_db)):
+    """Patterns with enough PTR rows for CPCV but no CPCV verdict yet.
+
+    Distinct from "no data" patterns: these have accumulated ≥30
+    ``trading_pattern_trades`` rows (the CPCV ``n_trades`` minimum) but
+    ``scan_patterns.cpcv_n_paths`` is NULL, meaning the dispatcher hasn't
+    produced a verdict. Surfaces the residue Phase 1a's silence audit
+    flagged.
+    """
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT sp.id              AS pattern_id,
+                       sp.name            AS name,
+                       sp.lifecycle_stage AS lifecycle_stage,
+                       sp.last_backtest_at AS last_backtest_at,
+                       sp.cpcv_n_paths IS NOT NULL AS has_cpcv_data,
+                       COALESCE(ptr.n, 0) AS ptr_rows
+                FROM scan_patterns sp
+                LEFT JOIN (
+                    SELECT scan_pattern_id, COUNT(*) AS n
+                    FROM trading_pattern_trades
+                    WHERE scan_pattern_id IS NOT NULL
+                    GROUP BY scan_pattern_id
+                ) ptr ON ptr.scan_pattern_id = sp.id
+                WHERE sp.cpcv_n_paths IS NULL
+                  AND COALESCE(ptr.n, 0) >= :min_rows
+                ORDER BY ptr.n DESC NULLS LAST, sp.id ASC
+                LIMIT 200
+                """
+            ),
+            {"min_rows": _PTR_READY_MIN_ROWS},
+        ).fetchall()
+        items = []
+        for r in rows:
+            m = r._mapping
+            items.append({
+                "pattern_id": int(m["pattern_id"]),
+                "name": m["name"],
+                "lifecycle_stage": m["lifecycle_stage"],
+                "ptr_rows": int(m["ptr_rows"] or 0),
+                "has_cpcv_data": bool(m["has_cpcv_data"]),
+                "last_backtest_at": (
+                    m["last_backtest_at"].isoformat()
+                    if m["last_backtest_at"] is not None else None
+                ),
+            })
+        return JSONResponse({
+            "ok": True,
+            "min_ptr_rows": _PTR_READY_MIN_ROWS,
+            "count": len(items),
+            "patterns": items,
+        })
+    except Exception as exc:
+        logger.debug("[brain] ptr_ready_but_ungated query failed: %s", exc)
+        return JSONResponse({
+            "ok": False,
+            "error": str(exc)[:200],
+            "patterns": [],
+            "count": 0,
+        })
+
+
+@router.get("/api/brain/patterns/cpcv-verdict-diff")
+def api_brain_patterns_cpcv_verdict_diff(db: Session = Depends(get_db)):
+    """Adaptive vs legacy CPCV verdict diff (most-recent evaluation per pattern).
+
+    Reads ``cpcv_adaptive_eval_log`` (Phase 2 shadow log). Each evaluation
+    writes one row per metric (``dsr`` / ``pbo`` / ``median_sharpe``); we
+    fold them into one row per pattern using the latest ``evaluated_at``.
+    Empty until ``chili_cpcv_adaptive_gate_enabled`` flips on at least
+    once.
+    """
+    try:
+        rows = db.execute(
+            text(
+                """
+                WITH latest AS (
+                    SELECT scan_pattern_id, MAX(evaluated_at) AS evaluated_at
+                    FROM cpcv_adaptive_eval_log
+                    GROUP BY scan_pattern_id
+                ),
+                folded AS (
+                    SELECT l.scan_pattern_id,
+                           l.evaluated_at,
+                           MAX(CASE WHEN e.metric_name = 'dsr'
+                                    THEN e.shrunken_value END) AS shrunken_dsr,
+                           MAX(CASE WHEN e.metric_name = 'pbo'
+                                    THEN e.shrunken_value END) AS shrunken_pbo,
+                           MAX(CASE WHEN e.metric_name = 'median_sharpe'
+                                    THEN e.shrunken_value END) AS shrunken_med_sharpe,
+                           BOOL_OR(e.legacy_verdict_pass)   AS legacy_pass,
+                           BOOL_OR(e.adaptive_verdict_pass) AS adaptive_pass,
+                           BOOL_OR(e.pareto_dominant)       AS pareto_dominant
+                    FROM cpcv_adaptive_eval_log e
+                    JOIN latest l
+                      ON l.scan_pattern_id = e.scan_pattern_id
+                     AND l.evaluated_at    = e.evaluated_at
+                    GROUP BY l.scan_pattern_id, l.evaluated_at
+                )
+                SELECT f.scan_pattern_id        AS pattern_id,
+                       sp.name                  AS name,
+                       sp.lifecycle_stage       AS lifecycle_stage,
+                       sp.promotion_gate_passed AS gate_passed_now,
+                       sp.quality_composite_score AS composite_score,
+                       sp.updated_at            AS pattern_updated_at,
+                       f.evaluated_at,
+                       f.shrunken_dsr,
+                       f.shrunken_pbo,
+                       f.shrunken_med_sharpe,
+                       f.legacy_pass,
+                       f.adaptive_pass,
+                       f.pareto_dominant
+                FROM folded f
+                JOIN scan_patterns sp ON sp.id = f.scan_pattern_id
+                ORDER BY f.evaluated_at DESC, f.scan_pattern_id ASC
+                LIMIT 200
+                """
+            )
+        ).fetchall()
+        items = []
+        agree = 0
+        disagree = 0
+        for r in rows:
+            m = r._mapping
+            lp = m["legacy_pass"]
+            ap = m["adaptive_pass"]
+            if lp is not None and ap is not None:
+                if lp == ap:
+                    agree += 1
+                else:
+                    disagree += 1
+            items.append({
+                "pattern_id": int(m["pattern_id"]),
+                "name": m["name"],
+                "lifecycle_stage": m["lifecycle_stage"],
+                "gate_passed_now": (
+                    None if m["gate_passed_now"] is None
+                    else bool(m["gate_passed_now"])
+                ),
+                "composite_score": (
+                    None if m["composite_score"] is None
+                    else float(m["composite_score"])
+                ),
+                "composite_score_at": (
+                    m["pattern_updated_at"].isoformat()
+                    if m["pattern_updated_at"] is not None else None
+                ),
+                "evaluated_at": (
+                    m["evaluated_at"].isoformat()
+                    if m["evaluated_at"] is not None else None
+                ),
+                "shrunken_dsr": (
+                    None if m["shrunken_dsr"] is None
+                    else float(m["shrunken_dsr"])
+                ),
+                "shrunken_pbo": (
+                    None if m["shrunken_pbo"] is None
+                    else float(m["shrunken_pbo"])
+                ),
+                "shrunken_med_sharpe": (
+                    None if m["shrunken_med_sharpe"] is None
+                    else float(m["shrunken_med_sharpe"])
+                ),
+                "legacy_pass": None if lp is None else bool(lp),
+                "adaptive_pass": None if ap is None else bool(ap),
+                "pareto_dominant": (
+                    None if m["pareto_dominant"] is None
+                    else bool(m["pareto_dominant"])
+                ),
+            })
+        return JSONResponse({
+            "ok": True,
+            "count": len(items),
+            "agree": agree,
+            "disagree": disagree,
+            "patterns": items,
+        })
+    except Exception as exc:
+        logger.debug("[brain] cpcv_verdict_diff query failed: %s", exc)
+        return JSONResponse({
+            "ok": False,
+            "error": str(exc)[:200],
+            "patterns": [],
+            "count": 0,
+            "agree": 0,
+            "disagree": 0,
+        })
+
+
+@router.get("/api/brain/dispatch-queue-depth")
+def api_brain_dispatch_queue_depth(db: Session = Depends(get_db)):
+    """Per (event_kind, event_type, status) queue depth from ``brain_work_events``.
+
+    Surfaces dispatcher liveness and per-handler backlog for the trading
+    domain. ``oldest_pending_age_seconds`` is computed against the
+    earliest ``created_at`` of unfinished rows in each bucket.
+    """
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT event_kind,
+                       event_type,
+                       status,
+                       COUNT(*)                              AS n,
+                       MIN(created_at)                       AS oldest_created_at,
+                       EXTRACT(
+                         EPOCH FROM (NOW() - MIN(created_at))
+                       )::BIGINT                             AS oldest_age_seconds
+                FROM brain_work_events
+                WHERE domain = 'trading'
+                  AND status IN ('pending', 'processing', 'retry_wait', 'dead')
+                GROUP BY event_kind, event_type, status
+                ORDER BY n DESC, event_type ASC, status ASC
+                """
+            )
+        ).fetchall()
+        buckets = []
+        total_pending = 0
+        total_processing = 0
+        total_retry_wait = 0
+        total_dead = 0
+        global_oldest_age = 0
+        for r in rows:
+            m = r._mapping
+            n = int(m["n"] or 0)
+            status = m["status"]
+            age = int(m["oldest_age_seconds"] or 0)
+            if status == "pending":
+                total_pending += n
+            elif status == "processing":
+                total_processing += n
+            elif status == "retry_wait":
+                total_retry_wait += n
+            elif status == "dead":
+                total_dead += n
+            if status in ("pending", "retry_wait") and age > global_oldest_age:
+                global_oldest_age = age
+            buckets.append({
+                "event_kind": m["event_kind"],
+                "event_type": m["event_type"],
+                "status": status,
+                "count": n,
+                "oldest_created_at": (
+                    m["oldest_created_at"].isoformat()
+                    if m["oldest_created_at"] is not None else None
+                ),
+                "oldest_age_seconds": age,
+            })
+        if global_oldest_age < 120:
+            health = "green"
+        elif global_oldest_age < 600:
+            health = "yellow"
+        else:
+            health = "red"
+        return JSONResponse({
+            "ok": True,
+            "totals": {
+                "pending": total_pending,
+                "processing": total_processing,
+                "retry_wait": total_retry_wait,
+                "dead": total_dead,
+            },
+            "oldest_pending_age_seconds": global_oldest_age,
+            "health": health,
+            "buckets": buckets,
+        })
+    except Exception as exc:
+        logger.debug("[brain] dispatch_queue_depth query failed: %s", exc)
+        return JSONResponse({
+            "ok": False,
+            "error": str(exc)[:200],
+            "totals": {"pending": 0, "processing": 0, "retry_wait": 0, "dead": 0},
+            "oldest_pending_age_seconds": 0,
+            "health": "green",
+            "buckets": [],
+        })
+
+
 # ── Trading domain: controls ───────────────────────────────────────────
 
 @router.post("/api/brain/trading/learn")

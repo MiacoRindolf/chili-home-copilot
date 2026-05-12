@@ -66,6 +66,8 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
         <button class="brain-nav-btn" data-panel="deep-dive" role="tab" aria-selected="false" onclick="switchBrainPanel('deep-dive')">Deep Dive</button>
       </nav>
 
+      {% include "brain/_trading_runtime_gates.html" %}
+
       <!-- Panel: Overview (operator desk + edge grid) -->
       <div class="brain-content-panel active" id="brain-panel-overview" role="tabpanel">
       <div class="trading-main-content">
