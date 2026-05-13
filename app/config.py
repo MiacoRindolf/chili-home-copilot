@@ -2561,6 +2561,9 @@ class Settings(BaseSettings):
             "CHILI_COHORT_SCORE_WEIGHT_DECAY_INVERSE"
         ),
     )
+    # Legacy knobs kept for env compatibility. The active cohort selector now
+    # fills the adaptive roster target from chili_cpcv_target_promotion_pool_pct
+    # instead of fixed top-N / weekly caps.
     chili_cohort_promote_top_n: int = Field(
         default=20,
         validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_TOP_N"),

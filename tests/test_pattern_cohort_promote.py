@@ -34,6 +34,7 @@ from app.services.trading.pattern_quality_score import (
     _clip,
 )
 from app.services.trading.pattern_cohort_promote import (
+    count_current_promotion_roster,
     count_recent_cohort_promotions,
     run_cohort_promote_cycle,
     select_cohort_candidates,
@@ -59,6 +60,7 @@ def _settings_stub(**overrides):
         chili_cohort_score_weight_decay_inverse=0.10,
         chili_cohort_promote_top_n=20,
         chili_cohort_promote_max_per_week=10,
+        chili_cpcv_target_promotion_pool_pct=1.0,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -338,7 +340,7 @@ def test_kill_switch_off_state_skips_cycle(db):
     assert pat.lifecycle_stage == "candidate"
 
 
-def test_first_week_promotes_top_n_capped_by_max_per_week(db):
+def test_first_cycle_promotes_to_adaptive_target_pool(db):
     _truncate_phase4_state(db)
     # Seed 12 eligible candidates with descending composite scores.
     pats = []
@@ -354,21 +356,21 @@ def test_first_week_promotes_top_n_capped_by_max_per_week(db):
         pats.append(p)
     cfg = _settings_stub(
         chili_cohort_promote_enabled=True,
-        chili_cohort_promote_top_n=20,
-        chili_cohort_promote_max_per_week=10,
+        chili_cpcv_target_promotion_pool_pct=0.5,
     )
     out = run_cohort_promote_cycle(db, settings_=cfg)
-    assert out["promoted_count"] == 10
-    # Top 10 by score are the first 10 patterns (highest scores).
-    expected_promoted_ids = {p.id for p in pats[:10]}
+    assert out["target_roster_size"] == 6
+    assert out["promoted_count"] == 6
+    # Top half by score are the first patterns (highest scores).
+    expected_promoted_ids = {p.id for p in pats[:6]}
     assert set(out["promoted_ids"]) == expected_promoted_ids
 
     # Verify lifecycle transitioned in DB.
-    for p in pats[:10]:
+    for p in pats[:6]:
         db.refresh(p)
         assert p.lifecycle_stage == "shadow_promoted"
         assert p.lifecycle_changed_at is not None
-    for p in pats[10:]:
+    for p in pats[6:]:
         db.refresh(p)
         assert p.lifecycle_stage == "candidate"
 
@@ -419,6 +421,31 @@ def test_eligibility_trusts_adaptive_cpcv_verdict_without_median_floor(db):
     cand_ids = [p.id for p in candidates]
     assert p_lower_cpcv.id in cand_ids
     assert cand_ids.index(p_higher_cpcv.id) < cand_ids.index(p_lower_cpcv.id)
+
+
+def test_eligibility_recovers_stale_challenged_when_adaptive_gate_passes(db):
+    _truncate_phase4_state(db)
+    p_challenged_now_passed = _make_pattern(
+        db,
+        name="old_gate_failed_now_passed",
+        lifecycle="challenged",
+        cpcv=1.7,
+        quality_score=0.8,
+        promotion_gate=True,
+    )
+    p_challenged_still_failed = _make_pattern(
+        db,
+        name="old_gate_failed_still_failed",
+        lifecycle="challenged",
+        cpcv=1.7,
+        quality_score=0.8,
+        promotion_gate=False,
+    )
+    cfg = _settings_stub()
+    candidates = select_cohort_candidates(db, settings_=cfg)
+    cand_ids = {p.id for p in candidates}
+    assert p_challenged_now_passed.id in cand_ids
+    assert p_challenged_still_failed.id not in cand_ids
 
 
 def test_eligibility_filter_excludes_promotion_gate_failed(db):
@@ -483,15 +510,24 @@ def test_eligibility_filter_excludes_promoted_and_shadow_promoted(db):
     assert p_live.id not in cand_ids
 
 
-def test_cap_enforcement_within_window(db):
+def test_target_roster_counts_existing_staged_and_promoted(db):
     _truncate_phase4_state(db)
-    # First, place 8 patterns at shadow_promoted within the last 7 days
-    # (simulating prior cohort promotions earlier in the week).
+    # First, place 8 patterns in staged/live roster states.
     recent = datetime.utcnow() - timedelta(days=2)
-    for i in range(8):
+    existing_lifecycles = [
+        "shadow_promoted",
+        "pilot_promoted",
+        "promoted",
+        "live",
+        "shadow_promoted",
+        "pilot_promoted",
+        "promoted",
+        "live",
+    ]
+    for i, lifecycle in enumerate(existing_lifecycles):
         _make_pattern(
             db, name=f"recent_{i}",
-            lifecycle="shadow_promoted",
+            lifecycle=lifecycle,
             quality_score=0.95,
             lifecycle_changed_at=recent,
         )
@@ -510,20 +546,24 @@ def test_cap_enforcement_within_window(db):
 
     cfg = _settings_stub(
         chili_cohort_promote_enabled=True,
-        chili_cohort_promote_max_per_week=10,
+        chili_cpcv_target_promotion_pool_pct=0.5,
     )
 
-    # Sanity check: counter sees the 8 prior promotions.
-    assert count_recent_cohort_promotions(db) == 8
+    # Legacy counter still counts shadow-only transitions.
+    assert count_recent_cohort_promotions(db) == 2
+    assert count_current_promotion_roster(db) == 8
 
     out = run_cohort_promote_cycle(db, settings_=cfg)
-    # Cap minus prior = 10 - 8 = 2 spots remaining → only 2 advance.
-    assert out["promoted_count"] == 2
-    assert out["spots_remaining_before"] == 2
+    # Active pool is 28; target roster is ceil(28 * 0.5) = 14.
+    # Existing roster 8 leaves 6 adaptive slots.
+    assert out["target_roster_size"] == 14
+    assert out["current_roster_size_before"] == 8
+    assert out["promoted_count"] == 6
+    assert out["spots_remaining_before"] == 6
 
-    # Re-running within the same week → cap reached, 0 advance.
+    # Re-running after target is reached advances no additional rows.
     out2 = run_cohort_promote_cycle(db, settings_=cfg)
-    assert out2["skipped"] == "cap_reached"
+    assert out2["skipped"] == "target_roster_reached"
 
 
 def test_tied_scores_tiebreaker_by_id_asc(db):
@@ -545,7 +585,7 @@ def test_tied_scores_tiebreaker_by_id_asc(db):
 
     cfg = _settings_stub(
         chili_cohort_promote_enabled=True,
-        chili_cohort_promote_max_per_week=1,
+        chili_cpcv_target_promotion_pool_pct=0.5,
     )
     out = run_cohort_promote_cycle(db, settings_=cfg)
     assert out["promoted_count"] == 1

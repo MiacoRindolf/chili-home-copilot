@@ -3277,13 +3277,11 @@ def _run_pattern_cohort_promote_job() -> None:
     """f-promotion-pipeline-rebalance Phase 4: weekly cohort
     auto-promote.
 
-    Selects top-N eligible patterns by ``quality_composite_score``
-    (populated by the nightly refresh) and advances them to
-    ``shadow_promoted`` (Phase 3's lifecycle stage). Capped at
-    ``chili_cohort_promote_max_per_week`` per rolling 7-day window.
+    Selects eligible patterns by ``quality_composite_score`` (populated by
+    the nightly refresh) and advances enough to ``shadow_promoted`` to fill
+    the adaptive roster target from ``chili_cpcv_target_promotion_pool_pct``.
 
-    Flag-disable via ``CHILI_COHORT_PROMOTE_ENABLED=false`` (default).
-    Phase 4 ships dormant; the operator opts in.
+    Flag-disable via ``CHILI_COHORT_PROMOTE_ENABLED=false``.
     """
     from ..config import settings as _settings
 

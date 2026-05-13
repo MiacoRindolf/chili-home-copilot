@@ -1,10 +1,9 @@
 """f-promotion-pipeline-rebalance Phase 4 (2026-05-10).
 
-Weekly cohort auto-promote. Ranks eligible candidates by composite score when
-available, then CPCV strength, and advances the top-N candidates per rolling
-7-day window to the
-``shadow_promoted`` lifecycle stage (Phase 3). NOT to ``promoted`` /
-``live`` — the risk-asymmetric ramp is the whole point of Phase 4.
+Adaptive cohort auto-promote. Ranks eligible candidates by composite score
+when available, then CPCV strength, and advances enough candidates to fill the
+operator's target promotion roster. Candidates move first to
+``shadow_promoted``; they do not jump directly to ``promoted`` / ``live``.
 
 Eligibility filter
 ------------------
@@ -12,7 +11,8 @@ Eligibility filter
 A pattern is eligible if and ONLY if:
 
 - ``active=True``
-- ``lifecycle_stage IN ('backtested', 'candidate')``
+- ``lifecycle_stage IN ('backtested', 'candidate')``, plus stale
+  ``challenged`` rows whose adaptive CPCV verdict now passes
 - ``promotion_gate_passed=True``
 - ``cpcv_median_sharpe`` is non-NULL
 - ``deflated_sharpe`` is non-NULL
@@ -22,15 +22,14 @@ A pattern is eligible if and ONLY if:
 - ``quality_composite_score`` is optional; scored candidates rank first,
   CPCV-only candidates can bootstrap observation
 
-Selection + cap
----------------
+Selection + target roster
+-------------------------
 
 Sort eligible patterns by ``quality_composite_score`` DESC NULLS LAST, then
-CPCV strength and ``id`` ASC (deterministic tiebreaker). Take top-N (default
-20). Cap at
-``max_per_week`` minus the count of cohort-recent transitions to
-``shadow_promoted`` in the last 7 days; if zero spots remain,
-short-circuit. Idempotent on re-run within the same week.
+CPCV strength and ``id`` ASC (deterministic tiebreaker). Fill remaining slots
+under ``chili_cpcv_target_promotion_pool_pct`` of the active pattern pool.
+Existing staged/live roster rows count toward that target, so reruns are
+naturally idempotent.
 
 Public API
 ----------
@@ -46,6 +45,7 @@ Public API
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -57,7 +57,13 @@ from ...models.trading import ScanPattern
 logger = logging.getLogger(__name__)
 
 
-COHORT_ELIGIBLE_LIFECYCLE_STAGES = ("backtested", "candidate")
+COHORT_ELIGIBLE_LIFECYCLE_STAGES = ("backtested", "candidate", "challenged")
+PROMOTION_ROSTER_LIFECYCLE_STAGES = (
+    "shadow_promoted",
+    "pilot_promoted",
+    "promoted",
+    "live",
+)
 
 
 def select_cohort_candidates(
@@ -74,17 +80,17 @@ def select_cohort_candidates(
         from ...config import settings as _settings
         settings_ = _settings
 
-    top_n = int(getattr(settings_, "chili_cohort_promote_top_n", 20))
-
     # Do not require directional outcomes here. shadow_promoted is the
     # observation stage that lets a pattern collect those outcomes without
     # broker exposure; requiring them here creates a bootstrap deadlock.
+    # Stale ``challenged`` rows are eligible only when the current adaptive
+    # verdict says they pass.
     sql = text(
         """
         SELECT sp.id
         FROM scan_patterns sp
         WHERE sp.active IS TRUE
-          AND sp.lifecycle_stage IN ('backtested', 'candidate')
+          AND sp.lifecycle_stage IN ('backtested', 'candidate', 'challenged')
           AND sp.promotion_gate_passed IS TRUE
           AND sp.cpcv_median_sharpe IS NOT NULL
           AND sp.deflated_sharpe IS NOT NULL
@@ -95,10 +101,9 @@ def select_cohort_candidates(
           sp.deflated_sharpe DESC NULLS LAST,
           sp.pbo ASC NULLS LAST,
           sp.id ASC
-        LIMIT :top_n
         """
     )
-    rows = db.execute(sql, {"top_n": top_n}).fetchall()
+    rows = db.execute(sql).fetchall()
     ids = [int(r[0]) for r in rows]
     if not ids:
         return []
@@ -135,21 +140,47 @@ def count_recent_cohort_promotions(
     )
 
 
+def count_active_patterns(db: Session) -> int:
+    """Count active patterns in the current promotion universe."""
+    return (
+        db.query(ScanPattern)
+          .filter(ScanPattern.active.is_(True))
+          .count()
+    )
+
+
+def count_current_promotion_roster(db: Session) -> int:
+    """Count active patterns already staged, pilot, promoted, or live."""
+    return (
+        db.query(ScanPattern)
+          .filter(ScanPattern.active.is_(True))
+          .filter(ScanPattern.lifecycle_stage.in_(PROMOTION_ROSTER_LIFECYCLE_STAGES))
+          .count()
+    )
+
+
+def target_promotion_roster_size(db: Session, *, settings_: Any) -> int:
+    """Derive the target roster from operator policy and active pool size."""
+    pct_raw = getattr(settings_, "chili_cpcv_target_promotion_pool_pct", None)
+    if pct_raw is None:
+        return 0
+    pct = max(0.0, min(1.0, float(pct_raw)))
+    return int(math.ceil(count_active_patterns(db) * pct))
+
+
 def run_cohort_promote_cycle(
     db: Session,
     *,
     now: Optional[datetime] = None,
     settings_: Any = None,
 ) -> dict:
-    """Weekly cohort-promote entry point.
+    """Adaptive cohort-promote entry point.
 
-    Selects top-N eligible patterns, caps at remaining spots in the
-    rolling 7-day window, and updates ``lifecycle_stage`` to
+    Selects ranked eligible patterns, fills remaining slots under the
+    target promotion roster, and updates ``lifecycle_stage`` to
     ``shadow_promoted`` for the cohort. Logs each transition.
 
-    Flag-gated by ``chili_cohort_promote_enabled`` (default False).
-    Phase 4 ships dormant; the operator opts in by setting the flag
-    True.
+    Flag-gated by ``chili_cohort_promote_enabled``.
     """
     if settings_ is None:
         from ...config import settings as _settings
@@ -160,20 +191,24 @@ def run_cohort_promote_cycle(
         return {"ok": True, "skipped": "flag_disabled"}
 
     now = now or datetime.utcnow()
-    cap = int(getattr(settings_, "chili_cohort_promote_max_per_week", 10))
-    promoted_recently = count_recent_cohort_promotions(db, now=now)
-    spots_remaining = max(0, cap - promoted_recently)
+    target_roster_size = target_promotion_roster_size(db, settings_=settings_)
+    current_roster_size = count_current_promotion_roster(db)
+    spots_remaining = max(0, target_roster_size - current_roster_size)
 
     if spots_remaining == 0:
         logger.info(
-            "[pattern_cohort_promote] cap reached: %d/%d in last 7d, skipping",
-            promoted_recently, cap,
+            "[pattern_cohort_promote] target roster reached: %d/%d, skipping",
+            current_roster_size, target_roster_size,
         )
         return {
             "ok": True,
-            "skipped": "cap_reached",
-            "promoted_in_last_7d": promoted_recently,
-            "cap": cap,
+            "skipped": "target_roster_reached",
+            "candidates_eligible": 0,
+            "promoted_count": 0,
+            "promoted_ids": [],
+            "spots_remaining_before": 0,
+            "target_roster_size": target_roster_size,
+            "current_roster_size": current_roster_size,
         }
 
     candidates = select_cohort_candidates(db, settings_=settings_)
@@ -200,8 +235,8 @@ def run_cohort_promote_cycle(
         "promoted_count": len(promoted_ids),
         "promoted_ids": promoted_ids,
         "spots_remaining_before": spots_remaining,
-        "promoted_in_last_7d_before": promoted_recently,
-        "cap": cap,
+        "target_roster_size": target_roster_size,
+        "current_roster_size_before": current_roster_size,
     }
     logger.info("[pattern_cohort_promote] cycle: %s", result)
     return result
