@@ -158,6 +158,18 @@ def test_eligible_main_imminent_unchanged_for_live(monkeypatch):
     assert scan_pattern_eligible_main_imminent(pat) is True
 
 
+def test_eligible_main_imminent_true_for_pilot_promoted_when_flag_on(monkeypatch):
+    pat = SimpleNamespace(lifecycle_stage="pilot_promoted", promotion_status="")
+    monkeypatch.setattr(settings, "chili_pilot_promoted_enabled", True)
+    assert scan_pattern_eligible_main_imminent(pat) is True
+
+
+def test_eligible_main_imminent_false_for_pilot_promoted_when_flag_off(monkeypatch):
+    pat = SimpleNamespace(lifecycle_stage="pilot_promoted", promotion_status="")
+    monkeypatch.setattr(settings, "chili_pilot_promoted_enabled", False)
+    assert scan_pattern_eligible_main_imminent(pat) is False
+
+
 def test_eligible_main_imminent_unchanged_for_challenged(monkeypatch):
     pat = SimpleNamespace(lifecycle_stage="challenged", promotion_status="")
     monkeypatch.setattr(settings, "chili_shadow_promoted_lifecycle_enabled", True)

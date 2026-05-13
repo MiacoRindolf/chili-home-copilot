@@ -917,18 +917,18 @@ function _executionRobustnessLine(p) {
 function loadShadowPromotedPatterns() {
   var container = document.getElementById('brain-shadow-promoted-patterns');
   if (!container) return;
-  container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Loading shadow observation cohort...</div>';
+  container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Loading staged CHILI-vetted cohort...</div>';
   fetch('/api/trading/brain/shadow-promoted-patterns', {credentials:'same-origin'}).then(parseFetchJson).then(function(d) {
     if (!d.ok || !d.patterns) {
-      container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Could not load shadow-promoted patterns.</div>';
+      container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Could not load staged CHILI-vetted patterns.</div>';
       return;
     }
     if (!d.patterns.length) {
-      container.innerHTML = '<div style="padding:10px;color:var(--text-muted);line-height:1.5">No shadow-promoted patterns yet. Adaptive CPCV can still be healthy; this cohort appears after the weekly cohort promote cycle or an operator-triggered run.</div>';
+      container.innerHTML = '<div style="padding:10px;color:var(--text-muted);line-height:1.5">No staged CHILI-vetted patterns yet. Adaptive CPCV can still be healthy; this cohort appears after the cohort promote cycle or an operator-triggered run.</div>';
       return;
     }
     var html = '<div style="margin-bottom:8px;font-size:10px;color:var(--text-secondary);line-height:1.45">' +
-      '<strong style="color:var(--text)">' + escHtml(String(d.count || d.patterns.length)) + '</strong> patterns are CHILI-vetted and broker-blocked while EV evidence is collected.' +
+      '<strong style="color:var(--text)">' + escHtml(String(d.count || d.patterns.length)) + '</strong> patterns are CHILI-vetted across shadow and pilot stages.' +
       '</div>';
     html += '<div class="tp-tradeable-grid">';
     d.patterns.forEach(function(p) {
@@ -943,10 +943,15 @@ function loadShadowPromotedPatterns() {
       var paths = p.cpcv_n_paths != null ? p.cpcv_n_paths : '--';
       var score = p.quality_composite_score != null ? Number(p.quality_composite_score).toFixed(3) : 'EV pending';
       var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(p.id);
+      var stage = String(p.observation_stage || p.lifecycle_stage || '').toLowerCase();
+      var isPilot = stage === 'pilot_promoted';
+      var badge = isPilot ? 'Pilot' : 'Shadow';
+      var badgeStyle = isPilot ? 'background:rgba(34,197,94,.14);color:#22c55e' : 'background:rgba(56,189,248,.14);color:#38bdf8';
+      var stageText = isPilot ? 'Pilot: broker-eligible with confidence-sized exposure while EV matures.' : 'Observation-only: eligible for pattern-imminent evidence collection, not broker execution.';
       html += '<div class="tp-tradeable-card">' +
         '<div style="display:flex;gap:6px;align-items:flex-start;justify-content:space-between;margin-bottom:4px">' +
           '<div style="font-size:11px;font-weight:700;color:var(--text);line-height:1.35">' + name + '</div>' +
-          '<span style="font-size:8px;white-space:nowrap;text-transform:uppercase;letter-spacing:.04em;padding:2px 6px;border-radius:4px;background:rgba(56,189,248,.14);color:#38bdf8">Shadow</span>' +
+          '<span style="font-size:8px;white-space:nowrap;text-transform:uppercase;letter-spacing:.04em;padding:2px 6px;border-radius:4px;' + badgeStyle + '">' + badge + '</span>' +
         '</div>' +
         '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:10px;color:var(--text-secondary)">' +
           '<span>' + tf + ' Â· ' + ac + '</span>' +
@@ -957,7 +962,7 @@ function loadShadowPromotedPatterns() {
           '<span>PBO ' + escHtml(String(pbo)) + '</span>' +
           '<span>Score ' + escHtml(String(score)) + '</span>' +
         '</div>' +
-        '<div style="font-size:8px;color:var(--text-muted);margin-top:5px;line-height:1.35">Observation-only: eligible for pattern-imminent evidence collection, not broker execution.</div>' +
+        '<div style="font-size:8px;color:var(--text-muted);margin-top:5px;line-height:1.35">' + stageText + '</div>' +
         '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading -></a>' +
       '</div>';
     });
@@ -965,7 +970,7 @@ function loadShadowPromotedPatterns() {
     container.innerHTML = html;
   }).catch(function(err) {
     var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
-    container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load shadow-promoted patterns.<br/><span style="font-size:9px;opacity:.85">' + hint + '</span></div>';
+    container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load staged CHILI-vetted patterns.<br/><span style="font-size:9px;opacity:.85">' + hint + '</span></div>';
   });
 }
 

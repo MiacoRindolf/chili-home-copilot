@@ -1495,11 +1495,12 @@ def api_shadow_promoted_patterns(
     db: Session = Depends(get_db),
     limit: int = Query(20, ge=1, le=50),
 ):
-    """Broker-blocked observation cohort produced by adaptive CPCV promotion.
+    """Staged CHILI-vetted cohort produced by adaptive CPCV promotion.
 
-    These are intentionally not returned as live tradeable patterns. They are
-    visible so operators can confirm the promotion pipeline produced new
-    CHILI-vetted patterns while directional EV is collected.
+    ``shadow_promoted`` rows are broker-blocked while directional EV is
+    collected. ``pilot_promoted`` rows are broker-eligible with confidence
+    sizing; they are surfaced here so the operator can distinguish staged
+    activation from mature full-risk promotion.
     """
     from ...models.trading import ScanPattern
 
@@ -1529,7 +1530,7 @@ def api_shadow_promoted_patterns(
         db.query(ScanPattern)
         .filter(
             ScanPattern.active.is_(True),
-            ScanPattern.lifecycle_stage == "shadow_promoted",
+            ScanPattern.lifecycle_stage.in_(("shadow_promoted", "pilot_promoted")),
         )
         .order_by(
             ScanPattern.quality_composite_score.desc().nullslast(),
@@ -1545,6 +1546,7 @@ def api_shadow_promoted_patterns(
 
     out = []
     for p in rows:
+        stage = (p.lifecycle_stage or "").strip().lower()
         out.append(
             {
                 "id": p.id,
@@ -1565,8 +1567,8 @@ def api_shadow_promoted_patterns(
                     if p.lifecycle_changed_at is not None
                     else None
                 ),
-                "broker_blocked": True,
-                "observation_stage": "shadow_promoted",
+                "broker_blocked": stage == "shadow_promoted",
+                "observation_stage": stage,
             }
         )
 
@@ -1576,9 +1578,9 @@ def api_shadow_promoted_patterns(
                 "ok": True,
                 "patterns": out,
                 "count": len(out),
-                "stage": "shadow_promoted",
-                "broker_blocked": True,
-                "message": "Shadow-promoted patterns are visible for EV observation and are not live-capital eligible.",
+                "stage": "shadow_or_pilot_promoted",
+                "broker_blocked": False,
+                "message": "Shadow rows collect EV without broker exposure; pilot rows are broker-eligible with confidence-sized exposure.",
             }
         )
     )

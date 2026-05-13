@@ -2170,7 +2170,7 @@ class Settings(BaseSettings):
     # ('promoted','live') matches CLAUDE.md hard-rule. Override via env to
     # widen during recovery: CHILI_AUTOTRADER_ELIGIBLE_LIFECYCLE_STAGES=promoted,live,validated
     chili_autotrader_eligible_lifecycle_stages: str = Field(
-        default="promoted,live",
+        default="promoted,live,pilot_promoted",
         validation_alias=AliasChoices("CHILI_AUTOTRADER_ELIGIBLE_LIFECYCLE_STAGES"),
     )
 
@@ -2576,6 +2576,13 @@ class Settings(BaseSettings):
     chili_shadow_vetting_finalize_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_SHADOW_VETTING_FINALIZE_ENABLED"),
+    )
+    # Pilot stage: broker-eligible but confidence-sized. This is the
+    # non-binary ramp between broker-blocked shadow observation and full
+    # promoted sizing.
+    chili_pilot_promoted_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_PILOT_PROMOTED_ENABLED"),
     )
     chili_autotrader_rth_only: bool = Field(
         default=True,

@@ -15834,6 +15834,35 @@ def _migration_239_cpcv_adaptive_eval_log(conn) -> None:
         conn.rollback()
 
 
+def _migration_240_scan_pattern_lifecycle_pilot_promoted(conn) -> None:
+    """Add ``pilot_promoted`` to the scan_patterns lifecycle constraint.
+
+    ``pilot_promoted`` is the confidence-sized activation stage between
+    broker-blocked ``shadow_promoted`` and full-risk ``promoted``.
+    """
+    tbl = "scan_patterns"
+    if tbl not in _tables(conn):
+        return
+    try:
+        conn.execute(text(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS chk_sp_lifecycle"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    try:
+        conn.execute(
+            text(
+                f"ALTER TABLE {tbl} ADD CONSTRAINT chk_sp_lifecycle CHECK (lifecycle_stage IN ("
+                f"'candidate','backtested','validated','challenged','shadow_promoted',"
+                f"'pilot_promoted','promoted','live','decayed','retired'"
+                f")) NOT VALID"
+            )
+        )
+        conn.execute(text(f"ALTER TABLE {tbl} VALIDATE CONSTRAINT chk_sp_lifecycle"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16101,6 +16130,8 @@ MIGRATIONS = [
      _migration_238_brain_work_events_claim_v2_index),
     ("239_cpcv_adaptive_eval_log",
      _migration_239_cpcv_adaptive_eval_log),
+    ("240_scan_pattern_lifecycle_pilot_promoted",
+     _migration_240_scan_pattern_lifecycle_pilot_promoted),
 ]
 
 

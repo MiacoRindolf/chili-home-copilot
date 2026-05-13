@@ -623,7 +623,10 @@ def _maybe_substitute_with_options(db: Session, alert: BreakoutAlert, spot: floa
 def _eligible_lifecycle_stages() -> set[str]:
     """The lifecycle_stage values that are allowed to enter new live trades."""
     raw = (getattr(settings, "chili_autotrader_eligible_lifecycle_stages", "promoted,live") or "")
-    return {s.strip().lower() for s in raw.split(",") if s.strip()}
+    stages = {s.strip().lower() for s in raw.split(",") if s.strip()}
+    if bool(getattr(settings, "chili_pilot_promoted_enabled", True)):
+        stages.add("pilot_promoted")
+    return stages
 
 
 def is_shadow_promoted_pattern(pat: ScanPattern) -> bool:
@@ -1578,6 +1581,57 @@ def _execute_new_entry(
         # HRP-allocated notional unchanged.
         snap["ps_sizing_error"] = str(_ps_e)[:200]
 
+    # Pilot-promoted patterns are broker-eligible, but not full-risk eligible.
+    # Size them by the Bayesian confidence used by the shadow-vetting
+    # finalizer. This runs after HRP/survival so pilot exposure cannot be
+    # inflated back to normal promoted notional by downstream allocators.
+    try:
+        from .pattern_shadow_vetting import pilot_promoted_risk_multiplier
+
+        _pilot_mult = pilot_promoted_risk_multiplier(
+            db,
+            int(alert.scan_pattern_id) if alert.scan_pattern_id else None,
+        )
+    except Exception as _pilot_e:
+        _pilot_mult = None
+        snap["pilot_sizing_error"] = str(_pilot_e)[:200]
+
+    if _pilot_mult is not None:
+        snap["pilot_promoted_risk_multiplier"] = round(float(_pilot_mult), 6)
+        if float(_pilot_mult) <= 0.0:
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="skipped",
+                reason="pilot_promoted_confidence_below_policy",
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="skipped",
+                reason="pilot_promoted_confidence_below_policy", alert=alert,
+            )
+            return
+        snap["notional_before_pilot_sizing"] = round(notional, 2)
+        notional = float(notional) * float(_pilot_mult)
+        snap["notional_effective"] = round(notional, 2)
+        snap["notional_source"] = (
+            snap.get("notional_source", "unknown") + "+pilot_confidence"
+        )
+
+    if snap.get("options_path") and snap.get("pilot_promoted_risk_multiplier") is not None:
+        _audit(
+            db, user_id=uid, alert=alert,
+            decision="skipped",
+            reason="pilot_promoted_options_path_blocked",
+            rule_snapshot=snap,
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(
+            out, kind="skipped",
+            reason="pilot_promoted_options_path_blocked", alert=alert,
+        )
+        return
+
     # HARDCODED (TEMP 2026-04-21): floor to whole shares rather than
     # fractional. Most mid/large-cap RH tickers (ACN, WGS, GH, BA…)
     # don't support fractional orders, and server-side rejection wastes
@@ -1612,6 +1666,19 @@ def _execute_new_entry(
         qty = int(qty_raw)  # whole shares only for now
 
     if qty < 1 and px > 0:
+        if snap.get("pilot_promoted_risk_multiplier") is not None:
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="skipped",
+                reason="pilot_promoted_notional_below_trade_unit",
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="skipped",
+                reason="pilot_promoted_notional_below_trade_unit", alert=alert,
+            )
+            return
         if px <= _TEMP_MAX_PER_SHARE_USD:
             snap["qty_upsized_reason"] = "fractional_not_supported_fallback"
             snap["qty_before_upsize"] = round(qty_raw, 8)

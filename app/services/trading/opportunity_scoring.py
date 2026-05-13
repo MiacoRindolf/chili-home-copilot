@@ -254,6 +254,10 @@ def scan_pattern_eligible_main_imminent(pat: ScanPattern) -> bool:
     promo = (getattr(pat, "promotion_status", None) or "").strip().lower()
     if life in ("promoted", "live"):
         return True
+    if life == "pilot_promoted" and bool(
+        getattr(settings, "chili_pilot_promoted_enabled", True)
+    ):
+        return True
     if life == "shadow_promoted" and bool(
         getattr(settings, "chili_shadow_promoted_lifecycle_enabled", True)
     ):

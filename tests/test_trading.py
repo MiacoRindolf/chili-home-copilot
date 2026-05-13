@@ -966,7 +966,7 @@ class TestBrainAPI:
         assert p_low_wr.id not in ids
         assert p_legacy.id not in ids
 
-    def test_shadow_promoted_patterns_visible_but_broker_blocked(self, db, client):
+    def test_staged_chili_vetted_patterns_visible_with_stage_broker_state(self, db, client):
         user, token = _make_paired(db)
         client.cookies.set(DEVICE_COOKIE_NAME, token)
         p_shadow = ScanPattern(
@@ -994,22 +994,40 @@ class TestBrainAPI:
             deflated_sharpe=1.0,
             pbo=0.0,
         )
-        db.add_all([p_shadow, p_candidate])
+        p_pilot = ScanPattern(
+            name="PilotVisible",
+            rules_json='{"conditions":[]}',
+            origin="brain_discovered",
+            promotion_status="pilot_via_shadow_vetting",
+            lifecycle_stage="pilot_promoted",
+            active=True,
+            cpcv_n_paths=20,
+            cpcv_median_sharpe=2.2,
+            deflated_sharpe=1.0,
+            pbo=0.0,
+            quality_composite_score=None,
+        )
+        db.add_all([p_shadow, p_candidate, p_pilot])
         db.commit()
         db.refresh(p_shadow)
         db.refresh(p_candidate)
+        db.refresh(p_pilot)
 
         resp = client.get("/api/trading/brain/shadow-promoted-patterns")
         assert resp.status_code == 200
         payload = resp.json()
         ids = [x["id"] for x in payload["patterns"]]
         assert payload["ok"] is True
-        assert payload["broker_blocked"] is True
+        assert payload["stage"] == "shadow_or_pilot_promoted"
         assert p_shadow.id in ids
+        assert p_pilot.id in ids
         assert p_candidate.id not in ids
         row = next(x for x in payload["patterns"] if x["id"] == p_shadow.id)
         assert row["lifecycle_stage"] == "shadow_promoted"
         assert row["broker_blocked"] is True
+        pilot = next(x for x in payload["patterns"] if x["id"] == p_pilot.id)
+        assert pilot["lifecycle_stage"] == "pilot_promoted"
+        assert pilot["broker_blocked"] is False
 
     def test_learned_patterns_includes_global_null_user_insights(self, db, client):
         """Worker/scheduler insights with user_id NULL appear for logged-in users."""
