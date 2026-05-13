@@ -3308,6 +3308,39 @@ def _run_pattern_cohort_promote_job() -> None:
     run_scheduler_job_guarded("pattern_cohort_promote", _work)
 
 
+def _run_pattern_shadow_vetting_job() -> None:
+    """Finalize fully vetted ``shadow_promoted`` patterns.
+
+    The cohort job moves CPCV-passed candidates into broker-blocked shadow
+    observation. This job closes that loop: once directional EV outcomes are
+    mature enough to produce ``quality_composite_score`` and the score clears
+    the adaptive top-pool policy, the pattern advances to normal
+    ``promoted``.
+    """
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_shadow_vetting_finalize_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.pattern_shadow_vetting import run_shadow_vetting_cycle
+
+        sess = SessionLocal()
+        try:
+            run_shadow_vetting_cycle(sess)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("pattern_shadow_vetting_finalizer", _work)
+
+
 def _run_pattern_directional_outcome_evaluator_job() -> None:
     """f-promotion-pipeline-rebalance Phase 2: evaluate directional
     correctness for closed-window pattern_breakout_imminent alerts.
@@ -4106,6 +4139,15 @@ def start_scheduler():
                     name="Pattern cohort auto-promote to shadow_promoted (Sun 22:00 PT)",
                     replace_existing=True,
                     max_instances=1,
+                )
+                _scheduler.add_job(
+                    _run_pattern_shadow_vetting_job,
+                    trigger=IntervalTrigger(minutes=30),
+                    id="pattern_shadow_vetting_finalizer",
+                    name="Pattern shadow vetting finalizer (every 30min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=105),
                 )
 
         if include_heavy:

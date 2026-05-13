@@ -2569,6 +2569,14 @@ class Settings(BaseSettings):
         default=10,
         validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_MAX_PER_WEEK"),
     )
+    # Shadow vetting finalizer. ``shadow_promoted`` is the broker-blocked
+    # observation stage; this flag lets the scheduler advance fully scored,
+    # top-pool shadow patterns to normal ``promoted`` lifecycle once their
+    # directional EV evidence has matured.
+    chili_shadow_vetting_finalize_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_SHADOW_VETTING_FINALIZE_ENABLED"),
+    )
     chili_autotrader_rth_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),
