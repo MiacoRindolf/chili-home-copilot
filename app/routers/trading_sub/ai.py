@@ -1489,6 +1489,101 @@ def api_tradeable_patterns(
     )
 
 
+@router.get("/api/trading/brain/shadow-promoted-patterns")
+def api_shadow_promoted_patterns(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Broker-blocked observation cohort produced by adaptive CPCV promotion.
+
+    These are intentionally not returned as live tradeable patterns. They are
+    visible so operators can confirm the promotion pipeline produced new
+    CHILI-vetted patterns while directional EV is collected.
+    """
+    from ...models.trading import ScanPattern
+
+    get_identity_ctx(request, db)
+    lim = max(1, min(int(limit), 50))
+
+    ptr_counts = (
+        db.execute(
+            text(
+                """
+                SELECT scan_pattern_id, COUNT(*)::int AS ptr_rows
+                FROM trading_pattern_trades
+                WHERE scan_pattern_id IS NOT NULL
+                GROUP BY scan_pattern_id
+                """
+            )
+        )
+        .fetchall()
+    )
+    ptr_by_pattern = {
+        int(r._mapping["scan_pattern_id"]): int(r._mapping["ptr_rows"] or 0)
+        for r in ptr_counts
+        if r._mapping["scan_pattern_id"] is not None
+    }
+
+    rows = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.active.is_(True),
+            ScanPattern.lifecycle_stage == "shadow_promoted",
+        )
+        .order_by(
+            ScanPattern.quality_composite_score.desc().nullslast(),
+            ScanPattern.cpcv_median_sharpe.desc().nullslast(),
+            ScanPattern.deflated_sharpe.desc().nullslast(),
+            ScanPattern.pbo.asc().nullslast(),
+            ScanPattern.lifecycle_changed_at.desc().nullslast(),
+            ScanPattern.id.asc(),
+        )
+        .limit(lim)
+        .all()
+    )
+
+    out = []
+    for p in rows:
+        out.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "description": (p.description or "")[:500] or None,
+                "timeframe": p.timeframe,
+                "asset_class": p.asset_class,
+                "lifecycle_stage": p.lifecycle_stage,
+                "promotion_status": p.promotion_status,
+                "cpcv_n_paths": p.cpcv_n_paths,
+                "cpcv_median_sharpe": p.cpcv_median_sharpe,
+                "deflated_sharpe": p.deflated_sharpe,
+                "pbo": p.pbo,
+                "quality_composite_score": p.quality_composite_score,
+                "ptr_rows": ptr_by_pattern.get(int(p.id), 0),
+                "lifecycle_changed_at": (
+                    p.lifecycle_changed_at.isoformat()
+                    if p.lifecycle_changed_at is not None
+                    else None
+                ),
+                "broker_blocked": True,
+                "observation_stage": "shadow_promoted",
+            }
+        )
+
+    return JSONResponse(
+        to_jsonable(
+            {
+                "ok": True,
+                "patterns": out,
+                "count": len(out),
+                "stage": "shadow_promoted",
+                "broker_blocked": True,
+                "message": "Shadow-promoted patterns are visible for EV observation and are not live-capital eligible.",
+            }
+        )
+    )
+
+
 @router.get("/api/trading/brain/research-edge-patterns")
 def api_research_edge_patterns(
     request: Request,

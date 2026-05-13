@@ -966,6 +966,51 @@ class TestBrainAPI:
         assert p_low_wr.id not in ids
         assert p_legacy.id not in ids
 
+    def test_shadow_promoted_patterns_visible_but_broker_blocked(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        p_shadow = ScanPattern(
+            name="ShadowVisible",
+            rules_json='{"conditions":[]}',
+            origin="brain_discovered",
+            promotion_status="legacy",
+            lifecycle_stage="shadow_promoted",
+            active=True,
+            cpcv_n_paths=20,
+            cpcv_median_sharpe=2.5,
+            deflated_sharpe=1.0,
+            pbo=0.0,
+            quality_composite_score=None,
+        )
+        p_candidate = ScanPattern(
+            name="CandidateHidden",
+            rules_json='{"conditions":[]}',
+            origin="brain_discovered",
+            promotion_status="legacy",
+            lifecycle_stage="candidate",
+            active=True,
+            cpcv_n_paths=20,
+            cpcv_median_sharpe=9.0,
+            deflated_sharpe=1.0,
+            pbo=0.0,
+        )
+        db.add_all([p_shadow, p_candidate])
+        db.commit()
+        db.refresh(p_shadow)
+        db.refresh(p_candidate)
+
+        resp = client.get("/api/trading/brain/shadow-promoted-patterns")
+        assert resp.status_code == 200
+        payload = resp.json()
+        ids = [x["id"] for x in payload["patterns"]]
+        assert payload["ok"] is True
+        assert payload["broker_blocked"] is True
+        assert p_shadow.id in ids
+        assert p_candidate.id not in ids
+        row = next(x for x in payload["patterns"] if x["id"] == p_shadow.id)
+        assert row["lifecycle_stage"] == "shadow_promoted"
+        assert row["broker_blocked"] is True
+
     def test_learned_patterns_includes_global_null_user_insights(self, db, client):
         """Worker/scheduler insights with user_id NULL appear for logged-in users."""
         user, token = _make_paired(db)

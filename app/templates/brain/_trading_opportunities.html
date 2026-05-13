@@ -20,6 +20,15 @@
         </div>
       </div>
 
+      <div class="brain-section" id="brain-shadow-promoted-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F52C;</span> New CHILI-vetted patterns
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:560px;line-height:1.35">Adaptive-CPCV cohort moved to <code style="font-size:9px">shadow_promoted</code>. Observation-only: alerts collect EV evidence, broker execution stays blocked.</span>
+          <button type="button" onclick="loadShadowPromotedPatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="brain-shadow-promoted-patterns" style="font-size:11px;color:var(--text-muted)">Loading shadow observation cohort...</div>
+      </div>
+
       <div class="brain-section" id="brain-opportunity-board">
         <div id="opp-stale-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);font-size:11px;color:#b45309"></div>
         <div id="opp-refresh-failed-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);font-size:11px;color:#b91c1c"></div>
