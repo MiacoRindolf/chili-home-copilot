@@ -2661,6 +2661,55 @@ class Settings(BaseSettings):
         le=365,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_SUBSTITUTE_DTE"),
     )
+    # Options entry-quality gates. These bootstrap StrategyParameter rows in
+    # the autotrader_options family so the brain can adapt the values after
+    # realized option outcomes accumulate. Defaults are economic break-even
+    # identities: reward/risk parity and non-negative expected value.
+    chili_autotrader_options_min_underlying_reward_risk: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_OPTIONS_MIN_UNDERLYING_REWARD_RISK"
+        ),
+        description=(
+            "Minimum reward/risk of the underlying target-vs-stop scenario "
+            "before an equity signal may be substituted into an option."
+        ),
+    )
+    chili_autotrader_options_min_option_reward_risk: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_OPTIONS_MIN_OPTION_REWARD_RISK"
+        ),
+        description=(
+            "Minimum option payoff reward/risk at the underlying target and "
+            "stop before an option substitution may enter."
+        ),
+    )
+    chili_autotrader_options_min_expected_value_pct: float = Field(
+        default=0.0,
+        ge=-100.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_OPTIONS_MIN_EXPECTED_VALUE_PCT"
+        ),
+        description=(
+            "Minimum expected value as a percent of option premium, using "
+            "the alert confidence as the directional probability input."
+        ),
+    )
+    chili_autotrader_options_max_contract_notional_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_OPTIONS_MAX_CONTRACT_NOTIONAL_USD"
+        ),
+        description=(
+            "Maximum premium dollars allowed for one option contract. "
+            "Set to 0 to use CHILI_AUTOTRADER_PER_TRADE_NOTIONAL_USD as "
+            "the cap."
+        ),
+    )
     # Task PP Phase 5 — option-aware exit monitor. When ON, the scheduler
     # ticks the options_exit_pass which closes open option Trade rows
     # on three triggers: DTE threshold (default 7d), premium stop-loss

@@ -15,6 +15,7 @@ options code paths execute. Paper-only by default when enabled
 
 __all__ = [
     "greeks",
+    "entry_quality",
     "strategies",
     "venue",
 ]

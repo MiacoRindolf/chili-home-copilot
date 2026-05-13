@@ -14,6 +14,7 @@ from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_rules import (
     RuleGateContext,
+    alert_confidence_from_score,
     autotrader_paper_realized_pnl_today_et,
     autotrader_realized_pnl_today_et,
     breakout_alert_already_processed,
@@ -597,6 +598,9 @@ def _maybe_substitute_with_options(db: Session, alert: BreakoutAlert, spot: floa
             underlying=str(alert.ticker),
             spot=float(spot),
             notional_usd=notional,
+            underlying_target=float(alert.target_price) if alert.target_price is not None else None,
+            underlying_stop=float(alert.stop_loss) if alert.stop_loss is not None else None,
+            confidence=alert_confidence_from_score(alert),
         )
         if not opt_meta:
             return

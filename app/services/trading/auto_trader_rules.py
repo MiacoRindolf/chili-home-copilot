@@ -111,6 +111,9 @@ class RuleGateSettings:
     min_projected_profit_pct: float = 12.0
     max_symbol_price_usd: float = 50.0
     max_entry_slippage_pct: float = 1.0
+    options_min_underlying_reward_risk: float = 1.0
+    options_min_option_reward_risk: float = 1.0
+    options_min_expected_value_pct: float = 0.0
 
     # Daily loss caps (percent-of-equity preferred; dollar is fallback)
     daily_loss_cap_pct: float = 1.5
@@ -154,6 +157,24 @@ class RuleGateSettings:
             max_symbol_price_usd=float(g("chili_autotrader_max_symbol_price_usd", cls.max_symbol_price_usd)),
             max_entry_slippage_pct=float(
                 g("chili_autotrader_max_entry_slippage_pct", cls.max_entry_slippage_pct)
+            ),
+            options_min_underlying_reward_risk=float(
+                g(
+                    "chili_autotrader_options_min_underlying_reward_risk",
+                    cls.options_min_underlying_reward_risk,
+                )
+            ),
+            options_min_option_reward_risk=float(
+                g(
+                    "chili_autotrader_options_min_option_reward_risk",
+                    cls.options_min_option_reward_risk,
+                )
+            ),
+            options_min_expected_value_pct=float(
+                g(
+                    "chili_autotrader_options_min_expected_value_pct",
+                    cls.options_min_expected_value_pct,
+                )
             ),
             daily_loss_cap_pct=float(g("chili_autotrader_daily_loss_cap_pct", cls.daily_loss_cap_pct)),
             daily_loss_cap_usd=float(g("chili_autotrader_daily_loss_cap_usd", cls.daily_loss_cap_usd)),
@@ -686,12 +707,10 @@ def passes_rule_gate(
         return False, "not_stock", snap
 
     # For options, the operator-driven entry has already chosen a strike,
-    # expiration, qty, and limit price. The equity-shaped gates below
-    # (confidence floor, projected profit %, slippage on equity-spread,
-    # symbol price cap) don't apply cleanly. Validate that the alert
-    # carries the required option metadata, then short-circuit through
-    # the kill-switch / drawdown / concurrent-limit checks the same way
-    # crypto does, and return ok.
+    # expiration, qty, and limit price. Validate that the alert carries
+    # the required option metadata here; after the confidence gate the
+    # dedicated options entry-quality model handles payoff/EV in the
+    # correct price domain.
     if options_path:
         snap_meta = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
         opt_meta = snap_meta.get("option_meta") or {}
@@ -791,35 +810,56 @@ def passes_rule_gate(
 
     entry = alert.entry_price
     target = alert.target_price
-    ppp = projected_profit_pct(entry, target)
-    snap["projected_profit_pct"] = ppp
-    env_min_pp = gs.min_projected_profit_pct
-    # Learned min profit: 70% of historical expectancy-pct, floored at 6% so a
-    # mean-reversion pattern with a tiny expectancy doesn't trigger entries
-    # that can't clear real spreads. Expectancy is signed — patterns with
-    # non-positive expectancy keep the env floor.
-    if pat_ctx.get("expectancy") is not None and float(pat_ctx["expectancy"]) > 0:
-        learned_min_pp = max(
-            MIN_PROFIT_PCT_FLOOR,
-            float(pat_ctx["expectancy"]) * 100 * LEARNED_PROFIT_MULTIPLIER,
+    px = float(ctx.current_price)
+    snap["current_price"] = px
+
+    if options_path:
+        from .options.entry_quality import evaluate_long_option_entry
+
+        option_entry = evaluate_long_option_entry(
+            db,
+            alert=alert,
+            option_meta=opt_meta,
+            current_underlying_price=px,
+            confidence=conf,
+            settings=gs,
         )
-        min_pp = min(env_min_pp, learned_min_pp)
-        snap["min_profit_source"] = "pattern_expectancy"
+        snap["projected_profit_pct"] = None
+        snap["projected_profit_pct_source"] = "options_entry_quality"
+        snap["min_profit_source"] = "not_applicable_options"
+        snap["min_profit_pct_effective"] = None
+        snap["option_entry_quality"] = option_entry.snapshot
+        if not option_entry.accepted:
+            return False, f"options_entry_quality:{option_entry.reason}", snap
     else:
-        min_pp = env_min_pp
-        snap["min_profit_source"] = "env_default"
-    snap["min_profit_pct_effective"] = round(min_pp, 3)
-    if ppp is None:
-        return False, "missing_entry_or_target", snap
-    if ppp < min_pp:
-        return False, "projected_profit_below_min", snap
+        ppp = projected_profit_pct(entry, target)
+        snap["projected_profit_pct"] = ppp
+        snap["projected_profit_pct_source"] = "stock_entry_target"
+        env_min_pp = gs.min_projected_profit_pct
+        # Learned min profit: 70% of historical expectancy-pct, floored at 6% so a
+        # mean-reversion pattern with a tiny expectancy doesn't trigger entries
+        # that can't clear real spreads. Expectancy is signed — patterns with
+        # non-positive expectancy keep the env floor.
+        if pat_ctx.get("expectancy") is not None and float(pat_ctx["expectancy"]) > 0:
+            learned_min_pp = max(
+                MIN_PROFIT_PCT_FLOOR,
+                float(pat_ctx["expectancy"]) * 100 * LEARNED_PROFIT_MULTIPLIER,
+            )
+            min_pp = min(env_min_pp, learned_min_pp)
+            snap["min_profit_source"] = "pattern_expectancy"
+        else:
+            min_pp = env_min_pp
+            snap["min_profit_source"] = "env_default"
+        snap["min_profit_pct_effective"] = round(min_pp, 3)
+        if ppp is None:
+            return False, "missing_entry_or_target", snap
+        if ppp < min_pp:
+            return False, "projected_profit_below_min", snap
 
     ref = float(entry) if entry is not None else float(alert.price_at_alert or 0)
     if ref <= 0:
         return False, "bad_reference_price", snap
 
-    px = float(ctx.current_price)
-    snap["current_price"] = px
     max_px = gs.max_symbol_price_usd
     # Task KK — the equity max-symbol-price cap (default $50) was meant to
     # avoid sub-1-share fractional rounding traps on stocks like NVDA. It
@@ -855,13 +895,20 @@ def passes_rule_gate(
         snap["entry_slippage_pct"] = None
         snap["slippage_skipped_reason"] = "options_path"
 
-    # Long viability: stop below entry, target above entry
-    if alert.stop_loss is not None:
-        sl = float(alert.stop_loss)
-        if sl >= ref or sl >= px:
-            return False, "stop_not_below_entry", snap
-    if target is not None and float(target) <= ref:
-        return False, "target_not_above_entry", snap
+    # Long viability: stock alerts express stop/target in the same price
+    # domain as entry/current price. Options substitutions keep the
+    # underlying stop/target from the source alert while ref is the option
+    # premium, so validating those against each other blocks every option.
+    # Premium exits are handled by the options exit monitor.
+    if options_path:
+        snap["stop_target_validation_skipped_reason"] = "options_underlying_levels"
+    else:
+        if alert.stop_loss is not None:
+            sl = float(alert.stop_loss)
+            if sl >= ref or sl >= px:
+                return False, "stop_not_below_entry", snap
+        if target is not None and float(target) <= ref:
+            return False, "target_not_above_entry", snap
 
     # Phase 2: pull brain-driven risk context (regime + dial + drawdown).
     # dial_value = 1.0 is baseline. risk_off tightens it (lower notional,
