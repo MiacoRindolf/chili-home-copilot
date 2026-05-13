@@ -9020,6 +9020,9 @@ function renderMonitorCards(setups) {
     var act = ld ? ld.action : '—';
     var src = ld && ld.decision_source ? ld.decision_source : '—';
     var when = ld && ld.created_at ? ld.created_at : 'never';
+    var healthLabel = ld && ld.health_label ? ld.health_label : 'Pattern health';
+    var healthHint = ld && ld.health_hint ? ld.health_hint : 'Share of pattern conditions still satisfied';
+    var healthScale = ld && ld.health_source && ld.health_source !== 'static_conditions' ? '0–100 (live setup)' : '0–100 (conditions met)';
     var pnlStr = s.pnl_pct != null ? (Number(s.pnl_pct) >= 0 ? '+' : '') + Number(s.pnl_pct).toFixed(2) + '%' : '—';
     var pnlColor = s.pnl_pct == null ? 'var(--text)' : (Number(s.pnl_pct) >= 0 ? '#22c55e' : '#ef4444');
     var planTitle = s.plan_label || s.pattern_name;
@@ -9037,14 +9040,14 @@ function renderMonitorCards(setups) {
     html += '</div>';
     html += '<div class="mon-pattern-line">' + pat + tf + '</div>';
     html += '<div class="mon-health-label-row">';
-    html += '<span class="mon-health-lbl">Pattern health</span>';
-    html += '<span class="mon-health-scale-hint">0–100 (conditions met)</span>';
+    html += '<span class="mon-health-lbl">' + escHtml(healthLabel) + '</span>';
+    html += '<span class="mon-health-scale-hint">' + escHtml(healthScale) + '</span>';
     html += '</div>';
     html += '<div class="mon-health-row">';
-    html += '<div class="mon-health-bar-wrap" title="Share of pattern conditions still satisfied">';
+    html += '<div class="mon-health-bar-wrap" title="' + escHtml(healthHint) + '">';
     html += '<div class="mon-health-bar" style="width:' + (hPct != null ? hPct : 0) + '%;"></div></div>';
     html += '<div class="mon-health-score-wrap">';
-    html += '<span class="mon-health-num" title="Pattern health score (0–100)">' + (health != null ? Math.round(health) : '—') + '</span>';
+    html += '<span class="mon-health-num" title="' + escHtml(healthLabel) + ' score (0–100)">' + (health != null ? Math.round(health) : '—') + '</span>';
     html += '<span class="mon-health-num-sub">/ 100</span>';
     html += '</div></div>';
     if (deltaPts != null) html += '<div style="font-size:10px;color:' + deltaColor + ';">Δ vs last check: <b>' + deltaStr + '</b> pts on this scale</div>';

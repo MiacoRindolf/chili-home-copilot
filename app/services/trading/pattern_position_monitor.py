@@ -54,6 +54,78 @@ _last_monitor_alert_sig: dict[str, str] = {}
 _MONITOR_ALERT_DEDUP_MAX_KEYS = 500
 
 
+def _condition_health_evaluable_count(health: ConditionHealth) -> int:
+    return sum(1 for c in health.conditions if getattr(c, "evaluable", True))
+
+
+def _effective_monitor_health_score(
+    *,
+    condition_health: ConditionHealth,
+    plan_health: TradePlanHealth,
+    vitals: Any | None,
+) -> tuple[float, str]:
+    """Return the health score the position monitor should persist/use.
+
+    Open-position health should describe the current trade thesis, not whether
+    the original entry filter still fires. Static pattern conditions remain in
+    the decision snapshot as entry-condition retention evidence. The persisted
+    monitor score uses the most conservative available live thesis score:
+    trade-plan health and setup-vitals composite. If those live thesis inputs
+    are unavailable, fall back to static condition retention.
+    """
+    candidates: list[float] = []
+    try:
+        candidates.append(float(plan_health.plan_health_score))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    if vitals is not None:
+        try:
+            candidates.append(float(getattr(vitals, "composite_health")))
+        except (AttributeError, TypeError, ValueError):
+            pass
+    if candidates:
+        return max(0.0, min(1.0, min(candidates))), "live_plan_vitals_min"
+    if _condition_health_evaluable_count(condition_health) > 0:
+        return float(condition_health.health_score), "static_conditions"
+    return float(condition_health.health_score), "static_unavailable_no_proxy"
+
+
+def _build_pattern_conditions_snapshot(
+    *,
+    health: ConditionHealth,
+    plan_health: TradePlanHealth,
+    pnl_pct: float | None,
+    sig_snap: Any,
+    flat_indicators: dict[str, Any],
+    vitals: Any,
+    vitals_degradation: dict[str, Any],
+    quote_source: str,
+    static_health_score: float,
+    health_source: str,
+) -> dict[str, Any]:
+    conditions_snap = health.to_dict()
+    conditions_snap["static_condition_health_score"] = static_health_score
+    conditions_snap["monitor_health_source"] = health_source
+    conditions_snap["trade_plan"] = plan_health.to_dict()
+    conditions_snap["pnl_pct"] = pnl_pct
+    conditions_snap["price_vs_stop_pct"] = sig_snap.price_vs_stop_pct
+    conditions_snap["price_vs_target_pct"] = sig_snap.price_vs_target_pct
+    _atr = flat_indicators.get("atr")
+    if _atr is None:
+        _atr = flat_indicators.get("atr_14")
+    try:
+        conditions_snap["atr_snapshot"] = float(_atr) if _atr is not None else None
+    except (TypeError, ValueError):
+        conditions_snap["atr_snapshot"] = None
+    if plan_health.nearest_support is not None:
+        conditions_snap["nearest_support"] = plan_health.nearest_support
+        conditions_snap["nearest_support_label"] = plan_health.nearest_support_label
+    conditions_snap["vitals"] = vitals.to_dict()
+    conditions_snap["vitals_degradation"] = vitals_degradation
+    conditions_snap["quote_source"] = quote_source
+    return conditions_snap
+
+
 def _trade_quote_price(trade: Trade) -> tuple[float | None, str]:
     """Venue-consistent quote lookup for live trades.
 
@@ -770,10 +842,27 @@ def _evaluate_single(
         flat,
         previous_health=previous_health,
     )
-    _last_health[trade.id] = health.health_score
 
     # ── Evaluate trade plan (dynamic conditions) + vitals ──
     plan_health = evaluate_trade_plan(trade_plan, flat, current_price, vitals=vitals)
+    static_health_score = float(health.health_score)
+    effective_score, health_source = _effective_monitor_health_score(
+        condition_health=health,
+        plan_health=plan_health,
+        vitals=vitals,
+    )
+    health.health_score = effective_score
+    health.health_delta = (
+        round(effective_score - previous_health, 4)
+        if previous_health is not None
+        else None
+    )
+    if health_source != "static_conditions":
+        health.human_summary = (
+            f"Monitor health uses {health_source}: {effective_score:.0%}.\n"
+            + (health.human_summary or "")
+        )
+    _last_health[trade.id] = health.health_score
 
     # ── Decide whether action is needed ──
     needs_action = False
@@ -803,6 +892,16 @@ def _evaluate_single(
     if bearish_div:
         needs_action = True
 
+    sig_snap = build_signal_snapshot(
+        plan_health=plan_health,
+        condition_health=health,
+        pnl_pct=pnl_pct,
+        current_price=current_price,
+        stop_price=trade.stop_loss or alert.stop_loss,
+        target_price=trade.take_profit or alert.target_price,
+        vitals=vitals,
+    )
+
     def _persist_vitals_history() -> None:
         try:
             record_setup_vitals_history(
@@ -818,19 +917,43 @@ def _evaluate_single(
 
     if not needs_action:
         _persist_vitals_history()
+        decision = PatternMonitorDecision(
+            trade_id=trade.id,
+            breakout_alert_id=alert.id,
+            scan_pattern_id=pattern.id,
+            health_score=health.health_score,
+            health_delta=health.health_delta,
+            conditions_snapshot=_build_pattern_conditions_snapshot(
+                health=health,
+                plan_health=plan_health,
+                pnl_pct=pnl_pct,
+                sig_snap=sig_snap,
+                flat_indicators=flat,
+                vitals=vitals,
+                vitals_degradation=vitals_degradation,
+                quote_source=quote_source,
+                static_health_score=static_health_score,
+                health_source=health_source,
+            ),
+            vitals_composite=float(vitals.composite_health),
+            action="hold",
+            old_stop=trade.stop_loss,
+            new_stop=None,
+            old_target=trade.take_profit,
+            new_target=None,
+            llm_confidence=None,
+            llm_reasoning=None,
+            mechanical_action=None,
+            mechanical_stop=None,
+            mechanical_target=None,
+            decision_source="live_thesis",
+            price_at_decision=current_price,
+        )
+        db.add(decision)
         return "hold"
 
-    # ── Build signal snapshot for rules engine ──
+    # ── Rule lookup for actionable states ──
     pattern_type = (pattern.name or f"pattern_{pattern.id}")[:120]
-    sig_snap = build_signal_snapshot(
-        plan_health=plan_health,
-        condition_health=health,
-        pnl_pct=pnl_pct,
-        current_price=current_price,
-        stop_price=trade.stop_loss or alert.stop_loss,
-        target_price=trade.take_profit or alert.target_price,
-        vitals=vitals,
-    )
     signal_sig = compute_signal_signature(sig_snap)
     simple = is_pattern_simple(pattern.rules_json if isinstance(pattern.rules_json, dict) else None)
     grad_status = get_graduation_status(db, pattern_type, signal_sig)
@@ -948,23 +1071,18 @@ def _evaluate_single(
         primary.action = "hold"
 
     # ── Log decision with dual-path data ──
-    conditions_snap = health.to_dict()
-    conditions_snap["trade_plan"] = plan_health.to_dict()
-    conditions_snap["pnl_pct"] = pnl_pct
-    conditions_snap["price_vs_stop_pct"] = sig_snap.price_vs_stop_pct
-    conditions_snap["price_vs_target_pct"] = sig_snap.price_vs_target_pct
-    _atr = flat.get("atr")
-    if _atr is None:
-        _atr = flat.get("atr_14")
-    try:
-        conditions_snap["atr_snapshot"] = float(_atr) if _atr is not None else None
-    except (TypeError, ValueError):
-        conditions_snap["atr_snapshot"] = None
-    if plan_health.nearest_support is not None:
-        conditions_snap["nearest_support"] = plan_health.nearest_support
-        conditions_snap["nearest_support_label"] = plan_health.nearest_support_label
-    conditions_snap["vitals"] = vitals.to_dict()
-    conditions_snap["vitals_degradation"] = vitals_degradation
+    conditions_snap = _build_pattern_conditions_snapshot(
+        health=health,
+        plan_health=plan_health,
+        pnl_pct=pnl_pct,
+        sig_snap=sig_snap,
+        flat_indicators=flat,
+        vitals=vitals,
+        vitals_degradation=vitals_degradation,
+        quote_source=quote_source,
+        static_health_score=static_health_score,
+        health_source=health_source,
+    )
 
     _persist_vitals_history()
 
@@ -1015,11 +1133,6 @@ def _evaluate_single(
         decision_source=decision_source,
         price_at_decision=current_price,
     )
-    if isinstance(decision.conditions_snapshot, dict):
-        decision.conditions_snapshot = {
-            **decision.conditions_snapshot,
-            "quote_source": quote_source,
-        }
     db.add(decision)
 
     # ── Apply adjustment ──

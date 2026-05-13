@@ -1581,6 +1581,18 @@ def _compute_single_indicator(
         slope = (hist - hist.shift(3)) / 3.0
         return _series_to_records(timestamps, slope, "value")
 
+    if name in ("volume_ratio", "rel_vol"):
+        from .indicator_core import compute_relative_volume
+
+        s = compute_relative_volume(volume.astype(float))
+        return _series_to_records(timestamps, s, "value")
+
+    if name == "gap_pct":
+        from .indicator_core import compute_gap_pct
+
+        s = compute_gap_pct(df["Open"].astype(float), close.astype(float))
+        return _series_to_records(timestamps, s, "value")
+
     if name in ("bb_pct_b", "bb_percent_b"):
         bb = BollingerBands(close=close, window=20, window_dev=2)
         u = bb.bollinger_hband()
@@ -1644,6 +1656,7 @@ def get_indicator_snapshot(
         "bbands", "bb_pct_b", "stoch", "adx", "atr", "obv",
         "roc_10", "realized_vol_20", "volume_z_20", "volume_z_60",
         "obv_slope_5", "atr_percentile_60", "macd_hist_slope_3",
+        "volume_ratio", "gap_pct",
     ]
     result = compute_indicators(
         ticker,

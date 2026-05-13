@@ -52,6 +52,8 @@ class ConditionResult:
     actual_value: Any
     met: bool
     human_desc: str = ""
+    evaluable: bool = True
+    missing_inputs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -63,11 +65,15 @@ class ConditionHealth:
     human_summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        evaluable = [c for c in self.conditions if c.evaluable]
+        missing = sorted({m for c in self.conditions for m in c.missing_inputs})
         return {
             "health_score": round(self.health_score, 3),
             "health_delta": round(self.health_delta, 3) if self.health_delta is not None else None,
-            "conditions_met": sum(1 for c in self.conditions if c.met),
+            "conditions_met": sum(1 for c in evaluable if c.met),
             "conditions_total": len(self.conditions),
+            "conditions_evaluable": len(evaluable),
+            "missing_indicators": missing,
             "critical_failures": [
                 {"indicator": c.indicator, "desc": c.human_desc} for c in self.critical_failures
             ],
@@ -78,6 +84,8 @@ class ConditionHealth:
                     "threshold": c.threshold,
                     "actual": c.actual_value,
                     "met": c.met,
+                    "evaluable": c.evaluable,
+                    "missing_inputs": c.missing_inputs,
                     "desc": c.human_desc,
                 }
                 for c in self.conditions
@@ -117,7 +125,15 @@ def _eval_single(cond: dict, indicators: dict[str, Any]) -> ConditionResult:
     else:
         display_threshold = raw_threshold
 
-    met = _eval_condition(cond, indicators)
+    missing_inputs: list[str] = []
+    if not ind_key or actual is None:
+        missing_inputs.append(ind_key or "indicator")
+    ref_key = cond.get("ref")
+    if ref_key and indicators.get(ref_key) is None:
+        missing_inputs.append(str(ref_key))
+    evaluable = not missing_inputs
+
+    met = _eval_condition(cond, indicators) if evaluable else False
 
     desc = _describe_condition(ind_key, op, display_threshold, actual, met)
     return ConditionResult(
@@ -127,6 +143,8 @@ def _eval_single(cond: dict, indicators: dict[str, Any]) -> ConditionResult:
         actual_value=actual,
         met=met,
         human_desc=desc,
+        evaluable=evaluable,
+        missing_inputs=missing_inputs,
     )
 
 
@@ -164,18 +182,32 @@ def evaluate_pattern_health(
     for cond in conditions_list:
         results.append(_eval_single(cond, indicators))
 
-    met_count = sum(1 for r in results if r.met)
+    evaluable = [r for r in results if r.evaluable]
+    met_count = sum(1 for r in evaluable if r.met)
     total = len(results)
-    health = met_count / total if total > 0 else 0.0
+    evaluable_count = len(evaluable)
+    health = met_count / evaluable_count if evaluable_count > 0 else 0.0
     delta = health - previous_health if previous_health is not None else None
 
     critical: list[ConditionResult] = []
     if alert_conditions_met:
         for r in results:
-            if not r.met and r.indicator in alert_conditions_met:
+            if r.evaluable and not r.met and r.indicator in alert_conditions_met:
                 critical.append(r)
 
-    summary_parts = [f"Pattern health: {met_count}/{total} conditions met ({health:.0%})"]
+    if evaluable_count:
+        summary_parts = [
+            f"Pattern health: {met_count}/{evaluable_count} evaluable conditions met ({health:.0%})"
+        ]
+        if evaluable_count != total:
+            missing = ", ".join(sorted({m for r in results for m in r.missing_inputs}))
+            summary_parts.append(f"Unavailable live inputs omitted from score: {missing}")
+    else:
+        missing = ", ".join(sorted({m for r in results for m in r.missing_inputs}))
+        summary_parts = [
+            "Pattern health: static conditions unavailable from live snapshot.",
+            f"Missing live inputs: {missing}",
+        ]
     if delta is not None:
         direction = "improving" if delta > 0 else "degrading" if delta < 0 else "stable"
         summary_parts.append(f"Trend: {direction} (delta {delta:+.0%})")

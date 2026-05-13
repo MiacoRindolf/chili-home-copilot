@@ -75,6 +75,14 @@ def _quote_price(q: dict[str, Any] | None) -> float | None:
 
 
 def _serialize_decision(d: PatternMonitorDecision) -> dict[str, Any]:
+    snap = d.conditions_snapshot if isinstance(d.conditions_snapshot, dict) else {}
+    health_source = snap.get("monitor_health_source") if snap else None
+    if health_source and health_source != "static_conditions":
+        health_label = "Setup health"
+        health_hint = "Using live trade-plan and setup-vitals health; entry-condition retention is in details"
+    else:
+        health_label = "Pattern health"
+        health_hint = "Share of evaluable pattern conditions still satisfied"
     return {
         "id": d.id,
         "trade_id": d.trade_id,
@@ -82,6 +90,9 @@ def _serialize_decision(d: PatternMonitorDecision) -> dict[str, Any]:
         "scan_pattern_id": d.scan_pattern_id,
         "health_score": json_safe(d.health_score),
         "health_score_pct": json_safe(_fraction_to_health_percent(d.health_score)),
+        "health_source": health_source,
+        "health_label": health_label,
+        "health_hint": health_hint,
         "health_delta": json_safe(d.health_delta) if d.health_delta is not None else None,
         "health_delta_pts": json_safe(_fraction_to_delta_points(d.health_delta)),
         "conditions_snapshot": json_safe(d.conditions_snapshot) if d.conditions_snapshot else None,
