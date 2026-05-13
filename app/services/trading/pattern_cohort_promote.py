@@ -1,8 +1,8 @@
 """f-promotion-pipeline-rebalance Phase 4 (2026-05-10).
 
 Adaptive cohort auto-promote. Ranks eligible candidates by composite score
-when available, then CPCV strength, and advances enough candidates to fill the
-operator's target promotion roster. Candidates move first to
+when available, then CPCV strength, and advances every adaptive-gate-passed
+candidate to broker-blocked observation. Candidates move first to
 ``shadow_promoted``; they do not jump directly to ``promoted`` / ``live``.
 
 Eligibility filter
@@ -22,30 +22,27 @@ A pattern is eligible if and ONLY if:
 - ``quality_composite_score`` is optional; scored candidates rank first,
   CPCV-only candidates can bootstrap observation
 
-Selection + target roster
--------------------------
+Selection + observation
+-----------------------
 
 Sort eligible patterns by ``quality_composite_score`` DESC NULLS LAST, then
-CPCV strength and ``id`` ASC (deterministic tiebreaker). Fill remaining slots
-under ``chili_cpcv_target_promotion_pool_pct`` of the active pattern pool.
-Existing staged/live roster rows count toward that target, so reruns are
-naturally idempotent.
+CPCV strength and ``id`` ASC (deterministic tiebreaker). Stage all eligible
+patterns into ``shadow_promoted`` because shadow is not broker exposure; it is
+the evidence-collection lane. Downstream shadow vetting applies the adaptive
+target roster policy before a pattern can move to broker-eligible pilot or full
+promotion.
 
 Public API
 ----------
 
 - ``select_cohort_candidates(db, *, settings_=None) -> list[ScanPattern]``:
   pure read; returns the eligibility set ranked by score.
-- ``count_recent_cohort_promotions(db, *, since_hours=168) -> int``:
-  count of transitions to ``shadow_promoted`` in the rolling window.
 - ``run_cohort_promote_cycle(db, *, now=None, settings_=None) -> dict``:
-  the weekly entry point. Flag-gated by ``chili_cohort_promote_enabled``
-  (default False).
+  the entry point. Flag-gated by ``chili_cohort_promote_enabled``.
 """
 from __future__ import annotations
 
 import logging
-import math
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -58,12 +55,6 @@ logger = logging.getLogger(__name__)
 
 
 COHORT_ELIGIBLE_LIFECYCLE_STAGES = ("backtested", "candidate", "challenged")
-PROMOTION_ROSTER_LIFECYCLE_STAGES = (
-    "shadow_promoted",
-    "pilot_promoted",
-    "promoted",
-    "live",
-)
 
 
 def select_cohort_candidates(
@@ -74,7 +65,8 @@ def select_cohort_candidates(
     """Return the eligibility set ranked by ``quality_composite_score``.
 
     Pure read — no DB writes. The list is bounded by
-    ``chili_cohort_promote_top_n`` (default 20).
+    This is the broker-blocked observation lane, so the result is intentionally
+    uncapped.
     """
     if settings_ is None:
         from ...config import settings as _settings
@@ -140,34 +132,6 @@ def count_recent_cohort_promotions(
     )
 
 
-def count_active_patterns(db: Session) -> int:
-    """Count active patterns in the current promotion universe."""
-    return (
-        db.query(ScanPattern)
-          .filter(ScanPattern.active.is_(True))
-          .count()
-    )
-
-
-def count_current_promotion_roster(db: Session) -> int:
-    """Count active patterns already staged, pilot, promoted, or live."""
-    return (
-        db.query(ScanPattern)
-          .filter(ScanPattern.active.is_(True))
-          .filter(ScanPattern.lifecycle_stage.in_(PROMOTION_ROSTER_LIFECYCLE_STAGES))
-          .count()
-    )
-
-
-def target_promotion_roster_size(db: Session, *, settings_: Any) -> int:
-    """Derive the target roster from operator policy and active pool size."""
-    pct_raw = getattr(settings_, "chili_cpcv_target_promotion_pool_pct", None)
-    if pct_raw is None:
-        return 0
-    pct = max(0.0, min(1.0, float(pct_raw)))
-    return int(math.ceil(count_active_patterns(db) * pct))
-
-
 def run_cohort_promote_cycle(
     db: Session,
     *,
@@ -176,9 +140,9 @@ def run_cohort_promote_cycle(
 ) -> dict:
     """Adaptive cohort-promote entry point.
 
-    Selects ranked eligible patterns, fills remaining slots under the
-    target promotion roster, and updates ``lifecycle_stage`` to
-    ``shadow_promoted`` for the cohort. Logs each transition.
+    Selects ranked eligible patterns and updates ``lifecycle_stage`` to
+    ``shadow_promoted`` for observation. Logs each transition. This step has
+    no portfolio cap because it does not create broker exposure.
 
     Flag-gated by ``chili_cohort_promote_enabled``.
     """
@@ -191,31 +155,10 @@ def run_cohort_promote_cycle(
         return {"ok": True, "skipped": "flag_disabled"}
 
     now = now or datetime.utcnow()
-    target_roster_size = target_promotion_roster_size(db, settings_=settings_)
-    current_roster_size = count_current_promotion_roster(db)
-    spots_remaining = max(0, target_roster_size - current_roster_size)
-
-    if spots_remaining == 0:
-        logger.info(
-            "[pattern_cohort_promote] target roster reached: %d/%d, skipping",
-            current_roster_size, target_roster_size,
-        )
-        return {
-            "ok": True,
-            "skipped": "target_roster_reached",
-            "candidates_eligible": 0,
-            "promoted_count": 0,
-            "promoted_ids": [],
-            "spots_remaining_before": 0,
-            "target_roster_size": target_roster_size,
-            "current_roster_size": current_roster_size,
-        }
-
     candidates = select_cohort_candidates(db, settings_=settings_)
-    selected = candidates[:spots_remaining]
 
     promoted_ids: list[int] = []
-    for pat in selected:
+    for pat in candidates:
         pat.lifecycle_stage = "shadow_promoted"
         pat.lifecycle_changed_at = now
         promoted_ids.append(int(pat.id))
@@ -234,9 +177,7 @@ def run_cohort_promote_cycle(
         "candidates_eligible": len(candidates),
         "promoted_count": len(promoted_ids),
         "promoted_ids": promoted_ids,
-        "spots_remaining_before": spots_remaining,
-        "target_roster_size": target_roster_size,
-        "current_roster_size_before": current_roster_size,
+        "observation_stage_uncapped": True,
     }
     logger.info("[pattern_cohort_promote] cycle: %s", result)
     return result

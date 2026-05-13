@@ -10,12 +10,12 @@ Pure / unit (no DB):
 
 Integration (DB; ``_test``-suffixed):
   - kill switch off → no advances
-  - first-week cycle promotes top-N capped by max_per_week
+  - first cycle stages all adaptive-passed candidates for observation
   - eligibility allows thin/no directional evidence for shadow-observation bootstrap
   - eligibility trusts the adaptive CPCV verdict instead of a median-sharpe floor
   - eligibility excludes promotion_gate_passed False
   - eligibility excludes already-shadow_promoted / promoted / live
-  - cap enforcement within rolling 7-day window
+  - observation staging ignores pilot/full roster target
   - tied scores → tiebreaker by id ASC
   - idempotent within week
 """
@@ -34,7 +34,6 @@ from app.services.trading.pattern_quality_score import (
     _clip,
 )
 from app.services.trading.pattern_cohort_promote import (
-    count_current_promotion_roster,
     count_recent_cohort_promotions,
     run_cohort_promote_cycle,
     select_cohort_candidates,
@@ -58,8 +57,6 @@ def _settings_stub(**overrides):
         chili_cohort_score_weight_pbo_inverse=0.15,
         chili_cohort_score_weight_directional_wr=0.25,
         chili_cohort_score_weight_decay_inverse=0.10,
-        chili_cohort_promote_top_n=20,
-        chili_cohort_promote_max_per_week=10,
         chili_cpcv_target_promotion_pool_pct=1.0,
     )
     base.update(overrides)
@@ -340,7 +337,7 @@ def test_kill_switch_off_state_skips_cycle(db):
     assert pat.lifecycle_stage == "candidate"
 
 
-def test_first_cycle_promotes_to_adaptive_target_pool(db):
+def test_first_cycle_stages_all_adaptive_passed_for_observation(db):
     _truncate_phase4_state(db)
     # Seed 12 eligible candidates with descending composite scores.
     pats = []
@@ -354,25 +351,18 @@ def test_first_cycle_promotes_to_adaptive_target_pool(db):
             db, pattern_id=p.id, n_correct=22, n_incorrect=8,
         )
         pats.append(p)
-    cfg = _settings_stub(
-        chili_cohort_promote_enabled=True,
-        chili_cpcv_target_promotion_pool_pct=0.5,
-    )
+    cfg = _settings_stub(chili_cohort_promote_enabled=True)
     out = run_cohort_promote_cycle(db, settings_=cfg)
-    assert out["target_roster_size"] == 6
-    assert out["promoted_count"] == 6
-    # Top half by score are the first patterns (highest scores).
-    expected_promoted_ids = {p.id for p in pats[:6]}
+    assert out["observation_stage_uncapped"] is True
+    assert out["promoted_count"] == 12
+    expected_promoted_ids = {p.id for p in pats}
     assert set(out["promoted_ids"]) == expected_promoted_ids
 
     # Verify lifecycle transitioned in DB.
-    for p in pats[:6]:
+    for p in pats:
         db.refresh(p)
         assert p.lifecycle_stage == "shadow_promoted"
         assert p.lifecycle_changed_at is not None
-    for p in pats[6:]:
-        db.refresh(p)
-        assert p.lifecycle_stage == "candidate"
 
 
 def test_eligibility_allows_thin_directional_for_shadow_observation_bootstrap(db):
@@ -510,7 +500,7 @@ def test_eligibility_filter_excludes_promoted_and_shadow_promoted(db):
     assert p_live.id not in cand_ids
 
 
-def test_target_roster_counts_existing_staged_and_promoted(db):
+def test_observation_stage_ignores_risk_roster_target(db):
     _truncate_phase4_state(db)
     # First, place 8 patterns in staged/live roster states.
     recent = datetime.utcnow() - timedelta(days=2)
@@ -551,24 +541,22 @@ def test_target_roster_counts_existing_staged_and_promoted(db):
 
     # Legacy counter still counts shadow-only transitions.
     assert count_recent_cohort_promotions(db) == 2
-    assert count_current_promotion_roster(db) == 8
 
     out = run_cohort_promote_cycle(db, settings_=cfg)
-    # Active pool is 28; target roster is ceil(28 * 0.5) = 14.
-    # Existing roster 8 leaves 6 adaptive slots.
-    assert out["target_roster_size"] == 14
-    assert out["current_roster_size_before"] == 8
-    assert out["promoted_count"] == 6
-    assert out["spots_remaining_before"] == 6
+    # Shadow observation is not broker exposure; all adaptive-passed fresh
+    # candidates are staged even though the pilot/full roster target is tighter.
+    assert out["observation_stage_uncapped"] is True
+    assert out["promoted_count"] == 20
+    assert set(out["promoted_ids"]) == {p.id for p in fresh}
 
-    # Re-running after target is reached advances no additional rows.
+    # Re-running after all eligible rows are staged advances no additional rows.
     out2 = run_cohort_promote_cycle(db, settings_=cfg)
-    assert out2["skipped"] == "target_roster_reached"
+    assert out2["promoted_count"] == 0
 
 
 def test_tied_scores_tiebreaker_by_id_asc(db):
     _truncate_phase4_state(db)
-    # Two patterns with identical composite score; only one slot.
+    # Two patterns with identical composite score.
     p_lower_id = _make_pattern(
         db, name="tied_lower_id", quality_score=0.80,
     )
@@ -583,13 +571,9 @@ def test_tied_scores_tiebreaker_by_id_asc(db):
     )
     assert p_lower_id.id < p_higher_id.id
 
-    cfg = _settings_stub(
-        chili_cohort_promote_enabled=True,
-        chili_cpcv_target_promotion_pool_pct=0.5,
-    )
-    out = run_cohort_promote_cycle(db, settings_=cfg)
-    assert out["promoted_count"] == 1
-    assert out["promoted_ids"] == [p_lower_id.id]
+    cfg = _settings_stub(chili_cohort_promote_enabled=True)
+    candidates = select_cohort_candidates(db, settings_=cfg)
+    assert [p.id for p in candidates[:2]] == [p_lower_id.id, p_higher_id.id]
 
 
 def test_idempotent_within_week(db):
@@ -603,10 +587,7 @@ def test_idempotent_within_week(db):
             db, pattern_id=p.id, n_correct=22, n_incorrect=8,
         )
         pats.append(p)
-    cfg = _settings_stub(
-        chili_cohort_promote_enabled=True,
-        chili_cohort_promote_max_per_week=10,
-    )
+    cfg = _settings_stub(chili_cohort_promote_enabled=True)
     out1 = run_cohort_promote_cycle(db, settings_=cfg)
     assert out1["promoted_count"] == 5
 

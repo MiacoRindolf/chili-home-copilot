@@ -3277,9 +3277,9 @@ def _run_pattern_cohort_promote_job() -> None:
     """f-promotion-pipeline-rebalance Phase 4: weekly cohort
     auto-promote.
 
-    Selects eligible patterns by ``quality_composite_score`` (populated by
-    the nightly refresh) and advances enough to ``shadow_promoted`` to fill
-    the adaptive roster target from ``chili_cpcv_target_promotion_pool_pct``.
+    Selects adaptive-passed eligible patterns and advances all of them to
+    broker-blocked ``shadow_promoted`` observation. Pilot/full promotion still
+    uses the adaptive roster target downstream.
 
     Flag-disable via ``CHILI_COHORT_PROMOTE_ENABLED=false``.
     """
