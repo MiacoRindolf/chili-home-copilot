@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,6 +23,44 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work:mine]"
+
+
+def _is_obsolete_snapshot_batch(
+    db: "Session",
+    ev,
+    *,
+    grace_seconds: int,
+) -> bool:
+    """Return True when a newer snapshot batch makes this event redundant."""
+    created_at = getattr(ev, "created_at", None)
+    if created_at is None:
+        return False
+    try:
+        from sqlalchemy import text
+
+        latest_created_at = db.execute(
+            text(
+                """
+                SELECT max(created_at)
+                FROM brain_work_events
+                WHERE domain = 'trading'
+                  AND event_type = 'market_snapshots_batch'
+                  AND id <> :event_id
+                """
+            ),
+            {"event_id": int(getattr(ev, "id", 0) or 0)},
+        ).scalar()
+    except Exception:
+        logger.debug(
+            "%s obsolete check failed ev_id=%s",
+            LOG_PREFIX,
+            getattr(ev, "id", None),
+            exc_info=True,
+        )
+        return False
+    if latest_created_at is None:
+        return False
+    return latest_created_at > (created_at + timedelta(seconds=max(0, grace_seconds)))
 
 
 def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> None:
@@ -70,6 +109,26 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
         logger.info(
             "%s skip ev_id=%s job_id=%s daily=%d intraday=%d below_floor=%d",
             LOG_PREFIX, ev.id, job_id, daily, intraday, min_snapshots,
+        )
+        return
+
+    obsolete_grace_s = int(
+        os.environ.get(
+            "CHILI_BRAIN_MINE_HANDLER_OBSOLETE_EVENT_GRACE_SECONDS",
+            str(getattr(settings, "brain_mine_handler_obsolete_event_grace_seconds", 900)),
+        )
+    )
+    if _is_obsolete_snapshot_batch(
+        db,
+        ev,
+        grace_seconds=obsolete_grace_s,
+    ):
+        logger.info(
+            "%s skip ev_id=%s job_id=%s obsolete_snapshot_batch grace_s=%d",
+            LOG_PREFIX,
+            ev.id,
+            job_id,
+            obsolete_grace_s,
         )
         return
 

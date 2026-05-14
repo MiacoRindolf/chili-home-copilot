@@ -437,6 +437,10 @@ class Settings(BaseSettings):
     # market_snapshots_batch outcome events.
     brain_work_mine_batch_size: int = 1
     brain_mine_handler_min_snapshots: int = 10
+    # Mining reads current snapshots and is expensive. After retries/backfills,
+    # older snapshot-batch events are redundant; coalesce them so the queue
+    # drains instead of rerunning full mining for stale batches.
+    brain_mine_handler_obsolete_event_grace_seconds: int = 900
 
     # FIX 37 (Phase 2 #2, 2026-04-29): event-driven CPCV gate handler.
     # Reacts to backtest_completed events; runs CPCV promotion gate;

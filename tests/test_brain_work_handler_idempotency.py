@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -235,6 +235,35 @@ def test_mine_handler_idempotent_below_snapshot_floor(monkeypatch) -> None:
     handle_market_snapshots_batch(MagicMock(), ev, None)
 
     # Below the snapshot floor → mine_patterns must NOT be called either time.
+    mine_mock.assert_not_called()
+
+
+def test_mine_handler_skips_obsolete_snapshot_batch(monkeypatch) -> None:
+    mine_mock = MagicMock(return_value=[])
+
+    import app.services.trading.learning as learning
+
+    monkeypatch.setattr(learning, "mine_patterns", mine_mock)
+
+    from app.services.trading.brain_work.handlers.mine import (
+        handle_market_snapshots_batch,
+    )
+
+    db = MagicMock()
+    db.execute.return_value.scalar.return_value = datetime.utcnow() + timedelta(hours=2)
+    ev = _FakeEvent(
+        event_id=44,
+        payload={
+            "snapshots_taken_daily": 25,
+            "intraday_snapshots_taken": 0,
+            "universe_size": 25,
+            "job_id": "old",
+        },
+    )
+    ev.created_at = datetime.utcnow() - timedelta(hours=2)
+
+    handle_market_snapshots_batch(db, ev, None)
+
     mine_mock.assert_not_called()
 
 
