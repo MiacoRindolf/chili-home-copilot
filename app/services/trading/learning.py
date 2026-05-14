@@ -2326,6 +2326,74 @@ def _matches_filter(row: dict, conditions: list[dict] | None) -> bool:
     return True
 
 
+def _indicator_payload_dict(raw: Any) -> dict[str, Any]:
+    """Normalize JSONB/string indicator payloads into a dict."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _load_recent_labeled_snapshots_for_mining(
+    db: Session,
+    *,
+    limit: int,
+) -> list[Any]:
+    """Load a bounded, skinny sample of labeled snapshots for mining.
+
+    The market_snapshots_batch handler can run while the snapshot table is
+    large and actively written. Pull only columns consumed below and order by
+    the indexed primary key rather than sorting full ORM rows by snapshot_date.
+    If the DB drops the connection under load, mining continues from freshly
+    fetched OHLCV rows instead of poisoning the work event into retry/dead.
+    """
+    if limit <= 0:
+        return []
+    try:
+        rows = (
+            db.query(
+                MarketSnapshot.id,
+                MarketSnapshot.ticker,
+                MarketSnapshot.snapshot_date,
+                MarketSnapshot.close_price,
+                MarketSnapshot.indicator_data,
+                MarketSnapshot.future_return_5d,
+                MarketSnapshot.future_return_10d,
+                MarketSnapshot.bar_interval,
+                MarketSnapshot.bar_start_at,
+                MarketSnapshot.news_sentiment,
+                MarketSnapshot.news_count,
+                MarketSnapshot.pe_ratio,
+                MarketSnapshot.market_cap_b,
+            )
+            .filter(
+                MarketSnapshot.future_return_5d.isnot(None),
+                MarketSnapshot.indicator_data.isnot(None),
+            )
+            .order_by(MarketSnapshot.id.desc())
+            .limit(int(limit))
+            .all()
+        )
+        return [row for row in rows if _indicator_payload_dict(row.indicator_data)]
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[learning] labeled snapshot mining sample unavailable; "
+            "continuing with fresh OHLCV rows: %s",
+            exc,
+            exc_info=True,
+        )
+        return []
+
+
 def mine_patterns(
     db: Session,
     user_id: int | None,
@@ -2401,13 +2469,18 @@ def mine_patterns(
         f"{len(all_rows)} data rows in {time.time() - _t0:.1f}s ({_workers} workers)"
     )
 
-    snapshots = db.query(MarketSnapshot).filter(
-        MarketSnapshot.future_return_5d.isnot(None),
-    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(5000).all()
+    snapshot_limit = max(
+        0,
+        int(getattr(settings, "brain_mine_labeled_snapshot_limit", 5000)),
+    )
+    snapshots = _load_recent_labeled_snapshots_for_mining(
+        db,
+        limit=snapshot_limit,
+    )
 
     for s in snapshots:
         try:
-            data = json.loads(s.indicator_data) if s.indicator_data else {}
+            data = _indicator_payload_dict(s.indicator_data)
             rsi_data = data.get("rsi", {})
             macd_data = data.get("macd", {})
             bb_data = data.get("bbands", {})

@@ -875,6 +875,10 @@ class Settings(BaseSettings):
 
     # Pattern mining: max tickers to pull OHLCV for per cycle (0 = no cap; use full merged mining list).
     brain_mine_patterns_max_tickers: int = 1000
+    # Historical labeled snapshot rows mixed into pattern mining. Keep bounded:
+    # this runs from market_snapshots_batch work events and must not monopolize
+    # the DB while fresh OHLCV mining is also active.
+    brain_mine_labeled_snapshot_limit: int = 5000
     # Require stability across chronological segments before save_insight from mine_patterns.
     brain_mining_purged_cpcv_enabled: bool = True
     # When True, CPCV + DSR + PBO gate blocks promotion after ensemble/DSR/holdout (HR1 path).
