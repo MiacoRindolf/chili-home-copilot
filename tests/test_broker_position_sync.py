@@ -145,3 +145,64 @@ def test_coinbase_sync_dedupes_duplicate_incoming_positions(
     assert len(rows) == 1
     assert rows[0].status == "open"
     assert rows[0].quantity == 0.5
+
+
+@patch("app.services.coinbase_service.get_positions", return_value=[])
+@patch("app.services.coinbase_service.is_connected", return_value=True)
+def test_coinbase_sync_scores_stale_close_from_sell_fills(
+    _connected,
+    _positions,
+    db,
+    monkeypatch,
+):
+    from app.services import coinbase_service
+    from app.services.trading.brain_work import execution_hooks
+
+    entry_at = datetime.utcnow() - timedelta(minutes=15)
+    fill_at = datetime.utcnow() - timedelta(minutes=1)
+    trade = Trade(
+        user_id=None,
+        ticker="ABC-USD",
+        direction="long",
+        entry_price=1.0,
+        quantity=10.0,
+        entry_date=entry_at,
+        status="open",
+        broker_source="coinbase",
+        broker_order_id="buy-1",
+    )
+    db.add(trade)
+    db.commit()
+
+    class _FakeClient:
+        def get_fills(self, product_id=None, limit=100):
+            return {
+                "fills": [
+                    {
+                        "product_id": "ABC-USD",
+                        "side": "SELL",
+                        "price": "1.25",
+                        "size": "10",
+                        "trade_time": fill_at.isoformat() + "Z",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(coinbase_service, "_get_client", lambda: _FakeClient())
+    monkeypatch.setattr(
+        execution_hooks,
+        "on_broker_reconciled_close",
+        lambda *args, **kwargs: None,
+    )
+
+    result = sync_coinbase_positions_to_db(db, user_id=None)
+    db.refresh(trade)
+
+    assert result["closed"] == 1
+    assert trade.status == "closed"
+    assert trade.exit_reason == "coinbase_position_sync_gone"
+    assert trade.exit_price == 1.25
+    assert trade.pnl == 2.5
+    assert trade.broker_status == "filled"
+    assert trade.last_broker_sync is not None
+    assert "exit priced from recent_sell_fills" in (trade.notes or "")

@@ -1097,6 +1097,8 @@ def _maybe_check_feature_parity(
     )
     if not live_snap:
         return "feature_parity_unavailable:no_live_snapshot" if fail_closed else None
+    if not (set(live_snap.keys()) - {"price"}):
+        return "feature_parity_unavailable:no_signal_features" if fail_closed else None
     features_to_check = set(live_snap.keys())
 
     try:
@@ -1132,6 +1134,7 @@ def _execute_broker_buy(
     snap: dict[str, Any],
     llm_snap: dict[str, Any] | None,
     out: dict[str, Any],
+    px: float | None = None,
 ) -> dict[str, Any] | None:
     """Place a live buy via Robinhood with the full safety envelope.
 
@@ -1404,9 +1407,37 @@ def _execute_broker_buy(
         # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
         # (2026-05-09): per-venue notional + concurrent-position cap.
         # Independent from RH cap per Phase 1 design constraint #1.
+        _cap_px = (
+            px
+            if px is not None
+            else snap.get("current_price")
+            or snap.get("price")
+            or snap.get("entry_price")
+            or getattr(alert, "entry_price", None)
+            or getattr(alert, "price_at_alert", None)
+        )
+        try:
+            _proposed_notional = float(qty) * float(_cap_px or 0.0)
+        except (TypeError, ValueError):
+            _proposed_notional = 0.0
+        if _proposed_notional <= 0.0:
+            _block_live_order(
+                db,
+                uid=uid,
+                alert=alert,
+                reason="coinbase_cap_unavailable:missing_price",
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            )
+            logger.warning(
+                "[autotrader] Coinbase cap missing usable price for ticker=%s; blocked live order",
+                alert.ticker,
+            )
+            return None
+
         try:
             from .cost_aware_gate import per_venue_cap_check as _cap_check
-            _proposed_notional = float(qty) * float(px or 0.0)
             _cap = _cap_check(
                 venue="coinbase",
                 proposed_notional_usd=_proposed_notional,
@@ -1643,6 +1674,7 @@ def _execute_scale_in(
             snap=snap,
             llm_snap=llm_snap,
             out=out,
+            px=px,
         )
         if res is None:
             return
@@ -1995,6 +2027,7 @@ def _execute_new_entry(
             snap=snap,
             llm_snap=llm_snap,
             out=out,
+            px=px,
         )
         if res is None:
             return

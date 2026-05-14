@@ -247,6 +247,48 @@ def test_feature_parity_uses_decision_snapshot_not_recomputed(monkeypatch):
     assert captured["features"] == {"rsi_14", "ema_stack", "price"}
 
 
+def test_feature_parity_blocks_price_only_snapshot_when_required(monkeypatch):
+    from app.services.trading import feature_parity, market_data
+
+    class _FakeDf:
+        empty = False
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(
+            chili_feature_parity_enabled=True,
+            chili_autotrader_live_require_feature_parity=True,
+            chili_feature_parity_fail_closed_on_error=True,
+        ),
+    )
+    monkeypatch.setattr(market_data, "fetch_ohlcv_df", lambda *a, **k: _FakeDf())
+    monkeypatch.setattr(
+        feature_parity,
+        "check_entry_feature_parity",
+        lambda *a, **k: pytest.fail("price-only snapshot should block before parity"),
+    )
+
+    alert = SimpleNamespace(
+        indicator_snapshot={},
+        signals_snapshot={},
+        price_at_alert=None,
+        entry_price=None,
+    )
+
+    reason = at_mod._maybe_check_feature_parity(
+        None,
+        alert=alert,
+        rule_snapshot={"current_price": 103.0},
+        ticker="SNAP",
+        scan_pattern_id=None,
+        venue="robinhood",
+        source="test",
+    )
+
+    assert reason == "feature_parity_unavailable:no_signal_features"
+
+
 def test_required_venue_health_blocks_insufficient_data(monkeypatch):
     from app.services.trading.venue import venue_health
 
@@ -305,3 +347,79 @@ def test_scale_in_blocks_live_capital_fallback(monkeypatch):
 
     assert blocked
     assert blocked[0]["reason"] == "capital_unavailable:fallback:get_portfolio_timeout"
+
+
+def test_coinbase_cap_uses_passed_price(monkeypatch):
+    from app import config as config_mod
+    from app.services.trading import broker_selector, cost_aware_gate, governance
+    from app.services.trading.venue import factory as venue_factory
+
+    captured: dict[str, float] = {}
+
+    def _fake_cap_check(*, proposed_notional_usd, **kwargs):
+        captured["proposed_notional_usd"] = proposed_notional_usd
+        return SimpleNamespace(
+            allowed=True,
+            reason="within_cap",
+            current_positions=0,
+            current_notional_usd=0.0,
+        )
+
+    fake_adapter = MagicMock()
+    fake_adapter.is_enabled.return_value = True
+    fake_adapter.place_market_order.return_value = {"ok": True, "order_id": "cb-123"}
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=True),
+    )
+    monkeypatch.setattr(
+        config_mod,
+        "settings",
+        SimpleNamespace(chili_coinbase_autotrader_live=True),
+    )
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        cost_aware_gate,
+        "cost_aware_min_edge_gate",
+        lambda *a, **k: SimpleNamespace(allowed=True, reason="ok"),
+    )
+    monkeypatch.setattr(
+        broker_selector,
+        "select_venue",
+        lambda *a, **k: SimpleNamespace(venue="coinbase", reason="test"),
+    )
+    monkeypatch.setattr(at_mod, "_live_venue_health_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr(cost_aware_gate, "per_venue_cap_check", _fake_cap_check)
+    monkeypatch.setattr(venue_factory, "get_adapter", lambda venue: fake_adapter)
+
+    alert = SimpleNamespace(
+        id=88,
+        ticker="PEPE-USD",
+        entry_price=None,
+        price_at_alert=None,
+    )
+    out = {"skipped": 0}
+
+    res = at_mod._execute_broker_buy(
+        None,
+        uid=1,
+        alert=alert,
+        qty=10.0,
+        client_order_id="cid-88",
+        snap={"projected_profit_pct": 5.0},
+        llm_snap=None,
+        out=out,
+        px=0.5,
+    )
+
+    assert res is not None and res["ok"] is True
+    assert res["_chili_broker_source"] == "coinbase"
+    assert captured["proposed_notional_usd"] == 5.0
+    fake_adapter.place_market_order.assert_called_once_with(
+        product_id="PEPE-USD",
+        side="buy",
+        base_size="10.0",
+        client_order_id="cid-88",
+    )

@@ -673,6 +673,131 @@ def _finalize_coinbase_pending_exit(db: Session, trade: Any, order: dict[str, An
     return round(pnl, 4)
 
 
+def _dictish(obj: Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "__dict__"):
+        return dict(obj.__dict__)
+    return {}
+
+
+def _coinbase_stale_close_fill(trade: Any) -> dict[str, Any] | None:
+    """Best-effort broker-fill evidence for a position-sync inferred close.
+
+    Position sync can observe "no position" before the order-sync path sees
+    the matching exit order. In that case, use broker-side SELL fills rather
+    than closing the local Trade with NULL exit/pnl.
+    """
+    ticker = str(getattr(trade, "ticker", "") or "").strip()
+    if not ticker:
+        return None
+    product_id = _to_product_id(ticker)
+    target_qty = _safe_float(getattr(trade, "quantity", None))
+    entry_at = getattr(trade, "entry_date", None)
+
+    pending_order_id = str(getattr(trade, "pending_exit_order_id", "") or "").strip()
+    if pending_order_id:
+        order = get_order_by_id(pending_order_id) or {}
+        status = str(order.get("status") or order.get("state") or "").lower()
+        side = str(order.get("side") or "").lower()
+        px = (
+            _safe_float(order.get("average_filled_price"))
+            or _safe_float(order.get("average_price"))
+            or _safe_float(order.get("price"))
+        )
+        qty = _safe_float(order.get("filled_size") or order.get("base_size")) or target_qty
+        if px > 0 and qty > 0 and (not side or side == "sell") and status in ("filled", "done"):
+            return {
+                "price": px,
+                "quantity": qty,
+                "exit_at": (
+                    _parse_cb_datetime(order.get("last_fill_time"))
+                    or _parse_cb_datetime(order.get("completion_time"))
+                    or _parse_cb_datetime(order.get("filled_at"))
+                    or datetime.utcnow()
+                ),
+                "source": "pending_exit_order",
+            }
+
+    client = _get_client()
+    if not client:
+        return None
+    try:
+        resp = client.get_fills(product_id=product_id, limit=100)
+    except Exception as exc:
+        logger.debug("[coinbase] stale close fill lookup failed for %s: %s", product_id, exc)
+        return None
+
+    rd = _dictish(resp)
+    raw_fills = (
+        rd.get("fills")
+        or rd.get("orders")
+        or getattr(resp, "fills", None)
+        or getattr(resp, "orders", None)
+        or []
+    )
+    if not isinstance(raw_fills, list):
+        return None
+
+    sells: list[dict[str, Any]] = []
+    for raw in raw_fills:
+        fd = _dictish(raw)
+        if not fd:
+            continue
+        fill_product = str(fd.get("product_id") or "").upper()
+        if fill_product and fill_product != product_id.upper():
+            continue
+        if str(fd.get("side") or "").lower() != "sell":
+            continue
+        px = _safe_float(fd.get("price") or fd.get("trade_price"))
+        qty = _safe_float(fd.get("size") or fd.get("trade_size"))
+        if px <= 0 or qty <= 0:
+            continue
+        fill_at = (
+            _parse_cb_datetime(fd.get("trade_time"))
+            or _parse_cb_datetime(fd.get("created_time"))
+            or _parse_cb_datetime(fd.get("filled_at"))
+        )
+        if entry_at is not None and fill_at is not None and fill_at < entry_at:
+            continue
+        sells.append({"price": px, "quantity": qty, "exit_at": fill_at or datetime.utcnow()})
+
+    if not sells:
+        return None
+    sells.sort(key=lambda row: row["exit_at"], reverse=True)
+
+    remaining = target_qty if target_qty > 0 else None
+    total_qty = 0.0
+    total_value = 0.0
+    latest_at = sells[0]["exit_at"]
+    for fill in sells:
+        qty = float(fill["quantity"])
+        if remaining is not None:
+            if remaining <= 0:
+                break
+            qty = min(qty, remaining)
+            remaining -= qty
+        total_qty += qty
+        total_value += qty * float(fill["price"])
+
+    if total_qty <= 0 or total_value <= 0:
+        return None
+    if target_qty > 0 and total_qty < (target_qty * 0.95):
+        logger.debug(
+            "[coinbase] stale close sell fills below coverage for %s: %.8f < %.8f",
+            product_id,
+            total_qty,
+            target_qty,
+        )
+        return None
+    return {
+        "price": total_value / total_qty,
+        "quantity": total_qty,
+        "exit_at": latest_at,
+        "source": "recent_sell_fills",
+    }
+
+
 # ── Order sync (Coinbase → local DB) ────────────────────────────────
 
 def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
@@ -909,14 +1034,34 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     )
 
     for trade in stale:
+        close_fill = _coinbase_stale_close_fill(trade)
         trade.status = "closed"
-        trade.exit_date = datetime.utcnow()
+        trade.exit_date = (
+            close_fill.get("exit_at") if close_fill is not None else datetime.utcnow()
+        )
+        if close_fill is not None:
+            exit_px = float(close_fill["price"])
+            qty = float(close_fill.get("quantity") or trade.quantity or 0.0)
+            entry = float(trade.entry_price or 0.0)
+            trade.exit_price = exit_px
+            if qty > 0:
+                trade.quantity = qty
+            if entry > 0 and qty > 0:
+                pnl = (exit_px - entry) * qty
+                if str(trade.direction or "long").lower() == "short":
+                    pnl = -pnl
+                trade.pnl = round(pnl, 4)
+            trade.broker_status = "filled"
+            trade.last_broker_sync = trade.exit_date
+            _clear_pending_exit_fields(trade)
         if not trade.exit_reason:
             trade.exit_reason = "coinbase_position_sync_gone"
         trade.notes = (
             (trade.notes or "")
             + f"\nAuto-closed: position no longer on Coinbase ({datetime.utcnow().strftime('%Y-%m-%d %H:%M')})"
         )
+        if close_fill is not None:
+            trade.notes += f" [exit priced from {close_fill['source']}]"
         try:
             from .trading.brain_work.execution_hooks import on_broker_reconciled_close
 
