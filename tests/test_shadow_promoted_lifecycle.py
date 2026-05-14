@@ -10,7 +10,7 @@ Verify the ``shadow_promoted`` lifecycle stage:
 * AutoTrader v1's ``_process_one_alert`` routes ``shadow_promoted``
   pattern alerts to shadow-log only — no broker call, no Trade row,
   audit row written with reason ``selector:shadow_promoted_pattern_eval``.
-* AutoTrader v1's path for ``promoted`` patterns is BYTE-IDENTICAL
+* AutoTrader v1's path for ``live`` patterns is BYTE-IDENTICAL
   pre/post Phase 3 (parity hard gate). Mixed alerts in the same tick
   route independently.
 
@@ -214,6 +214,7 @@ def _autotrader_scaffold_patches():
         patch.object(
             auto_trader, "run_revalidation_llm", return_value=(True, {}),
         ),
+        patch.object(auto_trader, "_maybe_check_feature_parity", return_value=None),
         patch.object(
             auto_trader,
             "check_autopilot_entry_gate",
@@ -268,8 +269,8 @@ def test_autotrader_routes_shadow_promoted_to_shadow_log_no_broker_call(
     assert trades == []
 
 
-def test_autotrader_byte_identical_for_promoted_pattern(db, monkeypatch):
-    """HARD GATE PARITY: a ``promoted`` pattern's alert reaches
+def test_autotrader_byte_identical_for_live_pattern(db, monkeypatch):
+    """HARD GATE PARITY: a ``live`` pattern's alert reaches
     ``_execute_new_entry`` with identical args whether the
     Phase 3 helper is in place or stubbed-out (simulating pre-Phase-3).
     The new shadow-promoted check is a no-op for non-shadow_promoted
@@ -281,7 +282,7 @@ def test_autotrader_byte_identical_for_promoted_pattern(db, monkeypatch):
 
     def _run_once(*, force_helper_false: bool):
         pat = _make_pattern(
-            db, name=f"parity_pat_{force_helper_false}", lifecycle_stage="promoted"
+            db, name=f"parity_pat_{force_helper_false}", lifecycle_stage="live"
         )
         alert = _make_alert(
             db, pattern_id=pat.id,
@@ -307,7 +308,7 @@ def test_autotrader_byte_identical_for_promoted_pattern(db, monkeypatch):
         patches.append(patch.object(auto_trader, "_execute_new_entry", side_effect=_spy))
         if force_helper_false:
             # Simulate pre-Phase-3 by forcing the helper to return False
-            # universally. Promoted patterns should ALSO take the same
+            # universally. Live patterns should ALSO take the same
             # path (helper already returns False for them); this proves
             # the code path through _process_one_alert is identical.
             patches.append(
@@ -351,9 +352,48 @@ def test_autotrader_byte_identical_for_promoted_pattern(db, monkeypatch):
     assert baseline["llm_snap"] == shipped["llm_snap"]
 
 
+def test_autotrader_promoted_requires_live_stage_for_live_orders(db, monkeypatch):
+    """A promoted pattern can still be observed, but live broker orders require
+    the explicit live lifecycle stage by default."""
+    monkeypatch.setattr(settings, "chili_autotrader_live_requires_live_lifecycle", True)
+
+    u = _make_user(db, name="promoted_live_gate_user")
+    pat = _make_pattern(db, name="promoted_needs_live", lifecycle_stage="promoted")
+    alert = _make_alert(db, pattern_id=pat.id, ticker="PLIVE1")
+
+    out = {"scaled_in": 0, "skipped": 0, "entered": 0}
+    runtime = {"live_orders_effective": True, "paper_mode_effective": False}
+
+    exec_calls: list[int] = []
+
+    def _fail_exec(db_, uid, alert_, px, snap, llm_snap, live, out_):
+        exec_calls.append(int(alert_.id))
+
+    patches = list(_autotrader_scaffold_patches())
+    patches.append(patch.object(auto_trader, "_execute_new_entry", side_effect=_fail_exec))
+    for p in patches:
+        p.start()
+    try:
+        auto_trader._process_one_alert(db, u.id, alert, out, runtime)
+    finally:
+        patch.stopall()
+
+    assert out["skipped"] == 1
+    assert exec_calls == []
+    runs = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == alert.id)
+        .all()
+    )
+    assert len(runs) == 1
+    assert (runs[0].reason or "").startswith(
+        "pattern_lifecycle_not_live_approved:promoted"
+    )
+
+
 def test_autotrader_mixed_alerts_route_independently(db, monkeypatch):
     """Two alerts in the same loop, one from a ``shadow_promoted``
-    pattern and one from a ``promoted`` pattern, route to the right
+    pattern and one from a ``live`` pattern, route to the right
     paths independently."""
     monkeypatch.setattr(settings, "chili_shadow_promoted_lifecycle_enabled", True)
 
@@ -361,11 +401,11 @@ def test_autotrader_mixed_alerts_route_independently(db, monkeypatch):
     pat_shadow = _make_pattern(
         db, name="mixed_shadow", lifecycle_stage="shadow_promoted"
     )
-    pat_promoted = _make_pattern(
-        db, name="mixed_promoted", lifecycle_stage="promoted"
+    pat_live = _make_pattern(
+        db, name="mixed_live", lifecycle_stage="live"
     )
     alert_shadow = _make_alert(db, pattern_id=pat_shadow.id, ticker="SMIX1")
-    alert_promoted = _make_alert(db, pattern_id=pat_promoted.id, ticker="PMIX1")
+    alert_live = _make_alert(db, pattern_id=pat_live.id, ticker="PMIX1")
 
     out = {"scaled_in": 0, "skipped": 0, "entered": 0}
     runtime = {"live_orders_effective": True, "paper_mode_effective": False}
@@ -382,17 +422,17 @@ def test_autotrader_mixed_alerts_route_independently(db, monkeypatch):
         p.start()
     try:
         auto_trader._process_one_alert(db, u.id, alert_shadow, out, runtime)
-        auto_trader._process_one_alert(db, u.id, alert_promoted, out, runtime)
+        auto_trader._process_one_alert(db, u.id, alert_live, out, runtime)
     finally:
         patch.stopall()
 
-    # Promoted alert → executed exactly once. Shadow alert → not executed.
-    assert exec_calls == [int(alert_promoted.id)]
+    # Live alert executes exactly once. Shadow alert does not execute.
+    assert exec_calls == [int(alert_live.id)]
     assert out["entered"] == 1
     assert out["skipped"] == 1
 
     # Audit rows: shadow_promoted_pattern_eval for the shadow alert,
-    # nothing blocked for the promoted alert (it reached _execute_new_entry).
+    # nothing blocked for the live alert (it reached _execute_new_entry).
     shadow_runs = (
         db.query(AutoTraderRun)
         .filter(AutoTraderRun.breakout_alert_id == alert_shadow.id)
@@ -402,15 +442,15 @@ def test_autotrader_mixed_alerts_route_independently(db, monkeypatch):
     assert shadow_runs[0].decision == "blocked"
     assert shadow_runs[0].reason == "selector:shadow_promoted_pattern_eval"
 
-    promoted_runs_blocked = (
+    live_runs_blocked = (
         db.query(AutoTraderRun)
         .filter(
-            AutoTraderRun.breakout_alert_id == alert_promoted.id,
+            AutoTraderRun.breakout_alert_id == alert_live.id,
             AutoTraderRun.decision == "blocked",
         )
         .all()
     )
-    assert promoted_runs_blocked == []
+    assert live_runs_blocked == []
 
 
 def test_autotrader_shadow_promoted_with_flag_off_falls_through_to_lifecycle_reject(

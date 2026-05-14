@@ -10,6 +10,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.services.trading.auto_trader import run_auto_trader_tick
@@ -54,6 +55,60 @@ def test_kill_switch_blocks_orchestrator_entry(
 
     assert res.get("skipped") is True
     assert res.get("reason") == "kill_switch"
+
+
+def test_kill_switch_refreshes_from_db_cross_process(
+    paired_client, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scheduler process with local memory off must observe an API process
+    kill-switch write through durable DB state."""
+    _c, _user = paired_client
+    from app.services.trading import governance as gov
+
+    deactivate_kill_switch()
+    db.execute(
+        text(
+            "INSERT INTO trading_risk_state "
+            "(user_id, snapshot_date, breaker_tripped, breaker_reason, regime, capital) "
+            "VALUES (:uid, NOW(), TRUE, :reason, 'kill_switch', 0)"
+        ),
+        {"uid": None, "reason": "cross_process_test"},
+    )
+    db.commit()
+
+    try:
+        assert gov.is_kill_switch_active() is True
+        status = gov.get_kill_switch_status()
+        assert status["active"] is True
+        assert status["reason"] == "cross_process_test"
+    finally:
+        deactivate_kill_switch()
+
+
+def test_kill_switch_same_reason_retries_failed_persist(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services.trading import governance as gov
+
+    gov._apply_kill_switch_state(active=False, reason=None, set_at=None)
+    with gov._kill_switch_lock:
+        gov._kill_switch_db_persisted = None
+
+    calls: list[tuple[bool, str | None]] = []
+
+    def _fake_persist(active: bool, reason: str | None) -> bool:
+        calls.append((active, reason))
+        return len(calls) > 1
+
+    monkeypatch.setattr(gov, "_persist_kill_switch_state", _fake_persist)
+
+    try:
+        gov.activate_kill_switch("retry_test")
+        gov.activate_kill_switch("retry_test")
+    finally:
+        gov._apply_kill_switch_state(active=False, reason=None, set_at=None)
+        with gov._kill_switch_lock:
+            gov._kill_switch_db_persisted = None
+
+    assert calls == [(True, "retry_test"), (True, "retry_test")]
 
 
 def test_kill_switch_blocks_monitor(

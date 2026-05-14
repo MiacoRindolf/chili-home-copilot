@@ -1420,6 +1420,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_GLOBAL_MAX_DAILY_LOSS_PCT_OF_EQUITY"),
     )
 
+    # Cross-process kill switch. API and scheduler run in separate processes,
+    # so live paths re-read durable state instead of trusting process memory.
+    chili_kill_switch_db_poll_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_KILL_SWITCH_DB_POLL_ENABLED"),
+    )
+    chili_kill_switch_db_poll_interval_s: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_KILL_SWITCH_DB_POLL_INTERVAL_S"),
+    )
+    chili_kill_switch_db_fail_closed: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_KILL_SWITCH_DB_FAIL_CLOSED"),
+    )
+
     # Venue order rate limiter (P0.3) — token-bucket per venue wrapping
     # place_* / cancel_order. Defaults are deliberately well below each
     # venue's published cap so a reconciler retry storm can't 429-lock
@@ -1486,6 +1503,14 @@ class Settings(BaseSettings):
     chili_feature_parity_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_FEATURE_PARITY_ENABLED"),
+    )
+    chili_autotrader_live_require_feature_parity: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_REQUIRE_FEATURE_PARITY"),
+    )
+    chili_feature_parity_fail_closed_on_error: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_FAIL_CLOSED_ON_ERROR"),
     )
     # Parity enforcement mode:
     #   "disabled" — assertion is a no-op (belt-and-suspenders on top of
@@ -2586,6 +2611,22 @@ class Settings(BaseSettings):
     chili_pilot_promoted_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_PILOT_PROMOTED_ENABLED"),
+    )
+    chili_autotrader_live_requires_live_lifecycle: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_REQUIRES_LIVE_LIFECYCLE"),
+    )
+    chili_autotrader_allow_pilot_promoted_live: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_ALLOW_PILOT_PROMOTED_LIVE"),
+    )
+    chili_autotrader_block_live_on_capital_fallback: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_BLOCK_LIVE_ON_CAPITAL_FALLBACK"),
+    )
+    chili_autotrader_live_require_venue_health_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_REQUIRE_VENUE_HEALTH_ENABLED"),
     )
     chili_autotrader_rth_only: bool = Field(
         default=True,

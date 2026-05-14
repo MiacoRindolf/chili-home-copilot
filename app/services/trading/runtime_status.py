@@ -279,13 +279,19 @@ def circuit_breaker_status() -> dict[str, Any]:
 
 def kill_switch_status() -> dict[str, Any]:
     try:
-        from .governance import get_kill_switch_reason, is_kill_switch_active
+        from .governance import get_kill_switch_status, is_kill_switch_active
 
         active = bool(is_kill_switch_active())
+        status = get_kill_switch_status()
         return _surface(
             "kill_switch",
             state="ok" if not active else "error",
-            extra={"active": active, "reason": get_kill_switch_reason() if active else None},
+            extra={
+                "active": active,
+                "reason": status.get("reason") if active else None,
+                "set_at": status.get("set_at"),
+                "db_error": status.get("db_error"),
+            },
         )
     except Exception as exc:
         return _surface("kill_switch", state="error", note=str(exc))

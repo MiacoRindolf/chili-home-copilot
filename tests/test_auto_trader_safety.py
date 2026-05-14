@@ -39,6 +39,8 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_autotrader_synergy_scale_notional_usd=150.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
         chili_feature_parity_enabled=False,
+        chili_autotrader_live_require_feature_parity=False,
+        chili_autotrader_live_require_venue_health_enabled=False,
     )
 
 
@@ -146,6 +148,13 @@ def test_kill_switch_flipped_mid_flight_blocks_placement(db, monkeypatch):
     monkeypatch.setattr(at_mod, "find_open_autotrader_trade", lambda *a, **k: None)
     monkeypatch.setattr(at_mod, "find_open_autotrader_paper", lambda *a, **k: None)
     monkeypatch.setattr(at_mod, "maybe_scale_in", lambda *a, **k: None)
+    from app.services.trading import auto_trader_rules as rules_mod
+    monkeypatch.setattr(rules_mod, "resolve_effective_capital", lambda *a, **k: (100_000.0, "broker_equity"))
+    monkeypatch.setattr(
+        rules_mod,
+        "resolve_brain_risk_context",
+        lambda *a, **k: {"dial_value": 1.0, "source": "test"},
+    )
     monkeypatch.setattr(
         at_mod, "passes_rule_gate",
         lambda *a, **k: (True, "ok", {"projected_profit_pct": 10.0}),
@@ -184,3 +193,115 @@ def test_kill_switch_flipped_mid_flight_blocks_placement(db, monkeypatch):
     assert any(
         r and "kill_switch_activated_mid_flight" in r for r in reasons
     ), f"expected mid-flight kill-switch reason, got: {reasons}"
+
+
+def test_feature_parity_uses_decision_snapshot_not_recomputed(monkeypatch):
+    """The AutoTrader parity gate must compare the real entry snapshot, not a
+    freshly computed vector against itself."""
+    from app.services.trading import feature_parity, market_data
+
+    class _FakeDf:
+        empty = False
+
+    captured: dict = {}
+
+    def _fake_check(db_, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(ok=True, reason=None, severity="ok")
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(
+            chili_feature_parity_enabled=True,
+            chili_autotrader_live_require_feature_parity=True,
+            chili_feature_parity_fail_closed_on_error=True,
+        ),
+    )
+    monkeypatch.setattr(market_data, "fetch_ohlcv_df", lambda *a, **k: _FakeDf())
+    monkeypatch.setattr(feature_parity, "check_entry_feature_parity", _fake_check)
+
+    alert = SimpleNamespace(
+        indicator_snapshot={"rsi_14": 42.0, "ema_stack": True},
+        signals_snapshot={},
+        price_at_alert=101.0,
+        entry_price=102.0,
+    )
+
+    reason = at_mod._maybe_check_feature_parity(
+        None,
+        alert=alert,
+        rule_snapshot={"current_price": 103.0},
+        ticker="SNAP",
+        scan_pattern_id=None,
+        venue="robinhood",
+        source="test",
+    )
+
+    assert reason is None
+    assert captured["live_snap"] == {
+        "rsi_14": 42.0,
+        "ema_stack": True,
+        "price": 103.0,
+    }
+    assert captured["features"] == {"rsi_14", "ema_stack", "price"}
+
+
+def test_required_venue_health_blocks_insufficient_data(monkeypatch):
+    from app.services.trading.venue import venue_health
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_live_require_venue_health_enabled=True),
+    )
+    monkeypatch.setattr(
+        venue_health,
+        "summarize_venue",
+        lambda *a, **k: {"status": "insufficient_data", "reason": "lifecycle_samples=0<5"},
+    )
+
+    reason = at_mod._live_venue_health_block_reason(None, venue="coinbase")
+
+    assert reason == "venue_health_insufficient_data:coinbase:lifecycle_samples=0<5"
+
+
+def test_scale_in_blocks_live_capital_fallback(monkeypatch):
+    alert = SimpleNamespace(id=77, ticker="SCAP")
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=True),
+    )
+    from app.services.trading import auto_trader_rules as rules_mod
+
+    monkeypatch.setattr(
+        rules_mod,
+        "resolve_effective_capital",
+        lambda *a, **k: (100_000.0, "fallback:get_portfolio_timeout"),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_execute_broker_buy",
+        lambda *a, **k: pytest.fail("broker should not be called on fallback capital"),
+    )
+    blocked: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "_block_live_order",
+        lambda *a, **k: blocked.append(k),
+    )
+
+    plan = SimpleNamespace(
+        trade=SimpleNamespace(),
+        added_quantity=1.0,
+        new_avg_entry=50.0,
+        new_stop=48.0,
+        new_target=55.0,
+    )
+    out = {"skipped": 0, "scaled_in": 0}
+
+    at_mod._execute_scale_in(None, 1, alert, plan, 50.0, {}, None, True, out)
+
+    assert blocked
+    assert blocked[0]["reason"] == "capital_unavailable:fallback:get_portfolio_timeout"

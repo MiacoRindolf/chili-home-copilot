@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -25,7 +26,117 @@ logger = logging.getLogger(__name__)
 
 _kill_switch = False
 _kill_switch_reason: str | None = None
+_kill_switch_set_at: datetime | None = None
+_kill_switch_db_error: str | None = None
+_kill_switch_db_persisted: bool | None = None
+_kill_switch_last_db_check_monotonic: float = 0.0
 _kill_switch_lock = threading.Lock()
+
+
+def _kill_switch_db_poll_enabled() -> bool:
+    return bool(getattr(settings, "chili_kill_switch_db_poll_enabled", True))
+
+
+def _kill_switch_db_poll_interval_s() -> float:
+    try:
+        return max(0.0, float(getattr(settings, "chili_kill_switch_db_poll_interval_s", 0.0) or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _kill_switch_db_fail_closed() -> bool:
+    return bool(getattr(settings, "chili_kill_switch_db_fail_closed", True))
+
+
+def _looks_like_missing_risk_state_table(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "trading_risk_state" in msg and (
+        "does not exist" in msg or "undefinedtable" in msg or "no such table" in msg
+    )
+
+
+def _apply_kill_switch_state(
+    *,
+    active: bool,
+    reason: str | None,
+    set_at: datetime | None,
+    db_error: str | None = None,
+) -> None:
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted
+    with _kill_switch_lock:
+        _kill_switch = bool(active)
+        _kill_switch_reason = (reason or None) if active else None
+        _kill_switch_set_at = set_at if active else None
+        _kill_switch_db_error = db_error
+        if db_error is None:
+            _kill_switch_db_persisted = True
+
+
+def _fetch_latest_kill_switch_state_from_db() -> tuple[bool, str | None, datetime | None] | None:
+    from ...db import SessionLocal
+    from sqlalchemy import text
+
+    sess = SessionLocal()
+    try:
+        row = sess.execute(text(
+            "SELECT breaker_tripped, breaker_reason, created_at "
+            "FROM trading_risk_state "
+            "WHERE regime = 'kill_switch' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1"
+        )).fetchone()
+        if not row:
+            return None
+        return bool(row[0]), (row[1] or None), row[2]
+    finally:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        sess.close()
+
+
+def _refresh_kill_switch_from_db_if_due(*, force: bool = False) -> None:
+    """Refresh process-local kill-switch state from durable DB state.
+
+    The scheduler and API run in separate processes. Live order paths call
+    ``is_kill_switch_active`` repeatedly, so this small DB-backed refresh makes
+    a kill switch flipped in the API visible to the scheduler without restart.
+    """
+    global _kill_switch_last_db_check_monotonic, _kill_switch_db_error
+    if not _kill_switch_db_poll_enabled():
+        return
+    now = time.monotonic()
+    interval = _kill_switch_db_poll_interval_s()
+    with _kill_switch_lock:
+        if not force and interval > 0 and (now - _kill_switch_last_db_check_monotonic) < interval:
+            return
+        _kill_switch_last_db_check_monotonic = now
+    try:
+        state = _fetch_latest_kill_switch_state_from_db()
+    except Exception as exc:
+        if _looks_like_missing_risk_state_table(exc):
+            logger.debug("[governance] kill-switch DB refresh skipped; trading_risk_state missing")
+            return
+        msg = f"kill_switch_db_read_failed:{type(exc).__name__}"
+        if _kill_switch_db_fail_closed():
+            _apply_kill_switch_state(
+                active=True,
+                reason=msg,
+                set_at=datetime.utcnow(),
+                db_error=str(exc)[:500],
+            )
+            logger.warning("[governance] Kill-switch DB read failed; failing closed", exc_info=True)
+        else:
+            with _kill_switch_lock:
+                _kill_switch_db_error = str(exc)[:500]
+            logger.warning("[governance] Kill-switch DB read failed; using process-local state", exc_info=True)
+        return
+    if state is None:
+        with _kill_switch_lock:
+            _kill_switch_db_error = None
+        return
+    active, reason, set_at = state
+    _apply_kill_switch_state(active=active, reason=reason, set_at=set_at, db_error=None)
 
 
 def activate_kill_switch(reason: str = "manual") -> None:
@@ -37,37 +148,65 @@ def activate_kill_switch(reason: str = "manual") -> None:
     activations from the price-monitor guardrail. Same-reason calls now
     no-op; a different reason still writes (state change worth recording).
     """
-    global _kill_switch, _kill_switch_reason
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted
+    needs_persist = True
     with _kill_switch_lock:
         if _kill_switch and _kill_switch_reason == reason:
-            return
-        _kill_switch = True
-        _kill_switch_reason = reason
-    _persist_kill_switch_state(True, reason)
-    logger.critical("[governance] KILL SWITCH ACTIVATED: %s", reason)
+            needs_persist = _kill_switch_db_persisted is not True
+            if not needs_persist:
+                return
+        else:
+            _kill_switch = True
+            _kill_switch_reason = reason
+            _kill_switch_set_at = datetime.utcnow()
+            _kill_switch_db_error = None
+            _kill_switch_db_persisted = None
+    persisted = _persist_kill_switch_state(True, reason)
+    with _kill_switch_lock:
+        _kill_switch_db_persisted = bool(persisted)
+    if needs_persist:
+        logger.critical("[governance] KILL SWITCH ACTIVATED: %s", reason)
 
 
 def deactivate_kill_switch() -> None:
     """Re-enable trading activity. Persists to DB."""
-    global _kill_switch, _kill_switch_reason
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted
     with _kill_switch_lock:
         _kill_switch = False
         _kill_switch_reason = None
-    _persist_kill_switch_state(False, None)
+        _kill_switch_set_at = None
+        _kill_switch_db_error = None
+        _kill_switch_db_persisted = None
+    persisted = _persist_kill_switch_state(False, None)
+    with _kill_switch_lock:
+        _kill_switch_db_persisted = bool(persisted)
     logger.info("[governance] Kill switch deactivated")
 
 
 def is_kill_switch_active() -> bool:
+    _refresh_kill_switch_from_db_if_due()
     with _kill_switch_lock:
         return _kill_switch
 
 
 def get_kill_switch_status() -> dict[str, Any]:
+    _refresh_kill_switch_from_db_if_due()
     with _kill_switch_lock:
-        return {"active": _kill_switch, "reason": _kill_switch_reason}
+        return {
+            "active": _kill_switch,
+            "reason": _kill_switch_reason,
+            "set_at": _kill_switch_set_at.isoformat() + "Z" if _kill_switch_set_at else None,
+            "db_error": _kill_switch_db_error,
+        }
 
 
-def _persist_kill_switch_state(active: bool, reason: str | None) -> None:
+def get_kill_switch_reason() -> str | None:
+    _refresh_kill_switch_from_db_if_due()
+    with _kill_switch_lock:
+        return _kill_switch_reason
+
+
+def _persist_kill_switch_state(active: bool, reason: str | None) -> bool:
     """Write kill-switch state to trading_risk_state so it survives restarts."""
     try:
         from ...db import SessionLocal
@@ -79,6 +218,7 @@ def _persist_kill_switch_state(active: bool, reason: str | None) -> None:
                 "VALUES (:uid, NOW(), :tripped, :reason, 'kill_switch', 0) "
             ), {"uid": None, "tripped": active, "reason": reason or ""})
             sess.commit()
+            return True
         finally:
             # FIX 46 pattern: rollback to end implicit read txn before close.
             try:
@@ -88,32 +228,25 @@ def _persist_kill_switch_state(active: bool, reason: str | None) -> None:
             sess.close()
     except Exception:
         logger.debug("[governance] Failed to persist kill-switch state to DB", exc_info=True)
+        return False
 
 
 def restore_kill_switch_from_db() -> None:
     """Restore kill-switch state from DB on startup."""
-    global _kill_switch, _kill_switch_reason
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted
     try:
-        from ...db import SessionLocal
-        from sqlalchemy import text
-        sess = SessionLocal()
-        try:
-            row = sess.execute(text(
-                "SELECT breaker_tripped, breaker_reason FROM trading_risk_state "
-                "WHERE regime = 'kill_switch' ORDER BY created_at DESC LIMIT 1"
-            )).fetchone()
-            if row and row[0]:
-                with _kill_switch_lock:
-                    _kill_switch = True
-                    _kill_switch_reason = row[1] or "restored from DB"
-                logger.warning("[governance] Kill switch restored from DB: %s", _kill_switch_reason)
-        finally:
-            # FIX 46 pattern: rollback to end implicit read txn before close.
-            try:
-                sess.rollback()
-            except Exception:
-                pass
-            sess.close()
+        state = _fetch_latest_kill_switch_state_from_db()
+        if state is None:
+            return
+        active, reason, set_at = state
+        with _kill_switch_lock:
+            _kill_switch = active
+            _kill_switch_reason = (reason or "restored from DB") if active else None
+            _kill_switch_set_at = set_at if active else None
+            _kill_switch_db_error = None
+            _kill_switch_db_persisted = True
+        if active:
+            logger.warning("[governance] Kill switch restored from DB: %s", _kill_switch_reason)
     except Exception:
         logger.debug("[governance] Could not restore kill-switch from DB", exc_info=True)
 

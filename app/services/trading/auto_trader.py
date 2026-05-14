@@ -306,6 +306,118 @@ def _audit(
         logger.debug("[autotrader] shadow_consume failed; ignored", exc_info=True)
 
 
+def _block_live_order(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    reason: str,
+    snap: dict[str, Any] | None,
+    llm_snap: dict[str, Any] | None,
+    out: dict[str, Any],
+) -> None:
+    rsn = (reason or "blocked")[:255]
+    _audit(
+        db,
+        user_id=uid,
+        alert=alert,
+        decision="blocked",
+        reason=rsn,
+        rule_snapshot=snap,
+        llm_snapshot=llm_snap,
+    )
+    out["skipped"] += 1
+    _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
+
+
+def _live_venue_health_block_reason(db: Session, *, venue: str) -> str | None:
+    venue_key = (venue or "").strip().lower() or "unknown"
+    require_healthy = bool(
+        getattr(settings, "chili_autotrader_live_require_venue_health_enabled", True)
+    )
+    try:
+        from .venue.venue_health import summarize_venue
+    except Exception as exc:
+        logger.warning(
+            "[autotrader] venue_health imports unavailable for venue=%s; failing closed",
+            venue_key,
+            exc_info=True,
+        )
+        return f"venue_health_unavailable:{venue_key}:{type(exc).__name__}"
+
+    try:
+        summary = summarize_venue(db, venue=venue_key)
+    except Exception as exc:
+        logger.warning(
+            "[autotrader] venue_health summary failed for venue=%s; failing closed",
+            venue_key,
+            exc_info=True,
+        )
+        return f"venue_health_unavailable:{venue_key}:{type(exc).__name__}"
+
+    status = str((summary or {}).get("status") or "").strip().lower()
+    if status == "degraded":
+        reason_detail = (summary or {}).get("reason") or "unknown"
+        return f"venue_degraded:{venue_key}:{reason_detail}"
+    if status == "disabled" and require_healthy:
+        return f"venue_health_required_disabled:{venue_key}"
+    if require_healthy and status != "healthy":
+        reason_detail = (summary or {}).get("reason") or "unknown"
+        if status == "insufficient_data":
+            return f"venue_health_insufficient_data:{venue_key}:{reason_detail}"
+        return f"venue_health_not_healthy:{venue_key}:{status or 'unknown'}"
+    return None
+
+
+def _last_scalar_feature_value(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        for item in reversed(value):
+            scalar = _last_scalar_feature_value(item)
+            if scalar is not None:
+                return scalar
+        return None
+    if isinstance(value, dict):
+        return None
+    return value
+
+
+def _collect_feature_values(src: Any, *, allowed: set[str], out: dict[str, Any]) -> None:
+    if not isinstance(src, dict):
+        return
+    for key, value in src.items():
+        key_s = str(key)
+        if key_s in allowed and key_s not in out:
+            scalar = _last_scalar_feature_value(value)
+            if scalar is not None:
+                out[key_s] = scalar
+        if isinstance(value, dict):
+            _collect_feature_values(value, allowed=allowed, out=out)
+
+
+def _feature_parity_decision_snapshot(
+    alert: BreakoutAlert,
+    rule_snapshot: dict[str, Any] | None,
+    *,
+    feature_keys: set[str],
+) -> dict[str, Any]:
+    """Extract the feature vector that actually drove the entry decision."""
+    out: dict[str, Any] = {}
+    _collect_feature_values(alert.indicator_snapshot, allowed=feature_keys, out=out)
+    _collect_feature_values(alert.signals_snapshot, allowed=feature_keys, out=out)
+    _collect_feature_values(rule_snapshot, allowed=feature_keys, out=out)
+    if "price" in feature_keys and "price" not in out:
+        for candidate in (
+            (rule_snapshot or {}).get("current_price") if isinstance(rule_snapshot, dict) else None,
+            getattr(alert, "price_at_alert", None),
+            getattr(alert, "entry_price", None),
+        ):
+            scalar = _last_scalar_feature_value(candidate)
+            if scalar is not None:
+                out["price"] = scalar
+                break
+    return out
+
+
 def _pattern_name(db: Session, scan_pattern_id: Optional[int]) -> str | None:
     if not scan_pattern_id:
         return None
@@ -624,8 +736,21 @@ def _maybe_substitute_with_options(db: Session, alert: BreakoutAlert, spot: floa
         logger.debug("[autotrader_options_substitute] failed; falling back to equity", exc_info=True)
 
 
-def _eligible_lifecycle_stages() -> set[str]:
-    """The lifecycle_stage values that are allowed to enter new live trades."""
+def _eligible_lifecycle_stages(*, live: bool = False) -> set[str]:
+    """Lifecycle stages allowed to enter a new order path.
+
+    Paper/shadow can evaluate promoted patterns. Real broker orders are
+    stricter by default: full-size live entries require the explicit ``live``
+    lifecycle stage, while ``pilot_promoted`` remains an opt-in broker ramp.
+    """
+    if live and bool(getattr(settings, "chili_autotrader_live_requires_live_lifecycle", True)):
+        stages = {"live"}
+        if (
+            bool(getattr(settings, "chili_pilot_promoted_enabled", True))
+            and bool(getattr(settings, "chili_autotrader_allow_pilot_promoted_live", True))
+        ):
+            stages.add("pilot_promoted")
+        return stages
     raw = (getattr(settings, "chili_autotrader_eligible_lifecycle_stages", "promoted,live") or "")
     stages = {s.strip().lower() for s in raw.split(",") if s.strip()}
     if bool(getattr(settings, "chili_pilot_promoted_enabled", True)):
@@ -643,8 +768,9 @@ def is_shadow_promoted_pattern(pat: ScanPattern) -> bool:
     shadow-log only (audit row with reason
     'selector:shadow_promoted_pattern_eval'); no broker call, no Trade
     row. When False (flag off, or stage != 'shadow_promoted'), control
-    falls through to the existing eligible-lifecycle gate, which
-    continues to enforce {promoted, live} for live entries.
+    falls through to the existing eligible-lifecycle gate. Paper can still
+    evaluate promoted patterns; real broker orders require live approval by
+    default.
     """
     if pat is None:
         return False
@@ -661,6 +787,7 @@ def _process_one_alert(
     out: dict[str, Any],
     runtime: dict[str, Any],
 ) -> None:
+    live = bool(runtime.get("live_orders_effective"))
     # 2026-04-28 lifecycle gate. Evidence audit demotes patterns to 'challenged'
     # but the entry funnel had been ignoring lifecycle_stage, so 32 of 34 entries
     # last week landed on demoted patterns (driving most of the bleed). Enforce
@@ -687,9 +814,14 @@ def _process_one_alert(
                     out, kind="blocked", reason=_shadow_reason, alert=alert,
                 )
                 return
-            _allowed = _eligible_lifecycle_stages()
+            _allowed = _eligible_lifecycle_stages(live=live)
             if _stage not in _allowed:
-                _reason = f"pattern_lifecycle_not_eligible:{_stage or 'none'}"
+                _prefix = (
+                    "pattern_lifecycle_not_live_approved"
+                    if live and bool(getattr(settings, "chili_autotrader_live_requires_live_lifecycle", True))
+                    else "pattern_lifecycle_not_eligible"
+                )
+                _reason = f"{_prefix}:{_stage or 'none'}"
                 _audit(db, user_id=uid, alert=alert, decision="skipped", reason=_reason)
                 out["skipped"] += 1
                 _autotrader_tick_note(out, kind="skipped", reason=_reason, alert=alert)
@@ -731,7 +863,6 @@ def _process_one_alert(
     # alert. No-op when flag is off (leaves the alert as equity).
     _maybe_substitute_with_options(db, alert, px)
 
-    live = bool(runtime.get("live_orders_effective"))
     open_n = count_autotrader_v1_open(db, uid, paper_mode=not live)
     open_by_lane = count_autotrader_v1_open_by_lane(db, uid, paper_mode=not live)
     loss_today = (
@@ -805,37 +936,8 @@ def _process_one_alert(
 
     for_new = scale_plan is None
 
-    # P1.2 — venue health circuit breaker. Cheaper than autopilot_mutex
-    # (one rolling-window aggregate) and the more fundamental signal: if
-    # the venue is observably sick we shouldn't fire ANY new orders there
-    # regardless of ownership. Fails open: if the feature flag is off or
-    # we can't compute a summary, treat as healthy. Only gates live paths
-    # — paper writes nothing to the event stream so would always show
-    # insufficient_data anyway.
-    if live:
-        try:
-            from .venue.venue_health import is_venue_degraded, venue_degraded_reason
-            if is_venue_degraded(db, venue="robinhood"):
-                reason_detail = venue_degraded_reason(db, venue="robinhood") or "unknown"
-                rsn = f"venue_degraded:robinhood:{reason_detail}"[:255]
-                _audit(
-                    db,
-                    user_id=uid,
-                    alert=alert,
-                    decision="blocked",
-                    reason=rsn,
-                )
-                out["skipped"] += 1
-                _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
-                return
-        except Exception:
-            # Defensive: venue-health module failure must never block the
-            # autotrader loop. Fall through to the remaining gates, but
-            # log loudly — a silent check failure defeats the circuit breaker.
-            logger.warning(
-                "[autotrader] venue_health check failed for alert=%s ticker=%s; failing open",
-                alert.id, alert.ticker, exc_info=True,
-            )
+    # Venue health is checked after broker selection in _execute_broker_buy so
+    # Coinbase-routed alerts are gated on Coinbase health instead of RH health.
 
     # P0.4 — autopilot mutual exclusion. Only gate LIVE orders: the lease
     # signal for momentum_neural is a mode="live" TradingAutomationSession,
@@ -899,15 +1001,18 @@ def _process_one_alert(
     # P1.4 — runtime feature-parity assertion at entry. Fetches a fresh
     # OHLCV frame, computes the live indicator snapshot, and verifies it
     # matches the canonical compute_all_from_df output on the same frame.
-    # Fails open (flag off / no frame / compute exception) so an unwired
-    # environment behaves unchanged. In ``soft`` mode always allows through
-    # — just records a TradingExecutionEvent with event_type='feature_parity_drift'
-    # and emits an alert. In ``hard`` mode blocks entry on critical drift.
+    # If enabled, compute/fetch/check failures fail closed by default so a
+    # broken canary cannot silently bless a live entry. In ``soft`` mode,
+    # successful drift checks still allow through and record a
+    # TradingExecutionEvent with event_type='feature_parity_drift'. In
+    # ``hard`` mode, critical drift blocks entry.
     # Only gates live paths: paper skip is cheap and paper drift still
     # records for auditing below.
     if live:
         _parity_blocked = _maybe_check_feature_parity(
             db,
+            alert=alert,
+            rule_snapshot=snap,
             ticker=alert.ticker,
             scan_pattern_id=alert.scan_pattern_id,
             venue="robinhood",
@@ -938,14 +1043,15 @@ def _process_one_alert(
 def _maybe_check_feature_parity(
     db: Session,
     *,
+    alert: BreakoutAlert,
+    rule_snapshot: dict[str, Any] | None,
     ticker: str,
     scan_pattern_id: int | None,
     venue: str,
     source: str,
 ) -> str | None:
-    """Run the P1.4 parity check. Returns a ``reason`` string when hard-mode
-    blocks entry, ``None`` otherwise (including soft-mode drift, disabled,
-    compute failures). Never raises.
+    """Run the P1.4 parity check. Returns a ``reason`` string when the live
+    entry should be blocked, ``None`` otherwise. Never raises.
 
     **Short-circuits on the feature flag BEFORE any OHLCV fetch / compute
     work.** The flag is off by default, so this function must be near-zero
@@ -954,49 +1060,44 @@ def _maybe_check_feature_parity(
     the ephemeral socket pool (WinError 10055).
     """
     if not bool(getattr(settings, "chili_feature_parity_enabled", False)):
+        if bool(getattr(settings, "chili_autotrader_live_require_feature_parity", True)):
+            return "feature_parity_required_disabled"
         return None
+
+    fail_closed = bool(getattr(settings, "chili_feature_parity_fail_closed_on_error", True))
 
     try:
         from .feature_parity import (
             DEFAULT_FEATURES,
             check_entry_feature_parity,
         )
-        from .indicator_core import compute_all_from_df
         from .market_data import fetch_ohlcv_df
     except Exception:
         logger.warning(
-            "[autotrader] feature_parity imports unavailable; failing open for %s",
+            "[autotrader] feature_parity imports unavailable for %s",
             ticker, exc_info=True,
         )
-        return None
+        return "feature_parity_unavailable:import" if fail_closed else None
 
     try:
         df = fetch_ohlcv_df(ticker, "1d", "6mo")
     except Exception:
         logger.warning(
-            "[autotrader] feature_parity OHLCV fetch failed for %s; failing open",
+            "[autotrader] feature_parity OHLCV fetch failed for %s",
             ticker, exc_info=True,
         )
-        return None
+        return "feature_parity_unavailable:ohlcv" if fail_closed else None
     if df is None or df.empty:
-        return None
+        return "feature_parity_unavailable:no_reference_df" if fail_closed else None
 
-    try:
-        arrays = compute_all_from_df(df, needed=set(DEFAULT_FEATURES))
-    except Exception:
-        logger.warning(
-            "[autotrader] feature_parity indicator compute failed for %s; failing open",
-            ticker, exc_info=True,
-        )
-        return None
-    live_snap: dict[str, Any] = {}
-    for key, vec in arrays.items():
-        if not isinstance(vec, list) or not vec:
-            continue
-        v = vec[-1]
-        if v is None:
-            continue
-        live_snap[key] = v
+    live_snap = _feature_parity_decision_snapshot(
+        alert,
+        rule_snapshot,
+        feature_keys=set(DEFAULT_FEATURES),
+    )
+    if not live_snap:
+        return "feature_parity_unavailable:no_live_snapshot" if fail_closed else None
+    features_to_check = set(live_snap.keys())
 
     try:
         result = check_entry_feature_parity(
@@ -1004,17 +1105,17 @@ def _maybe_check_feature_parity(
             ticker=ticker,
             live_snap=live_snap,
             reference_df=df,
-            features=DEFAULT_FEATURES,
+            features=features_to_check,
             source=source,
             scan_pattern_id=scan_pattern_id,
             venue=venue,
         )
     except Exception:
         logger.warning(
-            "[autotrader] feature_parity check raised for %s; failing open",
+            "[autotrader] feature_parity check raised for %s",
             ticker, exc_info=True,
         )
-        return None
+        return "feature_parity_unavailable:check_failed" if fail_closed else None
     if result.ok:
         return None
     # Hard-mode critical block.
@@ -1069,6 +1170,21 @@ def _execute_broker_buy(
         )
         return None
 
+    cap_source = str(snap.get("notional_capital_source") or snap.get("capital_source") or "")
+    if cap_source.startswith("fallback:") and bool(
+        getattr(settings, "chili_autotrader_block_live_on_capital_fallback", True)
+    ):
+        _block_live_order(
+            db,
+            uid=uid,
+            alert=alert,
+            reason=f"capital_unavailable:{cap_source}",
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        )
+        return None
+
     # Task MM Phase 2 — when this is an options alert, branch to the
     # options venue adapter instead of the spot adapter. The rule gate
     # has already validated the option metadata exists, so we just
@@ -1076,6 +1192,18 @@ def _execute_broker_buy(
     # by the gate when options_path=True.
     if snap.get("options_path") and snap.get("option_meta"):
         opt_meta = snap["option_meta"]
+        venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
+        if venue_reason is not None:
+            _block_live_order(
+                db,
+                uid=uid,
+                alert=alert,
+                reason=venue_reason,
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            )
+            return None
         from .venue.robinhood_options import RobinhoodOptionsAdapter
         opt_ad = RobinhoodOptionsAdapter()
         if not opt_ad.is_enabled():
@@ -1135,16 +1263,20 @@ def _execute_broker_buy(
     # pre-Phase-5; the gate is a no-op). Coinbase-only tickers must
     # have projected_profit_pct that clears the Tier-1 fee floor
     # (default 120bps round-trip + 30bps buffer = 150bps min).
+    _cost_gate_error: str | None = None
     try:
         from .cost_aware_gate import cost_aware_min_edge_gate as _cost_gate
         _cost_decision = _cost_gate(
             ticker=alert.ticker,
             projected_profit_pct=snap.get("projected_profit_pct"),
         )
-    except Exception:
-        # Defensive: cost gate failure must not block RH legacy path.
-        # Default to allowed=True for RH and let downstream rule-gate
-        # handle min_projected_profit_pct.
+    except Exception as exc:
+        logger.warning(
+            "[autotrader] cost gate unavailable for ticker=%s; will fail closed if routed to Coinbase",
+            alert.ticker,
+            exc_info=True,
+        )
+        _cost_gate_error = f"{type(exc).__name__}"
         _cost_decision = None
     if _cost_decision is not None and not _cost_decision.allowed:
         _cost_reason = f"cost_gate:{_cost_decision.reason}"
@@ -1177,8 +1309,25 @@ def _execute_broker_buy(
     # 'rh') or routes to Coinbase (decision.venue == 'coinbase',
     # gated on CHILI_COINBASE_AUTOTRADER_LIVE — default OFF = shadow-
     # log only). Skip decisions audit + return early.
-    from .broker_selector import select_venue
-    _venue_decision = select_venue(ticker=alert.ticker)
+    try:
+        from .broker_selector import select_venue
+        _venue_decision = select_venue(ticker=alert.ticker)
+    except Exception as exc:
+        _block_live_order(
+            db,
+            uid=uid,
+            alert=alert,
+            reason=f"broker_selector_unavailable:{type(exc).__name__}",
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        )
+        logger.warning(
+            "[autotrader] broker selector failed for ticker=%s; blocked live order",
+            alert.ticker,
+            exc_info=True,
+        )
+        return None
 
     if _venue_decision.venue == "skip":
         _selector_reason = f"selector:{_venue_decision.reason}"
@@ -1227,6 +1376,31 @@ def _execute_broker_buy(
             )
             return None
 
+        if _cost_gate_error is not None:
+            _block_live_order(
+                db,
+                uid=uid,
+                alert=alert,
+                reason=f"cost_gate_unavailable:{_cost_gate_error}",
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            )
+            return None
+
+        venue_reason = _live_venue_health_block_reason(db, venue="coinbase")
+        if venue_reason is not None:
+            _block_live_order(
+                db,
+                uid=uid,
+                alert=alert,
+                reason=venue_reason,
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            )
+            return None
+
         # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
         # (2026-05-09): per-venue notional + concurrent-position cap.
         # Independent from RH cap per Phase 1 design constraint #1.
@@ -1238,8 +1412,22 @@ def _execute_broker_buy(
                 proposed_notional_usd=_proposed_notional,
                 db=db, user_id=uid,
             )
-        except Exception:
-            _cap = None
+        except Exception as exc:
+            _block_live_order(
+                db,
+                uid=uid,
+                alert=alert,
+                reason=f"coinbase_cap_unavailable:{type(exc).__name__}",
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            )
+            logger.warning(
+                "[autotrader] Coinbase cap check failed for ticker=%s; blocked live order",
+                alert.ticker,
+                exc_info=True,
+            )
+            return None
         if _cap is not None and not _cap.allowed:
             _cap_reason = f"coinbase_cap:{_cap.reason}"
             _audit(
@@ -1306,6 +1494,19 @@ def _execute_broker_buy(
     # BYTE-IDENTICAL. The selector adds a pre-route hop but does NOT
     # change any of the call args below; the RH adapter receives
     # exactly the same arguments it did pre-Phase-3.
+    venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
+    if venue_reason is not None:
+        _block_live_order(
+            db,
+            uid=uid,
+            alert=alert,
+            reason=venue_reason,
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        )
+        return None
+
     ad = get_adapter("robinhood")
     if ad is None or not ad.is_enabled():
         _audit(
@@ -1413,6 +1614,26 @@ def _execute_scale_in(
     t = plan.trade
     add_q = float(plan.added_quantity)
     if live:
+        if bool(getattr(settings, "chili_autotrader_block_live_on_capital_fallback", True)):
+            try:
+                from .auto_trader_rules import resolve_effective_capital
+
+                _, cap_source = resolve_effective_capital(db, settings)
+            except Exception as exc:
+                cap_source = f"fallback:scale_in_capital_check:{type(exc).__name__}"
+            snap["scale_in_capital_source"] = cap_source
+            snap.setdefault("notional_capital_source", cap_source)
+            if str(cap_source).startswith("fallback:"):
+                _block_live_order(
+                    db,
+                    uid=uid,
+                    alert=alert,
+                    reason=f"capital_unavailable:{cap_source}",
+                    snap=snap,
+                    llm_snap=llm_snap,
+                    out=out,
+                )
+                return
         res = _execute_broker_buy(
             db,
             uid=uid,
@@ -1711,6 +1932,20 @@ def _execute_new_entry(
         snap["qty_raw"] = round(qty_raw, 8)
 
     if live:
+        from .governance import is_kill_switch_active
+
+        if is_kill_switch_active():
+            _block_live_order(
+                db,
+                uid=uid,
+                alert=alert,
+                reason="kill_switch_activated_mid_flight",
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            )
+            return
+
         # FIX C1 (2026-04-29 third-pass audit): PDT-aware entry gate.
         # The third-pass audit found 1,333/1,349 monitor exits in 24h
         # rejected with "Sell may cause PDT designation." -- the autotrader
@@ -1840,7 +2075,7 @@ def _execute_new_entry(
                 trade_id=int(tr.id),
                 ticker=tr.ticker,
                 transition="entry",
-                broker_source="robinhood",
+                broker_source=_broker_source_for_trade,
                 quantity=float(tr.quantity),
                 price=float(fill),
             )
@@ -1869,7 +2104,12 @@ def _execute_new_entry(
             trade_id=tr.id,
         )
         out["placed"] += 1
-        _autotrader_tick_note(out, kind="placed", reason="live_robinhood", alert=alert)
+        _autotrader_tick_note(
+            out,
+            kind="placed",
+            reason=f"live_{_broker_source_for_trade}",
+            alert=alert,
+        )
         _maybe_open_paper_shadow(
             db, uid=uid, alert=alert, qty=qty, px=px,
             snap=snap, decision="placed",

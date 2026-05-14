@@ -270,16 +270,23 @@ def _call_with_timeout(fn, timeout_s, *args, **kwargs):
     continues in background until its socket times out.
     """
     import concurrent.futures
+    ex = None
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(fn, *args, **kwargs)
-            try:
-                return True, future.result(timeout=timeout_s)
-            except concurrent.futures.TimeoutError:
-                return False, None
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = ex.submit(fn, *args, **kwargs)
+        try:
+            return True, future.result(timeout=timeout_s)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return False, None
     except Exception as e:
         logger.debug("[autotrader] _call_with_timeout exception: %s", e)
         return False, None
+    finally:
+        if ex is not None:
+            # Do not wait for a socket-stuck broker SDK call; the timeout's
+            # entire job is to release the scheduler thread promptly.
+            ex.shutdown(wait=False, cancel_futures=True)
 
 
 def _fetch_broker_equity_once(

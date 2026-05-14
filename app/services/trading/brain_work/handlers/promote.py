@@ -83,14 +83,14 @@ def handle_pattern_eligible_promotion(db: "Session", ev, user_id: int | None) ->
             from ...realized_ev_gate import check_realized_ev_blocking
 
             ev_blocked, ev_reasons, _ev_snap = check_realized_ev_blocking(pattern)
-        except ImportError:
-            # Fallback: realized_ev_gate module may not exist in older code paths.
+        except ImportError as e:
+            # Fail closed: CPCV is not sufficient when the final EV gate is unavailable.
             logger.warning(
-                "%s realized_ev_gate import failed — using CPCV-only promotion",
-                LOG_PREFIX,
+                "%s realized_ev_gate import failed pattern_id=%d: %s",
+                LOG_PREFIX, pid, e,
             )
-            ev_blocked = False
-            ev_reasons = []
+            ev_blocked = True
+            ev_reasons = [f"ev_gate_import_error:{type(e).__name__}"]
         except Exception as e:
             logger.warning(
                 "%s realized_ev_gate eval crashed pattern_id=%d: %s",
