@@ -1790,6 +1790,37 @@ def _run_validate_evolve_job():
     run_scheduler_job_guarded("validate_evolve", _work)
 
 
+def _run_triple_barrier_label_job():
+    """f-triple-barrier-activation (2026-05-14, Phase C of
+    f-evidence-fidelity-architecture): 4-hourly batch that labels
+    recent MarketSnapshots against the triple-barrier (TP/SL/timeout)
+    rule. Wraps ``triple_barrier_labeler.label_snapshots`` which is
+    mode-gated on ``brain_triple_barrier_mode`` (defaults to
+    ``shadow`` -- writes rows but does not feed downstream gates).
+    Cron not event-handler because labeling needs ``min_lookback_days``
+    of forward bars; the trigger is "enough time has passed."
+    """
+    from ..db import SessionLocal
+    from .trading.cron_jobs.triple_barrier_label import (
+        run_triple_barrier_label_cycle,
+    )
+
+    def _work() -> None:
+        logger.info("[scheduler] Starting triple_barrier_label cycle")
+        with SessionLocal() as db:
+            try:
+                result = run_triple_barrier_label_cycle(db)
+                logger.info(
+                    "[scheduler] triple_barrier_label result: %s", result,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[scheduler] triple_barrier_label failed: %s", e,
+                )
+
+    run_scheduler_job_guarded("triple_barrier_label", _work)
+
+
 def _run_broker_sync_job():
     """Sync Robinhood + Coinbase orders and positions for the session owner.
 
@@ -3990,6 +4021,23 @@ def start_scheduler():
                     name="Hypothesis-weight evolution (every 6h at :15)",
                     replace_existing=True,
                     max_instances=1,
+                )
+
+                # f-triple-barrier-activation (Phase C of
+                # f-evidence-fidelity-architecture, 2026-05-14):
+                # 4-hourly batch labels recent MarketSnapshots against
+                # TP/SL/timeout barriers and writes to
+                # trading_triple_barrier_labels. Mode-gated on
+                # settings.brain_triple_barrier_mode (default: shadow).
+                # See docs/runbooks/TRIPLE_BARRIER_LABELING.md.
+                _scheduler.add_job(
+                    _run_triple_barrier_label_job,
+                    trigger=IntervalTrigger(hours=4),
+                    id="triple_barrier_label_cycle",
+                    name="Triple-barrier labeling (every 4h)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
                 )
 
                 # f-add-pg-stat-snapshot-logger (2026-05-06): 5-minute
