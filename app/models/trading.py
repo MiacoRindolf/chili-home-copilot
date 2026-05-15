@@ -924,6 +924,22 @@ class ScanPattern(Base):
     # / decay components; ranked by the weekly cohort-promote job.
     quality_composite_score: Optional[float] = Column(Float, nullable=True)
 
+    # f-canonical-outcome-layer Phase A (mig 241, 2026-05-14): split the
+    # racing writers. ``corrected_*`` is authored exclusively by
+    # ``learning.update_pattern_stats_from_closed_trades`` (which also
+    # mirrors into the legacy ``{trade_count, win_rate, avg_return_pct}``
+    # columns above). ``raw_realized_*`` is authored exclusively by
+    # ``realized_stats_sync.sync_realized_stats``. Readers should call
+    # ``pattern_stats_accessor.get_corrected_pattern_stats(pat)``.
+    corrected_trade_count: Optional[int] = Column(Integer, nullable=True)
+    corrected_win_rate: Optional[float] = Column(Float, nullable=True)
+    corrected_avg_return_pct: Optional[float] = Column(Float, nullable=True)
+    raw_realized_trade_count: Optional[int] = Column(Integer, nullable=True)
+    raw_realized_win_rate: Optional[float] = Column(Float, nullable=True)
+    raw_realized_avg_return_pct: Optional[float] = Column(Float, nullable=True)
+    corrected_stats_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
+    raw_realized_stats_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
+
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 
 

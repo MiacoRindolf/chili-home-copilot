@@ -911,6 +911,12 @@ class Settings(BaseSettings):
     chili_realized_sync_enabled: bool = True
     chili_realized_sync_lookback_days: int = 365
     chili_realized_sync_min_n: int = 1
+    # f-canonical-outcome-layer Phase A (2026-05-14). Shadow-log raw-vs-
+    # corrected win-rate divergence thresholds. INFO ≥ info_pct, WARNING
+    # ≥ warn_pct. Phase A is pure observation -- no DB row, no metric --
+    # so operators can tune without touching code.
+    chili_canonical_outcome_divergence_info_pct: float = 0.20
+    chili_canonical_outcome_divergence_warn_pct: float = 0.50
     # 2026-04-29 third-pass audit FIX B-1: daily realized-EV demote pass.
     # Re-applies the realized-EV gate to every promoted pattern; demotes
     # any that fail outside the configured settle window. Mig 206 is the

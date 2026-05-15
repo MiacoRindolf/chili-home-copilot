@@ -1,4 +1,4 @@
-"""Sync ``ScanPattern.{trade_count, win_rate, avg_return_pct}`` from ``trading_trades``.
+"""Sync ``ScanPattern.raw_realized_*`` from ``trading_trades``.
 
 Background (2026-04-28): the audit showed many patterns with stored
 ``win_rate`` but ``trade_count = 0``. The EWMA-drop write paths in
@@ -6,16 +6,23 @@ Background (2026-04-28): the audit showed many patterns with stored
 update loops; patterns whose live trades came in via other code paths
 (broker reconcile, manual close, etc.) never have their column synced.
 
-This module is the source-of-truth sync. It reads ``trading_trades``
-and recomputes the stats for every pattern that has at least one
-closed trade. Idempotent. Cheap (one GROUP BY query + one UPDATE per
-pattern). Safe to run on every brain-worker cycle.
+2026-05-14 (f-canonical-outcome-layer Phase A): this writer used to
+also write the legacy ``{trade_count, win_rate, avg_return_pct}``
+columns and raced with the corrected writer in
+:mod:`learning.update_pattern_stats_from_closed_trades`. Last-writer-
+wins meant downstream gates could read the dumber raw numbers
+(pattern 585 was the textbook case). The split: this module writes
+**only** ``raw_realized_*``; ``learning.py`` writes corrected_* plus
+the legacy columns. Readers go through
+``pattern_stats_accessor.get_corrected_pattern_stats``.
 
 Tunable::
 
-    chili_realized_sync_enabled        = True
-    chili_realized_sync_lookback_days  = 365   # all-time by default? 365 keeps it bounded
-    chili_realized_sync_min_n          = 1     # don\'t bother for patterns with no trades
+    chili_realized_sync_enabled                = True
+    chili_realized_sync_lookback_days          = 365   # all-time by default? 365 keeps it bounded
+    chili_realized_sync_min_n                  = 1     # don\'t bother for patterns with no trades
+    chili_canonical_outcome_divergence_info_pct = 0.20  # shadow-log INFO
+    chili_canonical_outcome_divergence_warn_pct = 0.50  # shadow-log WARNING
 """
 from __future__ import annotations
 
@@ -37,9 +44,48 @@ def _settings_get(name: str, default: Any) -> Any:
         return default
 
 
+def _shadow_log_divergence(
+    pid: int,
+    raw_wr: float | None,
+    corrected_wr: float | None,
+    info_pct: float,
+    warn_pct: float,
+) -> None:
+    """Compare raw vs corrected win-rate and shadow-log at INFO / WARNING
+    thresholds. No DB row, no metric -- Phase A is pure observation
+    (per brief consult-gate decision)."""
+    if raw_wr is None or corrected_wr is None:
+        return
+    try:
+        cw = float(corrected_wr)
+        rw = float(raw_wr)
+    except (TypeError, ValueError):
+        return
+    if not (math.isfinite(cw) and math.isfinite(rw)):
+        return
+    denom = max(abs(cw), 1e-9)
+    delta = abs(rw - cw) / denom
+    if delta >= warn_pct:
+        logger.warning(
+            "[realized_sync] divergence pid=%s corrected=%.4f raw=%.4f delta=%.1f%%",
+            pid, cw, rw, delta * 100.0,
+        )
+    elif delta >= info_pct:
+        logger.info(
+            "[realized_sync] divergence pid=%s corrected=%.4f raw=%.4f delta=%.1f%%",
+            pid, cw, rw, delta * 100.0,
+        )
+
+
 def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, int]:
-    """Recompute ``trade_count`` / ``win_rate`` / ``avg_return_pct`` from
-    ``trading_trades``. Returns counts of patterns updated / skipped.
+    """Recompute ``raw_realized_{trade_count, win_rate, avg_return_pct}``
+    from ``trading_trades``. Returns counts of patterns updated /
+    skipped.
+
+    Legacy ``{trade_count, win_rate, avg_return_pct}`` are NEVER written
+    by this function -- since 2026-05-14 they are owned exclusively by
+    :func:`learning.update_pattern_stats_from_closed_trades` (the
+    corrected writer).
     """
     if not bool(_settings_get("chili_realized_sync_enabled", True)):
         logger.info("[realized_sync] disabled via chili_realized_sync_enabled")
@@ -47,6 +93,8 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
 
     lookback = int(_settings_get("chili_realized_sync_lookback_days", 365))
     min_n = max(1, int(_settings_get("chili_realized_sync_min_n", 1)))
+    info_pct = float(_settings_get("chili_canonical_outcome_divergence_info_pct", 0.20))
+    warn_pct = float(_settings_get("chili_canonical_outcome_divergence_warn_pct", 0.50))
 
     # Realized stats per pattern from trading_trades. Mean-of-trade-returns
     # IS the EV. We compute pct return from entry/exit prices (matches what
@@ -80,8 +128,8 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
         wr = (wins / n) if n > 0 else None
         avg_ret = float(r.avg_ret_pct) if r.avg_ret_pct is not None else None
 
-        # NaN/range safety. Migration 193 added a CHECK that win_rate must be
-        # in [0, 1]; respect that here so we never trigger an IntegrityError.
+        # NaN/range safety. Migration 241 mirrored the legacy
+        # CHECK(win_rate ∈ [0,1]) onto raw_realized_win_rate; respect it.
         if wr is not None and (not math.isfinite(wr) or wr < 0.0 or wr > 1.0):
             logger.warning(
                 "[realized_sync] skipping pattern_id=%s — computed wr=%s out of range", pid, wr,
@@ -99,15 +147,27 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
             updated += 1
             continue
 
+        # Read the current corrected_win_rate (if any) so we can shadow-
+        # log raw vs corrected divergence after the UPDATE. Sticking with
+        # corrected_win_rate (not legacy win_rate) because divergence is
+        # interesting only against the authoritative value.
+        existing = sess.execute(
+            text("SELECT corrected_win_rate FROM scan_patterns WHERE id = :pid"),
+            {"pid": pid},
+        ).first()
+        corrected_wr = existing[0] if existing is not None else None
+
         sess.execute(text("""
             UPDATE scan_patterns
-            SET trade_count = :n,
-                win_rate = :wr,
-                avg_return_pct = :ret,
-                updated_at = CURRENT_TIMESTAMP
+            SET raw_realized_trade_count = :n,
+                raw_realized_win_rate = :wr,
+                raw_realized_avg_return_pct = :ret,
+                raw_realized_stats_updated_at = CURRENT_TIMESTAMP
             WHERE id = :pid
         """), {"pid": pid, "n": n, "wr": wr, "ret": avg_ret})
         updated += 1
+
+        _shadow_log_divergence(pid, wr, corrected_wr, info_pct, warn_pct)
 
     if not dry_run:
         sess.commit()

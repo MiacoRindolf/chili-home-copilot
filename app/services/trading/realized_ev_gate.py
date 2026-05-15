@@ -66,24 +66,35 @@ def _settings_get(name: str, default: Any) -> Any:
 def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
     """Check the pattern's realized stats against the EV gate.
 
-    Reads ``scan_pattern.win_rate`` (fraction in [0,1] post-migration 193),
-    ``avg_return_pct`` (in %), and ``trade_count``. None of these are
-    re-derived — we trust the values written by the realized-PnL update
-    paths in :mod:`learning.py`.
+    Reads ``corrected_*`` first (the authoritative columns owned by
+    :func:`learning.update_pattern_stats_from_closed_trades`); falls
+    back to the legacy ``{win_rate, avg_return_pct, trade_count}``
+    columns when ``corrected_*`` is NULL. The fallback covers the
+    merge window before the one-shot backfill runs; once backfill
+    completes it is a no-op. Routing through
+    :func:`pattern_stats_accessor.get_corrected_pattern_stats` keeps
+    that contract in one place.
 
     Returns :class:`EvGateResult` with the snapshot of inputs (for
     auditability) and the pass/fail reasons. The snapshot is what gets
     persisted alongside any blocking decision.
     """
+    from .pattern_stats_accessor import get_corrected_pattern_stats
+
     enabled = bool(_settings_get("chili_realized_ev_gate_enabled", True))
     min_n = int(_settings_get("chili_realized_ev_min_trades", 5))
     min_ret = float(_settings_get("chili_realized_ev_min_avg_return_pct", 0.0))
     min_wr = float(_settings_get("chili_realized_ev_min_win_rate", 0.0))
 
+    stats = get_corrected_pattern_stats(scan_pattern)
+
     snapshot = {
-        "win_rate": getattr(scan_pattern, "win_rate", None),
-        "avg_return_pct": getattr(scan_pattern, "avg_return_pct", None),
-        "trade_count": getattr(scan_pattern, "trade_count", None),
+        "win_rate": stats.win_rate,
+        "avg_return_pct": stats.avg_return_pct,
+        "trade_count": stats.trade_count,
+        "stats_source_win_rate": stats.source_win_rate,
+        "stats_source_avg_return_pct": stats.source_avg_return_pct,
+        "stats_source_trade_count": stats.source_trade_count,
         "min_trades_required": min_n,
         "min_avg_return_pct_required": min_ret,
         "min_win_rate_required": min_wr,
@@ -96,9 +107,9 @@ def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
         return EvGateResult(passed=True, reasons=("gate_disabled",), snapshot=snapshot)
 
     reasons: list[str] = []
-    n = int(getattr(scan_pattern, "trade_count", 0) or 0)
-    wr = getattr(scan_pattern, "win_rate", None)
-    ret = getattr(scan_pattern, "avg_return_pct", None)
+    n = int(stats.trade_count or 0)
+    wr = stats.win_rate
+    ret = stats.avg_return_pct
 
     # Sample-size requirement: never promote on a 1-trade fluke.
     if n < min_n:

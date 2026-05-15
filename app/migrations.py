@@ -15863,6 +15863,83 @@ def _migration_240_scan_pattern_lifecycle_pilot_promoted(conn) -> None:
         conn.rollback()
 
 
+def _migration_241_scan_pattern_canonical_outcome_split(conn) -> None:
+    """Phase A of f-evidence-fidelity-architecture (2026-05-14).
+
+    Splits the racing pattern-stats writers into authoritative
+    ``corrected_*`` and shadow ``raw_realized_*`` columns. After this
+    migration:
+
+    * ``learning.update_pattern_stats_from_closed_trades`` dual-writes
+      ``corrected_*`` + the legacy ``{trade_count, win_rate,
+      avg_return_pct}`` columns -- it is the sole legacy owner.
+    * ``realized_stats_sync.sync_realized_stats`` writes ONLY
+      ``raw_realized_*`` -- never touches legacy.
+
+    Legacy columns stay populated (= corrected) so existing readers
+    keep working through the rollout. Reader hardening (read corrected
+    first, fall back to legacy when NULL) lives in
+    ``pattern_stats_accessor.get_corrected_pattern_stats``.
+
+    Migration 193 added a CHECK that ``win_rate ∈ [0, 1]``. We mirror
+    that invariant on both new fraction columns so it can never drift.
+
+    PostgreSQL ≤ 16 does not support ``ADD CONSTRAINT IF NOT EXISTS``
+    on the constraint clause -- guard each CHECK with a ``pg_constraint``
+    existence lookup using the ``DO $$`` pattern already in use across
+    this file.
+
+    Idempotent: ``ADD COLUMN IF NOT EXISTS`` + ``pg_constraint`` lookup.
+    Additive only -- no drops, no type changes.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+
+    conn.execute(text("""
+        ALTER TABLE scan_patterns
+          ADD COLUMN IF NOT EXISTS corrected_trade_count INTEGER,
+          ADD COLUMN IF NOT EXISTS corrected_win_rate DOUBLE PRECISION,
+          ADD COLUMN IF NOT EXISTS corrected_avg_return_pct DOUBLE PRECISION,
+          ADD COLUMN IF NOT EXISTS raw_realized_trade_count INTEGER,
+          ADD COLUMN IF NOT EXISTS raw_realized_win_rate DOUBLE PRECISION,
+          ADD COLUMN IF NOT EXISTS raw_realized_avg_return_pct DOUBLE PRECISION,
+          ADD COLUMN IF NOT EXISTS corrected_stats_updated_at TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS raw_realized_stats_updated_at TIMESTAMP
+    """))
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'chk_sp_corrected_wr_range'
+            ) THEN
+                ALTER TABLE scan_patterns
+                    ADD CONSTRAINT chk_sp_corrected_wr_range
+                    CHECK (corrected_win_rate IS NULL
+                           OR (corrected_win_rate >= 0.0
+                               AND corrected_win_rate <= 1.0));
+            END IF;
+        END$$;
+    """))
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'chk_sp_raw_realized_wr_range'
+            ) THEN
+                ALTER TABLE scan_patterns
+                    ADD CONSTRAINT chk_sp_raw_realized_wr_range
+                    CHECK (raw_realized_win_rate IS NULL
+                           OR (raw_realized_win_rate >= 0.0
+                               AND raw_realized_win_rate <= 1.0));
+            END IF;
+        END$$;
+    """))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16132,6 +16209,8 @@ MIGRATIONS = [
      _migration_239_cpcv_adaptive_eval_log),
     ("240_scan_pattern_lifecycle_pilot_promoted",
      _migration_240_scan_pattern_lifecycle_pilot_promoted),
+    ("241_scan_pattern_canonical_outcome_split",
+     _migration_241_scan_pattern_canonical_outcome_split),
 ]
 
 

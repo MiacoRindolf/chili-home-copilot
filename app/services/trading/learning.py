@@ -5375,12 +5375,21 @@ def _evidence_correction_persist(
         audit_reason = "no_change"
 
     if changed and not coverage_too_thin:
+        # f-canonical-outcome-layer Phase A (2026-05-14): this is now the
+        # sole legacy-column owner. Dual-write corrected_* alongside the
+        # legacy columns so readers can prefer corrected_* without losing
+        # consumers that still read legacy.
+        now = datetime.utcnow()
         if math.isfinite(stats.win_rate) and 0.0 <= stats.win_rate <= 1.0:
             pattern.win_rate = after_wr
+            pattern.corrected_win_rate = after_wr
         if math.isfinite(stats.avg_return_pct):
             pattern.avg_return_pct = after_avg
+            pattern.corrected_avg_return_pct = after_avg
         pattern.trade_count = after_n
-        pattern.updated_at = datetime.utcnow()
+        pattern.corrected_trade_count = after_n
+        pattern.corrected_stats_updated_at = now
+        pattern.updated_at = now
 
     audit_row = PatternEvidenceCorrection(
         scan_pattern_id=pattern.id,

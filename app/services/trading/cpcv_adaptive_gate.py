@@ -229,7 +229,7 @@ def _load_pool_metrics(db, *, exclude_pattern_id: int | None) -> dict[str, Any]:
                 """
                 SELECT
                     id,
-                    COALESCE(trade_count, 0) AS n_trades,
+                    COALESCE(corrected_trade_count, trade_count, 0) AS n_trades,
                     deflated_sharpe,
                     pbo,
                     cpcv_median_sharpe,

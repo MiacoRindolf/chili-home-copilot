@@ -1,6 +1,8 @@
 # NEXT_TASK: f-canonical-outcome-layer
 
-STATUS: PENDING
+STATUS: DONE
+
+Report: `docs/STRATEGY/CC_REPORTS/2026-05-14_canonical-outcome-layer.md`
 
 ## Goal
 
