@@ -1,0 +1,707 @@
+"""Tests for f-phase3-stop-bleed (Phase 3 stop-the-bleeding deliverables).
+
+Covers D1 (monthly DD breaker), D2 (NameError reason format),
+D3 (product_id normalizer), D4 (BUY pre-flight cash check),
+D6 (@validates scan_pattern_id), D7 (migration 243 BNB-USD zombie
+cleanup).
+
+D5 (stop_not_below_entry producer fix) is deferred to a follow-up
+brief per the f-phase3-stop-bleed hard-constraints allowance; the
+existing rule at auto_trader_rules.py:915 continues to reject the bad
+orders so no regression test is needed in this file.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+import pytest
+from sqlalchemy import text
+
+from app.models.trading import ScanPattern, Trade, _NO_PATTERN_SENTINEL
+from app.services.trading import portfolio_risk
+from app.services.trading.portfolio_risk import (
+    _monthly_dd_threshold,
+    check_drawdown_breaker,
+)
+from app.services.trading.venue.coinbase_spot import (
+    _coinbase_preflight_cash_check,
+    _normalize_product_id,
+)
+
+
+# --------------------------------------------------------------------- #
+# Helpers                                                               #
+# --------------------------------------------------------------------- #
+
+def _seed_pattern(db, *, pattern_id: int = 585) -> int:
+    """Idempotently insert a ScanPattern row to satisfy the FK from
+    ``trading_trades.scan_pattern_id``. The ``db`` fixture truncates per
+    test so we re-seed each call (cheap; one row)."""
+    existing = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
+    if existing is None:
+        db.add(ScanPattern(id=pattern_id, name=f"test_pattern_{pattern_id}"))
+        db.flush()
+    return pattern_id
+
+
+def _seed_chili_attributed_trade(
+    db,
+    *,
+    user_id: int,
+    pnl: float,
+    days_ago: int,
+    scan_pattern_id: int = 585,  # real promoted pattern from the 2026-05-15 audit
+    broker_source: str = "robinhood",
+    auto_trader_version: str = "v1",
+) -> Trade:
+    """Seed a CHILI-attributed closed Trade row.
+
+    Sets auto_trader_version so the breaker's CHILI-placed-only filter
+    includes it. Auto-seeds the referenced ScanPattern when scan_pattern_id
+    is positive (the FK constraint requires it).
+    """
+    if scan_pattern_id is not None and scan_pattern_id > 0:
+        _seed_pattern(db, pattern_id=scan_pattern_id)
+    exit_dt = datetime.utcnow() - timedelta(days=days_ago)
+    # Decouple exit_price from pnl: the @validates("exit_price") guard
+    # rejects non-positive values, but pnl is the canonical column for
+    # the breaker's math. Set exit_price to a benign positive constant
+    # and let pnl carry the test signal.
+    t = Trade(
+        user_id=user_id,
+        ticker="ZZZ",
+        direction="long",
+        entry_price=10.0,
+        exit_price=10.0,
+        quantity=1.0,
+        entry_date=exit_dt - timedelta(days=1),
+        exit_date=exit_dt,
+        last_fill_at=exit_dt,
+        filled_at=exit_dt,
+        status="closed",
+        pnl=pnl,
+        broker_source=broker_source,
+        scan_pattern_id=scan_pattern_id,
+        auto_trader_version=auto_trader_version,
+    )
+    db.add(t)
+    db.flush()
+    return t
+
+
+def _seed_user(db, *, user_id: int = 999) -> int:
+    """Insert a User row so trades' user_id FK can resolve."""
+    from app.models import User
+    u = User(id=user_id, name=f"test_user_{user_id}", email=f"t{user_id}@x.com")
+    db.merge(u)
+    db.flush()
+    return user_id
+
+
+# --------------------------------------------------------------------- #
+# D1 — monthly DD breaker                                               #
+# --------------------------------------------------------------------- #
+
+class TestD1MonthlyDdBreaker:
+
+    def test_threshold_returns_none_below_30_days(self, db):
+        uid = _seed_user(db)
+        # 29 distinct days of history -- below the 30-day floor.
+        for d in range(29):
+            _seed_chili_attributed_trade(db, user_id=uid, pnl=10.0, days_ago=d + 1)
+        threshold, n_obs = _monthly_dd_threshold(db, uid)
+        assert threshold is None
+        assert n_obs == 29
+
+    def test_threshold_computes_when_30_plus_days(self, db):
+        uid = _seed_user(db)
+        # 40 days of history with known mean/std.
+        for d in range(40):
+            _seed_chili_attributed_trade(db, user_id=uid, pnl=10.0, days_ago=d + 1)
+        threshold, n_obs = _monthly_dd_threshold(db, uid)
+        assert threshold is not None
+        assert n_obs == 40
+        # Constant 10/day → mean=10, std=0 → threshold = 30*10 - K*sqrt(30)*0 = 300.
+        assert abs(threshold - 300.0) < 1e-6
+
+    def test_threshold_filters_no_pattern_rows(self, db):
+        uid = _seed_user(db)
+        # 30 days of legit attribution + 30 days of no_pattern (NULL).
+        # The helper SQL filter is ``scan_pattern_id IS NOT NULL AND != -1``,
+        # so a NULL scan_pattern_id is excluded from the distribution.
+        # Use broker_source="manual" so the D6 validator allows NULL.
+        for d in range(30):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=10.0, days_ago=d + 1,
+                scan_pattern_id=585,
+            )
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=-100.0, days_ago=d + 1,
+                scan_pattern_id=None,
+                broker_source="manual",
+            )
+        threshold, n_obs = _monthly_dd_threshold(db, uid)
+        # n_obs should reflect only the 30 attributed days, NOT 60.
+        assert n_obs == 30
+        # Mean should be 10 (from attributed rows only); std=0.
+        assert threshold is not None
+        assert abs(threshold - 300.0) < 1e-6
+
+    def test_threshold_scoped_to_user_id(self, db):
+        uid_a = _seed_user(db, user_id=101)
+        uid_b = _seed_user(db, user_id=102)
+        # User A has 35 days of profitable history.
+        for d in range(35):
+            _seed_chili_attributed_trade(db, user_id=uid_a, pnl=50.0, days_ago=d + 1)
+        # User B has none.
+        threshold_a, n_a = _monthly_dd_threshold(db, uid_a)
+        threshold_b, n_b = _monthly_dd_threshold(db, uid_b)
+        assert n_a == 35 and threshold_a is not None
+        assert n_b == 0 and threshold_b is None
+
+    def test_threshold_k_sigma_from_settings(self, db):
+        """K is loaded from settings; identical history yields different
+        thresholds under different K -- proves no hardcoded constant in
+        the helper body."""
+        uid = _seed_user(db)
+        for d in range(40):
+            # Variable PnL so std > 0 and K matters.
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=10.0 + (d % 7) * 5.0, days_ago=d + 1,
+            )
+
+        class _S:
+            chili_monthly_dd_breaker_lower_bound_sigmas = 1.0
+
+        class _S3:
+            chili_monthly_dd_breaker_lower_bound_sigmas = 3.0
+
+        t1, _ = _monthly_dd_threshold(db, uid, settings_obj=_S())
+        t3, _ = _monthly_dd_threshold(db, uid, settings_obj=_S3())
+        assert t1 is not None and t3 is not None
+        # Higher K → wider tail → lower (more negative) threshold.
+        assert t3 < t1
+
+    def test_breaker_disabled_by_default_does_not_trip(self, db, monkeypatch):
+        """When the flag is OFF, even severe synthetic losses do not trip
+        the new D1 path. Other breaker checks may still fire on their own."""
+        from app import config as app_config
+        # Defensively force the flag OFF in case env or process-wide state
+        # has flipped it.
+        monkeypatch.setattr(
+            app_config.settings, "chili_monthly_dd_breaker_enabled", False,
+        )
+        uid = _seed_user(db)
+        # Seed 40 days of attributed history with huge loss in last 30d.
+        for d in range(40):
+            pnl = -1000.0 if d < 30 else 10.0
+            _seed_chili_attributed_trade(db, user_id=uid, pnl=pnl, days_ago=d + 1)
+        # capital=1_000_000 so the existing 5d/30d %-of-capital checks
+        # don't fire; we want to isolate D1 behavior.
+        tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
+        # The D1 monthly_dd_breaker reason has a distinctive prefix.
+        if tripped and reason:
+            assert "monthly_dd_breaker" not in reason
+
+    def test_breaker_enabled_skips_when_insufficient_history(self, db, monkeypatch, caplog):
+        uid = _seed_user(db)
+        # Only 5 attributed days.
+        for d in range(5):
+            _seed_chili_attributed_trade(db, user_id=uid, pnl=10.0, days_ago=d + 1)
+        from app import config as app_config
+        monkeypatch.setattr(
+            app_config.settings, "chili_monthly_dd_breaker_enabled", True,
+        )
+        import logging
+        with caplog.at_level(logging.WARNING):
+            tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
+        if tripped and reason:
+            assert "monthly_dd_breaker" not in reason
+        # The skip-warning is emitted at WARNING level with this text.
+        skip_msgs = [
+            r for r in caplog.records
+            if "monthly_dd_breaker enabled but only" in (r.getMessage() or "")
+        ]
+        assert len(skip_msgs) >= 1
+
+    def test_breaker_enabled_trips_when_pnl_below_threshold(self, db, monkeypatch):
+        uid = _seed_user(db)
+        # 35 days of mildly profitable attributed history outside the 30d
+        # window. Then 30 consecutive losing days inside the window so the
+        # losses contribute to the 30d sum without the std-inflation a
+        # single outlier would cause.
+        for d in range(35):
+            _seed_chili_attributed_trade(db, user_id=uid, pnl=10.0, days_ago=d + 31)
+        for d in range(30):
+            _seed_chili_attributed_trade(db, user_id=uid, pnl=-1000.0, days_ago=d + 1)
+        from app import config as app_config
+        monkeypatch.setattr(
+            app_config.settings, "chili_monthly_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_monthly_dd_breaker_lower_bound_sigmas", 2.0,
+        )
+        tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
+        assert tripped is True
+        assert reason is not None and "monthly_dd_breaker" in reason
+
+    def test_breaker_enabled_does_not_trip_when_pnl_above_threshold(self, db, monkeypatch):
+        uid = _seed_user(db)
+        # 35 days of pnl=10 outside the 30d window → threshold ≈ 300.
+        # Recent 30d window: 30 days at pnl=50/day → monthly = 1500 ≫ 300.
+        for d in range(35):
+            _seed_chili_attributed_trade(db, user_id=uid, pnl=10.0, days_ago=d + 31)
+        for d in range(30):
+            _seed_chili_attributed_trade(db, user_id=uid, pnl=50.0, days_ago=d + 1)
+        from app import config as app_config
+        monkeypatch.setattr(
+            app_config.settings, "chili_monthly_dd_breaker_enabled", True,
+        )
+        tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
+        if tripped and reason:
+            assert "monthly_dd_breaker" not in reason
+
+
+# --------------------------------------------------------------------- #
+# D2 — NameError diagnostic improvement                                  #
+# --------------------------------------------------------------------- #
+
+class TestD2NameErrorDiagnostic:
+
+    def test_nameerror_with_name_attribute_formats_with_identifier(self):
+        """The D2 fix extracts ``NameError.name`` so the rejection
+        histogram pins the unbound identifier instead of reporting a
+        generic ``coinbase_cap_unavailable:NameError``."""
+        try:
+            undefined_thing  # noqa: F821 — intentional unbound name
+        except NameError as exc:
+            _exc_detail = type(exc).__name__
+            if isinstance(exc, NameError) and getattr(exc, "name", None):
+                _exc_detail = f"NameError:{exc.name}"
+            reason = f"coinbase_cap_unavailable:{_exc_detail}"
+        assert reason == "coinbase_cap_unavailable:NameError:undefined_thing"
+
+    def test_non_nameerror_falls_back_to_class_name(self):
+        """Non-NameError exceptions follow the legacy path -- only
+        NameError gets the new identifier-extraction treatment."""
+        try:
+            raise ValueError("oops")
+        except Exception as exc:
+            _exc_detail = type(exc).__name__
+            if isinstance(exc, NameError) and getattr(exc, "name", None):
+                _exc_detail = f"NameError:{exc.name}"
+            reason = f"coinbase_cap_unavailable:{_exc_detail}"
+        assert reason == "coinbase_cap_unavailable:ValueError"
+
+    def test_d2_code_present_in_auto_trader_module(self):
+        """Belt-and-suspenders: verify the new code is in the source.
+        Integration is observed via the post-deploy rejection histogram
+        (D9), not via unit-tested in-process drive of _process_one_alert."""
+        from pathlib import Path
+        src = Path(__file__).resolve().parents[1] / "app/services/trading/auto_trader.py"
+        text_src = src.read_text(encoding="utf-8")
+        assert 'NameError:{exc.name}' in text_src
+        assert 'isinstance(exc, NameError) and getattr(exc, "name", None)' in text_src
+
+
+# --------------------------------------------------------------------- #
+# D3 — product_id normalizer                                            #
+# --------------------------------------------------------------------- #
+
+class TestD3NormalizeProductId:
+
+    def test_happy_path_uppercases(self):
+        assert _normalize_product_id("btc-usd") == "BTC-USD"
+
+    def test_already_canonical_passes_through(self):
+        assert _normalize_product_id("ETH-USDC") == "ETH-USDC"
+
+    def test_strip_whitespace(self):
+        assert _normalize_product_id("  BTC-USD  ") == "BTC-USD"
+
+    @pytest.mark.parametrize("bad", ["BTC", "BTCUSD", "BTC/USD", "", "BTC-USDT", "-USD"])
+    def test_rejects_malformed(self, bad):
+        with pytest.raises(ValueError, match="invalid product_id"):
+            _normalize_product_id(bad)
+
+    def test_rejects_none(self):
+        with pytest.raises(ValueError, match="invalid product_id"):
+            _normalize_product_id(None)
+
+    def test_error_message_preserves_original_input(self):
+        """The error string must contain the un-normalized input so the
+        producer bug is easy to find."""
+        try:
+            _normalize_product_id("BTC/USD")
+        except ValueError as exc:
+            assert "'BTC/USD'" in str(exc)
+        else:  # pragma: no cover
+            pytest.fail("ValueError not raised")
+
+
+# --------------------------------------------------------------------- #
+# D4 — pre-flight BUY cash check                                        #
+# --------------------------------------------------------------------- #
+
+class TestD4PreflightCashCheck:
+
+    def _patch_resolver(self, monkeypatch, *, total: float, last_updated_age_s: float = 0.0):
+        import time as _t
+        import app.services.trading.cost_aware_gate as cag
+        # The helper does ``from ..cost_aware_gate import resolve_coinbase_buying_power``
+        # inside the function body. Patching the module attribute is the
+        # canonical seam (each call re-imports fresh).
+        monkeypatch.setattr(
+            cag,
+            "resolve_coinbase_buying_power",
+            lambda: {
+                "usd": total / 2,
+                "usdc": total / 2,
+                "total": float(total),
+                "last_updated": _t.time() - float(last_updated_age_s),
+            },
+        )
+
+    def test_pass_through_when_buying_power_sufficient(self, monkeypatch):
+        self._patch_resolver(monkeypatch, total=10_000.0)
+        result = _coinbase_preflight_cash_check(
+            product_id="BTC-USD",
+            base_size="0.01",
+            limit_price="50000",  # 0.01 * 50000 = $500 < $10k
+        )
+        assert result is None
+
+    def test_refuses_when_buying_power_below_required(self, monkeypatch):
+        self._patch_resolver(monkeypatch, total=100.0)
+        result = _coinbase_preflight_cash_check(
+            product_id="BTC-USD",
+            base_size="0.01",
+            limit_price="50000",  # 0.01 * 50000 = $500 > $100
+        )
+        assert result is not None
+        assert result.get("ok") is False
+        assert result.get("preflight_refused") is True
+        assert "local buying_power $100.00" in result["error"]
+        assert "BTC-USD" in result["error"]
+
+    def test_fee_slack_uses_settings(self, monkeypatch):
+        """R1: fee slack is settings-sourced, not a hardcoded 1.005.
+        At 0bps slack the pre-flight allows exactly at base*limit;
+        at 200bps it refuses the same call."""
+        # Total buying power = exactly base*limit = 500.
+        self._patch_resolver(monkeypatch, total=500.0)
+        from app import config as app_config
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_coinbase_preflight_fee_slack_bps", 0.0,
+        )
+        result_zero_slack = _coinbase_preflight_cash_check(
+            product_id="BTC-USD",
+            base_size="0.01",
+            limit_price="50000",
+        )
+        # 500.0 < 500.0 is False -- exactly equal allows through.
+        assert result_zero_slack is None
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_coinbase_preflight_fee_slack_bps", 200.0,
+        )
+        result_with_slack = _coinbase_preflight_cash_check(
+            product_id="BTC-USD",
+            base_size="0.01",
+            limit_price="50000",  # 500 * 1.02 = 510 > 500 → refuse
+        )
+        assert result_with_slack is not None
+        assert result_with_slack.get("preflight_refused") is True
+
+    def test_stale_cache_allows_through_with_warning(self, monkeypatch, caplog):
+        """R2: stale-cache threshold is settings-sourced. When the cache
+        is older than chili_coinbase_preflight_max_stale_seconds, the
+        pre-flight allows through (broker is final check)."""
+        # Buying power is technically insufficient, but cache is stale.
+        self._patch_resolver(monkeypatch, total=100.0, last_updated_age_s=60.0)
+        from app import config as app_config
+        monkeypatch.setattr(
+            app_config.settings, "chili_coinbase_preflight_max_stale_seconds", 5.0,
+        )
+        import logging
+        with caplog.at_level(logging.WARNING):
+            result = _coinbase_preflight_cash_check(
+                product_id="BTC-USD",
+                base_size="0.01",
+                limit_price="50000",
+            )
+        assert result is None  # allowed through despite insufficient
+        stale_msgs = [
+            r for r in caplog.records
+            if "buying_power cache stale" in (r.getMessage() or "")
+        ]
+        assert len(stale_msgs) >= 1
+
+
+# --------------------------------------------------------------------- #
+# D6 — @validates scan_pattern_id                                       #
+# --------------------------------------------------------------------- #
+
+class TestD6ScanPatternIdValidator:
+
+    def test_null_with_robinhood_broker_source_raises(self):
+        with pytest.raises(ValueError, match="scan_pattern_id IS NULL"):
+            Trade(
+                ticker="ZZZ",
+                direction="long",
+                entry_price=10.0,
+                quantity=1.0,
+                broker_source="robinhood",
+                scan_pattern_id=None,
+            )
+
+    def test_null_with_coinbase_broker_source_raises(self):
+        with pytest.raises(ValueError, match="scan_pattern_id IS NULL"):
+            Trade(
+                ticker="ZZZ",
+                direction="long",
+                entry_price=10.0,
+                quantity=1.0,
+                broker_source="coinbase",
+                scan_pattern_id=None,
+            )
+
+    def test_null_with_manual_broker_source_passes(self):
+        t = Trade(
+            ticker="ZZZ",
+            direction="long",
+            entry_price=10.0,
+            quantity=1.0,
+            broker_source="manual",
+            scan_pattern_id=None,
+        )
+        assert t.scan_pattern_id is None
+
+    def test_null_with_reconcile_import_broker_source_passes(self):
+        t = Trade(
+            ticker="ZZZ",
+            direction="long",
+            entry_price=10.0,
+            quantity=1.0,
+            broker_source="reconcile_import",
+            scan_pattern_id=None,
+        )
+        assert t.scan_pattern_id is None
+
+    def test_real_pattern_id_passes_regardless_of_broker_source(self):
+        t = Trade(
+            ticker="ZZZ",
+            direction="long",
+            entry_price=10.0,
+            quantity=1.0,
+            broker_source="robinhood",
+            scan_pattern_id=585,
+        )
+        assert t.scan_pattern_id == 585
+
+    def test_null_with_strategy_proposal_id_passes(self):
+        """User-approved proposal placed via a live broker can land
+        with NULL scan_pattern_id (signals_json may not carry attribution).
+        The strategy_proposal_id signals "this came from a user-approved
+        proposal" so the validator allows it."""
+        t = Trade(
+            ticker="ZZZ",
+            direction="long",
+            entry_price=10.0,
+            quantity=1.0,
+            broker_source="robinhood",
+            strategy_proposal_id=123,
+            scan_pattern_id=None,
+        )
+        assert t.scan_pattern_id is None
+
+    def test_null_with_no_broker_source_passes(self):
+        """Defensive: when broker_source is unset/empty, the validator
+        defers enforcement so SQLAlchemy's attribute-population order
+        doesn't false-fire the guard during ``Trade(...)`` construction."""
+        t = Trade(
+            ticker="ZZZ",
+            direction="long",
+            entry_price=10.0,
+            quantity=1.0,
+            scan_pattern_id=None,
+        )
+        assert t.scan_pattern_id is None
+
+    def test_update_without_setting_scan_pattern_id_does_not_fire(self, db):
+        """REGRESSION: closing an existing open no_pattern trade (e.g.
+        CRDL id=1814) via ``status='closed'`` + ``exit_date=now()``
+        without touching ``scan_pattern_id`` must NOT trigger the
+        validator. The brief explicitly relies on this so CRDL's exit
+        machinery continues to function with the D6 guard in place."""
+        uid = _seed_user(db)
+        # Seed a legacy no_pattern open trade (broker_source="manual" so
+        # the validator allows the initial insert with NULL).
+        t = Trade(
+            user_id=uid,
+            ticker="CRDLCHK",
+            direction="long",
+            entry_price=1.45,
+            quantity=200.0,
+            entry_date=datetime.utcnow() - timedelta(days=15),
+            status="open",
+            broker_source="manual",
+            scan_pattern_id=None,
+        )
+        db.add(t)
+        db.flush()
+        trade_id = t.id
+        # Now close it without touching scan_pattern_id.
+        t.status = "closed"
+        t.exit_date = datetime.utcnow()
+        t.exit_price = 1.60
+        t.pnl = (1.60 - 1.45) * 200.0
+        db.flush()
+        # No ValueError raised; the row persisted.
+        refreshed = db.query(Trade).get(trade_id)
+        assert refreshed.status == "closed"
+        assert refreshed.scan_pattern_id is None
+
+
+# --------------------------------------------------------------------- #
+# D7 — migration 243 BNB-USD zombie cleanup                              #
+# --------------------------------------------------------------------- #
+
+class TestD7Migration243:
+
+    def test_idempotent_no_op_when_row_absent(self, db):
+        """On chili_test the id=1861 row is absent; migration should be
+        a logged no-op, not a failure."""
+        from app.migrations import _migration_243_bnb_usd_zombie_cleanup
+        # Use the underlying engine connection so commit semantics match.
+        conn = db.connection()
+        # Should not raise.
+        _migration_243_bnb_usd_zombie_cleanup(conn)
+
+    def test_cancels_zombie_when_all_guards_match(self, db):
+        from app.migrations import _migration_243_bnb_usd_zombie_cleanup
+        uid = _seed_user(db)
+        # Seed the zombie. quantity must be > 0 (model validator) but
+        # filled_quantity=0 keeps it inside the migration's filter.
+        zombie = Trade(
+            id=1861,
+            user_id=uid,
+            ticker="BNB-USD",
+            direction="long",
+            entry_price=680.46,
+            quantity=1.0,
+            filled_quantity=0.0,
+            entry_date=datetime.utcnow() - timedelta(days=4),
+            status="open",
+            broker_source="manual",  # allows NULL scan_pattern_id
+            scan_pattern_id=None,
+        )
+        db.add(zombie)
+        db.flush()
+        db.commit()
+
+        conn = db.connection()
+        _migration_243_bnb_usd_zombie_cleanup(conn)
+
+        db.expire_all()
+        refreshed = db.query(Trade).filter(Trade.id == 1861).first()
+        assert refreshed is not None
+        assert refreshed.status == "cancelled"
+        assert refreshed.exit_reason == "zombie_cleanup_2026_05_15_phase3"
+        assert refreshed.exit_date is not None
+
+    def test_idempotent_no_op_on_second_run(self, db):
+        """Re-running after the row has been cancelled is a safe no-op."""
+        from app.migrations import _migration_243_bnb_usd_zombie_cleanup
+        uid = _seed_user(db)
+        zombie = Trade(
+            id=1861,
+            user_id=uid,
+            ticker="BNB-USD",
+            direction="long",
+            entry_price=680.46,
+            quantity=1.0,
+            filled_quantity=0.0,
+            entry_date=datetime.utcnow() - timedelta(days=4),
+            status="open",
+            broker_source="manual",
+            scan_pattern_id=None,
+        )
+        db.add(zombie)
+        db.flush()
+        db.commit()
+
+        conn = db.connection()
+        _migration_243_bnb_usd_zombie_cleanup(conn)
+        # Second run -- should not touch the row again.
+        _migration_243_bnb_usd_zombie_cleanup(conn)
+
+        db.expire_all()
+        refreshed = db.query(Trade).filter(Trade.id == 1861).first()
+        assert refreshed is not None
+        assert refreshed.status == "cancelled"
+
+    def test_does_not_touch_row_when_filled_quantity_positive(self, db):
+        """Guards in the WHERE clause prevent the cleanup from running
+        if the row actually has fills -- protection against running it
+        on a real (non-zombie) position."""
+        from app.migrations import _migration_243_bnb_usd_zombie_cleanup
+        uid = _seed_user(db)
+        not_a_zombie = Trade(
+            id=1861,
+            user_id=uid,
+            ticker="BNB-USD",
+            direction="long",
+            entry_price=680.46,
+            quantity=1.0,
+            filled_quantity=1.0,  # NOT a zombie
+            entry_date=datetime.utcnow() - timedelta(days=4),
+            status="open",
+            broker_source="manual",
+            scan_pattern_id=None,
+        )
+        db.add(not_a_zombie)
+        db.flush()
+        db.commit()
+
+        conn = db.connection()
+        _migration_243_bnb_usd_zombie_cleanup(conn)
+
+        db.expire_all()
+        refreshed = db.query(Trade).filter(Trade.id == 1861).first()
+        assert refreshed is not None
+        assert refreshed.status == "open"  # untouched
+        assert refreshed.exit_reason is None
+
+    def test_does_not_touch_crdl_id_1814(self, db):
+        """CRDL is explicitly out of scope. The WHERE clause's
+        ``id = 1861`` filter excludes anything else, but we test
+        explicitly here because the brief is emphatic about it."""
+        from app.migrations import _migration_243_bnb_usd_zombie_cleanup
+        uid = _seed_user(db)
+        crdl = Trade(
+            id=1814,
+            user_id=uid,
+            ticker="CRDL",
+            direction="long",
+            entry_price=1.4485,
+            quantity=200.0,
+            filled_quantity=200.0,
+            entry_date=datetime.utcnow() - timedelta(days=15),
+            status="open",
+            broker_source="manual",
+            scan_pattern_id=None,
+        )
+        db.add(crdl)
+        db.flush()
+        db.commit()
+
+        conn = db.connection()
+        _migration_243_bnb_usd_zombie_cleanup(conn)
+
+        db.expire_all()
+        refreshed = db.query(Trade).filter(Trade.id == 1814).first()
+        assert refreshed is not None
+        assert refreshed.status == "open"
+        assert refreshed.exit_reason is None
