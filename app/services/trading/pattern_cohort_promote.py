@@ -72,6 +72,23 @@ def select_cohort_candidates(
         from ...config import settings as _settings
         settings_ = _settings
 
+    # f-composite-quality-reweight-realized-evidence (2026-05-16): realized-PnL
+    # eligibility floor. A pattern with >= N realized closed trades whose
+    # equal-weighted avg_pnl_pct is <= 0 is REFUSED cohort promotion. Below
+    # the n_floor (sample too small) or with positive realized avg, the
+    # pattern is allowed through. Reads window, n_floor, and the
+    # max-negative-pct strict-> bound from settings. NO magic-default fallbacks
+    # (advisor brief section 2.6).
+    window_days = int(getattr(
+        settings_, "chili_cohort_score_realized_window_days", 90,
+    ))
+    min_n_floor = int(getattr(
+        settings_, "chili_cohort_promote_min_realized_trades_for_floor", 5,
+    ))
+    max_negative_pct = float(getattr(
+        settings_, "chili_cohort_promote_max_realized_avg_pnl_pct_negative", 0.0,
+    ))
+
     # Do not require directional outcomes here. shadow_promoted is the
     # observation stage that lets a pattern collect those outcomes without
     # broker exposure; requiring them here creates a bootstrap deadlock.
@@ -79,14 +96,33 @@ def select_cohort_candidates(
     # verdict says they pass.
     sql = text(
         """
+        WITH realized AS (
+            SELECT scan_pattern_id,
+                   COUNT(*) AS n_realized,
+                   AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct
+            FROM trading_trades
+            WHERE scan_pattern_id IS NOT NULL
+              AND scan_pattern_id != -1
+              AND status = 'closed'
+              AND pnl IS NOT NULL
+              AND entry_price > 0
+              AND quantity > 0
+              AND exit_date > NOW() - make_interval(days => :window_days)
+            GROUP BY scan_pattern_id
+        )
         SELECT sp.id
         FROM scan_patterns sp
+        LEFT JOIN realized r ON r.scan_pattern_id = sp.id
         WHERE sp.active IS TRUE
           AND sp.lifecycle_stage IN ('backtested', 'candidate', 'challenged')
           AND sp.promotion_gate_passed IS TRUE
           AND sp.cpcv_median_sharpe IS NOT NULL
           AND sp.deflated_sharpe IS NOT NULL
           AND sp.pbo IS NOT NULL
+          AND (
+              COALESCE(r.n_realized, 0) < :min_n_floor
+              OR r.avg_pnl_pct > :max_negative_pct
+          )
         ORDER BY
           sp.quality_composite_score DESC NULLS LAST,
           sp.cpcv_median_sharpe DESC NULLS LAST,
@@ -95,7 +131,14 @@ def select_cohort_candidates(
           sp.id ASC
         """
     )
-    rows = db.execute(sql).fetchall()
+    rows = db.execute(
+        sql,
+        {
+            "window_days": window_days,
+            "min_n_floor": min_n_floor,
+            "max_negative_pct": max_negative_pct,
+        },
+    ).fetchall()
     ids = [int(r[0]) for r in rows]
     if not ids:
         return []
