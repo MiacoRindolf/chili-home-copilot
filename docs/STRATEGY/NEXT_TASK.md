@@ -1,66 +1,38 @@
-# NEXT_TASK: f-phase3-stop-bleed (Phase 3 stop-bleed from 2026-05-15 quant audit)
+# NEXT_TASK: f-composite-quality-reweight-realized-evidence
 
 STATUS: DONE
 
-## Goal
+## Outcome
 
-Ship the four "stop-the-bleeding" items from the Phase 3 roadmap of the
-2026-05-15 quant audit:
+D1-D7 shipped over 6 commits (c4cf1ba, 22a12ed, aadae96, 81000e6, 2e468fa, + CC_REPORT).
 
-1. Monthly-realized-drawdown gate inside the existing
-   `check_drawdown_breaker` (so April-2026-class single-month bleeds
-   trip the kill switch).
-2. Five rejection-histogram code defects (NameError diagnostic
-   improvement, INVALID_ARGUMENT product_id normalizer, Insufficient-balance
-   pre-flight, stop-not-below-entry producer fix, model-layer scan_pattern_id
-   guard).
-3. BNB-USD zombie row cleanup (migration 243).
-4. Verification: re-run discovery probe; confirm rejection counts drop.
+**Spearman re-measurement:**
+- Pre-deploy: rho = **−0.7570**, p = 0.0044 (statistically significant anti-correlation)
+- Post-deploy: rho = **−0.2587**, p = 0.42 (no longer statistically significant)
 
-## Brief
+**Magnitude reduction:** 66% (the anti-correlation collapsed from strong to noise).
 
-`docs/STRATEGY/QUEUED/f-phase3-stop-bleed.md`
+**Brief's success threshold not met** (asked rho ≥ +0.30; got −0.26). Pattern 585 (the alpha) moved from rank 10 of 12 to rank 3, but two n<5 patterns (1068, 1067) still rank above it because of an unforeseen interaction with the re-normalization design choice (when n<5, the formula multiplies the five non-realized weights by 1/0.65 = 1.538, which inflates strong-backtest-weak-realized patterns above proven winners).
 
-## Context
+**Migration 244 demoted 2 patterns:**
+- pid=706 (Above upper BB + RSI, n=6, avg=−0.24%, total=−$3.96): shadow_promoted → challenged
+- pid=1216 (EMA stack + RSI neutral, n=11, avg=−6.75%, total=−$21.04): pilot_promoted → challenged
 
-- `docs/AUDITS/audit-discovery-stats-output.txt`
-- `docs/AUDITS/audit-no-pattern-timing-output.txt`
-- Re-runnable via `.\scripts\dispatch-audit-discovery.ps1` and
-  `.\scripts\dispatch-audit-no-pattern-timing.ps1` through the
-  `_claude_daemon` dispatch loop.
+CC_REPORT at `docs/STRATEGY/CC_REPORTS/2026-05-16_f-composite-quality-reweight-realized-evidence.md`.
 
-## Deliverables (per brief)
+## Follow-up queued
 
-D1. Monthly DD extension in `portfolio_risk.py:check_drawdown_breaker`,
-    threshold computed empirically (Gaussian lower-bound on 30-day
-    realized PnL from CHILI-attributed history; no hardcoded dollar
-    amount). Flags: `chili_monthly_dd_breaker_enabled` (default off),
-    `chili_monthly_dd_breaker_lower_bound_sigmas` (default 2.0 = 95%).
-D2. NameError diagnostic improvement at `auto_trader.py:1602`
-D3. Product-ID normalizer (`_normalize_product_id`) in `coinbase_spot.py`
-D4. Pre-flight cash-check in three Coinbase placement methods
-D5. Upstream producer fix for `stop_not_below_entry` alerts
-D6. `@validates("scan_pattern_id")` guard at `app/models/trading.py:Trade`
-D7. Migration 243: BNB-USD zombie row (id=1861) cleanup
-D8. `tests/test_phase3_stop_bleed.py` — one test per deliverable
-D9. Post-deploy: re-run audit-discovery-stats probe + record deltas
+The next brief should drop the re-normalization arm and use a "raw partial sum (max 0.65), no inflation" rule when n_realized < 5. Expected effect: pattern 585 tops the ranking, n<5 patterns cap below it, anti-correlation regression test passes.
 
-## Hard constraints
+To be authored: `docs/STRATEGY/QUEUED/f-composite-reweight-no-renormalize.md`.
 
-- One commit per deliverable (clean audit trail).
-- All tests pass before deploy.
-- Drawdown breaker default OFF; operator flips ON after walk-forward
-  shows it would have tripped ~2026-04-22.
-- No alpha-generation code touched (no autotrader entry-logic changes,
-  no pattern miner changes, no LLM cascade changes — only gates).
-- TEST_DATABASE_URL ends in `_test`.
-- D5 (producer fix) may be deferred to a follow-up brief if non-obvious;
-  ship D1–D4, D6–D9 regardless. The existing rule at
-  `auto_trader_rules.py:915` already rejects the bad orders.
+A second, smaller fix in the same follow-up: the `weight_sum` validation in `compute_and_persist_scores` currently includes non-weight parameters (normalizer_pct, evidence_tau, window_days), giving the spurious "weights sum to 121.01" warning observed in D6 deploy logs. Cosmetic only — no behavior impact.
 
-## Result
+## Pending operator actions
 
-CC_REPORT at `docs/STRATEGY/CC_REPORTS/2026-05-15_phase3-stop-bleed.md`,
-covering: 7 commits, walk-forward DD-breaker simulation (would have
-tripped on/around 2026-04-22), tests passing, post-deploy histogram
-confirming initial movement on the four bug counts.
+- `CHILI_COHORT_PROMOTE_ENABLED` stays **OFF**. The new formula is safer than the old, but the top-of-ranking inversion (1068/1067 above 585) means flipping the flag would still promote losers. Do not flip until the follow-up fix lands.
+- `git push` the 5-commit chain (c4cf1ba → 2e468fa) when ready. Not pushed automatically — operator's call.
+
+## Source brief preserved
+
+`docs/STRATEGY/QUEUED/f-composite-quality-reweight-realized-evidence.md` (amended 2026-05-16 during plan-gate to drop the pattern_family_trial_log insert and correct the w_norm normalizer note).
