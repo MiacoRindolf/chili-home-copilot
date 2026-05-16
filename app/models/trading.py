@@ -36,6 +36,21 @@ class WatchlistItem(Base):
     added_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+# f-phase3-stop-bleed D6 — constants for the Trade.scan_pattern_id
+# validator. The 2026-05-15 audit found 210 trade rows with NULL
+# scan_pattern_id totalling $1,560 of realized losses (legacy pre-CHILI
+# cleanup). They're done bleeding (12 closes in May vs 108 in March) but
+# the validator prevents silent reintroduction by REQUIRING attribution
+# on any new Trade insert whose broker_source is a normal live-execution
+# tag (e.g. "robinhood", "coinbase"). NULL is allowed only for sources in
+# ``_RECONCILE_IMPORT_SOURCES`` (manual user actions, future reconcile-
+# import paths). Callers that legitimately have no pattern attribution
+# should set ``scan_pattern_id = _NO_PATTERN_SENTINEL`` (-1) explicitly so
+# the absence is documented rather than implicit.
+_RECONCILE_IMPORT_SOURCES = frozenset({"reconcile_import", "manual"})
+_NO_PATTERN_SENTINEL = -1
+
+
 class Trade(Base):
     __tablename__ = "trading_trades"
 
@@ -166,6 +181,35 @@ class Trade(Base):
                 f"trade_anomaly: quantity must be > 0, got {value!r} "
                 f"(ticker={getattr(self, 'ticker', '?')})"
             )
+        return value
+
+    # f-phase3-stop-bleed D6 — refuse silent reintroduction of legacy-
+    # cleanup-style no_pattern trades. NULL ``scan_pattern_id`` is allowed
+    # only when ``broker_source`` is one of ``_RECONCILE_IMPORT_SOURCES``
+    # (currently {"reconcile_import", "manual"}). The autotrader and
+    # proposal-via-broker paths must either supply a real pattern id or the
+    # ``_NO_PATTERN_SENTINEL`` (-1) to document that the absence is known
+    # and accepted.
+    #
+    # Note: ``@validates`` fires on ATTRIBUTE SET, not on UPDATE-without-set.
+    # Closing an existing open no_pattern trade (e.g. CRDL id=1814) via
+    # ``status='closed'`` + ``exit_date=now()`` without touching
+    # ``scan_pattern_id`` does not trigger this validator. The D6
+    # regression test in tests/test_phase3_stop_bleed.py covers that case.
+    @validates("scan_pattern_id")
+    def _validate_scan_pattern_id(self, key, value):
+        if value is None:
+            bs = (getattr(self, "broker_source", None) or "").lower()
+            # During before_insert the broker_source may not be set yet --
+            # we defer enforcement when bs is empty/None so SQLAlchemy's
+            # attribute-population order doesn't false-fire the guard.
+            if bs and bs not in _RECONCILE_IMPORT_SOURCES:
+                raise ValueError(
+                    f"trade_anomaly: scan_pattern_id IS NULL with "
+                    f"broker_source={bs!r}; expected pattern attribution "
+                    f"or sentinel ({_NO_PATTERN_SENTINEL}). "
+                    f"f-phase3-stop-bleed D6"
+                )
         return value
 
 
