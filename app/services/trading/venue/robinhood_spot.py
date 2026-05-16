@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from ..portfolio_risk import _assert_portfolio_breaker_ok
 from . import idempotency_store, order_state_machine, rate_limiter, venue_health
 from .protocol import (
     FreshnessMeta,
@@ -460,6 +461,18 @@ class RobinhoodSpotAdapter(VenueAdapter):
         ticker = _to_ticker(product_id)
         qty = float(base_size)
 
+        # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
+        # tier blocks every entry path when live + tripped; pass-through when
+        # disabled, in shadow mode, or insufficient history (fail-OPEN).
+        if side.lower() == "buy":
+            _ok, _br_reason = _assert_portfolio_breaker_ok()
+            if not _ok:
+                return {
+                    "ok": False,
+                    "error": f"portfolio_breaker:{_br_reason}",
+                    "client_order_id": client_order_id,
+                }
+
         if idempotency_store.is_duplicate(client_order_id, venue=_VENUE):
             return {"ok": False, "error": "duplicate_client_order_id", "client_order_id": client_order_id}
 
@@ -590,6 +603,18 @@ class RobinhoodSpotAdapter(VenueAdapter):
         ticker = _to_ticker(product_id)
         qty = float(base_size)
         price = float(limit_price)
+
+        # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
+        # tier blocks every entry path when live + tripped; pass-through when
+        # disabled, in shadow mode, or insufficient history (fail-OPEN).
+        if side.lower() == "buy":
+            _ok, _br_reason = _assert_portfolio_breaker_ok()
+            if not _ok:
+                return {
+                    "ok": False,
+                    "error": f"portfolio_breaker:{_br_reason}",
+                    "client_order_id": client_order_id,
+                }
 
         if idempotency_store.is_duplicate(client_order_id, venue=_VENUE):
             return {"ok": False, "error": "duplicate_client_order_id", "client_order_id": client_order_id}

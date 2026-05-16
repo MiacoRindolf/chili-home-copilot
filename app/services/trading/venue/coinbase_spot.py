@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional
 
 from ....config import settings
 from ... import coinbase_service as cb
+from ..portfolio_risk import _assert_portfolio_breaker_ok
 from . import idempotency_store, order_state_machine, rate_limiter, venue_health
 from .protocol import (
     FreshnessMeta,
@@ -770,6 +771,17 @@ class CoinbaseSpotAdapter(VenueAdapter):
             product_id = _normalize_product_id(product_id)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
+        # tier blocks every entry path when live + tripped; pass-through when
+        # disabled, in shadow mode, or insufficient history (fail-OPEN).
+        if side.lower() == "buy":
+            _ok, _br_reason = _assert_portfolio_breaker_ok()
+            if not _ok:
+                return {
+                    "ok": False,
+                    "error": f"portfolio_breaker:{_br_reason}",
+                    "client_order_id": client_order_id,
+                }
         cid = client_order_id or str(uuid.uuid4())
         if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
@@ -892,6 +904,17 @@ class CoinbaseSpotAdapter(VenueAdapter):
             )
             if _preflight_refusal is not None:
                 return _preflight_refusal
+        # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
+        # tier runs AFTER the local cash preflight so the cheaper guard fires
+        # first; the breaker still short-circuits before idempotency/rate-limit.
+        if side.lower() == "buy":
+            _ok, _br_reason = _assert_portfolio_breaker_ok()
+            if not _ok:
+                return {
+                    "ok": False,
+                    "error": f"portfolio_breaker:{_br_reason}",
+                    "client_order_id": client_order_id,
+                }
         cid = client_order_id or str(uuid.uuid4())
         if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
@@ -1040,6 +1063,17 @@ class CoinbaseSpotAdapter(VenueAdapter):
             )
             if _preflight_refusal is not None:
                 return _preflight_refusal
+        # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Rare
+        # entry path (this method is mostly SELL stop-losses) but if it ever
+        # gates a BUY stop the portfolio tier still applies.
+        if side.lower() == "buy":
+            _ok, _br_reason = _assert_portfolio_breaker_ok()
+            if not _ok:
+                return {
+                    "ok": False,
+                    "error": f"portfolio_breaker:{_br_reason}",
+                    "client_order_id": client_order_id,
+                }
         cid = client_order_id or str(uuid.uuid4())
         if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {
