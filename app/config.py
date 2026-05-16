@@ -2906,6 +2906,27 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MONTHLY_DD_BREAKER_LOWER_BOUND_SIGMAS"),
     )
 
+    # f-phase3-stop-bleed D4 — Coinbase placement pre-flight cash check.
+    # The 2026-05-15 audit's last-7d rejection histogram shows 830
+    # ``broker:Insufficient balance`` errors -- we lose race conditions
+    # between our buying_power resolver and the placement call. A local
+    # pre-flight refuses the call when our cached buying_power is already
+    # below the order's required notional (broker is still final check).
+    # Fee slack and the stale-cache tolerance are settings-sourced (no
+    # magic constants -- COWORK_ADVISOR_BRIEF §2.6).
+    chili_coinbase_preflight_fee_slack_bps: float = Field(
+        default=50.0,
+        ge=0.0,
+        le=500.0,
+        validation_alias=AliasChoices("CHILI_COINBASE_PREFLIGHT_FEE_SLACK_BPS"),
+    )
+    chili_coinbase_preflight_max_stale_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_COINBASE_PREFLIGHT_MAX_STALE_SECONDS"),
+    )
+
     # Phase B (tech-debt): TTL cache on broker-equity lookups so a flapping
     # broker does not amplify into a per-tick retry storm. When enabled, the
     # first call per ``chili_autotrader_broker_equity_cache_ttl_seconds`` window

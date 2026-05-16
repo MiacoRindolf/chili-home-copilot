@@ -73,6 +73,92 @@ def _normalize_product_id(product_id: str | None) -> str:
     return pid
 
 
+def _coinbase_preflight_cash_check(
+    *,
+    product_id: str,
+    base_size: str,
+    limit_price: str,
+) -> Optional[dict[str, Any]]:
+    """f-phase3-stop-bleed D4 — local BUY pre-flight against Coinbase
+    buying-power cache.
+
+    The 2026-05-15 audit's last-7d rejection histogram shows 830
+    ``broker:Insufficient balance`` errors. Many are races between our
+    resolver and the placement call. A local refuse is cheaper than a
+    broker round-trip + rate-limit charge.
+
+    Returns ``None`` on pass-through (let the placement proceed). Returns
+    an envelope ``{"ok": False, "error": "...", "preflight_refused":
+    True}`` when local buying power is strictly below the order's
+    required notional. When the cache is stale beyond
+    ``chili_coinbase_preflight_max_stale_seconds``, returns None with a
+    logged warning so the broker remains the final authority.
+
+    Fee slack (``chili_coinbase_preflight_fee_slack_bps``) and stale
+    threshold (``chili_coinbase_preflight_max_stale_seconds``) are both
+    settings-sourced — no magic constants (COWORK_ADVISOR_BRIEF §2.6).
+    """
+    try:
+        from ..cost_aware_gate import resolve_coinbase_buying_power
+    except Exception:
+        _log.warning(
+            "[coinbase_spot] D4 preflight: resolver import failed; allowing",
+            exc_info=True,
+        )
+        return None
+    try:
+        bp = resolve_coinbase_buying_power()
+    except Exception:
+        _log.warning(
+            "[coinbase_spot] D4 preflight: resolver raised; allowing",
+            exc_info=True,
+        )
+        return None
+
+    fee_slack_bps = float(getattr(
+        settings, "chili_coinbase_preflight_fee_slack_bps", 50.0,
+    ))
+    max_stale_s = float(getattr(
+        settings, "chili_coinbase_preflight_max_stale_seconds", 5.0,
+    ))
+
+    last_updated = float(bp.get("last_updated") or 0.0)
+    if last_updated > 0:
+        stale_age_s = time.time() - last_updated
+        if stale_age_s > max_stale_s:
+            _log.warning(
+                "[coinbase_spot] D4 preflight: buying_power cache stale by "
+                "%.1fs (max %.1fs); allowing through, broker is final check",
+                stale_age_s, max_stale_s,
+            )
+            return None
+
+    try:
+        required_usd = (
+            float(base_size) * float(limit_price)
+            * (1.0 + fee_slack_bps / 10000.0)
+        )
+    except (TypeError, ValueError):
+        _log.warning(
+            "[coinbase_spot] D4 preflight: non-numeric base_size/limit_price "
+            "(base_size=%r limit_price=%r); allowing",
+            base_size, limit_price,
+        )
+        return None
+
+    total_usd = float(bp.get("total") or 0.0)
+    if total_usd < required_usd:
+        msg = (
+            f"local buying_power ${total_usd:.2f} < required "
+            f"${required_usd:.2f} for {product_id} "
+            f"(fee_slack={fee_slack_bps:.0f}bps)"
+        )
+        _log.info("[coinbase_spot] D4 preflight refused: %s", msg)
+        return {"ok": False, "error": msg, "preflight_refused": True}
+
+    return None
+
+
 def _quantize_price(value: float, increment: float, *, mode: str) -> str:
     """Quantize *value* to *increment* using exact Decimal arithmetic.
 
@@ -795,6 +881,17 @@ class CoinbaseSpotAdapter(VenueAdapter):
             product_id = _normalize_product_id(product_id)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        # f-phase3-stop-bleed D4 — BUY pre-flight against local
+        # buying-power cache. Refuses orders the broker would reject as
+        # Insufficient balance, sparing the round-trip + rate-limit charge.
+        if side.upper() == "BUY":
+            _preflight_refusal = _coinbase_preflight_cash_check(
+                product_id=product_id,
+                base_size=base_size,
+                limit_price=limit_price,
+            )
+            if _preflight_refusal is not None:
+                return _preflight_refusal
         cid = client_order_id or str(uuid.uuid4())
         if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
@@ -932,6 +1029,17 @@ class CoinbaseSpotAdapter(VenueAdapter):
             product_id = _normalize_product_id(product_id)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        # f-phase3-stop-bleed D4 — BUY pre-flight against local
+        # buying-power cache. Stop-limit BUYs are rare (this method is
+        # typically used for SELL stop-losses) but the guard covers them.
+        if side.upper() == "BUY":
+            _preflight_refusal = _coinbase_preflight_cash_check(
+                product_id=product_id,
+                base_size=base_size,
+                limit_price=limit_price,
+            )
+            if _preflight_refusal is not None:
+                return _preflight_refusal
         cid = client_order_id or str(uuid.uuid4())
         if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {
