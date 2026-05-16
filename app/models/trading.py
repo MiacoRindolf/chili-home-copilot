@@ -185,29 +185,44 @@ class Trade(Base):
 
     # f-phase3-stop-bleed D6 — refuse silent reintroduction of legacy-
     # cleanup-style no_pattern trades. NULL ``scan_pattern_id`` is allowed
-    # only when ``broker_source`` is one of ``_RECONCILE_IMPORT_SOURCES``
-    # (currently {"reconcile_import", "manual"}). The autotrader and
-    # proposal-via-broker paths must either supply a real pattern id or the
-    # ``_NO_PATTERN_SENTINEL`` (-1) to document that the absence is known
-    # and accepted.
+    # when:
+    #   * ``broker_source`` is in ``_RECONCILE_IMPORT_SOURCES``
+    #     (``"reconcile_import"`` or ``"manual"``)
+    #   * ``strategy_proposal_id`` is set -- a user-approved proposal,
+    #     even when its signals_json carried no pattern attribution
+    #   * ``broker_source`` is empty -- deferred enforcement during the
+    #     attribute-population phase of ``Trade(...)`` construction
     #
-    # Note: ``@validates`` fires on ATTRIBUTE SET, not on UPDATE-without-set.
+    # The autotrader's own live placement path always supplies a real
+    # ``scan_pattern_id`` (that's the whole point of CHILI's pattern
+    # attribution), so the validator catches the actual bleed pattern
+    # without false-firing on legitimate proposal-via-broker inserts.
+    #
+    # NOTE on the sentinel: an earlier draft of D6 substituted -1 at the
+    # producer site, but ``trading_trades.scan_pattern_id`` has a FK to
+    # ``scan_patterns.id`` and there is no id=-1 row in production.
+    # The ``_NO_PATTERN_SENTINEL`` constant is retained for callers that
+    # want to set it explicitly AND that have arranged for an id=-1
+    # ScanPattern row to exist; production code does not currently use it.
+    #
+    # @validates fires on ATTRIBUTE SET, not on UPDATE-without-set.
     # Closing an existing open no_pattern trade (e.g. CRDL id=1814) via
     # ``status='closed'`` + ``exit_date=now()`` without touching
-    # ``scan_pattern_id`` does not trigger this validator. The D6
-    # regression test in tests/test_phase3_stop_bleed.py covers that case.
+    # ``scan_pattern_id`` does not trigger this validator.
     @validates("scan_pattern_id")
     def _validate_scan_pattern_id(self, key, value):
         if value is None:
             bs = (getattr(self, "broker_source", None) or "").lower()
-            # During before_insert the broker_source may not be set yet --
-            # we defer enforcement when bs is empty/None so SQLAlchemy's
-            # attribute-population order doesn't false-fire the guard.
-            if bs and bs not in _RECONCILE_IMPORT_SOURCES:
+            proposal_id = getattr(self, "strategy_proposal_id", None)
+            if (
+                bs
+                and bs not in _RECONCILE_IMPORT_SOURCES
+                and proposal_id is None
+            ):
                 raise ValueError(
                     f"trade_anomaly: scan_pattern_id IS NULL with "
-                    f"broker_source={bs!r}; expected pattern attribution "
-                    f"or sentinel ({_NO_PATTERN_SENTINEL}). "
+                    f"broker_source={bs!r} and no strategy_proposal_id; "
+                    f"expected pattern attribution. "
                     f"f-phase3-stop-bleed D6"
                 )
         return value

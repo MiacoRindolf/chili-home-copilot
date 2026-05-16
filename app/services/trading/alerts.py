@@ -1727,14 +1727,6 @@ def _execute_proposal(
                 or (result.get("raw") or {}).get("average_filled_price")
             )
 
-            # f-phase3-stop-bleed D6 — when a proposal is placed via a
-            # live broker (robinhood / coinbase) but its signals_json
-            # carried no scan_pattern_id, document the absence with the
-            # sentinel (-1) instead of NULL. The model-layer validator
-            # rejects NULL with non-reconcile broker_source; the sentinel
-            # makes "user-approved proposal, no pattern attribution
-            # available" explicit in the data.
-            _spid_for_trade = _prop_spid if _prop_spid is not None else -1
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,
@@ -1757,12 +1749,12 @@ def _execute_proposal(
                 last_fill_at=now if is_already_filled else None,
                 tca_reference_entry_price=float(proposal.entry_price),
                 strategy_proposal_id=proposal.id,
-                scan_pattern_id=_spid_for_trade,
+                scan_pattern_id=_prop_spid,
                 indicator_snapshot=json.dumps({
                     "stop_loss": proposal.stop_loss,
                     "take_profit": proposal.take_profit,
                     "proposal_id": proposal.id,
-                    "scan_pattern_id": _spid_for_trade,
+                    "scan_pattern_id": _prop_spid,
                 }),
                 tags="auto-trade,proposal",
                 pattern_tags=_ptags or None,
