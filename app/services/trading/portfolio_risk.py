@@ -963,7 +963,7 @@ def _monthly_dd_threshold(
     if settings_obj is None:
         from ...config import settings as _s
         settings_obj = _s
-    k = float(getattr(settings_obj, "chili_monthly_dd_breaker_lower_bound_sigmas", 2.0))
+    k = float(getattr(settings_obj, "chili_pattern_dd_breaker_lower_bound_sigmas", 2.0))
 
     threshold = (30.0 * mean_d) - k * ((30.0 ** 0.5) * std_d)
     return threshold, n
@@ -1107,7 +1107,7 @@ def check_drawdown_breaker(
     # and this check is skipped (no fallback dollar value).
     try:
         from ...config import settings as _s_dd
-        flag_enabled = bool(getattr(_s_dd, "chili_monthly_dd_breaker_enabled", False))
+        flag_enabled = bool(getattr(_s_dd, "chili_pattern_dd_breaker_enabled", False))
     except Exception:
         flag_enabled = False
     if flag_enabled:
@@ -1136,12 +1136,13 @@ def check_drawdown_breaker(
             if float(monthly_pnl) <= float(threshold):
                 _breaker_tripped = True
                 k_val = float(getattr(
-                    _s_dd, "chili_monthly_dd_breaker_lower_bound_sigmas", 2.0
+                    _s_dd, "chili_pattern_dd_breaker_lower_bound_sigmas", 2.0
                 ))
                 _breaker_reason = (
-                    f"monthly_dd_breaker: 30-day CHILI-attributed realized PnL "
-                    f"${float(monthly_pnl):.2f} <= empirical Gaussian "
-                    f"lower-bound ${float(threshold):.2f} "
+                    f"monthly_dd_breaker: 30-day realized PnL "
+                    f"${float(monthly_pnl):.2f} (CHILI-attributed only) "
+                    f"<= empirical Gaussian lower-bound "
+                    f"${float(threshold):.2f} "
                     f"(K={k_val}σ, computed from {n_obs}d CHILI history)"
                 )
                 _persist_breaker_state(True, _breaker_reason)

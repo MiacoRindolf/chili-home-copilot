@@ -172,10 +172,10 @@ class TestD1MonthlyDdBreaker:
             )
 
         class _S:
-            chili_monthly_dd_breaker_lower_bound_sigmas = 1.0
+            chili_pattern_dd_breaker_lower_bound_sigmas = 1.0
 
         class _S3:
-            chili_monthly_dd_breaker_lower_bound_sigmas = 3.0
+            chili_pattern_dd_breaker_lower_bound_sigmas = 3.0
 
         t1, _ = _monthly_dd_threshold(db, uid, settings_obj=_S())
         t3, _ = _monthly_dd_threshold(db, uid, settings_obj=_S3())
@@ -190,7 +190,7 @@ class TestD1MonthlyDdBreaker:
         # Defensively force the flag OFF in case env or process-wide state
         # has flipped it.
         monkeypatch.setattr(
-            app_config.settings, "chili_monthly_dd_breaker_enabled", False,
+            app_config.settings, "chili_pattern_dd_breaker_enabled", False,
         )
         uid = _seed_user(db)
         # Seed 40 days of attributed history with huge loss in last 30d.
@@ -211,7 +211,7 @@ class TestD1MonthlyDdBreaker:
             _seed_chili_attributed_trade(db, user_id=uid, pnl=10.0, days_ago=d + 1)
         from app import config as app_config
         monkeypatch.setattr(
-            app_config.settings, "chili_monthly_dd_breaker_enabled", True,
+            app_config.settings, "chili_pattern_dd_breaker_enabled", True,
         )
         import logging
         with caplog.at_level(logging.WARNING):
@@ -237,10 +237,10 @@ class TestD1MonthlyDdBreaker:
             _seed_chili_attributed_trade(db, user_id=uid, pnl=-1000.0, days_ago=d + 1)
         from app import config as app_config
         monkeypatch.setattr(
-            app_config.settings, "chili_monthly_dd_breaker_enabled", True,
+            app_config.settings, "chili_pattern_dd_breaker_enabled", True,
         )
         monkeypatch.setattr(
-            app_config.settings, "chili_monthly_dd_breaker_lower_bound_sigmas", 2.0,
+            app_config.settings, "chili_pattern_dd_breaker_lower_bound_sigmas", 2.0,
         )
         tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
         assert tripped is True
@@ -256,7 +256,7 @@ class TestD1MonthlyDdBreaker:
             _seed_chili_attributed_trade(db, user_id=uid, pnl=50.0, days_ago=d + 1)
         from app import config as app_config
         monkeypatch.setattr(
-            app_config.settings, "chili_monthly_dd_breaker_enabled", True,
+            app_config.settings, "chili_pattern_dd_breaker_enabled", True,
         )
         tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
         if tripped and reason:
@@ -370,7 +370,7 @@ class TestD1MonthlyDdBreaker:
         db.flush()
 
         monkeypatch.setattr(
-            app_config.settings, "chili_monthly_dd_breaker_enabled", True,
+            app_config.settings, "chili_pattern_dd_breaker_enabled", True,
         )
         tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
         # 5d/30d %-of-capital checks use a different scope and might fire on

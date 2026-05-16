@@ -14,7 +14,10 @@ Reports the first-trip date for K ∈ {1.5, 2.0, 2.5, 3.0} (sigma).
 Per the brief, the reasonable target is "tripped on or around
 2026-04-22" -- the cumulative-PnL trough date from the 2026-05-15
 audit. If K=2.0 trips much earlier or never, the methodology needs
-revisiting before the operator flips chili_monthly_dd_breaker_enabled.
+revisiting before the operator flips chili_pattern_dd_breaker_enabled
+(renamed from chili_monthly_dd_breaker_enabled by
+f-portfolio-vs-pattern-breaker-separation, 2026-05-16; legacy env var
+remains honored via AliasChoices for one release).
 
 Usage:
     set DATABASE_URL=postgresql://chili:chili@localhost:5433/chili

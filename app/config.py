@@ -2923,7 +2923,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_BREAKER_SCOPE_AUTOTRADER_ONLY"),
     )
 
-    # f-phase3-stop-bleed D1 — empirical monthly drawdown breaker.
+    # f-phase3-stop-bleed D1 — empirical monthly drawdown breaker
+    # (CHILI-attributed / pattern tier).
+    # RENAMED 2026-05-16 by f-portfolio-vs-pattern-breaker-separation D4:
+    # chili_monthly_dd_breaker_enabled → chili_pattern_dd_breaker_enabled
+    # to disambiguate from the new portfolio tier. AliasChoices keeps the
+    # legacy env var honored for one release; the legacy alias will be
+    # removed in a follow-up brief once operators confirm migration.
     # Default OFF until walk-forward shows it would have tripped on/around
     # 2026-04-22 (the cumulative-PnL trough date from the 2026-05-15 audit).
     # When ON, ``check_drawdown_breaker`` computes a Gaussian lower-bound on
@@ -2931,18 +2937,71 @@ class Settings(BaseSettings):
     # and trips when actual 30d PnL falls below it. No fallback dollar value
     # (see COWORK_ADVISOR_BRIEF §2.6); when history is <30d the check skips
     # with a logged warning.
-    chili_monthly_dd_breaker_enabled: bool = Field(
+    chili_pattern_dd_breaker_enabled: bool = Field(
         default=False,
-        validation_alias=AliasChoices("CHILI_MONTHLY_DD_BREAKER_ENABLED"),
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DD_BREAKER_ENABLED",
+            "CHILI_MONTHLY_DD_BREAKER_ENABLED",  # legacy alias (one-release deprecation)
+        ),
     )
     # K — sigma multiplier for the Gaussian lower-bound. 2.0 = 95% one-sided;
     # 3.0 = ~99.7%. Tighter K means the breaker is less likely to false-trip
     # but more likely to miss a real bleed; looser K is the inverse.
-    chili_monthly_dd_breaker_lower_bound_sigmas: float = Field(
+    chili_pattern_dd_breaker_lower_bound_sigmas: float = Field(
         default=2.0,
         ge=0.5,
         le=5.0,
-        validation_alias=AliasChoices("CHILI_MONTHLY_DD_BREAKER_LOWER_BOUND_SIGMAS"),
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DD_BREAKER_LOWER_BOUND_SIGMAS",
+            "CHILI_MONTHLY_DD_BREAKER_LOWER_BOUND_SIGMAS",  # legacy
+        ),
+    )
+
+    # f-portfolio-vs-pattern-breaker-separation — portfolio-tier drawdown
+    # breaker. Gates EVERY entry path (CHILI-attributed, no_pattern, manual,
+    # reconcile-inferred) at the venue-adapter boundary against an
+    # all-closed PnL distribution. Default-OFF. Lives next to the pattern
+    # tier; the two are independent (D5 in the brief) and each gates only
+    # what its trip signal can act on. The pattern tier gates
+    # CHILI-attributed entries from the autotrader; the portfolio tier
+    # gates every BUY entry from the venue adapters regardless of source.
+    chili_portfolio_dd_breaker_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PORTFOLIO_DD_BREAKER_ENABLED"),
+    )
+    # 7-day shadow-soak gate. When enabled=True AND live=False the breaker
+    # computes the "would have tripped" decision, persists a shadow row to
+    # trading_risk_state (regime='portfolio_breaker_shadow'), and logs a
+    # structured INFO line — but DOES NOT block entries. Flip to True
+    # after the operator reviews the shadow-log output and confirms the
+    # tier is calibrated correctly.
+    chili_portfolio_dd_breaker_live: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PORTFOLIO_DD_BREAKER_LIVE"),
+    )
+    # K — sigma multiplier for the portfolio-tier Gaussian lower-bound.
+    # Default 2.0 matches the pattern tier initially; the two tune
+    # independently because their distributions differ — all-closed is
+    # wider than CHILI-attributed in today's data per the 2026-05-15
+    # quant audit.
+    chili_portfolio_dd_breaker_lower_bound_sigmas: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=5.0,
+        validation_alias=AliasChoices(
+            "CHILI_PORTFOLIO_DD_BREAKER_LOWER_BOUND_SIGMAS",
+        ),
+    )
+    # Knob to silence shadow-log emission if the daily volume becomes
+    # noisy (e.g. the breaker would-have-tripped multiple times/day and
+    # the log lines mask other signals). Default-ON when the tier is
+    # enabled; operator flips False to silence. Does NOT affect live
+    # blocking behavior — only the shadow-log row + INFO line.
+    chili_portfolio_dd_breaker_shadow_log_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_PORTFOLIO_DD_BREAKER_SHADOW_LOG_ENABLED",
+        ),
     )
 
     # f-phase3-stop-bleed D4 — Coinbase placement pre-flight cash check.
