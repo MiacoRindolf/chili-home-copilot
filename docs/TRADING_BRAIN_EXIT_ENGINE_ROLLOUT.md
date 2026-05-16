@@ -1,5 +1,66 @@
 # Trading Brain — ExitEngine Unification Rollout (Phase B)
 
+> **STATUS — 2026-05-15: cutover path RETIRED. Shadow logging stays
+> active as a sanity check; the `shadow → authoritative` ladder is no
+> longer the planned migration path.**
+>
+> **Why retired**
+>
+> 1. The cutover-gate verdict query
+>    (`scripts/dispatch-exit-parity-cutover-gate.ps1`) is structurally
+>    incapable of producing signal on backtest. The shadow harness
+>    feeds both engines a synthetic bar with
+>    `open=high=low=close=price`; both emit `exit_price=price` when
+>    they close, so `exit_price_drift_bps = 0` for every `both_close`
+>    row by construction. STDDEV=0 → t-stat=NULL → PASS regardless of
+>    real engine behaviour.
+> 2. The gate's `MIN_SAMPLE_N=1000` floor can't be reached on the live
+>    cohort at current paper-soak rates (516 `both_hold` and 0
+>    `both_close` over a 24h window on 2026-05-10).
+> 3. The only structural disagreement the gate ever surfaced (39
+>    `legacy_only_close` rows in the 2026-05-09 window, all
+>    `priority_winner='exit_trail'`) was the ATR=0 trailing-stop bug
+>    in legacy. It was fixed directly in
+>    `app/services/backtest_service.py` on 2026-05-15
+>    (`f-exit-parity-trail-atr-zero-divergence`). No canonical
+>    migration was required.
+> 4. The bigger evidence-quality questions are answered upstream by
+>    the `f-evidence-fidelity-architecture` arc that landed
+>    2026-05-14 through 2026-05-15 (Phases A–E + activations):
+>    canonical-outcome-layer, execution-truth-wiring, triple-barrier
+>    activation, NetEdge live wiring, multiple-testing discipline. The
+>    proper exit-quality test is now "what P/L did this exit produce
+>    against the triple-barrier label?", not "did canonical and
+>    legacy emit the same string?". See the corresponding CC reports
+>    under `docs/STRATEGY/CC_REPORTS/2026-05-14_*.md` and
+>    `docs/STRATEGY/CC_REPORTS/2026-05-15_evidence-fidelity-followup-activations.md`.
+>
+> **What stays in place**
+>
+> - `BRAIN_EXIT_ENGINE_MODE=shadow` continues to log
+>   `trading_exit_parity_log` rows on every backtest and live close.
+>   Useful as a sanity check that engine refactors didn't change live
+>   behaviour. Stripping the surface entirely is a separate cleanup.
+> - The `compute_parity_v2_fields` helper and the live/backtest hooks
+>   keep working. The migration columns (mig 230) stay.
+> - Section 5's release blocker (no `mode=authoritative` ever) stays
+>   in force — the cutover is retired, not delayed.
+>
+> **What is dropped from the plan of record**
+>
+> - The `shadow → compare → authoritative` ladder below.
+> - The cutover-gate verdict as a gate. The scheduled task that
+>   reports it is queued for retirement / repointing at a
+>   triple-barrier and venue-truth digest instead.
+> - The queued brief `f-exit-parity-trail-atr-zero-divergence`
+>   (consumed by the 2026-05-15 fix; the brief's Option A shipped).
+>
+> The §2 onwards content is preserved verbatim below for archival
+> reference. Read it as "what we *had* planned", not "what we plan
+> to do next".
+
+---
+
 This document describes the rollout of the canonical `ExitEvaluator`
 (`app/services/trading/exit_evaluator.py`) that unifies two divergent exit
 paths — `DynamicPatternStrategy` inside `app/services/backtest_service.py`
