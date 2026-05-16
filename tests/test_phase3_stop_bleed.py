@@ -20,9 +20,13 @@ from sqlalchemy import text
 from app.models.trading import ScanPattern, Trade, _NO_PATTERN_SENTINEL
 from app.services.trading import portfolio_risk
 from app.services.trading.portfolio_risk import (
+    _assert_portfolio_breaker_ok,
     _monthly_attributed_pnl,
     _monthly_dd_threshold,
+    _monthly_total_pnl,
+    _portfolio_dd_threshold,
     check_drawdown_breaker,
+    check_portfolio_drawdown_breaker,
 )
 from app.services.trading.venue.coinbase_spot import (
     _coinbase_preflight_cash_check,
@@ -381,6 +385,385 @@ class TestD1MonthlyDdBreaker:
                 f"monthly_dd_breaker tripped on no_pattern bleed despite the "
                 f"attribution-scope fix: {reason}"
             )
+
+
+# --------------------------------------------------------------------- #
+# f-portfolio-vs-pattern-breaker-separation D6 — two-tier breaker        #
+# --------------------------------------------------------------------- #
+
+def _seed_no_pattern_trade(db, *, user_id: int, pnl: float, days_ago: int) -> None:
+    """Insert a no_pattern (scan_pattern_id NULL) closed trade via raw SQL.
+
+    Bypasses the @validates("scan_pattern_id") guard the ORM enforces on
+    Trade rows — the guard only allows NULL for broker_source='manual' /
+    'reconcile_inferred', but raw SQL is the canonical pattern in this
+    file (see TestD1MonthlyDdBreaker.test_numerator_filters_no_pattern...)
+    for seeding the no_pattern bleed bucket.
+    """
+    db.execute(
+        text(
+            """
+            INSERT INTO trading_trades (
+                user_id, ticker, direction, entry_price, exit_price, quantity,
+                entry_date, exit_date, last_fill_at, filled_at, status, pnl,
+                broker_source, scan_pattern_id, auto_trader_version
+            ) VALUES (
+                :uid, 'NPL', 'long', 10.0, 10.0, 1.0,
+                NOW() - make_interval(days => :da + 1),
+                NOW() - make_interval(days => :da),
+                NOW() - make_interval(days => :da),
+                NOW() - make_interval(days => :da),
+                'closed', :pnl, 'manual', NULL, NULL
+            )
+            """
+        ),
+        {"uid": user_id, "pnl": float(pnl), "da": int(days_ago)},
+    )
+    db.flush()
+
+
+class TestPortfolioBreakerSeparation:
+    """D6 — two-tier drawdown breaker separation.
+
+    Verifies the brief's lever-signal alignment: pattern tier gates
+    CHILI-attributed strategy decisions, portfolio tier gates EVERY
+    venue-adapter entry path. Each tier's threshold is drawn from its
+    own coherent distribution; each can trip / not trip independently.
+    """
+
+    def test_portfolio_breaker_trips_on_all_closed_pnl_exceeding_threshold(
+        self, db, monkeypatch,
+    ):
+        # Seed shape (intentional, std > 0 so the trip margin is robust):
+        #   - 35 days outside the 30d window (days_ago 31..65):
+        #     attributed +10/day, ALL-closed daily_sum = +10. Stable mean.
+        #   - 30 days inside the 30d window (days_ago 1..30):
+        #     attributed -500/day + no_pattern -500/day via raw SQL,
+        #     ALL-closed daily_sum = -1000/day.
+        # Threshold computation (portfolio tier, 65d window):
+        #   mean over all 65 days ≈ ((35×10) + (30×-1000))/65 = -454.6
+        #   variance is large (35d ≈ +10 vs 30d ≈ -1000 → huge spread)
+        #   threshold ends up deeply negative (~ -$19k empirically).
+        # Numerator (recent 30d ALL-closed) = 30 × -1000 = -$30,000,
+        # which is below the threshold by a wide margin → trips.
+        from app import config as app_config
+
+        uid = _seed_user(db, user_id=950)
+        for d in range(35):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=10.0, days_ago=d + 31,
+            )
+        for d in range(30):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=-500.0, days_ago=d + 1,
+            )
+            _seed_no_pattern_trade(
+                db, user_id=uid, pnl=-500.0, days_ago=d + 1,
+            )
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_live", True,
+        )
+        # Silence shadow-log persistence so the test does not write
+        # trading_risk_state rows even on live trips (the trip path persists
+        # a live row; we accept that — verifies the persistence is reachable).
+        monkeypatch.setattr(
+            app_config.settings,
+            "chili_portfolio_dd_breaker_shadow_log_enabled",
+            False,
+        )
+
+        # Sanity: numerator < threshold.
+        threshold, n_obs = _portfolio_dd_threshold(db, uid)
+        monthly_total = _monthly_total_pnl(db, uid)
+        assert threshold is not None and n_obs >= 30
+        assert monthly_total <= threshold, (
+            f"seed math wrong: monthly_total={monthly_total} "
+            f"> threshold={threshold}"
+        )
+
+        tripped, reason = check_portfolio_drawdown_breaker(db, uid)
+        assert tripped is True
+        assert reason is not None
+        assert "portfolio_dd_breaker" in reason
+        assert "ALL closed trades" in reason
+
+    def test_portfolio_breaker_does_not_trip_on_chili_loss_when_no_pattern_offsets(
+        self, db, monkeypatch,
+    ):
+        """Lever-signal alignment proof — portfolio tier sees ALL-closed.
+
+        Seed shape:
+          - 35 outside days: attributed +$30, no_pattern -$30 → daily_sum=0
+            (with variance from the per-row magnitudes).
+          - 30 inside days: attributed -$500, no_pattern +$600 → daily_sum=+$100.
+        Portfolio numerator = 30 × +100 = +$3,000 → above threshold → no trip.
+        Pattern numerator = 30 × -500 = -$15,000 → below threshold → trips.
+        This is the rare case the brief calls out: CHILI loses big but
+        no_pattern offsets account-level → portfolio safe to keep trading.
+        """
+        from app import config as app_config
+
+        uid = _seed_user(db, user_id=951)
+        for d in range(35):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=30.0, days_ago=d + 31,
+            )
+            _seed_no_pattern_trade(
+                db, user_id=uid, pnl=-30.0, days_ago=d + 31,
+            )
+        for d in range(30):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=-500.0, days_ago=d + 1,
+            )
+            _seed_no_pattern_trade(
+                db, user_id=uid, pnl=600.0, days_ago=d + 1,
+            )
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_live", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings,
+            "chili_portfolio_dd_breaker_shadow_log_enabled",
+            False,
+        )
+
+        # Portfolio: numerator > threshold → does NOT trip.
+        tripped_p, reason_p = check_portfolio_drawdown_breaker(db, uid)
+        assert tripped_p is False
+        assert reason_p is None
+
+        # Pattern: numerator (attributed-only) deeply negative → trips.
+        monkeypatch.setattr(
+            app_config.settings, "chili_pattern_dd_breaker_enabled", True,
+        )
+        tripped_a, reason_a = check_drawdown_breaker(db, uid, capital=1_000_000.0)
+        assert tripped_a is True
+        assert reason_a is not None and "monthly_dd_breaker" in reason_a
+
+    def test_pattern_breaker_still_works_post_rename(self, db, monkeypatch):
+        """The pattern tier still trips under its own distribution after
+        the chili_monthly_dd_breaker_enabled → chili_pattern_dd_breaker_enabled
+        rename. Regression guard against the rename breaking the existing
+        D1 path."""
+        from app import config as app_config
+
+        uid = _seed_user(db, user_id=952)
+        for d in range(35):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=10.0, days_ago=d + 31,
+            )
+        for d in range(30):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=-1000.0, days_ago=d + 1,
+            )
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_pattern_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings,
+            "chili_pattern_dd_breaker_lower_bound_sigmas",
+            2.0,
+        )
+        tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
+        assert tripped is True
+        # Trip-reason wording stays "monthly_dd_breaker:" for log/SQL
+        # backward-compat — the rename is on the settings key, not the
+        # log prefix (operators have parsers built on the old text).
+        assert reason is not None and "monthly_dd_breaker" in reason
+
+    def test_portfolio_tripped_blocks_manual_buy_through_coinbase_adapter(
+        self, db, monkeypatch,
+    ):
+        """Trickiest sub-test — exercises the venue-adapter gate.
+
+        Mocks the broker client factory so no real network call is made,
+        but leaves the test DB real so the breaker's SQL runs against
+        seeded data. The gate fires from the top of place_market_order
+        and short-circuits before any broker call — proved by asserting
+        the mock's market_order_buy was NEVER invoked.
+        """
+        from unittest.mock import MagicMock
+
+        from app import config as app_config
+        from app.services.trading.venue.coinbase_spot import CoinbaseSpotAdapter
+        from app.services.trading.venue import (
+            reset_duplicate_client_order_guard_for_tests,
+        )
+
+        uid = _seed_user(db, user_id=953)
+        for d in range(35):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=10.0, days_ago=d + 31,
+            )
+        for d in range(30):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=-500.0, days_ago=d + 1,
+            )
+            _seed_no_pattern_trade(
+                db, user_id=uid, pnl=-500.0, days_ago=d + 1,
+            )
+        # _assert_portfolio_breaker_ok opens its own SessionLocal — commit
+        # seeds so the separate connection sees them.
+        db.commit()
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_live", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings,
+            "chili_portfolio_dd_breaker_shadow_log_enabled",
+            False,
+        )
+        # Force adapter through the gate even without Coinbase creds.
+        monkeypatch.setattr(
+            app_config.settings, "chili_coinbase_spot_adapter_enabled", True,
+        )
+
+        reset_duplicate_client_order_guard_for_tests()
+        mock_client = MagicMock()
+        mock_client.market_order_buy.return_value = {
+            "success": True,
+            "success_response": {"order_id": "should_not_be_called"},
+        }
+        adapter = CoinbaseSpotAdapter(client_factory=lambda: mock_client)
+        adapter.is_enabled = lambda: True  # type: ignore[method-assign]
+        adapter._require_client = lambda: mock_client  # type: ignore[method-assign]
+
+        result = adapter.place_market_order(
+            product_id="BTC-USD",
+            side="buy",
+            base_size="0.001",
+            client_order_id="test-portfolio-blocked",
+        )
+
+        assert result.get("ok") is False
+        err = (result.get("error") or "")
+        assert err.startswith("portfolio_breaker:"), (
+            f"expected envelope to start with portfolio_breaker:, got {err!r}"
+        )
+        # Gate must short-circuit BEFORE the broker is touched.
+        assert not mock_client.market_order_buy.called, (
+            "portfolio breaker gate did NOT short-circuit before the broker "
+            "client call — the gate is wired in the wrong position"
+        )
+
+        # Cleanup committed seeds (next test's TRUNCATE will handle it too,
+        # but explicit teardown avoids surprises if this test runs in
+        # isolation).
+        db.execute(
+            text("DELETE FROM trading_trades WHERE user_id = :uid"),
+            {"uid": uid},
+        )
+        db.execute(
+            text(
+                "DELETE FROM trading_risk_state WHERE regime = "
+                "'portfolio_breaker'"
+            ),
+        )
+        db.commit()
+
+    def test_portfolio_not_tripped_pattern_tripped_blocks_attributed_allows_no_pattern(
+        self, db, monkeypatch,
+    ):
+        """The lever-alignment crossover case.
+
+        Same seed as test 7.2 (no_pattern offsets the attributed loss at
+        account level). Both tiers enabled. Portfolio tier does NOT
+        trip; pattern tier DOES trip. The pattern tier's verdict gates
+        only CHILI-attributed strategy decisions inside auto_trader; the
+        venue-adapter gate (portfolio tier) ALLOWS the entry through, so
+        a no_pattern reconcile-driven buy would proceed.
+        """
+        from app import config as app_config
+
+        uid = _seed_user(db, user_id=954)
+        for d in range(35):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=30.0, days_ago=d + 31,
+            )
+            _seed_no_pattern_trade(
+                db, user_id=uid, pnl=-30.0, days_ago=d + 31,
+            )
+        for d in range(30):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=-500.0, days_ago=d + 1,
+            )
+            _seed_no_pattern_trade(
+                db, user_id=uid, pnl=600.0, days_ago=d + 1,
+            )
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_pattern_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_live", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings,
+            "chili_portfolio_dd_breaker_shadow_log_enabled",
+            False,
+        )
+
+        # Pattern tier trips (attributed-only distribution sees the loss).
+        tripped_a, reason_a = check_drawdown_breaker(
+            db, uid, capital=1_000_000.0,
+        )
+        assert tripped_a is True
+        assert reason_a is not None and "monthly_dd_breaker" in reason_a
+
+        # Portfolio tier does NOT trip (no_pattern offset keeps numerator
+        # above threshold).
+        tripped_p, reason_p = check_portfolio_drawdown_breaker(db, uid)
+        assert tripped_p is False
+        assert reason_p is None
+
+    def test_alias_backwards_compat_legacy_env_var_still_honored(
+        self, monkeypatch,
+    ):
+        """Verifies the chili_monthly_dd_breaker_enabled →
+        chili_pattern_dd_breaker_enabled rename doesn't break operators
+        still on the legacy CHILI_MONTHLY_DD_BREAKER_ENABLED env var.
+
+        Why a fresh Settings() instantiation instead of monkeypatch on the
+        existing singleton: pydantic's AliasChoices resolves at field
+        construction (when Settings.__init__ reads env), not on attribute
+        access. monkeypatch.setattr(settings, "field", val) bypasses the
+        alias path entirely and would let this test pass even if the
+        AliasChoices wiring were broken. Re-instantiating Settings() with
+        env vars set is the ONLY way to exercise the alias-resolution
+        code path. Do not "fix" this back to monkeypatch.setattr.
+        """
+        from app.config import Settings
+
+        monkeypatch.delenv("CHILI_PATTERN_DD_BREAKER_ENABLED", raising=False)
+        monkeypatch.delenv("CHILI_MONTHLY_DD_BREAKER_ENABLED", raising=False)
+
+        # Case 1: only the legacy env var set → resolves via the alias.
+        monkeypatch.setenv("CHILI_MONTHLY_DD_BREAKER_ENABLED", "true")
+        s1 = Settings()
+        assert s1.chili_pattern_dd_breaker_enabled is True
+
+        # Case 2: both set, new name takes precedence (AliasChoices order
+        # is new-first, legacy-second). One boolean field — no
+        # double-counting possible.
+        monkeypatch.setenv("CHILI_PATTERN_DD_BREAKER_ENABLED", "false")
+        s2 = Settings()
+        assert s2.chili_pattern_dd_breaker_enabled is False
 
 
 # --------------------------------------------------------------------- #
