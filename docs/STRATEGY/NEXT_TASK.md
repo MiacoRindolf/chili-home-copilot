@@ -1,46 +1,66 @@
-# NEXT_TASK: f-multiple-testing-discipline (Phase E of evidence-fidelity)
+# NEXT_TASK: f-phase3-stop-bleed (Phase 3 stop-bleed from 2026-05-15 quant audit)
 
 STATUS: DONE
 
 ## Goal
 
-**Phase E (final) of evidence-fidelity-architecture.** Fix the DSR
-multiple-testing correction wiring — `cpcv_gate.py:120` hardcoded
-`n_hypotheses_tested=1`, which effectively disabled the DSR (Bailey &
-López de Prado 2014) deflation. Add Benjamini-Hochberg family-level
-FDR accounting per Harvey-Liu-Zhu (2016), shadow-logged for 7 days
-behind a default-off flag (`chili_family_fdr_enabled`).
+Ship the four "stop-the-bleeding" items from the Phase 3 roadmap of the
+2026-05-15 quant audit:
+
+1. Monthly-realized-drawdown gate inside the existing
+   `check_drawdown_breaker` (so April-2026-class single-month bleeds
+   trip the kill switch).
+2. Five rejection-histogram code defects (NameError diagnostic
+   improvement, INVALID_ARGUMENT product_id normalizer, Insufficient-balance
+   pre-flight, stop-not-below-entry producer fix, model-layer scan_pattern_id
+   guard).
+3. BNB-USD zombie row cleanup (migration 243).
+4. Verification: re-run discovery probe; confirm rejection counts drop.
 
 ## Brief
 
-`docs/STRATEGY/QUEUED/f-multiple-testing-discipline.md`
+`docs/STRATEGY/QUEUED/f-phase3-stop-bleed.md`
 
-Parent: `docs/STRATEGY/QUEUED/f-evidence-fidelity-architecture-2026-05-14.md`
+## Context
 
-Prior phases shipped:
-- A `ca1705f` — canonical outcome split
-- B `51da8cc` — execution-truth wiring
-- C `340215f` — triple-barrier label scheduler
-- D `e5a04e5` — netedge live wiring
+- `docs/AUDITS/audit-discovery-stats-output.txt`
+- `docs/AUDITS/audit-no-pattern-timing-output.txt`
+- Re-runnable via `.\scripts\dispatch-audit-discovery.ps1` and
+  `.\scripts\dispatch-audit-no-pattern-timing.ps1` through the
+  `_claude_daemon` dispatch loop.
 
 ## Deliverables (per brief)
 
-1. `promotion_gate._count_variants_in_family` helper (D1+D2)
-2. `cpcv_gate.py:120` — replace hardcoded `=1` with family count (D1)
-3. Migration 242 — `pattern_family_trial_log` table (D3)
-4. `app/services/trading/family_fdr.py` — BH math + shadow logger (D4)
-5. `cpcv_adaptive_gate.py` integration + `chili_family_fdr_enabled` flag (D5+D6)
-6. `tests/test_multiple_testing_discipline.py` — 17 tests, all PASS (D7)
-7. CC_REPORT `2026-05-14_multiple-testing-discipline.md` (D8)
+D1. Monthly DD extension in `portfolio_risk.py:check_drawdown_breaker`,
+    threshold computed empirically (Gaussian lower-bound on 30-day
+    realized PnL from CHILI-attributed history; no hardcoded dollar
+    amount). Flags: `chili_monthly_dd_breaker_enabled` (default off),
+    `chili_monthly_dd_breaker_lower_bound_sigmas` (default 2.0 = 95%).
+D2. NameError diagnostic improvement at `auto_trader.py:1602`
+D3. Product-ID normalizer (`_normalize_product_id`) in `coinbase_spot.py`
+D4. Pre-flight cash-check in three Coinbase placement methods
+D5. Upstream producer fix for `stop_not_below_entry` alerts
+D6. `@validates("scan_pattern_id")` guard at `app/models/trading.py:Trade`
+D7. Migration 243: BNB-USD zombie row (id=1861) cleanup
+D8. `tests/test_phase3_stop_bleed.py` — one test per deliverable
+D9. Post-deploy: re-run audit-discovery-stats probe + record deltas
 
 ## Hard constraints
 
-- Default fallback when no family info: `n_hypotheses_tested=1` (no regression)
-- Flag-gated: `chili_family_fdr_enabled` defaults False; BH adjustment shadow-logged
-- Reads Phase A `corrected_*` columns (no autotrader / venue / broker touched)
-- Migration additive only (new table + index)
-- TEST_DATABASE_URL must end in `_test`
+- One commit per deliverable (clean audit trail).
+- All tests pass before deploy.
+- Drawdown breaker default OFF; operator flips ON after walk-forward
+  shows it would have tripped ~2026-04-22.
+- No alpha-generation code touched (no autotrader entry-logic changes,
+  no pattern miner changes, no LLM cascade changes — only gates).
+- TEST_DATABASE_URL ends in `_test`.
+- D5 (producer fix) may be deferred to a follow-up brief if non-obvious;
+  ship D1–D4, D6–D9 regardless. The existing rule at
+  `auto_trader_rules.py:915` already rejects the bad orders.
 
 ## Result
 
-17 tests PASS. Phase E (final) of evidence-fidelity arc complete.
+CC_REPORT at `docs/STRATEGY/CC_REPORTS/2026-05-15_phase3-stop-bleed.md`,
+covering: 7 commits, walk-forward DD-breaker simulation (would have
+tripped on/around 2026-04-22), tests passing, post-deploy histogram
+confirming initial movement on the four bug counts.
