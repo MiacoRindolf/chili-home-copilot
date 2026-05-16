@@ -15994,6 +15994,60 @@ def _migration_242_pattern_family_trial_log(conn) -> None:
         conn.rollback()
 
 
+def _migration_243_bnb_usd_zombie_cleanup(conn) -> None:
+    """f-phase3-stop-bleed D7 — clean up the BNB-USD zombie row id=1861.
+
+    The 2026-05-15 audit flagged id=1861 (qty=0, entry=$680.46) as a
+    still-open no_pattern position with $0 notional -- sterile, not real
+    exposure, but inflating the open-positions count. Cancel the row
+    only if it still matches ALL four guards (id, ticker, status, qty=0);
+    skip silently otherwise.
+
+    CRDL (id=1814) is EXPLICITLY out of scope per the brief -- operator
+    decision 2026-05-15 to keep it open and let CHILI's existing bracket
+    stop ($1.1965) and target ($1.7539) manage the exit. The WHERE
+    clause's ``id = 1861`` filter excludes CRDL categorically.
+
+    Idempotent: ``status IN ('open', 'working')`` ensures the second run
+    finds no matching rows and is a no-op. Wrapped in try/except so a
+    missing row (e.g. chili_test, other non-prod envs) is logged but
+    does not fail the startup migration pass.
+    """
+    rc = -1
+    try:
+        result = conn.execute(
+            text(
+                """
+                UPDATE trading_trades
+                   SET status = 'cancelled',
+                       exit_reason = 'zombie_cleanup_2026_05_15_phase3',
+                       exit_date = now()
+                 WHERE id = 1861
+                   AND ticker = 'BNB-USD'
+                   AND status IN ('open', 'working')
+                   AND COALESCE(filled_quantity, quantity, 0) = 0
+                """
+            )
+        )
+        try:
+            rc = result.rowcount
+        except Exception:
+            rc = -1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig243] BNB-USD zombie cleanup raised; rolling back",
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "[mig243] BNB-USD zombie cleanup affected %d row(s) "
+        "(0 expected on second run or non-prod env)",
+        rc,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16267,6 +16321,8 @@ MIGRATIONS = [
      _migration_241_scan_pattern_canonical_outcome_split),
     ("242_pattern_family_trial_log",
      _migration_242_pattern_family_trial_log),
+    ("243_bnb_usd_zombie_cleanup",
+     _migration_243_bnb_usd_zombie_cleanup),
 ]
 
 
