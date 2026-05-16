@@ -758,6 +758,149 @@ def _eligible_lifecycle_stages(*, live: bool = False) -> set[str]:
     return stages
 
 
+# f-netedge-live-wiring (Phase D of evidence-fidelity, 2026-05-14):
+# Module-level state for the regime-diagnostic emitter. Emits at most once
+# every _NETEDGE_DIAG_MIN_INTERVAL_S seconds when >50% of recent NetEdge
+# shadow rows have unknown/empty regime — signals that the regime_ledger
+# feed isn't flowing into the autotrader path.
+_NETEDGE_DIAG_LAST_EMIT_TS: float = 0.0
+_NETEDGE_DIAG_MIN_INTERVAL_S: float = 300.0
+
+
+def _emit_netedge_shadow_score(
+    db: Session,
+    alert: BreakoutAlert,
+    entry_price: float,
+) -> None:
+    """Shadow-log a NetEdge score for *alert* alongside the heuristic gate.
+
+    Stage 1 of f-netedge-live-wiring: the live autotrader bypasses
+    ``portfolio_allocator.evaluate`` (which is where NetEdge is fed today),
+    so every recent NetEdgeScoreLog row has ``scan_pattern_id=null`` and
+    ``regime=unknown``. This helper fixes that by computing a shadow score
+    from the autotrader's own context — pattern, regime-at-alert, stop,
+    target, asset_class — so the calibrator can learn per-pattern and
+    per-regime.
+
+    Failure of any step (import, DB read, score) MUST NOT bubble up and
+    block the autotrader. The caller's contract is "write-only side
+    effect, never raise."
+    """
+    try:
+        from . import net_edge_ranker as _net_edge
+
+        if not _net_edge.mode_is_active():
+            return
+        if alert is None or entry_price is None or float(entry_price) <= 0:
+            return
+
+        stop = float(alert.stop_loss) if alert.stop_loss is not None else 0.0
+        if stop <= 0:
+            return
+        target = float(alert.target_price) if alert.target_price is not None else None
+
+        asset_class = (
+            "crypto" if (alert.asset_type or "").strip().lower() == "crypto" else "stock"
+        )
+
+        raw_prob: float | None = None
+        if alert.scan_pattern_id:
+            from .pattern_stats_accessor import get_corrected_pattern_stats
+
+            pat = (
+                db.query(ScanPattern)
+                .filter(ScanPattern.id == int(alert.scan_pattern_id))
+                .one_or_none()
+            )
+            if pat is not None:
+                stats = get_corrected_pattern_stats(pat)
+                if stats.win_rate is not None:
+                    wr = float(stats.win_rate)
+                    raw_prob = wr / 100.0 if wr > 1.0 else wr
+        if raw_prob is None:
+            return
+
+        regime = (alert.regime_at_alert or "").strip() or None
+        if regime is None:
+            try:
+                from .regime import get_regime_indicators
+
+                regime = (
+                    str(get_regime_indicators().get("regime_composite") or "").strip() or None
+                )
+            except Exception:
+                regime = None
+
+        timeframe = (alert.timeframe or "").strip() or None
+
+        _net_edge.score(
+            db,
+            _net_edge.NetEdgeSignalContext(
+                ticker=alert.ticker,
+                asset_class=asset_class,
+                scan_pattern_id=int(alert.scan_pattern_id) if alert.scan_pattern_id else None,
+                raw_prob=float(raw_prob),
+                entry_price=float(entry_price),
+                stop_price=stop,
+                target_price=target,
+                regime=regime,
+                timeframe=timeframe,
+                heuristic_score=None,
+            ),
+        )
+    except Exception as exc:
+        logger.debug("[autotrader] netedge shadow score failed: %s", exc)
+
+
+def _maybe_emit_regime_diagnostic(db: Session) -> None:
+    """Warn when >50% of recent NetEdge shadow rows have unknown regime.
+
+    Rate-limited to once per ``_NETEDGE_DIAG_MIN_INTERVAL_S`` seconds so it
+    doesn't spam the log. Reads only — never raises. Looks at the last 100
+    rows from the past hour; if ``regime`` is null/empty/unknown for >50%
+    of them, logs a WARNING so the operator notices the regime_ledger
+    isn't flowing into the autotrader path.
+    """
+    global _NETEDGE_DIAG_LAST_EMIT_TS
+    try:
+        now_ts = time.time()
+        if now_ts - _NETEDGE_DIAG_LAST_EMIT_TS < _NETEDGE_DIAG_MIN_INTERVAL_S:
+            return
+        from datetime import timedelta as _td
+
+        from ...models.trading import NetEdgeScoreLog
+
+        cutoff = datetime.utcnow() - _td(hours=1)
+        rows = (
+            db.query(NetEdgeScoreLog.regime)
+            .filter(NetEdgeScoreLog.created_at >= cutoff)
+            .order_by(NetEdgeScoreLog.id.desc())
+            .limit(100)
+            .all()
+        )
+        n = len(rows)
+        if n < 10:
+            return
+        unknown = sum(
+            1
+            for (r,) in rows
+            if r is None or str(r).strip().lower() in ("", "unknown", "none", "na")
+        )
+        frac = unknown / n
+        if frac > 0.5:
+            logger.warning(
+                "[autotrader] netedge regime-snapshot diagnostic: %d/%d recent "
+                "rows have unknown/empty regime (%.0f%%) — regime_ledger feed "
+                "may be stale or missing",
+                unknown,
+                n,
+                frac * 100.0,
+            )
+            _NETEDGE_DIAG_LAST_EMIT_TS = now_ts
+    except Exception as exc:
+        logger.debug("[autotrader] netedge regime diagnostic failed: %s", exc)
+
+
 def is_shadow_promoted_pattern(pat: ScanPattern) -> bool:
     """f-promotion-pipeline-rebalance Phase 3 (2026-05-10):
     True iff *pat* is at lifecycle_stage 'shadow_promoted' AND the
@@ -1032,6 +1175,14 @@ def _process_one_alert(
             out["skipped"] += 1
             _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
             return
+
+    # f-netedge-live-wiring Stage 1: parallel NetEdge shadow score.
+    # Runs after every gate that could have rejected the alert but BEFORE
+    # broker placement. Shadow-log only — never gates the decision; the
+    # heuristic path below remains authoritative until a future brief
+    # flips brain_net_edge_ranker_mode to ``authoritative``.
+    _emit_netedge_shadow_score(db, alert, float(px))
+    _maybe_emit_regime_diagnostic(db)
 
     if scale_plan is not None:
         _execute_scale_in(db, uid, alert, scale_plan, px, snap, llm_snap, live, out)
