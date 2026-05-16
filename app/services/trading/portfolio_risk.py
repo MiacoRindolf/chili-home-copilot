@@ -1012,6 +1012,290 @@ def _monthly_attributed_pnl(
     return float(result or 0.0)
 
 
+def _portfolio_dd_threshold(
+    db: Session,
+    user_id: int | None,
+    settings_obj: Any | None = None,
+) -> tuple[float | None, int]:
+    """Empirical Gaussian lower-bound on 30-day realized PnL, ALL-CLOSED scope.
+
+    Parallel to :func:`_monthly_dd_threshold` except the WHERE clause has
+    NO ``scan_pattern_id`` predicates -- this tier's distribution is
+    every closed trade (attributed, no_pattern, manual,
+    reconcile-inferred). Returns ``(threshold_usd, n_days_observed)``.
+    When ``n_days_observed < 30`` the threshold is ``None`` and the
+    portfolio breaker MUST skip the check, matching the pattern tier's
+    n<30 behavior.
+
+    The K-sigma multiplier is loaded from
+    ``chili_portfolio_dd_breaker_lower_bound_sigmas`` (default 2.0) so
+    the two tiers tune independently. Tier separation is per
+    f-portfolio-vs-pattern-breaker-separation -- the pattern tier's lever
+    halts CHILI-attributed entries, the portfolio tier's lever halts
+    EVERY entry path; each tier's distribution must be drawn from the
+    population its lever can act on for the K*sigma math to remain
+    coherent.
+    """
+    from sqlalchemy import text
+
+    rows = db.execute(
+        text(
+            """
+            SELECT DATE_TRUNC('day',
+                       COALESCE(exit_date, last_fill_at, filled_at))::date AS d,
+                   COALESCE(SUM(pnl), 0)::float AS daily_pnl
+              FROM trading_trades
+             WHERE user_id = :uid
+               AND status = 'closed'
+               AND pnl IS NOT NULL
+               AND COALESCE(exit_date, last_fill_at, filled_at)
+                   >= now() - interval '180 days'
+             GROUP BY 1
+            """
+        ),
+        {"uid": user_id},
+    ).fetchall()
+
+    n = len(rows)
+    if n < 30:
+        return None, n
+
+    daily = [float(r.daily_pnl or 0.0) for r in rows]
+    mean_d = sum(daily) / n
+    var_d = sum((p - mean_d) ** 2 for p in daily) / max(n - 1, 1)
+    std_d = var_d ** 0.5
+
+    if settings_obj is None:
+        from ...config import settings as _s
+        settings_obj = _s
+    k = float(getattr(
+        settings_obj, "chili_portfolio_dd_breaker_lower_bound_sigmas", 2.0,
+    ))
+
+    threshold = (30.0 * mean_d) - k * ((30.0 ** 0.5) * std_d)
+    return threshold, n
+
+
+def _monthly_total_pnl(
+    db: Session,
+    user_id: int | None,
+) -> float:
+    """Sum of realized PnL on ALL closed trades over the trailing 30 days.
+
+    Parallel to :func:`_monthly_attributed_pnl` but without the
+    ``scan_pattern_id`` filter. Numerator for the portfolio tier; sampled
+    from the same population as :func:`_portfolio_dd_threshold` so the
+    numerator/denominator attribution-symmetry that
+    f-monthly-dd-breaker-numerator-symmetrize enforced for the pattern
+    tier is preserved here for the portfolio tier.
+    """
+    from sqlalchemy import text
+
+    result = db.execute(
+        text(
+            """
+            SELECT COALESCE(SUM(pnl), 0)::float
+              FROM trading_trades
+             WHERE user_id = :uid
+               AND status = 'closed'
+               AND pnl IS NOT NULL
+               AND COALESCE(exit_date, last_fill_at, filled_at)
+                   >= now() - interval '30 days'
+            """
+        ),
+        {"uid": user_id},
+    ).scalar()
+    return float(result or 0.0)
+
+
+def _persist_portfolio_breaker_state(
+    tripped: bool,
+    reason: str | None,
+    regime: str,
+) -> None:
+    """Write portfolio-tier breaker state to ``trading_risk_state``.
+
+    Mirrors :func:`_persist_breaker_state` (the pattern tier helper) but
+    takes ``regime`` as a parameter so shadow rows
+    (regime='portfolio_breaker_shadow') and live trip rows
+    (regime='portfolio_breaker') are distinguishable in audit queries
+    without a schema migration. Same rollback-before-close discipline.
+    """
+    try:
+        from ...db import SessionLocal
+        from sqlalchemy import text
+        sess = SessionLocal()
+        try:
+            sess.execute(text(
+                "INSERT INTO trading_risk_state (user_id, snapshot_date, "
+                "breaker_tripped, breaker_reason, regime, capital) "
+                "VALUES (:uid, NOW(), :tripped, :reason, :regime, 0)"
+            ), {
+                "uid": None,
+                "tripped": tripped,
+                "reason": (reason or "")[:500],
+                "regime": regime,
+            })
+            sess.commit()
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+    except Exception:
+        logger.debug(
+            "[portfolio_breaker] persist failed", exc_info=True,
+        )
+
+
+def check_portfolio_drawdown_breaker(
+    db: Session,
+    user_id: int | None,
+) -> tuple[bool, str | None]:
+    """Portfolio-tier drawdown breaker.
+
+    Independent of :func:`check_drawdown_breaker` (which gates the
+    pattern tier). This function:
+
+    - Returns ``(False, None)`` immediately when
+      ``chili_portfolio_dd_breaker_enabled`` is False.
+    - Computes threshold via :func:`_portfolio_dd_threshold` and
+      numerator via :func:`_monthly_total_pnl`.
+    - Skips with a WARNING when n_days_observed < 30 (matches the
+      pattern tier's n<30 behavior; the portfolio tier may be dormant
+      while the pattern tier is active or vice versa -- each tier's
+      history is scoped independently).
+    - In **shadow mode** (enabled=True, live=False): computes the
+      would-have-tripped decision, persists a shadow row to
+      ``trading_risk_state`` with regime='portfolio_breaker_shadow' and
+      emits a structured INFO log line, but ALWAYS returns
+      ``(False, None)`` so entries proceed. This is the 7-day soak path
+      operators run before flipping the live flag.
+    - In **live mode** (enabled=True, live=True): on trip, persists a
+      live row with regime='portfolio_breaker' and returns
+      ``(True, reason)`` -- the venue-adapter gate then blocks the entry.
+
+    Returns ``(tripped: bool, reason: str | None)``.
+    """
+    from ...config import settings as _s
+    if not bool(getattr(_s, "chili_portfolio_dd_breaker_enabled", False)):
+        return False, None
+
+    try:
+        threshold, n_obs = _portfolio_dd_threshold(db, user_id, settings_obj=_s)
+    except Exception:
+        logger.warning(
+            "[portfolio_breaker] _portfolio_dd_threshold failed; skipping check",
+            exc_info=True,
+        )
+        return False, None
+
+    if threshold is None:
+        logger.warning(
+            "[portfolio_breaker] enabled but only %dd all-closed history "
+            "(<30 required); skipping check. The breaker activates "
+            "organically once history accumulates.", n_obs,
+        )
+        return False, None
+
+    try:
+        monthly_pnl = _monthly_total_pnl(db, user_id)
+    except Exception:
+        logger.warning(
+            "[portfolio_breaker] _monthly_total_pnl failed; skipping check",
+            exc_info=True,
+        )
+        return False, None
+
+    if float(monthly_pnl) > float(threshold):
+        return False, None
+
+    k_val = float(getattr(
+        _s, "chili_portfolio_dd_breaker_lower_bound_sigmas", 2.0,
+    ))
+    reason = (
+        f"portfolio_dd_breaker: 30-day realized PnL "
+        f"${float(monthly_pnl):.2f} (ALL closed trades) "
+        f"<= empirical Gaussian lower-bound ${float(threshold):.2f} "
+        f"(K={k_val}σ, computed from {n_obs}d ALL-closed history)"
+    )
+
+    live = bool(getattr(_s, "chili_portfolio_dd_breaker_live", False))
+    if not live:
+        if bool(getattr(_s, "chili_portfolio_dd_breaker_shadow_log_enabled", True)):
+            _persist_portfolio_breaker_state(
+                tripped=False,
+                reason=f"SHADOW: {reason}",
+                regime="portfolio_breaker_shadow",
+            )
+            logger.info(
+                "[portfolio_breaker_shadow] would_have_tripped=true "
+                "threshold=%.2f monthly_total_pnl=%.2f n_obs=%d "
+                "k_sigma=%.1f reason=%s",
+                threshold, monthly_pnl, n_obs, k_val, reason,
+            )
+        return False, None
+
+    _persist_portfolio_breaker_state(
+        tripped=True,
+        reason=reason,
+        regime="portfolio_breaker",
+    )
+    logger.warning("[portfolio_breaker] TRIPPED: %s", reason)
+    return True, reason
+
+
+def _assert_portfolio_breaker_ok(
+    user_id: int | None = None,
+) -> tuple[bool, str | None]:
+    """Venue-adapter entry boundary gate for the portfolio breaker.
+
+    Single call site for both ``robinhood_spot`` and ``coinbase_spot``
+    buy-entry methods. Self-managed DB session because venue adapters
+    don't have request-scoped DB context — do NOT try to "optimize" this
+    by threading a session through the venue adapter signature; the
+    rate-limiter and idempotency-store already make DB-shape calls in
+    the same hot path, so this is consistent with the existing adapter
+    cost profile.
+
+    Returns ``(True, None)`` when the breaker is disabled, in shadow
+    mode, has insufficient history, or is not tripped — i.e. when the
+    entry should proceed. Returns ``(False, reason)`` ONLY when both
+    ``chili_portfolio_dd_breaker_enabled`` AND
+    ``chili_portfolio_dd_breaker_live`` are True AND the breaker's trip
+    condition is met.
+
+    Fails OPEN on DB / exception (matches the pattern tier's defensive
+    behavior): a safety belt that goes blind must not halt the system.
+    Logs a warning and returns ``(True, None)``. Fail-closed would be a
+    denial-of-service surface for any DB hiccup.
+    """
+    try:
+        from ...config import settings as _s
+        if not bool(getattr(_s, "chili_portfolio_dd_breaker_enabled", False)):
+            return True, None
+        from ...db import SessionLocal
+        sess = SessionLocal()
+        try:
+            tripped, reason = check_portfolio_drawdown_breaker(sess, user_id)
+            if not tripped:
+                return True, None
+            return False, reason
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+    except Exception:
+        logger.warning(
+            "[portfolio_breaker] gate check raised; failing OPEN",
+            exc_info=True,
+        )
+        return True, None
+
+
 def check_drawdown_breaker(
     db: Session,
     user_id: int | None,
