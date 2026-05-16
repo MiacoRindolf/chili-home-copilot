@@ -2587,25 +2587,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_ENABLED"),
     )
     chili_cohort_score_weight_cpcv_sharpe: float = Field(
-        default=0.30,
+        default=0.10,
         validation_alias=AliasChoices(
             "CHILI_COHORT_SCORE_WEIGHT_CPCV_SHARPE"
         ),
     )
     chili_cohort_score_weight_deflated_sharpe: float = Field(
-        default=0.20,
+        default=0.05,
         validation_alias=AliasChoices(
             "CHILI_COHORT_SCORE_WEIGHT_DEFLATED_SHARPE"
         ),
     )
     chili_cohort_score_weight_pbo_inverse: float = Field(
-        default=0.15,
+        default=0.05,
         validation_alias=AliasChoices(
             "CHILI_COHORT_SCORE_WEIGHT_PBO_INVERSE"
         ),
     )
     chili_cohort_score_weight_directional_wr: float = Field(
-        default=0.25,
+        default=0.35,
         validation_alias=AliasChoices(
             "CHILI_COHORT_SCORE_WEIGHT_DIRECTIONAL_WR"
         ),
@@ -2614,6 +2614,45 @@ class Settings(BaseSettings):
         default=0.10,
         validation_alias=AliasChoices(
             "CHILI_COHORT_SCORE_WEIGHT_DECAY_INVERSE"
+        ),
+    )
+    # f-composite-quality-reweight-realized-evidence (2026-05-16): realized-PnL
+    # component weight + inputs + cohort-promote floor. New defaults sum to 1.0
+    # (0.10 + 0.05 + 0.05 + 0.35 + 0.10 + 0.35). Cowork-resolved Q1/Q2/Q3.
+    chili_cohort_score_weight_realized: float = Field(
+        default=0.35,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_WEIGHT_REALIZED"
+        ),
+    )
+    chili_cohort_score_realized_pnl_normalizer_pct: float = Field(
+        default=0.01,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_REALIZED_PNL_NORMALIZER_PCT"
+        ),
+    )
+    chili_cohort_score_realized_evidence_tau: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_REALIZED_EVIDENCE_TAU"
+        ),
+    )
+    chili_cohort_score_realized_window_days: int = Field(
+        default=90,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_REALIZED_WINDOW_DAYS"
+        ),
+    )
+    chili_cohort_promote_min_realized_trades_for_floor: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_PROMOTE_MIN_REALIZED_TRADES_FOR_FLOOR"
+        ),
+    )
+    chili_cohort_promote_max_realized_avg_pnl_pct_negative: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_PROMOTE_MAX_REALIZED_AVG_PNL_PCT_NEGATIVE"
         ),
     )
     # Legacy knobs kept for env compatibility. The active cohort selector now
