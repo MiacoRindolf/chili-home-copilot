@@ -1035,6 +1035,12 @@ def _portfolio_dd_threshold(
     EVERY entry path; each tier's distribution must be drawn from the
     population its lever can act on for the K*sigma math to remain
     coherent.
+
+    When ``user_id`` is None (the venue-adapter gate's default) the
+    query drops the user filter and aggregates across the entire
+    household account. CHILI is a single-account-per-broker app, so
+    "portfolio" semantically means the broker account regardless of
+    which household user initiated the trade.
     """
     from sqlalchemy import text
 
@@ -1045,7 +1051,7 @@ def _portfolio_dd_threshold(
                        COALESCE(exit_date, last_fill_at, filled_at))::date AS d,
                    COALESCE(SUM(pnl), 0)::float AS daily_pnl
               FROM trading_trades
-             WHERE user_id = :uid
+             WHERE (:uid IS NULL OR user_id = :uid)
                AND status = 'closed'
                AND pnl IS NOT NULL
                AND COALESCE(exit_date, last_fill_at, filled_at)
@@ -1088,6 +1094,11 @@ def _monthly_total_pnl(
     numerator/denominator attribution-symmetry that
     f-monthly-dd-breaker-numerator-symmetrize enforced for the pattern
     tier is preserved here for the portfolio tier.
+
+    When ``user_id`` is None (the venue-adapter gate's default) the
+    query drops the user filter and aggregates across the entire
+    household account. See :func:`_portfolio_dd_threshold` for the
+    rationale.
     """
     from sqlalchemy import text
 
@@ -1096,7 +1107,7 @@ def _monthly_total_pnl(
             """
             SELECT COALESCE(SUM(pnl), 0)::float
               FROM trading_trades
-             WHERE user_id = :uid
+             WHERE (:uid IS NULL OR user_id = :uid)
                AND status = 'closed'
                AND pnl IS NOT NULL
                AND COALESCE(exit_date, last_fill_at, filled_at)
