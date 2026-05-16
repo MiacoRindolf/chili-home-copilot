@@ -20,6 +20,7 @@ from sqlalchemy import text
 from app.models.trading import ScanPattern, Trade, _NO_PATTERN_SENTINEL
 from app.services.trading import portfolio_risk
 from app.services.trading.portfolio_risk import (
+    _monthly_attributed_pnl,
     _monthly_dd_threshold,
     check_drawdown_breaker,
 )
@@ -260,6 +261,126 @@ class TestD1MonthlyDdBreaker:
         tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
         if tripped and reason:
             assert "monthly_dd_breaker" not in reason
+
+    def test_numerator_filters_no_pattern_matching_threshold_scope(self, db):
+        """ARCHITECT-FLAG fix 2026-05-16: numerator must filter scan_pattern_id
+        just like the threshold.
+
+        Pre-fix, check_drawdown_breaker's monthly_pnl SELECT had no
+        scan_pattern_id filter while _monthly_dd_threshold filtered to
+        attributed only. A no_pattern bleed in the same 30-day window would
+        push the numerator deep negative without widening the threshold's
+        variance estimate -- tripping the breaker on losses the threshold
+        mathematically cannot see.
+        """
+        uid = _seed_user(db, user_id=998)
+
+        # 30 attributed days at +$10/day → attributed monthly_pnl = +$300.
+        for d in range(30):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=10.0, days_ago=d + 1,
+            )
+
+        # Massive no_pattern bleed via raw SQL (bypasses @validates guard).
+        db.execute(
+            text(
+                """
+                INSERT INTO trading_trades (
+                    user_id, ticker, direction, entry_price, exit_price, quantity,
+                    entry_date, exit_date, last_fill_at, filled_at, status, pnl,
+                    broker_source, scan_pattern_id, auto_trader_version
+                ) VALUES (
+                    :uid, 'NPL', 'long', 10.0, 10.0, 1.0,
+                    NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day',
+                    NOW() - INTERVAL '1 day', NOW() - INTERVAL '1 day',
+                    'closed', -2000.0, 'manual', NULL, NULL
+                )
+                """
+            ),
+            {"uid": uid},
+        )
+        db.flush()
+
+        # Helper must EXCLUDE the no_pattern bleed.
+        attributed_pnl = _monthly_attributed_pnl(db, uid)
+        assert attributed_pnl == pytest.approx(300.0, abs=1.0), (
+            f"numerator should be attributed-only +$300, got "
+            f"${attributed_pnl:.2f}; no_pattern bleed is leaking in"
+        )
+
+        # Sanity check: the unfiltered SUM(pnl) (what the bug shipped) would
+        # include the bleed.
+        unfiltered = db.execute(
+            text(
+                """
+                SELECT COALESCE(SUM(pnl), 0)::float
+                  FROM trading_trades
+                 WHERE user_id = :uid
+                   AND status = 'closed'
+                   AND pnl IS NOT NULL
+                   AND COALESCE(exit_date, last_fill_at, filled_at)
+                       >= NOW() - INTERVAL '30 days'
+                """
+            ),
+            {"uid": uid},
+        ).scalar()
+        assert float(unfiltered or 0.0) == pytest.approx(-1700.0, abs=1.0), (
+            "unfiltered SUM(pnl) should be -$1,700 = +$300 attributed + "
+            "(-$2,000) no_pattern; if not, the test scenario is malformed"
+        )
+
+    def test_breaker_no_trip_on_no_pattern_bleed_when_flag_on(
+        self, db, monkeypatch,
+    ):
+        """End-to-end: with the flag ON and a no_pattern bleed alongside
+        attributed history, the monthly_dd path must NOT trip.
+
+        35 days of +$10/day attributed (threshold ≈ +$300, std=0) plus a
+        -$1,000 no_pattern row in the 30-day window. Pre-fix this would
+        have tripped: numerator = -$700 vs threshold +$300, -$700 <= +$300.
+        Post-fix: numerator = +$300 attributed-only, breaker does not trip
+        on the monthly_dd path.
+        """
+        from app import config as app_config
+
+        uid = _seed_user(db, user_id=997)
+
+        for d in range(35):
+            _seed_chili_attributed_trade(
+                db, user_id=uid, pnl=10.0, days_ago=d + 1,
+            )
+
+        db.execute(
+            text(
+                """
+                INSERT INTO trading_trades (
+                    user_id, ticker, direction, entry_price, exit_price, quantity,
+                    entry_date, exit_date, last_fill_at, filled_at, status, pnl,
+                    broker_source, scan_pattern_id, auto_trader_version
+                ) VALUES (
+                    :uid, 'NPL', 'long', 10.0, 10.0, 1.0,
+                    NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day',
+                    NOW() - INTERVAL '1 day', NOW() - INTERVAL '1 day',
+                    'closed', -1000.0, 'manual', NULL, NULL
+                )
+                """
+            ),
+            {"uid": uid},
+        )
+        db.flush()
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_monthly_dd_breaker_enabled", True,
+        )
+        tripped, reason = check_drawdown_breaker(db, uid, capital=1_000_000.0)
+        # 5d/30d %-of-capital checks use a different scope and might fire on
+        # the -$1,000 row -- but the monthly_dd reason has a distinctive
+        # prefix and must NOT appear.
+        if tripped and reason:
+            assert "monthly_dd_breaker" not in reason, (
+                f"monthly_dd_breaker tripped on no_pattern bleed despite the "
+                f"attribution-scope fix: {reason}"
+            )
 
 
 # --------------------------------------------------------------------- #
