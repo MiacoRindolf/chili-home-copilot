@@ -1595,11 +1595,19 @@ def _execute_broker_buy(
                 db=db, user_id=uid,
             )
         except Exception as exc:
+            # f-phase3-stop-bleed D2 — expose the unbound identifier on
+            # NameError so the rejection histogram pins the source bug
+            # instead of reporting an anonymous ``coinbase_cap_unavailable:
+            # NameError`` 54x/week. ``NameError.name`` is the unbound name
+            # (Python 3.10+).
+            _exc_detail = type(exc).__name__
+            if isinstance(exc, NameError) and getattr(exc, "name", None):
+                _exc_detail = f"NameError:{exc.name}"
             _block_live_order(
                 db,
                 uid=uid,
                 alert=alert,
-                reason=f"coinbase_cap_unavailable:{type(exc).__name__}",
+                reason=f"coinbase_cap_unavailable:{_exc_detail}",
                 snap=snap,
                 llm_snap=llm_snap,
                 out=out,
