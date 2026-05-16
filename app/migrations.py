@@ -16048,6 +16048,126 @@ def _migration_243_bnb_usd_zombie_cleanup(conn) -> None:
     )
 
 
+def _migration_244_composite_reweight_demote_losers(conn) -> None:
+    """f-composite-quality-reweight-realized-evidence D4 - one-shot demote
+    of patterns whose realized PnL contradicts their promoted lifecycle stage.
+
+    The 2026-05-16 diagnostic showed Spearman(quality_composite_score,
+    total_realized_pnl) = -0.757 at p=0.0044 (n=12). Several patterns at high
+    composite scores (1066/1067/1068/1073/1216) had negative realized PnL
+    over >=5 closed trades but still sat in promoted / shadow_promoted /
+    pilot_promoted lifecycle stages. This migration demotes them back to
+    'challenged' so they are no longer trade-eligible while D2's new formula
+    and D3's eligibility floor take effect.
+
+    Selection criteria. A pattern is demoted iff:
+      - lifecycle_stage IN ('promoted', 'shadow_promoted', 'pilot_promoted')
+      - has >= 5 closed trades in the trailing 90 days
+      - equal-weighted avg(pnl / (entry_price * quantity)) <= 0
+      - scan_pattern_id is not the no-pattern sentinel (-1)
+
+    Thresholds (5, 90, 0.0) match the D2 settings defaults at time of
+    writing. The migration hardcodes them deliberately - migrations are
+    immutable snapshots; if settings change later, this one-shot should not
+    change with them.
+
+    Audit. One structured log line per demoted pattern:
+        [chili_mig_244] pid=<id> old_stage=<stage> new_stage=challenged
+                        n_trades=<n> avg_pnl_pct=<pct> total_pnl=<dollars>
+
+    Idempotent. Second run finds no patterns matching lifecycle_stage in
+    the promoted cohort (they were just demoted to 'challenged') and is a
+    no-op.
+
+    Demoted-to-challenged - NOT retired. The pattern miner can re-promote
+    a challenged row when regime / evidence shifts. Retire is operator-only.
+    """
+    try:
+        rows = conn.execute(text(
+            """
+            WITH realized AS (
+                SELECT scan_pattern_id,
+                       COUNT(*) AS n,
+                       AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct,
+                       SUM(pnl) AS total_pnl
+                FROM trading_trades
+                WHERE scan_pattern_id IS NOT NULL
+                  AND scan_pattern_id != -1
+                  AND status = 'closed'
+                  AND pnl IS NOT NULL
+                  AND entry_price > 0
+                  AND quantity > 0
+                  AND exit_date > NOW() - INTERVAL '90 days'
+                GROUP BY scan_pattern_id
+            )
+            SELECT sp.id, sp.lifecycle_stage, r.n, r.avg_pnl_pct, r.total_pnl
+            FROM scan_patterns sp
+            JOIN realized r ON r.scan_pattern_id = sp.id
+            WHERE sp.lifecycle_stage IN ('promoted', 'shadow_promoted', 'pilot_promoted')
+              AND r.n >= 5
+              AND r.avg_pnl_pct <= 0
+            """
+        )).fetchall()
+    except Exception:
+        conn.rollback()
+        logger.exception("[mig244] candidate SELECT failed; rolling back")
+        return
+
+    if not rows:
+        logger.info("[mig244] no patterns match demote criteria; no-op")
+        return
+
+    for r in rows:
+        pid = int(r[0])
+        old_stage = str(r[1])
+        n = int(r[2])
+        avg_pnl_pct = float(r[3]) if r[3] is not None else 0.0
+        total_pnl = float(r[4]) if r[4] is not None else 0.0
+        logger.info(
+            "[chili_mig_244] pid=%d old_stage=%s new_stage=challenged "
+            "n_trades=%d avg_pnl_pct=%.6f total_pnl=%.2f",
+            pid, old_stage, n, avg_pnl_pct, total_pnl,
+        )
+
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE scan_patterns
+               SET lifecycle_stage = 'challenged',
+                   lifecycle_changed_at = NOW()
+             WHERE id IN (
+                 SELECT sp.id
+                 FROM scan_patterns sp
+                 JOIN (
+                     SELECT scan_pattern_id,
+                            COUNT(*) AS n,
+                            AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct
+                     FROM trading_trades
+                     WHERE scan_pattern_id IS NOT NULL
+                       AND scan_pattern_id != -1
+                       AND status = 'closed'
+                       AND pnl IS NOT NULL
+                       AND entry_price > 0
+                       AND quantity > 0
+                       AND exit_date > NOW() - INTERVAL '90 days'
+                     GROUP BY scan_pattern_id
+                 ) r ON r.scan_pattern_id = sp.id
+                 WHERE sp.lifecycle_stage IN ('promoted', 'shadow_promoted', 'pilot_promoted')
+                   AND r.n >= 5
+                   AND r.avg_pnl_pct <= 0
+             )
+            """
+        ))
+        demoted = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("[mig244] demote UPDATE failed; rolling back")
+        return
+
+    logger.info("[mig244] demoted %d patterns to 'challenged'", demoted)
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16323,6 +16443,8 @@ MIGRATIONS = [
      _migration_242_pattern_family_trial_log),
     ("243_bnb_usd_zombie_cleanup",
      _migration_243_bnb_usd_zombie_cleanup),
+    ("244_composite_reweight_demote_losers",
+     _migration_244_composite_reweight_demote_losers),
 ]
 
 
