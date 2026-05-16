@@ -121,7 +121,16 @@ def _simulate_legacy_backtest_close(
         atr_val = 0.0
         if i < len(atr_arr) and atr_arr[i] is not None:
             atr_val = atr_arr[i]
-        trailing_stop = highest - exit_atr_mult * atr_val
+        # Mirror the ATR=0 guard in
+        # ``backtest_service.DynamicPatternStrategy.next``: when
+        # ``atr_val == 0`` the trail formula collapses to a fixed
+        # peak-stop, so skip the trail-close branch entirely.
+        if atr_val > 0:
+            trailing_stop = highest - exit_atr_mult * atr_val
+            trail_close = price < trailing_stop
+        else:
+            trailing_stop = None
+            trail_close = False
         trailing_stops.append(trailing_stop)
 
         bos_triggered = False
@@ -132,7 +141,7 @@ def _simulate_legacy_backtest_close(
                 if price < bos_threshold:
                     bos_triggered = True
 
-        if price < trailing_stop:
+        if trail_close:
             return i, "exit_trail", price, trailing_stops
         if bos_triggered:
             return i, "exit_bos", price, trailing_stops
@@ -270,13 +279,77 @@ def test_backtest_parity_trailing_stop_matches_bar_by_bar(seed: int):
         state = decision.updated_state
 
     # Legacy trail is a raw candidate (can loosen); canonical trail is
-    # monotonic. So canonical must be >= legacy at each bar.
+    # monotonic. So canonical must be >= legacy at each bar. Skip bars
+    # where either side has no trail (None) -- e.g., ATR=0 in legacy,
+    # or before canonical seeds its first trail.
     for bi, (l_trail, c_trail) in enumerate(zip(legacy_trails, canonical_trails)):
-        if c_trail is None:
+        if c_trail is None or l_trail is None:
             continue
         assert c_trail >= l_trail - 1e-9, (
             f"seed={seed} bar={bi} canonical_trail={c_trail} legacy_trail={l_trail}"
         )
+
+
+def test_atr_zero_holds_in_both_engines():
+    """Regression: on a bar with ``atr_val == 0`` and a pullback from the
+    running peak, both engines must return ``hold``.
+
+    Pre-fix the legacy formula
+    ``trailing_stop = highest_since_entry - exit_atr_mult * 0``
+    collapsed to ``highest_since_entry``, firing ``exit_trail`` on any
+    pullback. Canonical correctly preserves the prior trail when
+    ``atr <= 0`` (``_new_trailing_stop`` short-circuits).
+
+    The fix in ``backtest_service.py:1322-1352`` aligns legacy with
+    canonical's "skip trail-close on degenerate-vol bars" semantics;
+    this test pins the invariant so neither side can regress.
+
+    Scenario: ATR is a comfortable 2.5 on bars 16-17 (so canonical's
+    monotonic trail seeds at 100 - 2*2.5 = 95, well below price). On
+    bar 18 ATR drops to 0 and price pulls back from 100 to 99.
+
+    * Pre-fix legacy would compute ``trailing_stop = 100 - 2*0 = 100``
+      and fire ``exit_trail`` because ``99 < 100``.
+    * Post-fix legacy skips the trail-close branch when ``atr_val == 0``
+      and holds.
+    * Canonical carries forward ``trail = 95`` from bar 17 (the
+      ``atr <= 0`` short-circuit in ``_new_trailing_stop``) and holds
+      because ``99 >= 95``.
+
+    See ``docs/STRATEGY/QUEUED/f-exit-parity-trail-atr-zero-divergence.md``
+    for the 39-row asymmetric-close cohort that motivated the fix.
+    """
+    closes = [100.0] * 16 + [100.0, 100.0, 99.0]  # 19 bars total
+    highs = [c + 0.1 for c in closes]
+    lows = [c - 0.1 for c in closes]
+    atr_arr: list[float | None] = [None] * 14 + [2.5, 2.5, 2.5, 2.5, 0.0]
+    swing_low_arr: list[float | None] = [None] * 19
+    entry_idx = 15
+
+    legacy_bar, legacy_reason, _, _ = _simulate_legacy_backtest_close(
+        highs=highs, lows=lows, closes=closes, entry_idx=entry_idx,
+        atr_arr=atr_arr, swing_low_arr=swing_low_arr,
+        exit_atr_mult=2.0, exit_max_bars=100,
+        bos_buffer_pct=0.003, bos_grace=100,
+    )
+    canonical_bar, canonical_action, _, _ = _simulate_canonical_backtest_close(
+        highs=highs, lows=lows, closes=closes, entry_idx=entry_idx,
+        atr_arr=atr_arr, swing_low_arr=swing_low_arr,
+        exit_atr_mult=2.0, exit_max_bars=100,
+        bos_buffer_frac=0.003, bos_grace=100,
+    )
+
+    # Both engines hold across all 3 evaluated bars (16, 17, 18).
+    assert legacy_bar is None, (
+        f"Legacy regressed: closed at bar {legacy_bar} with {legacy_reason!r}; "
+        "the ATR=0 trail-skip guard at backtest_service.py:1322-1352 "
+        "is not in place."
+    )
+    assert canonical_bar is None, (
+        f"Canonical regressed: closed at bar {canonical_bar} with "
+        f"{canonical_action!r}; canonical's atr<=0 guard in "
+        "_new_trailing_stop is broken."
+    )
 
 
 # ---------------------------------------------------------------------------

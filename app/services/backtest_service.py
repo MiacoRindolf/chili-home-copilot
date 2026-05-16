@@ -1323,7 +1323,23 @@ class DynamicPatternStrategy(Strategy):
             if i < len(self._atr_array) and self._atr_array[i] is not None:
                 atr_val = self._atr_array[i]
 
-            trailing_stop = self._highest_since_entry - self._exit_atr_mult * atr_val
+            # Skip ATR trailing-stop on degenerate-volatility bars. When
+            # ``atr_val == 0`` the formula
+            # ``trailing_stop = highest_since_entry - mult * 0``
+            # collapses to ``highest_since_entry``, which fires
+            # ``exit_trail`` on ANY pullback from the running peak --
+            # a fixed peak-stop, not a trailing-stop. The canonical
+            # evaluator (``exit_evaluator._new_trailing_stop``) already
+            # skips trail updates when ``atr is None or atr <= 0``; the
+            # legacy path now matches. Closes the only structural
+            # backtest divergence the cutover gate ever surfaced
+            # (``f-exit-parity-trail-atr-zero-divergence``).
+            if atr_val > 0:
+                trailing_stop = self._highest_since_entry - self._exit_atr_mult * atr_val
+                trail_close = price < trailing_stop
+            else:
+                trailing_stop = None
+                trail_close = False
 
             bos_triggered = False
             swing_low_val = None
@@ -1337,12 +1353,12 @@ class DynamicPatternStrategy(Strategy):
                         bos_triggered = True
 
             legacy_would_close = (
-                price < trailing_stop
+                trail_close
                 or self._bars_in_trade >= self._exit_max_bars
                 or bos_triggered
             )
             if legacy_would_close:
-                if price < trailing_stop:
+                if trail_close:
                     legacy_action_str = "exit_trail"
                 elif bos_triggered:
                     legacy_action_str = "exit_bos"
