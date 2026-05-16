@@ -1,25 +1,60 @@
 """f-promotion-pipeline-rebalance Phase 4 (2026-05-10).
 
+f-composite-quality-reweight-realized-evidence (2026-05-16):
+Reweighted toward realized PnL evidence. The original 0.30/0.20/0.15
+weighting on CPCV/DSR/PBO produced a Spearman(score, total_pnl) of
+−0.757 against realized OOS trades (DSR pegged at 1.0 and PBO pegged
+at 0.0 for every scored pattern — 0.35 of the score was a constant
+with no discriminatory power). New defaults shift weight onto the
+two real-OOS signals (directional WR and realized PnL).
+
 Composite quality scoring for scan patterns. Reads CPCV / DSR / PBO
 evidence from ``scan_patterns``, the rolling-30 directional WR from
-``pattern_directional_quality_v`` (Phase 2), and computes a decay
-factor on-the-fly from ``pattern_alert_directional_outcome``. Persists
-the result to ``scan_patterns.quality_composite_score`` (mig 237).
+``pattern_directional_quality_v`` (Phase 2), realized PnL stats from
+``trading_trades`` (window settings-driven; default trailing 90d),
+and computes a decay factor on-the-fly from
+``pattern_alert_directional_outcome``. Persists the result to
+``scan_patterns.quality_composite_score`` (mig 237).
 
-Composite formula
------------------
+Composite formula (new defaults — 2026-05-16)
+---------------------------------------------
 
-``composite = w1*clip(cpcv_sharpe/2.0, 0, 1)
-            + w2*clip(deflated_sharpe/1.0, 0, 1)
-            + w3*(1 - clip(pbo, 0, 1))
-            + w4*directional_wr
-            + w5*(1 - decay)``
+``composite = 0.10*clip(cpcv_sharpe/2.0, 0, 1)
+            + 0.05*clip(deflated_sharpe/1.0, 0, 1)
+            + 0.05*(1 - clip(pbo, 0, 1))
+            + 0.35*directional_wr
+            + 0.10*(1 - decay)
+            + 0.35*realized_pnl_score*realized_evidence_score(n)``
 
 Each component is normalized to ``[0, 1]`` so composite ∈ ``[0, 1]``
 when weights sum to 1. Targets (cpcv→2.0, dsr→1.0) are calibrated to
 the eligibility floor: ``cpcv_median_sharpe >= 1.0`` (the gate floor)
 lands at half-credit, ``cpcv_median_sharpe == 2.0`` (academic
 "excellent") lands at full credit. Patterns above 2.0 saturate.
+
+Realized component
+------------------
+
+``realized_pnl_score = (clip(avg_pnl_pct / w_norm, -1, 1) + 1) / 2``
+where ``avg_pnl_pct = avg(pnl / (entry_price * quantity))`` over the
+trailing window of CLOSED trades joined on ``scan_pattern_id``. With
+``w_norm = 0.01`` (default), +1%/trade saturates to 1.0 and −1%/trade
+floors to 0.0; zero PnL is 0.5.
+
+``realized_evidence_score(n) = 1 - exp(-n / tau)`` with default
+``tau = 30``. At n=5 contributes ~15%; at n=30, ~63%; at n=85,
+~94%. The two multiply: the effective realized contribution is
+``realized_pnl_score * realized_evidence_score``.
+
+NULL propagation
+----------------
+
+When ``realized_n_trades < 5`` (or no realized data at all), the
+realized component is ZERO and the remaining five weights
+re-normalize to sum to 1.0 (each multiplied by 1 / (1 - w_realized)).
+This preserves the composite ∈ ``[0, 1]`` invariant. When CPCV / DSR
+/ PBO / directional_wr / decay are NULL, the composite remains
+``None`` (no magic-default fallback — advisor brief §2.6).
 
 Decay
 -----
@@ -50,6 +85,7 @@ Public API
 from __future__ import annotations
 
 import logging
+import math as _math
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -71,11 +107,54 @@ def _clip(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return x
 
 
+def realized_pnl_score(
+    avg_pnl_pct: Optional[float],
+    w_norm: float,
+) -> Optional[float]:
+    """Normalized realized-PnL component, mapped to ``[0, 1]``.
+
+    Formula: ``(clip(avg_pnl_pct / w_norm, -1, 1) + 1) / 2``.
+
+    - ``avg_pnl_pct = +w_norm`` → ``1.0`` (full credit)
+    - ``avg_pnl_pct = -w_norm`` → ``0.0`` (full debit)
+    - ``avg_pnl_pct = 0``       → ``0.5`` (neutral)
+    - Saturates outside ``[-w_norm, +w_norm]``.
+
+    Returns ``None`` when ``avg_pnl_pct`` is ``None`` or ``w_norm`` is
+    non-positive (NULL propagation — no magic-default fallback).
+    """
+    if avg_pnl_pct is None or w_norm is None or float(w_norm) <= 0:
+        return None
+    normed = float(avg_pnl_pct) / float(w_norm)
+    if normed < -1.0:
+        normed = -1.0
+    elif normed > 1.0:
+        normed = 1.0
+    return (normed + 1.0) / 2.0
+
+
+def realized_evidence_score(
+    n: Optional[int],
+    tau: float,
+) -> float:
+    """Sample-size confidence multiplier in ``[0, 1)``.
+
+    ``1 - exp(-n / tau)``. At ``n = tau`` contributes ~63%, saturates
+    near 1 as ``n → ∞``. Always defined for ``n >= 0`` and ``tau > 0``;
+    returns ``0.0`` when either is missing.
+    """
+    if n is None or tau is None or float(tau) <= 0:
+        return 0.0
+    return 1.0 - _math.exp(-float(n) / float(tau))
+
+
 def compute_quality_composite_score(
     pat: ScanPattern,
     directional_wr: Optional[float],
     decay: Optional[float],
     weights: dict,
+    realized_pnl_score: Optional[float] = None,
+    realized_n_trades: int = 0,
 ) -> Optional[float]:
     """Compute the composite quality score for a single pattern.
 
@@ -97,8 +176,19 @@ def compute_quality_composite_score(
         means rolling_sample_n < 30 (insufficient evidence to detect
         decay).
     weights : dict
-        Five-element dict with keys ``cpcv_sharpe``, ``deflated_sharpe``,
-        ``pbo_inverse``, ``directional_wr``, ``decay_inverse``.
+        Six-weight dict + two normalizer keys:
+        ``cpcv_sharpe``, ``deflated_sharpe``, ``pbo_inverse``,
+        ``directional_wr``, ``decay_inverse``, ``realized``,
+        ``realized_evidence_tau``. Weights should sum to 1.0; the
+        ``realized`` weight is dormant whenever the caller passes
+        ``realized_pnl_score=None`` or ``realized_n_trades < 5``.
+    realized_pnl_score : Optional[float]
+        Normalized realized-PnL component in ``[0, 1]`` (see
+        :func:`realized_pnl_score`). ``None`` means insufficient
+        evidence (``realized_n_trades < 5`` OR no closed trades).
+    realized_n_trades : int
+        Count of closed trades in the realized window (used to scale
+        the realized component by ``realized_evidence_score``).
     """
     cpcv = getattr(pat, "cpcv_median_sharpe", None)
     dsr = getattr(pat, "deflated_sharpe", None)
@@ -115,19 +205,37 @@ def compute_quality_composite_score(
     wr = _clip(float(directional_wr))
     dec_inv = 1.0 - _clip(float(decay))
 
-    w1 = float(weights.get("cpcv_sharpe", 0.30))
-    w2 = float(weights.get("deflated_sharpe", 0.20))
-    w3 = float(weights.get("pbo_inverse", 0.15))
-    w4 = float(weights.get("directional_wr", 0.25))
-    w5 = float(weights.get("decay_inverse", 0.10))
+    w_cpcv = float(weights.get("cpcv_sharpe", 0.10))
+    w_dsr = float(weights.get("deflated_sharpe", 0.05))
+    w_pbo = float(weights.get("pbo_inverse", 0.05))
+    w_wr = float(weights.get("directional_wr", 0.35))
+    w_decay = float(weights.get("decay_inverse", 0.10))
+    w_realized = float(weights.get("realized", 0.35))
+    tau = float(weights.get("realized_evidence_tau", 30.0))
 
-    return (
-        w1 * cpcv_n
-        + w2 * dsr_n
-        + w3 * pbo_inv
-        + w4 * wr
-        + w5 * dec_inv
+    non_realized_terms = (
+        w_cpcv * cpcv_n
+        + w_dsr * dsr_n
+        + w_pbo * pbo_inv
+        + w_wr * wr
+        + w_decay * dec_inv
     )
+
+    n = int(realized_n_trades or 0)
+    has_realized = realized_pnl_score is not None and n >= 5
+
+    if not has_realized:
+        # Realized component is dormant: rescale the five non-realized
+        # weights so they sum to 1.0. Equivalent to multiplying each by
+        # 1 / (w_cpcv + w_dsr + w_pbo + w_wr + w_decay).
+        non_realized_sum = w_cpcv + w_dsr + w_pbo + w_wr + w_decay
+        if non_realized_sum <= 0:
+            return None
+        return non_realized_terms / non_realized_sum
+
+    evidence = realized_evidence_score(n, tau)
+    realized_component = _clip(float(realized_pnl_score)) * evidence
+    return non_realized_terms + w_realized * realized_component
 
 
 def _load_directional_quality_map(db: Session) -> dict[int, dict[str, Any]]:
@@ -206,21 +314,105 @@ def _load_decay_map(db: Session) -> dict[int, Optional[float]]:
 def _resolve_weights(settings_: Any) -> dict:
     return {
         "cpcv_sharpe": float(getattr(
-            settings_, "chili_cohort_score_weight_cpcv_sharpe", 0.30,
+            settings_, "chili_cohort_score_weight_cpcv_sharpe", 0.10,
         )),
         "deflated_sharpe": float(getattr(
-            settings_, "chili_cohort_score_weight_deflated_sharpe", 0.20,
+            settings_, "chili_cohort_score_weight_deflated_sharpe", 0.05,
         )),
         "pbo_inverse": float(getattr(
-            settings_, "chili_cohort_score_weight_pbo_inverse", 0.15,
+            settings_, "chili_cohort_score_weight_pbo_inverse", 0.05,
         )),
         "directional_wr": float(getattr(
-            settings_, "chili_cohort_score_weight_directional_wr", 0.25,
+            settings_, "chili_cohort_score_weight_directional_wr", 0.35,
         )),
         "decay_inverse": float(getattr(
             settings_, "chili_cohort_score_weight_decay_inverse", 0.10,
         )),
+        "realized": float(getattr(
+            settings_, "chili_cohort_score_weight_realized", 0.35,
+        )),
+        "realized_pnl_normalizer_pct": float(getattr(
+            settings_, "chili_cohort_score_realized_pnl_normalizer_pct", 0.01,
+        )),
+        "realized_evidence_tau": float(getattr(
+            settings_, "chili_cohort_score_realized_evidence_tau", 30.0,
+        )),
+        "realized_window_days": int(getattr(
+            settings_, "chili_cohort_score_realized_window_days", 90,
+        )),
     }
+
+
+def _load_realized_pnl_map(
+    db: Session,
+    window_days: int,
+) -> dict[int, dict[str, Any]]:
+    """Per-pattern realized PnL stats over the trailing window.
+
+    Returns ``{scan_pattern_id: {"n": int, "avg_pnl_pct": float,
+    "total_pnl": float}}`` for every pattern with at least one closed
+    trade in the window. The caller decides the n-floor (default 5)
+    before treating ``avg_pnl_pct`` as a realized-component input.
+
+    ``avg_pnl_pct`` is equal-weighted across trades:
+    ``avg(pnl / (entry_price * quantity))``. The schema-level guards
+    (mig 214 check constraints) ensure ``entry_price > 0`` and
+    ``quantity > 0`` on closed trades; the WHERE clause re-asserts
+    them for safety. Sentinel ``scan_pattern_id = -1`` is excluded
+    (``_NO_PATTERN_SENTINEL`` — see ``app/models/trading.py``).
+    """
+    rows = db.execute(
+        text(
+            """
+            SELECT scan_pattern_id,
+                   COUNT(*) AS n,
+                   AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct,
+                   SUM(pnl) AS total_pnl
+            FROM trading_trades
+            WHERE scan_pattern_id IS NOT NULL
+              AND scan_pattern_id != -1
+              AND status = 'closed'
+              AND pnl IS NOT NULL
+              AND entry_price > 0
+              AND quantity > 0
+              AND exit_date > NOW() - make_interval(days => :window_days)
+            GROUP BY scan_pattern_id
+            """
+        ),
+        {"window_days": int(window_days)},
+    ).fetchall()
+    out: dict[int, dict[str, Any]] = {}
+    for r in rows:
+        pid = int(r[0])
+        out[pid] = {
+            "n": int(r[1] or 0),
+            "avg_pnl_pct": float(r[2]) if r[2] is not None else None,
+            "total_pnl": float(r[3]) if r[3] is not None else 0.0,
+        }
+    return out
+
+
+def _realized_component_for_pattern(
+    pid: int,
+    realized_map: dict[int, dict[str, Any]],
+    weights: dict,
+) -> tuple[Optional[float], int]:
+    """Return ``(realized_pnl_score, n_trades)`` for a single pattern.
+
+    Applies the n-floor (default 5) — patterns with fewer than 5 closed
+    trades get ``realized_pnl_score = None`` (NULL propagation per
+    advisor brief §2.6). Patterns absent from the map (zero closed
+    trades in window) get ``(None, 0)``.
+    """
+    rec = realized_map.get(int(pid))
+    if not rec:
+        return (None, 0)
+    n = int(rec.get("n", 0) or 0)
+    avg = rec.get("avg_pnl_pct")
+    if n < 5 or avg is None:
+        return (None, n)
+    w_norm = float(weights.get("realized_pnl_normalizer_pct", 0.01))
+    return (realized_pnl_score(avg, w_norm), n)
 
 
 def compute_and_persist_scores(
@@ -253,6 +445,9 @@ def compute_and_persist_scores(
 
     dq_map = _load_directional_quality_map(db)
     decay_map = _load_decay_map(db)
+    realized_map = _load_realized_pnl_map(
+        db, int(weights.get("realized_window_days", 90)),
+    )
 
     patterns = (
         db.query(ScanPattern)
@@ -261,6 +456,7 @@ def compute_and_persist_scores(
     )
 
     scored = 0
+    scored_with_realized = 0
     skipped_null_evidence = 0
     skipped_thin_directional = 0
     cleared = 0
@@ -269,6 +465,9 @@ def compute_and_persist_scores(
         wr = dq["directional_wr"] if dq else None
         sample_n = dq["rolling_sample_n"] if dq else 0
         decay = decay_map.get(int(pat.id))
+        rp_score, rp_n = _realized_component_for_pattern(
+            int(pat.id), realized_map, weights,
+        )
 
         # Eligibility tightening from j.1: rolling_sample_n < 30 →
         # excluded entirely (decay un-computable).
@@ -278,11 +477,15 @@ def compute_and_persist_scores(
         else:
             new_score = compute_quality_composite_score(
                 pat, wr, decay, weights,
+                realized_pnl_score=rp_score,
+                realized_n_trades=rp_n,
             )
             if new_score is None:
                 skipped_null_evidence += 1
             else:
                 scored += 1
+                if rp_score is not None and rp_n >= 5:
+                    scored_with_realized += 1
 
         prev = pat.quality_composite_score
         if new_score != prev:
@@ -297,10 +500,12 @@ def compute_and_persist_scores(
         "ok": True,
         "patterns_examined": len(patterns),
         "scored": scored,
+        "scored_with_realized": scored_with_realized,
         "skipped_thin_directional": skipped_thin_directional,
         "skipped_null_evidence": skipped_null_evidence,
         "cleared_to_null": cleared,
         "weight_sum": round(weight_sum, 4),
+        "realized_window_days": int(weights.get("realized_window_days", 90)),
     }
     logger.info("[pattern_quality_score] refresh: %s", result)
     return result
@@ -347,6 +552,9 @@ def compute_and_persist_scores_streaming(
 
     dq_map = _load_directional_quality_map(db)
     decay_map = _load_decay_map(db)
+    realized_map = _load_realized_pnl_map(
+        db, int(weights.get("realized_window_days", 90)),
+    )
 
     patterns = (
         db.query(ScanPattern)
@@ -370,6 +578,9 @@ def compute_and_persist_scores_streaming(
         wr = dq["directional_wr"] if dq else None
         sample_n = dq["rolling_sample_n"] if dq else 0
         decay = decay_map.get(int(pat.id))
+        rp_score, rp_n = _realized_component_for_pattern(
+            int(pat.id), realized_map, weights,
+        )
 
         if sample_n < 30 or decay is None:
             new_score: Optional[float] = None
@@ -377,6 +588,8 @@ def compute_and_persist_scores_streaming(
         else:
             new_score = compute_quality_composite_score(
                 pat, wr, decay, weights,
+                realized_pnl_score=rp_score,
+                realized_n_trades=rp_n,
             )
             if new_score is None:
                 skipped_null_evidence += 1
@@ -408,6 +621,8 @@ def compute_and_persist_scores_streaming(
                     "directional_wr": wr,
                     "rolling_sample_n": sample_n,
                     "decay": decay,
+                    "realized_pnl_score": rp_score,
+                    "realized_n_trades": rp_n,
                 })
             except Exception:
                 # Operator callback is best-effort; never block the loop.

@@ -140,6 +140,7 @@ def _recompute_for_pattern(
     from app.services.trading.pattern_quality_score import (
         _resolve_weights,
         compute_quality_composite_score,
+        realized_pnl_score as _realized_pnl_score,
     )
 
     pattern = sess.get(ScanPattern, pid)
@@ -164,12 +165,24 @@ def _recompute_for_pattern(
 
     directional_wr, sample_n = _load_directional_wr_for_pattern(sess, pid)
     decay = _load_decay_for_pattern(sess, pid)
+    rp_n, rp_avg = _load_realized_pnl_for_pattern(
+        sess, pid, int(weights.get("realized_window_days", 90)),
+    )
+    if rp_n >= 5 and rp_avg is not None:
+        rp_score = _realized_pnl_score(
+            rp_avg,
+            float(weights.get("realized_pnl_normalizer_pct", 0.01)),
+        )
+    else:
+        rp_score = None
 
     if sample_n < 30 or decay is None:
         new_score: Optional[float] = None
     else:
         new_score = compute_quality_composite_score(
             pattern, directional_wr, decay, weights,
+            realized_pnl_score=rp_score,
+            realized_n_trades=rp_n,
         )
 
     old_score = getattr(pattern, "quality_composite_score", None)
@@ -231,6 +244,50 @@ def _load_directional_wr_for_pattern(
     wr = float(row[0]) if row[0] is not None else None
     n = int(row[1]) if row[1] is not None else 0
     return (wr, n)
+
+
+def _load_realized_pnl_for_pattern(
+    sess: "Session", pid: int, window_days: int,
+) -> tuple[int, Optional[float]]:
+    """Per-pattern realized PnL stats over the trailing window.
+
+    Returns ``(n_closed_trades, avg_pnl_pct)``. ``avg_pnl_pct`` is
+    equal-weighted: ``avg(pnl / (entry_price * quantity))`` across all
+    ``status='closed'`` trades with non-NULL pnl in the window. Returns
+    ``(0, None)`` when the pattern has no closed trades or on read
+    failure (NULL propagation per advisor brief §2.6 — no magic
+    fallback).
+    """
+    from sqlalchemy import text as _text
+
+    try:
+        row = sess.execute(
+            _text(
+                """
+                SELECT COUNT(*) AS n,
+                       AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct
+                FROM trading_trades
+                WHERE scan_pattern_id = :pid
+                  AND scan_pattern_id != -1
+                  AND status = 'closed'
+                  AND pnl IS NOT NULL
+                  AND entry_price > 0
+                  AND quantity > 0
+                  AND exit_date > NOW() - make_interval(days => :window_days)
+                """
+            ),
+            {"pid": int(pid), "window_days": int(window_days)},
+        ).fetchone()
+    except Exception as exc:
+        logger.debug(
+            "%s realized read failed for pid=%d: %s", LOG_PREFIX, pid, exc,
+        )
+        return (0, None)
+    if row is None:
+        return (0, None)
+    n = int(row[0] or 0)
+    avg = float(row[1]) if row[1] is not None else None
+    return (n, avg)
 
 
 def _load_decay_for_pattern(
