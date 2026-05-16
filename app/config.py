@@ -2884,6 +2884,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_BREAKER_SCOPE_AUTOTRADER_ONLY"),
     )
 
+    # f-phase3-stop-bleed D1 — empirical monthly drawdown breaker.
+    # Default OFF until walk-forward shows it would have tripped on/around
+    # 2026-04-22 (the cumulative-PnL trough date from the 2026-05-15 audit).
+    # When ON, ``check_drawdown_breaker`` computes a Gaussian lower-bound on
+    # 30-day realized PnL from the trailing 180d of CHILI-attributed history
+    # and trips when actual 30d PnL falls below it. No fallback dollar value
+    # (see COWORK_ADVISOR_BRIEF §2.6); when history is <30d the check skips
+    # with a logged warning.
+    chili_monthly_dd_breaker_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MONTHLY_DD_BREAKER_ENABLED"),
+    )
+    # K — sigma multiplier for the Gaussian lower-bound. 2.0 = 95% one-sided;
+    # 3.0 = ~99.7%. Tighter K means the breaker is less likely to false-trip
+    # but more likely to miss a real bleed; looser K is the inverse.
+    chili_monthly_dd_breaker_lower_bound_sigmas: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=5.0,
+        validation_alias=AliasChoices("CHILI_MONTHLY_DD_BREAKER_LOWER_BOUND_SIGMAS"),
+    )
+
     # Phase B (tech-debt): TTL cache on broker-equity lookups so a flapping
     # broker does not amplify into a per-tick retry storm. When enabled, the
     # first call per ``chili_autotrader_broker_equity_cache_ttl_seconds`` window

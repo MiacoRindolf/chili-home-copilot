@@ -906,6 +906,69 @@ def _compute_unrealized_pnl(db: Session, user_id: int | None) -> float:
     return total_unrealized
 
 
+def _monthly_dd_threshold(
+    db: Session,
+    user_id: int | None,
+    settings_obj: Any | None = None,
+) -> tuple[float | None, int]:
+    """Empirical Gaussian lower-bound on 30-day realized PnL.
+
+    Computed from CHILI-attributed live history (``scan_pattern_id IS NOT
+    NULL AND scan_pattern_id != -1``). Returns ``(threshold_usd,
+    n_days_observed)``. When ``n_days_observed < 30`` the threshold is
+    ``None`` and the breaker MUST skip the check (no fallback dollar
+    value -- see f-phase3-stop-bleed D1 + COWORK_ADVISOR_BRIEF §2.6).
+
+    The K-sigma multiplier is loaded from settings, not hardcoded.
+
+    Formula::
+
+        threshold = 30 * mean(daily_pnl) - K * sqrt(30) * std(daily_pnl)
+
+    where ``daily_pnl`` is the per-day SUM of realized PnL on CHILI-
+    attributed closed trades over the trailing 180 days, treated as iid
+    Gaussian for the monthly aggregate.
+    """
+    from sqlalchemy import text
+
+    rows = db.execute(
+        text(
+            """
+            SELECT DATE_TRUNC('day',
+                       COALESCE(exit_date, last_fill_at, filled_at))::date AS d,
+                   COALESCE(SUM(pnl), 0)::float AS daily_pnl
+              FROM trading_trades
+             WHERE user_id = :uid
+               AND status = 'closed'
+               AND pnl IS NOT NULL
+               AND scan_pattern_id IS NOT NULL
+               AND scan_pattern_id != -1
+               AND COALESCE(exit_date, last_fill_at, filled_at)
+                   >= now() - interval '180 days'
+             GROUP BY 1
+            """
+        ),
+        {"uid": user_id},
+    ).fetchall()
+
+    n = len(rows)
+    if n < 30:
+        return None, n
+
+    daily = [float(r.daily_pnl or 0.0) for r in rows]
+    mean_d = sum(daily) / n
+    var_d = sum((p - mean_d) ** 2 for p in daily) / max(n - 1, 1)
+    std_d = var_d ** 0.5
+
+    if settings_obj is None:
+        from ...config import settings as _s
+        settings_obj = _s
+    k = float(getattr(settings_obj, "chili_monthly_dd_breaker_lower_bound_sigmas", 2.0))
+
+    threshold = (30.0 * mean_d) - k * ((30.0 ** 0.5) * std_d)
+    return threshold, n
+
+
 def check_drawdown_breaker(
     db: Session,
     user_id: int | None,
@@ -992,6 +1055,64 @@ def check_drawdown_breaker(
         _persist_breaker_state(True, _breaker_reason)
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
+
+    # f-phase3-stop-bleed D1 — empirical monthly DD breaker.
+    # Default OFF until walk-forward shows trip ~2026-04-22 in
+    # docs/STRATEGY/CC_REPORTS/2026-05-15_phase3-stop-bleed.md, after
+    # which the operator flips the flag ON. The threshold is data-driven;
+    # if <30d of CHILI-attributed history exists the helper returns None
+    # and this check is skipped (no fallback dollar value).
+    try:
+        from ...config import settings as _s_dd
+        flag_enabled = bool(getattr(_s_dd, "chili_monthly_dd_breaker_enabled", False))
+    except Exception:
+        flag_enabled = False
+    if flag_enabled:
+        try:
+            threshold, n_obs = _monthly_dd_threshold(db, user_id, settings_obj=_s_dd)
+        except Exception:
+            logger.warning(
+                "[circuit_breaker] _monthly_dd_threshold failed; skipping check",
+                exc_info=True,
+            )
+            threshold, n_obs = None, 0
+        if threshold is None:
+            logger.warning(
+                "[circuit_breaker] monthly_dd_breaker enabled but only %dd "
+                "CHILI-attributed history (<30 required); skipping check. "
+                "The breaker activates organically once history accumulates.",
+                n_obs,
+            )
+        else:
+            from sqlalchemy import text as _text_dd
+            monthly_pnl = db.execute(
+                _text_dd(
+                    """
+                    SELECT COALESCE(SUM(pnl), 0)::float
+                      FROM trading_trades
+                     WHERE user_id = :uid
+                       AND status = 'closed'
+                       AND pnl IS NOT NULL
+                       AND COALESCE(exit_date, last_fill_at, filled_at)
+                           >= now() - interval '30 days'
+                    """
+                ),
+                {"uid": user_id},
+            ).scalar() or 0.0
+            if float(monthly_pnl) <= float(threshold):
+                _breaker_tripped = True
+                k_val = float(getattr(
+                    _s_dd, "chili_monthly_dd_breaker_lower_bound_sigmas", 2.0
+                ))
+                _breaker_reason = (
+                    f"monthly_dd_breaker: 30-day realized PnL "
+                    f"${float(monthly_pnl):.2f} <= empirical Gaussian "
+                    f"lower-bound ${float(threshold):.2f} "
+                    f"(K={k_val}σ, computed from {n_obs}d CHILI history)"
+                )
+                _persist_breaker_state(True, _breaker_reason)
+                logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
+                return True, _breaker_reason
 
     # Consecutive losses — YY: CHILI-placed only.
     #
