@@ -1,15 +1,21 @@
 <#
 .SYNOPSIS
-  Fails if any log line is a Phase-F venue-truth release blocker.
+  Fails if venue-truth logs regress out of authoritative mode.
 
 .DESCRIPTION
-  A line is a BLOCKER if it contains BOTH:
+  As of 2026-05-15, venue-truth telemetry is AUTHORITATIVE by default
+  (post Phase B of evidence-fidelity-architecture). The release-blocker
+  is inverted from its phase-F shadow-lockdown role: a line is a
+  BLOCKER if it contains BOTH:
     - [venue_truth_ops]
-    - mode=authoritative
+    - mode=shadow   (or mode=off - any non-authoritative leak)
 
-  Phase F rolls out venue-truth telemetry in shadow mode only; an
-  ``authoritative`` log line means the cutover leaked into a non-
-  authoritative deploy.
+  An authoritative deploy that emits ``mode=shadow`` or ``mode=off``
+  lines means the venue_truth_mode setting regressed somewhere in the
+  rollout (config drift, env override, partial-update).
+
+  Legacy phase-F semantics (fire on ``mode=authoritative``) are
+  available via ``-LegacyShadowLockdown`` for rollback windows.
 
   Separately (optional via -DiagnosticsJson) a JSON dump of the
   /api/trading/brain/venue-truth/diagnostics endpoint can be piped in
@@ -43,7 +49,9 @@ param(
     [Parameter()]
     [int] $MinObservations = 0,
     [Parameter()]
-    [double] $MaxMeanGapBps = 0.0
+    [double] $MaxMeanGapBps = 0.0,
+    [Parameter()]
+    [switch] $LegacyShadowLockdown
 )
 
 begin {
@@ -52,8 +60,13 @@ begin {
     function Test-ReleaseBlockerLine {
         param([string] $Line)
         if ([string]::IsNullOrEmpty($Line)) { return $false }
-        return $Line.Contains("[venue_truth_ops]") -and
-               $Line.Contains("mode=authoritative")
+        if (-not $Line.Contains("[venue_truth_ops]")) { return $false }
+        if ($LegacyShadowLockdown) {
+            # Legacy phase-F semantics - fire if anyone emits authoritative.
+            return $Line.Contains("mode=authoritative")
+        }
+        # Default (2026-05-15+) - authoritative is expected, fire on regression.
+        return $Line.Contains("mode=shadow") -or $Line.Contains("mode=off")
     }
 
     function Add-LineIfBlocker {
@@ -83,7 +96,8 @@ end {
     }
 
     if ($blockers.Count -gt 0) {
-        Write-Error "Release blocker: $($blockers.Count) line(s) match [venue_truth_ops] mode=authoritative"
+        $expected = if ($LegacyShadowLockdown) { "mode=authoritative" } else { "mode=shadow or mode=off (regression from authoritative)" }
+        Write-Error "Release blocker: $($blockers.Count) line(s) match [venue_truth_ops] $expected"
         foreach ($b in $blockers) {
             [Console]::Error.WriteLine($b)
         }

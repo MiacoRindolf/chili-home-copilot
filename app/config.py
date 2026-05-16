@@ -329,14 +329,21 @@ class Settings(BaseSettings):
     # + capacity cap. Read-only in shadow; flipping to authoritative lets
     # NetEdgeRanker / sizing consume the per-ticker estimates. See
     # docs/TRADING_BRAIN_EXECUTION_REALISM_ROLLOUT.md.
-    brain_execution_cost_mode: str = "shadow"
+    # 2026-05-15 (post Phase B of evidence-fidelity): flipped from
+    # "shadow" -> "authoritative" by operator. Writers populate the
+    # rolling estimate table and downstream consumers may now read it.
+    brain_execution_cost_mode: str = "authoritative"
     brain_execution_cost_default_fee_bps: float = 1.0
     brain_execution_cost_impact_cap_bps: float = 50.0
     brain_execution_capacity_max_adv_frac: float = 0.05
 
     # Venue-truth telemetry (Phase F) — compares expected vs realized
     # costs per fill. Shadow writes to `trading_venue_truth_log` only.
-    brain_venue_truth_mode: str = "shadow"
+    # 2026-05-15: flipped from "shadow" -> "authoritative" by operator.
+    # The legacy phase-F lockdown release-blocker has been inverted; it
+    # now fires on `mode=shadow` (regression detector). See
+    # `scripts/check_venue_truth_release_blocker.ps1`.
+    brain_venue_truth_mode: str = "authoritative"
     brain_venue_truth_ops_log_enabled: bool = True
 
     # Live brackets + reconciliation (Phase G) — persists bracket intent
@@ -1010,7 +1017,7 @@ class Settings(BaseSettings):
     # flag so operators can observe legacy vs adjusted divergence for
     # the 7-day soak window before flipping. See
     # ``app/services/trading/family_fdr.py``.
-    chili_family_fdr_enabled: bool = False
+    chili_family_fdr_enabled: bool = True
     # Q1.T3 phase 1: INSERT into ``unified_signals`` alongside existing payloads (default OFF).
     chili_unified_signal_enabled: bool = True
     # Q1.T3 phase 2: shadow-consume unified_signals from autotrader and log
