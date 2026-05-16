@@ -381,8 +381,17 @@ def _evaluate_adaptive(
     eval_payload: Mapping[str, Any],
     *,
     pool: Mapping[str, Any],
+    family_size: int = 1,
 ) -> tuple[bool, list[str], list[dict[str, Any]], dict[str, Any]]:
-    """Compute (pass, reasons, metric_rows, summary_row) from pool-relative math."""
+    """Compute (pass, reasons, metric_rows, summary_row) from pool-relative math.
+
+    Phase E (2026-05-14): when ``family_size > 1`` and
+    ``chili_family_fdr_enabled`` is True, the DSR pool-percentile
+    threshold is replaced with its Benjamini-Hochberg adjustment
+    (``family_fdr.bh_adjusted_dsr_threshold``). The raw and adjusted
+    thresholds are both surfaced via the DSR metric row so the shadow
+    log captures the divergence even when the flag is OFF.
+    """
     pool_pct = float(
         getattr(settings, "chili_cpcv_target_promotion_pool_pct", 0.05) or 0.05
     )
@@ -444,7 +453,26 @@ def _evaluate_adaptive(
             float(raw_dsr), n_trades, float(dsr_pool_mean), prior_n
         )
         lower = _hansen_dsr_lower_ci(shrunk_dsr, max(2, n_trades), ci_level)
-        thr = _empirical_percentile(pool_dsr, q) if pool_dsr else None
+        thr_naive = _empirical_percentile(pool_dsr, q) if pool_dsr else None
+        # Phase E (2026-05-14): BH-adjusted family-FDR threshold. Math is
+        # pure; the *use* of the adjusted threshold is flag-gated, but
+        # the raw vs adjusted divergence is always surfaced into the
+        # metric row so the shadow log can replay the comparison.
+        try:
+            from .family_fdr import (
+                bh_adjusted_dsr_threshold,
+                family_fdr_enabled,
+            )
+            fam_m = int(max(1, family_size))
+            if thr_naive is not None and fam_m > 1:
+                thr_bh = bh_adjusted_dsr_threshold(float(thr_naive), fam_m)
+            else:
+                thr_bh = (float(thr_naive) if thr_naive is not None else None)
+            use_bh = bool(family_fdr_enabled() and fam_m > 1 and thr_bh is not None)
+        except Exception:
+            thr_bh = (float(thr_naive) if thr_naive is not None else None)
+            use_bh = False
+        thr = thr_bh if use_bh else thr_naive
         eligible = thr is None or lower >= float(thr)
         dsr_row.update({
             "raw_value": float(raw_dsr),
@@ -452,6 +480,12 @@ def _evaluate_adaptive(
             "lower_ci": float(lower),
             "pool_percentile": q,
             "pool_threshold": (float(thr) if thr is not None else None),
+            "pool_threshold_naive": (
+                float(thr_naive) if thr_naive is not None else None
+            ),
+            "pool_threshold_bh": (float(thr_bh) if thr_bh is not None else None),
+            "family_size": int(max(1, family_size)),
+            "family_fdr_applied": bool(use_bh),
             "eligible": bool(eligible),
         })
         if not eligible:
@@ -728,8 +762,40 @@ def maybe_apply_adaptive_gate(
                     "pid=%s: %s — falling back to pool_mean",
                     scan_pattern_id, exc,
                 )
+        # Phase E (2026-05-14): resolve the candidate's hypothesis-family
+        # size for the BH-adjusted DSR threshold. The lookup is one
+        # indexed pattern-row read and falls back to ``1`` (legacy
+        # behavior) on any error.
+        family_size = 1
+        family_label: str | None = None
+        if db is not None and scan_pattern_id is not None:
+            try:
+                from .family_fdr import family_size_for_pattern
+                family_size = int(family_size_for_pattern(db, int(scan_pattern_id)))
+            except Exception as exc:
+                logger.debug(
+                    "[cpcv_adaptive_gate] family_size lookup failed pid=%s: %s",
+                    scan_pattern_id, exc,
+                )
+            try:
+                from sqlalchemy import text as _text
+                row = db.execute(
+                    _text(
+                        "SELECT hypothesis_family FROM scan_patterns "
+                        "WHERE id = :pid"
+                    ),
+                    {"pid": int(scan_pattern_id)},
+                ).fetchone()
+                if row is not None and row[0]:
+                    family_label = str(row[0])
+            except Exception as exc:
+                logger.debug(
+                    "[cpcv_adaptive_gate] family label lookup failed pid=%s: %s",
+                    scan_pattern_id, exc,
+                )
+
         adaptive_ok, adaptive_reasons, metric_rows, summary_row = _evaluate_adaptive(
-            eval_payload, pool=pool
+            eval_payload, pool=pool, family_size=family_size
         )
         summary_row["legacy_verdict_pass"] = bool(legacy_pass)
 
@@ -740,14 +806,41 @@ def maybe_apply_adaptive_gate(
                 metric_rows=metric_rows,
                 summary_row=summary_row,
             )
+            # Phase E: shadow-log the family-FDR trial row regardless of
+            # the flag. The verdict snapshotted is the one the wrapper
+            # is about to return (legacy when flag OFF, adaptive when
+            # ON) so the 7-day soak shows real promotion decisions.
+            try:
+                from .family_fdr import family_fdr_enabled, log_family_trial
+                returned_verdict = (
+                    bool(adaptive_ok)
+                    if adaptive_gate_enabled()
+                    else bool(legacy_pass)
+                )
+                _ = family_fdr_enabled  # touch import so the helper is reachable in tests
+                log_family_trial(
+                    db,
+                    hypothesis_family=family_label,
+                    variant_pattern_id=int(scan_pattern_id),
+                    variant_dsr=eval_payload.get("deflated_sharpe"),
+                    variant_pbo=eval_payload.get("pbo"),
+                    variant_promoted=returned_verdict,
+                    family_variants_tested_so_far=family_size,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[cpcv_adaptive_gate] family_fdr trial-log write failed pid=%s: %s",
+                    scan_pattern_id, exc,
+                )
 
         logger.info(
             "[cpcv_adaptive_gate] pat=%s legacy_pass=%s adaptive_pass=%s "
-            "pool_size=%s reasons=%s marginal_bps=%.3f",
+            "pool_size=%s family_size=%s reasons=%s marginal_bps=%.3f",
             scan_pattern_id,
             legacy_pass,
             adaptive_ok,
             pool.get("pool_size"),
+            family_size,
             adaptive_reasons,
             float(summary_row.get("marginal_portfolio_sharpe_bps") or 0.0),
         )

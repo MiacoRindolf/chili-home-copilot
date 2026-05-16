@@ -15940,6 +15940,60 @@ def _migration_241_scan_pattern_canonical_outcome_split(conn) -> None:
     conn.commit()
 
 
+def _migration_242_pattern_family_trial_log(conn) -> None:
+    """Phase E of f-evidence-fidelity-architecture (2026-05-14).
+
+    Trial-log keyed by ``hypothesis_family``. The Benjamini-Hochberg
+    family-level FDR control in ``family_fdr.py`` reads this table to
+    replay the BH-adjusted DSR threshold against the active roster
+    after the 7-day shadow soak. One row per variant evaluation:
+
+    * ``family_variants_tested_so_far`` — running count at write time
+    * ``family_best_dsr_at_time`` — max DSR across the family when this
+      row landed (snapshot for post-hoc audit)
+    * ``variant_promoted`` — verdict the gate returned (legacy when the
+      flag is OFF, BH-adjusted when ON)
+
+    Additive only: new table + index. No DML on ``scan_patterns``,
+    no column adds. Idempotent (CREATE ... IF NOT EXISTS). No-op when
+    ``scan_patterns`` is absent (FK target).
+
+    ``evaluated_at`` is TIMESTAMPTZ to match migrations 164 and 239 so
+    operator-query windows line up across the audit tables.
+    """
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    try:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS pattern_family_trial_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    hypothesis_family TEXT NOT NULL,
+                    variant_pattern_id INTEGER NOT NULL
+                        REFERENCES scan_patterns(id) ON DELETE CASCADE,
+                    evaluated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    variant_dsr DOUBLE PRECISION,
+                    variant_pbo DOUBLE PRECISION,
+                    variant_promoted BOOLEAN,
+                    family_best_dsr_at_time DOUBLE PRECISION,
+                    family_variants_tested_so_far INTEGER
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_pattern_family_trial_log_fam "
+                "ON pattern_family_trial_log (hypothesis_family, evaluated_at DESC)"
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16211,6 +16265,8 @@ MIGRATIONS = [
      _migration_240_scan_pattern_lifecycle_pilot_promoted),
     ("241_scan_pattern_canonical_outcome_split",
      _migration_241_scan_pattern_canonical_outcome_split),
+    ("242_pattern_family_trial_log",
+     _migration_242_pattern_family_trial_log),
 ]
 
 

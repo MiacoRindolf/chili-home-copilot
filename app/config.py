@@ -1002,6 +1002,15 @@ class Settings(BaseSettings):
     # Portfolio marginal Sharpe contribution required to admit, in basis points.
     # 0.0 = any positive marginal contribution admits (effective no-op floor).
     chili_portfolio_marginal_sharpe_min_bps: float = 0.0
+    # Phase E of f-evidence-fidelity-architecture (2026-05-14). When ON,
+    # the adaptive CPCV gate applies a Benjamini-Hochberg adjustment to
+    # the DSR pool-percentile threshold based on the candidate's
+    # hypothesis-family size. Default OFF — the BH-adjusted threshold is
+    # shadow-logged into ``pattern_family_trial_log`` regardless of the
+    # flag so operators can observe legacy vs adjusted divergence for
+    # the 7-day soak window before flipping. See
+    # ``app/services/trading/family_fdr.py``.
+    chili_family_fdr_enabled: bool = False
     # Q1.T3 phase 1: INSERT into ``unified_signals`` alongside existing payloads (default OFF).
     chili_unified_signal_enabled: bool = True
     # Q1.T3 phase 2: shadow-consume unified_signals from autotrader and log

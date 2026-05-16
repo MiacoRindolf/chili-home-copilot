@@ -50,6 +50,7 @@ def handle_backtest_completed(db: "Session", ev, user_id: int | None) -> None:
     from app.models.trading import ScanPattern
     from ...mining_validation import check_promotion_ready
     from ...promotion_gate import (
+        _count_variants_in_family,
         cpcv_eval_to_scan_pattern_fields,
         persist_cpcv_shadow_eval,
     )
@@ -114,10 +115,17 @@ def handle_backtest_completed(db: "Session", ev, user_id: int | None) -> None:
             row_d["ret_5d"] = float(r.outcome_return_pct or 0.0)
             ensemble_rows.append(row_d)
 
+        # Phase E of f-evidence-fidelity-architecture (2026-05-14): the
+        # DSR multi-testing correction is only meaningful when the gate
+        # is told how many siblings were tested in the same hypothesis
+        # family. Falls back to 1 when the pattern has neither
+        # ``hypothesis_family`` nor a populated ``parent_id`` chain
+        # (matches legacy behavior; no silent regression).
+        n_hypo = _count_variants_in_family(sess, pattern)
         ok, detail = check_promotion_ready(
             ensemble_rows,
             min_trades=_MIN_TRADES_FOR_GATE,
-            n_hypotheses_tested=1,  # single-pattern eval; cycle uses higher
+            n_hypotheses_tested=n_hypo,
             scan_pattern=pattern,
         )
 

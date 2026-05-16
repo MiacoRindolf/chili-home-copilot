@@ -77,6 +77,58 @@ LGBM_CPCV_PARAMS: dict[str, Any] = {
 }
 
 
+def _count_variants_in_family(sess: Any, pattern: Any) -> int:
+    """Count sibling patterns sharing this pattern's hypothesis family.
+
+    Phase E of f-evidence-fidelity-architecture (2026-05-14). The DSR
+    multiple-testing correction in :func:`compute_deflated_sharpe_ratio`
+    only deflates correctly when ``n_hypotheses_tested`` reflects the
+    true family-trial count. Prefer the explicit ``hypothesis_family``
+    column; fall back to walking the ``parent_id`` chain when family is
+    NULL (legacy patterns predate the column).
+
+    Always returns ``>= 1`` so the gate never sees a degenerate count
+    (matches the legacy ``n_hypotheses_tested=1`` floor).
+    """
+    if pattern is None or sess is None:
+        return 1
+    try:
+        from app.models.trading import ScanPattern
+    except Exception:
+        return 1
+
+    fam = getattr(pattern, "hypothesis_family", None)
+    if fam:
+        try:
+            cnt = int(
+                sess.query(ScanPattern)
+                .filter(
+                    ScanPattern.hypothesis_family == fam,
+                    ScanPattern.active.is_(True),
+                )
+                .count()
+            )
+            return max(1, cnt)
+        except Exception:
+            return 1
+
+    root_id = getattr(pattern, "parent_id", None) or getattr(pattern, "id", None)
+    if root_id is None:
+        return 1
+    try:
+        cnt = int(
+            sess.query(ScanPattern)
+            .filter(
+                ScanPattern.parent_id == int(root_id),
+                ScanPattern.active.is_(True),
+            )
+            .count()
+        )
+        return max(1, cnt)
+    except Exception:
+        return 1
+
+
 def bars_per_year(bar_interval: str) -> float:
     """US equity session approximation: 252 days × 6.5 hours / bar duration."""
     iv = (bar_interval or "1d").strip().lower()
