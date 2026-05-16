@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -42,6 +43,34 @@ def reset_product_info_cache_for_tests() -> None:
     """Clear product-info cache (pytest only)."""
     with _PRODUCT_INFO_CACHE_LOCK:
         _PRODUCT_INFO_CACHE.clear()
+
+
+# f-phase3-stop-bleed D3 — pre-send product_id validator.
+# Coinbase Advanced Trade rejects malformed product_ids with HTTP 400
+# INVALID_ARGUMENT. The 2026-05-15 audit's last-7d rejection histogram
+# shows 48 such errors. Rejecting locally avoids the round-trip and the
+# rate-limit charge, and the original (un-normalized) value is preserved
+# in the ValueError so the upstream producer bug is easy to find.
+_VALID_PRODUCT_ID = re.compile(r"^[A-Z0-9]+-(USD|USDC)$")
+
+
+def _normalize_product_id(product_id: str | None) -> str:
+    """Validate Coinbase product_id and return the upper-cased canonical form.
+
+    Accepts inputs like ``"btc-usd"`` and returns ``"BTC-USD"``. Raises
+    ``ValueError`` on any of the common drift patterns seen in the audit:
+    missing quote suffix (``"BTC"``), USD without separator
+    (``"BTCUSD"``), slash separator from CCXT conventions (``"BTC/USD"``),
+    or empty / None input. We do NOT auto-correct — the producer is the
+    bug; refuse so the broker doesn't see it.
+    """
+    pid = (product_id or "").strip().upper()
+    if not _VALID_PRODUCT_ID.match(pid):
+        raise ValueError(
+            f"coinbase_spot: invalid product_id {product_id!r}; "
+            f"expected '<BASE>-USD' or '<BASE>-USDC'"
+        )
+    return pid
 
 
 def _quantize_price(value: float, increment: float, *, mode: str) -> str:
@@ -649,6 +678,12 @@ class CoinbaseSpotAdapter(VenueAdapter):
     ) -> dict[str, Any]:
         if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
             return {"ok": False, "error": "adapter disabled"}
+        # f-phase3-stop-bleed D3 — refuse malformed product_id locally so the
+        # broker never sees it (avoids the 400 INVALID_ARGUMENT round-trip).
+        try:
+            product_id = _normalize_product_id(product_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         cid = client_order_id or str(uuid.uuid4())
         if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
@@ -754,6 +789,12 @@ class CoinbaseSpotAdapter(VenueAdapter):
     ) -> dict[str, Any]:
         if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
             return {"ok": False, "error": "adapter disabled"}
+        # f-phase3-stop-bleed D3 — refuse malformed product_id locally so the
+        # broker never sees it (avoids the 400 INVALID_ARGUMENT round-trip).
+        try:
+            product_id = _normalize_product_id(product_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         cid = client_order_id or str(uuid.uuid4())
         if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
@@ -885,6 +926,12 @@ class CoinbaseSpotAdapter(VenueAdapter):
         """
         if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
             return {"ok": False, "error": "adapter disabled"}
+        # f-phase3-stop-bleed D3 — refuse malformed product_id locally so the
+        # broker never sees it (avoids the 400 INVALID_ARGUMENT round-trip).
+        try:
+            product_id = _normalize_product_id(product_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         cid = client_order_id or str(uuid.uuid4())
         if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {
