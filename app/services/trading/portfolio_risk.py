@@ -969,6 +969,49 @@ def _monthly_dd_threshold(
     return threshold, n
 
 
+def _monthly_attributed_pnl(
+    db: Session,
+    user_id: int | None,
+) -> float:
+    """Sum of realized PnL on CHILI-attributed closed trades over the
+    trailing 30 days.
+
+    Matches :func:`_monthly_dd_threshold`'s attribution scope
+    (``scan_pattern_id IS NOT NULL AND scan_pattern_id != -1``) so the
+    monthly DD breaker's numerator and denominator are calibrated against
+    the same population. Without this filter, no_pattern bleed (manual /
+    legacy / reconciler-imported trades with NULL or -1 scan_pattern_id)
+    inflates the numerator without widening the threshold's variance
+    estimate -- tripping the breaker on losses the threshold cannot
+    statistically see.
+
+    Background: ARCHITECT-FLAG raised by the 2026-05-16 monthly-DD-breaker
+    arming-watch report (docs/STRATEGY/CC_REPORTS/
+    2026-05-16_phase3-monthly-dd-breaker-arming-watch.md). Threshold was
+    attributed-only, numerator was all-closed -- a definitional asymmetry
+    one SQL clause wide. This helper closes it.
+    """
+    from sqlalchemy import text
+
+    result = db.execute(
+        text(
+            """
+            SELECT COALESCE(SUM(pnl), 0)::float
+              FROM trading_trades
+             WHERE user_id = :uid
+               AND status = 'closed'
+               AND pnl IS NOT NULL
+               AND scan_pattern_id IS NOT NULL
+               AND scan_pattern_id != -1
+               AND COALESCE(exit_date, last_fill_at, filled_at)
+                   >= now() - interval '30 days'
+            """
+        ),
+        {"uid": user_id},
+    ).scalar()
+    return float(result or 0.0)
+
+
 def check_drawdown_breaker(
     db: Session,
     user_id: int | None,
@@ -1084,28 +1127,19 @@ def check_drawdown_breaker(
                 n_obs,
             )
         else:
-            from sqlalchemy import text as _text_dd
-            monthly_pnl = db.execute(
-                _text_dd(
-                    """
-                    SELECT COALESCE(SUM(pnl), 0)::float
-                      FROM trading_trades
-                     WHERE user_id = :uid
-                       AND status = 'closed'
-                       AND pnl IS NOT NULL
-                       AND COALESCE(exit_date, last_fill_at, filled_at)
-                           >= now() - interval '30 days'
-                    """
-                ),
-                {"uid": user_id},
-            ).scalar() or 0.0
+            # Attribution-symmetric numerator: same scope as the threshold
+            # (scan_pattern_id IS NOT NULL AND != -1). Without this, no_pattern
+            # bleed pushes the numerator down without widening the threshold's
+            # variance estimate -- see ARCHITECT-FLAG in
+            # 2026-05-16_phase3-monthly-dd-breaker-arming-watch.md.
+            monthly_pnl = _monthly_attributed_pnl(db, user_id)
             if float(monthly_pnl) <= float(threshold):
                 _breaker_tripped = True
                 k_val = float(getattr(
                     _s_dd, "chili_monthly_dd_breaker_lower_bound_sigmas", 2.0
                 ))
                 _breaker_reason = (
-                    f"monthly_dd_breaker: 30-day realized PnL "
+                    f"monthly_dd_breaker: 30-day CHILI-attributed realized PnL "
                     f"${float(monthly_pnl):.2f} <= empirical Gaussian "
                     f"lower-bound ${float(threshold):.2f} "
                     f"(K={k_val}σ, computed from {n_obs}d CHILI history)"
