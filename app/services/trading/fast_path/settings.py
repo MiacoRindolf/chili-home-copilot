@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = (os.environ.get(name) or "").strip().lower()
+    # Be tolerant of accidentally-inline notes in .env files, e.g.
+    # "1 until soak completes". Compose/dotenv can pass that whole
+    # string through, and treating it as False silently disables gates.
+    raw = raw.split()[0] if raw else raw
     if raw in ("1", "true", "yes", "on"):
         return True
     if raw in ("0", "false", "no", "off"):
@@ -216,6 +220,22 @@ class FastPathSettings:
     paying the taker fee, so the operator wants the maker chance brief.
     Override via ``CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S``."""
 
+    # ── Short-alert gate (2026-05-17) ─────────────────────────────────
+    emit_short_alerts: bool = False
+    """When False (default), the scanner skips ``imbalance_short`` alert
+    emission entirely. Coinbase spot — the only fast-path venue today —
+    cannot short, so the executor rejects every short alert with
+    ``short_unsupported_in_spot`` regardless of edge or sizing. Pre-gate
+    diagnostic (2026-05-16): 2,546 of 6,595 alerts/24h (39%) were
+    imbalance_short and 100% rejected, burning DB writes + executor
+    compute for zero strategy gain.
+
+    Operators on a perp venue (Hyperliquid / dYdX / Drift) that supports
+    shorts should override via ``CHILI_FAST_PATH_EMIT_SHORT_ALERTS=true``.
+    Tests can override via the ``emit_short_alerts`` constructor arg on
+    ``MomentumScanner`` directly (default True for backwards-compat with
+    pre-gate fixtures)."""
+
 
 def _env_float(name: str, default: float) -> float:
     raw = (os.environ.get(name) or "").strip()
@@ -274,6 +294,9 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S", 10),
         maker_first_taker_fallback_s=_env_int(
             "CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S", 5),
+        # Short-alert gate (2026-05-17)
+        emit_short_alerts=_env_bool(
+            "CHILI_FAST_PATH_EMIT_SHORT_ALERTS", False),
     )
 
 

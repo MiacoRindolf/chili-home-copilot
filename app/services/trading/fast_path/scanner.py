@@ -180,10 +180,21 @@ class MomentumScanner:
 
     Single-threaded usage assumed (asyncio task on the WS client).
     Diagnostic counters are surfaced via :meth:`stats`.
+
+    Parameters
+    ----------
+    emit_short_alerts
+        When ``False``, the scanner skips ``imbalance_short`` emission
+        entirely. Default ``True`` for backwards-compat with existing
+        unit tests (which assert the scanner emits both directions).
+        Production wiring in ``ws_client.py`` passes the value from
+        ``settings.emit_short_alerts`` (default ``False`` — Coinbase
+        spot can't short, see 2026-05-17 ARCHITECT-FLAG).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, emit_short_alerts: bool = True) -> None:
         self._state: dict[str, _PerTickerState] = {}
+        self._emit_short_alerts = bool(emit_short_alerts)
         # Diagnostic counters — surfaced via stats().
         self.bars_seen = 0
         self.books_seen = 0
@@ -191,6 +202,7 @@ class MomentumScanner:
         self.fired_volume_breakout_pullback_long = 0
         self.fired_imbalance_long = 0
         self.fired_imbalance_short = 0
+        self.suppressed_short_alert_disabled = 0
         self.fired_spread_squeeze = 0
         self.suppressed_cooldown = 0
         self.suppressed_warmup = 0
@@ -337,7 +349,16 @@ class MomentumScanner:
             else:
                 self.suppressed_cooldown += 1
         elif imb <= IMBALANCE_SHORT_THRESHOLD:
-            if self._cooldown_ok(st, "imbalance_short", IMBALANCE_COOLDOWN_S, now_monotonic):
+            # 2026-05-17 spot-venue gate: skip imbalance_short emission
+            # when the scanner is configured for a long-only venue.
+            # The executor would reject these with
+            # 'short_unsupported_in_spot' anyway -- this saves the
+            # alert insert + executor decision-log write upstream.
+            # Pre-gate measurement: 2,546/6,595 alerts/24h (39%) were
+            # imbalance_short and 100% rejected.
+            if not self._emit_short_alerts:
+                self.suppressed_short_alert_disabled += 1
+            elif self._cooldown_ok(st, "imbalance_short", IMBALANCE_COOLDOWN_S, now_monotonic):
                 alerts.append(self._book_alert(ticker, "imbalance_short", ts, imb, book))
                 self.fired_imbalance_short += 1
             else:
@@ -523,6 +544,7 @@ class MomentumScanner:
                 self.fired_volume_breakout_pullback_long,
             "fired_imbalance_long": self.fired_imbalance_long,
             "fired_imbalance_short": self.fired_imbalance_short,
+            "suppressed_short_alert_disabled": self.suppressed_short_alert_disabled,
             "fired_spread_squeeze": self.fired_spread_squeeze,
             "suppressed_cooldown": self.suppressed_cooldown,
             "suppressed_warmup": self.suppressed_warmup,

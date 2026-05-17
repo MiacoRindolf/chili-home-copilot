@@ -72,7 +72,13 @@ class CoinbaseWSClient:
         )
         # F3: event-driven scalp scanner. Pure-Python; reads bars +
         # books and emits alert dicts.
-        self._scanner = MomentumScanner()
+        # 2026-05-17: pass emit_short_alerts so the scanner skips
+        # imbalance_short on long-only venues (Coinbase spot). Default
+        # is False at the settings layer; operators on a perp venue
+        # flip CHILI_FAST_PATH_EMIT_SHORT_ALERTS=true.
+        self._scanner = MomentumScanner(
+            emit_short_alerts=getattr(settings, "emit_short_alerts", False),
+        )
         # Diagnostic counters — surfaced via stats() so the supervisor
         # metrics line shows whether we're seeing raw traffic at all
         # (vs only filtering it out as not-yet-closed).
