@@ -16778,6 +16778,54 @@ def _migration_249_bracket_intents_position_id(conn) -> None:
     logger.info("[mig249] done -- backfilled=%d", backfilled)
 
 
+def _migration_250_coinbase_account_type_spot(conn) -> None:
+    """f-account-type-coinbase-retrofit (2026-05-18) -- correct
+    account_type on trading_positions rows for Coinbase positions.
+
+    Phase 1/2 writers seeded ALL positions with account_type='cash' --
+    that was acceptable for Robinhood (the operator uses a single
+    cash-equivalent account) but is structurally wrong for Coinbase
+    where the account type is 'spot' (per Coinbase API convention and
+    the perps/funding distinction the operator will need later).
+
+    Pre-retrofit sample (2026-05-18 probe):
+      - 125 rows: robinhood / cash / equity     (correct, leave)
+      - 53  rows: coinbase / cash / crypto      (WRONG -> set 'spot')
+      - 23  rows: robinhood / cash / crypto     (correct, operator uses
+                                                 Robinhood crypto in
+                                                 cash account; leave)
+
+    Only Coinbase rows are touched. The 23 Robinhood-crypto rows stay
+    at 'cash' to match how the operator's account is structured.
+
+    Idempotent: WHERE clause checks current account_type so re-running
+    is a no-op once the values are 'spot'.
+    """
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_positions
+               SET account_type = 'spot',
+                   updated_at = NOW()
+             WHERE broker_source = 'coinbase'
+               AND account_type = 'cash'
+            """
+        ))
+        rc = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig250] coinbase account_type retrofit affected %d row(s) "
+            "(53 expected on first run; 0 on subsequent / non-prod)",
+            rc,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig250] coinbase account_type retrofit raised; rolling back",
+            exc_info=True,
+        )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -17060,6 +17108,7 @@ MIGRATIONS = [
     ("247_promote_pattern_537_path_a", _migration_247_promote_pattern_537_path_a),
     ("248_execution_events_position_id", _migration_248_execution_events_position_id),
     ("249_bracket_intents_position_id", _migration_249_bracket_intents_position_id),
+    ("250_coinbase_account_type_spot", _migration_250_coinbase_account_type_spot),
 ]
 
 

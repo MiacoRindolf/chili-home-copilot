@@ -1562,12 +1562,17 @@ _SYNC_GAP_THRESHOLD_SECONDS = (
 def _resolve_account_type_for_position(broker_source: str, ticker: str) -> str:
     """Resolve account_type for a broker-observed position.
 
-    Phase 1 returns 'cash' for all live broker observations -- the
-    operator runs a single cash-equivalent account per broker today.
-    The autopilot routing layer (Phase 7) refines per-account-type
-    rules later. The column exists in the schema for forward-compat
-    only.
+    f-account-type-coinbase-retrofit (mig 250, 2026-05-18): Coinbase
+    positions live in 'spot' accounts (Coinbase's API convention; the
+    'cash' label was a Phase 1 placeholder). All other brokers continue
+    to map to 'cash' until the autopilot routing layer (Phase 7)
+    refines per-account-type rules.
+
+    Mig 250 retrofitted existing Coinbase rows; this function ensures
+    new fills get the correct value going forward.
     """
+    if (broker_source or "").strip().lower() == "coinbase":
+        return "spot"
     return "cash"
 
 
