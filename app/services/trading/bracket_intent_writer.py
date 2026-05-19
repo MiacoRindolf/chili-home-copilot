@@ -407,16 +407,38 @@ def upsert_bracket_intent(
         "stop_model_resolved": bracket_result.stop_model_resolved,
     }
 
+    # f-position-identity-phase-3 (mig 249, 2026-05-18): double-write
+    # position_id alongside trade_id. Reuses the same resolver Phase 2
+    # uses in execution_audit.record_execution_event. NEVER raises;
+    # resolution misses become position_id=NULL. NO READER consults
+    # position_id in Phase 3 -- this is foundation for Phase 4's
+    # inverse-reconcile rewrite.
+    position_id_resolved: int | None = None
+    try:
+        from .position_resolver import resolve_position_id
+        position_id_resolved = resolve_position_id(
+            db,
+            trade=None,
+            user_id=user_id,
+            ticker=bracket_input.ticker,
+            broker_source=broker_source,
+            direction=bracket_input.direction,
+        )
+    except Exception:
+        # Belt-and-suspenders: resolver swallows internally, but never
+        # let an import-time issue (e.g., circular) break the writer.
+        position_id_resolved = None
+
     now = datetime.utcnow()
     if existing is None:
         row = db.execute(text("""
             INSERT INTO trading_bracket_intents (
-                trade_id, user_id, ticker, direction, quantity, entry_price,
+                trade_id, position_id, user_id, ticker, direction, quantity, entry_price,
                 stop_price, target_price, stop_model, pattern_id, regime,
                 intent_state, shadow_mode, broker_source,
                 payload_json, created_at, updated_at
             ) VALUES (
-                :trade_id, :user_id, :ticker, :direction, :quantity, :entry_price,
+                :trade_id, :position_id, :user_id, :ticker, :direction, :quantity, :entry_price,
                 :stop_price, :target_price, :stop_model, :pattern_id, :regime,
                 :intent_state, :shadow_mode, :broker_source,
                 CAST(:payload_json AS JSONB), :now, :now
@@ -424,6 +446,7 @@ def upsert_bracket_intent(
             RETURNING id
         """), {
             "trade_id": int(trade_id),
+            "position_id": position_id_resolved,
             "user_id": user_id,
             "ticker": bracket_input.ticker,
             "direction": bracket_input.direction,

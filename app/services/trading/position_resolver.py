@@ -1,0 +1,94 @@
+"""Shared position-id resolver for the position-identity refactor.
+
+Phase 2 (mig 248, 2026-05-18) introduced
+``trading_execution_events.position_id`` and the
+``_resolve_position_id_for_event`` helper inside
+``execution_audit.py``. Phase 3 (mig 249, 2026-05-18) extends the
+same pattern to ``trading_bracket_intents.position_id``, so the
+helper is extracted here to be importable from both writer paths
+without circular dependencies.
+
+The resolver matches on the (user_id, broker_source, ticker, direction)
+natural key — the same key Phase 1's writers used in
+``broker_service._phase1_record_position_observation``. Prefers
+``state='open'`` over ``state='closed'`` when both match (handles the
+close/reopen pattern from the Phase 1 soak).
+
+NEVER raises. All exceptions swallowed. Caller MUST tolerate a NULL
+result and continue writing the row regardless. This preserves the
+shadow-mode invariant of Phases 1/2/3: the position-identity layer is
+write-only until Phase 4's authority flip.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+
+def resolve_position_id(
+    db: Session,
+    *,
+    trade: Any | None = None,
+    user_id: int | None = None,
+    ticker: str | None = None,
+    broker_source: str | None = None,
+    direction: str | None = None,
+) -> int | None:
+    """Resolve a ``trading_positions.id`` from event/intent context.
+
+    Resolution priority:
+    1. If ``trade`` is provided, prefer attributes off the trade row
+       (user_id, broker_source, ticker, direction).
+    2. Otherwise use the explicit kwargs.
+
+    Falls back to ``direction='long'`` when not specified (matches
+    Phase 1's default in
+    ``broker_service._resolve_direction_for_position``). Broker source
+    is lower-cased to match the seed convention.
+
+    Returns ``None`` when:
+    - user_id, broker_source, or ticker is missing/empty
+    - no matching ``trading_positions`` row exists
+    - the DB query raises any exception (swallowed silently)
+
+    Returns the ``id`` of the matched position otherwise.
+    """
+    try:
+        if trade is not None:
+            uid = getattr(trade, "user_id", None) or user_id
+            broker = (
+                getattr(trade, "broker_source", None) or broker_source or ""
+            )
+            tkr = getattr(trade, "ticker", None) or ticker
+            dir_ = getattr(trade, "direction", None) or direction or "long"
+        else:
+            uid = user_id
+            broker = broker_source or ""
+            tkr = ticker
+            dir_ = direction or "long"
+
+        broker = (broker or "").strip().lower()
+        dir_ = (dir_ or "long").strip().lower()
+        tkr = (tkr or "").strip()
+
+        if not (uid and broker and tkr):
+            return None
+
+        row = db.execute(text(
+            """
+            SELECT id FROM trading_positions
+            WHERE user_id = :uid
+              AND broker_source = :broker
+              AND ticker = :tkr
+              AND direction = :direction
+            ORDER BY
+              CASE state WHEN 'open' THEN 0 ELSE 1 END,
+              id DESC
+            LIMIT 1
+            """
+        ), {"uid": uid, "broker": broker, "tkr": tkr, "direction": dir_}).first()
+        return int(row[0]) if row else None
+    except Exception:
+        return None

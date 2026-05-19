@@ -205,59 +205,23 @@ def _resolve_position_id_for_event(
 ) -> int | None:
     """f-position-identity-phase-2 (2026-05-18): resolve a trading_positions.id
     for an execution event via the (user, broker, ticker, direction) natural
-    key. Returns ``None`` on any miss; NEVER raises (caller MUST tolerate
-    a NULL position_id and continue writing the event row regardless).
+    key. Returns ``None`` on any miss; NEVER raises.
 
-    Resolution priority when multiple positions match the natural key:
-    state='open' first, then by id DESC. This handles the close-and-reopen
-    pattern the Phase 1 soak surfaced (GRT-USD ran 13 close/reopen cycles
-    while its broker position stayed live).
-
-    Defaults match Phase 1's writers in ``broker_service``:
-    - ``direction`` defaults to 'long' when trade.direction is NULL/empty.
-    - ``broker_source`` is lower-cased to match the seed convention.
-
-    No reader consults position_id in Phase 2 — this is double-write only.
+    Phase 3 (2026-05-18): implementation extracted to
+    ``app/services/trading/position_resolver.py`` so the same resolver
+    can power both ``execution_audit.record_execution_event`` AND
+    ``bracket_intent_writer``. This wrapper preserves the Phase 2 API
+    surface — existing tests and call sites continue to import this
+    name unchanged.
     """
-    try:
-        from sqlalchemy import text as _t
-
-        if trade is not None:
-            uid = getattr(trade, "user_id", None) or user_id
-            broker = (
-                getattr(trade, "broker_source", None) or broker_source or ""
-            )
-            tkr = getattr(trade, "ticker", None) or ticker
-            direction = getattr(trade, "direction", None) or "long"
-        else:
-            uid = user_id
-            broker = broker_source or ""
-            tkr = ticker
-            direction = "long"
-
-        broker = (broker or "").strip().lower()
-        direction = (direction or "long").strip().lower()
-        tkr = (tkr or "").strip()
-
-        if not (uid and broker and tkr):
-            return None
-
-        row = db.execute(_t(
-            """
-            SELECT id FROM trading_positions
-            WHERE user_id = :uid
-              AND broker_source = :broker
-              AND ticker = :tkr
-              AND direction = :direction
-            ORDER BY
-              CASE state WHEN 'open' THEN 0 ELSE 1 END,
-              id DESC
-            LIMIT 1
-            """
-        ), {"uid": uid, "broker": broker, "tkr": tkr, "direction": direction}).first()
-        return int(row[0]) if row else None
-    except Exception:
-        return None
+    from .position_resolver import resolve_position_id
+    return resolve_position_id(
+        db,
+        trade=trade,
+        user_id=user_id,
+        ticker=ticker,
+        broker_source=broker_source,
+    )
 
 
 def record_execution_event(

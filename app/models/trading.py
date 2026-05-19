@@ -2298,6 +2298,21 @@ class BracketIntent(Base):
     updated_at: datetime = Column(
         DateTime, default=datetime.utcnow, nullable=False,
     )
+    terminal_reject_repair_last_attempt_at: Optional[datetime] = Column(
+        DateTime, nullable=True,
+    )
+    # f-position-identity-phase-3 (mig 249, 2026-05-18): nullable FK to
+    # trading_positions. Double-written by bracket_intent_writer.upsert_for_trade
+    # alongside trade_id. NO READER consults this column in Phase 3 — readers
+    # stay on trade_id until Phase 4's authority flip. Backfill populated the
+    # historical rows via the (user, broker, ticker, direction) natural key
+    # through trade_id -> trading_trades. Mirrors Phase 2's pattern on
+    # trading_execution_events.
+    position_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("trading_positions.id", ondelete="SET NULL"),
+        nullable=True, index=False,
+    )
 
 
 class BracketReconciliationLog(Base):

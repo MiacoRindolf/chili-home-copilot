@@ -16667,6 +16667,117 @@ def _migration_248_execution_events_position_id(conn) -> None:
     )
 
 
+def _migration_249_bracket_intents_position_id(conn) -> None:
+    """f-position-identity-phase-3 (2026-05-18) -- add nullable position_id
+    FK + partial index to trading_bracket_intents, then backfill via the
+    same natural-key join used in mig 248. Mirrors Phase 2's pattern.
+
+    SCOPE
+    -----
+    Same shape as mig 248 but for bracket intents. NO READER consults
+    the new column. The Phase 4 inverse-reconcile rewrite is the first
+    consumer.
+
+    BRIEF
+    -----
+    docs/STRATEGY/NEXT_TASK.md (operator promoted 2026-05-18 "all"
+    after Phase 2 ship). The (user, broker, ticker, direction)
+    natural-key join through trade_id -> trading_trades ->
+    trading_positions is identical to mig 248's resolver.
+
+    STEPS
+    -----
+    1. ``ADD COLUMN IF NOT EXISTS position_id BIGINT NULL`` (FK to
+       trading_positions(id) ON DELETE SET NULL).
+    2. Partial index on position_id (WHERE NOT NULL).
+    3. Backfill via UPDATE...FROM that joins through trade_id ->
+       trading_trades -> trading_positions on the natural key.
+       Prefers state='open' over state='closed' when both match.
+
+    No quarantine view this time -- bracket_intents has trade_id NOT
+    NULL (per the schema), so the only failure mode is "no matching
+    position" which would be a data-integrity bug (Phase 2 just
+    backfilled trading_positions to cover every trading_trades
+    natural-key tuple, so this should never fire).
+
+    IDEMPOTENCY
+    -----------
+    - ``ADD COLUMN IF NOT EXISTS``.
+    - ``CREATE INDEX IF NOT EXISTS``.
+    - Backfill UPDATE guarded by ``WHERE position_id IS NULL``.
+    """
+    # 1. Column.
+    try:
+        conn.execute(text(
+            """
+            ALTER TABLE trading_bracket_intents
+            ADD COLUMN IF NOT EXISTS position_id BIGINT NULL
+            REFERENCES trading_positions(id) ON DELETE SET NULL
+            """
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning("[mig249] column-add failed", exc_info=True)
+
+    # 2. Partial index.
+    try:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_bracket_intents_position_id "
+            "ON trading_bracket_intents (position_id) "
+            "WHERE position_id IS NOT NULL"
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning("[mig249] partial index create failed", exc_info=True)
+
+    # 3. Backfill via natural-key join.
+    backfilled = 0
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_bracket_intents bi
+               SET position_id = sub.position_id
+              FROM (
+                SELECT bi2.id AS intent_id,
+                       (
+                         SELECT p.id
+                         FROM trading_positions p
+                         WHERE p.user_id = t.user_id
+                           AND p.broker_source = LOWER(t.broker_source)
+                           AND p.ticker = t.ticker
+                           AND p.direction = COALESCE(LOWER(NULLIF(t.direction, '')), 'long')
+                         ORDER BY
+                           CASE p.state WHEN 'open' THEN 0 ELSE 1 END,
+                           p.id DESC
+                         LIMIT 1
+                       ) AS position_id
+                FROM trading_bracket_intents bi2
+                JOIN trading_trades t ON t.id = bi2.trade_id
+                WHERE bi2.position_id IS NULL
+                  AND t.user_id IS NOT NULL
+                  AND t.broker_source IS NOT NULL
+                  AND t.ticker IS NOT NULL
+              ) sub
+             WHERE bi.id = sub.intent_id
+               AND sub.position_id IS NOT NULL
+               AND bi.position_id IS NULL
+            """
+        ))
+        backfilled = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig249] backfilled position_id on %d bracket_intents rows",
+            backfilled,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning("[mig249] bracket_intents backfill failed", exc_info=True)
+
+    logger.info("[mig249] done -- backfilled=%d", backfilled)
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16948,6 +17059,7 @@ MIGRATIONS = [
     ("246_scan_pattern_payoff_ratio", _migration_246_scan_pattern_payoff_ratio),
     ("247_promote_pattern_537_path_a", _migration_247_promote_pattern_537_path_a),
     ("248_execution_events_position_id", _migration_248_execution_events_position_id),
+    ("249_bracket_intents_position_id", _migration_249_bracket_intents_position_id),
 ]
 
 

@@ -177,9 +177,12 @@ def test_no_reader_consults_position_id_in_app_services():
         r"trading_execution_events\.position_id",            # qualified SQL ref
     ]
 
-    # Files where Phase 2 writes are allowed (the writer).
+    # Files where Phase 2 writes are allowed (the writer + the Phase 3
+    # shared-resolver module which legitimately references the column
+    # name in docstrings/comments without actually READING the value).
     allowed = {
         str(repo_root / "app" / "services" / "trading" / "execution_audit.py"),
+        str(repo_root / "app" / "services" / "trading" / "position_resolver.py"),
     }
 
     offenders = []
