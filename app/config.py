@@ -2568,6 +2568,29 @@ class Settings(BaseSettings):
             "CHILI_COINBASE_MAKER_ONLY_ENABLED"
         ),
     )
+    # f-stop-engine-payoff-ratio-gate (2026-05-19): payoff-ratio-aware
+    # sizing scaler for the autotrader. Composes AFTER HRP / survival /
+    # pilot_promoted multipliers. Reads scan_patterns.payoff_ratio +
+    # payoff_ratio_n (Tier A columns from mig 246, refreshed nightly by
+    # realized_stats_sync). Tiers:
+    #   payoff_ratio_n < min_n          -> 1.0x (insufficient evidence)
+    #   payoff_ratio >= 5.0 AND n >= min -> 1.5x (very_high; e.g. pattern 585)
+    #   payoff_ratio >= 2.0 AND n >= min -> 1.25x (high)
+    #   payoff_ratio >= 1.0 AND n >= min -> 1.0x (moderate; no-op)
+    #   payoff_ratio < 1.0 AND n >= min  -> 0.5x (low; sub-1:1 history)
+    # Default OFF. Operator flips after paper-soak comparison.
+    chili_autotrader_payoff_sizing_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAYOFF_SIZING_ENABLED"
+        ),
+    )
+    chili_autotrader_payoff_min_n: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAYOFF_MIN_N"
+        ),
+    )
     # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
     # directional-correctness signal — gate-noise-free pattern eval.
     # The autotrader's 7-stage gate chain laundered pattern 585's 1284

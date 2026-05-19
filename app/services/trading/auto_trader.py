@@ -2104,6 +2104,71 @@ def _execute_new_entry(
         )
         return
 
+    # f-stop-engine-payoff-ratio-gate (2026-05-19): payoff-ratio-aware
+    # sizing scaler. Composes AFTER HRP / survival / pilot_promoted
+    # multipliers; uses the Tier A scan_pattern.payoff_ratio +
+    # payoff_ratio_n (mig 246, refreshed nightly by
+    # realized_stats_sync). Tier thresholds (hardcoded; tune via
+    # follow-up brief if needed):
+    #   n < min_n               -> 1.0x (insufficient evidence)
+    #   payoff >= 5.0           -> 1.5x  (very_high; e.g., pattern 585)
+    #   payoff >= 2.0           -> 1.25x (high)
+    #   payoff >= 1.0           -> 1.0x  (moderate; no-op)
+    #   payoff <  1.0           -> 0.5x  (low; sub-1:1 history)
+    # Wrapped in try/except: sizing must NEVER crash an entry attempt.
+    # Default OFF; operator flips after paper-soak comparison.
+    try:
+        _po_enabled = bool(getattr(
+            settings, "chili_autotrader_payoff_sizing_enabled", False,
+        ))
+    except Exception:
+        _po_enabled = False
+
+    if _po_enabled and getattr(alert, "scan_pattern_id", None):
+        try:
+            from sqlalchemy import text as _po_t
+            _po_row = db.execute(_po_t(
+                "SELECT payoff_ratio, payoff_ratio_n FROM scan_patterns "
+                "WHERE id = :pid"
+            ), {"pid": int(alert.scan_pattern_id)}).first()
+            if _po_row is not None:
+                _po_pr = float(_po_row[0]) if _po_row[0] is not None else None
+                _po_pn = int(_po_row[1] or 0)
+                _po_min_n = int(getattr(
+                    settings, "chili_autotrader_payoff_min_n", 5,
+                ))
+                _po_mult = 1.0
+                _po_tier = "insufficient_n"
+                if _po_pr is not None and _po_pn >= _po_min_n:
+                    if _po_pr >= 5.0:
+                        _po_mult = 1.5
+                        _po_tier = "very_high"
+                    elif _po_pr >= 2.0:
+                        _po_mult = 1.25
+                        _po_tier = "high"
+                    elif _po_pr >= 1.0:
+                        _po_mult = 1.0
+                        _po_tier = "moderate"
+                    else:
+                        _po_mult = 0.5
+                        _po_tier = "low"
+                snap["payoff_sizing_tier"] = _po_tier
+                snap["payoff_sizing_multiplier"] = _po_mult
+                snap["payoff_ratio_observed"] = _po_pr
+                snap["payoff_ratio_n_observed"] = _po_pn
+                if _po_mult != 1.0:
+                    snap["notional_before_payoff_sizing"] = round(notional, 2)
+                    notional = float(notional) * _po_mult
+                    if notional < _TEMP_MIN_NOTIONAL_USD:
+                        notional = _TEMP_MIN_NOTIONAL_USD
+                        snap["payoff_sizing_floored_to_min"] = True
+                    snap["notional_effective"] = round(notional, 2)
+                    snap["notional_source"] = (
+                        snap.get("notional_source", "unknown") + "+payoff"
+                    )
+        except Exception as _po_e:
+            snap["payoff_sizing_error"] = str(_po_e)[:200]
+
     # HARDCODED (TEMP 2026-04-21): floor to whole shares rather than
     # fractional. Most mid/large-cap RH tickers (ACN, WGS, GH, BA…)
     # don't support fractional orders, and server-side rejection wastes
