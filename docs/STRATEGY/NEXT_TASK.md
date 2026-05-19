@@ -1,37 +1,94 @@
-# NEXT_TASK: f-position-identity-phase-4-flag-flip-paper-soak
+# NEXT_TASK: f-bracket-fired-stop-recording
 
-STATUS: DONE
+STATUS: PENDING
 
-## Outcome (2026-05-19)
+## Goal
 
-Phase 4 flag flipped + soak completed cleanly.
+Close the last sell-event gap in Phase 4's data plumbing: when a resting BRACKET STOP order fires at the broker (the most common exit path for protected positions), CHILI's order-state polling detects the state change but does NOT yet write a sell `execution_event` for the FILL itself. After this brief:
 
-**Step 1 audit:**
-- `sells_recorded` = 450 (mig 254 synthetic + future live) ✓
-- `positions_with_sell` = 112 distinct positions ✓
-- `schema_version` tip = `254_synthetic_exit_fill_events` ✓
+1. Every broker-fired bracket stop fill writes a row to `trading_execution_events` with `status='filled'`, `payload_json->>'side'='sell'`, `event_type='bracket_stop_fired'` (or similar).
+2. The new event resolves `position_id` via the Phase 2 resolver automatically (free via the existing `record_execution_event` integration).
+3. Phase 4's `position_has_recorded_sell` helper sees these fills going forward.
+4. Combined with mig 254 (historical synthetic backfill) and the previously-shipped exit-monitor writer + Coinbase sync-gone writer, the **entire** universe of sell events is now captured in `trading_execution_events`.
 
-**Step 2 flip + restart:**
-- `.env` updated with `CHILI_POSITION_IDENTITY_PHASE4_AUTHORITY_ENABLED=true` (using ASCII-safe `[System.IO.File]::WriteAllBytes` per `feedback_never_powershell_outfile_env`)
-- `docker compose up -d --force-recreate broker-sync-worker` clean
-- Worker recreated, scheduler started, 8 jobs registered, zero tracebacks
+## Why now
 
-**Step 3 soak (~6 min observed window):**
-- Zero `INVERSE RECONCILE [phase4_*]` log lines (RH session is dead so `sync_positions_to_db` doesn't enter the inverse-reconcile branch — expected and benign)
-- Zero `CONTRADICTION` log lines
-- Zero Phase 4 related tracebacks / crashes
-- Bracket reconciliation sweep + crypto stop-loss monitor both ran cleanly
+Coinbase + Robinhood-crypto exit recording shipped 2026-05-19. The remaining gap is the broker-fired stop path: when the brain places a stop order at the broker, then later the broker fires that order autonomously when price hits the stop level. Today the order's filled-state change is detected by `broker_service.py`'s order polling loop, but the resulting fill is not written as a sell `execution_event`.
 
-**Step 4 PROMOTE.** Flag stays on. Integration verified; data plane complete; reader plane live. Decision recorded in `docs/STRATEGY/COWORK_DECISIONS_LOG.md`.
+This is the last writer-side gap before Phase 5 can begin safely.
 
-CC report: `docs/STRATEGY/CC_REPORTS/2026-05-19_f-position-identity-phase-4-flag-flip-paper-soak.md`
+## Investigation phase (~30 min, read-only)
 
-## Next strategic priority
+1. Find the path that detects bracket-stop fills. Likely candidates:
+   - `app/services/broker_service.py:4310-4331` (open_with_pending_exit loop) — calls `sync_pending_exit_order`. Check if THAT function writes events.
+   - `app/services/trading/bracket_reconciliation_service.py` — reconciles bracket state against broker. May detect broker-fired stops.
+   - `app/services/trading/robinhood_exit_execution.py:sync_pending_exit_order` — already known to not call `record_execution_event` for fills.
+2. Cross-check by querying `trading_execution_events` over the last 30d for ANY rows with `event_type` referencing stop-fill or bracket-fire. If none, the gap is real.
 
-Position-identity refactor is **operationally complete** (Phases 1-4 all shipped and in production). The natural next moves:
+## Implementation phase
 
-1. **`f-coinbase-exit-side-recording`** — Phase 4 covers Robinhood `sync_positions_to_db` only. Coinbase has its own sync path that doesn't share the inverse-reconcile code. If Coinbase positions ever hit the "broker alive, locally closed" edge case, the legacy event_count check still runs. Brief queued.
-2. **`f-bracket-fired-stop-recording`** — Broker-fired stop fills aren't yet written as live sell events. Mig 254 backfills historical, but new bracket fires would be missed. Brief queued.
-3. **Phase 5 envelope-rename + decision-layer split** — the next big position-identity refactor step per design doc § 6.2. Wait for Phase 4 to be exercised in real conditions (i.e., RH session restored + at least one inverse-reconcile firing observed) before starting.
+For each detection path identified in investigation:
 
-Operator promotes whichever of the above is highest priority.
+```python
+from .execution_audit import record_execution_event
+
+record_execution_event(
+    db,
+    user_id=trade.user_id,
+    ticker=trade.ticker,
+    trade=trade,  # so position_id resolves via Phase 2 resolver
+    scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+    broker_source=trade.broker_source,
+    order_id=stop_order_id,
+    event_type="bracket_stop_fired",
+    status="filled",
+    average_fill_price=fill_price,
+    cumulative_filled_quantity=fill_qty,
+    payload_json={
+        "side": "sell",
+        "source": "bracket_stop_broker_fire",
+        "trade_id": int(trade.id),
+        "stop_intent_id": getattr(bracket_intent, "id", None),
+    },
+)
+```
+
+Wrap in try/except — never block the existing close flow.
+
+## Brain integration (reuse, don't rewrite)
+
+- `app/services/trading/execution_audit.record_execution_event` — same writer used by Coinbase exit + Robinhood-crypto-exit hooks.
+- `app/services/trading/position_resolver.resolve_position_id` — auto-resolves position_id inside record_execution_event. No new lookups needed in this brief.
+
+## Constraints / do not touch
+
+- **No live behavior change.** Observability only. The bracket reconciler / exit poller already manages the Trade row state; this brief just adds the audit-event row.
+- **Tests use `_test`-suffixed DB.** Standard rule.
+- **Wrap in try/except.** Mandatory; failure must NEVER block the close path.
+- **Don't backfill historical broker-fired stops via a new mig.** Mig 254 covered the cohort by synthesizing from `trading_trades.exit_*`. Backfilling stop fills SPECIFICALLY would require digging into broker order-history APIs which is out of scope.
+
+## Out of scope
+
+- Phase 5 envelope-rename — separate refactor; waits for at least one real `[phase4_*]` log line in production.
+- Any RH session restoration (operator action, separate).
+- The known-quiet `chk_trades_entry_price_positive` phantom row #404 (already-protected by phantom-row guard in mig 253 backfill).
+
+## Success criteria
+
+1. Investigation enumerates every bracket-stop-fill detection site.
+2. Each gets a `record_execution_event(payload.side='sell')` writer hook wrapped in try/except.
+3. Post-deploy probe (run after at least one bracket stop fires) shows a new `event_type='bracket_stop_fired'` row in `trading_execution_events`.
+4. Tests (≥3): static-grep for the writer call sites + try/except wrappers, mirror the pattern from `tests/test_coinbase_exit_side_recording.py`.
+5. CC_REPORT documents the writer-event-type label (so future audit queries know what to look for).
+
+## Rollback plan
+
+- `git revert <commit>` removes the writer calls. Existing close paths unchanged.
+- Any new events already written stay; harmless audit rows.
+
+## Reference
+
+- Coinbase exit-recording CC report: `docs/STRATEGY/CC_REPORTS/2026-05-19_f-coinbase-exit-side-recording.md`
+- Phase 4 helper: `app/services/trading/position_resolver.position_has_recorded_sell`
+- Phase 4 CC report: `docs/STRATEGY/CC_REPORTS/2026-05-18_f-position-identity-phase-4.md`
+- Mig 254 (synthetic backfill): `app/migrations.py:_migration_254_synthetic_exit_fill_events`
