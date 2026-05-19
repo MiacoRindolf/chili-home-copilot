@@ -484,13 +484,27 @@ def _try_adopt_unverified_coinbase_order(
     Coinbase-only. Robinhood does NOT have this bug (verify routing
     was always correct for RH) and callers should gate accordingly.
     """
+    # f-orphan-recovery-column-fix (2026-05-19):
+    # Original SQL referenced ``payload`` (JSONB column is named
+    # ``payload_json``) and ``created_at`` (timestamp columns are
+    # ``event_at`` and ``recorded_at``). Both column references raised
+    # ``UndefinedColumn`` at Postgres, which silently aborted the
+    # broker-sync-worker's session. The bracket-reconciliation sweep's
+    # subsequent INSERTs (via ``record_execution_event``) then failed
+    # with ``InFailedSqlTransaction`` for the rest of the sweep. Fix:
+    # use the actual column names from
+    # ``app/models/trading.py:TradingExecutionEvent`` (mig 248-era).
+    # Defensive rollback in except: on any failure here we re-open a
+    # clean transaction so downstream writes (e.g. _g2_event) don't
+    # inherit an aborted state. Without the rollback, even a typo
+    # caught by ``try`` would poison the entire sweep.
     sql = text(
-        "SELECT payload->>'new_stop_order_id' AS oid "
+        "SELECT payload_json->>'new_stop_order_id' AS oid "
         "FROM trading_execution_events "
         "WHERE event_type = 'g2_place_missing_stop_unverified' "
-        "  AND payload->>'bracket_intent_id' = :bid "
-        "  AND created_at >= NOW() - (:lb || ' seconds')::interval "
-        "ORDER BY created_at DESC LIMIT 1"
+        "  AND payload_json->>'bracket_intent_id' = :bid "
+        "  AND recorded_at >= NOW() - (:lb || ' seconds')::interval "
+        "ORDER BY recorded_at DESC LIMIT 1"
     )
     try:
         row = db.execute(
@@ -502,6 +516,10 @@ def _try_adopt_unverified_coinbase_order(
             f"{BRACKET_WRITER_G2} orphan-recovery lookup raised intent=%s",
             bracket_intent_id, exc_info=True,
         )
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return None
     if row is None or not row[0]:
         return None
