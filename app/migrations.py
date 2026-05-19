@@ -16916,6 +16916,87 @@ def _migration_251_tca_reference_entry_backfill(conn) -> None:
     )
 
 
+def _migration_252_tca_reference_entry_backfill_from_breakout_alerts(conn) -> None:
+    """f-tca-writer-wiring follow-up (2026-05-18) -- mig 251 joined to the
+    wrong alerts table.
+
+    BACKGROUND: ``trading_alerts`` (generic delivery log) does NOT have
+    ``entry_price``. The autotrader's source alerts live in
+    ``trading_breakout_alerts`` which DOES have entry_price/stop_loss/
+    target_price. ``trading_trades.related_alert_id`` is the FK to
+    ``trading_breakout_alerts.id``, not to ``trading_alerts.id``.
+
+    Mig 251 fired but resolved 0 rows because its JOIN against
+    ``trading_alerts.entry_price`` triggered a "column does not exist"
+    error caught by the try/except. Mig 252 redoes the backfill using
+    the correct table.
+
+    Idempotent. Both backfill UPDATEs guarded by WHERE NULL.
+    """
+    # Step 1: backfill reference price from trading_breakout_alerts.
+    ref_backfilled = 0
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_trades t
+               SET tca_reference_entry_price = a.entry_price
+              FROM trading_breakout_alerts a
+             WHERE t.related_alert_id = a.id
+               AND t.tca_reference_entry_price IS NULL
+               AND a.entry_price IS NOT NULL
+               AND a.entry_price > 0
+            """
+        ))
+        ref_backfilled = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig252] tca_reference_entry_price backfilled on %d trades "
+            "(via trading_breakout_alerts)",
+            ref_backfilled,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig252] reference backfill failed", exc_info=True,
+        )
+
+    # Step 2: compute tca_entry_slippage_bps where reference + fill known.
+    bps_backfilled = 0
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_trades
+               SET tca_entry_slippage_bps = ROUND(
+                   CAST(
+                     (COALESCE(avg_fill_price, entry_price) - tca_reference_entry_price)
+                     / tca_reference_entry_price * 10000.0
+                     AS NUMERIC),
+                   2)::double precision
+             WHERE tca_entry_slippage_bps IS NULL
+               AND tca_reference_entry_price IS NOT NULL
+               AND tca_reference_entry_price > 0
+               AND COALESCE(avg_fill_price, entry_price) IS NOT NULL
+               AND COALESCE(avg_fill_price, entry_price) > 0
+            """
+        ))
+        bps_backfilled = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig252] tca_entry_slippage_bps computed on %d trades",
+            bps_backfilled,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig252] bps compute failed", exc_info=True,
+        )
+
+    logger.info(
+        "[mig252] done -- references_backfilled=%d, bps_computed=%d",
+        ref_backfilled, bps_backfilled,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -17200,6 +17281,8 @@ MIGRATIONS = [
     ("249_bracket_intents_position_id", _migration_249_bracket_intents_position_id),
     ("250_coinbase_account_type_spot", _migration_250_coinbase_account_type_spot),
     ("251_tca_reference_entry_backfill", _migration_251_tca_reference_entry_backfill),
+    ("252_tca_reference_entry_backfill_from_breakout_alerts",
+     _migration_252_tca_reference_entry_backfill_from_breakout_alerts),
 ]
 
 
