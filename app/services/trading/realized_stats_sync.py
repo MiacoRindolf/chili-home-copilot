@@ -99,6 +99,17 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
     # Realized stats per pattern from trading_trades. Mean-of-trade-returns
     # IS the EV. We compute pct return from entry/exit prices (matches what
     # learning.py does for the EWMA-replacement path).
+    #
+    # f-evaluation-function-fix Tier A #2 (2026-05-18): also refresh
+    # avg_winner_pct / avg_loser_pct / payoff_ratio so the
+    # ``_matches_thin_evidence_criteria`` payoff-ratio protection sees
+    # current values. Uses ``pnl / (entry_price * quantity)`` (notional-
+    # normalized) to match mig 246's backfill convention. Note that
+    # avg_ret_pct (above) uses entry-to-exit price return scaled to
+    # percent (×100); the payoff columns use the notional-fractional form
+    # (no ×100, no quantity cancellation). Both are correct measurements
+    # of different things — preserve the existing avg_ret_pct shape for
+    # backwards compat.
     rows = sess.execute(text("""
         SELECT scan_pattern_id,
                count(*) AS n,
@@ -110,7 +121,24 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                    THEN ((exit_price - entry_price) / entry_price) * 100.0
                    ELSE NULL
                  END
-               ) AS avg_ret_pct
+               ) AS avg_ret_pct,
+               avg(
+                 CASE
+                   WHEN pnl > 0 AND entry_price > 0 AND quantity > 0
+                   THEN pnl / (entry_price * quantity)
+                 END
+               ) AS avg_winner_pct,
+               avg(
+                 CASE
+                   WHEN pnl < 0 AND entry_price > 0 AND quantity > 0
+                   THEN pnl / (entry_price * quantity)
+                 END
+               ) AS avg_loser_pct,
+               count(*) FILTER (
+                 WHERE pnl IS NOT NULL
+                   AND entry_price > 0
+                   AND quantity > 0
+               ) AS payoff_n
         FROM trading_trades
         WHERE status = 'closed'
           AND scan_pattern_id IS NOT NULL
@@ -128,6 +156,23 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
         wr = (wins / n) if n > 0 else None
         avg_ret = float(r.avg_ret_pct) if r.avg_ret_pct is not None else None
 
+        # f-evaluation-function-fix Tier A #2 (2026-05-18): payoff-ratio
+        # quartet. avg_loser_pct is negative; payoff_ratio uses ABS().
+        avg_winner_pct = float(r.avg_winner_pct) if r.avg_winner_pct is not None else None
+        avg_loser_pct = float(r.avg_loser_pct) if r.avg_loser_pct is not None else None
+        payoff_n_val = int(r.payoff_n or 0)
+        payoff_ratio_val: float | None = None
+        if (
+            avg_winner_pct is not None
+            and avg_loser_pct is not None
+            and avg_loser_pct < 0
+            and math.isfinite(avg_winner_pct)
+            and math.isfinite(avg_loser_pct)
+        ):
+            payoff_ratio_val = avg_winner_pct / abs(avg_loser_pct)
+            if not math.isfinite(payoff_ratio_val):
+                payoff_ratio_val = None
+
         # NaN/range safety. Migration 241 mirrored the legacy
         # CHECK(win_rate ∈ [0,1]) onto raw_realized_win_rate; respect it.
         if wr is not None and (not math.isfinite(wr) or wr < 0.0 or wr > 1.0):
@@ -141,8 +186,12 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
 
         if dry_run:
             logger.info(
-                "[realized_sync] DRY pattern_id=%s n=%s wr=%.4f avg_ret_pct=%s",
-                pid, n, wr or 0.0, f"{avg_ret:.2f}" if avg_ret is not None else "None",
+                "[realized_sync] DRY pattern_id=%s n=%s wr=%.4f avg_ret_pct=%s "
+                "payoff=%s payoff_n=%d",
+                pid, n, wr or 0.0,
+                f"{avg_ret:.2f}" if avg_ret is not None else "None",
+                f"{payoff_ratio_val:.3f}" if payoff_ratio_val is not None else "None",
+                payoff_n_val,
             )
             updated += 1
             continue
@@ -162,9 +211,20 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
             SET raw_realized_trade_count = :n,
                 raw_realized_win_rate = :wr,
                 raw_realized_avg_return_pct = :ret,
-                raw_realized_stats_updated_at = CURRENT_TIMESTAMP
+                raw_realized_stats_updated_at = CURRENT_TIMESTAMP,
+                avg_winner_pct = :avg_winner,
+                avg_loser_pct = :avg_loser,
+                payoff_ratio = :payoff_ratio,
+                payoff_ratio_n = :payoff_n,
+                payoff_ratio_updated_at = CURRENT_TIMESTAMP
             WHERE id = :pid
-        """), {"pid": pid, "n": n, "wr": wr, "ret": avg_ret})
+        """), {
+            "pid": pid, "n": n, "wr": wr, "ret": avg_ret,
+            "avg_winner": avg_winner_pct,
+            "avg_loser": avg_loser_pct,
+            "payoff_ratio": payoff_ratio_val,
+            "payoff_n": payoff_n_val,
+        })
         updated += 1
 
         _shadow_log_divergence(pid, wr, corrected_wr, info_pct, warn_pct)

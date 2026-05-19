@@ -16168,6 +16168,196 @@ def _migration_244_composite_reweight_demote_losers(conn) -> None:
     logger.info("[mig244] demoted %d patterns to 'challenged'", demoted)
 
 
+def _migration_245_restore_pattern_585(conn) -> None:
+    """f-evaluation-function-fix Tier A #1 (2026-05-18) — restore the
+    one statistically-credible alpha pattern that the WR-only demote gate
+    mistakenly killed.
+
+    Pattern 585 ("Intraday Squeeze + Declining Volume [guided-drop-bb_squeeze]")
+    has CPCV median Sharpe 1.41, deflated Sharpe 1.0, PBO 0.0 -- the
+    strongest evidence base in the bank. Realized window 2026-05-01 to
+    2026-05-13: 86 trades, WR 34.9%, avg return 1.68%/trade, total
+    +$547.16 -- skew-driven positive expectancy (payoff ratio ~3:1).
+
+    Got demoted by an older run of run_thin_evidence_demote / repaired_oos
+    path which gated solely on WR. Phase 1 protection from
+    f-promotion-pipeline-rebalance (CPCV >= 1.0 -> skip demote, mig 236)
+    landed AFTER the original demote on 585 fired. The 2026-05-16
+    composite reweight (mig 244) corrected polarity but never restored
+    585 because it was already in 'decayed'.
+
+    This migration restores 585 to 'pilot_promoted' with a
+    safety-belted WHERE clause so it's strictly idempotent and won't
+    over-write a future legit demote that intentionally moved it to
+    'retired' or 'challenged'.
+
+    Safety belt -- only flips when ALL four conditions still hold:
+      - id = 585
+      - lifecycle_stage = 'decayed'
+      - promotion_demote_reason = 'thin_evidence_low_realized_wr'
+      - cpcv_median_sharpe >= 1.0 (the Phase 1 protection floor)
+
+    Companion change: ``avg_winner_pct`` / ``avg_loser_pct`` /
+    ``payoff_ratio`` columns are added in mig 246, and
+    ``_matches_thin_evidence_criteria`` gets a payoff-ratio gate in the
+    same release to prevent recurrence.
+    """
+    rc = -1
+    try:
+        result = conn.execute(
+            text(
+                """
+                UPDATE scan_patterns
+                   SET lifecycle_stage = 'pilot_promoted',
+                       lifecycle_changed_at = NOW(),
+                       active = TRUE,
+                       promotion_status = 'promoted',
+                       demoted_at = NULL,
+                       promotion_demote_reason = NULL
+                 WHERE id = 585
+                   AND lifecycle_stage = 'decayed'
+                   AND promotion_demote_reason = 'thin_evidence_low_realized_wr'
+                   AND cpcv_median_sharpe >= 1.0
+                """
+            )
+        )
+        try:
+            rc = result.rowcount
+        except Exception:
+            rc = -1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig245] pattern 585 restore raised; rolling back",
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "[mig245] pattern 585 restore affected %d row(s) "
+        "(1 expected on first run; 0 on subsequent runs / non-prod envs)",
+        rc,
+    )
+
+
+def _migration_246_scan_pattern_payoff_ratio(conn) -> None:
+    """f-evaluation-function-fix Tier A #2 (2026-05-18) -- materialize
+    avg_winner_pct / avg_loser_pct / payoff_ratio on scan_patterns and
+    backfill from historical trades.
+
+    The demote criteria today gate solely on win_rate. A skew-driven
+    edge (e.g. pattern 585: WR 35%, avg return 1.68%, payoff ratio ~3:1)
+    is positive expectancy but gets demoted. The fix that lands with
+    this release adds a ``payoff_ratio >= chili_pattern_demote_payoff_ratio_floor``
+    protection clause to ``_matches_thin_evidence_criteria`` and the
+    symmetric live-vs-OOS path. To make that clause efficient and
+    introspectable, the per-pattern payoff stats are materialized on
+    ``scan_patterns`` rather than computed on each demote-pass.
+
+    Schema (IF NOT EXISTS — idempotent):
+
+      - ``avg_winner_pct`` double precision NULL: equal-weighted average
+        of ``pnl / (entry_price * quantity)`` across closed trades with
+        ``pnl > 0`` for the pattern.
+      - ``avg_loser_pct`` double precision NULL: same for ``pnl < 0``
+        (kept negative; downstream code uses ``ABS()`` when forming
+        the ratio).
+      - ``payoff_ratio`` double precision NULL: derived as
+        ``avg_winner_pct / ABS(avg_loser_pct)`` when both are non-NULL
+        and ``avg_loser_pct < 0``; NULL otherwise (NULL propagation,
+        no magic default per advisor brief).
+      - ``payoff_ratio_n`` integer NULL: total closed-trade count
+        contributing (winners + losers); used by the demote-gate
+        ``min_n`` floor so we never gate on a single-trade payoff.
+      - ``payoff_ratio_updated_at`` timestamp NULL: last refresh time
+        for the materialized stats.
+
+    Backfill. One-shot UPDATE drawing from ``trading_trades`` where
+    ``status='closed'``, ``pnl IS NOT NULL``, ``entry_price > 0``,
+    ``quantity > 0``, ``scan_pattern_id IS NOT NULL`` and != -1.
+    Patterns with zero closed trades remain NULL across the four
+    fields. Re-running the migration on an already-populated DB just
+    refreshes the values (the WHERE is identical so the answer is the
+    same).
+
+    Sentinel handling: ``scan_pattern_id = -1`` (no_pattern) excluded
+    -- consistent with mig 244 selection logic.
+
+    Failure mode: column ADD is wrapped in try/except per column so a
+    partial pre-existing schema (e.g. a hand-applied column on a dev
+    DB) does not abort the migration. The backfill UPDATE is wrapped
+    separately.
+    """
+    # 1. Add columns idempotently.
+    for col_ddl in (
+        "ALTER TABLE scan_patterns ADD COLUMN IF NOT EXISTS avg_winner_pct DOUBLE PRECISION",
+        "ALTER TABLE scan_patterns ADD COLUMN IF NOT EXISTS avg_loser_pct DOUBLE PRECISION",
+        "ALTER TABLE scan_patterns ADD COLUMN IF NOT EXISTS payoff_ratio DOUBLE PRECISION",
+        "ALTER TABLE scan_patterns ADD COLUMN IF NOT EXISTS payoff_ratio_n INTEGER",
+        "ALTER TABLE scan_patterns ADD COLUMN IF NOT EXISTS payoff_ratio_updated_at TIMESTAMP WITHOUT TIME ZONE",
+    ):
+        try:
+            conn.execute(text(col_ddl))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.warning(
+                "[mig246] column-add raised, continuing: %s",
+                col_ddl, exc_info=True,
+            )
+
+    # 2. Backfill (and refresh on re-run).
+    try:
+        result = conn.execute(text(
+            """
+            WITH agg AS (
+                SELECT scan_pattern_id,
+                       COUNT(*) AS n_total,
+                       AVG(CASE WHEN pnl > 0 THEN pnl / (entry_price * quantity) END)
+                           AS avg_winner_pct,
+                       AVG(CASE WHEN pnl < 0 THEN pnl / (entry_price * quantity) END)
+                           AS avg_loser_pct
+                FROM trading_trades
+                WHERE scan_pattern_id IS NOT NULL
+                  AND scan_pattern_id != -1
+                  AND status = 'closed'
+                  AND pnl IS NOT NULL
+                  AND entry_price > 0
+                  AND quantity > 0
+                GROUP BY scan_pattern_id
+            )
+            UPDATE scan_patterns sp
+               SET avg_winner_pct = agg.avg_winner_pct,
+                   avg_loser_pct = agg.avg_loser_pct,
+                   payoff_ratio_n = agg.n_total,
+                   payoff_ratio = CASE
+                       WHEN agg.avg_winner_pct IS NOT NULL
+                        AND agg.avg_loser_pct IS NOT NULL
+                        AND agg.avg_loser_pct < 0
+                       THEN agg.avg_winner_pct / ABS(agg.avg_loser_pct)
+                       ELSE NULL
+                   END,
+                   payoff_ratio_updated_at = NOW()
+              FROM agg
+             WHERE sp.id = agg.scan_pattern_id
+            """
+        ))
+        rc = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig246] payoff_ratio backfill raised; rolling back",
+            exc_info=True,
+        )
+        return
+
+    logger.info(
+        "[mig246] payoff_ratio backfill updated %d scan_patterns row(s)",
+        rc,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16445,6 +16635,8 @@ MIGRATIONS = [
      _migration_243_bnb_usd_zombie_cleanup),
     ("244_composite_reweight_demote_losers",
      _migration_244_composite_reweight_demote_losers),
+    ("245_restore_pattern_585", _migration_245_restore_pattern_585),
+    ("246_scan_pattern_payoff_ratio", _migration_246_scan_pattern_payoff_ratio),
 ]
 
 

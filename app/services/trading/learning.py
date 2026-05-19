@@ -743,6 +743,34 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
             continue
         if float(live_wr) < float(oos_wr) - max_gap:
             p = db.query(ScanPattern).filter(ScanPattern.id == int(pid)).first()
+            # f-evaluation-function-fix Tier A #2 (2026-05-18): payoff-ratio
+            # protection -- symmetric with _matches_thin_evidence_criteria.
+            # A live-vs-OOS WR gap on a skew-driven edge is expected and
+            # not evidence of decay. Protect when payoff_ratio >= floor
+            # AND enough realized trades back it (default n >= 5).
+            if p is not None:
+                try:
+                    _payoff_floor = float(getattr(
+                        settings, "chili_pattern_demote_payoff_ratio_floor", 1.5,
+                    ))
+                    _payoff_min_n = int(getattr(
+                        settings, "chili_pattern_demote_payoff_ratio_min_n", 5,
+                    ))
+                    _pr = getattr(p, "payoff_ratio", None)
+                    _pn = getattr(p, "payoff_ratio_n", None)
+                    if _pr is not None and _pn is not None \
+                            and int(_pn) >= _payoff_min_n \
+                            and float(_pr) >= _payoff_floor:
+                        logger.info(
+                            "[learning] run_live_pattern_depromotion: skipping "
+                            "demote on pid=%d (payoff_ratio=%.3f n=%d "
+                            ">= floor %.2f / min_n %d) despite WR gap",
+                            int(p.id), float(_pr), int(_pn),
+                            _payoff_floor, _payoff_min_n,
+                        )
+                        continue
+                except (TypeError, ValueError):
+                    pass
             if p and p.active and (p.promotion_status or "") == "promoted":
                 _op = (p.promotion_status or "").strip()
                 _ol = (p.lifecycle_stage or "").strip()
@@ -980,6 +1008,28 @@ def _matches_thin_evidence_criteria(p, *, settings_=None) -> bool:
                     return False
             except (TypeError, ValueError):
                 pass
+
+    # f-evaluation-function-fix Tier A #2 (2026-05-18): payoff-ratio
+    # protection. A pattern with WR < 0.33 but payoff_ratio >= floor
+    # (default 1.5) is positive expectancy by skew, not luck. Protect
+    # it from the realized-WR demote so the next "pattern 585" is not
+    # killed in its crib. ``avg_winner_pct`` / ``avg_loser_pct`` /
+    # ``payoff_ratio`` are materialized on scan_patterns by mig 246
+    # and refreshed by the nightly stats job.
+    payoff_floor = float(getattr(
+        s, "chili_pattern_demote_payoff_ratio_floor", 1.5,
+    ))
+    payoff_min_n = int(getattr(
+        s, "chili_pattern_demote_payoff_ratio_min_n", 5,
+    ))
+    payoff_ratio = getattr(p, "payoff_ratio", None)
+    payoff_n = getattr(p, "payoff_ratio_n", None)
+    if payoff_ratio is not None and payoff_n is not None:
+        try:
+            if int(payoff_n) >= payoff_min_n and float(payoff_ratio) >= payoff_floor:
+                return False
+        except (TypeError, ValueError):
+            pass
 
     return True
 

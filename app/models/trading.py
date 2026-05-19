@@ -999,6 +999,18 @@ class ScanPattern(Base):
     corrected_stats_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
     raw_realized_stats_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
 
+    # f-evaluation-function-fix Tier A #2 (mig 246, 2026-05-18): payoff-
+    # ratio materialization. The thin-evidence demote gate uses WR alone;
+    # skew-driven edges (low WR, high payoff) get systematically demoted.
+    # These columns are populated by mig 246's backfill and refreshed
+    # by the nightly stats job; consumed by ``_matches_thin_evidence_criteria``
+    # to short-circuit demote when ``payoff_ratio >= floor``.
+    avg_winner_pct: Optional[float] = Column(Float, nullable=True)
+    avg_loser_pct: Optional[float] = Column(Float, nullable=True)
+    payoff_ratio: Optional[float] = Column(Float, nullable=True)
+    payoff_ratio_n: Optional[int] = Column(Integer, nullable=True)
+    payoff_ratio_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
+
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 
 

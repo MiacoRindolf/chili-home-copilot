@@ -443,6 +443,18 @@ def compute_and_persist_scores(
             weight_sum,
         )
 
+    # f-evaluation-function-fix Tier A #3 (2026-05-18): require >=N
+    # closed realized trades before the composite score is materialized.
+    # Pre-fix, a pattern with 0 realized trades could still get a score
+    # from re-normalized non-realized terms; n=2 patterns ranked above
+    # n=86 pattern 585 in the 2026-05-16 diagnostic. Setting min_n=5 (the
+    # same floor used by the realized COMPONENT) makes "no evidence ->
+    # NULL score" hold end-to-end, so cohort-promote eligibility skips
+    # those rows by construction. Set to 0 to restore prior behavior.
+    min_realized_n = int(getattr(
+        settings_, "chili_composite_min_realized_trades", 5,
+    ))
+
     dq_map = _load_directional_quality_map(db)
     decay_map = _load_decay_map(db)
     realized_map = _load_realized_pnl_map(
@@ -459,6 +471,7 @@ def compute_and_persist_scores(
     scored_with_realized = 0
     skipped_null_evidence = 0
     skipped_thin_directional = 0
+    skipped_thin_realized = 0
     cleared = 0
     for pat in patterns:
         dq = dq_map.get(int(pat.id))
@@ -474,6 +487,14 @@ def compute_and_persist_scores(
         if sample_n < 30 or decay is None:
             new_score = None
             skipped_thin_directional += 1
+        elif min_realized_n > 0 and int(rp_n or 0) < min_realized_n:
+            # f-evaluation-function-fix Tier A #3: realized-evidence
+            # floor short-circuit. Without realized trades, the score
+            # would lean entirely on CPCV/DSR/PBO/directional/decay --
+            # which can rank n=2 noise above n=86 alpha. Keep these
+            # patterns out of cohort eligibility until they have data.
+            new_score = None
+            skipped_thin_realized += 1
         else:
             new_score = compute_quality_composite_score(
                 pat, wr, decay, weights,
@@ -502,10 +523,12 @@ def compute_and_persist_scores(
         "scored": scored,
         "scored_with_realized": scored_with_realized,
         "skipped_thin_directional": skipped_thin_directional,
+        "skipped_thin_realized": skipped_thin_realized,
         "skipped_null_evidence": skipped_null_evidence,
         "cleared_to_null": cleared,
         "weight_sum": round(weight_sum, 4),
         "realized_window_days": int(weights.get("realized_window_days", 90)),
+        "min_realized_n": min_realized_n,
     }
     logger.info("[pattern_quality_score] refresh: %s", result)
     return result
@@ -550,6 +573,13 @@ def compute_and_persist_scores_streaming(
             weight_sum,
         )
 
+    # f-evaluation-function-fix Tier A #3 (2026-05-18): same floor as
+    # the non-streaming refresh path -- patterns with realized n below
+    # ``chili_composite_min_realized_trades`` get composite=NULL.
+    min_realized_n = int(getattr(
+        settings_, "chili_composite_min_realized_trades", 5,
+    ))
+
     dq_map = _load_directional_quality_map(db)
     decay_map = _load_decay_map(db)
     realized_map = _load_realized_pnl_map(
@@ -566,6 +596,7 @@ def compute_and_persist_scores_streaming(
     scored = 0
     skipped_null_evidence = 0
     skipped_thin_directional = 0
+    skipped_thin_realized = 0
     cleared = 0
     written = 0
     stopped = False
@@ -585,6 +616,9 @@ def compute_and_persist_scores_streaming(
         if sample_n < 30 or decay is None:
             new_score: Optional[float] = None
             skipped_thin_directional += 1
+        elif min_realized_n > 0 and int(rp_n or 0) < min_realized_n:
+            new_score = None
+            skipped_thin_realized += 1
         else:
             new_score = compute_quality_composite_score(
                 pat, wr, decay, weights,
@@ -660,12 +694,14 @@ def compute_and_persist_scores_streaming(
         "processed": processed,
         "scored": scored,
         "skipped_thin_directional": skipped_thin_directional,
+        "skipped_thin_realized": skipped_thin_realized,
         "skipped_null_evidence": skipped_null_evidence,
         "cleared_to_null": cleared,
         "would_write": written if dry_run else None,
         "wrote": (0 if dry_run else written),
         "stopped_by_flag": stopped,
         "weight_sum": round(weight_sum, 4),
+        "min_realized_n": min_realized_n,
         "pending_changes_sample": pending_changes[:8],
     }
     logger.info(

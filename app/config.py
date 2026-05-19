@@ -2494,6 +2494,49 @@ class Settings(BaseSettings):
             "CHILI_PATTERN_DEMOTE_REQUIRE_CPCV_DEGRADE"
         ),
     )
+    # f-evaluation-function-fix Tier A #2 (2026-05-18): payoff-ratio
+    # protection in the demote-criteria gates. The 2026-05-18 audit
+    # found pattern 585 (the system's only proven alpha: CPCV 1.41,
+    # WR 35%, avg return 1.68%/trade, payoff ratio ~3:1) was demoted
+    # by run_thin_evidence_demote -- a gate that uses WR alone. Skew-
+    # driven strategies systematically score below WR floors despite
+    # being positive-expectancy. When ``payoff_ratio >= floor``, the
+    # pattern is protected from realized-WR-based demote regardless
+    # of WR. Materialized on scan_patterns by mig 246 and refreshed
+    # nightly. 1.5 chosen because at WR=0.33 (the existing floor) a
+    # payoff ratio of 2.0 gives positive expectancy; 1.5 is a more
+    # conservative floor that still protects skew edges. Set to a
+    # very high value (e.g. 1e9) to disable the protection.
+    chili_pattern_demote_payoff_ratio_floor: float = Field(
+        default=1.5,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DEMOTE_PAYOFF_RATIO_FLOOR"
+        ),
+    )
+    # Companion floor: a payoff_ratio backed by < N closed trades is
+    # noise. Default 5 matches the existing realized-stats floor used
+    # by compute_quality_composite_score's realized component.
+    chili_pattern_demote_payoff_ratio_min_n: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DEMOTE_PAYOFF_RATIO_MIN_N"
+        ),
+    )
+    # f-evaluation-function-fix Tier A #3 (2026-05-18): composite-score
+    # sample-size floor. compute_quality_composite_score already gates
+    # the realized COMPONENT at n>=5 but still produces a non-NULL
+    # score from re-normalized non-realized terms when n<5. The 2026-
+    # 05-16 diagnostic surfaced n=2 patterns (1215) ranked above n=86
+    # pattern 585 -- noise inflating the cohort-promote landmine. This
+    # floor makes the whole composite NULL when realized n<floor, so
+    # the cohort-promote eligibility query simply skips those rows.
+    # Default 5 matches the realized-component floor.
+    chili_composite_min_realized_trades: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "CHILI_COMPOSITE_MIN_REALIZED_TRADES"
+        ),
+    )
     # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
     # directional-correctness signal — gate-noise-free pattern eval.
     # The autotrader's 7-stage gate chain laundered pattern 585's 1284
