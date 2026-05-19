@@ -2551,6 +2551,23 @@ class Settings(BaseSettings):
             "CHILI_POSITION_IDENTITY_PHASE4_AUTHORITY_ENABLED"
         ),
     )
+    # f-coinbase-maker-only-routing (2026-05-19): when True, the autotrader
+    # routes Coinbase BUY entries through a post_only limit order at
+    # current best-bid instead of a crossing market order. Coinbase taker
+    # fees are 60bps each side (120bps round-trip); maker fees are 40bps
+    # or less depending on volume tier. The 2026-05-18 TCA finding showed
+    # avg +102bps entry slippage on crypto, consuming ~60% of pattern 585's
+    # 168bps gross edge. Maker-only routing reduces fees + adverse fills.
+    # Trade-off: if the limit can't fill at best-bid (price moved up),
+    # the order is REJECTED by the broker and the entry is MISSED. The
+    # design assumption: missing one entry is better than paying ~100bps
+    # of slippage. Default OFF for paper-soak before promotion.
+    chili_coinbase_maker_only_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_MAKER_ONLY_ENABLED"
+        ),
+    )
     # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
     # directional-correctness signal — gate-noise-free pattern eval.
     # The autotrader's 7-stage gate chain laundered pattern 585's 1284

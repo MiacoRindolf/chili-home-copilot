@@ -884,6 +884,7 @@ class CoinbaseSpotAdapter(VenueAdapter):
         base_size: str,
         limit_price: str,
         client_order_id: Optional[str] = None,
+        post_only: bool = False,
     ) -> dict[str, Any]:
         if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
             return {"ok": False, "error": "adapter disabled"}
@@ -948,20 +949,36 @@ class CoinbaseSpotAdapter(VenueAdapter):
         try:
             c = self._require_client()
             side_l = side.lower()
+            # f-coinbase-maker-only-routing (2026-05-19): when post_only is
+            # True, prefer the SDK's *_post_only variant so the broker
+            # rejects orders that would cross as taker. Falls back to the
+            # post_only=True kwarg form on older SDKs. Mirrors the dispatch
+            # in coinbase_service.place_buy_order (added 2026-05-08 for
+            # the fast-path maker-only executor).
+            _common_kwargs = dict(
+                client_order_id=cid,
+                product_id=pid,
+                base_size=str(base_size),
+                limit_price=str(limit_price),
+            )
             if side_l == "buy":
-                resp = c.limit_order_gtc_buy(
-                    client_order_id=cid,
-                    product_id=pid,
-                    base_size=str(base_size),
-                    limit_price=str(limit_price),
-                )
+                if post_only:
+                    _po_fn = getattr(c, "limit_order_gtc_buy_post_only", None)
+                    if callable(_po_fn):
+                        resp = _po_fn(**_common_kwargs)
+                    else:
+                        resp = c.limit_order_gtc_buy(post_only=True, **_common_kwargs)
+                else:
+                    resp = c.limit_order_gtc_buy(**_common_kwargs)
             elif side_l == "sell":
-                resp = c.limit_order_gtc_sell(
-                    client_order_id=cid,
-                    product_id=pid,
-                    base_size=str(base_size),
-                    limit_price=str(limit_price),
-                )
+                if post_only:
+                    _po_fn = getattr(c, "limit_order_gtc_sell_post_only", None)
+                    if callable(_po_fn):
+                        resp = _po_fn(**_common_kwargs)
+                    else:
+                        resp = c.limit_order_gtc_sell(post_only=True, **_common_kwargs)
+                else:
+                    resp = c.limit_order_gtc_sell(**_common_kwargs)
             else:
                 return {"ok": False, "error": f"invalid side: {side}"}
             rd = _as_dict(resp)

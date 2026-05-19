@@ -1650,12 +1650,68 @@ def _execute_broker_buy(
                 alert=alert,
             )
             return None
-        cb_res = cb_ad.place_market_order(
-            product_id=alert.ticker,
-            side="buy",
-            base_size=str(qty),
-            client_order_id=client_order_id,
-        )
+
+        # f-coinbase-maker-only-routing (2026-05-19): when the flag is
+        # ON, attempt a post_only limit-buy at current best-bid instead
+        # of a crossing market order. 2026-05-18 TCA showed +102 bps
+        # avg entry slippage on crypto, eating ~60% of pattern 585's
+        # 168 bps gross edge. Maker-only trades off "missed entries
+        # when price moves up" for "no taker fees + no adverse fill".
+        # If best-bid is unavailable OR maker_only is False, fall
+        # through to the original market path (preserves byte-identical
+        # behavior when flag is OFF).
+        cb_res = None
+        _maker_only = False
+        try:
+            from ...config import settings as _settings
+            _maker_only = bool(getattr(
+                _settings, "chili_coinbase_maker_only_enabled", False,
+            ))
+        except Exception:
+            _maker_only = False
+
+        if _maker_only:
+            try:
+                _bbo, _fr = cb_ad.get_best_bid_ask(alert.ticker)
+                _bid = getattr(_bbo, "bid", None) if _bbo is not None else None
+                if _bid is None or float(_bid) <= 0:
+                    logger.warning(
+                        "[autotrader] maker-only: no best_bid for %s; "
+                        "falling back to market order",
+                        alert.ticker,
+                    )
+                else:
+                    cb_res = cb_ad.place_limit_order_gtc(
+                        product_id=alert.ticker,
+                        side="buy",
+                        base_size=str(qty),
+                        limit_price=str(float(_bid)),
+                        client_order_id=client_order_id,
+                        post_only=True,
+                    )
+                    if isinstance(cb_res, dict):
+                        cb_res["_chili_maker_only"] = True
+                        cb_res["_chili_maker_limit_price"] = float(_bid)
+                    logger.info(
+                        "[autotrader] maker-only posted limit_buy %s "
+                        "qty=%s limit=%s post_only=True",
+                        alert.ticker, qty, _bid,
+                    )
+            except Exception:
+                logger.warning(
+                    "[autotrader] maker-only routing failed for %s; "
+                    "falling back to market order",
+                    alert.ticker, exc_info=True,
+                )
+                cb_res = None
+
+        if cb_res is None:
+            cb_res = cb_ad.place_market_order(
+                product_id=alert.ticker,
+                side="buy",
+                base_size=str(qty),
+                client_order_id=client_order_id,
+            )
         if not cb_res.get("ok"):
             _audit(
                 db, user_id=uid, alert=alert,
