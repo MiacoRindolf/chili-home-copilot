@@ -92,3 +92,59 @@ def resolve_position_id(
         return int(row[0]) if row else None
     except Exception:
         return None
+
+
+def position_has_recorded_sell(
+    db: Session,
+    position_id: int | None,
+) -> bool:
+    """f-position-identity-phase-4 (2026-05-18): precise inverse-reconcile
+    check — does the given position have at least one recorded SELL fill in
+    ``trading_execution_events``?
+
+    Phase 1's inverse-reconcile workaround used a per-trade_id event_count
+    check (zero events on the dead trade_id → re-open). That was conservative
+    because:
+    - Fills get attached to whichever trade_id is active when they happen.
+    - When a Trade row gets wrongly closed and recreated, fills associated
+      with the prior trade_id are orphaned from the live position.
+    - The count couldn't distinguish "no buy/sell fills" from "buy fills
+      under a different trade_id".
+
+    Phase 2 (mig 248) populated ``trading_execution_events.position_id`` so
+    we can ask the precise question instead: across ALL Trade-row generations
+    associated with this position, has the broker ever recorded a SELL fill?
+
+    Returns False on:
+    - ``position_id is None`` (caller falls back to old path)
+    - Any DB exception (caller falls back to old path)
+    - No matching rows
+
+    Returns True only when at least one event row matches::
+
+        position_id = :pid
+        AND status = 'filled'
+        AND lower(payload_json->>'side') = 'sell'
+
+    The ``status='filled'`` guard excludes status='queued'/'pending'/etc
+    where 'side' might also be 'sell' but no actual SELL fill happened
+    (intent only). The ``payload_json->>'side'`` discriminator was
+    verified live 2026-05-18 — Robinhood / Coinbase / autotrader paths
+    all set ``side`` in the normalized payload.
+    """
+    if position_id is None:
+        return False
+    try:
+        from sqlalchemy import text as _t
+        row = db.execute(_t(
+            """
+            SELECT 1 FROM trading_execution_events
+            WHERE position_id = :pid
+              AND status = 'filled'
+              AND LOWER(payload_json->>'side') = 'sell'
+            LIMIT 1
+            """
+        ), {"pid": int(position_id)}).first()
+        return row is not None
+    except Exception:
+        return False

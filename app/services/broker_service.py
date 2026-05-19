@@ -2001,7 +2001,50 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                         float(most_recent.entry_price) - float(avg_price)
                     ) < 1e-9
                 )
-                if int(event_count) == 0 and qty_match and price_match:
+                # f-position-identity-phase-4 (2026-05-18): replace the
+                # conservative event_count==0 check with a precise position-
+                # level "has the broker ever recorded a SELL fill?" check.
+                #
+                # Phase 1's per-trade_id event_count was conservative: any
+                # event (status pings, stop-place attempts, etc.) on the
+                # current trade_id would block re-open, even though the
+                # actual fills attached to the dead prior trade_id were
+                # the load-bearing signal.
+                #
+                # Phase 4's check consults position_id across ALL trade
+                # generations and only returns True when there's a real
+                # SELL fill (status='filled' AND payload.side='sell').
+                # Flag-gated by chili_position_identity_phase4_authority_enabled
+                # (default False). When off, the legacy event_count==0
+                # path remains authoritative.
+                _phase4_enabled = False
+                _phase4_has_sell = False
+                try:
+                    from .trading.position_resolver import (
+                        position_has_recorded_sell as _phase4_check,
+                    )
+                    from ..config import settings as _phase4_settings
+                    _phase4_enabled = bool(getattr(
+                        _phase4_settings,
+                        "chili_position_identity_phase4_authority_enabled",
+                        False,
+                    ))
+                    if _phase4_enabled:
+                        _pid = getattr(most_recent, "position_id", None)
+                        _phase4_has_sell = _phase4_check(db, _pid)
+                except Exception:
+                    # Belt-and-suspenders: if any import / lookup fails,
+                    # fall back to the legacy event_count==0 path. NEVER
+                    # let Phase 4 plumbing break broker_sync.
+                    _phase4_enabled = False
+                    _phase4_has_sell = False
+
+                if _phase4_enabled:
+                    _close_was_bookkeeping = not _phase4_has_sell
+                else:
+                    _close_was_bookkeeping = int(event_count) == 0
+
+                if _close_was_bookkeeping and qty_match and price_match:
                     prior_exit_reason = most_recent.exit_reason or "<unset>"
                     most_recent.status = "open"
                     most_recent.exit_date = None
@@ -2023,23 +2066,38 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                         ),
                         {"tid": int(most_recent.id)},
                     )
+                    _phase4_tag = "phase4_no_sell" if _phase4_enabled else "phase1_event_count_0"
                     logger.warning(
-                        "[broker_sync] INVERSE RECONCILE: re-opened "
-                        "trade_id=%d ticker=%s qty=%s avg=%s "
-                        "(prior exit_reason=%s, no execution_events on record, "
-                        "broker qty/price match)",
-                        most_recent.id, ticker, qty, avg_price,
+                        "[broker_sync] INVERSE RECONCILE [%s]: re-opened "
+                        "trade_id=%d position_id=%s ticker=%s qty=%s avg=%s "
+                        "(prior exit_reason=%s, broker qty/price match)",
+                        _phase4_tag,
+                        most_recent.id,
+                        getattr(most_recent, "position_id", None),
+                        ticker, qty, avg_price,
                         prior_exit_reason,
                     )
                     reopened += 1
                     continue
-                if int(event_count) > 0:
+                # Contradiction branch -- under Phase 4 it fires when a sell
+                # IS on record but broker still shows the position; under
+                # legacy it fires when any event is on the dead trade_id.
+                _is_contradiction = (
+                    _phase4_has_sell if _phase4_enabled
+                    else int(event_count) > 0
+                )
+                if _is_contradiction:
+                    _ctag = "phase4_has_sell" if _phase4_enabled else "phase1_events_exist"
                     logger.error(
-                        "[broker_sync] CONTRADICTION: trade_id=%d ticker=%s "
-                        "status=closed has %d execution_events on record yet "
-                        "broker still reports position qty=%s avg=%s. NOT "
+                        "[broker_sync] CONTRADICTION [%s]: trade_id=%d "
+                        "position_id=%s ticker=%s status=closed has recorded "
+                        "activity (event_count=%d, has_sell=%s) yet broker "
+                        "still reports position qty=%s avg=%s. NOT "
                         "auto-reconciling. Operator review required.",
-                        most_recent.id, ticker, int(event_count), qty, avg_price,
+                        _ctag, most_recent.id,
+                        getattr(most_recent, "position_id", None),
+                        ticker, int(event_count), bool(_phase4_has_sell),
+                        qty, avg_price,
                     )
                     continue
                 # event_count == 0 but qty/price mismatch -- the broker

@@ -151,10 +151,14 @@ def test_no_reader_consults_position_id_on_bracket_intents_in_app_services():
     ]
 
     # The writer is allowed (it sets position_id on INSERT).
+    # Phase 4 (2026-05-18) added an intentional position_id reader in
+    # broker_service.sync_positions_to_db inverse-reconcile path,
+    # flag-gated by chili_position_identity_phase4_authority_enabled.
     allowed = {
         str(repo_root / "app" / "services" / "trading" / "bracket_intent_writer.py"),
         str(repo_root / "app" / "services" / "trading" / "execution_audit.py"),
         str(repo_root / "app" / "services" / "trading" / "position_resolver.py"),
+        str(repo_root / "app" / "services" / "broker_service.py"),
     }
 
     offenders = []

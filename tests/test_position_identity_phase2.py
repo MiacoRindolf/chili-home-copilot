@@ -180,9 +180,13 @@ def test_no_reader_consults_position_id_in_app_services():
     # Files where Phase 2 writes are allowed (the writer + the Phase 3
     # shared-resolver module which legitimately references the column
     # name in docstrings/comments without actually READING the value).
+    # Phase 4 (2026-05-18) added an intentional reader in
+    # broker_service.sync_positions_to_db (inverse-reconcile path) -- it's
+    # flag-gated by chili_position_identity_phase4_authority_enabled.
     allowed = {
         str(repo_root / "app" / "services" / "trading" / "execution_audit.py"),
         str(repo_root / "app" / "services" / "trading" / "position_resolver.py"),
+        str(repo_root / "app" / "services" / "broker_service.py"),
     }
 
     offenders = []

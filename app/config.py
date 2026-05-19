@@ -2537,6 +2537,20 @@ class Settings(BaseSettings):
             "CHILI_COMPOSITE_MIN_REALIZED_TRADES"
         ),
     )
+    # f-position-identity-phase-4 (2026-05-18): feature flag for the
+    # precise inverse-reconcile path that consults position-level fill
+    # history instead of the conservative per-trade_id event_count
+    # workaround. When True, broker_service.sync_positions_to_db uses
+    # position_resolver.position_has_recorded_sell(position_id) as the
+    # discriminator -- precise across all Trade row generations linked
+    # to a position. When False (default), the existing event_count==0
+    # path is used. Operator flips to True after a paper-soak window.
+    chili_position_identity_phase4_authority_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "CHILI_POSITION_IDENTITY_PHASE4_AUTHORITY_ENABLED"
+        ),
+    )
     # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
     # directional-correctness signal — gate-noise-free pattern eval.
     # The autotrader's 7-stage gate chain laundered pattern 585's 1284
