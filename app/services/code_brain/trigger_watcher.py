@@ -111,11 +111,19 @@ def watch_validation_failures(db: Session) -> int:
     if not exists_row:
         return 0
 
+    # f-trigger-watcher-column-fix (2026-05-19): the original SQL used
+    # ``created_at`` (no such column on coding_task_validation_run; per
+    # app/models/coding_task.py:CodingTaskValidationRun the timestamp
+    # columns are ``started_at`` and ``finished_at``) and ``passed =
+    # false`` (no ``passed`` column; status values include ``failed``).
+    # Postgres returned ``column "created_at" does not exist at character
+    # 63`` every 30 seconds from scheduler-cron, polluting the postgres
+    # error log. Surfaced 2026-05-19 during autotrader-silence audit.
     rows = db.execute(
         text(
             "SELECT DISTINCT task_id FROM coding_task_validation_run "
-            "WHERE created_at > NOW() - INTERVAL '30 minutes' "
-            "  AND passed = false "
+            "WHERE finished_at > NOW() - INTERVAL '30 minutes' "
+            "  AND status = 'failed' "
             "  AND task_id IS NOT NULL"
         )
     ).fetchall()
