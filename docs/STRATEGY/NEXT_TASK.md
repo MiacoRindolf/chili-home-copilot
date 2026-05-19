@@ -1,38 +1,62 @@
-# NEXT_TASK: f-composite-quality-reweight-realized-evidence
+# NEXT_TASK: f-position-identity-phase-3-bracket-intent-position-id-retarget
 
-STATUS: DONE
+STATUS: PENDING
 
-## Outcome
+## Goal
 
-D1-D7 shipped over 6 commits (c4cf1ba, 22a12ed, aadae96, 81000e6, 2e468fa, + CC_REPORT).
+Extend position-identity from Phase 2's `trading_execution_events.position_id` to **`trading_bracket_intents.position_id`** — the second writer-side FK. After Phase 3:
 
-**Spearman re-measurement:**
-- Pre-deploy: rho = **−0.7570**, p = 0.0044 (statistically significant anti-correlation)
-- Post-deploy: rho = **−0.2587**, p = 0.42 (no longer statistically significant)
+1. `trading_bracket_intents` has a nullable `position_id BIGINT FK -> trading_positions(id) ON DELETE SET NULL`.
+2. Every existing bracket intent has `position_id` backfilled via the same `(user, broker, ticker, direction)` natural-key resolver used in Phase 2.
+3. Every NEW bracket intent written by `bracket_intent_writer` / `bracket_writer_g2` / `bracket_reconciliation_service` double-writes `position_id` alongside `trade_id`.
+4. **Still NO reader path consults `position_id`** — Phase 3 is the second-and-final foundation phase. Phase 4 (`f-position-identity-phase-4-inverse-reconcile-position-history`) will flip readers under a feature flag.
 
-**Magnitude reduction:** 66% (the anti-correlation collapsed from strong to noise).
+## Why this is the right next step
 
-**Brief's success threshold not met** (asked rho ≥ +0.30; got −0.26). Pattern 585 (the alpha) moved from rank 10 of 12 to rank 3, but two n<5 patterns (1068, 1067) still rank above it because of an unforeseen interaction with the re-normalization design choice (when n<5, the formula multiplies the five non-realized weights by 1/0.65 = 1.538, which inflates strong-backtest-weak-realized patterns above proven winners).
+Phase 2 just shipped (commit on 2026-05-18, mig 248). The Phase 2 brief and CC report both call out Phase 3 as the natural follow-on:
 
-**Migration 244 demoted 2 patterns:**
-- pid=706 (Above upper BB + RSI, n=6, avg=−0.24%, total=−$3.96): shadow_promoted → challenged
-- pid=1216 (EMA stack + RSI neutral, n=11, avg=−6.75%, total=−$21.04): pilot_promoted → challenged
+- Bracket intents are the second 1:1-trade_id-coupled table the design doc § 1 enumerated. Same orphan problem: when a Trade row dies + recreates, the bracket intent FK dies with it (e.g., trade 1815 EKSO on 2026-05-01).
+- Phase 4's inverse-reconcile rewrite needs BOTH `execution_events.position_id` AND `bracket_intents.position_id` populated before it can replace the conservative `event_count == 0` workaround.
+- The code surface is the same area touched in Phase 2 — momentum on the refactor, less context-switch.
 
-CC_REPORT at `docs/STRATEGY/CC_REPORTS/2026-05-16_f-composite-quality-reweight-realized-evidence.md`.
+## Brain integration (reuse, don't rewrite)
 
-## Follow-up queued
+- `app/services/trading/execution_audit._resolve_position_id_for_event` — **THIS IS THE RESOLVER TO REUSE.** Phase 3 should NOT write a parallel resolver. Either import the existing one, or extract it to a shared module (e.g. `app/services/trading/position_resolver.py`) if Phase 3 needs it in places that can't import from `execution_audit`.
+- `app/services/trading/bracket_intent_writer.py` (and `bracket_writer_g2.py`) — the writer paths. Add the position_id resolution call before the bracket_intent row is created.
+- `app/services/trading/bracket_reconciliation_service.py` — also writes bracket intents; same pattern.
+- `app/migrations.py` — add mig **249** with the same shape as mig 248: column + partial index + backfill via natural-key join through `trade_id → trading_trades → trading_positions`.
 
-The next brief should drop the re-normalization arm and use a "raw partial sum (max 0.65), no inflation" rule when n_realized < 5. Expected effect: pattern 585 tops the ranking, n<5 patterns cap below it, anti-correlation regression test passes.
+## Constraints / do not touch
 
-To be authored: `docs/STRATEGY/QUEUED/f-composite-reweight-no-renormalize.md`.
+- **No reader path consults `position_id` yet.** Phase 3 is still write-only. The static-grep reader-canary in `tests/test_position_identity_phase2.py` already covers `app/services/`; extend it (or add a Phase 3 companion) to also cover bracket-intent reads.
+- **No removal of `trade_id` on `trading_bracket_intents`.** Stays as primary FK through Phase 5 per design doc § 6.2.
+- **No live-money behavior change.** The new column is read by nobody. Resolution misses → `position_id=NULL`, never an exception.
+- **Migration is idempotent.** `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`. Backfill uses `WHERE position_id IS NULL`.
+- **Tests use `_test`-suffixed DB.** Standard PROTOCOL Hard Rule.
+- **No magic numbers.** Direction default `'long'`, account_type default `'cash'` — both match Phase 1/2's writers.
 
-A second, smaller fix in the same follow-up: the `weight_sum` validation in `compute_and_persist_scores` currently includes non-weight parameters (normalizer_pct, evidence_tau, window_days), giving the spurious "weights sum to 121.01" warning observed in D6 deploy logs. Cosmetic only — no behavior impact.
+## Out of scope
 
-## Pending operator actions
+- The Phase 4 reader-flip and inverse-reconcile rewrite (`event_count == 0` -> position-level history). Separate brief.
+- TCA writer wiring (`f-tca-writer-wiring`) — independent code surface; can ship in parallel by a separate CC session if operator wants.
+- `account_type='spot'` retrofit for Coinbase rows. Cheap one-line UPDATE, surfaces as `account_type_cleanup_coinbase_spot`. Not blocking.
 
-- `CHILI_COHORT_PROMOTE_ENABLED` stays **OFF**. The new formula is safer than the old, but the top-of-ranking inversion (1068/1067 above 585) means flipping the flag would still promote losers. Do not flip until the follow-up fix lands.
-- `git push` the 5-commit chain (c4cf1ba → 2e468fa) when ready. Not pushed automatically — operator's call.
+## Success criteria
 
-## Source brief preserved
+1. Mig 249 applied cleanly. `schema_version` tip advances to `'249_bracket_intents_position_id'`.
+2. `trading_bracket_intents.position_id` populated for **100% of new intents** written since deploy (probe: `SELECT COUNT(*) FROM trading_bracket_intents WHERE created_at > '<deploy_ts>' AND position_id IS NULL` returns 0, allowing for intents where the trade row's natural key has no matching position — those should appear in a Phase 3 quarantine view).
+3. Backfill resolves the historical bracket_intent rows. Acceptance target: >= 95% of rows with non-NULL `trade_id` resolved (mirrors Phase 2's 100% on the with_trade_id cohort, with some slack for any pre-Phase-2 anomalies).
+4. Reader canary still passes — extend `tests/test_position_identity_phase2.py::test_no_reader_consults_position_id_in_app_services` (or add a Phase 3 sibling) to also catch reads of `trading_bracket_intents.position_id`.
+5. 8+ new tests covering: resolver-reuse import, double-write at each of the 3 bracket-intent writer call sites, backfill idempotency, NULL handling on intent rows whose trade_id is itself NULL.
 
-`docs/STRATEGY/QUEUED/f-composite-quality-reweight-realized-evidence.md` (amended 2026-05-16 during plan-gate to drop the pattern_family_trial_log insert and correct the w_norm normalizer note).
+## Rollback plan
+
+- `git revert <phase3 commit>` — removes the double-write. New intents stop populating `position_id`; pre-revert rows retain whatever they had.
+- Column + index stay (additive migration); drop separately if absolutely needed.
+
+## Reference
+
+- Phase 2 CC report: `docs/STRATEGY/CC_REPORTS/2026-05-18_f-position-identity-phase-2.md`
+- Design doc § 8.3 (Phase 3 spec): `docs/DESIGN/POSITION_IDENTITY.md`
+- Phase 2 brief (lessons learned): `docs/STRATEGY/QUEUED/f-position-identity-phase-2-execution-events-position-id-backfill.md` (marked SHIPPED)
+- Memory: `project_2026_05_18_phase2_shipped` (this session's entry)

@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-10, after Phase 6 of f-promotion-pipeline-rebalance (parallel initiative, Phases 1-4 shipped, Phase 5 deferred). Promotion-rebalance section added below the Coinbase autotrader block; position-identity-refactor sections unchanged.
+**Last update:** 2026-05-18, after f-evaluation-function-fix Tier A shipped (commit `23bde18`) restoring pattern 585 + adding payoff-ratio demote protection + composite n≥5 floor. Position-identity Phase 2 is the next priority. See "Algo-trader re-eval 2026-05-18" section at bottom.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -58,9 +58,10 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 - **Design doc shipped 2026-05-04.** Locked at `docs/DESIGN/POSITION_IDENTITY.md`. Six phases enumerated with per-phase exit criteria.
 - **Phase 1 shipped 2026-05-04.** Migration 224 created `trading_positions` + `trading_position_events`; `sync_positions_to_db` writes shadow-mode (try/except wrapped, never raises, zero readers depend on it); backfill walked both `trading_trades` and `trading_paper_trades`. Audit query post-deploy: 19/19 parity, 0 discrepancies.
-- **Phase 1 1-week soak in progress.** Soak window closes 2026-05-11. Passive monitoring via `scripts/audit_position_layer_parity.py`.
-- **Phase 2 queues after soak.** `trading_execution_events.position_id` backfill — link every fill row in history to its position. Read-side stays pointed at trade_id; this is the foundation for Phase 3's authority flip.
-- **Phases 3–6 sketched in design doc.** Authority flip (3), close-path consolidation (4), envelope-rename + decision-layer split (5, with 2-week soak), bracket_intent re-key + cleanup (6).
+- **Phase 1 1-week soak passed.** Closed 2026-05-11. GRT-USD's 13-cycle close/reopen pattern surfaced as the marquee evidence for why position-identity is needed.
+- **Phase 2 SHIPPED 2026-05-18.** Mig 248. `trading_execution_events.position_id` added + indexed + quarantine view; Option A backfill seeded 168 historical closed positions (33 → 201 in `trading_positions`); 8,358/8,358 with_trade_id events resolved (100%); 6,797 null_trade_id events sit in quarantine (expected). Double-write live at `record_execution_event` via `_resolve_position_id_for_event`. 11/11 tests pass. Reader canary pinned. Single commit in this Cowork session. CC_REPORT at `docs/STRATEGY/CC_REPORTS/2026-05-18_f-position-identity-phase-2.md`.
+- **Phase 3 NEXT.** `f-position-identity-phase-3-bracket-intent-position-id-retarget` — add `position_id` to `trading_bracket_intents`, backfill, swap reader paths under a feature flag. Brief to be written.
+- **Phases 4–6 sketched in design doc.** Close-path consolidation (4), envelope-rename + decision-layer split (5, with 2-week soak), bracket_intent re-key + cleanup (6).
 
 ## Parallel initiative — Coinbase autotrader enablement
 
@@ -219,3 +220,165 @@ job at the flag check; nightly score refresh continues
 - **Live broker-routing changes.** This refactor is data-model only. Order placement code stays as-is; only the way we *think* about positions changes.
 - **Non-Robinhood/Coinbase venues.** Forex (OANDA), perps (Hyperliquid/dYdX/Kraken Futures) follow the same pattern but Phase 1 starts with the brokers that have today's audit pain. Generalize to other venues once the model is proven.
 - **Dashboards and reporting changes.** Existing reporting queries continue to work via backwards-compat. UI changes can come later.
+
+## Parallel initiative — Phase 3 stop-bleed SHIPPED 2026-05-16 (Path A on DD breaker)
+
+f-phase3-stop-bleed (out of the 2026-05-15 quant audit) shipped 9 commits
+(`0fa783f` → `67c330e`) covering D1 (empirical monthly DD breaker, default
+off), D2 (NameError diagnostic), D3 (`_normalize_product_id`), D4
+(pre-flight Coinbase cash check + R1/R2 settings), D6 (`@validates
+scan_pattern_id`), D7 (mig 243 BNB-USD cleanup), D8 (41/41 tests), D9
+(walk-forward sim). D5 (stop_not_below_entry producer fix) deferred; the
+existing rule at `auto_trader_rules.py:915` continues to reject the bad
+orders so capital is not at risk while it sits in queue.
+
+**Walk-forward finding.** The breaker never trips across K = 1.5σ /
+2.0σ / 2.5σ / 3.0σ over 2026-03-10 → 2026-05-16. Reason: only **20
+distinct CHILI-attributed close-days** in 67 calendar days; the
+helper's `n >= 30` floor refuses to compute. CC handed Cowork the
+A-or-B decision (keep floor / lower floor); **operator chose Path A**
+on 2026-05-16.
+
+**Path A arm-up protocol** (per `COWORK_REVIEWS/2026-05-16_phase3-stop-bleed.md`):
+
+1. Daily scheduled task reports `n_distinct_close_days` from
+   CHILI-attributed history.
+2. When n ≥ 30, helper returns a non-None threshold; Cowork updates
+   CURRENT_PLAN.md noting breaker is data-ready.
+3. Operator flips `CHILI_MONTHLY_DD_BREAKER_ENABLED=1` only after
+   reviewing the first non-None output and the K-sigma value at that
+   point. Default remains `false`.
+4. ETA at ~5 distinct close-days/week: mid-June 2026.
+
+**Deploy state (2026-05-16).** Commits on disk. Container restart
+daemon-dispatched 2026-05-16 to make D2/D3/D4/D6 live in running
+processes. Post-restart audit-discovery probe scheduled for T+24h to
+isolate D2/D3/D4 rejection-histogram deltas from pre-fix bleed.
+
+**Next strategic priority.** The walk-forward result surfaced a
+larger architectural issue than the breaker itself: the `no_pattern`
+cohort (210 trades / −$1,560 / 47% of trade volume) is leaking past
+the attribution pipeline. The `alerts.py:_scan_pattern_id_from_proposal`
+extractor and the family-backfill work from
+`project_2026_05_16_evidence_fidelity_activations.md` are the
+upstream chokepoints. Two QUEUED briefs to write next:
+
+- `f-attribution-leak-extractor`: walk
+  `strategy_proposal_id → strategy_proposals` to recover pattern
+  context when `signals_json` lacks it. Acceptance:
+  `no_pattern` share of new trades drops from ~47% to <20%.
+- `f-stop-not-below-entry-d5`: producer-side fix for the stop≥entry
+  defect. Start with `scanner.py` + `pattern_imminent_alerts.py`.
+
+## Algo-trader re-eval 2026-05-16 (Cowork)
+
+Cowork did a full algo-trader hat re-eval after Phase 3 stop-bleed
+shipped. Key findings (probes captured in chat):
+
+**The no_pattern bleed is throttling.** Last-7d shows 167 attributed
+trades vs only 3 no_pattern trades ($0 PnL). The D6 validator + the
+family-backfill activation on 2026-05-16 are doing what they should.
+The bleed has migrated, not stopped: 7d attributed PnL is −$74.
+
+**The composite quality score is inversely correlated with realized
+PnL.** Diagnostic #1 (run 2026-05-16):
+
+- Spearman(score, total_pnl) = **−0.757** at p = 0.0044 (n=12)
+- Top-half by composite: total PnL −$118.63
+- Bottom-half by composite: total PnL +$597.80
+- Pattern 585 (only proven alpha, +$554 over 85 trades) sits rank 10/12
+
+Mechanism: DSR pegged at 1.0 for all 12 scored patterns, PBO pegged at
+0.0 for all 12 — DSR + PBO contribute **0.35 as a dead constant** to
+every score. Of the remaining discriminating weight, CPCV Sharpe
+(in-sample overfit) dominates at 0.30/0.65 = 46%.
+
+**Target distance is fine.** Diagnostic #2 (run 2026-05-16): clean-exit
+target-hit-rate is 9.8% (n=51), not the 1.3% the all-trades figure
+suggested. 83% of trades exit via opaque paths (NULL exit_reason 33% +
+reconciler-driven 50%); the system is losing decisional content about
+"did our hypothesis pay off?" before the brain can learn from it. But
+the trades that DO get clean exits are reaching stops, not getting
+mis-targeted.
+
+**Sequence chosen.** Composite-reweight (this brief, NEXT_TASK) ships
+first because:
+1. It's the active landmine — flipping `CHILI_COHORT_PROMOTE_ENABLED`
+   today would promote losers and dilute 585.
+2. It's the highest-leverage change with the smallest blast radius
+   (formula + flag + one-shot mig; no autotrader/broker touched).
+3. Position-identity Phase 2 (next after composite-reweight) addresses
+   the NULL-exit-reason observability problem at its root.
+
+**What's working, don't break:** pattern 585 alpha (statistically sound
+at sign-test p ≈ 0.003), promotion-pipeline rebalance Phases 1–4
+infrastructure, the May 1/May 7 connection-hygiene work, Phase 3
+stop-bleed deploys.
+
+**Strategic-debt items flagged but not in flight:** ATR-multiple stops
+(structural premature-stop driver), Coinbase 120bps round-trip without
+maker routing (Phase 7 live-flip blocker), HMM regime classifier
+yfinance-blocked (regime conditioning blocked), monthly DD breaker
+data-starved (~mid-June arms organically per Path A).
+
+## Algo-trader re-eval 2026-05-18 (architect/data-scientist audit + Tier A ship)
+
+The 2026-05-18 architect/data-scientist pass identified that the demote
+gate uses WR alone, which systematically punishes skew-driven edges.
+Pattern 585 (only proven alpha: CPCV 1.41, deflated 1.0, PBO 0.0,
++\$547 over 86 trades, WR 35%, payoff ratio 4.97:1) had been demoted
+to `decayed`. Without 585 the 90d cumulative was −\$1,718; the
+"decayed" tier was outperforming the "promoted" tier by an order of
+magnitude. The dominant pain point was the evaluation function, not
+the trading. Tier A surgical fixes shipped same session.
+
+**Tier A shipped (commit `23bde18`):**
+
+* Mig 245 — pattern 585 restored to `pilot_promoted` (safety-belted,
+  idempotent).
+* Mig 246 — `scan_patterns.{avg_winner_pct, avg_loser_pct,
+  payoff_ratio, payoff_ratio_n, payoff_ratio_updated_at}` added +
+  backfilled. Refreshed nightly by `realized_stats_sync`.
+* Payoff-ratio gate in `_matches_thin_evidence_criteria` AND
+  `run_live_pattern_depromotion` — symmetric protection across both
+  demote paths. Default: `payoff_ratio >= 1.5 AND n >= 5` short-
+  circuits demote regardless of WR.
+* Composite-score n≥5 floor — `chili_composite_min_realized_trades`
+  (default 5) makes the composite NULL when realized n is below
+  floor. Cohort-promote landmine closed structurally.
+* 25/25 tests pass; live DB verified post-deploy.
+
+**Hidden alpha surfaced — decision made same session.** Pid 537
+("Falling Wedge Breakout + Trend Reclaim") had realized 29.6:1 payoff
+ratio over 7 trades (+\$86 90d). Operator chose **Path A** (promote
+now); mig 247 + commit `2e61287` flipped it to `pilot_promoted`.
+Data-scientist caveats recorded: effective sample is ~3 distinct
+ideas (ACHC, PFSI, WDCX) over 10-day window; CPCV Sharpe 0.626 is
+BELOW the brain's 1.0 floor; promotion was operator override of
+the brain's own 2026-05-16 demote. Watch list at n=15; if WR drops
+below 50% or payoff_ratio below 3, re-demote. Bonus same-session
+finding: pattern 585 auto-elevated `pilot_promoted` → `promoted`
+between probes, confirming the Tier A unblock works end-to-end.
+
+**Tier B (next priority, queued):**
+
+* `f-position-identity-phase-2-execution-events-position-id-backfill`
+  — closes the 80% opaque-exits gap at its root. Already queued.
+* `f-tca-writer-wiring` — slippage is currently invisible (zero TCA
+  rows in last 90d). Newly queued 2026-05-18.
+
+**Tier C (strategic, queued):**
+
+* `f-pattern-537-evaluation` — second-alpha promotion decision.
+* `f-composite-reweight-no-renormalize` — softer cap-at-0.65
+  alternative to Tier A #3, partially superseded; operator decides if
+  still useful.
+* Momentum-continuation family demote (391 patterns of one family, 0
+  in live ladder, persistent bleed). No brief yet.
+* Coinbase maker-only routing — required before Phase 7 live-flip.
+  Already in memory as `f-fastpath-maker-only`.
+
+**What's working, don't break (updated):** pattern 585 alpha (now
+restored AND protected), promotion-pipeline rebalance Phases 1–4
+infrastructure, the May 1/May 7 connection-hygiene work, Phase 3
+stop-bleed deploys, Tier A payoff-ratio gate (just shipped).
