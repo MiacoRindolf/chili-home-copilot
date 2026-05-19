@@ -1156,6 +1156,42 @@ def submit_robinhood_trade_exit(
                 },
             ),
         )
+        # f-execution-events-sell-side-recording (2026-05-18) — record
+        # the sell fill so position_has_recorded_sell (Phase 4) sees it.
+        # Called AFTER _finalize_filled_exit (which sets status='closed'
+        # + exit_date), so apply_execution_event_to_trade's terminal
+        # guard protects the trade row from any side effects. Side
+        # discriminator goes in payload_json (the only place
+        # position_has_recorded_sell looks).
+        try:
+            from .execution_audit import record_execution_event
+            record_execution_event(
+                db,
+                user_id=trade.user_id,
+                ticker=trade.ticker,
+                trade=trade,  # safe: terminal guard active after _finalize
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                broker_source=trade.broker_source,
+                order_id=order_id or None,
+                event_type="exit_fill",
+                status="filled",
+                average_fill_price=trade.exit_price,
+                cumulative_filled_quantity=float(trade.quantity or 0.0),
+                event_at=now,
+                payload_json={
+                    "side": "sell",
+                    "source": "rh_exit_submit",
+                    "exit_reason": exit_reason,
+                    "order_type": order_type,
+                    "broker_state": state,
+                },
+            )
+        except Exception:
+            logger.debug(
+                "[rh_exit] sell-side record_execution_event failed for "
+                "trade=%s (non-fatal)",
+                getattr(trade, "id", None), exc_info=True,
+            )
         return {"ok": True, "state": "filled", "pnl": pnl, "order_id": order_id}
 
     _mark_pending_exit_order(
@@ -1223,6 +1259,39 @@ def sync_pending_exit_order(
                 extra={"broker_state": state, "order_id": order.get("id"), "pnl": pnl},
             ),
         )
+        # f-execution-events-sell-side-recording (2026-05-18) — record
+        # the polled sell-fill (mirrors the submit-side fire above).
+        # Called AFTER _finalize_filled_exit so the terminal guard in
+        # apply_execution_event_to_trade protects the trade row from
+        # entry_price clobber etc.
+        try:
+            from .execution_audit import record_execution_event
+            record_execution_event(
+                db,
+                user_id=trade.user_id,
+                ticker=trade.ticker,
+                trade=trade,
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                broker_source=trade.broker_source,
+                order_id=str(order.get("id") or "") or None,
+                event_type="exit_fill",
+                status="filled",
+                average_fill_price=trade.exit_price,
+                cumulative_filled_quantity=float(trade.quantity or 0.0),
+                event_at=_parse_dt(order.get("last_transaction_at")) or now,
+                payload_json={
+                    "side": "sell",
+                    "source": "rh_exit_sync_pending",
+                    "exit_reason": exit_reason,
+                    "broker_state": state,
+                },
+            )
+        except Exception:
+            logger.debug(
+                "[rh_exit] sync-fill sell-side record_execution_event failed "
+                "for trade=%s (non-fatal)",
+                getattr(trade, "id", None), exc_info=True,
+            )
         return {"state": "filled", "pnl": pnl}
 
     if state in ("cancelled", "canceled", "rejected", "failed", "expired"):

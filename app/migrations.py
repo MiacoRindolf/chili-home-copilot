@@ -17089,6 +17089,111 @@ def _migration_253_tca_backfill_guard_phantom_rows(conn) -> None:
     )
 
 
+def _migration_254_synthetic_exit_fill_events(conn) -> None:
+    """f-execution-events-sell-side-recording (2026-05-18) -- backfill
+    synthetic sell-side execution events for historical closed trades.
+
+    BACKGROUND. Phase 4 (commit cdf65fe) shipped a flag-gated reader
+    that calls position_has_recorded_sell(db, position_id). The helper
+    queries trading_execution_events WHERE status='filled' AND
+    LOWER(payload_json->>'side')='sell'. Post-deploy probe found ZERO
+    matching rows: robinhood_exit_execution.py places SELL orders but
+    never calls record_execution_event for the resulting fill. Result:
+    Phase 4 flag could not be safely enabled because every closed
+    position would test as "no sell recorded" -> bookkeeping-only close
+    -> eligible for catastrophic re-open.
+
+    THIS MIGRATION inserts a synthetic 'backfill_exit_fill' event for
+    every closed trade with exit_price + exit_date populated. The
+    payload tags side='sell' so position_has_recorded_sell will find
+    it. position_id is resolved via the natural-key join through
+    trade_id -> trading_trades -> trading_positions (same pattern as
+    mig 248's events backfill).
+
+    Companion code change ships in this release: robinhood_exit_execution.py
+    + coinbase exit paths gain record_execution_event(..., payload_json=
+    {'side': 'sell', ...}) calls going forward.
+
+    SELECTION CRITERIA. A trade gets a synthetic exit-fill row iff:
+      - status = 'closed'
+      - exit_date IS NOT NULL
+      - exit_price IS NOT NULL AND exit_price > 0
+      - entry_price > 0 AND quantity > 0  (phantom-row guard per mig 253)
+      - scan_pattern_id IS NULL OR != -1  (no_pattern sentinel skip)
+      - NO existing event_type='backfill_exit_fill' row for this trade_id
+        (idempotency)
+
+    IDEMPOTENT. WHERE NOT EXISTS guard on the INSERT ensures re-runs
+    are no-ops. Wrapped in try/except.
+    """
+    inserted = 0
+    try:
+        result = conn.execute(text(
+            """
+            INSERT INTO trading_execution_events (
+                user_id, trade_id, position_id, ticker, broker_source,
+                event_type, status, average_fill_price,
+                cumulative_filled_quantity, event_at, recorded_at,
+                payload_json
+            )
+            SELECT
+                t.user_id,
+                t.id AS trade_id,
+                (
+                  SELECT p.id
+                  FROM trading_positions p
+                  WHERE p.user_id = t.user_id
+                    AND p.broker_source = LOWER(t.broker_source)
+                    AND p.ticker = t.ticker
+                    AND p.direction = COALESCE(LOWER(NULLIF(t.direction, '')), 'long')
+                  ORDER BY
+                    CASE p.state WHEN 'open' THEN 0 ELSE 1 END,
+                    p.id DESC
+                  LIMIT 1
+                ) AS position_id,
+                t.ticker,
+                LOWER(t.broker_source) AS broker_source,
+                'backfill_exit_fill' AS event_type,
+                'filled' AS status,
+                t.exit_price AS average_fill_price,
+                t.quantity AS cumulative_filled_quantity,
+                t.exit_date AS event_at,
+                NOW() AS recorded_at,
+                jsonb_build_object(
+                    'side', 'sell',
+                    'source', 'mig254_backfill',
+                    'trade_id', t.id,
+                    'exit_reason', COALESCE(t.exit_reason, '<unset>')
+                ) AS payload_json
+            FROM trading_trades t
+            WHERE t.status = 'closed'
+              AND t.exit_date IS NOT NULL
+              AND t.exit_price IS NOT NULL
+              AND t.exit_price > 0
+              AND t.entry_price > 0
+              AND t.quantity > 0
+              AND (t.scan_pattern_id IS NULL OR t.scan_pattern_id != -1)
+              AND NOT EXISTS (
+                  SELECT 1 FROM trading_execution_events e
+                  WHERE e.trade_id = t.id
+                    AND e.event_type = 'backfill_exit_fill'
+              )
+            """
+        ))
+        inserted = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig254] synthetic exit-fill events inserted: %d", inserted,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig254] backfill failed; rolling back", exc_info=True,
+        )
+
+    logger.info("[mig254] done -- inserted=%d", inserted)
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -17377,6 +17482,8 @@ MIGRATIONS = [
      _migration_252_tca_reference_entry_backfill_from_breakout_alerts),
     ("253_tca_backfill_guard_phantom_rows",
      _migration_253_tca_backfill_guard_phantom_rows),
+    ("254_synthetic_exit_fill_events",
+     _migration_254_synthetic_exit_fill_events),
 ]
 
 
