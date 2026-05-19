@@ -705,6 +705,17 @@ def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
         from .bracket_intent import BracketIntentInput
         from .bracket_intent_writer import upsert_bracket_intent
 
+        # f-stop-engine-atr-nested-key (2026-05-19): the original code
+        # read ``snap["atr"]`` at the top level only, but the actual
+        # indicator_snapshot shape produced by the breakout-alert
+        # writer nests ATR at ``breakout_alert.flat_indicators.atr``
+        # (also where adx, bb_pct, rsi_14, etc. live -- see trade 2064
+        # ABTC for an example). Top-level reads always returned None
+        # so the FALLBACK_FIRED CRITICAL log fired on every trade
+        # every cycle for all open positions. This walker covers:
+        #   * top-level ``atr`` / ``ATR`` (legacy schema)
+        #   * ``breakout_alert.flat_indicators.atr`` (current schema)
+        #   * ``flat_indicators.atr`` (alt depth)
         atr_val = None
         try:
             snapshot = getattr(trade, "indicator_snapshot", None)
@@ -712,6 +723,18 @@ def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
                 snap = json.loads(snapshot)
                 if isinstance(snap, dict):
                     atr_val = snap.get("atr") or snap.get("ATR")
+                    if atr_val is None:
+                        # Walk nested locations: breakout_alert -> flat_indicators -> atr
+                        ba = snap.get("breakout_alert")
+                        if isinstance(ba, dict):
+                            fi = ba.get("flat_indicators")
+                            if isinstance(fi, dict):
+                                atr_val = fi.get("atr") or fi.get("ATR")
+                    if atr_val is None:
+                        # Some snapshots have flat_indicators at the top
+                        fi = snap.get("flat_indicators")
+                        if isinstance(fi, dict):
+                            atr_val = fi.get("atr") or fi.get("ATR")
         except Exception:
             atr_val = None
 
@@ -929,6 +952,38 @@ def evaluate_all(
             with db.begin_nested():
                 brain = _build_brain_context(trade, db)
                 market = _fetch_market_context(trade.ticker)
+                # f-stop-engine-atr-trade-snapshot-fallback (2026-05-19):
+                # When the live market_data ATR fetch returns None (which
+                # is the steady-state for any ticker whose upstream data
+                # provider is intermittently unavailable -- see memory
+                # ``project_massive_blocked`` and ``project_regime_
+                # classifier_yfinance_block``), fall back to the ATR
+                # baked into the trade's own ``indicator_snapshot`` at
+                # entry-time. Schema observed on live trades:
+                # ``snap["breakout_alert"]["flat_indicators"]["atr"]``.
+                # This is the value the autotrader sized stops from at
+                # entry, so it's the most appropriate fallback. Without
+                # this fallback, ``_compute_initial_stop`` fires the
+                # FALLBACK_FIRED CRITICAL log on every cycle for every
+                # open trade, with ``atr=None`` -- the operator-visible
+                # alert noise that triggered today's investigation.
+                if market.atr is None:
+                    try:
+                        snap_raw = getattr(trade, "indicator_snapshot", None)
+                        if isinstance(snap_raw, str) and snap_raw:
+                            snap = json.loads(snap_raw)
+                            if isinstance(snap, dict):
+                                _ba = snap.get("breakout_alert")
+                                if isinstance(_ba, dict):
+                                    _fi = _ba.get("flat_indicators")
+                                    if isinstance(_fi, dict):
+                                        _atr_from_trade = (
+                                            _fi.get("atr") or _fi.get("ATR")
+                                        )
+                                        if _atr_from_trade and float(_atr_from_trade) > 0:
+                                            market.atr = float(_atr_from_trade)
+                    except Exception:
+                        pass
                 result = evaluate_trade(trade, market, db, brain=brain)
                 summary["total_checked"] += 1
 
