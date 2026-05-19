@@ -1,94 +1,73 @@
-# NEXT_TASK: f-bracket-fired-stop-recording
+# NEXT_TASK: f-position-identity-phase-5-envelope-rename
 
 STATUS: PENDING
 
 ## Goal
 
-Close the last sell-event gap in Phase 4's data plumbing: when a resting BRACKET STOP order fires at the broker (the most common exit path for protected positions), CHILI's order-state polling detects the state change but does NOT yet write a sell `execution_event` for the FILL itself. After this brief:
+Position-identity refactor Phase 5 per `docs/DESIGN/POSITION_IDENTITY.md` § 6.2: rename `trading_trades` → `trading_management_envelopes`, split out a separate `trading_decisions` table for immutable entry intent, and remove `trade_id` from `trading_execution_events` / `trading_bracket_intents` in favor of the now-complete `position_id` FK.
 
-1. Every broker-fired bracket stop fill writes a row to `trading_execution_events` with `status='filled'`, `payload_json->>'side'='sell'`, `event_type='bracket_stop_fired'` (or similar).
-2. The new event resolves `position_id` via the Phase 2 resolver automatically (free via the existing `record_execution_event` integration).
-3. Phase 4's `position_has_recorded_sell` helper sees these fills going forward.
-4. Combined with mig 254 (historical synthetic backfill) and the previously-shipped exit-monitor writer + Coinbase sync-gone writer, the **entire** universe of sell events is now captured in `trading_execution_events`.
+This is the BIG refactor — schema rename, multi-table split, ORM updates, 2-week soak window. Per design doc it must wait for Phases 1-4 to be operationally enabled and exercised. Phase 4 is shipped + flag-flipped but has NOT been exercised in production yet (RH session is down → `sync_positions_to_db` inverse-reconcile branch hasn't entered).
 
-## Why now
+**Gate this brief on at least one observed `[phase4_*]` log line in production.**
 
-Coinbase + Robinhood-crypto exit recording shipped 2026-05-19. The remaining gap is the broker-fired stop path: when the brain places a stop order at the broker, then later the broker fires that order autonomously when price hits the stop level. Today the order's filled-state change is detected by `broker_service.py`'s order polling loop, but the resulting fill is not written as a sell `execution_event`.
+## Why this is next
 
-This is the last writer-side gap before Phase 5 can begin safely.
+Position-identity refactor's data plane is fully complete (Phase 1+2+3 = `trading_positions` + `*.position_id` populated; mig 254 backfilled + 5 writer hooks now cover every sell-event source). Reader plane shipped behind a flag. Phase 5 is the schema cleanup that retires the load-bearing workarounds in `trading_trades` / `trading_execution_events.trade_id` / `trading_bracket_intents.trade_id`.
 
-## Investigation phase (~30 min, read-only)
+## What "exercised in production" means (gating condition)
 
-1. Find the path that detects bracket-stop fills. Likely candidates:
-   - `app/services/broker_service.py:4310-4331` (open_with_pending_exit loop) — calls `sync_pending_exit_order`. Check if THAT function writes events.
-   - `app/services/trading/bracket_reconciliation_service.py` — reconciles bracket state against broker. May detect broker-fired stops.
-   - `app/services/trading/robinhood_exit_execution.py:sync_pending_exit_order` — already known to not call `record_execution_event` for fills.
-2. Cross-check by querying `trading_execution_events` over the last 30d for ANY rows with `event_type` referencing stop-fill or bracket-fire. If none, the gap is real.
+At least ONE of:
 
-## Implementation phase
+1. A `broker-sync-worker` log line containing `[phase4_no_sell]` or `[phase4_has_sell]` — i.e., the inverse-reconcile branch fires and uses the new helper.
+2. A new sell event in `trading_execution_events` with one of the new event_types (`crypto_exit_submitted`, `coinbase_position_sync_gone_close`, `broker_reconcile_position_gone_close`, `stop_engine_auto_sell`, `exit_fill`) authored AFTER 2026-05-19 (post-deploy of the writers).
+3. Operator-driven manual smoke: place a small crypto exit, confirm a `crypto_exit_submitted` event lands in the table.
 
-For each detection path identified in investigation:
+Until one of these is observed, Phase 5 stays queued.
 
-```python
-from .execution_audit import record_execution_event
+## Bridge briefs that don't require Phase 5
 
-record_execution_event(
-    db,
-    user_id=trade.user_id,
-    ticker=trade.ticker,
-    trade=trade,  # so position_id resolves via Phase 2 resolver
-    scan_pattern_id=getattr(trade, "scan_pattern_id", None),
-    broker_source=trade.broker_source,
-    order_id=stop_order_id,
-    event_type="bracket_stop_fired",
-    status="filled",
-    average_fill_price=fill_price,
-    cumulative_filled_quantity=fill_qty,
-    payload_json={
-        "side": "sell",
-        "source": "bracket_stop_broker_fire",
-        "trade_id": int(trade.id),
-        "stop_intent_id": getattr(bracket_intent, "id", None),
-    },
-)
-```
+While waiting for Phase 4 exercise, the operator may instead pick from:
 
-Wrap in try/except — never block the existing close flow.
+- **`f-coinbase-maker-only-routing`** (memory-queued, high-leverage per the 2026-05-18 TCA finding: avg +102 bps entry slippage). Maker-only routing on Coinbase would reduce taker fees + adverse fills materially. ~60% of pattern 585's gross edge would be reclaimed.
+- **`f-stop-engine-payoff-ratio-gate`** (not yet written): use the payoff_ratio gate (Tier A #2 from 2026-05-18) to size-tier the autotrader entries. Smaller blast radius than Phase 5.
+- **`f-pid-537-watcher-elevation-decision`** (gated on n=15 verdict from the daily watcher).
+
+## Phase 5 scope (preview only; do not start until gated)
+
+Per design doc § 6.2:
+
+1. New `trading_decisions` table — immutable entry-intent snapshot.
+2. Rename `trading_trades` → `trading_management_envelopes` (alembic-style via custom migration `_migration_NNN_envelope_rename`).
+3. Migrate `trade_id` FKs on `trading_execution_events` and `trading_bracket_intents` to point at `trading_management_envelopes.id` (rename is mechanical; FK targets stay valid).
+4. New `decision_id` FK column on envelopes pointing at `trading_decisions`.
+5. ORM updates (ScanPattern → Decision → Envelope → Position chain).
+6. 2-week soak per design doc.
+7. Final phase: drop `trade_id` on `trading_execution_events` / `trading_bracket_intents`, use `position_id` exclusively.
 
 ## Brain integration (reuse, don't rewrite)
 
-- `app/services/trading/execution_audit.record_execution_event` — same writer used by Coinbase exit + Robinhood-crypto-exit hooks.
-- `app/services/trading/position_resolver.resolve_position_id` — auto-resolves position_id inside record_execution_event. No new lookups needed in this brief.
+When Phase 5 is unblocked:
+- `position_resolver.resolve_position_id` + `position_resolver.position_has_recorded_sell` — both stay unchanged; they already use `position_id`.
+- All 5 sell-event writer call sites — unchanged; they go through `record_execution_event` which is downstream of the envelope-rename.
+- The flag-gated Phase 4 reader at `broker_service.py:~1980` — needs updating to reference the renamed table.
 
 ## Constraints / do not touch
 
-- **No live behavior change.** Observability only. The bracket reconciler / exit poller already manages the Trade row state; this brief just adds the audit-event row.
-- **Tests use `_test`-suffixed DB.** Standard rule.
-- **Wrap in try/except.** Mandatory; failure must NEVER block the close path.
-- **Don't backfill historical broker-fired stops via a new mig.** Mig 254 covered the cohort by synthesizing from `trading_trades.exit_*`. Backfilling stop fills SPECIFICALLY would require digging into broker order-history APIs which is out of scope.
+- **Don't start Phase 5 until the gate above is met.**
+- When started: no live-money behavior change during the schema rename. The rename + FK retarget is data-model only; close-path strings + flag-gated reader stay the same.
+- 2-week soak is non-negotiable per the design doc.
 
-## Out of scope
+## Success criteria (when Phase 5 starts)
 
-- Phase 5 envelope-rename — separate refactor; waits for at least one real `[phase4_*]` log line in production.
-- Any RH session restoration (operator action, separate).
-- The known-quiet `chk_trades_entry_price_positive` phantom row #404 (already-protected by phantom-row guard in mig 253 backfill).
-
-## Success criteria
-
-1. Investigation enumerates every bracket-stop-fill detection site.
-2. Each gets a `record_execution_event(payload.side='sell')` writer hook wrapped in try/except.
-3. Post-deploy probe (run after at least one bracket stop fires) shows a new `event_type='bracket_stop_fired'` row in `trading_execution_events`.
-4. Tests (≥3): static-grep for the writer call sites + try/except wrappers, mirror the pattern from `tests/test_coinbase_exit_side_recording.py`.
-5. CC_REPORT documents the writer-event-type label (so future audit queries know what to look for).
+To be detailed in the Phase 5 brief. This file is just the gate.
 
 ## Rollback plan
 
-- `git revert <commit>` removes the writer calls. Existing close paths unchanged.
-- Any new events already written stay; harmless audit rows.
+The renames are reversible via inverse migration. The 2-week soak is the operational safety net.
 
 ## Reference
 
-- Coinbase exit-recording CC report: `docs/STRATEGY/CC_REPORTS/2026-05-19_f-coinbase-exit-side-recording.md`
-- Phase 4 helper: `app/services/trading/position_resolver.position_has_recorded_sell`
-- Phase 4 CC report: `docs/STRATEGY/CC_REPORTS/2026-05-18_f-position-identity-phase-4.md`
-- Mig 254 (synthetic backfill): `app/migrations.py:_migration_254_synthetic_exit_fill_events`
+- `docs/DESIGN/POSITION_IDENTITY.md` § 6.2 — Phase 5 spec
+- Coverage-map summary in `docs/STRATEGY/CC_REPORTS/2026-05-19_f-bracket-fired-stop-recording.md`
+- All Phase 1-4 CC reports under `docs/STRATEGY/CC_REPORTS/`
+- Memory: `project_2026_05_19_phase4_flag_flipped`, `project_2026_05_19_coinbase_exit_recording_shipped`, `project_2026_05_19_bracket_fired_stop_recording_shipped` (this session)
