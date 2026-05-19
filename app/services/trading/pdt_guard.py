@@ -128,6 +128,39 @@ def _fetch_account_equity_usd() -> float | None:
         return None
 
 
+def _earliest_business_day_in_window(
+    now: datetime, *, window_business_days: int = 5
+) -> datetime:
+    """Return UTC midnight of the earliest business day still inside a
+    rolling ``window_business_days`` window ending today.
+
+    Walks back day-by-day, counting weekdays (Mon=0..Fri=4) and skipping
+    Sat/Sun. Today is counted as the first business day of the window.
+
+    Examples (counting today + 4 prior business days = 5 total):
+      * Today Tue 2026-05-19 → window = Wed 5/13 .. Tue 5/19; returns
+        midnight 2026-05-13.
+      * Today Mon 2026-05-19 → window = Tue 5/13 .. Mon 5/19; returns
+        midnight 2026-05-13.
+      * Today Fri 2026-05-16 → window = Mon 5/12 .. Fri 5/16; returns
+        midnight 2026-05-12.
+
+    Federal market holidays (e.g. Memorial Day) are NOT skipped here;
+    that's a conservative bias (window may include one extra holiday-
+    day, but never under-include). The broker is the canonical source
+    for PDT determination; this is a pre-check.
+    """
+    d = now.date()
+    days_found = 0
+    while True:
+        if d.weekday() < 5:  # Mon..Fri
+            days_found += 1
+            if days_found >= window_business_days:
+                break
+        d = d - timedelta(days=1)
+    return datetime(d.year, d.month, d.day)
+
+
 def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | None:
     """Count round-trip day trades (opened AND closed same calendar day)
     in the trailing 5 business days from ``trading_trades``.
@@ -140,16 +173,24 @@ def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | No
     and refused EVERY entry, including legitimate equity entries when
     the equity sub-ledger was below the PDT cap.
 
+    f-pdt-business-day-cutoff (2026-05-19): previously the cutoff was
+    ``NOW() - INTERVAL '9 days'`` -- a coarse calendar proxy chosen to
+    "err on the side of refusing." The side-effect was over-counting
+    by 2-4 days: a Tue probe at 5/19 was counting trades from 5/11
+    (7 business days ago) and 5/12 (6 BDs) that have NO bearing on the
+    SEC's rolling 5-business-day window. Operator account had 1 real
+    day-trade (5/13 ABT) but the gate reported 3 day-trades and blocked
+    every equity entry below $25K equity. Fix: walk back 5 business
+    days using :func:`_earliest_business_day_in_window`, which exactly
+    matches the SEC's rolling window for any weekday.
+
     Returns ``None`` on query failure; the caller MUST treat None as
     "unknown" and refuse the entry.
     """
     try:
-        # Approximate "5 business days" with a 9-calendar-day lookback so
-        # we cover all weekends and most short market closures. The exact
-        # calendar conversion is the broker's responsibility for the
-        # canonical PDT determination; this is a conservative pre-check
-        # that errs on the side of refusing.
-        cutoff = datetime.utcnow() - timedelta(days=9)
+        cutoff = _earliest_business_day_in_window(
+            datetime.utcnow(), window_business_days=5,
+        )
         # f-pdt-count-broker-confirmed-only (2026-05-08): three new
         # exclusions so the count covers ONLY broker-confirmed day-trades.
         #   * ``broker_order_id IS NOT NULL``: the exit was a real
