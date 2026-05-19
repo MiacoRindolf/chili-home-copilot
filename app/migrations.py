@@ -16997,6 +16997,98 @@ def _migration_252_tca_reference_entry_backfill_from_breakout_alerts(conn) -> No
     )
 
 
+def _migration_253_tca_backfill_guard_phantom_rows(conn) -> None:
+    """f-tca-writer-wiring follow-up #2 (2026-05-18) -- mig 252's UPDATE
+    failed because phantom trade row id=404 (ETH-USD, entry_price=0,
+    quantity=9e-07) violates ``chk_trades_entry_price_positive`` when
+    touched by any UPDATE, even if the touched column is unrelated.
+
+    PostgreSQL re-validates ALL check constraints on rows touched by
+    UPDATE, even when the constrained column isn't being SET. Trade
+    404 is a known phantom (mig 200 cleaned up other phantoms; this
+    one escaped). My backfill JOIN matched it via related_alert_id ->
+    a valid breakout_alert row, so the entire UPDATE statement
+    aborted before any rows committed.
+
+    Mig 253 redoes mig 252's two-step backfill with extra WHERE guards
+    that EXCLUDE phantom rows (entry_price <= 0 OR quantity <= 0).
+    Trade 404 stays NULL for tca_reference_entry_price (correct — it
+    has no real fill to measure slippage against).
+
+    Idempotent. Re-running is a no-op because the WHERE clauses include
+    ``tca_reference_entry_price IS NULL`` / ``tca_entry_slippage_bps IS NULL``.
+
+    This was already run manually against prod 2026-05-18 via
+    scripts/d-tca-manual-backfill-v2.py (285 rows affected; avg entry
+    slippage 102 bps). The migration captures the same logic for
+    staging/test deploys.
+    """
+    ref_backfilled = 0
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_trades t
+               SET tca_reference_entry_price = a.entry_price
+              FROM trading_breakout_alerts a
+             WHERE t.related_alert_id = a.id
+               AND t.tca_reference_entry_price IS NULL
+               AND a.entry_price IS NOT NULL
+               AND a.entry_price > 0
+               AND t.entry_price > 0
+               AND t.quantity > 0
+            """
+        ))
+        ref_backfilled = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig253] tca_reference_entry_price backfilled on %d trades "
+            "(phantom-row guarded)",
+            ref_backfilled,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig253] reference backfill failed", exc_info=True,
+        )
+
+    bps_backfilled = 0
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_trades
+               SET tca_entry_slippage_bps = ROUND(
+                   CAST(
+                     (COALESCE(avg_fill_price, entry_price) - tca_reference_entry_price)
+                     / tca_reference_entry_price * 10000.0
+                     AS NUMERIC),
+                   2)::double precision
+             WHERE tca_entry_slippage_bps IS NULL
+               AND tca_reference_entry_price IS NOT NULL
+               AND tca_reference_entry_price > 0
+               AND entry_price > 0
+               AND quantity > 0
+               AND COALESCE(avg_fill_price, entry_price) IS NOT NULL
+               AND COALESCE(avg_fill_price, entry_price) > 0
+            """
+        ))
+        bps_backfilled = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig253] tca_entry_slippage_bps computed on %d trades",
+            bps_backfilled,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig253] bps compute failed", exc_info=True,
+        )
+
+    logger.info(
+        "[mig253] done -- references_backfilled=%d, bps_computed=%d",
+        ref_backfilled, bps_backfilled,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -17283,6 +17375,8 @@ MIGRATIONS = [
     ("251_tca_reference_entry_backfill", _migration_251_tca_reference_entry_backfill),
     ("252_tca_reference_entry_backfill_from_breakout_alerts",
      _migration_252_tca_reference_entry_backfill_from_breakout_alerts),
+    ("253_tca_backfill_guard_phantom_rows",
+     _migration_253_tca_backfill_guard_phantom_rows),
 ]
 
 
