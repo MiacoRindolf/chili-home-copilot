@@ -2525,6 +2525,46 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             on_broker_reconciled_close(db, trade, source="sync_positions_to_db")
         except Exception:
             pass
+
+        # f-bracket-fired-stop-recording (2026-05-19): write a sell-side
+        # execution_events row for this Robinhood stale-close. This is the
+        # landing path for broker-fired bracket stops on equity: the
+        # broker fires the resting stop autonomously, the position
+        # vanishes, sync_positions sees the stale-open Trade and lands
+        # here. Without this writer, Phase 4's position_has_recorded_sell
+        # helper would not see these closures. Mirrors the Coinbase
+        # version in coinbase_service.sync_positions_to_db.
+        # Wrapped in try/except: observability-only, never blocks close.
+        try:
+            from .trading.execution_audit import record_execution_event
+
+            _payload = {
+                "side": "sell",
+                "source": "broker_reconcile_position_gone",
+                "trade_id": int(getattr(trade, "id", 0) or 0),
+                "exit_reason": trade.exit_reason,
+                "synthetic": True,
+            }
+            record_execution_event(
+                db,
+                user_id=trade.user_id,
+                ticker=trade.ticker,
+                trade=trade,
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                broker_source="robinhood",
+                event_type="broker_reconcile_position_gone_close",
+                status="filled",
+                average_fill_price=trade.exit_price,
+                cumulative_filled_quantity=float(trade.quantity or 0.0),
+                payload_json=_payload,
+            )
+        except Exception:
+            logger.debug(
+                "[broker_sync] sell-side execution_event write failed for "
+                "trade#%s (non-fatal -- Phase 4 visibility only)",
+                getattr(trade, "id", None), exc_info=True,
+            )
+
         if not trade.management_scope:
             trade.management_scope = MANAGEMENT_SCOPE_BROKER_SYNC
         # f-equity-broker-reconcile-wipeout-protection (2026-05-08):

@@ -1082,6 +1082,44 @@ def _try_auto_execute_stop(
                     "[stop_engine] on_live_trade_closed failed for trade %s",
                     trade_id, exc_info=True,
                 )
+            # f-bracket-fired-stop-recording (2026-05-19): record the
+            # stop_engine-initiated SELL as a sell-side execution_event
+            # so Phase 4's position_has_recorded_sell helper sees it.
+            # This path submits the sell directly via broker_manager
+            # (NOT through pending_exit_order_id), so the
+            # sync_pending_exit_order writer at
+            # robinhood_exit_execution.py:1267 does NOT fire for it.
+            # Wrapped in try/except: never block the close path.
+            try:
+                from .execution_audit import record_execution_event
+                _exit_px = alert.get("price")
+                _payload = {
+                    "side": "sell",
+                    "source": "stop_engine_auto_exec",
+                    "trade_id": int(getattr(trade, "id", 0) or 0),
+                    "exit_reason": trade.exit_reason,
+                    "alert_event": alert.get("event"),
+                    "alert_reason": alert.get("reason"),
+                }
+                record_execution_event(
+                    db,
+                    user_id=trade.user_id,
+                    ticker=trade.ticker,
+                    trade=trade,
+                    scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                    broker_source=broker_src,
+                    event_type="stop_engine_auto_sell",
+                    status="filled",
+                    average_fill_price=float(_exit_px) if _exit_px else None,
+                    cumulative_filled_quantity=float(qty or 0.0),
+                    payload_json=_payload,
+                )
+            except Exception:
+                _log.debug(
+                    "[stop_engine] record_execution_event failed for "
+                    "trade %s (non-fatal; sell already submitted)",
+                    trade_id, exc_info=True,
+                )
     except Exception:
         _log.warning("[stop_engine] auto-exec failed for trade %s", trade_id, exc_info=True)
 
