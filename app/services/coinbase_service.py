@@ -1068,6 +1068,53 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             on_broker_reconciled_close(db, trade, source="coinbase_position_sync")
         except Exception:
             logger.debug("[coinbase] brain_work broker close hook failed", exc_info=True)
+
+        # f-coinbase-exit-side-recording (2026-05-19): write a
+        # synthetic sell-side execution_events row for this auto-close.
+        # The position vanished from Coinbase (could be a real fill we
+        # didn't observe, a manual sell, a transfer, etc.). For the
+        # Phase 4 helper ``position_has_recorded_sell``'s purposes we
+        # treat it as a sell -- the position IS closed at the broker.
+        # Wrapped in try/except: this is observability-only and must
+        # never block the close.
+        try:
+            from .trading.execution_audit import record_execution_event
+
+            _exit_px = float(close_fill["price"]) if close_fill is not None else None
+            _exit_qty = (
+                float(close_fill.get("quantity") or trade.quantity or 0.0)
+                if close_fill is not None
+                else (float(trade.quantity or 0.0) if trade.quantity else None)
+            )
+            _payload = {
+                "side": "sell",
+                "source": "coinbase_position_sync_gone",
+                "trade_id": int(getattr(trade, "id", 0) or 0),
+                "exit_reason": trade.exit_reason,
+                "synthetic": True,
+            }
+            if close_fill is not None:
+                _payload["close_fill_source"] = close_fill.get("source")
+            record_execution_event(
+                db,
+                user_id=trade.user_id,
+                ticker=trade.ticker,
+                trade=trade,
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                broker_source="coinbase",
+                event_type="coinbase_position_sync_gone_close",
+                status="filled",
+                average_fill_price=_exit_px,
+                cumulative_filled_quantity=_exit_qty,
+                payload_json=_payload,
+            )
+        except Exception:
+            logger.debug(
+                "[coinbase] sell-side execution_event write failed for trade#%s "
+                "(non-fatal — Phase 4 visibility only)",
+                getattr(trade, "id", None), exc_info=True,
+            )
+
         closed += 1
 
     db.commit()

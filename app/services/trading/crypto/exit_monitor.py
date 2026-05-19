@@ -434,6 +434,46 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             t.pending_exit_requested_at = datetime.now(timezone.utc).replace(tzinfo=None)
             db.add(t)
             db.commit()
+
+            # f-coinbase-exit-side-recording (2026-05-19): write a
+            # sell-side execution_events row so the Phase 4 helper
+            # ``position_has_recorded_sell`` sees this exit. Covers
+            # both Coinbase AND Robinhood crypto exits because this
+            # function dispatches to both via
+            # ``_place_market_sell_for_trade``. Wrapped in try/except
+            # so a record-event failure NEVER blocks the exit
+            # submission that already succeeded.
+            try:
+                from ..execution_audit import record_execution_event
+                _raw = res.get("raw") if isinstance(res, dict) else None
+                _payload: dict[str, Any] = {
+                    "side": "sell",
+                    "source": "crypto_exit_monitor",
+                    "trade_id": int(getattr(t, "id", 0) or 0),
+                    "reason": reason[:50],
+                }
+                if _raw is not None:
+                    _payload["raw"] = _raw
+                record_execution_event(
+                    db,
+                    user_id=t.user_id,
+                    ticker=t.ticker,
+                    trade=t,
+                    scan_pattern_id=getattr(t, "scan_pattern_id", None),
+                    broker_source=_broker_source,
+                    order_id=str(order_id) if order_id else None,
+                    event_type="crypto_exit_submitted",
+                    status="submitted",
+                    requested_quantity=float(qty) if qty is not None else None,
+                    payload_json=_payload,
+                )
+            except Exception:
+                logger.debug(
+                    "[crypto_exit] record_execution_event failed for trade#%s "
+                    "(non-fatal — exit was already submitted to the venue)",
+                    t.id, exc_info=True,
+                )
+
             out["closed"] += 1
             if monitor_exit_meta is not None:
                 logger.info(
