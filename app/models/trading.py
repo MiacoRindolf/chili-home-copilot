@@ -3460,3 +3460,109 @@ class FastPathUniverseEntry(Base):
         DateTime, default=datetime.utcnow, nullable=False
     )
     promoted_at: Optional[datetime] = Column(DateTime, nullable=True)
+
+
+# f-orm-trading-positions-fix (2026-05-19):
+# Phase 2 (mig 224, 2026-05-04) created the ``trading_positions`` +
+# ``trading_position_events`` tables at the DB layer. Phase 2/3 added
+# nullable ``position_id`` FK columns on ``trading_execution_events``
+# and ``trading_bracket_intents`` (referencing
+# ``trading_positions.id``). However NO ``TradingPosition`` ORM class
+# was ever declared, so SQLAlchemy could not resolve the FK target in
+# its metadata. The error stays LATENT until a session flushes any row
+# on those tables — at which point dependency-sort accesses
+# ``ForeignKey.column``, raises ``NoReferencedTableError``, and the
+# session enters ``PendingRollbackError`` state. f-bracket-fired-stop-
+# recording + f-coinbase-exit-side-recording (2026-05-19) added new
+# write-paths from broker-sync-worker which surfaced the latent bug
+# (bracket_reconciliation sweep failing to commit + crypto exit
+# writer reporting "sell-side execution_event write failed").
+#
+# Fix: declare the two ORM classes that mirror the existing DB schema.
+# No new migration; column names match mig 224. Phase 4 still consults
+# trade_id (these classes are not read by any decision path yet);
+# they exist purely so SQLAlchemy can resolve the FK.
+class TradingPosition(Base):
+    """Broker-authoritative position identity.
+
+    Keyed by (user_id, broker_source, account_type, ticker, direction).
+    Schema created by ``_migration_224_position_identity_phase_1``.
+    NO READER consults rows on this table until Phase 4's authority
+    flip (which is itself gated on the first ``[phase4_*]`` log line).
+    """
+
+    __tablename__ = "trading_positions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "broker_source", "account_type", "ticker", "direction",
+            name="uq_trading_positions_natural_key",
+        ),
+        Index(
+            "ix_trading_positions_state_open",
+            "broker_source", "ticker",
+            postgresql_where=text("state = 'open'"),
+        ),
+        Index("ix_trading_positions_user_broker", "user_id", "broker_source"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    broker_source: str = Column(String(20), nullable=False)
+    account_type: str = Column(String(20), nullable=False, default="cash")
+    ticker: str = Column(String(20), nullable=False)
+    direction: str = Column(String(10), nullable=False, default="long")
+    asset_kind: Optional[str] = Column(String(20), nullable=True)
+    current_quantity: Optional[float] = Column(Float, nullable=True)
+    current_avg_price: Optional[float] = Column(Float, nullable=True)
+    state: str = Column(String(20), nullable=False, default="unknown")
+    current_envelope_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("trading_trades.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_observed_at: Optional[datetime] = Column(DateTime, nullable=True)
+    last_state_transition_at: Optional[datetime] = Column(
+        DateTime, nullable=True
+    )
+    created_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+
+class TradingPositionEvent(Base):
+    """Append-only event stream for position state derivation.
+
+    Schema created by ``_migration_224_position_identity_phase_1``.
+    Treated as the truth for ``TradingPosition`` snapshot fields once
+    Phase 4 swaps the authority. Until then this table is shadow-only.
+    """
+
+    __tablename__ = "trading_position_events"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    position_id: int = Column(
+        BigInteger,
+        ForeignKey("trading_positions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_type: str = Column(String(20), nullable=False)
+    transition_reason: str = Column(String(64), nullable=False)
+    quantity: Optional[float] = Column(Float, nullable=True)
+    avg_price: Optional[float] = Column(Float, nullable=True)
+    broker_payload: Optional[dict] = Column(JSONB, nullable=True)
+    envelope_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("trading_trades.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    observed_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    recorded_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
