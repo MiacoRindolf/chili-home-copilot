@@ -1,73 +1,116 @@
-# NEXT_TASK: f-position-identity-phase-5-envelope-rename
+# NEXT_TASK: f-coinbase-maker-only-paper-soak
 
 STATUS: PENDING
 
 ## Goal
 
-Position-identity refactor Phase 5 per `docs/DESIGN/POSITION_IDENTITY.md` § 6.2: rename `trading_trades` → `trading_management_envelopes`, split out a separate `trading_decisions` table for immutable entry intent, and remove `trade_id` from `trading_execution_events` / `trading_bracket_intents` in favor of the now-complete `position_id` FK.
-
-This is the BIG refactor — schema rename, multi-table split, ORM updates, 2-week soak window. Per design doc it must wait for Phases 1-4 to be operationally enabled and exercised. Phase 4 is shipped + flag-flipped but has NOT been exercised in production yet (RH session is down → `sync_positions_to_db` inverse-reconcile branch hasn't entered).
-
-**Gate this brief on at least one observed `[phase4_*]` log line in production.**
+Operator-driven paper-soak of the Coinbase maker-only routing flag (`CHILI_COINBASE_MAKER_ONLY_ENABLED`). The code shipped 2026-05-19 (commit `18fee1e`, default OFF). This brief is the soak/audit/promote sequence — no further code change.
 
 ## Why this is next
 
-Position-identity refactor's data plane is fully complete (Phase 1+2+3 = `trading_positions` + `*.position_id` populated; mig 254 backfilled + 5 writer hooks now cover every sell-event source). Reader plane shipped behind a flag. Phase 5 is the schema cleanup that retires the load-bearing workarounds in `trading_trades` / `trading_execution_events.trade_id` / `trading_bracket_intents.trade_id`.
+The 2026-05-18 TCA finding showed Coinbase entry slippage averaging +102 bps, consuming ~60% of pattern 585's 168 bps gross edge. Maker-only routing addresses both taker fees AND adverse fills. Code is shipped and tested (41/41 tests pass), but the operational flip needs operator validation in production.
 
-## What "exercised in production" means (gating condition)
+This is the **highest-leverage** of the three queued bridge briefs because the per-trade dollar impact compounds across every Coinbase entry going forward.
 
-At least ONE of:
+## Procedure
 
-1. A `broker-sync-worker` log line containing `[phase4_no_sell]` or `[phase4_has_sell]` — i.e., the inverse-reconcile branch fires and uses the new helper.
-2. A new sell event in `trading_execution_events` with one of the new event_types (`crypto_exit_submitted`, `coinbase_position_sync_gone_close`, `broker_reconcile_position_gone_close`, `stop_engine_auto_sell`, `exit_fill`) authored AFTER 2026-05-19 (post-deploy of the writers).
-3. Operator-driven manual smoke: place a small crypto exit, confirm a `crypto_exit_submitted` event lands in the table.
+### Step 1 — Pre-flip baseline (5 min)
 
-Until one of these is observed, Phase 5 stays queued.
+```sql
+-- Capture the pre-flip avg entry slippage on Coinbase crypto:
+SELECT
+  AVG(tca_entry_slippage_bps)::numeric(10,2) AS avg_entry_bps,
+  STDDEV(tca_entry_slippage_bps)::numeric(10,2) AS sd_bps,
+  COUNT(*) AS n
+FROM trading_trades
+WHERE broker_source = 'coinbase'
+  AND status = 'closed'
+  AND tca_entry_slippage_bps IS NOT NULL
+  AND entry_date > NOW() - INTERVAL '14 days';
+-- Save this number. Target post-flip: avg < 30 bps.
+```
 
-## Bridge briefs that don't require Phase 5
+### Step 2 — Flip flag
 
-While waiting for Phase 4 exercise, the operator may instead pick from:
+In `.env` (use ASCII WriteAllBytes per `feedback_never_powershell_outfile_env`):
 
-- **`f-coinbase-maker-only-routing`** (memory-queued, high-leverage per the 2026-05-18 TCA finding: avg +102 bps entry slippage). Maker-only routing on Coinbase would reduce taker fees + adverse fills materially. ~60% of pattern 585's gross edge would be reclaimed.
-- **`f-stop-engine-payoff-ratio-gate`** (not yet written): use the payoff_ratio gate (Tier A #2 from 2026-05-18) to size-tier the autotrader entries. Smaller blast radius than Phase 5.
-- **`f-pid-537-watcher-elevation-decision`** (gated on n=15 verdict from the daily watcher).
+```
+CHILI_COINBASE_MAKER_ONLY_ENABLED=true
+```
 
-## Phase 5 scope (preview only; do not start until gated)
+Then:
 
-Per design doc § 6.2:
+```
+docker compose up -d --force-recreate autotrader-worker
+```
 
-1. New `trading_decisions` table — immutable entry-intent snapshot.
-2. Rename `trading_trades` → `trading_management_envelopes` (alembic-style via custom migration `_migration_NNN_envelope_rename`).
-3. Migrate `trade_id` FKs on `trading_execution_events` and `trading_bracket_intents` to point at `trading_management_envelopes.id` (rename is mechanical; FK targets stay valid).
-4. New `decision_id` FK column on envelopes pointing at `trading_decisions`.
-5. ORM updates (ScanPattern → Decision → Envelope → Position chain).
-6. 2-week soak per design doc.
-7. Final phase: drop `trade_id` on `trading_execution_events` / `trading_bracket_intents`, use `position_id` exclusively.
+(Lowest blast radius — only the autotrader needs the new value.)
 
-## Brain integration (reuse, don't rewrite)
+### Step 3 — Watch logs for the first maker-only attempt
 
-When Phase 5 is unblocked:
-- `position_resolver.resolve_position_id` + `position_resolver.position_has_recorded_sell` — both stay unchanged; they already use `position_id`.
-- All 5 sell-event writer call sites — unchanged; they go through `record_execution_event` which is downstream of the envelope-rename.
-- The flag-gated Phase 4 reader at `broker_service.py:~1980` — needs updating to reference the renamed table.
+```bash
+docker compose logs -f autotrader-worker | grep -E "maker-only|place_limit_order_gtc|falling back to market"
+```
 
-## Constraints / do not touch
+Expect either:
+- `[autotrader] maker-only posted limit_buy <ticker> qty=<n> limit=<bid> post_only=True` → success
+- `[autotrader] maker-only: no best_bid for <ticker>; falling back to market order` → degraded (no BBO available)
+- `[autotrader] maker-only routing failed for <ticker>; falling back to market order` → exception (look at the traceback)
 
-- **Don't start Phase 5 until the gate above is met.**
-- When started: no live-money behavior change during the schema rename. The rename + FK retarget is data-model only; close-path strings + flag-gated reader stay the same.
-- 2-week soak is non-negotiable per the design doc.
+### Step 4 — Audit after 24-48h
 
-## Success criteria (when Phase 5 starts)
+```sql
+-- New maker-routed entries:
+SELECT id, ticker, broker_source,
+       payload_json->>'_chili_maker_only' AS maker,
+       payload_json->>'_chili_maker_limit_price' AS limit_px,
+       status, average_fill_price
+FROM trading_execution_events
+WHERE event_type IN ('order_submitted', 'status')
+  AND broker_source = 'coinbase'
+  AND created_at > '<flip_ts>'
+  AND payload_json->>'_chili_maker_only' IS NOT NULL
+ORDER BY id DESC LIMIT 20;
 
-To be detailed in the Phase 5 brief. This file is just the gate.
+-- Avg entry slippage post-flip (compare to Step 1 baseline):
+SELECT AVG(tca_entry_slippage_bps)::numeric(10,2), COUNT(*)
+FROM trading_trades
+WHERE broker_source = 'coinbase'
+  AND status = 'closed'
+  AND tca_entry_slippage_bps IS NOT NULL
+  AND entry_date > '<flip_ts>';
+```
+
+### Step 5 — Promote or rollback
+
+After ~1 week of trades:
+
+- **Promote** (leave flag on): avg entry bps dropped materially toward <30 bps. Document the flip in `docs/STRATEGY/COWORK_DECISIONS_LOG.md`.
+- **Rollback**: avg bps didn't improve OR missed-entry rate is unacceptable. Flip flag back to false + restart autotrader-worker.
+
+## Anomaly thresholds
+
+- **No maker-routed entries in 48h:** check (a) BBO availability, (b) whether autotrader is even attempting Coinbase entries (alert volume could be low). Probe `trading_alerts WHERE broker_source='coinbase' AND created_at > <flip_ts>`.
+- **High missed-entry rate (>30% of attempts log fallback or reject):** the bid was moving too fast. Consider a small bump above bid (e.g., +0.5 bps) OR accept the fallback and re-evaluate weekly.
+- **Avg bps doesn't drop:** something else is contributing to slippage (delayed fills, queue position). Out-of-scope for this brief; queue a separate diagnostic.
+
+## Out of scope
+
+- Code changes. This is a soak/decision brief.
+- Maker-only on the SELL side (separate future brief).
+- Adaptive maker-timeout-then-taker fallback (separate future brief).
+- Phase 5 envelope-rename (gated on first `[phase4_*]` log line; orthogonal to this).
 
 ## Rollback plan
 
-The renames are reversible via inverse migration. The 2-week soak is the operational safety net.
+```
+CHILI_COINBASE_MAKER_ONLY_ENABLED=false
+```
+then `docker compose up -d --force-recreate autotrader-worker`. Legacy market-order path resumes immediately.
 
 ## Reference
 
-- `docs/DESIGN/POSITION_IDENTITY.md` § 6.2 — Phase 5 spec
-- Coverage-map summary in `docs/STRATEGY/CC_REPORTS/2026-05-19_f-bracket-fired-stop-recording.md`
-- All Phase 1-4 CC reports under `docs/STRATEGY/CC_REPORTS/`
-- Memory: `project_2026_05_19_phase4_flag_flipped`, `project_2026_05_19_coinbase_exit_recording_shipped`, `project_2026_05_19_bracket_fired_stop_recording_shipped` (this session)
+- Code commit: `18fee1e`
+- CC report (code ship): `docs/STRATEGY/CC_REPORTS/2026-05-19_f-coinbase-maker-only-routing.md`
+- TCA finding source: `docs/STRATEGY/CC_REPORTS/2026-05-18_f-position-identity-phase-3-and-tca-and-account-type.md`
+- Memory: `project_2026_05_19_coinbase_maker_only_shipped` (this session)
