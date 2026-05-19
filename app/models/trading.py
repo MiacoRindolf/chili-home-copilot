@@ -491,6 +491,17 @@ class TradingExecutionEvent(Base):
     ack_to_first_fill_ms: Optional[float] = Column(Float, nullable=True)
     payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
 
+    # f-position-identity-phase-2 (mig 248, 2026-05-18): nullable FK to
+    # trading_positions. Double-written by execution_audit.record_execution_event
+    # alongside trade_id. NO READER consults this column in Phase 2; readers
+    # stay on trade_id until Phase 3's authority flip. Backfill populated the
+    # historical rows via the (user, broker, ticker, direction) natural key.
+    position_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("trading_positions.id", ondelete="SET NULL"),
+        nullable=True, index=False,
+    )
+
 
 class JournalEntry(Base):
     __tablename__ = "trading_journal"

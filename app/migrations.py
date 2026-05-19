@@ -16452,6 +16452,221 @@ def _migration_247_promote_pattern_537_path_a(conn) -> None:
     )
 
 
+def _migration_248_execution_events_position_id(conn) -> None:
+    """f-position-identity-phase-2 (2026-05-18) -- add nullable position_id
+    FK + partial index + quarantine view on trading_execution_events, then
+    seed historical closed positions (Option A from the brief) and backfill
+    position_id on existing rows via the natural-key join.
+
+    SCOPE
+    -----
+    Phase 2 is double-write + backfill ONLY. No reader path consults the new
+    column. The natural-key join continues to drive any read that needs
+    position context until Phase 3. ``trade_id`` stays as the primary
+    linkage in ``trading_execution_events``; removal lands in Phase 5.
+
+    BRIEF
+    -----
+    docs/STRATEGY/QUEUED/f-position-identity-phase-2-execution-events-position-id-backfill.md
+    Operator decision: **Option A** (seed historical closed positions for
+    every (user, broker, ticker, direction) tuple in trading_trades to
+    unlock resolution of the ~5,305 closed-trade execution_events that
+    Phase 1 couldn't cover). Brief recommended this; operator approved
+    2026-05-18 ("ship the next one").
+
+    STEPS
+    -----
+    1. ``ADD COLUMN IF NOT EXISTS position_id BIGINT NULL`` (FK to
+       trading_positions(id) ON DELETE SET NULL).
+    2. Partial index on position_id (WHERE position_id IS NOT NULL).
+    3. Quarantine view ``trading_execution_events_quarantine`` selecting
+       rows where position_id IS NULL with a quarantine_reason categorical.
+    4. Seed trading_positions rows at state='closed' for every (user,
+       broker, account_type='cash', ticker, direction='long') tuple in
+       trading_trades that doesn't yet exist in trading_positions.
+       Matches Phase 1's account_type/direction defaults (per
+       broker_service._resolve_account_type_for_position + _resolve_direction_for_position).
+    5. Backfill trading_execution_events.position_id via
+       UPDATE...FROM that joins through trade_id -> trading_trades ->
+       trading_positions on the natural key. Prefers state='open' over
+       state='closed' when both match (handles the close/reopen pattern
+       from the GRT-USD soak case).
+
+    IDEMPOTENCY
+    -----------
+    - ``ADD COLUMN IF NOT EXISTS`` (PostgreSQL 9.6+ supports this).
+    - ``CREATE INDEX IF NOT EXISTS``.
+    - ``CREATE OR REPLACE VIEW``.
+    - Step 4: ``NOT EXISTS`` guard on the INSERT.
+    - Step 5: ``WHERE position_id IS NULL`` guard on the UPDATE.
+
+    All steps wrapped in their own try/except blocks so a partial failure
+    in one step doesn't abort the others (mirrors mig 246's pattern).
+    """
+    # 1. Add column (with FK + ON DELETE SET NULL — matches design § 8.2).
+    for ddl in (
+        """
+        ALTER TABLE trading_execution_events
+        ADD COLUMN IF NOT EXISTS position_id BIGINT NULL
+        REFERENCES trading_positions(id) ON DELETE SET NULL
+        """,
+    ):
+        try:
+            conn.execute(text(ddl))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.warning(
+                "[mig248] column-add failed (may already exist with different "
+                "constraint shape); continuing", exc_info=True,
+            )
+
+    # 2. Partial index — only rows that have been resolved.
+    try:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_execution_events_position_id "
+            "ON trading_execution_events (position_id) "
+            "WHERE position_id IS NOT NULL"
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning("[mig248] partial index create failed", exc_info=True)
+
+    # 3. Quarantine view — categorical reason for the operator.
+    try:
+        conn.execute(text(
+            """
+            CREATE OR REPLACE VIEW trading_execution_events_quarantine AS
+            SELECT
+                e.id, e.trade_id, e.user_id, e.ticker, e.broker_source,
+                e.event_type, e.event_at, e.recorded_at,
+                t.status AS trade_status,
+                CASE
+                    WHEN e.trade_id IS NULL THEN 'null_trade_id'
+                    WHEN t.id IS NULL THEN 'orphan_trade_id'
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM trading_positions p
+                        WHERE p.user_id = t.user_id
+                          AND p.broker_source = t.broker_source
+                          AND p.ticker = t.ticker
+                    ) THEN 'no_matching_position'
+                    ELSE 'resolution_failed_other'
+                END AS quarantine_reason
+            FROM trading_execution_events e
+            LEFT JOIN trading_trades t ON t.id = e.trade_id
+            WHERE e.position_id IS NULL
+            """
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning("[mig248] quarantine view create failed", exc_info=True)
+
+    # 4. Option A: seed trading_positions rows at state='closed' for any
+    # historical (user, broker, ticker, direction) tuple in trading_trades
+    # that doesn't already exist. account_type defaults to 'cash' and
+    # direction defaults to 'long' to match Phase 1's writers
+    # (broker_service._resolve_account_type_for_position / _resolve_direction_for_position).
+    # asset_kind is auto-derived from ticker suffix.
+    seeded = 0
+    try:
+        result = conn.execute(text(
+            """
+            INSERT INTO trading_positions (
+                user_id, broker_source, account_type, ticker, direction,
+                asset_kind, current_quantity, current_avg_price, state,
+                last_observed_at, last_state_transition_at,
+                created_at, updated_at
+            )
+            SELECT DISTINCT
+                t.user_id,
+                LOWER(t.broker_source) AS broker_source,
+                'cash' AS account_type,
+                t.ticker,
+                COALESCE(LOWER(NULLIF(t.direction, '')), 'long') AS direction,
+                CASE WHEN t.ticker LIKE '%%-USD' THEN 'crypto' ELSE 'equity' END
+                    AS asset_kind,
+                0.0 AS current_quantity,
+                NULL::double precision AS current_avg_price,
+                'closed' AS state,
+                NOW() AS last_observed_at,
+                NOW() AS last_state_transition_at,
+                NOW() AS created_at,
+                NOW() AS updated_at
+            FROM trading_trades t
+            WHERE t.user_id IS NOT NULL
+              AND t.broker_source IS NOT NULL
+              AND t.ticker IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM trading_positions p
+                  WHERE p.user_id = t.user_id
+                    AND p.broker_source = LOWER(t.broker_source)
+                    AND p.ticker = t.ticker
+                    AND p.direction = COALESCE(LOWER(NULLIF(t.direction, '')), 'long')
+              )
+            """
+        ))
+        seeded = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info("[mig248] seeded %d historical closed positions", seeded)
+    except Exception:
+        conn.rollback()
+        logger.warning("[mig248] closed-position seed failed", exc_info=True)
+
+    # 5. Backfill execution_events.position_id via the natural-key join.
+    # Prefer state='open' over state='closed' when both match a (user,
+    # broker, ticker, direction) tuple — captures the close-and-reopen
+    # case the Phase 1 soak surfaced (GRT-USD ran 13 close/reopen cycles).
+    backfilled = 0
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_execution_events e
+               SET position_id = sub.position_id
+              FROM (
+                SELECT e2.id AS event_id,
+                       (
+                         SELECT p.id
+                         FROM trading_positions p
+                         WHERE p.user_id = t.user_id
+                           AND p.broker_source = LOWER(t.broker_source)
+                           AND p.ticker = t.ticker
+                           AND p.direction = COALESCE(LOWER(NULLIF(t.direction, '')), 'long')
+                         ORDER BY
+                           CASE p.state WHEN 'open' THEN 0 ELSE 1 END,
+                           p.id DESC
+                         LIMIT 1
+                       ) AS position_id
+                FROM trading_execution_events e2
+                JOIN trading_trades t ON t.id = e2.trade_id
+                WHERE e2.position_id IS NULL
+                  AND e2.trade_id IS NOT NULL
+                  AND t.user_id IS NOT NULL
+                  AND t.broker_source IS NOT NULL
+                  AND t.ticker IS NOT NULL
+              ) sub
+             WHERE e.id = sub.event_id
+               AND sub.position_id IS NOT NULL
+               AND e.position_id IS NULL
+            """
+        ))
+        backfilled = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig248] backfilled position_id on %d execution_events rows",
+            backfilled,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning("[mig248] execution_events backfill failed", exc_info=True)
+
+    logger.info(
+        "[mig248] done — seeded=%d closed positions, backfilled=%d events",
+        seeded, backfilled,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16732,6 +16947,7 @@ MIGRATIONS = [
     ("245_restore_pattern_585", _migration_245_restore_pattern_585),
     ("246_scan_pattern_payoff_ratio", _migration_246_scan_pattern_payoff_ratio),
     ("247_promote_pattern_537_path_a", _migration_247_promote_pattern_537_path_a),
+    ("248_execution_events_position_id", _migration_248_execution_events_position_id),
 ]
 
 

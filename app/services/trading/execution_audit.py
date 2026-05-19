@@ -195,6 +195,71 @@ def apply_execution_event_to_trade(trade: Any, event: Any) -> None:
     trade.last_broker_sync = _utcnow()
 
 
+def _resolve_position_id_for_event(
+    db: Session,
+    *,
+    trade: Any | None,
+    user_id: int | None,
+    ticker: str | None,
+    broker_source: str | None,
+) -> int | None:
+    """f-position-identity-phase-2 (2026-05-18): resolve a trading_positions.id
+    for an execution event via the (user, broker, ticker, direction) natural
+    key. Returns ``None`` on any miss; NEVER raises (caller MUST tolerate
+    a NULL position_id and continue writing the event row regardless).
+
+    Resolution priority when multiple positions match the natural key:
+    state='open' first, then by id DESC. This handles the close-and-reopen
+    pattern the Phase 1 soak surfaced (GRT-USD ran 13 close/reopen cycles
+    while its broker position stayed live).
+
+    Defaults match Phase 1's writers in ``broker_service``:
+    - ``direction`` defaults to 'long' when trade.direction is NULL/empty.
+    - ``broker_source`` is lower-cased to match the seed convention.
+
+    No reader consults position_id in Phase 2 — this is double-write only.
+    """
+    try:
+        from sqlalchemy import text as _t
+
+        if trade is not None:
+            uid = getattr(trade, "user_id", None) or user_id
+            broker = (
+                getattr(trade, "broker_source", None) or broker_source or ""
+            )
+            tkr = getattr(trade, "ticker", None) or ticker
+            direction = getattr(trade, "direction", None) or "long"
+        else:
+            uid = user_id
+            broker = broker_source or ""
+            tkr = ticker
+            direction = "long"
+
+        broker = (broker or "").strip().lower()
+        direction = (direction or "long").strip().lower()
+        tkr = (tkr or "").strip()
+
+        if not (uid and broker and tkr):
+            return None
+
+        row = db.execute(_t(
+            """
+            SELECT id FROM trading_positions
+            WHERE user_id = :uid
+              AND broker_source = :broker
+              AND ticker = :tkr
+              AND direction = :direction
+            ORDER BY
+              CASE state WHEN 'open' THEN 0 ELSE 1 END,
+              id DESC
+            LIMIT 1
+            """
+        ), {"uid": uid, "broker": broker, "tkr": tkr, "direction": direction}).first()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
+
+
 def record_execution_event(
     db: Session,
     *,
@@ -234,9 +299,21 @@ def record_execution_event(
     broker = (broker_source or getattr(trade, "broker_source", None) or "manual").strip().lower()
     venue_name = venue or _venue_for_broker(broker)
     family = execution_family or _execution_family_for_broker(broker, ticker=ticker)
+    # f-position-identity-phase-2 (2026-05-18) — double-write: resolve the
+    # trading_positions.id for this event alongside trade_id. NEVER raises
+    # (resolver swallows all errors). NO READER consults this column yet —
+    # Phase 2 is foundation for the Phase 3 authority flip. See mig 248.
+    position_id_resolved = _resolve_position_id_for_event(
+        db,
+        trade=trade,
+        user_id=user_id,
+        ticker=ticker,
+        broker_source=broker,
+    )
     event_row = TradingExecutionEvent(
         user_id=user_id,
         trade_id=getattr(trade, "id", None),
+        position_id=position_id_resolved,
         proposal_id=getattr(proposal, "id", None),
         automation_session_id=automation_session_id,
         scan_pattern_id=scan_pattern_id or getattr(trade, "scan_pattern_id", None) or getattr(proposal, "scan_pattern_id", None),
