@@ -16826,6 +16826,96 @@ def _migration_250_coinbase_account_type_spot(conn) -> None:
         )
 
 
+def _migration_251_tca_reference_entry_backfill(conn) -> None:
+    """f-tca-writer-wiring (2026-05-18) -- backfill
+    trading_trades.tca_reference_entry_price from related_alert_id for
+    historical autotrader trades, then compute tca_entry_slippage_bps
+    where both reference and fill are known.
+
+    Pre-fix state (probe 2026-05-18): 0 of 638 trades have
+    tca_reference_entry_price populated -- the autotrader Trade-creation
+    path at auto_trader.py:2233 was not writing the column. Companion
+    code change in this release adds the write going forward.
+
+    This migration retroactively populates the column for historical
+    autotrader trades (where related_alert_id is set) by reading the
+    intended entry price from trading_alerts.
+
+    Then it computes tca_entry_slippage_bps as:
+        (entry_price - tca_reference_entry_price) / tca_reference_entry_price * 10000
+    rounded to 2 decimals (long-direction convention; positive = paid more).
+
+    Idempotent. WHERE clauses guard against repeat writes.
+
+    Step 1: backfill tca_reference_entry_price for autotrader trades.
+    Step 2: compute tca_entry_slippage_bps where reference and fill known.
+
+    Both wrapped separately so a partial failure leaves a working
+    intermediate state.
+    """
+    # Step 1: backfill reference price from trading_alerts.
+    ref_backfilled = 0
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_trades t
+               SET tca_reference_entry_price = a.entry_price
+              FROM trading_alerts a
+             WHERE t.related_alert_id = a.id
+               AND t.tca_reference_entry_price IS NULL
+               AND a.entry_price IS NOT NULL
+               AND a.entry_price > 0
+            """
+        ))
+        ref_backfilled = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig251] tca_reference_entry_price backfilled on %d trades",
+            ref_backfilled,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig251] tca_reference_entry_price backfill failed", exc_info=True,
+        )
+
+    # Step 2: compute tca_entry_slippage_bps where reference + fill known.
+    bps_backfilled = 0
+    try:
+        result = conn.execute(text(
+            """
+            UPDATE trading_trades
+               SET tca_entry_slippage_bps = ROUND(
+                   CAST(
+                     (COALESCE(avg_fill_price, entry_price) - tca_reference_entry_price)
+                     / tca_reference_entry_price * 10000.0
+                     AS NUMERIC),
+                   2)::double precision
+             WHERE tca_entry_slippage_bps IS NULL
+               AND tca_reference_entry_price IS NOT NULL
+               AND tca_reference_entry_price > 0
+               AND COALESCE(avg_fill_price, entry_price) IS NOT NULL
+               AND COALESCE(avg_fill_price, entry_price) > 0
+            """
+        ))
+        bps_backfilled = result.rowcount if result.rowcount is not None else 0
+        conn.commit()
+        logger.info(
+            "[mig251] tca_entry_slippage_bps computed on %d trades",
+            bps_backfilled,
+        )
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig251] tca_entry_slippage_bps compute failed", exc_info=True,
+        )
+
+    logger.info(
+        "[mig251] done -- references_backfilled=%d, bps_computed=%d",
+        ref_backfilled, bps_backfilled,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -17109,6 +17199,7 @@ MIGRATIONS = [
     ("248_execution_events_position_id", _migration_248_execution_events_position_id),
     ("249_bracket_intents_position_id", _migration_249_bracket_intents_position_id),
     ("250_coinbase_account_type_spot", _migration_250_coinbase_account_type_spot),
+    ("251_tca_reference_entry_backfill", _migration_251_tca_reference_entry_backfill),
 ]
 
 

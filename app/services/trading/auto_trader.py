@@ -2230,6 +2230,16 @@ def _execute_new_entry(
         # (RH, options) defaults to 'robinhood' (BYTE-IDENTICAL with
         # the prior hardcoded value).
         _broker_source_for_trade = res.get("_chili_broker_source") or "robinhood"
+        # f-tca-writer-wiring (2026-05-18): capture the AUTOTRADER's decision
+        # price ``px`` as the entry-side TCA reference. ``fill`` (above) is
+        # the broker's actual fill price (or px as fallback); ``px`` is the
+        # autotrader's chosen entry price at signal time. The difference is
+        # the entry slippage that ``apply_tca_on_trade_fill`` will compute
+        # downstream when broker_sync runs.
+        try:
+            _tca_ref_entry = float(px) if px is not None else None
+        except (TypeError, ValueError):
+            _tca_ref_entry = None
         tr = Trade(
             user_id=uid,
             ticker=alert.ticker.upper(),
@@ -2252,10 +2262,25 @@ def _execute_new_entry(
             tags="autotrader_v1",
             auto_trader_version=AUTOTRADER_VERSION,
             scale_in_count=0,
+            tca_reference_entry_price=_tca_ref_entry,
         )
         db.add(tr)
         db.commit()
         db.refresh(tr)
+        # f-tca-writer-wiring (2026-05-18): compute entry slippage NOW, using
+        # the reference (px) and the broker's actual fill price. Without this,
+        # the apply_tca_on_trade_fill call in broker_service is the only
+        # writer — and it depends on broker_sync re-touching the trade later.
+        # Wrap in try/except per the existing tca pattern in this file.
+        try:
+            from .tca_service import apply_tca_on_trade_fill
+            apply_tca_on_trade_fill(tr)
+            db.commit()
+        except Exception:
+            logger.debug(
+                "[autotrader] entry TCA write failed (non-fatal) for trade_id=%s",
+                getattr(tr, "id", None), exc_info=True,
+            )
         # Phase 2C: emit trade_lifecycle entry event and save correlation_id
         # on the Trade. On close, plasticity uses this to look up the path log
         # and reinforce/attenuate the edges that carried the signal.
