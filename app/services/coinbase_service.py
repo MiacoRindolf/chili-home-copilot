@@ -38,6 +38,15 @@ _CHECK_TTL = 600
 _cache: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 300
 
+# f-coinbase-dust-auto-create-skip (2026-05-19): minimum dollar notional
+# below which ``sync_positions_to_db`` will refuse to auto-create a Trade
+# row from a Coinbase wallet holding. Coinbase's ``quote_min_size`` is
+# typically $1 for spot products; we set this slightly higher to also
+# screen out exposure-only-on-paper holdings the autotrader couldn't
+# round-trip. Operator can raise via env override if needed; staying
+# hardcoded for now keeps the contract obvious.
+_MIN_AUTO_CREATE_NOTIONAL_USD = 1.0
+
 
 def _cache_get(key: str) -> Any | None:
     entry = _cache.get(key)
@@ -1003,6 +1012,31 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 logger.warning(
                     "[coinbase] Skipping auto-create for %s: cost basis unavailable",
                     ticker,
+                )
+                continue
+            # f-coinbase-dust-auto-create-skip (2026-05-19): refuse auto-
+            # create when the notional dollar value (avg_price * qty) is
+            # below ``_MIN_AUTO_CREATE_NOTIONAL_USD``. Coinbase's
+            # ``quote_min_size`` is typically $1; positions below this
+            # cannot place new orders against them. Without this guard,
+            # operator-side dust holdings (e.g. 0.269 ACS at $0.00019 =
+            # $0.00005 notional, or 2.18e-06 BNB at $680 = $0.0015) got
+            # auto-created as trades that subsequently got closed via
+            # ``coinbase_position_sync_gone`` whenever the wallet's tiny
+            # holding transiently dropped out of ``cb_tickers`` -- the
+            # phantom round-trip cycle that burned the autotrader's
+            # ``coinbase_cap:venue_notional_cap_exceeded`` quota (133
+            # blocks in 24h) and obscured the autotrader's real intent.
+            notional_usd = float(avg_price) * float(qty)
+            if notional_usd < _MIN_AUTO_CREATE_NOTIONAL_USD:
+                logger.warning(
+                    "[coinbase] Skipping auto-create for %s: dust notional "
+                    "$%.5f < $%.2f min (qty=%s, avg_price=%s)",
+                    ticker,
+                    notional_usd,
+                    _MIN_AUTO_CREATE_NOTIONAL_USD,
+                    qty,
+                    avg_price,
                 )
                 continue
             trade = Trade(
