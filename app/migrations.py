@@ -16358,6 +16358,100 @@ def _migration_246_scan_pattern_payoff_ratio(conn) -> None:
     )
 
 
+def _migration_247_promote_pattern_537_path_a(conn) -> None:
+    """f-pattern-537-evaluation Path A (2026-05-18 operator decision) --
+    one-shot promotion of pattern 537 ("Falling Wedge Breakout + Trend
+    Reclaim") from 'challenged' to 'pilot_promoted'.
+
+    OPERATOR DECISION CONTEXT. 2026-05-18 audit surfaced pid 537 with
+    realized 29.6:1 payoff ratio over 7 trades. Operator chose Path A
+    (promote now) over Path B (queue CPCV re-eval) or C (keep monitor).
+
+    DATA-SCIENTIST CAVEATS (recorded for future audit):
+
+    - n=7 closed trades; only ~3 distinct independent ideas
+      (ACHC, PFSI, WDCX), traded 4/20-4/30 — 10-day time concentration.
+    - The 29.6:1 payoff ratio is inflated by 3 scratch trades (ABNB
+      +$0.07 / AAON -$0.15 / PFSI -$0.24); effective payoff on
+      substantive trades is closer to 6:1.
+    - cpcv_median_sharpe = 0.626 (BELOW the brain's own 1.0
+      promotion-gate floor) and promotion_gate_passed = False.
+      promotion_status was 'challenged_cpcv_adaptive_dsr' at the time
+      of this migration -- the brain itself had flagged the CPCV
+      evidence as insufficient.
+    - lifecycle was changed to 'challenged' on 2026-05-16 (two days
+      before this promote). This migration is overriding a brain
+      decision that was made very recently.
+
+    SAFETY BELT. Only flips when ALL conditions still hold:
+      - id = 537
+      - lifecycle_stage = 'challenged'
+      - payoff_ratio >= 5.0 (the actual payoff is ~29; threshold here
+        is 5 to leave room for the realized stats refreshing slightly
+        before this mig runs without breaking idempotency)
+      - payoff_ratio_n >= 5
+
+    OUTCOME ON SUCCESS:
+      - lifecycle_stage = 'pilot_promoted'
+      - promotion_status = 'promoted'  (was 'challenged_cpcv_adaptive_dsr')
+      - lifecycle_changed_at = NOW()
+      - demoted_at = NULL, promotion_demote_reason = NULL
+      - active = TRUE (was already True)
+
+    FOLLOW-UP MONITORING. After this migration, 537 is alert-eligible
+    AND trade-eligible. Watch list (recorded in memory entry
+    project_2026_05_18_pid537_path_a):
+      - Re-evaluate at n=15 (next 8 trades) -- if WR drops below 50%
+        or payoff_ratio collapses below 3, re-demote.
+      - The Tier-A payoff-ratio gate (default floor=1.5, min_n=5)
+        DOES protect 537 from realized-WR demote so long as the
+        payoff stays above 1.5, but does NOT protect against a
+        CPCV re-eval finding insufficient OOS evidence.
+
+    IDEMPOTENT. Second run finds 537 already in 'pilot_promoted' (not
+    'challenged') and is a no-op.
+    """
+    rc = -1
+    try:
+        result = conn.execute(
+            text(
+                """
+                UPDATE scan_patterns
+                   SET lifecycle_stage = 'pilot_promoted',
+                       lifecycle_changed_at = NOW(),
+                       active = TRUE,
+                       promotion_status = 'promoted',
+                       demoted_at = NULL,
+                       promotion_demote_reason = NULL
+                 WHERE id = 537
+                   AND lifecycle_stage = 'challenged'
+                   AND payoff_ratio IS NOT NULL
+                   AND payoff_ratio >= 5.0
+                   AND payoff_ratio_n IS NOT NULL
+                   AND payoff_ratio_n >= 5
+                """
+            )
+        )
+        try:
+            rc = result.rowcount
+        except Exception:
+            rc = -1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning(
+            "[mig247] pattern 537 Path A promote raised; rolling back",
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "[mig247] pattern 537 Path A (challenged -> pilot_promoted) "
+        "affected %d row(s) "
+        "(1 expected on first run; 0 on subsequent runs / non-prod envs)",
+        rc,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -16637,6 +16731,7 @@ MIGRATIONS = [
      _migration_244_composite_reweight_demote_losers),
     ("245_restore_pattern_585", _migration_245_restore_pattern_585),
     ("246_scan_pattern_payoff_ratio", _migration_246_scan_pattern_payoff_ratio),
+    ("247_promote_pattern_537_path_a", _migration_247_promote_pattern_537_path_a),
 ]
 
 
