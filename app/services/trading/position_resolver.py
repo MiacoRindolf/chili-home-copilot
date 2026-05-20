@@ -49,7 +49,7 @@ def resolve_position_id(
     is lower-cased to match the seed convention.
 
     Returns ``None`` when:
-    - user_id, broker_source, or ticker is missing/empty
+    - broker_source or ticker is missing/empty
     - no matching ``trading_positions`` row exists
     - the DB query raises any exception (swallowed silently)
 
@@ -73,13 +73,13 @@ def resolve_position_id(
         dir_ = (dir_ or "long").strip().lower()
         tkr = (tkr or "").strip()
 
-        if not (uid and broker and tkr):
+        if not (broker and tkr):
             return None
 
         row = db.execute(text(
             """
             SELECT id FROM trading_positions
-            WHERE user_id = :uid
+            WHERE COALESCE(user_id, -1) = COALESCE(:uid, -1)
               AND broker_source = :broker
               AND ticker = :tkr
               AND direction = :direction

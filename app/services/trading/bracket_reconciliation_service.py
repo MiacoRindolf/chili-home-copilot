@@ -260,10 +260,101 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
         )
         rh_stops_by_ticker = {}
 
+    cb_stops_by_ticker: dict[str, Any] = {}
+    cb_stop_qty_by_ticker: dict[str, float] = {}
+    try:
+        wanted_cb = any(
+            (r.get("broker_source") or "").lower() == "coinbase"
+            for r in local_rows
+        )
+        if wanted_cb:
+            from .venue.factory import get_adapter
+
+            adapter = get_adapter("coinbase")
+            if adapter is not None:
+                raw_orders, _fresh = adapter.list_open_orders(
+                    product_id=None, limit=250,
+                )
+                for od in raw_orders or []:
+                    side = str(getattr(od, "side", "") or "").lower()
+                    order_type = str(getattr(od, "order_type", "") or "").upper()
+                    state = str(getattr(od, "status", "") or "").lower()
+                    product_id = str(getattr(od, "product_id", "") or "").upper()
+                    if side != "sell" or "STOP" not in order_type:
+                        continue
+                    if not product_id or not _is_working_stop_order_state(state):
+                        continue
+                    qty = 0.0
+                    raw = getattr(od, "raw", None) or {}
+                    cfg = raw.get("order_configuration") if isinstance(raw, dict) else None
+                    if isinstance(cfg, dict):
+                        for inner in cfg.values():
+                            if isinstance(inner, dict):
+                                value = inner.get("base_size")
+                                if value not in (None, ""):
+                                    try:
+                                        qty = float(value)
+                                    except Exception:
+                                        qty = 0.0
+                                    break
+                            if qty > 0:
+                                break
+                    if qty <= 0 and isinstance(raw, dict):
+                        value = raw.get("outstanding_hold_amount")
+                        if value not in (None, ""):
+                            try:
+                                qty = float(value)
+                            except Exception:
+                                qty = 0.0
+                    cb_stop_qty_by_ticker[product_id] = (
+                        cb_stop_qty_by_ticker.get(product_id, 0.0) + max(0.0, qty)
+                    )
+                    prior = cb_stops_by_ticker.get(product_id)
+                    if prior is None or (
+                        str(getattr(od, "created_time", "") or "")
+                        > str(getattr(prior, "created_time", "") or "")
+                    ):
+                        cb_stops_by_ticker[product_id] = od
+    except Exception:
+        logger.warning(
+            f"{BRACKET_RECONCILIATION} broker_manager_view_fn: Coinbase "
+            "stop-order fetch failed; stop_order_id will stay None for "
+            "Coinbase this sweep",
+            exc_info=True,
+        )
+        cb_stops_by_ticker = {}
+        cb_stop_qty_by_ticker = {}
+
+    def _coinbase_stop_price(order: Any) -> Optional[float]:
+        raw = getattr(order, "raw", None) or {}
+        cfg = raw.get("order_configuration") if isinstance(raw, dict) else None
+        if isinstance(cfg, dict):
+            for inner in cfg.values():
+                if not isinstance(inner, dict):
+                    continue
+                for key in ("stop_price", "trigger_price"):
+                    value = inner.get(key)
+                    if value not in (None, ""):
+                        try:
+                            return float(value)
+                        except Exception:
+                            pass
+        return None
+
     def _stop_meta_for(tkr: Optional[str], src: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[float]]:
         if not tkr:
             return None, None, None
-        if (src or "").lower() != "robinhood":
+        src_l = (src or "").lower()
+        if src_l == "coinbase":
+            od = cb_stops_by_ticker.get(tkr.upper())
+            if not od:
+                return None, None, None
+            return (
+                getattr(od, "order_id", None),
+                getattr(od, "status", None),
+                _coinbase_stop_price(od),
+            )
+        if src_l != "robinhood":
             return None, None, None
         od = rh_stops_by_ticker.get(tkr.upper())
         if not od:
@@ -296,6 +387,19 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
             qty_f = float(qty or 0)
         except Exception:
             qty_f = 0.0
+        if (
+            (src or "").lower() == "coinbase"
+            and tkr
+            and stop_oid is not None
+            and cb_stop_qty_by_ticker.get(tkr, 0.0) < qty_f - 1e-9
+        ):
+            logger.info(
+                f"{BRACKET_RECONCILIATION} Coinbase stop coverage partial "
+                "ticker=%s broker_qty=%s stop_qty=%s; classifying as "
+                "missing_stop so writer places uncovered remainder",
+                tkr, qty_f, cb_stop_qty_by_ticker.get(tkr, 0.0),
+            )
+            stop_oid, stop_state, stop_price = None, None, None
         views.append(BrokerView(
             available=True,
             ticker=tkr,

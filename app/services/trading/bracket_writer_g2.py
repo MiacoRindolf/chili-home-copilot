@@ -1082,6 +1082,61 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, default=_default, separators=(",", ":"))
 
 
+def _coinbase_stop_order_base_size(order: Any) -> float:
+    raw = getattr(order, "raw", None) or {}
+    if isinstance(raw, dict):
+        cfg = raw.get("order_configuration")
+        if isinstance(cfg, dict):
+            for inner in cfg.values():
+                if isinstance(inner, dict):
+                    base_size = inner.get("base_size")
+                    if base_size not in (None, ""):
+                        try:
+                            return float(base_size)
+                        except Exception:
+                            pass
+        for key in ("outstanding_hold_amount", "base_size", "size"):
+            value = raw.get(key)
+            if value not in (None, ""):
+                try:
+                    return float(value)
+                except Exception:
+                    pass
+    return 0.0
+
+
+def _coinbase_open_stop_orders_for_ticker(adapter: Any, ticker: str) -> list[Any]:
+    """Return working Coinbase SELL stop orders for one product.
+
+    Coinbase permits multiple resting sell stops against one spot holding.
+    The local bracket schema can store only one ``broker_stop_order_id``, so
+    the writer must sum broker-held stop quantities before placing another
+    order. Otherwise a split-order coverage state looks like "missing stop"
+    forever and the writer keeps trying to over-cover the same inventory.
+    """
+    try:
+        orders, _fresh = adapter.list_open_orders(product_id=ticker, limit=100)
+    except Exception:
+        return []
+    out: list[Any] = []
+    for order in orders or []:
+        side = str(getattr(order, "side", "") or "").lower()
+        order_type = str(getattr(order, "order_type", "") or "").upper()
+        status = str(getattr(order, "status", "") or "").lower()
+        product_id = str(getattr(order, "product_id", "") or "").upper()
+        if product_id != str(ticker or "").upper():
+            continue
+        if side != "sell" or "STOP" not in order_type:
+            continue
+        if status not in (
+            "open", "active", "working", "queued", "confirmed", "pending",
+            "submitted", "accepted", "partially_filled", "unconfirmed",
+        ):
+            continue
+        out.append(order)
+    return out
+
+
 def place_missing_stop(
     db: Session,
     *,
@@ -1366,6 +1421,87 @@ def place_missing_stop(
             action="place_missing_stop", ok=False, reason="broker_qty_zero",
             broker_source=broker_source, ticker=ticker,
         )
+
+    if _bs_lower == "coinbase":
+        existing_stop_orders = _coinbase_open_stop_orders_for_ticker(
+            adapter, ticker,
+        )
+        existing_stop_qty = sum(
+            _coinbase_stop_order_base_size(o) for o in existing_stop_orders
+        )
+        target_qty = float(local_quantity)
+        if broker_qty is not None:
+            target_qty = min(target_qty, float(broker_qty))
+        uncovered_qty = max(0.0, target_qty - existing_stop_qty)
+        if existing_stop_qty > 0:
+            order_ids = [
+                getattr(o, "order_id", None)
+                for o in existing_stop_orders
+                if getattr(o, "order_id", None)
+            ]
+            if uncovered_qty <= 1e-9:
+                adopted_oid = order_ids[-1] if order_ids else None
+                logger.info(
+                    f"{BRACKET_WRITER_G2} place_missing_stop COINBASE-COVERED "
+                    "intent=%s ticker=%s target_qty=%s existing_stop_qty=%s "
+                    "orders=%s",
+                    bracket_intent_id, ticker, target_qty, existing_stop_qty,
+                    len(order_ids),
+                )
+                try:
+                    from .bracket_intent_writer import (
+                        IntentState as _IS,
+                        transition as _tr,
+                    )
+                    _tr(
+                        db, int(bracket_intent_id),
+                        to_state=_IS.CONFIRMED_AT_BROKER,
+                        reason="coinbase_existing_stop_coverage",
+                    )
+                except Exception:
+                    logger.debug(
+                        f"{BRACKET_WRITER_G2} coinbase coverage transition "
+                        "failed",
+                        exc_info=True,
+                    )
+                _g2_event(
+                    db,
+                    trade_id=trade_id,
+                    bracket_intent_id=bracket_intent_id,
+                    ticker=ticker,
+                    broker_source=broker_source,
+                    event_type="g2_place_missing_stop_existing_coinbase_coverage",
+                    status="covered",
+                    new_stop_order_id=adopted_oid,
+                    qty=float(existing_stop_qty),
+                    stop_price=float(stop_price),
+                    decision_kind=decision.kind,
+                    decision_severity=decision.severity,
+                    extra={
+                        "target_qty": target_qty,
+                        "existing_stop_qty": existing_stop_qty,
+                        "order_ids": order_ids,
+                    },
+                )
+                return WriterAction(
+                    action="place_missing_stop",
+                    ok=True,
+                    reason="existing_coinbase_stop_coverage",
+                    broker_source=broker_source,
+                    ticker=ticker,
+                    new_stop_order_id=adopted_oid,
+                    new_stop_qty=float(existing_stop_qty),
+                    new_stop_price=float(stop_price),
+                )
+            if uncovered_qty < float(local_quantity):
+                logger.warning(
+                    f"{BRACKET_WRITER_G2} place_missing_stop COINBASE-CAP "
+                    "intent=%s ticker=%s local_qty=%s broker_qty=%s "
+                    "existing_stop_qty=%s placing_uncovered=%s",
+                    bracket_intent_id, ticker, local_quantity, broker_qty,
+                    existing_stop_qty, uncovered_qty,
+                )
+                local_quantity = uncovered_qty
 
     # FIX 57 (2026-05-01) + 2026-05-03 + 2026-05-04 revision -- covered-
     # by-existing-sell handling.

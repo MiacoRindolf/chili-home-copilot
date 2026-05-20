@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -964,6 +965,263 @@ def _link_latest_alert(db: Session, trade) -> None:
         logger.debug("[coinbase] _link_latest_alert failed for %s", trade.ticker, exc_info=True)
 
 
+def _is_coinbase_sync_trade(trade: Any) -> bool:
+    tags = str(getattr(trade, "tags", "") or "").lower()
+    notes = str(getattr(trade, "notes", "") or "").lower()
+    return (
+        "coinbase-sync" in tags
+        or "auto-synced from coinbase" in notes
+        or not getattr(trade, "broker_order_id", None)
+    )
+
+
+def _canonical_coinbase_user_id(db: Session, requested_user_id: int | None) -> int | None:
+    """Resolve the singleton Coinbase account's local owner id.
+
+    Scheduler paths sometimes pass ``user_id=1`` while operator/manual syncs
+    pass ``None``. Coinbase itself is one connected account here, so creating
+    a NULL-user Trade when a user-owned Coinbase history exists splits one
+    broker position into two local envelopes. Prefer the requested id; when
+    absent, reuse the most recent non-NULL Coinbase owner if one exists.
+    """
+    if requested_user_id is not None:
+        return requested_user_id
+    try:
+        from ..models.trading import Trade
+
+        row = (
+            db.query(Trade.user_id)
+            .filter(Trade.broker_source == "coinbase", Trade.user_id.isnot(None))
+            .order_by(Trade.id.desc())
+            .first()
+        )
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return requested_user_id
+
+
+def _ensure_coinbase_position_identity(
+    db: Session,
+    *,
+    trade: Any,
+    broker_payload: dict[str, Any] | None,
+) -> int | None:
+    """Mirror a Coinbase broker-observed position into position identity.
+
+    Coinbase ``sync_positions_to_db`` can legitimately discover an open
+    exchange position whose original order/fill event was missed by CHILI
+    (manual order, transient worker outage, or maker-only order lifecycle
+    race). Pre-fix, that path created/updated only the Trade envelope and
+    left ``trading_positions`` plus ``position_id`` NULL, so Phase 4/5
+    readers had no stable broker-position identity for the same inventory.
+
+    This helper reuses the Phase 1 shadow writer from ``broker_service`` and
+    then stamps the current Trade envelope onto the matched position row.
+    Best-effort only: failures roll back the position sidecar writes and the
+    caller continues syncing the Trade envelope.
+    """
+    try:
+        from . import broker_service as _bs
+        from .trading.position_resolver import resolve_position_id
+
+        ticker = str(getattr(trade, "ticker", "") or "").strip()
+        if not ticker:
+            return None
+        qty = float(
+            getattr(trade, "quantity", None)
+            or (broker_payload or {}).get("quantity")
+            or 0.0
+        )
+        avg = (
+            getattr(trade, "entry_price", None)
+            or (broker_payload or {}).get("average_buy_price")
+            or getattr(trade, "avg_fill_price", None)
+        )
+        avg_f = float(avg) if avg not in (None, "") else None
+        direction = str(getattr(trade, "direction", None) or "long").lower()
+        user_id = getattr(trade, "user_id", None)
+
+        _bs._phase1_record_position_observation(
+            db,
+            user_id=user_id,
+            broker_source="coinbase",
+            account_type=_bs._resolve_account_type_for_position("coinbase", ticker),
+            ticker=ticker,
+            direction=direction,
+            asset_kind=_bs._infer_asset_kind_for_position(ticker),
+            broker_qty=qty,
+            broker_avg=avg_f,
+            broker_payload=broker_payload,
+        )
+        position_id = resolve_position_id(
+            db,
+            trade=trade,
+            user_id=user_id,
+            ticker=ticker,
+            broker_source="coinbase",
+            direction=direction,
+        )
+        if position_id is None:
+            return None
+        db.execute(
+            text(
+                "UPDATE trading_positions "
+                "SET current_envelope_id = :trade_id, "
+                "    current_quantity = :qty, "
+                "    current_avg_price = COALESCE(:avg, current_avg_price), "
+                "    state = 'open', "
+                "    last_observed_at = NOW(), "
+                "    updated_at = NOW() "
+                "WHERE id = :pid"
+            ),
+            {
+                "pid": int(position_id),
+                "trade_id": int(getattr(trade, "id")),
+                "qty": qty,
+                "avg": avg_f,
+            },
+        )
+        db.execute(
+            text(
+                "UPDATE trading_bracket_intents "
+                "SET position_id = :pid, updated_at = NOW() "
+                "WHERE trade_id = :trade_id "
+                "  AND (position_id IS NULL OR position_id <> :pid)"
+            ),
+            {"pid": int(position_id), "trade_id": int(getattr(trade, "id"))},
+        )
+        db.commit()
+        return int(position_id)
+    except Exception:
+        logger.debug(
+            "[coinbase] position-identity sidecar write failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _ensure_coinbase_sync_entry_event(
+    db: Session,
+    *,
+    trade: Any,
+    broker_payload: dict[str, Any] | None,
+    position_id: int | None,
+) -> None:
+    """Write one synthetic BUY fill for Coinbase auto-synced envelopes.
+
+    The row is explicitly tagged ``synthetic`` so it is not mistaken for a
+    broker websocket/order event, but it gives TCA, Phase 4, and Phase 5 a
+    visible entry lineage for inventory CHILI discovered by broker sync.
+    """
+    if not _is_coinbase_sync_trade(trade):
+        return
+    try:
+        exists = db.execute(
+            text(
+                "SELECT id FROM trading_execution_events "
+                "WHERE trade_id = :trade_id "
+                "  AND event_type = 'coinbase_position_sync_entry' "
+                "LIMIT 1"
+            ),
+            {"trade_id": int(getattr(trade, "id"))},
+        ).first()
+        if exists:
+            if position_id is not None:
+                db.execute(
+                    text(
+                        "UPDATE trading_execution_events "
+                        "SET position_id = :pid "
+                        "WHERE id = :event_id "
+                        "  AND position_id IS NULL"
+                    ),
+                    {"pid": int(position_id), "event_id": int(exists[0])},
+                )
+                db.commit()
+            return
+        from .trading.execution_audit import record_execution_event
+
+        qty = float(
+            getattr(trade, "quantity", None)
+            or (broker_payload or {}).get("quantity")
+            or 0.0
+        )
+        avg = (
+            getattr(trade, "entry_price", None)
+            or (broker_payload or {}).get("average_buy_price")
+            or getattr(trade, "avg_fill_price", None)
+        )
+        avg_f = float(avg) if avg not in (None, "") else None
+        payload = {
+            "side": "buy",
+            "source": "coinbase_position_sync",
+            "synthetic": True,
+            "position_id": position_id,
+            "broker_position": broker_payload or {},
+        }
+        record_execution_event(
+            db,
+            user_id=getattr(trade, "user_id", None),
+            ticker=getattr(trade, "ticker", None),
+            trade=trade,
+            scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+            broker_source="coinbase",
+            event_type="coinbase_position_sync_entry",
+            status="filled",
+            requested_quantity=qty,
+            cumulative_filled_quantity=qty,
+            last_fill_quantity=qty,
+            average_fill_price=avg_f,
+            event_at=getattr(trade, "entry_date", None) or datetime.utcnow(),
+            payload_json=payload,
+        )
+        db.commit()
+    except Exception:
+        logger.debug(
+            "[coinbase] synthetic sync-entry event write failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _coinbase_has_working_sell_orders(ticker: str | None) -> bool:
+    """Best-effort stale-close guard for Coinbase ticker-level flaps."""
+    if not ticker:
+        return False
+    try:
+        from .trading.venue.factory import get_adapter
+
+        adapter = get_adapter("coinbase")
+        if adapter is None:
+            return False
+        orders, _fresh = adapter.list_open_orders(product_id=str(ticker), limit=50)
+        for order in orders or []:
+            side = str(getattr(order, "side", "") or "").lower()
+            status = str(getattr(order, "status", "") or "").lower()
+            if side != "sell":
+                continue
+            if status in (
+                "open", "active", "working", "queued", "confirmed", "pending",
+                "submitted", "accepted", "partially_filled", "unconfirmed",
+            ):
+                return True
+    except Exception:
+        logger.debug(
+            "[coinbase] open-order stale-close guard failed for %s",
+            ticker,
+            exc_info=True,
+        )
+    return False
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Coinbase positions into local Trade model."""
     from ..models.trading import BreakoutAlert, Trade
@@ -971,9 +1229,13 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     if not is_connected():
         return {"created": 0, "updated": 0, "closed": 0}
 
-    acquire_broker_position_sync_lock(db, broker_source="coinbase", user_id=user_id)
+    canonical_user_id = _canonical_coinbase_user_id(db, user_id)
+
+    acquire_broker_position_sync_lock(
+        db, broker_source="coinbase", user_id=canonical_user_id,
+    )
     cleanup = collapse_open_broker_position_duplicates(
-        db, broker_source="coinbase", user_id=user_id,
+        db, broker_source="coinbase", user_id=canonical_user_id,
     )
 
     all_positions = dedupe_positions_by_ticker(get_positions())
@@ -987,24 +1249,38 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         if not qty or qty <= 0:
             continue
 
-        existing = (
-            db.query(Trade)
-            .filter(
-                Trade.user_id == user_id,
-                Trade.ticker == ticker,
-                Trade.broker_source == "coinbase",
-                Trade.status == "open",
-            )
-            .first()
+        # Coinbase is one broker account in this app. Some scheduler paths
+        # call with user_id=1 while operator/manual syncs call with
+        # user_id=None; matching strictly on user_id split the same exchange
+        # position into duplicate Trade envelopes. Prefer the requested user
+        # when present, but fall back to any open Coinbase envelope for the
+        # same ticker before creating a new one.
+        existing_q = db.query(Trade).filter(
+            Trade.ticker == ticker,
+            Trade.broker_source == "coinbase",
+            Trade.status == "open",
         )
+        existing = None
+        if canonical_user_id is not None:
+            existing = existing_q.filter(Trade.user_id == canonical_user_id).first()
+        if existing is None:
+            existing = existing_q.order_by(Trade.id.desc()).first()
 
         if existing:
+            if existing.user_id is None and canonical_user_id is not None:
+                existing.user_id = canonical_user_id
             existing.quantity = qty
             avg_price = pos.get("average_buy_price", 0)
             if avg_price and avg_price > 0 and (not existing.entry_price or existing.entry_price == 0):
                 existing.entry_price = avg_price
             if not existing.related_alert_id:
                 _link_latest_alert(db, existing)
+            position_id = _ensure_coinbase_position_identity(
+                db, trade=existing, broker_payload=pos,
+            )
+            _ensure_coinbase_sync_entry_event(
+                db, trade=existing, broker_payload=pos, position_id=position_id,
+            )
             updated += 1
         else:
             avg_price = pos.get("average_buy_price", 0)
@@ -1040,7 +1316,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 )
                 continue
             trade = Trade(
-                user_id=user_id,
+                user_id=canonical_user_id,
                 ticker=ticker,
                 direction="long",
                 entry_price=avg_price,
@@ -1054,20 +1330,60 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             db.add(trade)
             db.flush()
             _link_latest_alert(db, trade)
+            position_id = _ensure_coinbase_position_identity(
+                db, trade=trade, broker_payload=pos,
+            )
+            _ensure_coinbase_sync_entry_event(
+                db, trade=trade, broker_payload=pos, position_id=position_id,
+            )
             created += 1
 
-    stale = (
-        db.query(Trade)
-        .filter(
-            Trade.user_id == user_id,
-            Trade.broker_source == "coinbase",
-            Trade.status == "open",
-            Trade.ticker.notin_(cb_tickers) if cb_tickers else True,
+    if cb_tickers:
+        stale = (
+            db.query(Trade)
+            .filter(
+                Trade.broker_source == "coinbase",
+                Trade.status == "open",
+                Trade.ticker.notin_(cb_tickers),
+            )
+            .all()
         )
-        .all()
-    )
+    else:
+        # R32-equivalent Coinbase guard: never close every open local
+        # Coinbase envelope off a single all-empty broker snapshot. Coinbase
+        # can legitimately return [] during transient API/egress failures;
+        # mass-closing would then free caps, recreate the same position on
+        # the next healthy sweep, and manufacture phantom PnL. A real "all
+        # positions sold" event can be reconciled once a non-empty broker
+        # snapshot returns or by operator/manual close.
+        open_count = (
+            db.query(Trade)
+            .filter(
+                Trade.broker_source == "coinbase",
+                Trade.status == "open",
+            )
+            .count()
+        )
+        if open_count:
+            logger.warning(
+                "[coinbase] Position sync returned zero live tickers while "
+                "%d local Coinbase trade(s) are open; skipping stale-close "
+                "this sweep to avoid an all-empty snapshot wipeout.",
+                open_count,
+            )
+        stale = []
 
     for trade in stale:
+        if _coinbase_has_working_sell_orders(trade.ticker):
+            logger.warning(
+                "[coinbase] Skipping stale-close for %s trade#%s: ticker "
+                "missing from positions snapshot but Coinbase still reports "
+                "working sell order(s). Treating as transient broker snapshot "
+                "gap, not a closed position.",
+                trade.ticker,
+                trade.id,
+            )
+            continue
         close_fill = _coinbase_stale_close_fill(trade)
         trade.status = "closed"
         trade.exit_date = (
@@ -1150,6 +1466,22 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             )
 
         closed += 1
+
+    try:
+        from . import broker_service as _bs
+
+        _bs._phase1_close_dropped_positions(
+            db,
+            user_id=canonical_user_id,
+            broker_source="coinbase",
+            observed_tickers=cb_tickers,
+        )
+    except Exception:
+        logger.debug("[coinbase] position-identity close sidecar failed", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     db.commit()
     logger.info(

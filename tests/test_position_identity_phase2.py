@@ -94,12 +94,14 @@ def test_resolver_uses_args_when_trade_is_none():
     assert out == 99
 
 
-def test_resolver_returns_none_on_null_user_id():
+def test_resolver_matches_null_user_id():
     db = _mock_db([(42,)])
     out = _resolve_position_id_for_event(
         db, trade=None, user_id=None, ticker="ABEO", broker_source="robinhood",
     )
-    assert out is None  # missing user_id short-circuits
+    assert out == 42
+    sql = str(db.execute.call_args[0][0])
+    assert "COALESCE(user_id, -1)" in sql
 
 
 def test_resolver_returns_none_on_null_broker():
