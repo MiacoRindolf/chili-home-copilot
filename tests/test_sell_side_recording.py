@@ -18,6 +18,7 @@ These tests pin the contract (helper-level, no DB):
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from pathlib import Path
 
 from app.services.trading.position_resolver import position_has_recorded_sell
 
@@ -77,3 +78,38 @@ def test_helper_uses_position_id_not_trade_id():
     # And the bind param matches.
     bound = db.execute.call_args[0][1]
     assert bound == {"pid": 42}
+
+
+def test_robinhood_sell_event_writes_are_committed():
+    """Robinhood sell-fill writers must commit after record_execution_event.
+
+    ``record_execution_event`` flushes, but does not commit. Without an
+    explicit commit here, Phase 4 can reopen an economically closed trade
+    because the position-level sell row vanishes when the session closes.
+    """
+    text = Path("app/services/trading/robinhood_exit_execution.py").read_text()
+    lines = text.splitlines()
+    call_lines = [
+        i
+        for i, line in enumerate(lines)
+        if line.strip() == "record_execution_event("
+    ]
+    assert len(call_lines) >= 2
+    for i in call_lines:
+        snippet = "\n".join(lines[i : i + 35])
+        assert "db.commit()" in snippet
+
+
+def test_robinhood_sell_event_write_failures_rollback():
+    """A failed sell-event audit write should not poison the DB session."""
+    text = Path("app/services/trading/robinhood_exit_execution.py").read_text()
+    lines = text.splitlines()
+    call_lines = [
+        i
+        for i, line in enumerate(lines)
+        if line.strip() == "record_execution_event("
+    ]
+    assert len(call_lines) >= 2
+    for i in call_lines:
+        snippet = "\n".join(lines[i : i + 45])
+        assert "db.rollback()" in snippet

@@ -1186,7 +1186,12 @@ def submit_robinhood_trade_exit(
                     "broker_state": state,
                 },
             )
+            db.commit()
         except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.debug(
                 "[rh_exit] sell-side record_execution_event failed for "
                 "trade=%s (non-fatal)",
@@ -1286,7 +1291,12 @@ def sync_pending_exit_order(
                     "broker_state": state,
                 },
             )
+            db.commit()
         except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.debug(
                 "[rh_exit] sync-fill sell-side record_execution_event failed "
                 "for trade=%s (non-fatal)",
