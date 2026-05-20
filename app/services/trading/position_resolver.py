@@ -120,11 +120,15 @@ def position_has_recorded_sell(
     - Any DB exception (caller falls back to old path)
     - No matching rows
 
-    Returns True only when at least one event row matches::
+    Returns True only when at least one non-synthetic event row matches::
 
         position_id = :pid
         AND status = 'filled'
         AND lower(payload_json->>'side') = 'sell'
+
+    Synthetic migration/reconcile rows are excluded. Those rows describe
+    local bookkeeping repairs, not broker-confirmed exits, and must not block
+    inverse reconcile when the broker still reports the position.
 
     The ``status='filled'`` guard excludes status='queued'/'pending'/etc
     where 'side' might also be 'sell' but no actual SELL fill happened
@@ -142,6 +146,19 @@ def position_has_recorded_sell(
             WHERE position_id = :pid
               AND status = 'filled'
               AND LOWER(payload_json->>'side') = 'sell'
+              AND COALESCE(LOWER(payload_json->>'source'), '') NOT IN (
+                  'mig254_backfill'
+              )
+              AND COALESCE(LOWER(payload_json->>'exit_reason'), '') NOT IN (
+                  'broker_reconcile_position_gone',
+                  'broker_reconcile_no_exit_price',
+                  'coinbase_position_sync_gone',
+                  'forced_unwind_reconcile',
+                  'zombie_reconcile_orphan'
+              )
+              AND COALESCE(LOWER(payload_json->>'synthetic'), 'false') NOT IN (
+                  'true', '1', 'yes'
+              )
             LIMIT 1
             """
         ), {"pid": int(position_id)}).first()

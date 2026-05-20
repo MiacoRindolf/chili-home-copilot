@@ -95,6 +95,54 @@ def _seed_execution_event(db, *, trade_id: int, ticker: str) -> None:
     """), {"tid": trade_id, "ticker": ticker})
 
 
+def _seed_position(db, *, position_id: int, trade_id: int, ticker: str, qty: float,
+                   entry_price: float, user_id: int) -> None:
+    db.execute(text("""
+        INSERT INTO trading_positions (
+            id, user_id, broker_source, account_type, ticker, direction,
+            asset_kind, current_quantity, current_avg_price, state,
+            current_envelope_id, last_observed_at, last_state_transition_at,
+            created_at, updated_at
+        ) VALUES (
+            :pid, :uid, 'robinhood', 'cash', :ticker, 'long',
+            'equity', :qty, :entry, 'open',
+            :tid, NOW(), NOW(), NOW(), NOW()
+        )
+        ON CONFLICT (id) DO NOTHING
+    """), {
+        "pid": position_id,
+        "uid": user_id,
+        "ticker": ticker,
+        "qty": qty,
+        "entry": entry_price,
+        "tid": trade_id,
+    })
+
+
+def _seed_position_sell_event(
+    db, *, trade_id: int, position_id: int, ticker: str, qty: float,
+    fill_price: float,
+) -> None:
+    db.execute(text("""
+        INSERT INTO trading_execution_events (
+            trade_id, position_id, ticker, venue, execution_family,
+            broker_source, event_type, status, cumulative_filled_quantity,
+            average_fill_price, event_at, recorded_at, payload_json
+        ) VALUES (
+            :tid, :pid, :ticker, 'robinhood', 'robinhood_equity',
+            'robinhood', 'exit_fill', 'filled', :qty,
+            :fill_price, NOW(), NOW(),
+            '{"side":"sell","source":"rh_exit_submit","exit_reason":"pattern_exit_now"}'::jsonb
+        )
+    """), {
+        "tid": trade_id,
+        "pid": position_id,
+        "ticker": ticker,
+        "qty": qty,
+        "fill_price": fill_price,
+    })
+
+
 def _patch_broker_positions(positions: list[dict]):
     """Patch the per-call broker accessors so sync_positions_to_db sees
     a deterministic snapshot regardless of the test host's network."""
@@ -165,6 +213,49 @@ def test_inverse_reconcile_reopens_bookkeeping_close(db):
     assert row[1] == "inverse_reconcile_reopen"
 
 
+def test_inverse_reconcile_reopens_rounded_crypto_avg_price(db):
+    """Crypto entry rows may be rounded while Robinhood reports the
+    8-decimal average cost. Same qty + close bookkeeping + near price should
+    reopen and refresh the row to broker truth."""
+    _seed_trade(
+        db, trade_id=4005, ticker="GRT-USD", qty=12376.0,
+        entry_price=0.0245, exit_reason="broker_reconcile_no_exit_price",
+    )
+    db.commit()
+
+    from app.services import broker_service
+
+    patches = _patch_broker_positions([
+        {
+            "ticker": "GRT-USD",
+            "quantity": 12376.0,
+            "average_buy_price": 0.02446752,
+        },
+    ])
+    for p in patches:
+        p.start()
+    try:
+        result = broker_service.sync_positions_to_db(db, user_id=None)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert result.get("reopened", 0) >= 1
+
+    row = db.execute(text(
+        "SELECT status, exit_reason, exit_date, exit_price, quantity, "
+        "entry_price, asset_kind "
+        "FROM trading_trades WHERE id=4005"
+    )).first()
+    assert row[0] == "open"
+    assert row[1] is None
+    assert row[2] is None
+    assert row[3] is None
+    assert float(row[4]) == pytest.approx(12376.0)
+    assert float(row[5]) == pytest.approx(0.02446752)
+    assert row[6] == "crypto"
+
+
 def test_inverse_reconcile_blocks_on_execution_history(db, caplog):
     """Scenario B: closed trade has an execution_event row (real broker
     activity) AND broker still reports the position. NOT auto-
@@ -207,6 +298,74 @@ def test_inverse_reconcile_blocks_on_execution_history(db, caplog):
         if "CONTRADICTION" in r.getMessage() and "trade_id=4002" in r.getMessage()
     ]
     assert matching, "expected CONTRADICTION error log; got none"
+
+
+def test_phase4_inverse_reconcile_resolves_position_before_reopen(db, caplog, monkeypatch):
+    """Phase 4 must not treat Trade.position_id absence as no recorded sell.
+
+    Trade rows do not carry a position_id column. The production path must
+    resolve the trading_positions row first; otherwise a just-filled exit can
+    be reopened while Robinhood's positions endpoint is still settling.
+    """
+    import logging
+
+    user_id = 4006
+    db.execute(text(
+        "INSERT INTO users (id, name) VALUES (:uid, 'phase4-user') "
+        "ON CONFLICT (id) DO NOTHING"
+    ), {"uid": user_id})
+    _seed_trade(
+        db, trade_id=4006, ticker="EPSILON", qty=13.0, entry_price=33.9857,
+        exit_reason="pattern_exit_now", user_id=user_id,
+    )
+    _seed_position(
+        db, position_id=44006, trade_id=4006, ticker="EPSILON", qty=13.0,
+        entry_price=33.9857, user_id=user_id,
+    )
+    _seed_position_sell_event(
+        db, trade_id=4006, position_id=44006, ticker="EPSILON", qty=13.0,
+        fill_price=34.4,
+    )
+    db.commit()
+
+    from app.config import settings
+    from app.services import broker_service
+
+    monkeypatch.setattr(
+        settings,
+        "chili_position_identity_phase4_authority_enabled",
+        True,
+        raising=False,
+    )
+    patches = _patch_broker_positions([
+        {"ticker": "EPSILON", "quantity": 13.0, "average_buy_price": 33.9857},
+    ])
+    for p in patches:
+        p.start()
+    try:
+        with caplog.at_level(
+            logging.ERROR, logger="app.services.broker_service",
+        ):
+            result = broker_service.sync_positions_to_db(db, user_id=user_id)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert result.get("reopened", 0) == 0
+
+    row = db.execute(text(
+        "SELECT status, exit_reason, exit_date "
+        "FROM trading_trades WHERE id=4006"
+    )).first()
+    assert row[0] == "closed"
+    assert row[1] == "pattern_exit_now"
+    assert row[2] is not None
+
+    matching = [
+        r for r in caplog.records
+        if "CONTRADICTION" in r.getMessage() and "trade_id=4006" in r.getMessage()
+    ]
+    assert matching, "expected Phase 4 sell history to block inverse reopen"
 
 
 def test_inverse_reconcile_skips_on_qty_mismatch(db):

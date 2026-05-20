@@ -383,6 +383,8 @@ def _row_to_local_view(row: dict[str, Any]) -> LocalView:
         target_price=row.get("target_price"),
         broker_source=row.get("broker_source"),
         trade_status=row.get("trade_status"),
+        pending_exit_status=row.get("pending_exit_status"),
+        pending_exit_reason=row.get("pending_exit_reason"),
     )
 
 
@@ -1537,6 +1539,93 @@ def _clear_pending_decision_and_set_state(
             pass
 
 
+def _stop_tightness(
+    *,
+    direction: str | None,
+    local_stop: float | None,
+    broker_stop: float | None,
+) -> str:
+    """Classify which stop is more protective for the position."""
+    if local_stop is None or broker_stop is None:
+        return "unknown"
+    try:
+        local_f = float(local_stop)
+        broker_f = float(broker_stop)
+    except (TypeError, ValueError):
+        return "unknown"
+    if abs(local_f - broker_f) <= 1e-9:
+        return "equal"
+    side = (direction or "long").lower()
+    if side == "short":
+        return "broker_tighter" if broker_f < local_f else "local_tighter"
+    return "broker_tighter" if broker_f > local_f else "local_tighter"
+
+
+def _adopt_broker_tighter_stop(
+    db: Session,
+    *,
+    local: LocalView,
+    broker: BrokerView,
+) -> dict[str, Any]:
+    """Mirror a more-protective broker stop into local trade + intent state.
+
+    The broker already owns the live order, so no cancel/place is required.
+    This removes false price-drift noise while keeping CHILI's management
+    envelope honest about the stop that can actually fire at the venue.
+    """
+    if local.trade_id is None or local.bracket_intent_id is None:
+        return {
+            "writer": "adopt_broker_tighter_stop",
+            "ok": False,
+            "reason": "missing_local_ids",
+            "new_stop_order_id": None,
+            "qty": None,
+            "stop_price": None,
+        }
+    if broker.stop_order_price is None:
+        return {
+            "writer": "adopt_broker_tighter_stop",
+            "ok": False,
+            "reason": "missing_broker_stop_price",
+            "new_stop_order_id": None,
+            "qty": None,
+            "stop_price": None,
+        }
+
+    broker_stop = float(broker.stop_order_price)
+    db.execute(
+        text(
+            "UPDATE trading_trades "
+            "SET stop_loss = :stop "
+            "WHERE id = :tid AND status = 'open'"
+        ),
+        {"tid": int(local.trade_id), "stop": broker_stop},
+    )
+    db.execute(
+        text(
+            "UPDATE trading_bracket_intents "
+            "SET stop_price = :stop, "
+            "    broker_stop_order_id = COALESCE(:order_id, broker_stop_order_id), "
+            "    last_diff_reason = 'adopted_broker_tighter_stop', "
+            "    updated_at = NOW() "
+            "WHERE id = :iid"
+        ),
+        {
+            "iid": int(local.bracket_intent_id),
+            "stop": broker_stop,
+            "order_id": broker.stop_order_id,
+        },
+    )
+    return {
+        "writer": "adopt_broker_tighter_stop",
+        "ok": True,
+        "reason": "broker_stop_tighter_than_engine",
+        "new_stop_order_id": broker.stop_order_id,
+        "qty": broker.position_quantity,
+        "stop_price": broker_stop,
+    }
+
+
 def _invoke_writer_for_decision(
     db: Session,
     *,
@@ -1681,6 +1770,42 @@ def _invoke_writer_for_decision(
             "qty": None,
             "stop_price": None,
         }
+
+    if decision.kind == "price_drift":
+        payload = decision.delta_payload or {}
+        if payload.get("leg") != "stop":
+            return None
+        tightness = _stop_tightness(
+            direction=local.direction,
+            local_stop=payload.get("local_price", local.stop_price),
+            broker_stop=payload.get("broker_price", broker.stop_order_price),
+        )
+        if tightness == "broker_tighter":
+            if not bool(getattr(settings, "chili_bracket_writer_g2_enabled", False)):
+                return {
+                    "writer": "adopt_broker_tighter_stop",
+                    "ok": False,
+                    "reason": "disabled",
+                    "new_stop_order_id": None,
+                    "qty": None,
+                    "stop_price": None,
+                }
+            return _adopt_broker_tighter_stop(db, local=local, broker=broker)
+        if tightness == "local_tighter":
+            # Do not blindly cancel/replace a working broker stop from inside
+            # the reconciliation loop. If the engine stop is already breached
+            # (the ABTC case), the live exit lane owns the sell; otherwise this
+            # needs a separate amend policy that validates session, quote, and
+            # immediate-trigger risk before touching the broker order.
+            return {
+                "writer": "amend_stop_price_drift",
+                "ok": False,
+                "reason": "local_stop_tighter_amend_requires_safe_session_policy",
+                "new_stop_order_id": None,
+                "qty": None,
+                "stop_price": local.stop_price,
+            }
+        return None
 
     try:
         from .bracket_writer_g2 import (
@@ -2197,6 +2322,8 @@ def _load_local_view(
             t.direction,
             t.quantity,
             t.status AS trade_status,
+            t.pending_exit_status,
+            t.pending_exit_reason,
             t.broker_source,
             bi.id AS bracket_intent_id,
             bi.intent_state,
@@ -2217,11 +2344,13 @@ def _load_local_view(
             "direction": r[3],
             "quantity": float(r[4]) if r[4] is not None else None,
             "trade_status": r[5],
-            "broker_source": r[6],
-            "bracket_intent_id": int(r[7]) if r[7] is not None else None,
-            "intent_state": r[8],
-            "stop_price": float(r[9]) if r[9] is not None else None,
-            "target_price": float(r[10]) if r[10] is not None else None,
+            "pending_exit_status": r[6],
+            "pending_exit_reason": r[7],
+            "broker_source": r[8],
+            "bracket_intent_id": int(r[9]) if r[9] is not None else None,
+            "intent_state": r[10],
+            "stop_price": float(r[11]) if r[11] is not None else None,
+            "target_price": float(r[12]) if r[12] is not None else None,
         }
         for r in rows
     ]
@@ -2242,6 +2371,8 @@ def _write_reconciliation_row(
         "target_price": local.target_price,
         "quantity": local.quantity,
         "trade_status": local.trade_status,
+        "pending_exit_status": local.pending_exit_status,
+        "pending_exit_reason": local.pending_exit_reason,
     }
     broker_payload: dict[str, Any] = {
         "available": broker.available,

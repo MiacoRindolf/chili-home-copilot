@@ -59,6 +59,8 @@ class LocalView:
     target_price: Optional[float]
     broker_source: Optional[str]
     trade_status: Optional[str]
+    pending_exit_status: Optional[str] = None
+    pending_exit_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,11 @@ def classify_discrepancy(
     has_local_intent = local.bracket_intent_id is not None
     broker_has_stop = _is_working_state(broker.stop_order_state)
     broker_has_target = _is_working_state(broker.target_order_state)
+    pending_exit_active = (
+        trade_open
+        and (local.pending_exit_status or "").lower()
+        in ("deferred", "pending", "submitted", "working")
+    )
 
     # ── orphan stop: broker has working child but local not open ─
     if (broker_has_stop or broker_has_target) and not trade_open:
@@ -172,6 +179,25 @@ def classify_discrepancy(
             delta_payload={
                 "intent_state": local.intent_state,
                 "broker_stop_order_state": broker.stop_order_state,
+            },
+        )
+
+    # Once the live exit lane has accepted ownership of the sell, bracket
+    # stop drift is no longer the repair surface. This covers overnight /
+    # premarket deferrals such as "stop hit but market not eligible yet";
+    # the exit executor will submit when its session guard allows it.
+    if pending_exit_active:
+        return ReconciliationDecision(
+            kind="agree",
+            severity="info",
+            delta_payload={
+                "reason": "pending_exit_owns_sell_lane",
+                "pending_exit_status": local.pending_exit_status,
+                "pending_exit_reason": local.pending_exit_reason,
+                "intent_state": local.intent_state,
+                "local_stop_price": local.stop_price,
+                "broker_stop_order_state": broker.stop_order_state,
+                "broker_stop_order_price": broker.stop_order_price,
             },
         )
 

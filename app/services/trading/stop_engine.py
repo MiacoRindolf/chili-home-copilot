@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -745,7 +745,11 @@ def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
         if stop_price is None or float(stop_price) <= 0:
             return
 
-        from .bracket_intent import BracketIntentInput
+        from .bracket_intent import (
+            BracketIntentInput,
+            BracketIntentResult,
+            compute_bracket_intent,
+        )
         from .bracket_intent_writer import upsert_bracket_intent
 
         # f-stop-engine-atr-nested-key (2026-05-19): the original code
@@ -771,14 +775,42 @@ def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
             pattern_id=getattr(trade, "scan_pattern_id", None),
             lifecycle_stage=getattr(brain, "lifecycle_stage", None) if brain else None,
             regime=getattr(brain, "regime", "cautious") if brain else "cautious",
-            pattern_win_rate=getattr(brain, "win_rate", None) if brain else None,
+            pattern_win_rate=getattr(brain, "pattern_win_rate", None) if brain else None,
             pattern_name=getattr(brain, "pattern_name", None) if brain else None,
+        )
+        bracket_result = compute_bracket_intent(bracket_input)
+        target_price = getattr(trade, "take_profit", None)
+        try:
+            target_override = float(target_price) if target_price is not None else None
+        except (TypeError, ValueError):
+            target_override = None
+        if target_override is not None and target_override <= 0:
+            target_override = None
+
+        # The bracket-intent row is the live placement cache. Once a trade
+        # exists, its current stop/target columns are the source of truth;
+        # recomputing from entry ATR would roll trailing stops and pattern
+        # monitor target moves back to stale entry-time values every sweep.
+        bracket_result = BracketIntentResult(
+            stop_price=float(stop_price),
+            target_price=(
+                target_override
+                if target_override is not None
+                else bracket_result.target_price
+            ),
+            stop_model_resolved=bracket_result.stop_model_resolved,
+            reasoning=f"{bracket_result.reasoning} source=trade_current_levels",
+            brain_summary={
+                **bracket_result.brain_summary,
+                "source": "trade_current_levels",
+            },
         )
         upsert_bracket_intent(
             db,
             trade_id=trade.id,
             user_id=getattr(trade, "user_id", None),
             bracket_input=bracket_input,
+            bracket_result=bracket_result,
             broker_source=broker_src,
         )
     except Exception:
@@ -909,8 +941,39 @@ def _should_suppress_alert(
     last_ts = recent.get((trade_id, event))
     if not last_ts:
         return False
-    elapsed = (datetime.utcnow() - last_ts).total_seconds()
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    elapsed = (now_utc - last_ts).total_seconds()
     return elapsed < cooldown
+
+
+def _result_has_trade_state_change(trade, result: StopDecisionResult) -> bool:
+    """Return True when applying this result would change the Trade row."""
+    if result.new_stop is not None and result.new_stop != trade.stop_loss:
+        is_pattern_linked = getattr(trade, "related_alert_id", None) is not None
+        if is_pattern_linked and trade.stop_loss is not None:
+            if result.new_stop > trade.stop_loss:
+                return True
+        else:
+            return True
+    if result.new_trail_stop is not None and result.new_trail_stop != trade.trail_stop:
+        return True
+    if result.watermark_updated and result.new_watermark is not None:
+        if result.new_watermark != getattr(trade, "high_watermark", None):
+            return True
+    if result.new_take_profit is not None:
+        try:
+            nt = float(result.new_take_profit)
+        except (TypeError, ValueError):
+            nt = 0.0
+        if nt > 0:
+            sym = getattr(trade, "ticker", "") or ""
+            asset = "crypto" if _is_crypto(sym) else "equity"
+            rounded = _norm_price(nt, sym, asset_class=asset)
+            cur = float(getattr(trade, "take_profit", None) or 0)
+            cur_aligned = _norm_price(cur, sym, asset_class=asset) if cur else 0.0
+            if getattr(trade, "take_profit", None) is None or cur_aligned != rounded:
+                return True
+    return False
 
 
 def evaluate_all(
@@ -965,6 +1028,7 @@ def evaluate_all(
 
     for trade in trades:
         try:
+            result_suppressed = False
             # Wrap each trade evaluation in a SAVEPOINT so one poisoned
             # update (e.g. a constraint violation on ``_apply_stop_to_trade``
             # or a bracket-intent insert) doesn't abort the outer
@@ -998,7 +1062,22 @@ def evaluate_all(
                 summary["total_checked"] += 1
 
                 if result.alert_event and result.alert_event != "DATA_STALE":
-                    _record_stop_decision(db, trade.id, result)
+                    result_suppressed = _should_suppress_alert(
+                        trade.id,
+                        result.alert_event,
+                        recent_decisions,
+                        adaptive_cooldowns,
+                    )
+                    # Suppression is primarily an operator-noise control, but
+                    # it must also prevent duplicate STOP_HIT/TARGET_HIT rows
+                    # from flooding the audit table. Still record suppressed
+                    # events that actually mutate trade state so stop moves do
+                    # not disappear from the audit trail.
+                    if (
+                        not result_suppressed
+                        or _result_has_trade_state_change(trade, result)
+                    ):
+                        _record_stop_decision(db, trade.id, result)
                     _apply_stop_to_trade(db, trade, result)
                 # f-coinbase-bracket-coverage-fix (2026-05-10): emit
                 # bracket intent on every sweep, not gated on alert_event.
@@ -1029,7 +1108,7 @@ def evaluate_all(
                 db.flush()
 
             if result.alert_event:
-                if _should_suppress_alert(trade.id, result.alert_event, recent_decisions, adaptive_cooldowns):
+                if result_suppressed:
                     summary["suppressed"] += 1
                     logger.debug(
                         "[stop_engine] Suppressed duplicate %s for %s (trade %d)",

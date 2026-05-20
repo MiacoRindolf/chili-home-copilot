@@ -125,6 +125,19 @@ def test_state_drift_authoritative_vs_cancelled():
     assert d.severity == "error"
 
 
+def test_pending_exit_owns_sell_lane_suppresses_stop_price_drift():
+    d = classify_discrepancy(
+        _local(
+            pending_exit_status="deferred",
+            pending_exit_reason="stop",
+            stop_price=1.4148,
+        ),
+        _broker(stop_order_price=0.8436, target_order_state=None),
+    )
+    assert d.kind == "agree"
+    assert d.delta_payload["reason"] == "pending_exit_owns_sell_lane"
+
+
 def test_price_drift_stop_leg_beyond_tolerance():
     # 25 bps tolerance default => 96.0 -> 96.30 is ~31 bps away
     d = classify_discrepancy(
