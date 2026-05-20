@@ -31,6 +31,7 @@ data/chili.db.archived*
 data/chili.db-wal.archived*
 data/chili.db-shm.archived*
 data/ticker_cache/crypto_top.json
+data/*.lock
 
 # ChromaDB vector store
 data/chroma/
@@ -66,6 +67,7 @@ backtest_refresh_scheduled.log
 # dumps, brain worker, etc. Never commit logs; they bloat the repo and
 # frequently contain credentials or user data.
 *.log
+*.log.*
 
 # Local DB backups (pg_dump output). Treat as secret — full state of the
 # live trading DB. Keep them out of git even if a commit slips through.

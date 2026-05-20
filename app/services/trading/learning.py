@@ -70,6 +70,99 @@ def _get_current_predictions_impl(*args, **kwargs):
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_EGRESS_LOCK = threading.Lock()
+_PROVIDER_EGRESS_CACHE: dict[str, Any] = {"ts": 0.0, "ok": True}
+
+
+def provider_egress_available_for_brain_work() -> bool:
+    """Cheap HTTP preflight before broad mining/backtest jobs fan out."""
+    try:
+        from ...config import settings
+
+        if not bool(getattr(settings, "brain_provider_preflight_enabled", True)):
+            return True
+        cache_ttl = max(5, int(getattr(settings, "brain_provider_preflight_cache_seconds", 60)))
+        timeout_s = max(0.2, float(getattr(settings, "brain_provider_preflight_timeout_seconds", 1.5)))
+    except Exception:
+        cache_ttl = 60
+        timeout_s = 1.5
+
+    now = time.time()
+    with _PROVIDER_EGRESS_LOCK:
+        cached_ts = float(_PROVIDER_EGRESS_CACHE.get("ts") or 0.0)
+        if now - cached_ts < cache_ttl:
+            return bool(_PROVIDER_EGRESS_CACHE.get("ok", True))
+
+    probes: list[tuple[str, str, dict[str, str] | None]] = []
+    try:
+        massive_key = str(getattr(settings, "massive_api_key", "") or "").strip()
+        if massive_key and _use_massive():
+            probes.append((
+                "massive",
+                "https://api.massive.com/v1/marketstatus/now",
+                {"apiKey": massive_key},
+            ))
+        polygon_key = str(getattr(settings, "polygon_api_key", "") or "").strip()
+        if polygon_key and _use_polygon():
+            probes.append((
+                "polygon",
+                "https://api.polygon.io/v1/marketstatus/now",
+                {"apiKey": polygon_key},
+            ))
+    except Exception:
+        pass
+    probes.extend([
+        ("yahoo", "https://query1.finance.yahoo.com/v8/finance/chart/SPY", {
+            "range": "1d",
+            "interval": "1d",
+        }),
+        ("coinbase", "https://api.exchange.coinbase.com/time", None),
+    ])
+
+    ok = False
+    for name, url, params in probes:
+        try:
+            import requests
+
+            resp = requests.get(url, params=params, timeout=timeout_s)
+            if resp.status_code < 500 and resp.status_code not in (401, 403, 429):
+                ok = True
+                break
+        except Exception:
+            continue
+
+    if ok:
+        try:
+            from ...config import settings as _preflight_settings
+
+            data_check = bool(
+                getattr(_preflight_settings, "brain_provider_preflight_data_check_enabled", True)
+            )
+        except Exception:
+            data_check = True
+        if data_check:
+            ok = False
+            for ticker in ("SPY", "BTC-USD"):
+                try:
+                    df = fetch_ohlcv_df(ticker, period="5d", interval="1d")
+                    if df is not None and not df.empty:
+                        ok = True
+                        break
+                except Exception:
+                    continue
+
+    with _PROVIDER_EGRESS_LOCK:
+        _PROVIDER_EGRESS_CACHE["ts"] = now
+        _PROVIDER_EGRESS_CACHE["ok"] = ok
+    if not ok:
+        logger.warning(
+            "[learning] provider preflight failed; broad brain work will skip this tick "
+            "(probes=%s, timeout_s=%.1f)",
+            ",".join(name for name, _, _ in probes),
+            timeout_s,
+        )
+    return ok
+
 _CPU_COUNT = os.cpu_count() or 4
 
 _shutting_down = threading.Event()
@@ -1740,7 +1833,12 @@ def take_snapshots_parallel(
     return count
 
 
-def _take_intraday_crypto_snapshots(db: Session, top_tickers: list[str]) -> int:
+def _take_intraday_crypto_snapshots(
+    db: Session,
+    top_tickers: list[str],
+    *,
+    max_workers: int | None = None,
+) -> int:
     """Intraday snapshot passes for crypto in ``top_tickers``; returns rows written."""
     from ...config import settings as _s
 
@@ -1752,7 +1850,12 @@ def _take_intraday_crypto_snapshots(db: Session, top_tickers: list[str]) -> int:
     for raw_iv in _s.brain_intraday_intervals.split(","):
         iv = raw_iv.strip()
         if iv and iv != "1d" and crypto_sn:
-            total += take_snapshots_parallel(db, crypto_sn, bar_interval=iv)
+            total += take_snapshots_parallel(
+                db,
+                crypto_sn,
+                max_workers=max_workers,
+                bar_interval=iv,
+            )
     return total
 
 
@@ -2038,7 +2141,11 @@ def _mine_min_avg_ret_pct(bar_interval: str) -> float:
     return 0.30
 
 
-def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
+def _mine_from_history(
+    ticker: str,
+    bar_interval: str = "1d",
+    budget: BrainResourceBudget | None = None,
+) -> list[dict]:
     from ta.momentum import RSIIndicator, StochasticOscillator
     from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
     from ta.volatility import BollingerBands, AverageTrueRange
@@ -2046,6 +2153,9 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
     from .scanner import _detect_resistance_retests, _detect_narrow_range, _detect_vcp
 
     from .data_quality import clean_ohlcv
+
+    if budget is not None and not budget.try_ohlcv("mine_patterns", 1):
+        return []
 
     biv = (bar_interval or "1d").strip().lower()
     period = _MINE_FETCH_PERIOD.get(biv, "6mo")
@@ -2061,6 +2171,8 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
         if len(df) < min_len:
             return []
     except Exception:
+        if budget is not None:
+            budget.record_miner_error("mine_patterns")
         return []
 
     close = df["Close"]
@@ -2204,6 +2316,10 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
             "regime": regime_info.get("regime", "unknown"),
             "spy_mom_5d": regime_info.get("spy_mom_5d", 0),
         })
+    if budget is not None and rows:
+        take = budget.add_miner_rows(len(rows))
+        if take < len(rows):
+            rows = rows[:take]
     return rows
 
 
@@ -2449,6 +2565,7 @@ def mine_patterns(
     user_id: int | None,
     *,
     ticker_universe: list[str] | None = None,
+    budget: BrainResourceBudget | None = None,
 ) -> list[str]:
     """Discover patterns from historical price data + existing snapshots."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2489,20 +2606,39 @@ def mine_patterns(
     except Exception:
         logger.debug("[learning] mine_patterns: non-critical operation failed", exc_info=True)
 
-    _workers = (
-        io_workers_high(settings)
-        if (_use_massive() or _use_polygon())
-        else io_workers_med(settings)
-    )
+    if not provider_egress_available_for_brain_work():
+        logger.warning("[learning] Pattern mining skipped: provider egress unavailable")
+        return []
+
+    if budget is None:
+        budget = BrainResourceBudget.from_settings()
+
+    worker_override = getattr(settings, "brain_mine_patterns_workers", None)
+    if worker_override is not None:
+        _workers = max(1, int(worker_override))
+    else:
+        _workers = min(4, io_workers_low(settings))
     _t0 = time.time()
     all_rows: list[dict] = []
-    for bar_iv, tick_chunk in interval_jobs:
+    fetch_jobs = 0
+    for idx, (bar_iv, tick_chunk) in enumerate(interval_jobs):
         if _shutting_down.is_set():
             break
+        planned_chunk = list(tick_chunk)
+        remaining = budget.remaining_ohlcv() if budget is not None else None
+        if remaining is not None:
+            if remaining <= 0:
+                break
+            remaining_jobs = max(1, len(interval_jobs) - idx)
+            per_interval_cap = max(1, remaining // remaining_jobs)
+            planned_chunk = planned_chunk[:per_interval_cap]
+        if not planned_chunk:
+            continue
+        fetch_jobs += len(planned_chunk)
         with ThreadPoolExecutor(max_workers=_workers) as executor:
             futures = {
-                executor.submit(_mine_from_history, t, bar_iv): t
-                for t in tick_chunk
+                executor.submit(_mine_from_history, t, bar_iv, budget): t
+                for t in planned_chunk
             }
 
             for future in as_completed(futures):
@@ -2515,7 +2651,8 @@ def mine_patterns(
                     continue
 
     logger.info(
-        f"[learning] Pattern mining OHLCV fetch: {len(mine_tickers)} tickers / {len(interval_jobs)} intervals → "
+        f"[learning] Pattern mining OHLCV fetch: universe={len(mine_tickers)} "
+        f"interval_jobs={len(interval_jobs)} fetch_jobs={fetch_jobs} -> "
         f"{len(all_rows)} data rows in {time.time() - _t0:.1f}s ({_workers} workers)"
     )
 
@@ -9721,14 +9858,42 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
     from .brain_io_concurrency import io_workers_for_snapshot_batch
     from .scanner import build_snapshot_ticker_universe
 
-    _sw = io_workers_for_snapshot_batch(_snap_sched_settings)
+    if not provider_egress_available_for_brain_work():
+        logger.warning("[learning] scheduled market snapshots skipped: provider egress unavailable")
+        return {
+            "ok": True,
+            "skipped": True,
+            "skip_reason": "provider_egress_unavailable",
+            "snapshots_taken_daily": 0,
+            "intraday_snapshots_taken": 0,
+            "snapshots_taken": 0,
+            "universe_size": 0,
+            "tickers": [],
+        }
+
+    _default_sw = io_workers_for_snapshot_batch(_snap_sched_settings)
+    _sw = min(
+        _default_sw,
+        max(1, int(getattr(_snap_sched_settings, "brain_scheduled_snapshot_workers", 2))),
+    )
     logger.info(
         f"{CHILI_BRAIN_IO} scheduled_market_snapshots_start universe_build=1 snapshot_workers=%s",
         _sw,
     )
     top_tickers, _drv = build_snapshot_ticker_universe(db, user_id)
-    daily_count = take_snapshots_parallel(db, top_tickers, bar_interval="1d")
-    intra_count = _take_intraday_crypto_snapshots(db, top_tickers)
+    max_tickers = max(
+        1,
+        int(getattr(_snap_sched_settings, "brain_scheduled_snapshot_max_tickers", 120)),
+    )
+    if max_tickers > 0:
+        top_tickers = top_tickers[:max_tickers]
+    daily_count = take_snapshots_parallel(
+        db,
+        top_tickers,
+        max_workers=_sw,
+        bar_interval="1d",
+    )
+    intra_count = _take_intraday_crypto_snapshots(db, top_tickers, max_workers=_sw)
 
     vitals_refresh: dict[str, Any] = {}
     try:
@@ -10013,7 +10178,12 @@ def run_learning_cycle(
         # graph-node: c_discovery/mine
         apply_learning_cycle_step_status(_learning_status, "c_discovery", "mine")
         step_start = time.time()
-        discoveries = mine_patterns(db, user_id, ticker_universe=top_tickers)
+        discoveries = mine_patterns(
+            db,
+            user_id,
+            ticker_universe=top_tickers,
+            budget=cycle_budget,
+        )
         report["patterns_discovered"] = len(discoveries)
         _learning_status["patterns_found"] = len(discoveries)
         _bump_node("c_discovery")

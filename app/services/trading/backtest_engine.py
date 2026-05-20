@@ -267,6 +267,15 @@ _TICKER_STOPWORDS = {
 # Max workers for parallel backtest execution
 def _bt_workers() -> int:
     """Threads per insight for parallel ticker backtests (bounded when many patterns run in parallel)."""
+    env_cap = (
+        os.environ.get("CHILI_BACKTEST_REFRESH_WORKERS", "").strip()
+        or os.environ.get("BRAIN_SMART_BT_MAX_WORKERS", "").strip()
+    )
+    if env_cap:
+        try:
+            return max(1, int(float(env_cap)))
+        except (TypeError, ValueError):
+            pass
     if os.environ.get("CHILI_MP_BACKTEST_CHILD", "").strip().lower() in ("1", "true", "yes"):
         try:
             from ...config import settings

@@ -32,6 +32,16 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("BRAIN_SMART_BT_MAX_WORKERS", "1")
+os.environ.setdefault("CHILI_BRAIN_FAST_BACKTEST_BATCH", "0")
+os.environ.setdefault("CHILI_BRAIN_DISPATCH_MARKET_SNAPSHOTS_ENABLED", "0")
+os.environ.setdefault("BRAIN_IO_WORKERS_HIGH", "2")
+os.environ.setdefault("BRAIN_IO_WORKERS_MED", "2")
+os.environ.setdefault("BRAIN_IO_WORKERS_LOW", "1")
+os.environ.setdefault("BRAIN_SNAPSHOT_IO_WORKERS", "2")
+os.environ.setdefault("BRAIN_PREDICTION_IO_WORKERS", "2")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import SessionLocal
@@ -453,7 +463,13 @@ def _run_subtask_signal_refresh(status: "BrainWorkerStatus") -> dict:
     status.set_step("SignalRefresh", "Refreshing promoted predictions...")
     db = SessionLocal()
     try:
-        from app.services.trading.learning import refresh_promoted_prediction_cache
+        from app.services.trading.learning import (
+            provider_egress_available_for_brain_work,
+            refresh_promoted_prediction_cache,
+        )
+        if not provider_egress_available_for_brain_work():
+            logger.info("[brain:subtask] signal_refresh skipped - provider egress unavailable")
+            return {"skipped": True, "skip_reason": "provider_egress_unavailable"}
         result = refresh_promoted_prediction_cache(db)
         return result
     except Exception as e:
@@ -496,6 +512,22 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     from app.services.trading.backtest_queue import get_pending_patterns
     from app.config import settings as _s
 
+    try:
+        from app.services.trading.learning import provider_egress_available_for_brain_work
+
+        if not provider_egress_available_for_brain_work():
+            logger.info(
+                "[brain:subtask] fast_backtest skipped - provider egress unavailable"
+            )
+            return {
+                "completed": 0,
+                "errors": 0,
+                "skipped": True,
+                "skip_reason": "provider_egress_unavailable",
+            }
+    except Exception as e:
+        logger.debug("[brain:subtask] provider preflight failed: %s", e)
+
     # FIX 43: skip the whole tick if the primary data provider is down.
     # When Coinbase fallback (FIX 42) is also unreachable (current host
     # network state), there's nothing to backtest with — running the path
@@ -522,7 +554,16 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
             logger.debug("[brain:subtask] fast_backtest breaker probe failed: %s", e)
 
     uid = getattr(_s, "brain_default_user_id", None)
-    batch_size = int(os.environ.get("CHILI_BRAIN_FAST_BACKTEST_BATCH", "30"))
+    batch_size = max(0, int(os.environ.get("CHILI_BRAIN_FAST_BACKTEST_BATCH", "30")))
+    if batch_size <= 0:
+        logger.info("[brain:subtask] fast_backtest skipped - batch disabled")
+        return {
+            "completed": 0,
+            "errors": 0,
+            "skipped": True,
+            "skip_reason": "batch_disabled",
+            "batch_size": batch_size,
+        }
     completed = 0
     errors = 0
     for _ in range(batch_size):

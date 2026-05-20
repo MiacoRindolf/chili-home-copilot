@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 # Mirror brain_worker.py / scheduler_worker.py: insert repo root onto sys.path
 # so `from app.<x> import ...` works regardless of cwd. Python prepends the
@@ -61,14 +62,29 @@ def main() -> int:
     # Schema check — fast-path tables must exist before we accept any data.
     # Migrations are idempotent; re-running them here is safe.
     if (os.environ.get("CHILI_FAST_PATH_RUN_MIGRATIONS") or "1") not in ("0", "false", "False"):
-        try:
-            logger.info("[fast_data_worker] running migrations (idempotent)")
-            run_migrations(engine)
-        except Exception as exc:
-            logger.critical(
-                "[fast_data_worker] migrations failed: %s", exc, exc_info=True,
-            )
-            return 1
+        attempts = max(1, int(os.environ.get("CHILI_FAST_PATH_MIGRATION_RETRIES", "12")))
+        sleep_s = max(1.0, float(os.environ.get("CHILI_FAST_PATH_MIGRATION_RETRY_SLEEP", "5")))
+        for attempt in range(1, attempts + 1):
+            try:
+                logger.info(
+                    "[fast_data_worker] running migrations (idempotent) attempt=%s/%s",
+                    attempt,
+                    attempts,
+                )
+                run_migrations(engine)
+                break
+            except Exception as exc:
+                if attempt >= attempts:
+                    logger.critical(
+                        "[fast_data_worker] migrations failed: %s", exc, exc_info=True,
+                    )
+                    return 1
+                logger.warning(
+                    "[fast_data_worker] migrations not ready: %s; retrying in %.1fs",
+                    exc,
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
 
     settings = load_settings()
     logger.info(

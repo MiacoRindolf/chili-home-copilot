@@ -870,6 +870,8 @@ class Settings(BaseSettings):
     brain_intraday_intervals: str = "1m,5m,15m"
     brain_intraday_max_tickers: int = 1000
     brain_snapshot_backfill_years: int = 10
+    brain_scheduled_snapshot_max_tickers: int = 120
+    brain_scheduled_snapshot_workers: int = 2
 
     # Crypto universe for prescreen / ticker_universe: 0 = fetch all pages from provider (CoinGecko, capped by safety limit); N>0 = top N by market cap.
     brain_crypto_universe_max: int = 200
@@ -886,6 +888,14 @@ class Settings(BaseSettings):
 
     # Pattern mining: max tickers to pull OHLCV for per cycle (0 = no cap; use full merged mining list).
     brain_mine_patterns_max_tickers: int = 1000
+    # Broad pattern mining is provider/network-bound and non-latency-sensitive.
+    # Keep the live worker conservative by default; operators can raise this
+    # when running a dedicated research box.
+    brain_mine_patterns_workers: int | None = None
+    brain_provider_preflight_enabled: bool = True
+    brain_provider_preflight_data_check_enabled: bool = True
+    brain_provider_preflight_cache_seconds: int = 60
+    brain_provider_preflight_timeout_seconds: float = 1.5
     # Historical labeled snapshot rows mixed into pattern mining. Keep bounded:
     # this runs from market_snapshots_batch work events and must not monopolize
     # the DB while fresh OHLCV mining is also active.

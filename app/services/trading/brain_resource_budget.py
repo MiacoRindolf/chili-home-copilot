@@ -61,6 +61,13 @@ class BrainResourceBudget:
             self.ohlcv_used += n
             return True
 
+    def remaining_ohlcv(self) -> int | None:
+        """Return remaining OHLCV slots, or None when the cap is unlimited."""
+        with self._lock:
+            if self.ohlcv_cap <= 0:
+                return None
+            return max(0, self.ohlcv_cap - self.ohlcv_used)
+
     def add_miner_rows(self, n: int) -> int:
         """Record up to *n* mined rows; returns how many were accepted (for trimming)."""
         if n <= 0:
