@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import create_engine, text
 
 from app.services.trading.fast_path import executor as ex_mod
 from app.services.trading.fast_path.executor import (
@@ -170,6 +171,44 @@ def test_taker_mode_does_not_invoke_maker_path():
     assert ex._insert_maker_attempt_sync.call_count == 0
 
 
+def test_open_positions_refresh_uses_fast_exits_as_truth():
+    """Capacity state must release after the exit manager writes fast_exits."""
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE fast_executions (
+                id INTEGER PRIMARY KEY,
+                ticker TEXT,
+                decision TEXT,
+                mode TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE fast_exits (
+                id INTEGER PRIMARY KEY,
+                entry_execution_id INTEGER
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO fast_executions (id, ticker, decision, mode) VALUES
+              (1, 'BTC-USD', 'paper_fill', 'paper'),
+              (2, 'BTC-USD', 'paper_fill', 'paper'),
+              (3, 'SOL-USD', 'live_placed', 'live'),
+              (4, 'DOGE-USD', 'rejected', 'paper')
+        """))
+        conn.execute(text("""
+            INSERT INTO fast_exits (id, entry_execution_id) VALUES
+              (10, 2)
+        """))
+
+    ex = FastPathExecutor(_make_settings(), engine, SimpleNamespace(_books={}))
+    ex._open_positions = {"BTC-USD": 99, "DOGE-USD": 7}
+
+    ex._refresh_open_positions_sync()
+
+    assert ex._open_positions == {"BTC-USD": 1, "SOL-USD": 1}
+
+
 # ---------------------------------------------------------------------------
 # Outstanding-per-(ticker, side) cap
 # ---------------------------------------------------------------------------
@@ -215,11 +254,13 @@ def test_maker_only_paper_places_and_schedules_timeout():
     ex = _make_executor(settings)
     ctx = _make_ctx()
     ex._build_context = MagicMock(return_value=ctx)
+    writes = []
 
     async def run():
-        async def _noop(*a, **kw):
+        async def _record(*a, **kw):
+            writes.append(kw)
             return None
-        ex._write_decision = _noop
+        ex._write_decision = _record
 
         await ex._process_alert_maker(
             alert=_make_alert(), ctx=ctx, gate_run=_make_gate_run(),
@@ -239,7 +280,8 @@ def test_maker_only_paper_places_and_schedules_timeout():
     asyncio.run(run())
 
     assert ex._metrics.maker_attempts_placed == 1
-    assert ex._metrics.decisions_paper_fill == 1
+    assert ex._metrics.decisions_paper_fill == 0
+    assert writes == []
     assert ex._insert_maker_attempt_sync.call_count == 1
     payload = ex._insert_maker_attempt_sync.call_args.args[0]
     assert payload["ticker"] == "BTC-USD"
@@ -323,6 +365,12 @@ def test_maker_timeout_paper_book_crossed_fills_and_notifies_decay():
     # best_ask <= limit (a strong cross).
     ctx_after = _make_ctx(best_bid=100.005, best_ask=100.005)
     ex._build_context = MagicMock(return_value=ctx_after)
+    writes = []
+
+    async def _record_write(*a, **kw):
+        writes.append(kw)
+        return None
+    ex._write_decision = _record_write
 
     attempt = {
         "attempt_id": 7,
@@ -359,6 +407,12 @@ def test_maker_timeout_paper_book_crossed_fills_and_notifies_decay():
     assert payload["fill_outcome"] == "filled"
     assert payload["final_price"] == pytest.approx(100.005)
     assert ex._metrics.maker_attempts_filled == 1
+    assert ex._metrics.decisions_paper_fill == 1
+    assert ex._open_positions["BTC-USD"] == 1
+    assert ex._daily_notional_used_usd == pytest.approx(10.0)
+    assert len(writes) == 1
+    assert writes[0]["decision"] == "paper_fill"
+    assert writes[0]["fill_price"] == pytest.approx(100.005)
     decay.record_maker_outcome.assert_called_once()
     kwargs = decay.record_maker_outcome.call_args.kwargs
     assert kwargs["fill_outcome"] == "filled"

@@ -1423,6 +1423,7 @@ def _execute_broker_buy(
         _cost_decision = _cost_gate(
             ticker=alert.ticker,
             projected_profit_pct=snap.get("projected_profit_pct"),
+            db=db,
         )
     except Exception as exc:
         logger.warning(
@@ -1433,6 +1434,12 @@ def _execute_broker_buy(
         _cost_gate_error = f"{type(exc).__name__}"
         _cost_decision = None
     if _cost_decision is not None and not _cost_decision.allowed:
+        snap["cost_gate_edge_bps"] = _cost_decision.edge_bps
+        snap["cost_gate_threshold_bps"] = _cost_decision.threshold_bps
+        snap["cost_gate_fee_bps"] = _cost_decision.fee_bps
+        snap["cost_gate_tca_cost_bps"] = _cost_decision.tca_cost_bps
+        if _cost_decision.tca_snapshot is not None:
+            snap["cost_gate_tca_snapshot"] = _cost_decision.tca_snapshot
         _cost_reason = f"cost_gate:{_cost_decision.reason}"
         _audit(
             db,
@@ -1455,6 +1462,13 @@ def _execute_broker_buy(
             _cost_decision.reason,
         )
         return None
+    if _cost_decision is not None:
+        snap["cost_gate_edge_bps"] = _cost_decision.edge_bps
+        snap["cost_gate_threshold_bps"] = _cost_decision.threshold_bps
+        snap["cost_gate_fee_bps"] = _cost_decision.fee_bps
+        snap["cost_gate_tca_cost_bps"] = _cost_decision.tca_cost_bps
+        if _cost_decision.tca_snapshot is not None:
+            snap["cost_gate_tca_snapshot"] = _cost_decision.tca_snapshot
 
     # f-coinbase-autotrader-enablement-phase-3-broker-selector
     # (2026-05-09): broker selector. RH path is BYTE-IDENTICAL
@@ -2107,14 +2121,10 @@ def _execute_new_entry(
     # f-stop-engine-payoff-ratio-gate (2026-05-19): payoff-ratio-aware
     # sizing scaler. Composes AFTER HRP / survival / pilot_promoted
     # multipliers; uses the Tier A scan_pattern.payoff_ratio +
-    # payoff_ratio_n (mig 246, refreshed nightly by
-    # realized_stats_sync). Tier thresholds (hardcoded; tune via
-    # follow-up brief if needed):
-    #   n < min_n               -> 1.0x (insufficient evidence)
-    #   payoff >= 5.0           -> 1.5x  (very_high; e.g., pattern 585)
-    #   payoff >= 2.0           -> 1.25x (high)
-    #   payoff >= 1.0           -> 1.0x  (moderate; no-op)
-    #   payoff <  1.0           -> 0.5x  (low; sub-1:1 history)
+    # payoff_ratio_n (mig 246, refreshed nightly by realized_stats_sync).
+    # The multiplier is posterior-smoothed instead of threshold-cliffed:
+    # thin samples shrink toward neutral 1.0x, while mature high-payoff
+    # patterns earn size gradually up to the configured cap.
     # Wrapped in try/except: sizing must NEVER crash an entry attempt.
     # Default OFF; operator flips after paper-soak comparison.
     try:
@@ -2134,28 +2144,24 @@ def _execute_new_entry(
             if _po_row is not None:
                 _po_pr = float(_po_row[0]) if _po_row[0] is not None else None
                 _po_pn = int(_po_row[1] or 0)
-                _po_min_n = int(getattr(
-                    settings, "chili_autotrader_payoff_min_n", 5,
-                ))
-                _po_mult = 1.0
-                _po_tier = "insufficient_n"
-                if _po_pr is not None and _po_pn >= _po_min_n:
-                    if _po_pr >= 5.0:
-                        _po_mult = 1.5
-                        _po_tier = "very_high"
-                    elif _po_pr >= 2.0:
-                        _po_mult = 1.25
-                        _po_tier = "high"
-                    elif _po_pr >= 1.0:
-                        _po_mult = 1.0
-                        _po_tier = "moderate"
-                    else:
-                        _po_mult = 0.5
-                        _po_tier = "low"
-                snap["payoff_sizing_tier"] = _po_tier
-                snap["payoff_sizing_multiplier"] = _po_mult
-                snap["payoff_ratio_observed"] = _po_pr
-                snap["payoff_ratio_n_observed"] = _po_pn
+                from .payoff_sizing import compute_payoff_sizing
+                _po_decision = compute_payoff_sizing(
+                    payoff_ratio=_po_pr,
+                    payoff_ratio_n=_po_pn,
+                    min_n=int(getattr(settings, "chili_autotrader_payoff_min_n", 5)),
+                    prior_ratio=float(getattr(
+                        settings, "chili_autotrader_payoff_prior_ratio", 1.0,
+                    )),
+                    prior_n=int(getattr(settings, "chili_autotrader_payoff_prior_n", 20)),
+                    min_multiplier=float(getattr(
+                        settings, "chili_autotrader_payoff_min_multiplier", 0.5,
+                    )),
+                    max_multiplier=float(getattr(
+                        settings, "chili_autotrader_payoff_max_multiplier", 1.5,
+                    )),
+                )
+                _po_mult = float(_po_decision.multiplier)
+                snap.update(_po_decision.to_snapshot())
                 if _po_mult != 1.0:
                     snap["notional_before_payoff_sizing"] = round(notional, 2)
                     notional = float(notional) * _po_mult

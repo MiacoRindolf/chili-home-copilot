@@ -164,6 +164,24 @@ def gate_calibrated_tradeability(alert: dict, ctx: ExecContext) -> GateResult:
     unconditionally with verdict='no_engine'. Keeps gate semantics
     backwards-compatible with existing tests.
     """
+    try:
+        from .settings import load as _load_fp_settings
+        fp_settings = _load_fp_settings()
+        if getattr(fp_settings, "cost_aware_admission_enabled", False):
+            # The original calibration gate used a static headline
+            # cost bar. When the dynamic cost-aware gate is enabled,
+            # let it own the economic line because it uses the current
+            # execution mode, configured fee tier, and live spread.
+            return GateResult(
+                "calibration", True, "",
+                {"verdict": "deferred_to_cost_aware_admission"},
+            )
+    except Exception as exc:
+        return GateResult(
+            "calibration", True, "",
+            {"verdict": "settings_lookup_failed", "error": str(exc)[:120]},
+        )
+
     if ctx.engine is None:
         return GateResult("calibration", True, "", {"verdict": "no_engine"})
     try:
@@ -393,19 +411,13 @@ def gate_spread_sanity(alert: dict, ctx: ExecContext,
     return GateResult("spread_sanity", True, "", {"spread_bps": float(sp)})
 
 
-# F8b: signal-class-specific ticker allowlists.
+# F8b: signal-class-specific ticker allowlist.
 #
-# F8a-evaluation-rerun-2 verified n=43 distinct realized exits on the
-# pullback signal with bimodal per-ticker edge:
-#   BTC-USD:  +5.66 bps avg, 62.5% win rate (n=8)
-#   SOL-USD:  +3.34 bps avg, 38.5% win rate (n=13)
-#   ETH-USD:  -6.44 bps avg, 30.0% win rate (n=10)
-#   DOGE-USD: -14.39 bps avg, 16.7% win rate (n=12)
-# Restricting to the positive subset is necessary to make the signal
-# class production-eligible. Hard-coded set is fine while we have
-# one signal class with a known split; if/when more signal classes
-# add their own allowlists, extract to a config artifact.
-PULLBACK_LONG_ALLOWLIST: frozenset[str] = frozenset({"BTC-USD", "SOL-USD"})
+# 2026-05-14 refresh: realized fast_exits showed the pullback class
+# remained positive on SOL-USD but drifted negative on BTC-USD. Keep
+# only the cohort with positive realized exits until the rotator/maker
+# pipeline has a stronger learned replacement.
+PULLBACK_LONG_ALLOWLIST: frozenset[str] = frozenset({"SOL-USD"})
 
 
 def gate_pullback_ticker_allowed(alert: dict, ctx: ExecContext) -> GateResult:

@@ -77,10 +77,12 @@ def test_broker_service_stale_close_writes_sell_side_event():
 
     # The Coinbase writer is in coinbase_service.py; this test is for
     # the Robinhood twin in broker_service.py. The signature is
-    # event_type='broker_reconcile_position_gone_close'.
-    assert "broker_reconcile_position_gone_close" in text, (
+    # event_type fits trading_execution_events.event_type VARCHAR(32).
+    event_type = "broker_reconcile_gone_close"
+    assert len(event_type) <= 32
+    assert event_type in text, (
         "broker_service.py is missing the "
-        "`broker_reconcile_position_gone_close` event_type label. "
+        "`broker_reconcile_gone_close` event_type label. "
         "f-bracket-fired-stop-recording mandates this writer so "
         "broker-fired bracket stops on RH equity get recorded as "
         "sell events for Phase 4."

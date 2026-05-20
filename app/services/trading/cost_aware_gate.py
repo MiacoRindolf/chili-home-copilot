@@ -36,6 +36,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from sqlalchemy import text
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +58,8 @@ class CostGateDecision:
     fee_bps: int
     threshold_bps: int
     edge_bps: int
+    tca_cost_bps: int = 0
+    tca_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +166,7 @@ def cost_aware_min_edge_gate(
     *,
     ticker: str,
     projected_profit_pct: Optional[float],
+    db=None,
     settings_=None,
 ) -> CostGateDecision:
     """Refuses Coinbase entries whose projected edge does not clear
@@ -219,18 +224,99 @@ def cost_aware_min_edge_gate(
             fee_bps=0, threshold_bps=0, edge_bps=edge_bps,
         )
 
-    # Coinbase routing: must clear fee + buffer.
+    # Coinbase routing: must clear fee + buffer, and optionally the live
+    # p90 spread/slippage estimate from TCA-derived cost rows.
+    tca_cost_bps = 0
+    tca_snapshot: dict[str, Any] | None = None
+    if bool(getattr(s, "chili_coinbase_cost_gate_include_tca_estimates", False)):
+        min_samples = int(getattr(s, "chili_coinbase_cost_gate_min_tca_samples", 5))
+        tca_cost_bps, tca_snapshot = _coinbase_tca_cost_bps(
+            db=db, ticker=ticker, side="buy", min_samples=min_samples
+        )
+        threshold_bps += tca_cost_bps
+
     if edge_bps >= threshold_bps:
         return CostGateDecision(
             allowed=True, reason=REASON_GATE_COINBASE_PASSED,
             fee_bps=fee_bps, threshold_bps=threshold_bps,
-            edge_bps=edge_bps,
+            edge_bps=edge_bps, tca_cost_bps=tca_cost_bps,
+            tca_snapshot=tca_snapshot,
         )
     return CostGateDecision(
         allowed=False, reason=REASON_GATE_COINBASE_BLOCKED,
         fee_bps=fee_bps, threshold_bps=threshold_bps,
-        edge_bps=edge_bps,
+        edge_bps=edge_bps, tca_cost_bps=tca_cost_bps,
+        tca_snapshot=tca_snapshot,
     )
+
+
+def _coinbase_tca_cost_bps(
+    *,
+    db,
+    ticker: str,
+    side: str,
+    min_samples: int,
+) -> tuple[int, dict[str, Any] | None]:
+    """Return p90 spread+slippage bps from execution-cost estimates.
+
+    Missing/unavailable estimates are treated as zero extra cost so the
+    legacy fee+buffer gate remains the fallback. When present, this lets live
+    TCA erode gross projected edge before the order reaches Coinbase.
+    """
+    if db is None:
+        return 0, None
+    try:
+        row = db.execute(text("""
+            SELECT sample_trades, p90_spread_bps, p90_slippage_bps,
+                   median_spread_bps, median_slippage_bps, last_updated_at
+            FROM trading_execution_cost_estimates
+            WHERE UPPER(ticker) = UPPER(:ticker)
+              AND LOWER(side) = LOWER(:side)
+            ORDER BY last_updated_at DESC
+            LIMIT 1
+        """), {"ticker": ticker, "side": side}).mappings().first()
+    except Exception:
+        return 0, None
+
+    if not row:
+        return 0, None
+
+    try:
+        samples = int(row.get("sample_trades") or 0)
+    except (TypeError, ValueError):
+        samples = 0
+    min_samples_i = max(1, int(min_samples or 1))
+    if samples < min_samples_i:
+        return 0, {
+            "sample_trades": samples,
+            "min_samples": min_samples_i,
+            "used": False,
+            "reason": "insufficient_samples",
+        }
+
+    def _f(name: str) -> float:
+        try:
+            value = float(row.get(name) or 0.0)
+            return value if value > 0.0 else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    spread_bps = _f("p90_spread_bps")
+    slippage_bps = _f("p90_slippage_bps")
+    tca_cost_bps = int(round(spread_bps + slippage_bps))
+    last_updated = row.get("last_updated_at")
+    return tca_cost_bps, {
+        "sample_trades": samples,
+        "p90_spread_bps": spread_bps,
+        "p90_slippage_bps": slippage_bps,
+        "median_spread_bps": _f("median_spread_bps"),
+        "median_slippage_bps": _f("median_slippage_bps"),
+        "tca_cost_bps": tca_cost_bps,
+        "last_updated_at": (
+            last_updated.isoformat() if hasattr(last_updated, "isoformat") else last_updated
+        ),
+        "used": True,
+    }
 
 
 # ── Per-venue cap check ──────────────────────────────────────────────

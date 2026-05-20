@@ -17194,6 +17194,34 @@ def _migration_254_synthetic_exit_fill_events(conn) -> None:
     logger.info("[mig254] done -- inserted=%d", inserted)
 
 
+def _migration_255_fast_path_retention_time_indexes(conn) -> None:
+    """Add timestamp-leading indexes required by fast-path retention.
+
+    The original fast-path indexes are optimized for UI/ticker lookups,
+    for example ``(ticker, snapshot_at DESC)``. Retention deletes scan by
+    timestamp only, so it intentionally refuses to run unless a btree index
+    starts with the retention column. These indexes keep pruning bounded on
+    high-volume partitioned tables, especially ``fast_orderbook``.
+    """
+    inspector = sa_inspect(conn)
+    tables = set(inspector.get_table_names())
+    index_specs = [
+        ("fast_snapshots", "ix_fast_snapshots_bar_close_retention", "bar_close_at"),
+        ("fast_orderbook", "ix_fast_orderbook_snapshot_retention", "snapshot_at"),
+        ("fast_alerts", "ix_fast_alerts_fired_retention", "fired_at"),
+        ("fast_executions", "ix_fast_executions_decided_retention", "decided_at"),
+        ("fast_exits", "ix_fast_exits_exited_retention", "exited_at"),
+    ]
+    for table, index_name, ts_col in index_specs:
+        if table not in tables:
+            continue
+        conn.execute(text(
+            f"CREATE INDEX IF NOT EXISTS {index_name} "
+            f"ON {table} ({ts_col}, id)"
+        ))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -17484,6 +17512,8 @@ MIGRATIONS = [
      _migration_253_tca_backfill_guard_phantom_rows),
     ("254_synthetic_exit_fill_events",
      _migration_254_synthetic_exit_fill_events),
+    ("255_fast_path_retention_time_indexes",
+     _migration_255_fast_path_retention_time_indexes),
 ]
 
 

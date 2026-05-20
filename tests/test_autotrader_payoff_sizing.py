@@ -54,6 +54,15 @@ def test_payoff_sizing_min_n_defaults_to_5():
     assert s.chili_autotrader_payoff_min_n == 5
 
 
+def test_payoff_sizing_posterior_defaults_are_neutral():
+    """Thin samples shrink toward neutral instead of threshold cliffs."""
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.chili_autotrader_payoff_prior_ratio == 1.0
+    assert s.chili_autotrader_payoff_prior_n == 20
+    assert s.chili_autotrader_payoff_min_multiplier == 0.5
+    assert s.chili_autotrader_payoff_max_multiplier == 1.5
+
+
 # ── #2 — auto_trader.py has the scaler code ───────────────────────────
 
 
@@ -85,7 +94,10 @@ def test_auto_trader_has_payoff_sizing_block():
 def test_auto_trader_payoff_scaler_writes_snapshot_fields():
     """The scaler must write observability fields to snap{} so the
     autotrader_runs audit log can show which tier fired."""
-    text = _read("app/services/trading/auto_trader.py")
+    text = (
+        _read("app/services/trading/auto_trader.py")
+        + _read("app/services/trading/payoff_sizing.py")
+    )
     for field in [
         '"payoff_sizing_tier"',
         '"payoff_sizing_multiplier"',
@@ -98,23 +110,41 @@ def test_auto_trader_payoff_scaler_writes_snapshot_fields():
         )
 
 
-def test_auto_trader_payoff_scaler_tier_thresholds():
-    """The scaler must implement the documented tier structure: very_high
-    >= 5.0 / high >= 2.0 / moderate >= 1.0 / low < 1.0 / insufficient_n."""
-    text = _read("app/services/trading/auto_trader.py")
+def test_payoff_scaler_tier_labels_and_bounds():
+    """The helper preserves tier labels but computes a smoothed multiplier."""
+    text = _read("app/services/trading/payoff_sizing.py")
     for tier in ["very_high", "high", "moderate", "low", "insufficient_n"]:
         assert tier in text, (
-            f"auto_trader.py is missing the '{tier}' tier label. "
+            f"payoff_sizing.py is missing the '{tier}' tier label. "
             f"Each tier label is part of the audit contract."
         )
 
-    # Multiplier values from the comment block (smoke-check)
-    # 1.5 / 1.25 / 1.0 / 0.5 are the documented constants
-    for mult in ["1.5", "1.25", "0.5"]:
+    for mult in ["1.5", "0.5"]:
         assert mult in text, (
-            f"auto_trader.py is missing multiplier value {mult}. "
-            f"Tier multipliers must match the documented constants."
+            f"payoff_sizing.py is missing multiplier bound {mult}. "
+            f"Multiplier bounds are part of the sizing contract."
         )
+
+
+def test_payoff_scaler_smooths_pattern_585_near_threshold():
+    from app.services.trading.payoff_sizing import compute_payoff_sizing
+
+    decision = compute_payoff_sizing(payoff_ratio=4.9656999, payoff_ratio_n=86)
+
+    assert decision.tier == "high"
+    assert 1.25 < decision.multiplier < 1.5
+    assert decision.adjusted_ratio is not None
+    assert decision.adjusted_ratio < 4.9656999
+
+
+def test_payoff_scaler_deflates_thin_extreme_payoff():
+    from app.services.trading.payoff_sizing import compute_payoff_sizing
+
+    decision = compute_payoff_sizing(payoff_ratio=29.57, payoff_ratio_n=7)
+
+    assert decision.tier == "very_high"
+    assert 1.0 < decision.multiplier < 1.25
+    assert decision.confidence_weight < 0.5
 
 
 # ── #3 — try/except wrapper (sizing never crashes) ────────────────────

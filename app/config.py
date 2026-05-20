@@ -2573,11 +2573,8 @@ class Settings(BaseSettings):
     # pilot_promoted multipliers. Reads scan_patterns.payoff_ratio +
     # payoff_ratio_n (Tier A columns from mig 246, refreshed nightly by
     # realized_stats_sync). Tiers:
-    #   payoff_ratio_n < min_n          -> 1.0x (insufficient evidence)
-    #   payoff_ratio >= 5.0 AND n >= min -> 1.5x (very_high; e.g. pattern 585)
-    #   payoff_ratio >= 2.0 AND n >= min -> 1.25x (high)
-    #   payoff_ratio >= 1.0 AND n >= min -> 1.0x (moderate; no-op)
-    #   payoff_ratio < 1.0 AND n >= min  -> 0.5x (low; sub-1:1 history)
+    # Uses posterior-smoothed sizing (prior_ratio/prior_n below) instead
+    # of raw threshold cliffs, while preserving tier labels in audit rows.
     # Default OFF. Operator flips after paper-soak comparison.
     chili_autotrader_payoff_sizing_enabled: bool = Field(
         default=False,
@@ -2589,6 +2586,42 @@ class Settings(BaseSettings):
         default=5,
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_PAYOFF_MIN_N"
+        ),
+    )
+    chili_autotrader_payoff_prior_ratio: float = Field(
+        default=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAYOFF_PRIOR_RATIO"
+        ),
+    )
+    chili_autotrader_payoff_prior_n: int = Field(
+        default=20,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAYOFF_PRIOR_N"
+        ),
+    )
+    chili_autotrader_payoff_min_multiplier: float = Field(
+        default=0.5,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAYOFF_MIN_MULTIPLIER"
+        ),
+    )
+    chili_autotrader_payoff_max_multiplier: float = Field(
+        default=1.5,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAYOFF_MAX_MULTIPLIER"
+        ),
+    )
+    chili_coinbase_cost_gate_include_tca_estimates: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_COST_GATE_INCLUDE_TCA_ESTIMATES"
+        ),
+    )
+    chili_coinbase_cost_gate_min_tca_samples: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_COST_GATE_MIN_TCA_SAMPLES"
         ),
     )
     # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
@@ -3331,6 +3364,12 @@ class Settings(BaseSettings):
     brain_retention_paper_trade_days: int = 180
     brain_retention_hypothesis_days: int = 180
     brain_retention_breakout_alert_days: int = 180
+    brain_retention_fast_snapshot_days: int = 30
+    brain_retention_fast_orderbook_days: int = 3
+    brain_retention_fast_alert_days: int = 14
+    brain_retention_fast_execution_days: int = 30
+    brain_retention_fast_exit_days: int = 90
+    brain_retention_fast_delete_batch_size: int = 50_000
 
     # Portfolio: max simultaneous open longs per coarse sector (0 = disabled).
     brain_max_open_per_sector: int = 0

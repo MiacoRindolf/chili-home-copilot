@@ -1,10 +1,10 @@
 # Re-runnable crypto autotrading pulse monitor.
-# Cowork dispatches this periodically (every 5-15 min) to surface anomalies
-# in the Coinbase live-soak lane while Phase 3 of f-promotion-pipeline-
-# rebalance ships in parallel via the session daemon.
+# Cowork dispatches periodically to surface anomalies in the Coinbase
+# live-soak lane. Output APPENDED to scripts/dispatch-crypto-pulse-out.txt.
 #
-# Output is APPENDED to scripts/dispatch-crypto-pulse-out.txt with a
-# timestamp banner so Cowork can diff successive samples.
+# Table names are prefixed `trading_` per SQLAlchemy __tablename__:
+#   trading_trades, trading_bracket_intents, trading_execution_events,
+#   trading_autotrader_runs, trading_alerts, trading_venue_truth_log.
 
 $ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot\..
@@ -46,7 +46,7 @@ function GREP-LOGS {
     "" | Add-Content $out
 }
 
-# 1. get_crypto_positions empty / auth-failure events in last 15 min
+# 1. get_crypto_positions empty / auth-failure events
 GREP-LOGS "1. get_crypto_positions empty/auth failures (autotrader-worker, 15m)" `
     "chili-home-copilot-autotrader-worker-1" `
     "get_crypto_positions|crypto_positions.*empty|coinbase.*auth|coinbase.*401|coinbase.*403" `
@@ -63,32 +63,28 @@ GREP-LOGS "2. crypto_exit cannot resolve broker qty (autotrader-worker, 15m)" `
     "cannot resolve broker qty|deferring sell" `
     25 "15m"
 
-# 3. bracket_reconciliation missing_stop warnings
+# 3. bracket_reconciliation missing_stop
 GREP-LOGS "3. bracket_reconciliation missing_stop (broker-sync, 15m)" `
     "chili-home-copilot-broker-sync-worker-1" `
     "kind=missing_stop" `
     25 "15m"
 
-# 4. broker_reconcile_position_gone events
-PSQL "4. broker_reconcile_position_gone in last 60 min" @"
-SELECT to_regclass('public.execution_events') AS execution_events_exists;
-"@
-
-PSQL "4b. recent reconcile-position-gone trades" @"
+# 4. broker_reconcile_position_gone trades (last 60 min)
+PSQL "4. recent reconcile-position-gone trades (last 60 min)" @"
 SELECT t.id, t.ticker, t.status, t.exit_reason, t.exit_price, t.exit_at,
        t.open_at, t.qty, t.entry_price
-  FROM trades t
+  FROM trading_trades t
  WHERE t.exit_reason ILIKE '%reconcile_position_gone%'
    AND t.exit_at > now() - interval '60 minutes'
  ORDER BY t.exit_at DESC
  LIMIT 10;
 "@
 
-# 5. Coinbase autotrader entries / fills in last 30 min
-PSQL "5. Recent Coinbase trades (entry/exit) - last 30 min" @"
+# 5. Recent Coinbase trades in last 30 min
+PSQL "5. Recent Coinbase trades (last 30 min, entry/exit)" @"
 SELECT t.id, t.ticker, t.status, t.side, t.qty, t.entry_price, t.exit_price,
        t.open_at, t.exit_at, t.exit_reason, t.scan_pattern_id
-  FROM trades t
+  FROM trading_trades t
  WHERE t.broker = 'coinbase'
    AND (t.open_at > now() - interval '30 minutes'
         OR t.exit_at > now() - interval '30 minutes')
@@ -96,13 +92,13 @@ SELECT t.id, t.ticker, t.status, t.side, t.qty, t.entry_price, t.exit_price,
  LIMIT 20;
 "@
 
-# 6. Implausible-quote events (TRUMP-USD bug family)
-GREP-LOGS "6. Implausible quote events (15m, all 3 lanes)" `
+# 6. Implausible-quote events
+GREP-LOGS "6. Implausible quote events (15m)" `
     "chili-home-copilot-autotrader-worker-1" `
     "implausible_quote|quote_implausible|stale_quote" `
     20 "15m"
 
-# 7. Idle-in-tx connection counts (FIX 46 hygiene)
+# 7. idle-in-tx by application_name
 PSQL "7. idle-in-tx by application_name" @"
 SELECT application_name,
        count(*) AS conns,
@@ -113,7 +109,7 @@ SELECT application_name,
  ORDER BY idle_in_tx DESC, conns DESC;
 "@
 
-# 8. Active open-status crypto trades + their bracket_intent state
+# 8. Currently open crypto trades + bracket intent state
 PSQL "8. Currently open crypto trades + bracket intent state" @"
 SELECT t.id AS trade_id, t.ticker, t.qty, t.entry_price, t.open_at,
        bi.id AS bi_id, bi.kind AS bi_kind, bi.status AS bi_status,
@@ -121,20 +117,40 @@ SELECT t.id AS trade_id, t.ticker, t.qty, t.entry_price, t.open_at,
        bi.broker_order_id, bi.broker_stop_order_id,
        bi.last_status_at,
        LEFT(coalesce(bi.reason_no_op, ''), 80) AS reason_no_op
-  FROM trades t
-  LEFT JOIN bracket_intent bi ON bi.trade_id = t.id
+  FROM trading_trades t
+  LEFT JOIN trading_bracket_intents bi ON bi.trade_id = t.id
  WHERE t.broker = 'coinbase'
    AND t.status = 'open'
  ORDER BY t.open_at DESC
  LIMIT 15;
 "@
 
-# 9. Phase 3 status (parallel work track)
-"## 9. Phase 3 session status" | Add-Content $out
+# 9. Recent autotrader decisions for crypto in last 30 min
+PSQL "9. Recent autotrader decisions on crypto (last 30 min)" @"
+SELECT id, ticker, decision, reason, occurred_at, alert_id, trade_id
+  FROM trading_autotrader_runs
+ WHERE ticker LIKE '%-USD'
+   AND occurred_at > now() - interval '30 minutes'
+ ORDER BY occurred_at DESC
+ LIMIT 20;
+"@
+
+# 10. Phase 4 session daemon status
+"## 10. Phase 4 session daemon status" | Add-Content $out
 if (Test-Path "scripts/_claude_session_status.json") {
     Get-Content "scripts/_claude_session_status.json" -Raw | Add-Content $out
 } else {
     "no status.json" | Add-Content $out
+}
+"" | Add-Content $out
+
+# 11. Plan-gate consult dir for current Phase
+"## 11. Phase 4 plan-gate consult dir" | Add-Content $out
+$consultDir = "scripts/_claude_session_consult/promotion-rebalance-phase4-2026-05-10"
+if (Test-Path $consultDir) {
+    Get-ChildItem $consultDir | Select-Object Name, Length, LastWriteTime | Format-Table | Out-String | Add-Content $out
+} else {
+    "(no consult dir yet -- session may not have created it)" | Add-Content $out
 }
 "" | Add-Content $out
 

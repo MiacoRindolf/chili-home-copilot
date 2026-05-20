@@ -4,11 +4,11 @@ STATUS: PENDING
 
 ## Goal
 
-Operator-driven paper-soak of the autotrader payoff-ratio-aware sizing scaler. Code shipped 2026-05-19 (commit `c07077c`, default OFF). This brief is the soak/audit/promote sequence — no further code change.
+Operator-driven paper-soak of the autotrader payoff-ratio-aware sizing scaler. Code shipped 2026-05-19 (commit `c07077c`, default OFF), then updated 2026-05-20 to posterior-smoothed sizing so exact payoff thresholds no longer create cliff behavior.
 
 ## Why this is next
 
-The Tier A payoff-ratio gate (commit `23bde18`, 2026-05-18) protects skew-driven edges from demote. The autotrader sizing scaler (commit `c07077c`, this session) extends the same signal to position sizing — up-sizes pattern 585 (4.97:1, n=86) to 1.5x; down-sizes patterns with sub-1:1 historical payoff to 0.5x. Code is shipped and tested (57/57 tests); the operational flip needs operator validation.
+The Tier A payoff-ratio gate (commit `23bde18`, 2026-05-18) protects skew-driven edges from demote. The autotrader sizing scaler extends the same signal to position sizing, but now shrinks thin samples toward neutral and moves size continuously. Pattern 585 (4.97:1, n=86) is expected to land in the `high` tier with a multiplier between 1.25x and 1.5x, not a hard 1.5x cliff.
 
 This is the **third bridge brief** while waiting for Phase 5 envelope-rename's `[phase4_*]` gate.
 
@@ -35,7 +35,7 @@ GROUP BY tier
 ORDER BY CASE tier WHEN 'very_high' THEN 1 WHEN 'high' THEN 2 WHEN 'moderate' THEN 3 WHEN 'low' THEN 4 ELSE 5 END;
 ```
 
-Expected (rough): a small number of `very_high` (pattern 585, maybe pid 537), some `high`, a long tail of `moderate` / `insufficient_n`, a few `low`.
+Expected (rough): pid 537 may remain `very_high` by adjusted ratio but with thin-sample shrinkage; pattern 585 should be `high`; a long tail remains `moderate` / `insufficient_n`, with a few `low`.
 
 ### Step 2 — Flip flag
 
@@ -69,7 +69,7 @@ WHERE created_at > '<flip_ts>'
 ORDER BY created_at DESC LIMIT 30;
 ```
 
-Sanity-check the tier mapping (e.g., pid 585 → `very_high`, mult=1.5; pid 1066 with payoff 0.275 → `low`, mult=0.5).
+Sanity-check the tier mapping and smoothing fields (e.g., pid 585 → `high`, mult between 1.25 and 1.5, with `payoff_ratio_adjusted` below the observed ratio; pid 1066 with low payoff should down-size only as much as its sample confidence supports).
 
 ### Step 4 — Promote or rollback after ~1 week
 
