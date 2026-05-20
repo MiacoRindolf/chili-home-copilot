@@ -23,6 +23,33 @@ from app.services.trading.venue import (
 from app.services.trading.venue.coinbase_spot import _normalize_bbo, _normalize_product
 
 
+def _attach_product(
+    ad: CoinbaseSpotAdapter,
+    *,
+    product_id: str = "BTC-USD",
+    base_increment: float = 0.00000001,
+    quote_increment: float = 0.01,
+) -> None:
+    prod = NormalizedProduct(
+        product_id=product_id,
+        base_currency=product_id.split("-")[0],
+        quote_currency=product_id.split("-")[1] if "-" in product_id else "USD",
+        status="online",
+        trading_disabled=False,
+        cancel_only=False,
+        limit_only=False,
+        post_only=False,
+        auction_mode=False,
+        base_increment=base_increment,
+        quote_increment=quote_increment,
+    )
+    fresh = FreshnessMeta(
+        retrieved_at_utc=datetime.now(timezone.utc),
+        max_age_seconds=15.0,
+    )
+    ad.get_product = lambda pid: (prod, fresh)  # type: ignore[assignment]
+
+
 def test_normalize_product_maps_increments_and_flags():
     raw = {
         "product_id": "BTC-USD",
@@ -99,6 +126,7 @@ def test_duplicate_client_order_guard(db):
     # is_enabled may be False without credentials — force client path via monkeypatch
     ad.is_enabled = lambda: True  # type: ignore[method-assign]
     ad._require_client = lambda: mock  # type: ignore[method-assign]
+    _attach_product(ad)
 
     r1 = ad.place_market_order(product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid)
     assert r1["ok"] is True
@@ -113,18 +141,29 @@ def test_duplicate_client_order_guard(db):
     reset_duplicate_client_order_guard_for_tests()
 
 
-def test_place_market_order_request_shaping(db):
-    # Phase B: purge any leftover DB idempotency row for "cid-xyz" so the
-    # test is self-contained against accumulated state. See
-    # test_duplicate_client_order_guard above for context.
-    from sqlalchemy import text as _sql_text
-
+def test_place_market_order_request_shaping(monkeypatch):
     cid = "cid-xyz"
-    db.execute(
-        _sql_text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
-        {"cid": cid},
+    monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot.idempotency_store.is_duplicate",
+        lambda *a, **k: False,
     )
-    db.commit()
+    monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot.idempotency_store.remember",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot.rate_limiter.try_acquire",
+        lambda v: (True, 0),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot.cb.clear_cache",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot."
+        "order_state_machine.record_transition_standalone",
+        lambda **kw: None,
+    )
     reset_duplicate_client_order_guard_for_tests()
     mock = MagicMock()
     mock.market_order_sell.return_value = {
@@ -134,9 +173,10 @@ def test_place_market_order_request_shaping(db):
     ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
     ad.is_enabled = lambda: True  # type: ignore[method-assign]
     ad._require_client = lambda: mock  # type: ignore[method-assign]
+    _attach_product(ad, product_id="ZK-USD", base_increment=0.1, quote_increment=0.01)
 
     out = ad.place_market_order(
-        product_id="ZK",
+        product_id="ZK-USD",
         side="sell",
         base_size="1.5",
         client_order_id=cid,
@@ -147,11 +187,6 @@ def test_place_market_order_request_shaping(db):
     assert kw["product_id"] == "ZK-USD"
     assert kw["base_size"] == "1.5"
     assert kw["client_order_id"] == cid
-    db.execute(
-        _sql_text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
-        {"cid": cid},
-    )
-    db.commit()
 
 
 def test_cancel_order_calls_sdk():
@@ -302,6 +337,7 @@ def test_place_market_order_timeout_caught_and_returned(db):
     ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
     ad.is_enabled = lambda: True  # type: ignore[method-assign]
     ad._require_client = lambda: mock  # type: ignore[method-assign]
+    _attach_product(ad)
 
     out = ad.place_market_order(
         product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid,
@@ -332,6 +368,7 @@ def test_place_market_order_broker_returns_429(db):
     ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
     ad.is_enabled = lambda: True  # type: ignore[method-assign]
     ad._require_client = lambda: mock  # type: ignore[method-assign]
+    _attach_product(ad)
 
     out = ad.place_market_order(
         product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid,
@@ -340,6 +377,86 @@ def test_place_market_order_broker_returns_429(db):
     assert "rate limit" in out["error"].lower()
     assert out["client_order_id"] == cid
     _purge_idempotency_cid(db, cid)
+    reset_duplicate_client_order_guard_for_tests()
+
+
+def test_place_market_order_success_without_broker_order_id_is_not_ok():
+    cid = "cid-cb-market-missing-oid"
+    reset_duplicate_client_order_guard_for_tests()
+    mock = MagicMock()
+    mock.market_order_buy.return_value = {
+        "success": True,
+        "success_response": {},
+    }
+    ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
+    ad.is_enabled = lambda: True  # type: ignore[method-assign]
+    ad._require_client = lambda: mock  # type: ignore[method-assign]
+    _attach_product(ad)
+
+    out = ad.place_market_order(
+        product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid,
+    )
+    assert out["ok"] is False
+    assert "missing order_id" in out["error"]
+    assert out["client_order_id"] == cid
+    assert out.get("order_id") is None
+    reset_duplicate_client_order_guard_for_tests()
+
+
+def test_place_limit_order_broker_error_does_not_fall_back_to_client_id():
+    cid = "cid-cb-limit-reject"
+    reset_duplicate_client_order_guard_for_tests()
+    mock = MagicMock()
+    mock.limit_order_gtc_sell.return_value = {
+        "success": False,
+        "error_response": {
+            "message": "post only would take liquidity",
+            "error": "INVALID_ORDER",
+        },
+    }
+    ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
+    ad.is_enabled = lambda: True  # type: ignore[method-assign]
+    ad._require_client = lambda: mock  # type: ignore[method-assign]
+    _attach_product(ad)
+
+    out = ad.place_limit_order_gtc(
+        product_id="BTC-USD",
+        side="sell",
+        base_size="0.001",
+        limit_price="99999",
+        client_order_id=cid,
+    )
+    assert out["ok"] is False
+    assert "post only" in out["error"].lower()
+    assert out["client_order_id"] == cid
+    assert out.get("order_id") is None
+    reset_duplicate_client_order_guard_for_tests()
+
+
+def test_place_limit_order_success_without_broker_order_id_is_not_ok():
+    cid = "cid-cb-limit-missing-oid"
+    reset_duplicate_client_order_guard_for_tests()
+    mock = MagicMock()
+    mock.limit_order_gtc_sell.return_value = {
+        "success": True,
+        "success_response": {},
+    }
+    ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
+    ad.is_enabled = lambda: True  # type: ignore[method-assign]
+    ad._require_client = lambda: mock  # type: ignore[method-assign]
+    _attach_product(ad)
+
+    out = ad.place_limit_order_gtc(
+        product_id="BTC-USD",
+        side="sell",
+        base_size="0.001",
+        limit_price="99999",
+        client_order_id=cid,
+    )
+    assert out["ok"] is False
+    assert "missing order_id" in out["error"]
+    assert out["client_order_id"] == cid
+    assert out.get("order_id") is None
     reset_duplicate_client_order_guard_for_tests()
 
 
@@ -392,6 +509,7 @@ def test_place_market_order_duplicate_cid_intra_process(db):
     ad = CoinbaseSpotAdapter(client_factory=lambda: mock)
     ad.is_enabled = lambda: True  # type: ignore[method-assign]
     ad._require_client = lambda: mock  # type: ignore[method-assign]
+    _attach_product(ad)
 
     first = ad.place_market_order(
         product_id="BTC-USD", side="buy", base_size="0.001", client_order_id=cid,

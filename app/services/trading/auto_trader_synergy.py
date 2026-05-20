@@ -89,12 +89,12 @@ def maybe_scale_in(
     except Exception:
         pass
 
-    base = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 300.0))
-    add = float(getattr(settings, "chili_autotrader_synergy_scale_notional_usd", 150.0))
+    existing_notional = float(t.entry_price) * float(t.quantity)
+    base = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 0.0) or 0.0)
+    add = float(getattr(settings, "chili_autotrader_synergy_scale_notional_usd", 0.0) or 0.0)
     if add <= 0 or current_price <= 0:
         return None
-    max_total = base * 2.0  # plan cap: base + scale <= 2x base notional
-    existing_notional = float(t.entry_price) * float(t.quantity)
+    max_total = (base if base > 0 else existing_notional) + add
     if existing_notional + add > max_total + 1e-6:
         return None
 

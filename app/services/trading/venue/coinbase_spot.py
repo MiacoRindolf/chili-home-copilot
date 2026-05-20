@@ -771,10 +771,13 @@ class CoinbaseSpotAdapter(VenueAdapter):
             product_id = _normalize_product_id(product_id)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        side_l = side.lower()
+        if side_l not in ("buy", "sell"):
+            return {"ok": False, "error": f"invalid side: {side}", "client_order_id": client_order_id}
         # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
         # tier blocks every entry path when live + tripped; pass-through when
         # disabled, in shadow mode, or insufficient history (fail-OPEN).
-        if side.lower() == "buy":
+        if side_l == "buy":
             _ok, _br_reason = _assert_portfolio_breaker_ok()
             if not _ok:
                 return {
@@ -797,6 +800,35 @@ class CoinbaseSpotAdapter(VenueAdapter):
                 pass
             return rate_limiter.rate_limited_response(_VENUE, retry_after, client_order_id=cid)
         pid = _to_product_id(product_id)
+        try:
+            prod = self._get_product_info_cached(pid)
+        except VenueAdapterError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "client_order_id": cid,
+                "code": getattr(e, "code", None),
+            }
+        try:
+            base_size = _quantize_size(float(base_size), prod.base_increment)
+        except (TypeError, ValueError) as e:
+            return {
+                "ok": False,
+                "error": f"base_size quantization failed: {e}",
+                "client_order_id": cid,
+            }
+        if Decimal(base_size) <= 0:
+            return {
+                "ok": False,
+                "error": f"quantized base_size <= 0 ({base_size})",
+                "client_order_id": cid,
+            }
+        if prod.base_min_size is not None and Decimal(base_size) < Decimal(str(prod.base_min_size)):
+            return {
+                "ok": False,
+                "error": f"base_size {base_size} below product base_min_size {prod.base_min_size}",
+                "client_order_id": cid,
+            }
         # P1.1 — about to hit the broker; pre-submit SUBMITTING transition so
         # the state machine sees the order exist before any ACK. Safe no-op
         # when the feature flag is off (standalone helper short-circuits).
@@ -812,13 +844,10 @@ class CoinbaseSpotAdapter(VenueAdapter):
             pass
         try:
             c = self._require_client()
-            side_l = side.lower()
             if side_l == "buy":
                 resp = c.market_order_buy(client_order_id=cid, product_id=pid, base_size=str(base_size))
             elif side_l == "sell":
                 resp = c.market_order_sell(client_order_id=cid, product_id=pid, base_size=str(base_size))
-            else:
-                return {"ok": False, "error": f"invalid side: {side}"}
             rd = _as_dict(resp)
             ok = bool(rd.get("success"))
             sr = _as_dict(rd.get("success_response"))
@@ -829,8 +858,8 @@ class CoinbaseSpotAdapter(VenueAdapter):
             # 429s and validation errors into ok=True. Real success requires the
             # broker's ``success`` flag.
             broker_oid = sr.get("order_id") or None
-            if ok:
-                oid = broker_oid or cid
+            if ok and broker_oid:
+                oid = broker_oid
                 idempotency_store.remember(
                     cid,
                     venue=_VENUE,
@@ -855,7 +884,31 @@ class CoinbaseSpotAdapter(VenueAdapter):
                 except Exception:
                     pass
                 cb.clear_cache()
-                return {"ok": True, "order_id": oid, "client_order_id": cid, "raw": rd}
+                return {
+                    "ok": True,
+                    "order_id": oid,
+                    "client_order_id": cid,
+                    "base_size": base_size,
+                    "raw": rd,
+                }
+            if ok and not broker_oid:
+                try:
+                    order_state_machine.record_transition_standalone(
+                        to_state=order_state_machine.OrderState.REJECTED,
+                        venue=_VENUE,
+                        source="cb_place_market",
+                        client_order_id=cid,
+                        broker_status="missing_order_id",
+                        raw_payload={"product_id": pid, "response": rd},
+                    )
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "error": "broker success response missing order_id",
+                    "client_order_id": cid,
+                    "raw": rd,
+                }
             er = _as_dict(rd.get("error_response"))
             # Broker refused at submit — REJECTED.
             try:
@@ -894,10 +947,62 @@ class CoinbaseSpotAdapter(VenueAdapter):
             product_id = _normalize_product_id(product_id)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        side_l = side.lower()
+        if side_l not in ("buy", "sell"):
+            return {"ok": False, "error": f"invalid side: {side}", "client_order_id": client_order_id}
+        cid = client_order_id or str(uuid.uuid4())
+        if idempotency_store.is_duplicate(cid, venue=_VENUE):
+            return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
+        pid = _to_product_id(product_id)
+        try:
+            prod = self._get_product_info_cached(pid)
+        except VenueAdapterError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "client_order_id": cid,
+                "code": getattr(e, "code", None),
+            }
+        try:
+            base_size = _quantize_size(float(base_size), prod.base_increment)
+            price_mode = "down" if side_l == "buy" else "up"
+            limit_price = _quantize_price(float(limit_price), prod.quote_increment, mode=price_mode)
+        except (TypeError, ValueError) as e:
+            return {
+                "ok": False,
+                "error": f"limit order quantization failed: {e}",
+                "client_order_id": cid,
+            }
+        if Decimal(base_size) <= 0:
+            return {
+                "ok": False,
+                "error": f"quantized base_size <= 0 ({base_size})",
+                "client_order_id": cid,
+            }
+        if prod.base_min_size is not None and Decimal(base_size) < Decimal(str(prod.base_min_size)):
+            return {
+                "ok": False,
+                "error": f"base_size {base_size} below product base_min_size {prod.base_min_size}",
+                "client_order_id": cid,
+            }
+        if Decimal(limit_price) <= 0:
+            return {
+                "ok": False,
+                "error": f"quantized limit_price <= 0 ({limit_price})",
+                "client_order_id": cid,
+            }
+        if prod.quote_min_size is not None:
+            notional = Decimal(base_size) * Decimal(limit_price)
+            if notional < Decimal(str(prod.quote_min_size)):
+                return {
+                    "ok": False,
+                    "error": f"notional {notional} below product quote_min_size {prod.quote_min_size}",
+                    "client_order_id": cid,
+                }
         # f-phase3-stop-bleed D4 — BUY pre-flight against local
         # buying-power cache. Refuses orders the broker would reject as
         # Insufficient balance, sparing the round-trip + rate-limit charge.
-        if side.upper() == "BUY":
+        if side_l == "buy":
             _preflight_refusal = _coinbase_preflight_cash_check(
                 product_id=product_id,
                 base_size=base_size,
@@ -908,17 +1013,14 @@ class CoinbaseSpotAdapter(VenueAdapter):
         # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
         # tier runs AFTER the local cash preflight so the cheaper guard fires
         # first; the breaker still short-circuits before idempotency/rate-limit.
-        if side.lower() == "buy":
+        if side_l == "buy":
             _ok, _br_reason = _assert_portfolio_breaker_ok()
             if not _ok:
                 return {
                     "ok": False,
                     "error": f"portfolio_breaker:{_br_reason}",
-                    "client_order_id": client_order_id,
+                    "client_order_id": cid,
                 }
-        cid = client_order_id or str(uuid.uuid4())
-        if idempotency_store.is_duplicate(cid, venue=_VENUE):
-            return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
         allowed, retry_after = rate_limiter.try_acquire(_VENUE)
         if not allowed:
             # P1.2 — record rate-limit exhaustion for the health breaker.
@@ -929,7 +1031,6 @@ class CoinbaseSpotAdapter(VenueAdapter):
             except Exception:
                 pass
             return rate_limiter.rate_limited_response(_VENUE, retry_after, client_order_id=cid)
-        pid = _to_product_id(product_id)
         # P1.1 — SUBMITTING before broker call.
         try:
             order_state_machine.record_transition_standalone(
@@ -948,7 +1049,6 @@ class CoinbaseSpotAdapter(VenueAdapter):
             pass
         try:
             c = self._require_client()
-            side_l = side.lower()
             # f-coinbase-maker-only-routing (2026-05-19): when post_only is
             # True, prefer the SDK's *_post_only variant so the broker
             # rejects orders that would cross as taker. Falls back to the
@@ -979,20 +1079,18 @@ class CoinbaseSpotAdapter(VenueAdapter):
                         resp = c.limit_order_gtc_sell(post_only=True, **_common_kwargs)
                 else:
                     resp = c.limit_order_gtc_sell(**_common_kwargs)
-            else:
-                return {"ok": False, "error": f"invalid side: {side}"}
             rd = _as_dict(resp)
             ok = bool(rd.get("success"))
             sr = _as_dict(rd.get("success_response"))
-            oid = sr.get("order_id") or cid
-            if ok or oid:
+            broker_oid = sr.get("order_id") or None
+            if ok and broker_oid:
                 idempotency_store.remember(
                     cid,
                     venue=_VENUE,
                     symbol=pid,
                     side=side_l,
                     qty=float(base_size or 0.0),
-                    broker_order_id=oid if oid != cid else None,
+                    broker_order_id=broker_oid,
                     status="submitted",
                 )
                 try:
@@ -1000,15 +1098,40 @@ class CoinbaseSpotAdapter(VenueAdapter):
                         to_state=order_state_machine.OrderState.ACK,
                         venue=_VENUE,
                         source="cb_place_limit",
-                        order_id=oid if oid != cid else None,
+                        order_id=broker_oid,
                         client_order_id=cid,
                         broker_status="accepted",
-                        raw_payload={"product_id": pid, "order_id": oid},
+                        raw_payload={"product_id": pid, "order_id": broker_oid},
                     )
                 except Exception:
                     pass
                 cb.clear_cache()
-                return {"ok": True, "order_id": oid, "client_order_id": cid, "raw": rd}
+                return {
+                    "ok": True,
+                    "order_id": broker_oid,
+                    "client_order_id": cid,
+                    "base_size": base_size,
+                    "limit_price": limit_price,
+                    "raw": rd,
+                }
+            if ok and not broker_oid:
+                try:
+                    order_state_machine.record_transition_standalone(
+                        to_state=order_state_machine.OrderState.REJECTED,
+                        venue=_VENUE,
+                        source="cb_place_limit",
+                        client_order_id=cid,
+                        broker_status="missing_order_id",
+                        raw_payload={"product_id": pid, "response": rd},
+                    )
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "error": "broker success response missing order_id",
+                    "client_order_id": cid,
+                    "raw": rd,
+                }
             er = _as_dict(rd.get("error_response"))
             try:
                 order_state_machine.record_transition_standalone(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta
+import json
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -20,6 +21,14 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _json_safe(value: Any) -> Any:
+    """Return a JSONB-safe copy of broker payloads that may contain SDK objects."""
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except Exception:
+        return {"_unserializable": str(value)[:4000]}
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -307,7 +316,7 @@ def record_execution_event(
         realized_slippage_bps=realized_slippage_bps,
         submit_to_ack_ms=_duration_ms(submitted_at, acknowledged_at),
         ack_to_first_fill_ms=_duration_ms(acknowledged_at, first_fill_at),
-        payload_json=dict(payload_json or {}),
+        payload_json=_json_safe(payload_json or {}),
     )
     db.add(event_row)
     db.flush()
@@ -383,7 +392,7 @@ def normalize_robinhood_order_event(
         "event_at": last_fill_at or acknowledged_at or _utcnow(),
         "reference_price": reference_price,
         "realized_slippage_bps": _buy_side_slippage_bps(reference_price, average_fill_price),
-        "payload_json": dict(order or {}),
+        "payload_json": _json_safe(order or {}),
     }
 
 
@@ -425,7 +434,7 @@ def normalize_coinbase_order_event(
         "event_at": last_fill_at or acknowledged_at or _utcnow(),
         "reference_price": reference_price,
         "realized_slippage_bps": _buy_side_slippage_bps(reference_price, average_fill_price),
-        "payload_json": dict(order or {}),
+        "payload_json": _json_safe(order or {}),
     }
 
 

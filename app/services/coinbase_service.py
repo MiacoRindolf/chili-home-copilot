@@ -842,6 +842,7 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     synced = filled = cancelled = errors = 0
 
     for trade in working_trades:
+        ticker_for_log = getattr(trade, "ticker", "?")
         try:
             cb_order = get_order_by_id(trade.broker_order_id)
             if not cb_order:
@@ -882,10 +883,15 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             synced += 1
 
         except Exception as e:
-            logger.warning(f"[coinbase] Order sync failed for {trade.ticker}: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.warning(f"[coinbase] Order sync failed for {ticker_for_log}: {e}")
             errors += 1
 
     for trade in open_with_pending_exit:
+        ticker_for_log = getattr(trade, "ticker", "?")
         try:
             pending_order_id = str(trade.pending_exit_order_id or "")
             cb_order = get_order_by_id(pending_order_id)
@@ -925,7 +931,11 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             synced += 1
 
         except Exception as e:
-            logger.warning(f"[coinbase] Pending exit sync failed for {trade.ticker}: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.warning(f"[coinbase] Pending exit sync failed for {ticker_for_log}: {e}")
             errors += 1
 
     if synced:

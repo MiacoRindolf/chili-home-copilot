@@ -2064,14 +2064,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_USER_ID"),
     )
     chili_autotrader_per_trade_notional_usd: float = Field(
-        default=300.0,
-        ge=1.0,
+        default=0.0,
+        ge=0.0,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PER_TRADE_NOTIONAL_USD"),
+        description=(
+            "Deprecated explicit dollar fallback for autotrader entries. "
+            "Leave at 0 so sizing comes from equity risk budget + dial."
+        ),
+    )
+    chili_autotrader_per_trade_risk_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PER_TRADE_RISK_PCT"),
+        description="Percent of effective account equity allocated before adaptive sizing overlays.",
     )
     chili_autotrader_synergy_scale_notional_usd: float = Field(
-        default=150.0,
+        default=0.0,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_SCALE_NOTIONAL_USD"),
+        description=(
+            "Explicit dollar add-on for scale-ins. Leave at 0 unless the "
+            "operator intentionally enables synergy sizing."
+        ),
     )
     chili_autotrader_synergy_enabled: bool = Field(
         default=False,
@@ -2126,9 +2141,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_CONFIDENCE_FLOOR"),
     )
     chili_autotrader_min_projected_profit_pct: float = Field(
-        default=12.0,
+        default=0.0,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MIN_PROJECTED_PROFIT_PCT"),
+        description=(
+            "Deprecated legacy projected-profit floor. Current entry admission "
+            "uses expected net edge from reward, stop risk, probability, and TCA."
+        ),
     )
     chili_autotrader_max_symbol_price_usd: float = Field(
         default=50.0,
@@ -2461,18 +2480,19 @@ class Settings(BaseSettings):
         default=30,
         validation_alias=AliasChoices("CHILI_MIN_EDGE_SAFETY_BUFFER_BPS"),
     )
-    # Per-venue notional cap (USD). Enforced INDEPENDENTLY of RH
-    # cap per Phase 1 design constraint #1 (separate per-venue caps,
-    # no aggregation). Default 50 -- conservative paper-soak floor;
-    # operator raises after Phase 6 paper soak validates the chain.
+    # Optional per-venue notional cap (USD) for CHILI-managed Coinbase
+    # autotrader exposure. 0 disables the static cap; sizing, buying power,
+    # cost/edge, and portfolio gates remain active.
     chili_coinbase_max_notional_usd: float = Field(
-        default=50.0,
+        default=0.0,
+        ge=0.0,
         validation_alias=AliasChoices("CHILI_COINBASE_MAX_NOTIONAL_USD"),
     )
-    # Per-venue concurrent-positions cap. 3 is the conservative
-    # paper-soak default; raises post-Phase-6 with operator review.
+    # Optional per-venue concurrent-position cap for CHILI-managed Coinbase
+    # autotrader exposure. 0 disables the static cap.
     chili_coinbase_max_concurrent_positions: int = Field(
-        default=3,
+        default=0,
+        ge=0,
         validation_alias=AliasChoices("CHILI_COINBASE_MAX_CONCURRENT_POSITIONS"),
     )
     # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size

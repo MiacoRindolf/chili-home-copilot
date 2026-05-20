@@ -38,14 +38,15 @@ def test_run_auto_trader_tick_paper_creates_paper_trade(db, monkeypatch):
         chili_autotrader_llm_revalidation_enabled=False,
         chili_autotrader_rth_only=False,
         chili_autotrader_confidence_floor=0.5,
-        chili_autotrader_min_projected_profit_pct=12.0,
+        chili_autotrader_min_projected_profit_pct=0.0,
         chili_autotrader_max_symbol_price_usd=500.0,
         chili_autotrader_max_entry_slippage_pct=5.0,
         chili_autotrader_daily_loss_cap_usd=500.0,
         chili_autotrader_max_concurrent=5,
-        chili_autotrader_per_trade_notional_usd=300.0,
+        chili_autotrader_per_trade_notional_usd=0.0,
+        chili_autotrader_per_trade_risk_pct=1.0,
         chili_autotrader_synergy_enabled=False,
-        chili_autotrader_synergy_scale_notional_usd=150.0,
+        chili_autotrader_synergy_scale_notional_usd=0.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
     )
     monkeypatch.setattr(at_mod, "settings", cfg)
@@ -64,6 +65,17 @@ def test_run_auto_trader_tick_paper_creates_paper_trade(db, monkeypatch):
     )
 
     with patch.object(at_mod, "_current_price", return_value=40.0):
+        from app.services.trading import auto_trader_rules as rules_mod
+        monkeypatch.setattr(
+            rules_mod,
+            "resolve_effective_capital",
+            lambda *a, **k: (100_000.0, "test_equity"),
+        )
+        monkeypatch.setattr(
+            rules_mod,
+            "resolve_brain_risk_context",
+            lambda *a, **k: {"dial_value": 1.0, "source": "test"},
+        )
         with patch(
             "app.services.trading.portfolio_risk.check_new_trade_allowed",
             return_value=(True, "ok"),
@@ -116,14 +128,15 @@ def test_run_auto_trader_tick_matches_null_user_alerts(db, monkeypatch):
         chili_autotrader_llm_revalidation_enabled=False,
         chili_autotrader_rth_only=False,
         chili_autotrader_confidence_floor=0.5,
-        chili_autotrader_min_projected_profit_pct=12.0,
+        chili_autotrader_min_projected_profit_pct=0.0,
         chili_autotrader_max_symbol_price_usd=500.0,
         chili_autotrader_max_entry_slippage_pct=5.0,
         chili_autotrader_daily_loss_cap_usd=500.0,
         chili_autotrader_max_concurrent=5,
-        chili_autotrader_per_trade_notional_usd=300.0,
+        chili_autotrader_per_trade_notional_usd=0.0,
+        chili_autotrader_per_trade_risk_pct=1.0,
         chili_autotrader_synergy_enabled=False,
-        chili_autotrader_synergy_scale_notional_usd=150.0,
+        chili_autotrader_synergy_scale_notional_usd=0.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
     )
     monkeypatch.setattr(at_mod, "settings", cfg)
@@ -142,6 +155,17 @@ def test_run_auto_trader_tick_matches_null_user_alerts(db, monkeypatch):
     )
 
     with patch.object(at_mod, "_current_price", return_value=50.0):
+        from app.services.trading import auto_trader_rules as rules_mod
+        monkeypatch.setattr(
+            rules_mod,
+            "resolve_effective_capital",
+            lambda *a, **k: (100_000.0, "test_equity"),
+        )
+        monkeypatch.setattr(
+            rules_mod,
+            "resolve_brain_risk_context",
+            lambda *a, **k: {"dial_value": 1.0, "source": "test"},
+        )
         with patch(
             "app.services.trading.portfolio_risk.check_new_trade_allowed",
             return_value=(True, "ok"),

@@ -209,15 +209,28 @@ def test_gate_coinbase_tca_estimate_raises_threshold():
 # ── Per-venue cap cases ─────────────────────────────────────────────
 
 
-def _seed_open_coinbase_trade(db, *, trade_id, ticker, qty, entry_price):
+def _seed_open_coinbase_trade(
+    db,
+    *,
+    trade_id,
+    ticker,
+    qty,
+    entry_price,
+    auto_trader: bool = True,
+):
     """Seed an open Coinbase trade so the cap query sees it."""
     from app.models.trading import Trade
+    from app.services.trading.management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
+
     if db.query(Trade).filter(Trade.id == trade_id).first() is not None:
         return
     tr = Trade(
         id=trade_id, ticker=ticker, status="open",
         broker_source="coinbase", direction="long",
         quantity=qty, entry_price=entry_price,
+        auto_trader_version="v1" if auto_trader else None,
+        management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1 if auto_trader else "broker_sync",
+        tags="autotrader_v1" if auto_trader else "coinbase-sync",
     )
     db.add(tr)
     db.commit()
@@ -261,6 +274,41 @@ def test_cap_position_count_exceeded_blocks(db):
     )
     assert res.allowed is False
     assert res.reason == REASON_CAP_POSITIONS
+
+
+def test_cap_zero_static_limits_allows_managed_positions(db):
+    """0 disables the static Coinbase cap; other risk gates still apply."""
+    _seed_open_coinbase_trade(
+        db, trade_id=8018, ticker="AKT-USD", qty=100.0, entry_price=0.45,
+    )
+    s = _settings_stub(max_positions=0, max_notional=0.0)
+    res = per_venue_cap_check(
+        venue="coinbase", proposed_notional_usd=10_000.0,
+        db=db, settings_=s,
+    )
+    assert res.allowed is True
+    assert res.reason == REASON_CAP_OK
+    assert res.current_positions == 1
+
+
+def test_cap_ignores_passive_coinbase_sync_rows(db):
+    """A broker-sync Coinbase holding should not consume the autotrader lane."""
+    _seed_open_coinbase_trade(
+        db,
+        trade_id=8020,
+        ticker="THQ-USD",
+        qty=30_000.0,
+        entry_price=0.02,
+        auto_trader=False,
+    )
+    s = _settings_stub(max_positions=1, max_notional=400.0)
+    res = per_venue_cap_check(
+        venue="coinbase", proposed_notional_usd=300.0,
+        db=db, settings_=s,
+    )
+    assert res.allowed is True
+    assert res.reason == REASON_CAP_OK
+    assert res.current_positions == 0
 
 
 def test_cap_robinhood_venue_no_op(db):

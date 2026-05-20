@@ -23,7 +23,8 @@ tightened in isolation:
   3. :func:`per_venue_cap_check` — returns ``{allowed, reason,
      current_positions, current_notional}``. Per-venue caps are
      INDEPENDENT (Phase 1 design constraint #1; no cross-venue
-     aggregation).
+     aggregation) and apply to CHILI-managed autotrader exposure, not
+     passive broker-sync holdings.
 
 Helper-level testable: every public function accepts injection
 seams (settings_, db, fast_path_active) so unit tests can run
@@ -338,8 +339,10 @@ def per_venue_cap_check(
     venues today this returns ``allowed=True`` (the existing RH
     autotrader has its own size/heat gates upstream).
 
-    Reads currently-open Trades from ``trading_trades`` filtered to
-    ``broker_source = venue``.
+    Reads currently-open CHILI-managed/autotrader Trades from
+    ``trading_trades`` filtered to ``broker_source = venue``. Passive
+    broker-sync rows are intentionally ignored here; otherwise an old
+    manually-held Coinbase position consumes the strategy's concurrency lane.
     """
     venue_l = (venue or "").strip().lower()
     s = settings_
@@ -359,10 +362,10 @@ def per_venue_cap_check(
         )
 
     max_notional = float(
-        getattr(s, "chili_coinbase_max_notional_usd", 50.0)
+        getattr(s, "chili_coinbase_max_notional_usd", 0.0) or 0.0
     )
     max_positions = int(
-        getattr(s, "chili_coinbase_max_concurrent_positions", 3)
+        getattr(s, "chili_coinbase_max_concurrent_positions", 0) or 0
     )
 
     try:
@@ -373,6 +376,10 @@ def per_venue_cap_check(
               FROM trading_trades
              WHERE status = 'open'
                AND LOWER(COALESCE(broker_source, '')) = 'coinbase'
+               AND (
+                    LOWER(COALESCE(auto_trader_version, '')) = 'v1'
+                    OR LOWER(COALESCE(management_scope, '')) = 'auto_trader_v1'
+               )
         """)).fetchall()
         current_positions = len(rows)
         current_notional = sum(float(r.notional or 0.0) for r in rows)
@@ -387,13 +394,13 @@ def per_venue_cap_check(
             current_positions=999, current_notional_usd=99999.0,
         )
 
-    if current_positions >= max_positions:
+    if max_positions > 0 and current_positions >= max_positions:
         return CapDecision(
             allowed=False, reason=REASON_CAP_POSITIONS,
             current_positions=current_positions,
             current_notional_usd=current_notional,
         )
-    if (current_notional + float(proposed_notional_usd)) > max_notional:
+    if max_notional > 0 and (current_notional + float(proposed_notional_usd)) > max_notional:
         return CapDecision(
             allowed=False, reason=REASON_CAP_NOTIONAL,
             current_positions=current_positions,

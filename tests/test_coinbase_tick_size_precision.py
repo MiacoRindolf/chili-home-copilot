@@ -105,6 +105,10 @@ def _adapter_with_product(prod: NormalizedProduct, *, sdk_response=None):
     fake_client = MagicMock()
     fake_client.stop_limit_order_gtc_buy.return_value = sdk_response
     fake_client.stop_limit_order_gtc_sell.return_value = sdk_response
+    fake_client.limit_order_gtc_buy.return_value = sdk_response
+    fake_client.limit_order_gtc_sell.return_value = sdk_response
+    fake_client.market_order_buy.return_value = sdk_response
+    fake_client.market_order_sell.return_value = sdk_response
     adapter._client = lambda: fake_client  # type: ignore[assignment]
 
     from app.services.trading.venue.protocol import FreshnessMeta
@@ -359,6 +363,47 @@ def test_size_quantized_down_to_base_increment_in_sdk_call(monkeypatch):
     )
     call_kwargs = sdk.stop_limit_order_gtc_sell.call_args.kwargs
     assert call_kwargs["base_size"] == "10.12"
+
+
+def test_limit_order_quantizes_size_and_limit_price_in_sdk_call(monkeypatch):
+    """Regular limit entries use the venue product increments too."""
+    _bypass_gates(monkeypatch)
+    prod = _product(pid="THQ-USD", base_increment=0.1, quote_increment=0.00001)
+    adapter, sdk, _ = _adapter_with_product(prod)
+
+    res = adapter.place_limit_order_gtc(
+        product_id="THQ-USD",
+        side="sell",
+        base_size="5950.36752793",
+        limit_price="0.020481",
+        client_order_id="limit-quant",
+    )
+
+    assert res["ok"] is True
+    call_kwargs = sdk.limit_order_gtc_sell.call_args.kwargs
+    assert call_kwargs["base_size"] == "5950.3"
+    assert call_kwargs["limit_price"] == "0.02049"
+    assert res["base_size"] == "5950.3"
+    assert res["limit_price"] == "0.02049"
+
+
+def test_market_order_quantizes_size_in_sdk_call(monkeypatch):
+    """Market entries should not send more size precision than Coinbase allows."""
+    _bypass_gates(monkeypatch)
+    prod = _product(pid="THQ-USD", base_increment=0.1, quote_increment=0.00001)
+    adapter, sdk, _ = _adapter_with_product(prod)
+
+    res = adapter.place_market_order(
+        product_id="THQ-USD",
+        side="sell",
+        base_size="5950.36752793",
+        client_order_id="market-quant",
+    )
+
+    assert res["ok"] is True
+    call_kwargs = sdk.market_order_sell.call_args.kwargs
+    assert call_kwargs["base_size"] == "5950.3"
+    assert res["base_size"] == "5950.3"
 
 
 def test_existing_safety_gates_intact_duplicate_check_short_circuits(monkeypatch):

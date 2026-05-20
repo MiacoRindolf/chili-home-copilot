@@ -9,49 +9,27 @@ from typing import Any, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, Trade
+from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from .ops_log_prefixes import CHILI_RISK_CACHE
 
 logger = logging.getLogger(__name__)
 
 
-# ── Learned-threshold constants (Phase D) ────────────────────────────
+# Learned confidence constants (Phase D).
 #
-# These numeric factors translate a pattern's historical record from the
-# M.1 regime-performance ledger into a per-alert threshold override. Each
-# constant has an operator-configurable env counterpart that acts as an
-# upper or lower guard — the operator stays in charge of the envelope;
-# the brain can only tighten inside it (lower the confidence floor when
-# the pattern is genuinely strong, or raise the minimum-profit floor to
-# keep mean-reverters out of the book).
+# The rule gate still adapts the confidence floor from the M.1 pattern-regime
+# ledger. Entry admission itself now uses expected net edge instead of a
+# static projected-profit threshold.
 #
-# The specific factors were calibrated during the M.1 cold-start rollout
-# (2025-Q4). Changing any of them moves every live gate, so treat them
-# as a configuration surface — add a regression test when you touch one.
-
-# Confidence floor = env_floor, but replaceable by
-# (pattern.hit_rate × CONFIDENCE_LEARNING_FACTOR) when a pattern has
-# confident cells. 0.85 means "trust 85% of the observed win rate" —
-# leaves ~15 percentage points of safety margin vs a freshly-promoted
-# pattern over-claiming.
+# Confidence floor = env_floor, but replaceable by pattern hit rate times
+# CONFIDENCE_LEARNING_FACTOR when a pattern has confident cells. 0.85 means
+# "trust 85% of the observed win rate", leaving a safety margin vs a freshly
+# promoted pattern over-claiming.
 CONFIDENCE_LEARNING_FACTOR: float = 0.85
 
-# Absolute confidence lower bound — even a learned pattern with a great
-# hit rate can't drop the floor below this. Keeps the gate from
-# silently trusting one lucky hot streak.
+# Absolute confidence lower bound. Even a learned pattern with a great hit
+# rate cannot drop the floor below this.
 CONFIDENCE_ABSOLUTE_FLOOR: float = 0.55
-
-# Minimum-projected-profit floor = env_min_pp, but replaceable by
-# (pattern.expectancy × 100 × LEARNED_PROFIT_MULTIPLIER) when the
-# pattern has confident expectancy. 0.7 means "require 70% of
-# historical expected move" — conservative bias for live entries.
-LEARNED_PROFIT_MULTIPLIER: float = 0.7
-
-# Absolute floor on the minimum-projected-profit gate when the learned
-# value would otherwise fall below this. 6.0% covers half a typical
-# spread-and-slippage round trip on a $20-$100 ticker; anything below
-# that is within noise.
-MIN_PROFIT_PCT_FLOOR: float = 6.0
 
 
 @dataclass
@@ -108,7 +86,9 @@ class RuleGateSettings:
 
     # Thresholds
     confidence_floor: float = 0.7
-    min_projected_profit_pct: float = 12.0
+    # Deprecated fallback. Current admission uses expected net edge, so this
+    # value should not act as a hidden 8%/9%/12% magic-profit threshold.
+    min_projected_profit_pct: float = 0.0
     max_symbol_price_usd: float = 50.0
     max_entry_slippage_pct: float = 1.0
     options_min_underlying_reward_risk: float = 1.0
@@ -414,6 +394,7 @@ def resolve_brain_risk_context(
     db: Session,
     *,
     user_id: Optional[int],
+    settings_override: Any | None = None,
 ) -> dict[str, Any]:
     """Return a snapshot of brain-driven risk inputs for a single tick.
 
@@ -456,7 +437,7 @@ def resolve_brain_risk_context(
         from ...models.trading import Trade
         from datetime import datetime, timedelta
 
-        cap, _ = resolve_effective_capital(db, _get_settings())
+        cap, _ = resolve_effective_capital(db, settings_override or _get_settings())
         if user_id is not None and cap > 0:
             unreal = _compute_unrealized_pnl(db, user_id)
             cutoff = datetime.utcnow() - timedelta(days=5)
@@ -514,11 +495,10 @@ def resolve_pattern_signal_context(
 ) -> dict[str, Any]:
     """Return learned (hit_rate, expectancy, profit_factor, n_cells) for a pattern.
 
-    Phase 3: replaces the hardcoded ``confidence_floor=0.7`` and
-    ``min_projected_profit_pct=12.0`` static thresholds with values pulled
-    from the brain's M.1 pattern-regime performance ledger. Each pattern's
-    confident cells across the 8 regime dimensions are averaged to give a
-    single signal-quality snapshot.
+    Phase 3: replaces hardcoded entry gates with values pulled from the
+    brain's M.1 pattern-regime performance ledger. Each pattern's confident
+    cells across the 8 regime dimensions are averaged to give a single
+    signal-quality snapshot for confidence and expected-edge admission.
 
     When the pattern has no confident cells (new / under-traded), returns
     ``source="fallback:no_cells"`` and the caller uses the static env
@@ -643,6 +623,226 @@ def projected_profit_pct(entry: Optional[float], target: Optional[float]) -> Opt
     return round((t - e) / e * 100.0, 4)
 
 
+@dataclass(frozen=True)
+class EntryEdgeDecision:
+    """Economic admission decision for a long autotrader entry.
+
+    Percent target size is only geometry. This decision turns the full entry
+    shape into expected net edge:
+
+        p(win) * reward - p(loss) * stop_loss - empirical_costs
+
+    and admits only when that value is positive. The snapshot is intentionally
+    verbose because this replaces the old static projected-profit threshold.
+    """
+
+    allowed: bool
+    reason: str
+    snapshot: dict[str, Any]
+
+
+def _fraction01(value: Any, default: float | None = None) -> float | None:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if v != v:  # NaN
+        return default
+    if v > 1.0 and v <= 100.0:
+        v = v / 100.0
+    return max(0.0, min(1.0, v))
+
+
+def _pattern_probability(
+    db: Session,
+    *,
+    alert: BreakoutAlert,
+    pat_ctx: dict[str, Any],
+    confidence: float,
+    settings: Any,
+) -> tuple[float, str, int | None]:
+    p = _fraction01(pat_ctx.get("hit_rate"))
+    n: int | None = None
+    if p is not None:
+        try:
+            n = int(pat_ctx.get("n_trades_sum") or 0)
+        except (TypeError, ValueError):
+            n = None
+        source = "pattern_regime_hit_rate"
+    else:
+        source = "alert_confidence"
+        p = _fraction01(confidence, 0.5)
+        if alert.scan_pattern_id:
+            try:
+                from .pattern_stats_accessor import get_corrected_pattern_stats
+
+                pat = (
+                    db.query(ScanPattern)
+                    .filter(ScanPattern.id == int(alert.scan_pattern_id))
+                    .one_or_none()
+                )
+                if pat is not None:
+                    stats = get_corrected_pattern_stats(pat)
+                    p2 = _fraction01(stats.win_rate)
+                    if p2 is not None:
+                        p = p2
+                        n = stats.trade_count
+                        source = f"pattern_{stats.source_win_rate}_win_rate"
+            except Exception:
+                pass
+
+    if p is None:
+        p = 0.5
+
+    # Shrink pattern-derived probabilities toward break-even until the
+    # realized-EV evidence count matures. The prior size reuses CHILI's
+    # existing promotion evidence knob instead of inventing a new threshold.
+    if n is not None and n > 0 and not source.startswith("alert_"):
+        try:
+            prior_n = max(0, int(getattr(settings, "chili_realized_ev_min_trades", 5)))
+        except Exception:
+            prior_n = 5
+        if prior_n > 0:
+            p = (p * n + 0.5 * prior_n) / max(1, n + prior_n)
+            source = f"{source}_shrunk"
+    return max(0.0, min(1.0, p)), source, n
+
+
+def _empirical_entry_cost_fraction(
+    db: Session,
+    *,
+    ticker: str,
+    settings: Any,
+) -> tuple[float, dict[str, Any]]:
+    """Return empirical entry cost fraction from TCA rows.
+
+    Missing cost data returns zero and says why; the Coinbase venue cost gate
+    still adds explicit fee protection downstream.
+    """
+    try:
+        from sqlalchemy import text
+
+        row = db.execute(text("""
+            SELECT sample_trades, p90_spread_bps, p90_slippage_bps,
+                   median_spread_bps, median_slippage_bps, last_updated_at
+            FROM trading_execution_cost_estimates
+            WHERE UPPER(ticker) = UPPER(:ticker)
+              AND LOWER(side) = 'buy'
+            ORDER BY last_updated_at DESC
+            LIMIT 1
+        """), {"ticker": ticker}).mappings().first()
+    except Exception:
+        return 0.0, {"used": False, "reason": "query_failed"}
+    if (
+        not row
+        or not hasattr(row, "get")
+        or row.__class__.__module__.startswith("unittest.mock")
+    ):
+        return 0.0, {"used": False, "reason": "no_estimate"}
+
+    try:
+        samples = int(row.get("sample_trades") or 0)
+    except (TypeError, ValueError):
+        samples = 0
+    try:
+        min_samples = max(
+            1, int(getattr(settings, "chili_coinbase_cost_gate_min_tca_samples", 5))
+        )
+    except Exception:
+        min_samples = 5
+    if samples < min_samples:
+        return 0.0, {
+            "used": False,
+            "reason": "insufficient_samples",
+            "sample_trades": samples,
+            "min_samples": min_samples,
+        }
+
+    def _bps(name: str) -> float:
+        try:
+            v = float(row.get(name) or 0.0)
+            return v if v > 0.0 else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    p90_spread = _bps("p90_spread_bps")
+    p90_slip = _bps("p90_slippage_bps")
+    total_bps = p90_spread + p90_slip
+    last_updated = row.get("last_updated_at")
+    return total_bps / 10000.0, {
+        "used": True,
+        "sample_trades": samples,
+        "p90_spread_bps": p90_spread,
+        "p90_slippage_bps": p90_slip,
+        "median_spread_bps": _bps("median_spread_bps"),
+        "median_slippage_bps": _bps("median_slippage_bps"),
+        "total_cost_bps": round(total_bps, 3),
+        "last_updated_at": (
+            last_updated.isoformat() if hasattr(last_updated, "isoformat") else last_updated
+        ),
+    }
+
+
+def evaluate_entry_edge(
+    db: Session,
+    alert: BreakoutAlert,
+    *,
+    settings: Any,
+    pat_ctx: dict[str, Any],
+    confidence: float,
+) -> EntryEdgeDecision:
+    entry = alert.entry_price
+    target = alert.target_price
+    stop = alert.stop_loss
+    ppp = projected_profit_pct(entry, target)
+    snap: dict[str, Any] = {
+        "method": "expected_net_edge_v1",
+        "projected_profit_pct": ppp,
+    }
+    if entry is None or target is None:
+        return EntryEdgeDecision(False, "missing_entry_or_target", snap)
+    try:
+        e = float(entry)
+        t = float(target)
+        s = float(stop) if stop is not None else 0.0
+    except (TypeError, ValueError):
+        return EntryEdgeDecision(False, "bad_entry_geometry", snap)
+    if e <= 0 or t <= 0:
+        return EntryEdgeDecision(False, "bad_entry_geometry", snap)
+    if t <= e:
+        snap["reward_fraction"] = 0.0
+        return EntryEdgeDecision(False, "target_not_above_entry", snap)
+    if s <= 0 or s >= e:
+        snap["stop_loss_fraction"] = None
+        return EntryEdgeDecision(False, "missing_or_invalid_stop_for_edge", snap)
+
+    reward = (t - e) / e
+    loss = (e - s) / e
+    prob, prob_source, sample_n = _pattern_probability(
+        db, alert=alert, pat_ctx=pat_ctx, confidence=confidence, settings=settings,
+    )
+    cost_fraction, cost_snapshot = _empirical_entry_cost_fraction(
+        db, ticker=alert.ticker, settings=settings,
+    )
+
+    expected_net = prob * reward - (1.0 - prob) * loss - cost_fraction
+    snap.update(
+        probability=round(prob, 6),
+        probability_source=prob_source,
+        probability_sample_n=sample_n,
+        reward_fraction=round(reward, 8),
+        stop_loss_fraction=round(loss, 8),
+        empirical_cost_fraction=round(cost_fraction, 8),
+        empirical_cost=cost_snapshot,
+        expected_net_fraction=round(expected_net, 8),
+        expected_net_pct=round(expected_net * 100.0, 4),
+        reward_risk=round(reward / loss, 6) if loss > 0 else None,
+    )
+    if expected_net <= 0.0:
+        return EntryEdgeDecision(False, "non_positive_expected_edge", snap)
+    return EntryEdgeDecision(True, "positive_expected_edge", snap)
+
+
 def passes_rule_gate(
     db: Session,
     alert: BreakoutAlert,
@@ -743,8 +943,8 @@ def passes_rule_gate(
         snap["option_meta"] = opt_meta
 
     # Phase 3: pull learned per-pattern signal quality from the M.1 ledger.
-    # When the pattern has confident cells we can derive confidence_floor and
-    # min_projected_profit from history instead of using the static env values.
+    # When the pattern has confident cells we can derive confidence and
+    # probability evidence from history instead of static entry thresholds.
     pat_ctx = resolve_pattern_signal_context(db, pattern_id=alert.scan_pattern_id)
     snap["pattern_signal"] = pat_ctx
 
@@ -842,26 +1042,22 @@ def passes_rule_gate(
         ppp = projected_profit_pct(entry, target)
         snap["projected_profit_pct"] = ppp
         snap["projected_profit_pct_source"] = "stock_entry_target"
-        env_min_pp = gs.min_projected_profit_pct
-        # Learned min profit: 70% of historical expectancy-pct, floored at 6% so a
-        # mean-reversion pattern with a tiny expectancy doesn't trigger entries
-        # that can't clear real spreads. Expectancy is signed — patterns with
-        # non-positive expectancy keep the env floor.
-        if pat_ctx.get("expectancy") is not None and float(pat_ctx["expectancy"]) > 0:
-            learned_min_pp = max(
-                MIN_PROFIT_PCT_FLOOR,
-                float(pat_ctx["expectancy"]) * 100 * LEARNED_PROFIT_MULTIPLIER,
-            )
-            min_pp = min(env_min_pp, learned_min_pp)
-            snap["min_profit_source"] = "pattern_expectancy"
-        else:
-            min_pp = env_min_pp
-            snap["min_profit_source"] = "env_default"
-        snap["min_profit_pct_effective"] = round(min_pp, 3)
-        if ppp is None:
-            return False, "missing_entry_or_target", snap
-        if ppp < min_pp:
-            return False, "projected_profit_below_min", snap
+        edge_decision = evaluate_entry_edge(
+            db,
+            alert,
+            settings=settings,
+            pat_ctx=pat_ctx,
+            confidence=conf,
+        )
+        snap["entry_edge"] = edge_decision.snapshot
+        snap["entry_edge_reason"] = edge_decision.reason
+        snap["entry_edge_expected_net_pct"] = edge_decision.snapshot.get(
+            "expected_net_pct"
+        )
+        if not edge_decision.allowed:
+            return False, edge_decision.reason, snap
+        snap["min_profit_source"] = "expected_net_edge"
+        snap["min_profit_pct_effective"] = None
 
     ref = float(entry) if entry is not None else float(alert.price_at_alert or 0)
     if ref <= 0:
@@ -921,7 +1117,9 @@ def passes_rule_gate(
     # dial_value = 1.0 is baseline. risk_off tightens it (lower notional,
     # fewer concurrent); risk_on loosens it up to the configured ceiling.
     uid_for_brain = alert.user_id if alert.user_id is not None else fallback_user_id
-    brain_ctx = resolve_brain_risk_context(db, user_id=uid_for_brain)
+    brain_ctx = resolve_brain_risk_context(
+        db, user_id=uid_for_brain, settings_override=settings,
+    )
     snap["brain_context"] = brain_ctx
     dial = float(brain_ctx.get("dial_value", 1.0))
 

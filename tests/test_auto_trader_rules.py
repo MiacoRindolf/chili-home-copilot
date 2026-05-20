@@ -114,7 +114,7 @@ def test_passes_rule_gate_slippage_fail(_mock_port, _mock_rth):
 
 @patch("app.services.trading.pattern_imminent_alerts.us_stock_session_open", return_value=True)
 @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, "ok"))
-def test_passes_rule_gate_projected_profit_fail(_mock_port, _mock_rth):
+def test_passes_rule_gate_expected_edge_fail(_mock_port, _mock_rth):
     db = MagicMock()
     alert = BreakoutAlert(
         ticker="AAA",
@@ -124,7 +124,7 @@ def test_passes_rule_gate_projected_profit_fail(_mock_port, _mock_rth):
         price_at_alert=10.0,
         entry_price=10.0,
         stop_loss=9.5,
-        target_price=10.5,
+        target_price=10.1,
         user_id=1,
     )
     ctx = RuleGateContext(current_price=10.0, autotrader_open_count=0, realized_loss_today_usd=0.0)
@@ -138,9 +138,10 @@ def test_passes_rule_gate_projected_profit_fail(_mock_port, _mock_rth):
     settings.chili_autotrader_max_concurrent = 5
     settings.chili_autotrader_assumed_capital_usd = 100_000.0
 
-    ok, reason, _ = passes_rule_gate(db, alert, settings=settings, ctx=ctx, for_new_entry=True)
+    ok, reason, snap = passes_rule_gate(db, alert, settings=settings, ctx=ctx, for_new_entry=True)
     assert not ok
-    assert reason == "projected_profit_below_min"
+    assert reason == "non_positive_expected_edge"
+    assert snap["entry_edge"]["expected_net_pct"] < 0
 
 
 # VV — per-lane concurrency cap tests. The rule gate should bucket the

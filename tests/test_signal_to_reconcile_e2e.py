@@ -67,16 +67,19 @@ def _autotrader_cfg(user_id: int) -> SimpleNamespace:
         chili_autotrader_llm_revalidation_enabled=False,
         chili_autotrader_rth_only=False,
         chili_autotrader_confidence_floor=0.5,
-        chili_autotrader_min_projected_profit_pct=12.0,
+        chili_autotrader_min_projected_profit_pct=0.0,
         chili_autotrader_max_symbol_price_usd=500.0,
         chili_autotrader_max_entry_slippage_pct=5.0,
         chili_autotrader_daily_loss_cap_usd=500.0,
         chili_autotrader_max_concurrent=5,
-        chili_autotrader_per_trade_notional_usd=300.0,
+        chili_autotrader_per_trade_notional_usd=0.0,
+        chili_autotrader_per_trade_risk_pct=1.0,
         chili_autotrader_synergy_enabled=False,
-        chili_autotrader_synergy_scale_notional_usd=150.0,
+        chili_autotrader_synergy_scale_notional_usd=0.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
         chili_feature_parity_enabled=False,
+        chili_autotrader_live_require_feature_parity=False,
+        chili_autotrader_live_require_venue_health_enabled=False,
         chili_robinhood_spot_adapter_enabled=True,
     )
 
@@ -144,6 +147,17 @@ def _run_live_autotrader(db, user_id: int, ticker: str, monkeypatch, broker_resu
     monkeypatch.setattr(at_mod, "find_open_autotrader_trade", lambda *a, **k: None)
     monkeypatch.setattr(at_mod, "find_open_autotrader_paper", lambda *a, **k: None)
     monkeypatch.setattr(at_mod, "maybe_scale_in", lambda *a, **k: None)
+    from app.services.trading import auto_trader_rules as rules_mod
+    monkeypatch.setattr(
+        rules_mod,
+        "resolve_effective_capital",
+        lambda *a, **k: (100_000.0, "test_equity"),
+    )
+    monkeypatch.setattr(
+        rules_mod,
+        "resolve_brain_risk_context",
+        lambda *a, **k: {"dial_value": 1.0, "source": "test"},
+    )
     monkeypatch.setattr(
         at_mod, "passes_rule_gate",
         lambda *a, **k: (True, "ok", {"projected_profit_pct": 20.0}),
@@ -155,6 +169,12 @@ def _run_live_autotrader(db, user_id: int, ticker: str, monkeypatch, broker_resu
     )
     from app.services.trading.venue import venue_health
     monkeypatch.setattr(venue_health, "is_venue_degraded", lambda *a, **k: False)
+    from app.services.trading import pdt_guard
+    monkeypatch.setattr(
+        pdt_guard,
+        "can_open_intraday_round_trip",
+        lambda *a, **k: SimpleNamespace(allowed=True, reason="test", snapshot={}),
+    )
 
     # The adapter calls broker_service.place_buy_order + is_connected.
     # Mocking just those makes the rest of the adapter path (idempotency
@@ -204,13 +224,13 @@ def _upsert_intent_for_trade(db, trade: Trade) -> int:
     return res.intent_id
 
 
-def test_e2e_alert_to_reconcile_agree_no_intent(db, monkeypatch):
-    """Happy path: alert → live fill → Trade exists with NO bracket intent →
-    broker shows matching position → classification is ``agree``.
+def test_e2e_alert_to_reconcile_backfills_missing_intent(db, monkeypatch):
+    """Alert -> live fill -> Trade exists with no bracket intent -> sweep
+    backfills an intent and classifies the broker's missing stop.
 
-    This is the common post-fill state before stop_engine has had a chance
-    to write the intent; the reconciler must not flag it as missing_stop
-    when there's nothing to be missing yet.
+    The reconciler now treats a post-fill trade without an intent as a
+    recoverable safety gap, backfills the local bracket intent, and then
+    reports the absent broker stop.
     """
     _shadow_mode(monkeypatch)
     u = models.User(name="e2e_agree_u")
@@ -238,10 +258,8 @@ def test_e2e_alert_to_reconcile_agree_no_intent(db, monkeypatch):
 
     summary = run_reconciliation_sweep(db, broker_view_fn=broker_fn)
     assert summary.trades_scanned == 1
-    # No bracket intent yet → classifier takes the agree path since qty
-    # matches and there's no missing-stop trigger (missing_stop requires
-    # has_local_intent).
-    assert summary.agree == 1, f"expected agree, got {summary.to_dict()}"
+    assert summary.missing_stop == 1, f"expected missing_stop, got {summary.to_dict()}"
+    assert summary.brackets_checked == 1
 
 
 def test_e2e_alert_to_reconcile_missing_stop_with_intent(db, monkeypatch):

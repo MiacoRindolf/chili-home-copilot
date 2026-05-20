@@ -200,12 +200,70 @@ def _resolve_user_id() -> Optional[int]:
     )
 
 
+def _resolve_entry_risk_notional(
+    db: Session,
+    *,
+    uid: int | None,
+) -> tuple[float, dict[str, Any]]:
+    """Resolve the base entry notional from account risk, not a fixed ticket.
+
+    The old path fell back to a hard $300 entry size. This helper prefers live
+    broker equity times the configured risk budget and risk dial. An explicit
+    dollar fallback is honored only when the operator sets it above zero.
+    """
+    from .auto_trader_rules import (
+        resolve_brain_risk_context,
+        resolve_effective_capital,
+    )
+
+    snap: dict[str, Any] = {}
+    try:
+        fallback_notional = float(
+            getattr(settings, "chili_autotrader_per_trade_notional_usd", 0.0) or 0.0
+        )
+    except Exception:
+        fallback_notional = 0.0
+    try:
+        per_trade_pct = float(
+            getattr(settings, "chili_autotrader_per_trade_risk_pct", 1.0) or 0.0
+        )
+    except Exception:
+        per_trade_pct = 1.0
+
+    equity, cap_source = resolve_effective_capital(db, settings)
+    brain_ctx = resolve_brain_risk_context(
+        db, user_id=uid, settings_override=settings,
+    )
+    try:
+        dial = float(brain_ctx.get("dial_value", 1.0))
+    except Exception:
+        dial = 1.0
+
+    snap["notional_risk_pct"] = per_trade_pct
+    snap["notional_dial"] = dial
+    snap["notional_capital_source"] = cap_source
+    snap["notional_capital_usd"] = round(float(equity or 0.0), 2)
+    snap["notional_explicit_fallback_usd"] = round(float(fallback_notional), 2)
+
+    if equity > 0 and per_trade_pct > 0:
+        return equity * (per_trade_pct / 100.0) * dial, {
+            **snap,
+            "notional_source": "equity_pct_dial",
+        }
+    if fallback_notional > 0:
+        return fallback_notional * dial, {
+            **snap,
+            "notional_source": "explicit_env_notional_dial",
+        }
+    return 0.0, {**snap, "notional_source": "capital_unavailable"}
+
+
 def _maybe_open_paper_shadow(
     db: Session,
     *,
     uid: int | None,
     alert: BreakoutAlert,
-    qty: int,
+    qty: float,
     px: float,
     snap: dict[str, Any],
     decision: str,
@@ -241,7 +299,7 @@ def _maybe_open_paper_shadow(
             stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
             target_price=float(alert.target_price) if alert.target_price is not None else None,
             direction="long",
-            quantity=max(1, int(qty)),
+            quantity=float(qty),
             signal_json=sig,
             paper_shadow_of_alert_id=int(alert.id),
         )
@@ -676,7 +734,13 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     return {"ok": True, **out}
 
 
-def _maybe_substitute_with_options(db: Session, alert: BreakoutAlert, spot: float) -> None:
+def _maybe_substitute_with_options(
+    db: Session,
+    alert: BreakoutAlert,
+    spot: float,
+    *,
+    uid: int | None,
+) -> None:
     """Phase 3 — when the substitute flag is on, translate a bullish
     equity alert into a long-call entry by writing option_meta into
     ``alert.indicator_snapshot`` and flipping ``alert.asset_type`` to
@@ -704,7 +768,9 @@ def _maybe_substitute_with_options(db: Session, alert: BreakoutAlert, spot: floa
             return
 
         from .options.synthesis import synthesize_option_meta
-        notional = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 300.0))
+        notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)
+        if notional <= 0:
+            return
         opt_meta = synthesize_option_meta(
             db=db,
             underlying=str(alert.ticker),
@@ -1004,7 +1070,7 @@ def _process_one_alert(
     # equity alert into an options alert. The rule gate's options_path
     # branch then picks it up just like an explicitly-queued option
     # alert. No-op when flag is off (leaves the alert as equity).
-    _maybe_substitute_with_options(db, alert, px)
+    _maybe_substitute_with_options(db, alert, px, uid=uid)
 
     open_n = count_autotrader_v1_open(db, uid, paper_mode=not live)
     open_by_lane = count_autotrader_v1_open_by_lane(db, uid, paper_mode=not live)
@@ -1706,11 +1772,24 @@ def _execute_broker_buy(
                     if isinstance(cb_res, dict):
                         cb_res["_chili_maker_only"] = True
                         cb_res["_chili_maker_limit_price"] = float(_bid)
-                    logger.info(
-                        "[autotrader] maker-only posted limit_buy %s "
-                        "qty=%s limit=%s post_only=True",
-                        alert.ticker, qty, _bid,
-                    )
+                    if isinstance(cb_res, dict) and cb_res.get("ok"):
+                        logger.info(
+                            "[autotrader] maker-only accepted limit_buy %s "
+                            "qty=%s limit=%s order_id=%s post_only=True",
+                            alert.ticker,
+                            cb_res.get("base_size") or qty,
+                            cb_res.get("limit_price") or _bid,
+                            cb_res.get("order_id"),
+                        )
+                    else:
+                        logger.warning(
+                            "[autotrader] maker-only rejected limit_buy %s "
+                            "qty=%s limit=%s error=%s",
+                            alert.ticker,
+                            qty,
+                            _bid,
+                            cb_res.get("error") if isinstance(cb_res, dict) else cb_res,
+                        )
             except Exception:
                 logger.warning(
                     "[autotrader] maker-only routing failed for %s; "
@@ -1953,51 +2032,33 @@ def _execute_new_entry(
         _autotrader_tick_note(out, kind="skipped", reason="bad_px", alert=alert)
         return
 
-    # Phase 3: notional = min(dial-scaled equity slice, env fallback).
-    # The flat ``chili_autotrader_per_trade_notional_usd=300`` was blind to
-    # equity and to pattern quality. Prefer a percent-of-equity sizing that
-    # scales with the risk dial, falling back to the env dollar amount only
-    # when live equity is unreachable.
-    from .auto_trader_rules import (
-        resolve_brain_risk_context,
-        resolve_effective_capital,
-    )
+    # Entry size starts from risk budget and account equity. A fixed dollar
+    # fallback is honored only when explicitly configured above zero.
+    notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)
+    snap.update(_notional_snap)
+    equity = float(_notional_snap.get("notional_capital_usd") or 0.0)
+    fallback_notional = float(_notional_snap.get("notional_explicit_fallback_usd") or 0.0)
+    if notional <= 0.0:
+        _audit(
+            db, user_id=uid, alert=alert,
+            decision="skipped", reason="entry_notional_unavailable",
+            rule_snapshot=snap,
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(
+            out, kind="skipped", reason="entry_notional_unavailable", alert=alert,
+        )
+        return
 
-    env_notional = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 300.0))
-    per_trade_pct = float(getattr(settings, "chili_autotrader_per_trade_risk_pct", 1.0))
-    equity, cap_source = resolve_effective_capital(db, settings)
-    brain_ctx = resolve_brain_risk_context(db, user_id=uid)
-    dial = float(brain_ctx.get("dial_value", 1.0))
-
-    if equity > 0 and per_trade_pct > 0:
-        dyn_notional = equity * (per_trade_pct / 100.0) * dial
-        notional = dyn_notional
-        snap["notional_source"] = "equity_pct_dial"
-    else:
-        notional = env_notional * dial
-        snap["notional_source"] = "env_dollar_dial"
-    snap["notional_env"] = env_notional
-    snap["notional_dial"] = dial
-    snap["notional_capital_source"] = cap_source
-
-    # ─── HARDCODED NOTIONAL FLOOR (TEMP — operator request 2026-04-21) ───
-    # With equity $10k, dial 0.5, per_trade_pct 1% → ~$50 notional, too
-    # small for meaningful capture. Floor at $300 target / $350 per-share
-    # upsize ceiling so mid-priced stocks (WGS @ $70, GH @ $92, ACN @ $197)
-    # can buy 1–4 whole shares instead of sub-1 fractional (which most
-    # tickers reject server-side).
-    # REMOVE when the dial / per_trade_pct can natively produce this sizing
-    # (i.e. once equity grows or per_trade_pct is raised). Until then,
-    # these constants override the dial-derived small notional.
-    _TEMP_MIN_NOTIONAL_USD = 300.0
-    _TEMP_MAX_PER_SHARE_USD = 350.0
-    if notional < _TEMP_MIN_NOTIONAL_USD:
-        snap["notional_floored"] = True
-        snap["notional_before_floor"] = round(notional, 2)
-        snap["notional_floor_applied"] = _TEMP_MIN_NOTIONAL_USD
-        notional = _TEMP_MIN_NOTIONAL_USD
+    # The base notional is not floored or upsized here. If the risk budget
+    # cannot buy the instrument's minimum trade unit, the entry is skipped.
     snap["notional_effective"] = round(notional, 2)
-    # ─────────────────────────────────────────────────────────────────────
+    _risk_pct = float(_notional_snap.get("notional_risk_pct") or 0.0)
+    _fallback_equity = (
+        fallback_notional / (_risk_pct / 100.0)
+        if fallback_notional > 0 and _risk_pct > 0
+        else fallback_notional
+    )
 
     # Q1.T5 — HRP shadow sizing (and live override when flag ON).
     # Always logged for shadow comparison; the chosen_sizing field of the
@@ -2008,7 +2069,7 @@ def _execute_new_entry(
         _hrp_decision = _hrp_decide(
             db,
             symbol=(alert.ticker or "").upper(),
-            account_equity_usd=float(equity if equity > 0 else env_notional / 0.02),
+            account_equity_usd=float(equity if equity > 0 else _fallback_equity),
             user_id=uid,
         )
         snap["hrp_naive_size_usd"] = _hrp_decision.naive_size_usd
@@ -2017,12 +2078,9 @@ def _execute_new_entry(
         snap["hrp_chosen_sizing"] = _hrp_decision.chosen_sizing
         snap["hrp_n_active_positions"] = _hrp_decision.n_active_positions
         if _hrp_decision.chosen_sizing == "hrp" and _hrp_decision.hrp_size_usd:
-            # Flag is ON and HRP succeeded — override notional with HRP value
-            # (still subject to floor + per-share-cap below).
+            # Flag is ON and HRP succeeded: override notional with HRP value.
             snap["notional_before_hrp"] = round(notional, 2)
             notional = float(_hrp_decision.hrp_size_usd)
-            if notional < _TEMP_MIN_NOTIONAL_USD:
-                notional = _TEMP_MIN_NOTIONAL_USD
             snap["notional_effective"] = round(notional, 2)
             snap["notional_source"] = "hrp_allocated"
     except Exception as _hrp_e:
@@ -2049,9 +2107,6 @@ def _execute_new_entry(
             snap["notional_before_ps_sizing"] = round(notional, 2)
             snap["ps_sizing_multiplier"] = mult
             notional = float(_ps_result["details"]["output_notional"])
-            if notional < _TEMP_MIN_NOTIONAL_USD:
-                notional = _TEMP_MIN_NOTIONAL_USD
-                snap["ps_sizing_floored_to_min"] = True
             snap["notional_effective"] = round(notional, 2)
             snap["notional_source"] = (
                 snap.get("notional_source", "unknown") + "+ps_sizing"
@@ -2165,9 +2220,6 @@ def _execute_new_entry(
                 if _po_mult != 1.0:
                     snap["notional_before_payoff_sizing"] = round(notional, 2)
                     notional = float(notional) * _po_mult
-                    if notional < _TEMP_MIN_NOTIONAL_USD:
-                        notional = _TEMP_MIN_NOTIONAL_USD
-                        snap["payoff_sizing_floored_to_min"] = True
                     snap["notional_effective"] = round(notional, 2)
                     snap["notional_source"] = (
                         snap.get("notional_source", "unknown") + "+payoff"
@@ -2175,20 +2227,73 @@ def _execute_new_entry(
         except Exception as _po_e:
             snap["payoff_sizing_error"] = str(_po_e)[:200]
 
-    # HARDCODED (TEMP 2026-04-21): floor to whole shares rather than
-    # fractional. Most mid/large-cap RH tickers (ACN, WGS, GH, BA…)
-    # don't support fractional orders, and server-side rejection wastes
-    # a tick. Whole-share sizing sacrifices some precision but succeeds
-    # universally. REMOVE with the rest of the TEMP block when the
-    # brain-driven fractional-eligibility check ships.
-    # CCC -- options sizing bypass. Operator-driven option entry already
-    # encoded qty in option_meta.quantity (default 1 contract). Equity
-    # math (qty = notional / px where px = UNDERLYING price) gives
-    # qty=0 for SPY at $714 / $300 notional and trips the per-share
-    # cap as "symbol_too_expensive_for_notional", which is wrong by
-    # construction. For options, set qty from option_meta and use
-    # premium*100*qty as the effective notional (skipping the per-share
-    # ceiling check below since qty>=1 is now guaranteed).
+    # Canonical Kelly/cost/correlation sizer for stock/crypto entries. Options
+    # keep their dedicated option-quality and contract-sizing path.
+    if not snap.get("options_path"):
+        try:
+            from .position_sizer_emitter import EmitterSignal, emit_shadow_proposal
+            from .position_sizer_writer import LegacySizing, mode_is_authoritative
+
+            _asset_class = (
+                "crypto" if (alert.asset_type or "").strip().lower() == "crypto"
+                else "equity"
+            )
+            _psizer_result = emit_shadow_proposal(
+                db,
+                signal=EmitterSignal(
+                    source="auto_trader.entry",
+                    ticker=alert.ticker,
+                    direction="long",
+                    entry_price=float(px),
+                    stop_price=float(alert.stop_loss) if alert.stop_loss is not None else 0.0,
+                    capital=float(equity if equity > 0 else _fallback_equity),
+                    target_price=float(alert.target_price) if alert.target_price is not None else None,
+                    asset_class=_asset_class,
+                    user_id=uid,
+                    pattern_id=int(alert.scan_pattern_id) if alert.scan_pattern_id else None,
+                    regime=getattr(alert, "regime_at_alert", None),
+                    confidence=alert_confidence_from_score(alert),
+                ),
+                legacy=LegacySizing(
+                    notional=float(notional),
+                    quantity=None,
+                    source=snap.get("notional_source", "autotrader_chain"),
+                ),
+            )
+            if _psizer_result is not None:
+                snap["position_sizer_proposal_id"] = _psizer_result.proposal_id
+                snap["position_sizer_mode"] = _psizer_result.mode
+                snap["position_sizer_proposed_notional"] = round(
+                    float(_psizer_result.proposed_notional), 2
+                )
+                snap["position_sizer_divergence_bps"] = _psizer_result.divergence_bps
+                if mode_is_authoritative():
+                    if float(_psizer_result.proposed_notional) <= 0.0:
+                        _audit(
+                            db, user_id=uid, alert=alert,
+                            decision="skipped",
+                            reason="position_sizer_zero_notional",
+                            rule_snapshot=snap,
+                        )
+                        out["skipped"] += 1
+                        _autotrader_tick_note(
+                            out, kind="skipped",
+                            reason="position_sizer_zero_notional", alert=alert,
+                        )
+                        return
+                    snap["notional_before_position_sizer"] = round(notional, 2)
+                    notional = float(_psizer_result.proposed_notional)
+                    snap["notional_effective"] = round(notional, 2)
+                    snap["notional_source"] = (
+                        snap.get("notional_source", "unknown")
+                        + "+position_sizer_authoritative"
+                    )
+        except Exception as _psizer_e:
+            snap["position_sizer_error"] = str(_psizer_e)[:200]
+
+    # Options use contract quantity from option_meta. Stock/crypto quantities
+    # use the broker tick normalizer, so fractional sizing is preserved when
+    # the venue supports it.
     if snap.get("options_path") and snap.get("option_meta"):
         _opt_meta = snap["option_meta"]
         try:
@@ -2205,10 +2310,13 @@ def _execute_new_entry(
         snap["qty_source"] = "options_meta"
         snap["notional_effective"] = round(_premium * 100.0 * qty, 2)
     else:
-        qty_raw = notional / px
-        qty = int(qty_raw)  # whole shares only for now
+        from .tick_normalizer import normalize_quantity
 
-    if qty < 1 and px > 0:
+        qty_raw = notional / px
+        qty = float(normalize_quantity(qty_raw, alert.ticker))
+        snap["qty_source"] = "risk_notional_fractional"
+
+    if qty <= 0 and px > 0:
         if snap.get("pilot_promoted_risk_multiplier") is not None:
             _audit(
                 db, user_id=uid, alert=alert,
@@ -2222,31 +2330,23 @@ def _execute_new_entry(
                 reason="pilot_promoted_notional_below_trade_unit", alert=alert,
             )
             return
-        if px <= _TEMP_MAX_PER_SHARE_USD:
-            snap["qty_upsized_reason"] = "fractional_not_supported_fallback"
-            snap["qty_before_upsize"] = round(qty_raw, 8)
-            qty = 1
-            snap["notional_effective"] = round(px, 2)
-        else:
-            # px exceeds the TEMP per-share ceiling — even 1 share is
-            # too expensive for the operator's intended trade size.
-            _audit(
-                db, user_id=uid, alert=alert,
-                decision="skipped",
-                reason="symbol_too_expensive_for_notional",
-                rule_snapshot=snap,
-            )
-            out["skipped"] += 1
-            _autotrader_tick_note(
-                out, kind="skipped", reason="symbol_too_expensive_for_notional", alert=alert
-            )
-            return
+        snap["qty_raw"] = round(qty_raw, 8)
+        _audit(
+            db, user_id=uid, alert=alert,
+            decision="skipped",
+            reason="notional_below_trade_unit",
+            rule_snapshot=snap,
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(
+            out, kind="skipped", reason="notional_below_trade_unit", alert=alert
+        )
+        return
     else:
-        # qty >= 1 case: update notional_effective to the integer-share
-        # actual cost (may be slightly under target — e.g. GH at $91.75
-        # gives 3 shares = $275.25, below $300 target but close enough
-        # for whole-share sizing).
-        snap["notional_effective"] = round(qty * px, 2)
+        # qty > 0: stock/crypto notional is the tick-normalized spot cost.
+        # Options keep the premium * contract-multiplier notional set above.
+        if not snap.get("options_path"):
+            snap["notional_effective"] = round(qty * px, 2)
         snap["qty_raw"] = round(qty_raw, 8)
 
     if live:
@@ -2357,6 +2457,16 @@ def _execute_new_entry(
         # (RH, options) defaults to 'robinhood' (BYTE-IDENTICAL with
         # the prior hardcoded value).
         _broker_source_for_trade = res.get("_chili_broker_source") or "robinhood"
+        try:
+            _broker_qty = float(res.get("base_size") or qty)
+        except (TypeError, ValueError):
+            _broker_qty = float(qty)
+        _entry_now = datetime.utcnow()
+        _is_coinbase_entry = _broker_source_for_trade == "coinbase"
+        _entry_status = "working" if _is_coinbase_entry else "open"
+        _entry_broker_status = "accepted" if _is_coinbase_entry else None
+        _entry_filled_qty = 0.0 if _is_coinbase_entry else None
+        _entry_remaining_qty = _broker_qty if _is_coinbase_entry else None
         # f-tca-writer-wiring (2026-05-18): capture the AUTOTRADER's decision
         # price ``px`` as the entry-side TCA reference. ``fill`` (above) is
         # the broker's actual fill price (or px as fallback); ``px`` is the
@@ -2372,9 +2482,14 @@ def _execute_new_entry(
             ticker=alert.ticker.upper(),
             direction="long",
             entry_price=fill,
-            quantity=float(qty),
-            entry_date=datetime.utcnow(),
-            status="open",
+            quantity=float(_broker_qty),
+            entry_date=_entry_now,
+            status=_entry_status,
+            broker_status=_entry_broker_status,
+            filled_quantity=_entry_filled_qty,
+            remaining_quantity=_entry_remaining_qty,
+            submitted_at=_entry_now if _is_coinbase_entry else None,
+            acknowledged_at=_entry_now if _is_coinbase_entry else None,
             stop_loss=float(alert.stop_loss) if alert.stop_loss is not None else None,
             take_profit=float(alert.target_price) if alert.target_price is not None else None,
             scan_pattern_id=alert.scan_pattern_id,
@@ -2401,8 +2516,9 @@ def _execute_new_entry(
         # Wrap in try/except per the existing tca pattern in this file.
         try:
             from .tca_service import apply_tca_on_trade_fill
-            apply_tca_on_trade_fill(tr)
-            db.commit()
+            if tr.status == "open":
+                apply_tca_on_trade_fill(tr)
+                db.commit()
         except Exception:
             logger.debug(
                 "[autotrader] entry TCA write failed (non-fatal) for trade_id=%s",
@@ -2414,15 +2530,17 @@ def _execute_new_entry(
         try:
             from .brain_neural_mesh.publisher import publish_trade_lifecycle
 
-            entry_corr = publish_trade_lifecycle(
-                db,
-                trade_id=int(tr.id),
-                ticker=tr.ticker,
-                transition="entry",
-                broker_source=_broker_source_for_trade,
-                quantity=float(tr.quantity),
-                price=float(fill),
-            )
+            entry_corr = None
+            if tr.status == "open":
+                entry_corr = publish_trade_lifecycle(
+                    db,
+                    trade_id=int(tr.id),
+                    ticker=tr.ticker,
+                    transition="entry",
+                    broker_source=_broker_source_for_trade,
+                    quantity=float(tr.quantity),
+                    price=float(fill),
+                )
             if entry_corr:
                 tr.mesh_entry_correlation_id = entry_corr
                 db.commit()
@@ -2442,7 +2560,7 @@ def _execute_new_entry(
             user_id=uid,
             alert=alert,
             decision="placed",
-            reason="ok",
+            reason="submitted" if _is_coinbase_entry else "ok",
             rule_snapshot=snap,
             llm_snapshot=llm_snap,
             trade_id=tr.id,
@@ -2451,11 +2569,14 @@ def _execute_new_entry(
         _autotrader_tick_note(
             out,
             kind="placed",
-            reason=f"live_{_broker_source_for_trade}",
+            reason=(
+                f"live_{_broker_source_for_trade}_submitted"
+                if _is_coinbase_entry else f"live_{_broker_source_for_trade}"
+            ),
             alert=alert,
         )
         _maybe_open_paper_shadow(
-            db, uid=uid, alert=alert, qty=qty, px=px,
+            db, uid=uid, alert=alert, qty=_broker_qty, px=px,
             snap=snap, decision="placed",
         )
         return
@@ -2463,7 +2584,6 @@ def _execute_new_entry(
     # Paper
     from .paper_trading import open_paper_trade
 
-    iq = max(1, int(qty))
     sig = {
         "auto_trader_v1": True,
         "breakout_alert_id": alert.id,
@@ -2478,7 +2598,7 @@ def _execute_new_entry(
         stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
         target_price=float(alert.target_price) if alert.target_price is not None else None,
         direction="long",
-        quantity=iq,
+        quantity=float(qty),
         signal_json=sig,
     )
     if pt is None:

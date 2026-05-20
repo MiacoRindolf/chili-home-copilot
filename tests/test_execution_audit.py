@@ -55,6 +55,28 @@ def test_normalize_coinbase_fill_event():
     assert event["cumulative_filled_quantity"] == 0.25
 
 
+def test_normalize_coinbase_payload_json_stringifies_sdk_objects():
+    class SdkOnlyObject:
+        def __str__(self) -> str:
+            return "sdk-order-configuration"
+
+    event = normalize_coinbase_order_event(
+        order={
+            "order_id": "cb-open-1",
+            "status": "OPEN",
+            "product_id": "THQ-USD",
+            "order_configuration": SdkOnlyObject(),
+        },
+        trade=SimpleNamespace(
+            ticker="THQ-USD",
+            broker_order_id="cb-open-1",
+            tca_reference_entry_price=0.02063,
+        ),
+    )
+
+    assert event["payload_json"]["order_configuration"] == "sdk-order-configuration"
+
+
 def test_apply_execution_event_to_trade_partial_fill_updates_fill_state():
     trade = SimpleNamespace(
         quantity=10.0,
