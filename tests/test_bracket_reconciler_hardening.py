@@ -145,6 +145,27 @@ def _broker_view_defaults(**over) -> BrokerView:
 
 
 class TestPartialFillSizing:
+    def test_robinhood_crypto_missing_broker_stop_is_software_stop_managed(self):
+        """RH crypto has no broker stop primitive; software stop monitor owns it."""
+        local = _local_view_defaults(
+            ticker="RAY-USD",
+            broker_source="robinhood",
+            stop_price=0.724,
+        )
+        broker = _broker_view_defaults(
+            ticker="RAY-USD",
+            broker_source="robinhood",
+            stop_order_id=None,
+            stop_order_state=None,
+            stop_order_price=None,
+        )
+
+        d = classify_discrepancy(local, broker)
+
+        assert d.kind == "agree"
+        assert d.severity == "info"
+        assert d.delta_payload["reason"] == "software_stop_managed_robinhood_crypto"
+
     def test_qty_drift_partial_fill_encoded_as_warn(self):
         """Broker holds less than intended — partial fill.
 

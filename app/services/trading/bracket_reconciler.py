@@ -176,6 +176,28 @@ def classify_discrepancy(
         )
 
     # ── missing stop: open trade with intent, no broker child ────
+    # Robinhood crypto has no broker-side stop primitive. These positions
+    # are protected by the software stop monitor instead; treating them as
+    # broker missing_stop makes the authoritative writer retry an impossible
+    # placement every sweep.
+    if (
+        trade_open
+        and has_local_intent
+        and not broker_has_stop
+        and (local.broker_source or broker.broker_source or "").lower() == "robinhood"
+        and (local.ticker or broker.ticker or "").upper().endswith("-USD")
+    ):
+        return ReconciliationDecision(
+            kind="agree",
+            severity="info",
+            delta_payload={
+                "reason": "software_stop_managed_robinhood_crypto",
+                "intent_state": local.intent_state,
+                "local_stop_price": local.stop_price,
+                "broker_stop_order_state": broker.stop_order_state,
+            },
+        )
+
     if trade_open and has_local_intent and not broker_has_stop:
         return ReconciliationDecision(
             kind="missing_stop",
