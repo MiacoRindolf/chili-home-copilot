@@ -29,6 +29,49 @@ REGIME_DECAY_ADJUSTMENTS = {
 }
 
 
+def _settings_get(name: str, default: Any) -> Any:
+    try:
+        from ...config import settings
+        return getattr(settings, name, default)
+    except Exception:
+        return default
+
+
+def _payoff_ratio_protects_from_wr_decay(pattern: Any) -> bool:
+    """Return True when realized payoff evidence should block WR-only decay.
+
+    The Tier A evaluation-function fix added payoff-ratio protection to
+    learning.py demote paths, but alpha_decay still demoted skew-driven
+    patterns on low win-rate alone. Keep this protection intentionally
+    narrow: it only applies to WR-only decay. If recent average return is
+    below the configured return floor, the pattern is actually losing and
+    should still be allowed to decay.
+    """
+    floor = float(_settings_get("chili_pattern_demote_payoff_ratio_floor", 1.5))
+    min_n = int(_settings_get("chili_pattern_demote_payoff_ratio_min_n", 5))
+    payoff_ratio = getattr(pattern, "payoff_ratio", None)
+    payoff_n = getattr(pattern, "payoff_ratio_n", None)
+    if payoff_ratio is None or payoff_n is None:
+        return False
+    try:
+        return int(payoff_n) >= min_n and float(payoff_ratio) >= floor
+    except (TypeError, ValueError):
+        return False
+
+
+def _should_skip_decay_for_payoff(
+    pattern: Any,
+    *,
+    wr_decay_fired: bool,
+    return_decay_fired: bool,
+) -> bool:
+    return (
+        wr_decay_fired
+        and not return_decay_fired
+        and _payoff_ratio_protects_from_wr_decay(pattern)
+    )
+
+
 def check_alpha_decay(
     db: Session,
     user_id: int | None = None,
@@ -141,7 +184,11 @@ def check_alpha_decay(
         is_decayed = False
         reason_parts = []
 
+        wr_decay_fired = False
+        return_decay_fired = False
+
         if live_wr < oos_wr - wr_gap:
+            wr_decay_fired = True
             is_decayed = True
             src_counts = {"live": 0, "paper": 0}
             for e in evidence:
@@ -153,10 +200,33 @@ def check_alpha_decay(
 
         # Compare using percent returns (return_floor is in percent, e.g. -1.0 = -1%)
         if live_avg_ret_pct < return_floor:
+            return_decay_fired = True
             is_decayed = True
             reason_parts.append(
                 f"Avg return {live_avg_ret_pct:.2f}% < floor {return_floor}%"
             )
+
+        if (
+            is_decayed
+            and _should_skip_decay_for_payoff(
+                pat,
+                wr_decay_fired=wr_decay_fired,
+                return_decay_fired=return_decay_fired,
+            )
+        ):
+            healthy.append(pat.id)
+            logger.info(
+                "[alpha_decay] Protected skew pattern %s from WR-only decay "
+                "(live_wr=%.3f oos_wr=%.3f avg_ret_pct=%.2f "
+                "payoff_ratio=%s n=%s)",
+                pat.id,
+                live_wr,
+                oos_wr,
+                live_avg_ret_pct,
+                getattr(pat, "payoff_ratio", None),
+                getattr(pat, "payoff_ratio_n", None),
+            )
+            continue
 
         if is_decayed:
             reason = "; ".join(reason_parts)
