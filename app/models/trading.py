@@ -149,6 +149,22 @@ class Trade(Base):
     partial_taken_at: Optional[datetime] = Column(DateTime, nullable=True)
     partial_taken_qty: Optional[float] = Column(Float, nullable=True)
     partial_taken_price: Optional[float] = Column(Float, nullable=True)
+    # Position-identity Phase 5A: additive bridge columns. These make the
+    # current Trade row act as a management envelope without renaming the
+    # table yet. The decision layer is immutable; both links stay nullable
+    # during soak/backfill.
+    decision_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("trading_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    position_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("trading_positions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     # Anomaly guards (incident 2026-04-19: Massive provider outage caused 66 crypto rows
     # to land with entry_price=0 because quote-fetch failed silently and writes proceeded).
@@ -3460,6 +3476,57 @@ class FastPathUniverseEntry(Base):
         DateTime, default=datetime.utcnow, nullable=False
     )
     promoted_at: Optional[datetime] = Column(DateTime, nullable=True)
+
+
+class TradingDecision(Base):
+    """Immutable entry-decision layer for position-identity Phase 5A.
+
+    One row captures the signal/proposal context that caused a management
+    envelope (today's ``trading_trades`` row) to exist. It is additive for
+    now: legacy Trade reads remain authoritative while the decision layer
+    soaks and parity checks run.
+    """
+
+    __tablename__ = "trading_decisions"
+    __table_args__ = (
+        UniqueConstraint("source_trade_id", name="uq_trading_decisions_source_trade"),
+        Index("ix_decisions_scan_pattern", "scan_pattern_id"),
+        Index("ix_decisions_related_alert", "related_alert_id"),
+        Index("ix_decisions_mesh_correlation", "mesh_entry_correlation_id"),
+        Index("ix_decisions_entry_date", "entry_date"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    source_trade_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("trading_trades.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    ticker: str = Column(String(20), nullable=False)
+    direction: str = Column(String(10), nullable=False, default="long")
+    entry_date: datetime = Column(DateTime, nullable=False, default=datetime.utcnow)
+    indicator_snapshot: Optional[dict] = Column(JSONB, nullable=True)
+    tca_reference_entry_price: Optional[float] = Column(Float, nullable=True)
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True
+    )
+    related_alert_id: Optional[int] = Column(
+        Integer,
+        ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    strategy_proposal_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_proposals.id", ondelete="SET NULL"), nullable=True
+    )
+    pattern_tags: Optional[str] = Column(String(500), nullable=True)
+    mesh_entry_correlation_id: Optional[str] = Column(String(64), nullable=True)
+    auto_trader_version: Optional[str] = Column(String(32), nullable=True)
+    asset_kind: Optional[str] = Column(String(20), nullable=True)
+    notes: Optional[str] = Column(Text, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 # f-orm-trading-positions-fix (2026-05-19):

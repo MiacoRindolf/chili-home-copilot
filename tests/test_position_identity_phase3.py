@@ -88,7 +88,10 @@ def test_shared_resolver_handles_trade_object():
 
 def test_shared_resolver_returns_none_on_missing_inputs():
     db = _mock_db([(42,)])
-    assert resolve_position_id(db, user_id=None, ticker="X", broker_source="y") is None
+    # Phase 2 follow-up (2026-05-20) made NULL user_id a legitimate
+    # natural-key match for broker-synced positions whose canonical owner
+    # is learned later. Missing broker/ticker still short-circuit.
+    assert resolve_position_id(db, user_id=None, ticker="X", broker_source="y") == 42
     assert resolve_position_id(db, user_id=1, ticker=None, broker_source="y") is None
     assert resolve_position_id(db, user_id=1, ticker="X", broker_source=None) is None
 

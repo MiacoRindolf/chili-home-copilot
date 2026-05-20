@@ -17310,6 +17310,488 @@ def _migration_255_fast_path_retention_time_indexes(conn) -> None:
     conn.commit()
 
 
+def _migration_256_position_identity_phase5a_decision_bridge(conn) -> None:
+    """Position-identity Phase 5A -- additive decision/envelope bridge.
+
+    This is intentionally NOT the destructive ``trading_trades`` rename.
+    It creates the immutable decision layer, adds nullable decision_id and
+    position_id links to today's Trade rows, backfills both, and exposes a
+    parity view. Legacy Trade readers stay untouched while the bridge soaks.
+    """
+    decisions_inserted = 0
+    trades_linked_to_decisions = 0
+    trades_linked_to_positions = 0
+
+    try:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS trading_decisions (
+                id BIGSERIAL PRIMARY KEY,
+                source_trade_id BIGINT NULL UNIQUE
+                    REFERENCES trading_trades(id) ON DELETE SET NULL,
+                user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                ticker VARCHAR(20) NOT NULL,
+                direction VARCHAR(10) NOT NULL DEFAULT 'long',
+                entry_date TIMESTAMP NOT NULL DEFAULT NOW(),
+                indicator_snapshot JSONB NULL,
+                tca_reference_entry_price DOUBLE PRECISION NULL,
+                scan_pattern_id INTEGER NULL
+                    REFERENCES scan_patterns(id) ON DELETE SET NULL,
+                related_alert_id INTEGER NULL
+                    REFERENCES trading_breakout_alerts(id) ON DELETE SET NULL,
+                strategy_proposal_id INTEGER NULL
+                    REFERENCES trading_proposals(id) ON DELETE SET NULL,
+                pattern_tags VARCHAR(500) NULL,
+                mesh_entry_correlation_id VARCHAR(64) NULL,
+                auto_trader_version VARCHAR(32) NULL,
+                asset_kind VARCHAR(20) NULL,
+                notes TEXT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+
+        # Re-running on a hand-created partial table should still converge.
+        conn.execute(text("""
+            ALTER TABLE trading_decisions
+                ADD COLUMN IF NOT EXISTS source_trade_id BIGINT NULL,
+                ADD COLUMN IF NOT EXISTS user_id INTEGER NULL,
+                ADD COLUMN IF NOT EXISTS ticker VARCHAR(20) NULL,
+                ADD COLUMN IF NOT EXISTS direction VARCHAR(10) NULL DEFAULT 'long',
+                ADD COLUMN IF NOT EXISTS entry_date TIMESTAMP NULL DEFAULT NOW(),
+                ADD COLUMN IF NOT EXISTS indicator_snapshot JSONB NULL,
+                ADD COLUMN IF NOT EXISTS tca_reference_entry_price DOUBLE PRECISION NULL,
+                ADD COLUMN IF NOT EXISTS scan_pattern_id INTEGER NULL,
+                ADD COLUMN IF NOT EXISTS related_alert_id INTEGER NULL,
+                ADD COLUMN IF NOT EXISTS strategy_proposal_id INTEGER NULL,
+                ADD COLUMN IF NOT EXISTS pattern_tags VARCHAR(500) NULL,
+                ADD COLUMN IF NOT EXISTS mesh_entry_correlation_id VARCHAR(64) NULL,
+                ADD COLUMN IF NOT EXISTS auto_trader_version VARCHAR(32) NULL,
+                ADD COLUMN IF NOT EXISTS asset_kind VARCHAR(20) NULL,
+                ADD COLUMN IF NOT EXISTS notes TEXT NULL,
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NULL DEFAULT NOW()
+        """))
+
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_trading_decisions_source_trade "
+            "ON trading_decisions (source_trade_id) "
+            "WHERE source_trade_id IS NOT NULL"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_decisions_scan_pattern "
+            "ON trading_decisions (scan_pattern_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_decisions_related_alert "
+            "ON trading_decisions (related_alert_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_decisions_mesh_correlation "
+            "ON trading_decisions (mesh_entry_correlation_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_decisions_entry_date "
+            "ON trading_decisions (entry_date DESC)"
+        ))
+
+        conn.execute(text("""
+            ALTER TABLE trading_trades
+                ADD COLUMN IF NOT EXISTS decision_id BIGINT NULL,
+                ADD COLUMN IF NOT EXISTS position_id BIGINT NULL
+        """))
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'fk_trading_trades_decision_id'
+                ) THEN
+                    ALTER TABLE trading_trades
+                    ADD CONSTRAINT fk_trading_trades_decision_id
+                    FOREIGN KEY (decision_id)
+                    REFERENCES trading_decisions(id)
+                    ON DELETE SET NULL;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'fk_trading_trades_position_id'
+                ) THEN
+                    ALTER TABLE trading_trades
+                    ADD CONSTRAINT fk_trading_trades_position_id
+                    FOREIGN KEY (position_id)
+                    REFERENCES trading_positions(id)
+                    ON DELETE SET NULL;
+                END IF;
+            END $$;
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_trades_decision_id "
+            "ON trading_trades (decision_id) WHERE decision_id IS NOT NULL"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_trades_position_id "
+            "ON trading_trades (position_id) WHERE position_id IS NOT NULL"
+        ))
+
+        # Current production stores trading_trades.indicator_snapshot as TEXT,
+        # while the ORM historically declared JSONB. Keep the decision layer
+        # clean by safely parsing valid JSON and leaving corrupt legacy blobs
+        # NULL instead of aborting the migration.
+        conn.execute(text("""
+            CREATE OR REPLACE FUNCTION _chili_try_jsonb(p_text text)
+            RETURNS jsonb
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF p_text IS NULL OR btrim(p_text) = '' THEN
+                    RETURN NULL;
+                END IF;
+                RETURN p_text::jsonb;
+            EXCEPTION WHEN others THEN
+                RETURN NULL;
+            END;
+            $$;
+        """))
+
+        result = conn.execute(text("""
+            INSERT INTO trading_decisions (
+                source_trade_id, user_id, ticker, direction, entry_date,
+                indicator_snapshot, tca_reference_entry_price, scan_pattern_id,
+                related_alert_id, strategy_proposal_id, pattern_tags,
+                mesh_entry_correlation_id, auto_trader_version, asset_kind,
+                notes, created_at
+            )
+            SELECT
+                t.id,
+                t.user_id,
+                t.ticker,
+                COALESCE(NULLIF(LOWER(t.direction), ''), 'long'),
+                COALESCE(t.entry_date, NOW()),
+                _chili_try_jsonb(t.indicator_snapshot::text),
+                t.tca_reference_entry_price,
+                t.scan_pattern_id,
+                t.related_alert_id,
+                t.strategy_proposal_id,
+                t.pattern_tags,
+                t.mesh_entry_correlation_id,
+                t.auto_trader_version,
+                t.asset_kind,
+                ('phase5a_backfill_from_trade_id=' || t.id::text),
+                COALESCE(t.entry_date, NOW())
+            FROM trading_trades t
+            WHERE t.entry_price > 0
+              AND t.quantity > 0
+              AND NOT EXISTS (
+                SELECT 1
+                FROM trading_decisions d
+                WHERE d.source_trade_id = t.id
+            )
+        """))
+        decisions_inserted = result.rowcount if result.rowcount is not None else 0
+
+        result = conn.execute(text("""
+            UPDATE trading_trades t
+               SET decision_id = d.id
+              FROM trading_decisions d
+             WHERE d.source_trade_id = t.id
+               AND t.decision_id IS NULL
+               AND t.entry_price > 0
+               AND t.quantity > 0
+        """))
+        trades_linked_to_decisions = (
+            result.rowcount if result.rowcount is not None else 0
+        )
+
+        result = conn.execute(text("""
+            UPDATE trading_trades t
+               SET position_id = sub.position_id
+              FROM (
+                    SELECT
+                        t2.id AS trade_id,
+                        (
+                            SELECT p.id
+                              FROM trading_positions p
+                             WHERE COALESCE(p.user_id, -1) = COALESCE(t2.user_id, -1)
+                               AND p.broker_source = LOWER(t2.broker_source)
+                               AND p.ticker = t2.ticker
+                               AND p.direction = COALESCE(
+                                    NULLIF(LOWER(t2.direction), ''), 'long'
+                               )
+                             ORDER BY
+                               CASE WHEN p.current_envelope_id = t2.id THEN 0 ELSE 1 END,
+                               CASE WHEN p.state = 'open' THEN 0 ELSE 1 END,
+                               p.id DESC
+                             LIMIT 1
+                        ) AS position_id
+                     FROM trading_trades t2
+                     WHERE t2.position_id IS NULL
+                       AND t2.broker_source IS NOT NULL
+                       AND btrim(t2.broker_source) <> ''
+                       AND t2.entry_price > 0
+                       AND t2.quantity > 0
+                   ) sub
+             WHERE t.id = sub.trade_id
+               AND t.position_id IS NULL
+               AND sub.position_id IS NOT NULL
+        """))
+        trades_linked_to_positions = (
+            result.rowcount if result.rowcount is not None else 0
+        )
+
+        conn.execute(text("""
+            CREATE OR REPLACE VIEW trading_phase5a_envelope_parity AS
+            SELECT
+                NOW()::timestamp AS checked_at,
+                COUNT(*)::bigint AS trade_rows,
+                COUNT(*) FILTER (WHERE t.decision_id IS NOT NULL)::bigint
+                    AS trades_with_decision,
+                COUNT(*) FILTER (WHERE t.decision_id IS NULL)::bigint
+                    AS trades_missing_decision,
+                COUNT(*) FILTER (
+                    WHERE t.broker_source IS NOT NULL
+                      AND btrim(t.broker_source) <> ''
+                      AND t.position_id IS NOT NULL
+                )::bigint AS broker_trades_with_position,
+                COUNT(*) FILTER (
+                    WHERE t.broker_source IS NOT NULL
+                      AND btrim(t.broker_source) <> ''
+                      AND t.position_id IS NULL
+                )::bigint AS broker_trades_missing_position,
+                COUNT(*) FILTER (
+                    WHERE t.status = 'open'
+                      AND t.broker_source IS NOT NULL
+                      AND btrim(t.broker_source) <> ''
+                      AND t.position_id IS NULL
+                )::bigint AS open_broker_trades_missing_position,
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM trading_decisions d
+                    LEFT JOIN trading_trades t2 ON t2.decision_id = d.id
+                    WHERE t2.id IS NULL
+                ) AS orphan_decisions
+            FROM trading_trades t
+        """))
+
+        conn.execute(text("DROP FUNCTION IF EXISTS _chili_try_jsonb(text)"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.warning("[mig256] Phase 5A decision bridge failed", exc_info=True)
+        raise
+
+    logger.info(
+        "[mig256] done -- decisions_inserted=%d trades_linked_to_decisions=%d "
+        "trades_linked_to_positions=%d",
+        decisions_inserted,
+        trades_linked_to_decisions,
+        trades_linked_to_positions,
+    )
+
+
+def _migration_257_position_identity_phase5a_trade_insert_trigger(conn) -> None:
+    """Position-identity Phase 5A -- keep new envelopes linked.
+
+    Mig 256 backfilled existing Trade rows. This migration protects the
+    future: every new ``trading_trades`` insert gets a matching immutable
+    ``trading_decisions`` row and, when a matching position already exists,
+    a ``position_id`` link. Implemented in the database so every writer path
+    participates without a broad application refactor.
+    """
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION trading_trades_phase5a_after_insert()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            v_decision_id BIGINT;
+            v_position_id BIGINT;
+            v_snapshot JSONB;
+        BEGIN
+            BEGIN
+                IF NEW.indicator_snapshot IS NOT NULL
+                   AND btrim(NEW.indicator_snapshot::text) <> '' THEN
+                    v_snapshot := NEW.indicator_snapshot::text::jsonb;
+                ELSE
+                    v_snapshot := NULL;
+                END IF;
+            EXCEPTION WHEN others THEN
+                v_snapshot := NULL;
+            END;
+
+            IF NEW.broker_source IS NOT NULL
+               AND btrim(NEW.broker_source) <> '' THEN
+                SELECT p.id
+                  INTO v_position_id
+                  FROM trading_positions p
+                 WHERE COALESCE(p.user_id, -1) = COALESCE(NEW.user_id, -1)
+                   AND p.broker_source = LOWER(NEW.broker_source)
+                   AND p.ticker = NEW.ticker
+                   AND p.direction = COALESCE(NULLIF(LOWER(NEW.direction), ''), 'long')
+                 ORDER BY
+                   CASE WHEN p.current_envelope_id = NEW.id THEN 0 ELSE 1 END,
+                   CASE WHEN p.state = 'open' THEN 0 ELSE 1 END,
+                   p.id DESC
+                 LIMIT 1;
+            END IF;
+
+            INSERT INTO trading_decisions (
+                source_trade_id, user_id, ticker, direction, entry_date,
+                indicator_snapshot, tca_reference_entry_price, scan_pattern_id,
+                related_alert_id, strategy_proposal_id, pattern_tags,
+                mesh_entry_correlation_id, auto_trader_version, asset_kind,
+                notes, created_at
+            ) VALUES (
+                NEW.id,
+                NEW.user_id,
+                NEW.ticker,
+                COALESCE(NULLIF(LOWER(NEW.direction), ''), 'long'),
+                COALESCE(NEW.entry_date, NOW()),
+                v_snapshot,
+                NEW.tca_reference_entry_price,
+                NEW.scan_pattern_id,
+                NEW.related_alert_id,
+                NEW.strategy_proposal_id,
+                NEW.pattern_tags,
+                NEW.mesh_entry_correlation_id,
+                NEW.auto_trader_version,
+                NEW.asset_kind,
+                ('phase5a_insert_trigger_from_trade_id=' || NEW.id::text),
+                COALESCE(NEW.entry_date, NOW())
+            )
+            ON CONFLICT (source_trade_id)
+            DO UPDATE SET source_trade_id = EXCLUDED.source_trade_id
+            RETURNING id INTO v_decision_id;
+
+            UPDATE trading_trades
+               SET decision_id = COALESCE(decision_id, v_decision_id),
+                   position_id = COALESCE(position_id, v_position_id)
+             WHERE id = NEW.id;
+
+            RETURN NEW;
+        END;
+        $$;
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_trading_trades_phase5a_after_insert
+        ON trading_trades
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_trading_trades_phase5a_after_insert
+        AFTER INSERT ON trading_trades
+        FOR EACH ROW
+        EXECUTE FUNCTION trading_trades_phase5a_after_insert()
+    """))
+    conn.commit()
+    logger.info("[mig257] trading_trades Phase 5A insert trigger installed")
+
+
+def _migration_258_position_identity_phase5a_residual_backfill(conn) -> None:
+    """Position-identity Phase 5A -- residual backfill after trigger install.
+
+    Covers rows created in the narrow window after mig 256 backfilled the
+    table but before mig 257 installed the insert trigger. Harmless on fresh
+    deploys where 256/257 run back-to-back before workers start.
+    """
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION _chili_try_jsonb(p_text text)
+        RETURNS jsonb
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF p_text IS NULL OR btrim(p_text) = '' THEN
+                RETURN NULL;
+            END IF;
+            RETURN p_text::jsonb;
+        EXCEPTION WHEN others THEN
+            RETURN NULL;
+        END;
+        $$;
+    """))
+    result = conn.execute(text("""
+        INSERT INTO trading_decisions (
+            source_trade_id, user_id, ticker, direction, entry_date,
+            indicator_snapshot, tca_reference_entry_price, scan_pattern_id,
+            related_alert_id, strategy_proposal_id, pattern_tags,
+            mesh_entry_correlation_id, auto_trader_version, asset_kind,
+            notes, created_at
+        )
+        SELECT
+            t.id,
+            t.user_id,
+            t.ticker,
+            COALESCE(NULLIF(LOWER(t.direction), ''), 'long'),
+            COALESCE(t.entry_date, NOW()),
+            _chili_try_jsonb(t.indicator_snapshot::text),
+            t.tca_reference_entry_price,
+            t.scan_pattern_id,
+            t.related_alert_id,
+            t.strategy_proposal_id,
+            t.pattern_tags,
+            t.mesh_entry_correlation_id,
+            t.auto_trader_version,
+            t.asset_kind,
+            ('phase5a_residual_backfill_from_trade_id=' || t.id::text),
+            COALESCE(t.entry_date, NOW())
+        FROM trading_trades t
+        WHERE t.decision_id IS NULL
+          AND t.entry_price > 0
+          AND t.quantity > 0
+          AND NOT EXISTS (
+              SELECT 1 FROM trading_decisions d
+              WHERE d.source_trade_id = t.id
+          )
+    """))
+    decisions_inserted = result.rowcount if result.rowcount is not None else 0
+    result = conn.execute(text("""
+        UPDATE trading_trades t
+           SET decision_id = d.id
+          FROM trading_decisions d
+         WHERE d.source_trade_id = t.id
+           AND t.decision_id IS NULL
+           AND t.entry_price > 0
+           AND t.quantity > 0
+    """))
+    decisions_linked = result.rowcount if result.rowcount is not None else 0
+    result = conn.execute(text("""
+        UPDATE trading_trades t
+           SET position_id = sub.position_id
+          FROM (
+                SELECT
+                    t2.id AS trade_id,
+                    (
+                        SELECT p.id
+                          FROM trading_positions p
+                         WHERE COALESCE(p.user_id, -1) = COALESCE(t2.user_id, -1)
+                           AND p.broker_source = LOWER(t2.broker_source)
+                           AND p.ticker = t2.ticker
+                           AND p.direction = COALESCE(NULLIF(LOWER(t2.direction), ''), 'long')
+                         ORDER BY
+                           CASE WHEN p.current_envelope_id = t2.id THEN 0 ELSE 1 END,
+                           CASE WHEN p.state = 'open' THEN 0 ELSE 1 END,
+                           p.id DESC
+                         LIMIT 1
+                    ) AS position_id
+                  FROM trading_trades t2
+                 WHERE t2.position_id IS NULL
+                   AND t2.broker_source IS NOT NULL
+                   AND btrim(t2.broker_source) <> ''
+                   AND t2.entry_price > 0
+                   AND t2.quantity > 0
+               ) sub
+         WHERE t.id = sub.trade_id
+           AND t.position_id IS NULL
+           AND sub.position_id IS NOT NULL
+    """))
+    positions_linked = result.rowcount if result.rowcount is not None else 0
+    conn.execute(text("DROP FUNCTION IF EXISTS _chili_try_jsonb(text)"))
+    conn.commit()
+    logger.info(
+        "[mig258] residual Phase 5A backfill -- decisions_inserted=%d "
+        "decisions_linked=%d positions_linked=%d",
+        decisions_inserted,
+        decisions_linked,
+        positions_linked,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -17602,6 +18084,12 @@ MIGRATIONS = [
      _migration_254_synthetic_exit_fill_events),
     ("255_fast_path_retention_time_indexes",
      _migration_255_fast_path_retention_time_indexes),
+    ("256_position_identity_phase5a_decision_bridge",
+     _migration_256_position_identity_phase5a_decision_bridge),
+    ("257_position_identity_phase5a_trade_insert_trigger",
+     _migration_257_position_identity_phase5a_trade_insert_trigger),
+    ("258_position_identity_phase5a_residual_backfill",
+     _migration_258_position_identity_phase5a_residual_backfill),
 ]
 
 
