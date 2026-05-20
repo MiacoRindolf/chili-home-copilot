@@ -17264,9 +17264,18 @@ def _migration_255_fast_path_retention_time_indexes(conn) -> None:
     for table, index_name, ts_col in index_specs:
         if table not in tables:
             continue
-        index_exists = bool(
-            conn.execute(text("SELECT to_regclass(:index_name)"), {"index_name": index_name}).scalar()
-        )
+        index_exists = bool(conn.execute(text("""
+            SELECT 1
+            FROM pg_indexes
+            WHERE schemaname = ANY(current_schemas(false))
+              AND tablename IN (:table, :default_table)
+              AND lower(indexdef) LIKE :needle
+            LIMIT 1
+        """), {
+            "table": table,
+            "default_table": f"{table}_default",
+            "needle": f"%using btree ({ts_col.lower()}%",
+        }).first())
         if index_exists:
             continue
         table_bytes = int(
