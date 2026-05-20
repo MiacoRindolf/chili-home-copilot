@@ -19,6 +19,16 @@ DEFAULT_BATCH_JOB_RETAIN_DAYS = 90
 DEFAULT_LEARNING_EVENT_RETAIN_DAYS = 120
 DEFAULT_ALERT_RETAIN_DAYS = 90
 DEFAULT_BACKTEST_RETAIN_DAYS = 180
+DEFAULT_FAST_DELETE_BATCH_SIZE = 50_000
+
+
+_FAST_RETENTION_TABLES: dict[str, tuple[str, str]] = {
+    "fast_snapshots": ("fast_snapshots", "bar_close_at"),
+    "fast_orderbook": ("fast_orderbook", "snapshot_at"),
+    "fast_alerts": ("fast_alerts", "fired_at"),
+    "fast_executions": ("fast_executions", "decided_at"),
+    "fast_exits": ("fast_exits", "exited_at"),
+}
 
 
 def run_retention_policy(
@@ -54,6 +64,7 @@ def run_retention_policy(
     results["stuck_jobs"] = _cleanup_stuck_batch_jobs(db, dry_run)
     results["setup_vitals_history"] = _prune_setup_vitals_history(db, 90, dry_run)
     results["ticker_vitals_stale"] = _prune_stale_ticker_vitals(db, 7, dry_run)
+    results["fast_path"] = _prune_fast_path_tables(db, dry_run)
 
     if not dry_run:
         try:
@@ -64,6 +75,155 @@ def run_retention_policy(
 
     logger.info("[retention] Sweep complete: %s", results)
     return results
+
+
+def _safe_positive_int(value: Any, default: int) -> int:
+    try:
+        out = int(value)
+        if out > 0:
+            return out
+    except (TypeError, ValueError):
+        pass
+    return int(default)
+
+
+def _prune_fast_path_tables(db: Session, dry_run: bool) -> dict[str, Any]:
+    """Batch-delete old fast-path rows.
+
+    The fast lane writes much higher volume than the daily brain tables,
+    especially ``fast_orderbook``. Deletes are capped per sweep so the
+    scheduler does not attempt a single huge transaction against a multi-GB
+    partition.
+    """
+    from ...config import settings
+
+    batch_size = _safe_positive_int(
+        getattr(settings, "brain_retention_fast_delete_batch_size", None),
+        DEFAULT_FAST_DELETE_BATCH_SIZE,
+    )
+    policy = {
+        "fast_snapshots": _safe_positive_int(
+            getattr(settings, "brain_retention_fast_snapshot_days", None), 30
+        ),
+        "fast_orderbook": _safe_positive_int(
+            getattr(settings, "brain_retention_fast_orderbook_days", None), 3
+        ),
+        "fast_alerts": _safe_positive_int(
+            getattr(settings, "brain_retention_fast_alert_days", None), 14
+        ),
+        "fast_executions": _safe_positive_int(
+            getattr(settings, "brain_retention_fast_execution_days", None), 30
+        ),
+        "fast_exits": _safe_positive_int(
+            getattr(settings, "brain_retention_fast_exit_days", None), 90
+        ),
+    }
+
+    results: dict[str, Any] = {"batch_size": batch_size}
+    for key, retain_days in policy.items():
+        table, ts_col = _FAST_RETENTION_TABLES[key]
+        results[key] = _prune_fast_table_by_time(
+            db,
+            table=table,
+            ts_col=ts_col,
+            retain_days=retain_days,
+            batch_size=batch_size,
+            dry_run=dry_run,
+        )
+    return results
+
+
+def _prune_fast_table_by_time(
+    db: Session,
+    *,
+    table: str,
+    ts_col: str,
+    retain_days: int,
+    batch_size: int,
+    dry_run: bool,
+) -> dict[str, int]:
+    if table not in _FAST_RETENTION_TABLES:
+        raise ValueError(f"unsupported fast retention table: {table}")
+    expected_table, expected_ts = _FAST_RETENTION_TABLES[table]
+    if table != expected_table or ts_col != expected_ts:
+        raise ValueError(f"unsupported fast retention timestamp: {table}.{ts_col}")
+
+    if not _fast_retention_has_leading_time_index(db, table, ts_col):
+        return {
+            "retain_days": retain_days,
+            "eligible_batch": 0,
+            "deleted": 0,
+            "skipped": 1,
+        }
+
+    cutoff = datetime.utcnow() - timedelta(days=retain_days)
+    count_sql = text(f"""
+        SELECT COUNT(*)
+        FROM (
+            SELECT 1
+            FROM {table}
+            WHERE {ts_col} < :cutoff
+            ORDER BY id ASC
+            LIMIT :limit
+        ) limited
+    """)
+    try:
+        eligible_batch = int(db.execute(
+            count_sql, {"cutoff": cutoff, "limit": int(batch_size)}
+        ).scalar() or 0)
+    except Exception:
+        return {"retain_days": retain_days, "eligible_batch": 0, "deleted": 0}
+
+    deleted = 0
+    if not dry_run and eligible_batch > 0:
+        delete_sql = text(f"""
+            WITH doomed AS (
+                SELECT id, {ts_col}
+                FROM {table}
+                WHERE {ts_col} < :cutoff
+                ORDER BY id ASC
+                LIMIT :limit
+            )
+            DELETE FROM {table} t
+            USING doomed
+            WHERE t.id = doomed.id
+              AND t.{ts_col} = doomed.{ts_col}
+        """)
+        result = db.execute(
+            delete_sql, {"cutoff": cutoff, "limit": int(batch_size)}
+        )
+        deleted = int(result.rowcount or 0)
+
+    return {
+        "retain_days": retain_days,
+        "eligible_batch": eligible_batch,
+        "deleted": deleted,
+    }
+
+
+def _fast_retention_has_leading_time_index(db: Session, table: str, ts_col: str) -> bool:
+    """Avoid accidental sequential scans on high-volume fast tables.
+
+    ``fast_orderbook`` can be tens of GB. Retention only runs when a btree
+    index starts with the table's timestamp column. Existing ticker-first
+    indexes are good for UI lookups but not for retention pruning.
+    """
+    try:
+        rows = db.execute(text("""
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = ANY (current_schemas(false))
+              AND tablename IN (:table, :default_table)
+        """), {"table": table, "default_table": f"{table}_default"}).fetchall()
+    except Exception:
+        return False
+
+    needle = f"using btree ({ts_col.lower()}"
+    for row in rows:
+        indexdef = str(row[0] or "").lower()
+        if needle in indexdef:
+            return True
+    return False
 
 
 def _archive_old_snapshots(db: Session, retain_days: int, dry_run: bool) -> dict[str, int]:

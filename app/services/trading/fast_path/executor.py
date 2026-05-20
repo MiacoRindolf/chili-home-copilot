@@ -455,6 +455,13 @@ class FastPathExecutor:
             # but recency gate will reject historical alerts).
             logger.warning("[fast_path] executor bootstrap failed: %s", exc)
             self._last_seen_alert_id = 0
+        try:
+            await loop.run_in_executor(None, self._refresh_open_positions_sync)
+        except Exception as exc:
+            logger.warning(
+                "[fast_path] executor open-position bootstrap failed: %s",
+                exc, exc_info=True,
+            )
         logger.info(
             "[fast_path] executor starting mode=%s live_authorized=%s "
             "min_score=%.2f max_spread_bps=%.2f notional_usd=%.2f "
@@ -497,6 +504,14 @@ class FastPathExecutor:
         self._metrics.polls_total += 1
         self._maybe_roll_daily_window()
         loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._refresh_open_positions_sync)
+        except Exception as exc:
+            self._metrics.db_errors += 1
+            logger.warning(
+                "[fast_path] executor open-position refresh failed: %s",
+                exc, exc_info=True,
+            )
         rows = await loop.run_in_executor(None, self._fetch_new_alerts)
         if not rows:
             return
@@ -840,20 +855,16 @@ class FastPathExecutor:
         )
         self._metrics.maker_attempts_placed += 1
 
-        # Decision row matches the taker shape so the autopilot UI
-        # treats maker placements as first-class.
-        await self._write_decision(
-            alert, ctx, decision=attempt_decision,
-            reject_reason=None,
-            gate_run=gate_run, side=side,
-            quantity=quantity, fill_price=limit_price, notional_usd=notional_usd,
-            broker_order_id=broker_order_id, decided_at=decided_at,
-            latency_ms=latency_ms,
-        )
         if ctx.mode == "live":
+            await self._write_decision(
+                alert, ctx, decision=attempt_decision,
+                reject_reason=None,
+                gate_run=gate_run, side=side,
+                quantity=quantity, fill_price=limit_price, notional_usd=notional_usd,
+                broker_order_id=broker_order_id, decided_at=decided_at,
+                latency_ms=latency_ms,
+            )
             self._metrics.decisions_live_placed += 1
-        else:
-            self._metrics.decisions_paper_fill += 1
 
         # Schedule the timeout-driven outcome resolver. Hybrid mode
         # uses the shorter ``maker_first_taker_fallback_s`` and labels
@@ -1079,6 +1090,27 @@ class FastPathExecutor:
                     "[fast_path] decay_miner.record_maker_outcome failed: %s",
                     exc, exc_info=True,
                 )
+
+        if ctx.mode != "live" and outcome in ("filled", "partial"):
+            fill_ctx = self._build_context(ticker)
+            fill_ctx.mode = "paper"
+            fill_ctx.live_authorized = False
+            decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            fill_price = float(final_price or limit_price)
+            filled_notional = float(attempt.get("notional_usd") or 0.0)
+            await self._write_decision(
+                alert, fill_ctx, decision="paper_fill",
+                reject_reason=None,
+                gate_run=gate_run, side=side,
+                quantity=float(attempt.get("quantity") or 0.0),
+                fill_price=fill_price, notional_usd=filled_notional,
+                broker_order_id=None, decided_at=decided_at,
+                latency_ms=0.0,
+            )
+            self._metrics.decisions_paper_fill += 1
+            self._open_positions[ticker] = self._open_positions.get(ticker, 0) + 1
+            self._daily_notional_used_usd += filled_notional
+            self._metrics.last_decision_at = decided_at
 
         # f-fastpath-maker-only-executor (2026-05-08): hybrid taker
         # fallback. When the maker leg is being replaced (no fill
@@ -1315,6 +1347,24 @@ class FastPathExecutor:
                 LIMIT 200
             """), {"last_id": self._last_seen_alert_id}).mappings().all()
             return [dict(r) for r in rows]
+
+    def _refresh_open_positions_sync(self) -> None:
+        """Refresh per-ticker capacity state from DB open entries."""
+        with self._engine.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT e.ticker, COUNT(*) AS open_n
+                FROM fast_executions e
+                LEFT JOIN fast_exits x
+                  ON x.entry_execution_id = e.id
+                WHERE e.decision IN ('paper_fill', 'live_placed')
+                  AND x.id IS NULL
+                GROUP BY e.ticker
+            """)).mappings().all()
+        self._open_positions = {
+            str(r["ticker"]): int(r["open_n"] or 0)
+            for r in rows
+            if int(r["open_n"] or 0) > 0
+        }
 
     async def _write_decision(self, alert: dict, ctx: ExecContext,
                               *, decision: str, reject_reason: str | None,

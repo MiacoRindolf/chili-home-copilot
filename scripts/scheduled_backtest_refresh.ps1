@@ -1,19 +1,53 @@
 # Scheduled Backtest Refresh Script
-# Runs the Python refresh script with proper environment
+# Runs a bounded, low-impact backtest refresh. Keep this conservative:
+# this task runs on the operator PC, not a dedicated batch host.
 
+$ErrorActionPreference = "Stop"
 $projectPath = "c:\dev\chili-home-copilot"
 $logFile = "$projectPath\backtest_refresh_scheduled.log"
+$python = "C:\Users\rindo\miniconda3\python.exe"
+if (-not (Test-Path $python)) {
+    $python = "python"
+}
 
 Set-Location $projectPath
+
+function Rotate-Log {
+    param([string]$Path, [int64]$MaxBytes = 20971520)
+    if ((Test-Path $Path) -and ((Get-Item $Path).Length -gt $MaxBytes)) {
+        $old = "$Path.1"
+        if (Test-Path $old) {
+            Remove-Item -LiteralPath $old -Force
+        }
+        Move-Item -LiteralPath $Path -Destination $old
+    }
+}
+
+Rotate-Log -Path $logFile
+
+$env:TQDM_DISABLE = "1"
+$env:CHILI_APP_NAME = "chili-backtest-refresh"
+if (-not $env:CHILI_BACKTEST_REFRESH_WORKERS) {
+    $env:CHILI_BACKTEST_REFRESH_WORKERS = "2"
+}
 
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 Add-Content -Path $logFile -Value "=== Scheduled refresh started at $timestamp ==="
 
 try {
-    python scripts/refresh_all_backtests.py 2>&1 | Tee-Object -Append -FilePath $logFile
+    & $python scripts/refresh_all_backtests.py `
+        --limit 1 `
+        --target-tickers 8 `
+        --workers $env:CHILI_BACKTEST_REFRESH_WORKERS `
+        --max-runtime-minutes 45 `
+        --sleep-seconds 10 *> $null
     $exitCode = $LASTEXITCODE
     $endTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -Path $logFile -Value "=== Completed at $endTime with exit code $exitCode ==="
+    if ($exitCode -ne 0) {
+        exit $exitCode
+    }
 } catch {
     Add-Content -Path $logFile -Value "ERROR: $_"
+    exit 1
 }

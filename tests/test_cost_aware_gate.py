@@ -46,13 +46,40 @@ def _settings_stub(
     *,
     fee_bps: int = 120, buffer_bps: int = 30,
     max_notional: float = 50.0, max_positions: int = 3,
+    include_tca: bool = False, min_tca_samples: int = 5,
 ):
     return SimpleNamespace(
         chili_coinbase_taker_fee_bps_round_trip=fee_bps,
         chili_min_edge_safety_buffer_bps=buffer_bps,
         chili_coinbase_max_notional_usd=max_notional,
         chili_coinbase_max_concurrent_positions=max_positions,
+        chili_coinbase_cost_gate_include_tca_estimates=include_tca,
+        chili_coinbase_cost_gate_min_tca_samples=min_tca_samples,
     )
+
+
+class _FakeMappings:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
+class _FakeResult:
+    def __init__(self, row):
+        self._row = row
+
+    def mappings(self):
+        return _FakeMappings(self._row)
+
+
+class _FakeCostDb:
+    def __init__(self, row):
+        self.row = row
+
+    def execute(self, *_args, **_kwargs):
+        return _FakeResult(self.row)
 
 
 # ── Gate cases ──────────────────────────────────────────────────────
@@ -154,6 +181,29 @@ def test_gate_higher_tier_fee_lowers_floor():
     assert res.allowed is True
     assert res.fee_bps == 30
     assert res.threshold_bps == 60
+
+
+def test_gate_coinbase_tca_estimate_raises_threshold():
+    """When enabled, p90 spread+slippage must come out of gross edge."""
+    s = _settings_stub(include_tca=True)
+    db = _FakeCostDb({
+        "sample_trades": 9,
+        "p90_spread_bps": 12.0,
+        "p90_slippage_bps": 88.0,
+        "median_spread_bps": 3.0,
+        "median_slippage_bps": 40.0,
+        "last_updated_at": None,
+    })
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=2.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is False
+    assert res.threshold_bps == 250
+    assert res.tca_cost_bps == 100
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is True
 
 
 # ── Per-venue cap cases ─────────────────────────────────────────────

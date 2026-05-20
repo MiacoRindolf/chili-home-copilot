@@ -69,6 +69,16 @@ def test_cost_aware_taker_fee_bps_env_override_works():
     assert loaded.cost_aware_taker_fee_bps == 15.0
 
 
+def test_bool_loader_tolerates_inline_operator_note():
+    """A malformed inline note after a bool should not disable a gate."""
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED": "1 until soak completes"},
+    ):
+        loaded = load()
+    assert loaded.cost_aware_admission_enabled is True
+
+
 def test_cost_aware_taker_fee_bps_in_plausible_range():
     """The default value must be in a plausible bps range for any
     Coinbase volume tier.

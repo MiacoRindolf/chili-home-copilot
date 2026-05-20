@@ -1,5 +1,7 @@
 # f-composite-reweight-no-renormalize
 
+> ⚠️ **PARTIALLY SUPERSEDED 2026-05-18 by f-evaluation-function-fix Tier A #3** (commit `23bde18`). That commit added a stricter version of this fix: `chili_composite_min_realized_trades` floor (default 5) makes the composite score NULL outright when `realized_n_trades < 5`, rather than capping the renormalized score at 0.65. The "n=2 patterns rank above n=86 alpha" problem is now closed structurally — those patterns get NULL, not a high score. **Re-evaluate this brief**: is the softer "cap at 0.65" approach still useful as a middle ground (let CPCV-strong, no-realized patterns get *some* score for ranking but not enough to outrank realized winners)? Or has Tier A #3 made this redundant? Operator decision.
+
 > ⚡ **ACTIVATION REMINDER (added 2026-05-16):** After this brief ships AND post-deploy Spearman crosses +0.30, the operator must manually flip `CHILI_COHORT_PROMOTE_ENABLED=true` in `.env` and run `docker compose up -d --force-recreate chili scheduler-worker brain-worker autotrader-worker`. Until then the cohort job stays dormant. Cowork-side scheduled reminder couldn't be auto-created (tool needs interactive approval); operator may want to do so with: `/schedule "every Monday 9am, check whether docs/STRATEGY/QUEUED/f-composite-reweight-no-renormalize.md has shipped and whether CHILI_COHORT_PROMOTE_ENABLED is ready to enable"`.
 
 > **Type:** Math/formula change in `compute_quality_composite_score` + companion `weight_sum` validation fix.

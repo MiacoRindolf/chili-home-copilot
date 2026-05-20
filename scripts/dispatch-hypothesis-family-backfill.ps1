@@ -3,7 +3,7 @@ $repo = "C:\dev\chili-home-copilot"
 Set-Location $repo
 
 $out = "$PSScriptRoot\dispatch-hypothesis-family-backfill-output.txt"
-"# Hypothesis-family backfill (Phase E follow-up) — $(Get-Date -Format o)" | Out-File $out -Encoding utf8
+"# Hypothesis-family backfill (Phase E follow-up) - $(Get-Date -Format o)" | Out-File $out -Encoding utf8
 
 # Clear any stale git lock so the daemon doesn't choke on us
 if (Test-Path "$repo\.git\index.lock") {
@@ -11,16 +11,18 @@ if (Test-Path "$repo\.git\index.lock") {
     "cleared stale .git/index.lock" | Add-Content $out
 }
 
-# Pre-flight: containers must be up. If chili / chili-db are down, this
-# audit cannot complete (it shells into both via docker exec).
-$psOut = & docker compose ps --format json 2>&1
-$psOut | Add-Content $out
-$haveChili = (docker ps --filter "name=chili$" --filter "status=running" -q 2>$null) -ne ""
-$haveDb    = (docker ps --filter "name=chili-db" --filter "status=running" -q 2>$null) -ne ""
+# Pre-flight: containers must be up. `docker compose ps` gives us status
+# for each service. We check chili (smoke runner) and postgres (db).
+$ps = & docker compose ps chili postgres 2>&1
+$ps | Add-Content $out
+$psStr = ($ps -join "`n")
+$haveChili = $psStr -match "chili.*\s+(Up|running)\s+"
+$haveDb    = $psStr -match "postgres.*\s+(Up|running)\s+"
 if (-not $haveChili -or -not $haveDb) {
-    "ABORT: chili and/or chili-db not running. Run dispatch-followup-activations-recreate.ps1 first (or bring containers up), then re-queue this script." | Add-Content $out
+    "ABORT: chili and/or postgres not up (haveChili=$haveChili haveDb=$haveDb). Run dispatch-followup-activations-recreate.ps1 first, then re-queue." | Add-Content $out
     exit 1
 }
+"  containers verified up" | Add-Content $out
 
 "=== Coverage audit ===" | Add-Content $out
 $audit = @"
@@ -33,25 +35,28 @@ SELECT
 FROM scan_patterns
 WHERE active = true;
 "@
-$auditOut = docker exec chili-db psql -U chili -d chili -c $audit 2>&1
+$auditOut = docker compose exec -T postgres psql -U chili -d chili -c $audit 2>&1
 $auditOut | Add-Content $out
 
 "=== By-family distribution (active) ===" | Add-Content $out
 $dist = "SELECT COALESCE(hypothesis_family,'__NULL__') AS family, COUNT(*) FROM scan_patterns WHERE active=true GROUP BY 1 ORDER BY 2 DESC;"
-docker exec chili-db psql -U chili -d chili -c $dist 2>&1 | Add-Content $out
+docker compose exec -T postgres psql -U chili -d chili -c $dist 2>&1 | Add-Content $out
 
 "=== Running smoke_family_backfill.py inside chili container ===" | Add-Content $out
 # Copy the smoke script into the chili container and execute it
 $smoke = "$repo\scripts\_smoke_family_backfill.py"
 if (Test-Path $smoke) {
-    docker cp $smoke chili:/tmp/_smoke_family_backfill.py 2>&1 | Add-Content $out
-    docker exec chili python /tmp/_smoke_family_backfill.py 2>&1 | Add-Content $out
+    # Pipe the script via stdin to avoid PowerShell argument quoting issues
+    # (a previous version used `python -c $content` and PS stripped the
+    # string-literal quotes inside the script, breaking sys.path.insert).
+    # `-T` keeps the channel non-interactive; `-i` lets python read stdin.
+    Get-Content $smoke -Raw | docker compose exec -T chili python 2>&1 | Add-Content $out
 } else {
     "ERROR: smoke script not found at $smoke" | Add-Content $out
 }
 
 "=== Post-backfill coverage ===" | Add-Content $out
-docker exec chili-db psql -U chili -d chili -c $audit 2>&1 | Add-Content $out
-docker exec chili-db psql -U chili -d chili -c $dist 2>&1 | Add-Content $out
+docker compose exec -T postgres psql -U chili -d chili -c $audit 2>&1 | Add-Content $out
+docker compose exec -T postgres psql -U chili -d chili -c $dist 2>&1 | Add-Content $out
 
 "DONE at $(Get-Date -Format o)" | Add-Content $out

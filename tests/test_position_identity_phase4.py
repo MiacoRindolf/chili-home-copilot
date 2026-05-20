@@ -66,6 +66,16 @@ def test_position_has_recorded_sell_match_returns_true():
     assert call_kwargs == {"pid": 42}
 
 
+def test_position_has_recorded_sell_excludes_synthetic_reconcile_rows():
+    db = _mock_db([])
+    assert position_has_recorded_sell(db, 42) is False
+    sql = str(db.execute.call_args[0][0]).lower()
+    assert "mig254_backfill" in sql
+    assert "broker_reconcile_position_gone" in sql
+    assert "broker_reconcile_no_exit_price" in sql
+    assert "synthetic" in sql
+
+
 # ── #4 — DB exception swallowed ────────────────────────────────────
 
 

@@ -22,6 +22,9 @@ fallback for ``-USD`` tickers. Off by default; flip
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -56,6 +59,11 @@ _PERIOD_DAYS = {
 # range exceeds that.
 _COINBASE_MAX_CANDLES = 300
 
+_CIRCUIT_LOCK = threading.Lock()
+_CIRCUIT_FAILS = 0
+_CIRCUIT_OPEN_UNTIL = 0.0
+_CIRCUIT_LAST_LOG = 0.0
+
 # Map a -USD ticker to a Coinbase product ID. For most cases it's identity:
 # "BTC-USD" → "BTC-USD". For aliases we may add overrides here.
 _PRODUCT_ALIASES: dict[str, str] = {
@@ -63,6 +71,68 @@ _PRODUCT_ALIASES: dict[str, str] = {
     # remappings if Coinbase deprecates a symbol but our seeds still use the
     # legacy name.
 }
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _circuit_is_open(product_id: str, interval: str) -> bool:
+    """Return True while provider/network failures are in backoff."""
+    global _CIRCUIT_LAST_LOG
+    now = time.time()
+    with _CIRCUIT_LOCK:
+        remaining = _CIRCUIT_OPEN_UNTIL - now
+        if remaining <= 0:
+            return False
+        if now - _CIRCUIT_LAST_LOG >= 60:
+            _CIRCUIT_LAST_LOG = now
+            logger.warning(
+                "[coinbase_ohlcv] circuit breaker OPEN - skipping %s %s (%ss remaining)",
+                product_id,
+                interval,
+                int(remaining),
+            )
+        return True
+
+
+def _request_failure_counts(exc: requests.RequestException) -> bool:
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status == 429 or (status is not None and int(status) >= 500)
+    return False
+
+
+def _record_request_success() -> None:
+    global _CIRCUIT_FAILS
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_FAILS = 0
+
+
+def _record_request_failure(exc: requests.RequestException) -> None:
+    global _CIRCUIT_FAILS, _CIRCUIT_OPEN_UNTIL, _CIRCUIT_LAST_LOG
+    if not _request_failure_counts(exc):
+        return
+    trip = _env_int("CHILI_COINBASE_OHLCV_CIRCUIT_TRIP", 5)
+    open_s = _env_int("CHILI_COINBASE_OHLCV_CIRCUIT_OPEN_SECONDS", 900)
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_FAILS += 1
+        if _CIRCUIT_FAILS < trip:
+            return
+        _CIRCUIT_FAILS = 0
+        _CIRCUIT_OPEN_UNTIL = time.time() + open_s
+        _CIRCUIT_LAST_LOG = time.time()
+    logger.error(
+        "[coinbase_ohlcv] circuit breaker OPEN - %s consecutive provider/network failures, "
+        "skipping calls for %ss",
+        trip,
+        open_s,
+    )
 
 
 def is_crypto_usd(ticker: str) -> bool:
@@ -148,6 +218,8 @@ def get_ohlcv(
         return []
 
     product_id = _to_product_id(ticker)
+    if _circuit_is_open(product_id, interval):
+        return []
     start_dt, end_dt = _resolve_window(start=start, end=end, period=period)
 
     # Chunk: each request can cover at most _COINBASE_MAX_CANDLES * granularity seconds.
@@ -158,7 +230,9 @@ def get_ohlcv(
         chunk_end = min(cursor + timedelta(seconds=chunk_seconds), end_dt)
         try:
             rows = _request_chunk(product_id, granularity_s, cursor, chunk_end)
+            _record_request_success()
         except requests.RequestException as e:
+            _record_request_failure(e)
             logger.warning(
                 "[coinbase_ohlcv] %s %s [%s..%s] request failed: %s",
                 product_id, interval, cursor.date(), chunk_end.date(), e,

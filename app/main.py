@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import ChoiceLoader
 
 from .db import Base, SessionLocal, engine
-from .migrations import run_migrations
+from .migrations import run_migrations, schema_startup_lock
 from .routers import admin, auth, brain, brain_project, brain_v1_compat, chat, code_brain_status, context_brain_status, dev_terminal, dispatch_status, health_routes, jobs, pages, marketplace, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import (  # noqa: F401 — register ORM tables
@@ -54,8 +54,9 @@ if sys.platform == "win32":
 # runs create_all + migrations, then truncates — avoiding self-deadlock with TRUNCATE.
 _under_pytest = (os.environ.get("CHILI_PYTEST") or "").strip().lower() in ("1", "true", "yes")
 if not _under_pytest:
-    Base.metadata.create_all(bind=engine)
-    run_migrations(engine)
+    with schema_startup_lock(engine):
+        Base.metadata.create_all(bind=engine)
+        run_migrations(engine, lock=False)
     # 2026-04-28: idle-in-tx watchdog. Backstop for the FractionalBacktest
     # leak that held a session open for 17h and blocked migration 193.
     try:

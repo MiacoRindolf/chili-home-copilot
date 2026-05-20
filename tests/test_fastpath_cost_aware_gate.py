@@ -13,6 +13,8 @@ import pytest
 from app.services.trading.fast_path.gates import (
     ExecContext,
     gate_cost_aware_admission,
+    gate_calibrated_tradeability,
+    gate_pullback_ticker_allowed,
 )
 
 
@@ -60,6 +62,37 @@ def test_gate_disabled_returns_allow_with_disabled_verdict():
         result = gate_cost_aware_admission(_alert(), _ctx())
     assert result.allow is True
     assert result.detail.get("verdict") == "disabled"
+
+
+def test_calibrated_tradeability_defers_when_cost_aware_enabled():
+    """Avoid the stale static cost bar shadowing the dynamic cost gate."""
+    with patch(
+        "app.services.trading.fast_path.settings.load",
+        return_value=_stub_fp_settings(enabled=True),
+    ), patch(
+        "app.services.trading.fast_path.calibration.is_score_tradeable",
+        side_effect=AssertionError("should not consult static tradeability"),
+    ):
+        result = gate_calibrated_tradeability(_alert(), _ctx())
+    assert result.allow is True
+    assert result.detail.get("verdict") == "deferred_to_cost_aware_admission"
+
+
+def test_pullback_allowlist_blocks_btc_after_realized_drift():
+    result = gate_pullback_ticker_allowed(
+        _alert(ticker="BTC-USD", alert_type="volume_breakout_pullback_long"),
+        _ctx(),
+    )
+    assert result.allow is False
+    assert result.reason == "pullback_ticker_not_allowed:BTC-USD"
+
+
+def test_pullback_allowlist_keeps_sol():
+    result = gate_pullback_ticker_allowed(
+        _alert(ticker="SOL-USD", alert_type="volume_breakout_pullback_long"),
+        _ctx(),
+    )
+    assert result.allow is True
 
 
 # ---------------------------------------------------------------------------

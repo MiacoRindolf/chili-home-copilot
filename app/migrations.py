@@ -39,11 +39,46 @@ with the prediction-mirror phase flags.
 from __future__ import annotations
 
 import logging
+import os
+from contextlib import contextmanager
+from typing import Iterator
 
 from sqlalchemy import inspect as sa_inspect, text
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.engine import Engine
+
+_SCHEMA_LOCK_CLASSID = 0x4348  # CH
+_SCHEMA_LOCK_OBJID = 0x4D49  # MI
+
+
+@contextmanager
+def schema_startup_lock(engine: Engine) -> Iterator[None]:
+    """Serialize startup schema work across web and worker containers."""
+    if getattr(engine.dialect, "name", "") != "postgresql":
+        yield
+        return
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        logger.info("[migrations] waiting for schema startup advisory lock")
+        conn.execute(
+            text("SELECT pg_advisory_lock(:classid, :objid)"),
+            {"classid": _SCHEMA_LOCK_CLASSID, "objid": _SCHEMA_LOCK_OBJID},
+        )
+        logger.info("[migrations] acquired schema startup advisory lock")
+        try:
+            yield
+        finally:
+            try:
+                conn.execute(
+                    text("SELECT pg_advisory_unlock(:classid, :objid)"),
+                    {"classid": _SCHEMA_LOCK_CLASSID, "objid": _SCHEMA_LOCK_OBJID},
+                )
+            except Exception:
+                logger.warning(
+                    "[migrations] failed to release schema startup advisory lock",
+                    exc_info=True,
+                )
 
 
 # ── Retired migrations ────────────────────────────────────────────────
@@ -17194,6 +17229,78 @@ def _migration_254_synthetic_exit_fill_events(conn) -> None:
     logger.info("[mig254] done -- inserted=%d", inserted)
 
 
+def _migration_255_fast_path_retention_time_indexes(conn) -> None:
+    """Add timestamp-leading indexes required by fast-path retention.
+
+    The original fast-path indexes are optimized for UI/ticker lookups,
+    for example ``(ticker, snapshot_at DESC)``. Retention deletes scan by
+    timestamp only, so it intentionally refuses to run unless a btree index
+    starts with the retention column. These indexes keep pruning bounded on
+    high-volume partitioned tables, especially ``fast_orderbook``.
+    """
+    inspector = sa_inspect(conn)
+    tables = set(inspector.get_table_names())
+    index_specs = [
+        ("fast_snapshots", "ix_fast_snapshots_bar_close_retention", "bar_close_at"),
+        ("fast_orderbook", "ix_fast_orderbook_snapshot_retention", "snapshot_at"),
+        ("fast_alerts", "ix_fast_alerts_fired_retention", "fired_at"),
+        ("fast_executions", "ix_fast_executions_decided_retention", "decided_at"),
+        ("fast_exits", "ix_fast_exits_exited_retention", "exited_at"),
+    ]
+    heavy_limit_bytes = int(
+        os.environ.get(
+            "CHILI_MIGRATION_HEAVY_FAST_INDEX_MAX_BYTES",
+            str(2 * 1024 * 1024 * 1024),
+        )
+    )
+    build_heavy = (
+        os.environ.get("CHILI_MIGRATION_BUILD_HEAVY_FAST_INDEXES", "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+    deferred_heavy_tables = {"fast_orderbook"}
+
+    for table, index_name, ts_col in index_specs:
+        if table not in tables:
+            continue
+        index_exists = bool(
+            conn.execute(text("SELECT to_regclass(:index_name)"), {"index_name": index_name}).scalar()
+        )
+        if index_exists:
+            continue
+        table_bytes = int(
+            conn.execute(
+                text(
+                    """
+                    SELECT COALESCE(sum(pg_total_relation_size(relid)), 0)
+                    FROM pg_partition_tree(to_regclass(:table_name))
+                    """
+                ),
+                {"table_name": table},
+            ).scalar()
+            or 0
+        )
+        if (
+            table in deferred_heavy_tables
+            and table_bytes > heavy_limit_bytes
+            and not build_heavy
+        ):
+            logger.warning(
+                "[mig255] deferred heavy startup index %s on %s (size=%.2fGB); "
+                "set CHILI_MIGRATION_BUILD_HEAVY_FAST_INDEXES=1 during a maintenance window",
+                index_name,
+                table,
+                table_bytes / (1024 * 1024 * 1024),
+            )
+            continue
+        conn.execute(text(
+            f"CREATE INDEX IF NOT EXISTS {index_name} "
+            f"ON {table} ({ts_col}, id)"
+        ))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -17484,16 +17591,27 @@ MIGRATIONS = [
      _migration_253_tca_backfill_guard_phantom_rows),
     ("254_synthetic_exit_fill_events",
      _migration_254_synthetic_exit_fill_events),
+    ("255_fast_path_retention_time_indexes",
+     _migration_255_fast_path_retention_time_indexes),
 ]
 
 
-def run_migrations(engine: Engine) -> None:
+def run_migrations(engine: Engine, *, lock: bool = True) -> None:
     """Create schema_version table if missing, then run any migrations not yet applied.
 
     Fails fast (before any DB writes) if a migration ID is duplicated or
     collides with a retired ID — see ``_assert_migration_ids_unique``.
     """
     _assert_migration_ids_unique()
+    if lock:
+        with schema_startup_lock(engine):
+            _run_migrations_unlocked(engine)
+        return
+
+    _run_migrations_unlocked(engine)
+
+
+def _run_migrations_unlocked(engine: Engine) -> None:
     with engine.connect() as conn:
         conn.execute(text(
             "CREATE TABLE IF NOT EXISTS schema_version ("

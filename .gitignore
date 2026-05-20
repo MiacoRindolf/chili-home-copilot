@@ -30,6 +30,8 @@ data/*.sqlite
 data/chili.db.archived*
 data/chili.db-wal.archived*
 data/chili.db-shm.archived*
+data/ticker_cache/crypto_top.json
+data/*.lock
 
 # ChromaDB vector store
 data/chroma/
@@ -65,6 +67,7 @@ backtest_refresh_scheduled.log
 # dumps, brain worker, etc. Never commit logs; they bloat the repo and
 # frequently contain credentials or user data.
 *.log
+*.log.*
 
 # Local DB backups (pg_dump output). Treat as secret — full state of the
 # live trading DB. Keep them out of git even if a commit slips through.
@@ -95,6 +98,17 @@ scripts/_claude_output.txt
 scripts/_claude_history/
 scripts/_claude_test_writehost.ps1
 scripts/_claude_daemon.ps1
+scripts/_claude_daemon_*.json
+scripts/_claude_session_status.json
+scripts/_claude_session_pause.flag*
+scripts/_claude_session_consult/*
+!scripts/_claude_session_consult/.gitkeep
+scripts/_claude_session_done/*
+!scripts/_claude_session_done/.gitkeep
+scripts/_claude_session_log/*
+!scripts/_claude_session_log/.gitkeep
+scripts/_claude_session_running/*
+!scripts/_claude_session_running/.gitkeep
 
 # Diagnostic/dispatch script outputs (per-run scratch dumps)
 scripts/dispatch-debug-loaded-output.txt
@@ -106,8 +120,16 @@ scripts/pat-write-check-output.txt
 scripts/dispatch-decay-heap-trend-output.txt
 scripts/dispatch-stats-trend-output.txt
 scripts/dispatch-postgres-integrity-output.txt
+scripts/dispatch-*.ps1
+scripts/dispatch-*-out.txt
+scripts/dispatch-*-output.txt
+scripts/*-out.txt
+scripts/*-output.txt
 # F-leak-1.1: rolling docker-stats logs from dispatch-stats-logger.ps1
 scripts/_stats_log/
+scripts/_pg_stat_log/
+scripts/watcher-out/
+scripts/_housekeeping_archive_*/
 
 # pytest scratch dumps captured to repo root during interactive runs
 _pytest_*.txt
@@ -122,16 +144,32 @@ host-debug-logs/
 # Per-task smoke test + diagnostic scripts (kept locally, never committed)
 scripts/_smoke_*.py
 scripts/_diag_*.py
+scripts/_*.csv
+scripts/_*.json
+scripts/_*.log
+scripts/_*.tmp
+scripts/_*.flag*
+scripts/_*msg*.txt
+scripts/_*pr_body*.md
+scripts/_*out*.txt
 .pr_body.md
 
 # Operator audit working-set (pre-CC scratch; not intended for git).
 # To share a specific audit, use 'git add -f docs/AUDITS/<file>'.
 docs/AUDITS/
+docs/STRATEGY/AUDITS/
+docs/STRATEGY/SIDECHANNEL/
+docs/STRATEGY/*.lock
+docs/STRATEGY/*.tmp
+docs/STRATEGY/.*.lock
+docs/STRATEGY/.test_append
 
 # Operator-scratch at repo root.
 HARDCODED_MAGIC_NUMBERS_AUDIT.txt
 docs/AUDIT_PROMPT.md
 docs/FAST_PATH_CLAUDE_CODE_PROMPT.md
+_x_test.txt
+test_write_check.txt
 
 # Cowork's working backlog of strategy reviews — keep tracked normally
 # (this is part of the Cowork ↔ CC protocol, not operator scratch).

@@ -181,9 +181,9 @@ def test_run_rotation_pass_first_pass_writes_shadow(db):
     candidates = ["BTC-USD", "ETH-USD", "SOL-USD"]
     snapshots = {
         # Decreasing composite so rank order is stable
-        "BTC-USD": _make_candidate(ticker="BTC-USD", volume_24h_base=10_000.0),
-        "ETH-USD": _make_candidate(ticker="ETH-USD", volume_24h_base=5_000.0),
-        "SOL-USD": _make_candidate(ticker="SOL-USD", volume_24h_base=1_000.0),
+        "BTC-USD": _make_candidate(ticker="BTC-USD", volume_24h_base=1_000_000.0),
+        "ETH-USD": _make_candidate(ticker="ETH-USD", volume_24h_base=500_000.0),
+        "SOL-USD": _make_candidate(ticker="SOL-USD", volume_24h_base=100_000.0),
     }
     out = run_rotation_pass(
         db, settings=s,
