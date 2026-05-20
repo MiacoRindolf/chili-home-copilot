@@ -682,6 +682,49 @@ def _sync_bracket_intent_stop_unconditional(db: Session, trade) -> None:
         logger.debug("[stop_engine] bracket intent stop_price sync failed", exc_info=True)
 
 
+def _indicator_snapshot_dict(trade) -> dict:
+    """Return indicator_snapshot as a dict, including double-encoded legacy rows."""
+    try:
+        snapshot = getattr(trade, "indicator_snapshot", None)
+        if not isinstance(snapshot, str) or not snapshot:
+            return {}
+        snap = json.loads(snapshot)
+        if isinstance(snap, str):
+            snap = json.loads(snap)
+        return snap if isinstance(snap, dict) else {}
+    except Exception:
+        return {}
+
+
+def _extract_atr_from_indicator_snapshot(trade) -> float | None:
+    """Extract ATR from current and legacy indicator_snapshot shapes."""
+    snap = _indicator_snapshot_dict(trade)
+    if not snap:
+        return None
+    atr_val = snap.get("atr") or snap.get("ATR")
+    if atr_val is None:
+        atr_block = snap.get("atr_14") or snap.get("ATR_14")
+        if isinstance(atr_block, dict):
+            atr_val = atr_block.get("value")
+        elif atr_block is not None:
+            atr_val = atr_block
+    if atr_val is None:
+        ba = snap.get("breakout_alert")
+        if isinstance(ba, dict):
+            fi = ba.get("flat_indicators")
+            if isinstance(fi, dict):
+                atr_val = fi.get("atr") or fi.get("ATR")
+    if atr_val is None:
+        fi = snap.get("flat_indicators")
+        if isinstance(fi, dict):
+            atr_val = fi.get("atr") or fi.get("ATR")
+    try:
+        atr = float(atr_val)
+        return atr if atr > 0 else None
+    except Exception:
+        return None
+
+
 def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
     """Phase G - single canonical bracket-intent emitter.
 
@@ -716,34 +759,14 @@ def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
         #   * top-level ``atr`` / ``ATR`` (legacy schema)
         #   * ``breakout_alert.flat_indicators.atr`` (current schema)
         #   * ``flat_indicators.atr`` (alt depth)
-        atr_val = None
-        try:
-            snapshot = getattr(trade, "indicator_snapshot", None)
-            if isinstance(snapshot, str) and snapshot:
-                snap = json.loads(snapshot)
-                if isinstance(snap, dict):
-                    atr_val = snap.get("atr") or snap.get("ATR")
-                    if atr_val is None:
-                        # Walk nested locations: breakout_alert -> flat_indicators -> atr
-                        ba = snap.get("breakout_alert")
-                        if isinstance(ba, dict):
-                            fi = ba.get("flat_indicators")
-                            if isinstance(fi, dict):
-                                atr_val = fi.get("atr") or fi.get("ATR")
-                    if atr_val is None:
-                        # Some snapshots have flat_indicators at the top
-                        fi = snap.get("flat_indicators")
-                        if isinstance(fi, dict):
-                            atr_val = fi.get("atr") or fi.get("ATR")
-        except Exception:
-            atr_val = None
+        atr_val = _extract_atr_from_indicator_snapshot(trade)
 
         bracket_input = BracketIntentInput(
             ticker=trade.ticker,
             direction=(trade.direction or "long").lower(),
             entry_price=float(trade.entry_price or 0.0),
             quantity=float(trade.quantity or 0.0),
-            atr=float(atr_val) if atr_val else None,
+            atr=atr_val,
             stop_model=getattr(trade, "stop_model", None),
             pattern_id=getattr(trade, "scan_pattern_id", None),
             lifecycle_stage=getattr(brain, "lifecycle_stage", None) if brain else None,
@@ -968,22 +991,9 @@ def evaluate_all(
                 # open trade, with ``atr=None`` -- the operator-visible
                 # alert noise that triggered today's investigation.
                 if market.atr is None:
-                    try:
-                        snap_raw = getattr(trade, "indicator_snapshot", None)
-                        if isinstance(snap_raw, str) and snap_raw:
-                            snap = json.loads(snap_raw)
-                            if isinstance(snap, dict):
-                                _ba = snap.get("breakout_alert")
-                                if isinstance(_ba, dict):
-                                    _fi = _ba.get("flat_indicators")
-                                    if isinstance(_fi, dict):
-                                        _atr_from_trade = (
-                                            _fi.get("atr") or _fi.get("ATR")
-                                        )
-                                        if _atr_from_trade and float(_atr_from_trade) > 0:
-                                            market.atr = float(_atr_from_trade)
-                    except Exception:
-                        pass
+                    _atr_from_trade = _extract_atr_from_indicator_snapshot(trade)
+                    if _atr_from_trade is not None:
+                        market.atr = _atr_from_trade
                 result = evaluate_trade(trade, market, db, brain=brain)
                 summary["total_checked"] += 1
 
