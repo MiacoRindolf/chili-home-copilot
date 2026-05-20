@@ -1967,7 +1967,9 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             #     discriminator on the events table; safer in the
             #     contradiction direction)
             #   * exact qty match (1e-9 tolerance)
-            #   * exact entry_price vs broker avg_price match (1e-9)
+            #   * entry_price vs broker avg_price match. Crypto rows may use
+            #     rounded entry prices while Robinhood reports 8-decimal cost
+            #     basis, so tolerate a small relative delta there.
             #
             # If all hold: re-open + re-arm bracket_intent + audit log.
             # If execution_events count > 0 OR qty/price mismatch:
@@ -1994,13 +1996,26 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 qty_match = abs(
                     float(most_recent.quantity or 0) - float(qty or 0)
                 ) < 1e-9
-                price_match = (
-                    most_recent.entry_price is not None
-                    and avg_price is not None
-                    and abs(
-                        float(most_recent.entry_price) - float(avg_price)
-                    ) < 1e-9
-                )
+                price_match = False
+                price_delta_bps: float | None = None
+                if most_recent.entry_price is not None and avg_price is not None:
+                    try:
+                        entry_f = float(most_recent.entry_price)
+                        avg_f = float(avg_price)
+                        price_delta = abs(entry_f - avg_f)
+                        price_ref = max(abs(entry_f), abs(avg_f), 1e-9)
+                        price_delta_bps = (price_delta / price_ref) * 10000.0
+                        asset_kind = (
+                            getattr(most_recent, "asset_kind", None)
+                            or _infer_asset_kind_for_position(ticker)
+                        )
+                        rel_tol = 0.005 if asset_kind == "crypto" else 0.0
+                        price_match = (
+                            price_delta < 1e-9
+                            or (rel_tol > 0 and (price_delta / price_ref) <= rel_tol)
+                        )
+                    except Exception:
+                        price_match = False
                 # f-position-identity-phase-4 (2026-05-18): replace the
                 # conservative event_count==0 check with a precise position-
                 # level "has the broker ever recorded a SELL fill?" check.
@@ -2022,6 +2037,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 try:
                     from .trading.position_resolver import (
                         position_has_recorded_sell as _phase4_check,
+                        resolve_position_id as _phase4_resolve_position_id,
                     )
                     from ..config import settings as _phase4_settings
                     _phase4_enabled = bool(getattr(
@@ -2031,7 +2047,21 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     ))
                     if _phase4_enabled:
                         _pid = getattr(most_recent, "position_id", None)
-                        _phase4_has_sell = _phase4_check(db, _pid)
+                        if _pid is None:
+                            _pid = _phase4_resolve_position_id(
+                                db,
+                                trade=most_recent,
+                                user_id=user_id,
+                                ticker=ticker,
+                                broker_source="robinhood",
+                            )
+                        if _pid is None:
+                            # Phase 4 is only safe when the position can be
+                            # resolved. Unknown position identity must retain
+                            # the older conservative event-count guard.
+                            _phase4_enabled = False
+                        else:
+                            _phase4_has_sell = _phase4_check(db, _pid)
                 except Exception:
                     # Belt-and-suspenders: if any import / lookup fails,
                     # fall back to the legacy event_count==0 path. NEVER
@@ -2050,6 +2080,11 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     most_recent.exit_date = None
                     most_recent.exit_price = None
                     most_recent.exit_reason = None
+                    most_recent.quantity = qty
+                    if avg_price is not None:
+                        most_recent.entry_price = avg_price
+                    if not getattr(most_recent, "asset_kind", None):
+                        most_recent.asset_kind = _infer_asset_kind_for_position(ticker)
                     if hasattr(most_recent, "pnl"):
                         most_recent.pnl = None
                     if hasattr(most_recent, "pnl_pct"):
@@ -2070,12 +2105,14 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     logger.warning(
                         "[broker_sync] INVERSE RECONCILE [%s]: re-opened "
                         "trade_id=%d position_id=%s ticker=%s qty=%s avg=%s "
-                        "(prior exit_reason=%s, broker qty/price match)",
+                        "(prior exit_reason=%s, broker qty/price match, "
+                        "price_delta_bps=%s)",
                         _phase4_tag,
                         most_recent.id,
                         getattr(most_recent, "position_id", None),
                         ticker, qty, avg_price,
                         prior_exit_reason,
+                        price_delta_bps,
                     )
                     reopened += 1
                     continue
@@ -2469,6 +2506,11 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
         trade.status = "closed"
         trade.exit_date = datetime.utcnow()
+        trade.pending_exit_order_id = None
+        trade.pending_exit_status = None
+        trade.pending_exit_requested_at = None
+        trade.pending_exit_reason = None
+        trade.pending_exit_limit_price = None
         entry = trade.entry_price or 0.0
         qty = trade.quantity or 0.0
         # FIX (2026-04-30): try to resolve the REAL exit price from broker
@@ -2534,35 +2576,61 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         # here. Without this writer, Phase 4's position_has_recorded_sell
         # helper would not see these closures. Mirrors the Coinbase
         # version in coinbase_service.sync_positions_to_db.
-        # Wrapped in try/except: observability-only, never blocks close.
+        # Wrapped in a savepoint + try/except: observability-only, never
+        # blocks close.
+        _event_trade_id = int(getattr(trade, "id", 0) or 0)
         try:
             from .trading.execution_audit import record_execution_event
 
             _payload = {
                 "side": "sell",
                 "source": "broker_reconcile_position_gone",
-                "trade_id": int(getattr(trade, "id", 0) or 0),
+                "trade_id": _event_trade_id,
                 "exit_reason": trade.exit_reason,
                 "synthetic": True,
             }
-            record_execution_event(
-                db,
-                user_id=trade.user_id,
-                ticker=trade.ticker,
-                trade=trade,
-                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
-                broker_source="robinhood",
-                event_type="broker_reconcile_position_gone_close",
-                status="filled",
-                average_fill_price=trade.exit_price,
-                cumulative_filled_quantity=float(trade.quantity or 0.0),
-                payload_json=_payload,
-            )
+            with db.begin_nested():
+                record_execution_event(
+                    db,
+                    user_id=trade.user_id,
+                    ticker=trade.ticker,
+                    trade=trade,
+                    scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                    broker_source="robinhood",
+                    event_type="broker_reconcile_gone_close",
+                    status="filled",
+                    average_fill_price=trade.exit_price,
+                    cumulative_filled_quantity=float(trade.quantity or 0.0),
+                    payload_json=_payload,
+                )
         except Exception:
             logger.debug(
                 "[broker_sync] sell-side execution_event write failed for "
                 "trade#%s (non-fatal -- Phase 4 visibility only)",
-                getattr(trade, "id", None), exc_info=True,
+                _event_trade_id, exc_info=True,
+            )
+
+        try:
+            from .trading.bracket_intent_writer import mark_closed
+
+            _intent_ids = db.execute(
+                text(
+                    "SELECT id FROM trading_bracket_intents "
+                    "WHERE trade_id = :tid AND intent_state <> 'closed'"
+                ),
+                {"tid": _event_trade_id},
+            ).scalars().all()
+            for _intent_id in _intent_ids:
+                mark_closed(
+                    db,
+                    int(_intent_id),
+                    reason=str(trade.exit_reason or "broker_reconcile_close")[:128],
+                )
+        except Exception:
+            logger.debug(
+                "[broker_sync] bracket intent close failed for trade#%s "
+                "(non-fatal)",
+                _event_trade_id, exc_info=True,
             )
 
         if not trade.management_scope:

@@ -187,6 +187,58 @@ def test_streak_at_threshold_allows_close(db, caplog):
     )
 
 
+def test_stale_close_clears_pending_exit_fields(db):
+    """A broker-reconcile close is terminal, so stale pending-exit metadata
+    must not survive on the closed Trade row."""
+    long_ago = datetime.utcnow() - timedelta(seconds=600)
+    db.execute(text("""
+        INSERT INTO trading_trades (
+            id, user_id, ticker, status, broker_source, direction,
+            quantity, entry_price, entry_date, last_broker_sync,
+            broker_sync_missing_streak, pending_exit_order_id,
+            pending_exit_status, pending_exit_requested_at,
+            pending_exit_reason, pending_exit_limit_price
+        ) VALUES (
+            2010, NULL, 'AAPL', 'open', 'robinhood', 'long',
+            1.0, 100.0, :ed, :lbs,
+            1, 'exit-2010', 'submitted', :lbs,
+            'stop_loss_hit', 99.0
+        )
+    """), {"ed": long_ago, "lbs": long_ago})
+    db.execute(text("""
+        INSERT INTO trading_bracket_intents (
+            id, trade_id, ticker, direction, quantity, entry_price,
+            stop_price, target_price, intent_state, shadow_mode,
+            broker_source, payload_json, created_at, updated_at
+        ) VALUES (
+            42010, 2010, 'AAPL', 'long', 1.0, 100.0,
+            99.0, 110.0, 'reconciled', false,
+            'robinhood', '{}'::jsonb, NOW(), NOW()
+        )
+    """))
+    db.commit()
+
+    p1, p2, p3, p4, p5 = _patch_broker_io(["MSFT"])
+    with p1, p2, p3, p4, p5, \
+         patch.object(bs, "_RECONCILE_PARTIAL_LIST_STREAK_MIN", 2), \
+         patch.object(bs, "_resolve_close_exit_price", return_value=101.0):
+        bs.sync_positions_to_db(db, user_id=None)
+
+    row = db.execute(text("""
+        SELECT status, pending_exit_order_id, pending_exit_status,
+               pending_exit_requested_at, pending_exit_reason,
+               pending_exit_limit_price
+        FROM trading_trades WHERE id = 2010
+    """)).first()
+    assert row[0] == "closed"
+    assert row[1:] == (None, None, None, None, None)
+
+    intent = db.execute(text(
+        "SELECT intent_state FROM trading_bracket_intents WHERE id = 42010"
+    )).scalar()
+    assert intent == "closed"
+
+
 def test_fresh_trade_time_guard_still_fires(db):
     """Brand-new trade with last_broker_sync=NULL but recent
     entry_date: even if streak somehow reaches threshold, the time

@@ -53,6 +53,7 @@ def _make_trade(
     ticker: str,
     broker_source: str | None,
     stop_loss: float | None,
+    take_profit: float | None = None,
     qty: float = 10.0,
     entry: float = 100.0,
     direction: str = "long",
@@ -68,7 +69,11 @@ def _make_trade(
         status=status,
         broker_source=broker_source,
         stop_loss=stop_loss,
-        take_profit=(entry + 5.0) if stop_loss is not None else None,
+        take_profit=(
+            take_profit
+            if take_profit is not None
+            else ((entry + 5.0) if stop_loss is not None else None)
+        ),
     )
     db.add(t)
     db.commit()
@@ -193,6 +198,36 @@ class TestBugAEntryTimeEmission:
         second = _intent_row(db, t.id)
         assert second is not None
         assert second["id"] == first["id"]
+
+    def test_emit_uses_trade_current_stop_and_target(self, db, monkeypatch):
+        """Recurring emits must not roll monitor-managed levels backward."""
+        _set_bracket_mode(monkeypatch, "shadow")
+        t = _make_trade(
+            db,
+            ticker="CURR-USD",
+            broker_source="coinbase",
+            stop_loss=88.0,
+            take_profit=140.0,
+            entry=100.0,
+        )
+
+        _maybe_emit_bracket_intent(db, t, brain=None)
+        first = _intent_row(db, t.id)
+        assert first is not None
+        assert first["stop_price"] == pytest.approx(88.0)
+        assert first["target_price"] == pytest.approx(140.0)
+
+        t.stop_loss = 92.0
+        t.take_profit = 150.0
+        db.add(t)
+        db.commit()
+
+        _maybe_emit_bracket_intent(db, t, brain=None)
+        second = _intent_row(db, t.id)
+        assert second is not None
+        assert second["id"] == first["id"]
+        assert second["stop_price"] == pytest.approx(92.0)
+        assert second["target_price"] == pytest.approx(150.0)
 
 
 # ─── Bug B: reconciler backfills missing intents ──────────────────

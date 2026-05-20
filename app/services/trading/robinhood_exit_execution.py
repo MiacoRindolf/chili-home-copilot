@@ -6,6 +6,7 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -423,6 +424,27 @@ def _finalize_filled_exit(
         )
     db.add(trade)
     db.commit()
+    try:
+        from .bracket_intent_writer import mark_closed
+
+        intent_ids = db.execute(
+            text(
+                "SELECT id FROM trading_bracket_intents "
+                "WHERE trade_id = :tid AND intent_state <> 'closed'"
+            ),
+            {"tid": int(trade.id)},
+        ).scalars().all()
+        for intent_id in intent_ids:
+            mark_closed(
+                db,
+                int(intent_id),
+                reason=f"exit_fill:{exit_reason}"[:128],
+            )
+    except Exception:
+        logger.debug(
+            "[rh_exit] mark bracket intent closed failed for trade=%s",
+            getattr(trade, "id", None), exc_info=True,
+        )
     # f-fix-live-trade-closed-emitter (2026-05-05): emit live_trade_closed
     # so the Phase 2 handler chain (pattern_stats + demote +
     # regime_ledger) fires on this Robinhood-broker-fill close.
