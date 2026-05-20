@@ -3380,6 +3380,10 @@ class Settings(BaseSettings):
     brain_retention_fast_execution_days: int = 30
     brain_retention_fast_exit_days: int = 90
     brain_retention_fast_delete_batch_size: int = 50_000
+    brain_retention_fast_partition_maintenance_enabled: bool = False
+    brain_retention_fast_partition_days_ahead: int = 7
+    brain_retention_fast_partition_max_default_bytes: int = 1_000_000_000
+    brain_retention_fast_drop_partitions_enabled: bool = True
 
     # Portfolio: max simultaneous open longs per coarse sector (0 = disabled).
     brain_max_open_per_sector: int = 0
