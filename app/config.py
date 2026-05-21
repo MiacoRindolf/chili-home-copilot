@@ -3421,6 +3421,9 @@ class Settings(BaseSettings):
     brain_retention_paper_trade_days: int = 180
     brain_retention_hypothesis_days: int = 180
     brain_retention_breakout_alert_days: int = 180
+    brain_retention_exit_parity_backtest_days: int = 7
+    brain_retention_exit_parity_live_days: int = 30
+    brain_retention_exit_parity_delete_batch_size: int = 50_000
     brain_retention_fast_snapshot_days: int = 30
     brain_retention_fast_orderbook_days: int = 3
     brain_retention_fast_alert_days: int = 14

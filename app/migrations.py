@@ -17792,6 +17792,672 @@ def _migration_258_position_identity_phase5a_residual_backfill(conn) -> None:
     )
 
 
+def _migration_259_jsonb_contract_repair(conn) -> None:
+    """Repair ORM/DB drift for trading JSONB columns without dropping legacy text.
+
+    Mig 075 attempted a direct text -> jsonb cast. Environments with malformed
+    historical payloads can stay stuck as TEXT, which breaks SQLAlchemy JSONB
+    semantics and research queries. This pass preserves the exact legacy text in
+    a sidecar table, then converts the canonical column to JSONB. Invalid
+    payloads become small JSONB wrapper objects instead of being nulled, so old
+    research and trade context remains inspectable.
+    """
+
+    def qi(identifier: str) -> str:
+        if not identifier.replace("_", "").isalnum() or identifier[0].isdigit():
+            raise ValueError(f"unsafe SQL identifier: {identifier!r}")
+        return f'"{identifier}"'
+
+    def ql(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    def column_udt(table: str, column: str) -> str | None:
+        row = conn.execute(text("""
+            SELECT udt_name
+            FROM information_schema.columns
+            WHERE table_schema = ANY(current_schemas(false))
+              AND table_name = :table_name
+              AND column_name = :column_name
+        """), {"table_name": table, "column_name": column}).fetchone()
+        return str(row[0]) if row else None
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS trading_jsonb_contract_repair_audit (
+            id BIGSERIAL PRIMARY KEY,
+            migration_id TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            column_name TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            preserved_column TEXT NULL,
+            converted_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            rows_seen BIGINT NOT NULL DEFAULT 0,
+            null_rows BIGINT NOT NULL DEFAULT 0,
+            sanitized_constant_rows BIGINT NOT NULL DEFAULT 0,
+            legacy_wrapped_rows BIGINT NOT NULL DEFAULT 0,
+            notes TEXT NULL
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS trading_jsonb_contract_legacy_text (
+            id BIGSERIAL PRIMARY KEY,
+            migration_id TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            column_name TEXT NOT NULL,
+            row_pk TEXT NOT NULL,
+            legacy_text TEXT NOT NULL,
+            captured_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+    conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_jsonb_contract_legacy_text_row
+        ON trading_jsonb_contract_legacy_text
+            (migration_id, table_name, column_name, row_pk)
+    """))
+    conn.execute(text("""
+        ALTER TABLE trading_jsonb_contract_repair_audit
+        ADD COLUMN IF NOT EXISTS sanitized_constant_rows
+            BIGINT NOT NULL DEFAULT 0
+    """))
+    conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_jsonb_contract_repair_audit_col
+        ON trading_jsonb_contract_repair_audit
+            (migration_id, table_name, column_name)
+    """))
+    conn.commit()
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION chili_jsonb_or_legacy_object(raw text, source text)
+        RETURNS jsonb
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            sanitized text;
+            pass integer;
+        BEGIN
+            IF raw IS NULL OR btrim(raw) = '' THEN
+                RETURN NULL;
+            END IF;
+
+            BEGIN
+                RETURN raw::jsonb;
+            EXCEPTION WHEN others THEN
+                sanitized := raw;
+                FOR pass IN 1..3 LOOP
+                    sanitized := regexp_replace(
+                        sanitized,
+                        '(^|[\\[\\{,:][[:space:]]*)(NaN|-Infinity|Infinity)([[:space:]]*($|[,\\]\\}]))',
+                        '\\1null\\3',
+                        'g'
+                    );
+                END LOOP;
+                BEGIN
+                    RETURN sanitized::jsonb;
+                EXCEPTION WHEN others THEN
+                    RETURN jsonb_build_object(
+                        '_chili_migration', '259_jsonb_contract_repair',
+                        '_chili_source', source,
+                        '_chili_legacy_text', raw
+                    );
+                END;
+            END;
+        END;
+        $$;
+    """))
+    conn.commit()
+
+    conversions = [
+        ("trading_trades", "indicator_snapshot"),
+        ("trading_backtests", "params"),
+        ("trading_proposals", "signals_json"),
+        ("trading_proposals", "indicator_json"),
+        ("trading_scans", "indicator_data"),
+        ("trading_hypotheses", "last_result_json"),
+    ]
+
+    for table, column in conversions:
+        if table not in _tables(conn):
+            continue
+        source_type = column_udt(table, column)
+        if source_type is None:
+            continue
+        if source_type == "jsonb":
+            continue
+
+        table_ident = qi(table)
+        column_ident = qi(column)
+        cols = _columns(conn, table)
+        if "id" not in cols:
+            logger.warning(
+                "[mig259] skip %s.%s: no id column for legacy sidecar",
+                table,
+                column,
+            )
+            continue
+        id_ident = qi("id")
+        source_label = f"{table}.{column}"
+
+        conn.execute(text(f"""
+            INSERT INTO trading_jsonb_contract_legacy_text (
+                migration_id, table_name, column_name, row_pk, legacy_text
+            )
+            SELECT
+                '259_jsonb_contract_repair',
+                :table_name,
+                :column_name,
+                {id_ident}::text,
+                {column_ident}::text
+            FROM {table_ident}
+            WHERE {column_ident} IS NOT NULL
+            ON CONFLICT (migration_id, table_name, column_name, row_pk)
+            DO NOTHING
+        """), {
+            "table_name": table,
+            "column_name": column,
+        })
+        conn.commit()
+
+        if table == "trading_trades":
+            # ``trading_trades`` has NOT VALID positive-price constraints with
+            # grandfathered bad rows. UPDATEs re-check those rows, but ALTER
+            # TYPE does not; the table is small, so direct conversion is the
+            # least invasive path.
+            conn.execute(text(
+                f"ALTER TABLE {table_ident} "
+                f"ALTER COLUMN {column_ident} TYPE JSONB "
+                f"USING chili_jsonb_or_legacy_object({column_ident}::text, "
+                f"{ql(source_label)})"
+            ))
+            conn.commit()
+        else:
+            batch_size = int(
+                os.environ.get("CHILI_JSONB_REPAIR_BATCH_SIZE", "5000")
+            )
+            repair_column = f"{column}_jsonb_repair_259"
+            legacy_column = f"{column}_legacy_text_259"
+            repair_ident = qi(repair_column)
+            legacy_ident = qi(legacy_column)
+            cols = _columns(conn, table)
+            if repair_column not in cols:
+                conn.execute(text(
+                    f"ALTER TABLE {table_ident} "
+                    f"ADD COLUMN {repair_ident} JSONB"
+                ))
+                conn.commit()
+
+            while True:
+                result = conn.execute(text(f"""
+                    UPDATE {table_ident} AS t
+                    SET {repair_ident} = chili_jsonb_or_legacy_object(
+                        t.{column_ident}::text,
+                        {ql(source_label)}
+                    )
+                    WHERE t.{id_ident} IN (
+                        SELECT {id_ident}
+                        FROM {table_ident}
+                        WHERE {column_ident} IS NOT NULL
+                          AND {repair_ident} IS NULL
+                        ORDER BY {id_ident}
+                        LIMIT :batch_size
+                    )
+                """), {"batch_size": batch_size})
+                changed = int(result.rowcount or 0)
+                conn.commit()
+                if changed <= 0:
+                    break
+
+            cols = _columns(conn, table)
+            if legacy_column not in cols:
+                conn.execute(text(
+                    f"ALTER TABLE {table_ident} "
+                    f"RENAME COLUMN {column_ident} TO {legacy_ident}"
+                ))
+                conn.commit()
+            cols = _columns(conn, table)
+            if repair_column in cols and column not in cols:
+                conn.execute(text(
+                    f"ALTER TABLE {table_ident} "
+                    f"RENAME COLUMN {repair_ident} TO {column_ident}"
+                ))
+                conn.commit()
+
+        stats = conn.execute(text(f"""
+            SELECT
+                COUNT(*) AS rows_seen,
+                COUNT(*) FILTER (WHERE {column_ident} IS NULL) AS null_rows,
+                COUNT(*) FILTER (
+                    WHERE legacy.legacy_text ~
+                        '(^|[\\[\\{{,:][[:space:]]*)(NaN|-Infinity|Infinity)([[:space:]]*($|[,\\]\\}}]))'
+                ) AS sanitized_constant_rows,
+                COUNT(*) FILTER (
+                    WHERE jsonb_typeof({column_ident}) = 'object'
+                      AND {column_ident} ? '_chili_legacy_text'
+                      AND {column_ident}->>'_chili_migration'
+                          = '259_jsonb_contract_repair'
+                ) AS legacy_wrapped_rows
+            FROM {table_ident}
+            LEFT JOIN trading_jsonb_contract_legacy_text legacy
+              ON legacy.migration_id = '259_jsonb_contract_repair'
+             AND legacy.table_name = {ql(table)}
+             AND legacy.column_name = {ql(column)}
+             AND legacy.row_pk = {table_ident}.{id_ident}::text
+        """)).mappings().first()
+        conn.execute(text("""
+            INSERT INTO trading_jsonb_contract_repair_audit (
+                migration_id, table_name, column_name, source_type,
+                preserved_column, rows_seen, null_rows,
+                sanitized_constant_rows, legacy_wrapped_rows, notes
+            )
+            VALUES (
+                '259_jsonb_contract_repair', :table_name, :column_name,
+                :source_type, :preserved_column, :rows_seen, :null_rows,
+                :sanitized_constant_rows, :legacy_wrapped_rows, :notes
+            )
+            ON CONFLICT (migration_id, table_name, column_name)
+            DO UPDATE SET
+                source_type = EXCLUDED.source_type,
+                preserved_column = EXCLUDED.preserved_column,
+                converted_at = NOW(),
+                rows_seen = EXCLUDED.rows_seen,
+                null_rows = EXCLUDED.null_rows,
+                sanitized_constant_rows = EXCLUDED.sanitized_constant_rows,
+                legacy_wrapped_rows = EXCLUDED.legacy_wrapped_rows,
+                notes = EXCLUDED.notes
+        """), {
+            "table_name": table,
+            "column_name": column,
+            "source_type": source_type,
+            "preserved_column": "trading_jsonb_contract_legacy_text",
+            "rows_seen": int(stats["rows_seen"] or 0) if stats else 0,
+            "null_rows": int(stats["null_rows"] or 0) if stats else 0,
+            "sanitized_constant_rows": (
+                int(stats["sanitized_constant_rows"] or 0) if stats else 0
+            ),
+            "legacy_wrapped_rows": (
+                int(stats["legacy_wrapped_rows"] or 0) if stats else 0
+            ),
+            "notes": "canonical column converted to JSONB; exact source text preserved",
+        })
+        conn.commit()
+
+        logger.info(
+            "[mig259] converted %s.%s from %s to jsonb; legacy_wrapped=%s",
+            table,
+            column,
+            source_type,
+            int(stats["legacy_wrapped_rows"] or 0) if stats else 0,
+        )
+
+    conn.execute(text("DROP FUNCTION IF EXISTS chili_jsonb_or_legacy_object(text, text)"))
+    conn.commit()
+
+
+def _migration_260_operational_retention_time_indexes(conn) -> None:
+    """Add/defer timestamp-leading indexes for high-volume retention.
+
+    Large live tables must not build heavyweight indexes during normal service
+    startup. This migration handles fresh/small tables and logs a deferral for
+    existing giants; ``scripts/maintain_trading_storage.py --create-indexes``
+    creates the same indexes concurrently during a maintenance window.
+    """
+
+    def has_leading_btree_index(table: str, ts_col: str) -> bool:
+        rows = conn.execute(text("""
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = ANY(current_schemas(false))
+              AND tablename = :table_name
+        """), {"table_name": table}).fetchall()
+        needle = f"using btree ({ts_col.lower()}"
+        return any(needle in str(row[0] or "").lower() for row in rows)
+
+    tables = _tables(conn)
+    index_specs = [
+        (
+            "trading_exit_parity_log",
+            "ix_exit_parity_created_retention",
+            "created_at",
+            "id",
+        ),
+        (
+            "trading_bracket_reconciliation_log",
+            "ix_bracket_reconciliation_observed_retention",
+            "observed_at",
+            "id",
+        ),
+        (
+            "trading_pattern_trades",
+            "ix_pattern_trades_created_retention",
+            "created_at",
+            "id",
+        ),
+    ]
+    heavy_limit_bytes = int(
+        os.environ.get(
+            "CHILI_MIGRATION_HEAVY_OPERATIONAL_INDEX_MAX_BYTES",
+            str(256 * 1024 * 1024),
+        )
+    )
+    build_heavy = (
+        os.environ.get("CHILI_MIGRATION_BUILD_HEAVY_OPERATIONAL_INDEXES", "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+    for table, index_name, ts_col, id_col in index_specs:
+        if table not in tables:
+            continue
+        if has_leading_btree_index(table, ts_col):
+            continue
+        table_bytes = int(
+            conn.execute(
+                text("SELECT COALESCE(pg_total_relation_size(to_regclass(:name)), 0)"),
+                {"name": table},
+            ).scalar()
+            or 0
+        )
+        if table_bytes > heavy_limit_bytes and not build_heavy:
+            logger.warning(
+                "[mig260] deferred heavy startup index %s on %s (size=%.2fGB); "
+                "run scripts/maintain_trading_storage.py --create-indexes "
+                "during a maintenance window",
+                index_name,
+                table,
+                table_bytes / (1024 * 1024 * 1024),
+            )
+            continue
+        conn.execute(text(
+            f"CREATE INDEX IF NOT EXISTS {index_name} "
+            f"ON {table} ({ts_col}, {id_col})"
+        ))
+        conn.commit()
+
+    conn.commit()
+
+
+def _migration_261_jsonb_string_payload_unwrap(conn) -> None:
+    """Normalize double-encoded JSONB string payloads after mig 259.
+
+    Some legacy TEXT rows stored JSON as a JSON string literal, e.g.
+    ``"{\"strategy_id\": ...}"``. Mig 259 made the column JSONB, but those
+    rows still decode as strings in SQLAlchemy. This migration unwraps only
+    JSONB strings whose inner text parses as an object/array, leaving ordinary
+    scalar strings untouched and preserving original text in the mig 259
+    sidecar / ``*_legacy_text_259`` columns.
+    """
+
+    def qi(identifier: str) -> str:
+        if not identifier.replace("_", "").isalnum() or identifier[0].isdigit():
+            raise ValueError(f"unsafe SQL identifier: {identifier!r}")
+        return f'"{identifier}"'
+
+    def column_udt(table: str, column: str) -> str | None:
+        row = conn.execute(text("""
+            SELECT udt_name
+            FROM information_schema.columns
+            WHERE table_schema = ANY(current_schemas(false))
+              AND table_name = :table_name
+              AND column_name = :column_name
+        """), {"table_name": table, "column_name": column}).fetchone()
+        return str(row[0]) if row else None
+
+    def eligible_count(table: str, column: str) -> int:
+        return int(conn.execute(text(f"""
+            SELECT COUNT(*)
+            FROM {qi(table)}
+            WHERE jsonb_typeof({qi(column)}) = 'string'
+              AND btrim({qi(column)} #>> '{{}}') ~ '^[\\[\\{{]'
+        """)).scalar() or 0)
+
+    def drop_trade_checks() -> None:
+        for name in [
+            "chk_trades_entry_price_positive",
+            "chk_trades_quantity_positive",
+            "chk_trades_exit_price_finite",
+        ]:
+            conn.execute(text(
+                f"ALTER TABLE trading_trades DROP CONSTRAINT IF EXISTS {name}"
+            ))
+
+    def restore_trade_checks() -> None:
+        constraints = [
+            ("chk_trades_entry_price_positive", "entry_price > 0"),
+            ("chk_trades_quantity_positive", "quantity > 0"),
+            (
+                "chk_trades_exit_price_finite",
+                "exit_price IS NULL OR exit_price > 0",
+            ),
+        ]
+        for name, expr in constraints:
+            conn.execute(text(
+                f"ALTER TABLE trading_trades "
+                f"ADD CONSTRAINT {name} CHECK ({expr}) NOT VALID"
+            ))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS trading_jsonb_string_unwrap_audit (
+            id BIGSERIAL PRIMARY KEY,
+            migration_id TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            column_name TEXT NOT NULL,
+            eligible_string_rows_before BIGINT NOT NULL DEFAULT 0,
+            eligible_string_rows_after BIGINT NOT NULL DEFAULT 0,
+            unwrapped_rows BIGINT NOT NULL DEFAULT 0,
+            converted_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+    conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_jsonb_string_unwrap_audit_col
+        ON trading_jsonb_string_unwrap_audit
+            (migration_id, table_name, column_name)
+    """))
+    conn.commit()
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION chili_jsonb_unwrap_string_payload(raw jsonb)
+        RETURNS jsonb
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            inner_text text;
+            sanitized text;
+            pass integer;
+        BEGIN
+            IF raw IS NULL OR jsonb_typeof(raw) <> 'string' THEN
+                RETURN raw;
+            END IF;
+
+            inner_text := raw #>> '{}';
+            IF inner_text IS NULL
+               OR btrim(inner_text) = ''
+               OR btrim(inner_text) !~ '^[\\[\\{]' THEN
+                RETURN raw;
+            END IF;
+
+            sanitized := inner_text;
+            FOR pass IN 1..3 LOOP
+                sanitized := regexp_replace(
+                    sanitized,
+                    '(^|[\\[\\{,:][[:space:]]*)(NaN|-Infinity|Infinity)([[:space:]]*($|[,\\]\\}]))',
+                    '\\1null\\3',
+                    'g'
+                );
+            END LOOP;
+
+            BEGIN
+                RETURN sanitized::jsonb;
+            EXCEPTION WHEN others THEN
+                RETURN raw;
+            END;
+        END;
+        $$;
+    """))
+    conn.commit()
+
+    conversions = [
+        ("trading_trades", "indicator_snapshot"),
+        ("trading_backtests", "params"),
+        ("trading_proposals", "signals_json"),
+        ("trading_proposals", "indicator_json"),
+        ("trading_scans", "indicator_data"),
+        ("trading_hypotheses", "last_result_json"),
+    ]
+    batch_size = int(os.environ.get("CHILI_JSONB_UNWRAP_BATCH_SIZE", "5000"))
+
+    for table, column in conversions:
+        if table not in _tables(conn) or column_udt(table, column) != "jsonb":
+            continue
+        cols = _columns(conn, table)
+        if "id" not in cols:
+            continue
+
+        table_ident = qi(table)
+        column_ident = qi(column)
+        id_ident = qi("id")
+        before = eligible_count(table, column)
+        if before <= 0:
+            after = 0
+            unwrapped = 0
+        else:
+            unwrapped = 0
+            if table == "trading_trades":
+                conn.execute(text("LOCK TABLE trading_trades IN ACCESS EXCLUSIVE MODE"))
+                drop_trade_checks()
+                result = conn.execute(text(f"""
+                    UPDATE {table_ident}
+                    SET {column_ident} = chili_jsonb_unwrap_string_payload({column_ident})
+                    WHERE jsonb_typeof({column_ident}) = 'string'
+                      AND btrim({column_ident} #>> '{{}}') ~ '^[\\[\\{{]'
+                """))
+                unwrapped = int(result.rowcount or 0)
+                restore_trade_checks()
+                conn.commit()
+            else:
+                while True:
+                    result = conn.execute(text(f"""
+                        UPDATE {table_ident} AS t
+                        SET {column_ident} = chili_jsonb_unwrap_string_payload(
+                            t.{column_ident}
+                        )
+                        WHERE t.{id_ident} IN (
+                            SELECT {id_ident}
+                            FROM {table_ident}
+                            WHERE jsonb_typeof({column_ident}) = 'string'
+                              AND btrim({column_ident} #>> '{{}}') ~ '^[\\[\\{{]'
+                            ORDER BY {id_ident}
+                            LIMIT :batch_size
+                        )
+                    """), {"batch_size": batch_size})
+                    changed = int(result.rowcount or 0)
+                    conn.commit()
+                    unwrapped += changed
+                    if changed <= 0:
+                        break
+            after = eligible_count(table, column)
+
+        conn.execute(text("""
+            INSERT INTO trading_jsonb_string_unwrap_audit (
+                migration_id, table_name, column_name,
+                eligible_string_rows_before, eligible_string_rows_after,
+                unwrapped_rows
+            )
+            VALUES (
+                '261_jsonb_string_payload_unwrap', :table_name, :column_name,
+                :before, :after, :unwrapped
+            )
+            ON CONFLICT (migration_id, table_name, column_name)
+            DO UPDATE SET
+                eligible_string_rows_before = EXCLUDED.eligible_string_rows_before,
+                eligible_string_rows_after = EXCLUDED.eligible_string_rows_after,
+                unwrapped_rows = EXCLUDED.unwrapped_rows,
+                converted_at = NOW()
+        """), {
+            "table_name": table,
+            "column_name": column,
+            "before": before,
+            "after": after,
+            "unwrapped": unwrapped,
+        })
+        conn.commit()
+
+        logger.info(
+            "[mig261] unwrapped %s.%s jsonb string payloads before=%d after=%d",
+            table,
+            column,
+            before,
+            after,
+        )
+
+    conn.execute(text("DROP FUNCTION IF EXISTS chili_jsonb_unwrap_string_payload(jsonb)"))
+    conn.commit()
+
+
+def _migration_262_fast_orderbook_default_snapshot_id_retention(conn) -> None:
+    """Require the exact ``(snapshot_at, id)`` index for default-partition pruning.
+
+    The older guard accepted a ``snapshot_at``-only index, but the retention
+    query orders by ``snapshot_at, id``. On the live 39 GB default partition that
+    still timed out. Fresh/small tables get the exact index here; large live
+    tables should build it concurrently through ``maintain_trading_storage.py``.
+    """
+
+    if "fast_orderbook_default" not in _tables(conn):
+        conn.commit()
+        return
+
+    rows = conn.execute(text("""
+        SELECT indexdef
+        FROM pg_indexes
+        WHERE schemaname = ANY(current_schemas(false))
+          AND tablename = 'fast_orderbook_default'
+    """)).fetchall()
+    if any(
+        "using btree (snapshot_at, id" in str(row[0] or "").lower()
+        for row in rows
+    ):
+        conn.commit()
+        return
+
+    heavy_limit_bytes = int(
+        os.environ.get(
+            "CHILI_MIGRATION_HEAVY_FAST_DEFAULT_INDEX_MAX_BYTES",
+            str(256 * 1024 * 1024),
+        )
+    )
+    build_heavy = (
+        os.environ.get("CHILI_MIGRATION_BUILD_HEAVY_FAST_DEFAULT_INDEXES", "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+    table_bytes = int(
+        conn.execute(
+            text(
+                "SELECT COALESCE(pg_total_relation_size("
+                "to_regclass('fast_orderbook_default')), 0)"
+            )
+        ).scalar()
+        or 0
+    )
+    if table_bytes > heavy_limit_bytes and not build_heavy:
+        logger.warning(
+            "[mig262] deferred heavy startup index "
+            "ix_fast_orderbook_default_snapshot_id_retention "
+            "on fast_orderbook_default (size=%.2fGB); run "
+            "scripts/maintain_trading_storage.py --create-indexes "
+            "--target fast-orderbook --execute during a maintenance window",
+            table_bytes / (1024 * 1024 * 1024),
+        )
+        conn.commit()
+        return
+
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_orderbook_default_snapshot_id_retention
+        ON fast_orderbook_default (snapshot_at, id)
+    """))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -18090,6 +18756,14 @@ MIGRATIONS = [
      _migration_257_position_identity_phase5a_trade_insert_trigger),
     ("258_position_identity_phase5a_residual_backfill",
      _migration_258_position_identity_phase5a_residual_backfill),
+    ("259_jsonb_contract_repair",
+     _migration_259_jsonb_contract_repair),
+    ("260_operational_retention_time_indexes",
+     _migration_260_operational_retention_time_indexes),
+    ("261_jsonb_string_payload_unwrap",
+     _migration_261_jsonb_string_payload_unwrap),
+    ("262_fast_orderbook_default_snapshot_id_retention",
+     _migration_262_fast_orderbook_default_snapshot_id_retention),
 ]
 
 

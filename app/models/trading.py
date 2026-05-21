@@ -1048,6 +1048,9 @@ class PatternTradeRow(Base):
     """
 
     __tablename__ = "trading_pattern_trades"
+    __table_args__ = (
+        Index("ix_pattern_trades_created_retention", "created_at", "id"),
+    )
 
     id: int = Column(Integer, primary_key=True, index=True)
     user_id: Optional[int] = Column(Integer, nullable=True, index=True)
@@ -1922,6 +1925,7 @@ class ExitParityLog(Base):
             "agree_strict_bool",
             "created_at",
         ),
+        Index("ix_exit_parity_created_retention", "created_at", "id"),
         # Migration 230 indices for the verdict/cutover-gate query paths.
         Index("ix_exit_parity_action_class_created", "action_class", "created_at"),
         Index("ix_exit_parity_priority_winner_created", "priority_winner", "created_at"),
@@ -2346,6 +2350,7 @@ class BracketReconciliationLog(Base):
         Index("ix_bracket_reconciliation_sweep", "sweep_id"),
         Index("ix_bracket_reconciliation_trade", "trade_id"),
         Index("ix_bracket_reconciliation_kind_ts", "kind", "observed_at"),
+        Index("ix_bracket_reconciliation_observed_retention", "observed_at", "id"),
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)

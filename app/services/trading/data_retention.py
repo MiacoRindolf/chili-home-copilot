@@ -21,6 +21,7 @@ DEFAULT_LEARNING_EVENT_RETAIN_DAYS = 120
 DEFAULT_ALERT_RETAIN_DAYS = 90
 DEFAULT_BACKTEST_RETAIN_DAYS = 180
 DEFAULT_FAST_DELETE_BATCH_SIZE = 50_000
+DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE = 50_000
 DEFAULT_FAST_PARTITION_DAYS_AHEAD = 7
 
 _IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -72,6 +73,13 @@ def run_retention_policy(
     results["proposals"] = _prune_old_proposals(db, settings.brain_retention_proposal_days, dry_run)
     results["paper_trades"] = _prune_old_paper_trades(db, settings.brain_retention_paper_trade_days, dry_run)
     results["stuck_jobs"] = _cleanup_stuck_batch_jobs(db, dry_run)
+    results["exit_parity_log"] = _prune_exit_parity_log(
+        db,
+        backtest_days=settings.brain_retention_exit_parity_backtest_days,
+        live_days=settings.brain_retention_exit_parity_live_days,
+        batch_size=settings.brain_retention_exit_parity_delete_batch_size,
+        dry_run=dry_run,
+    )
     results["setup_vitals_history"] = _prune_setup_vitals_history(db, 90, dry_run)
     results["ticker_vitals_stale"] = _prune_stale_ticker_vitals(db, 7, dry_run)
     results["fast_path"] = _prune_fast_path_tables(db, dry_run)
@@ -425,17 +433,39 @@ def _fast_retention_has_leading_time_index(db: Session, table: str, ts_col: str)
     index starts with the table's timestamp column. Existing ticker-first
     indexes are good for UI lookups but not for retention pruning.
     """
+    return _retention_has_leading_time_index(
+        db,
+        table,
+        ts_col,
+        include_default_partition=True,
+        require_id_second=True,
+    )
+
+
+def _retention_has_leading_time_index(
+    db: Session,
+    table: str,
+    ts_col: str,
+    *,
+    include_default_partition: bool = False,
+    require_id_second: bool = False,
+) -> bool:
+    default_table = f"{table}_default" if include_default_partition else table
     try:
         rows = db.execute(text("""
             SELECT indexdef
             FROM pg_indexes
             WHERE schemaname = ANY (current_schemas(false))
               AND tablename IN (:table, :default_table)
-        """), {"table": table, "default_table": f"{table}_default"}).fetchall()
+        """), {"table": table, "default_table": default_table}).fetchall()
     except Exception:
         return False
 
-    needle = f"using btree ({ts_col.lower()}"
+    needle = (
+        f"using btree ({ts_col.lower()}, id"
+        if require_id_second
+        else f"using btree ({ts_col.lower()}"
+    )
     for row in rows:
         indexdef = str(row[0] or "").lower()
         if needle in indexdef:
@@ -582,6 +612,96 @@ def _cleanup_stuck_batch_jobs(db: Session, dry_run: bool) -> dict[str, int]:
             {"cutoff": cutoff},
         )
     return {"eligible": count, "fixed": count if not dry_run else 0}
+
+
+def _prune_exit_parity_log(
+    db: Session,
+    *,
+    backtest_days: int,
+    live_days: int,
+    batch_size: int | None = None,
+    dry_run: bool,
+) -> dict[str, int]:
+    """Batch-delete old exit parity rows after timestamp index is present.
+
+    Backtest parity rows are high-volume instrumentation, not a source of
+    truth. Live parity rows get a longer window because they are useful for
+    drift/cutover review. The function is intentionally batch-capped so a
+    single scheduler tick cannot lock a 10+ GB table.
+    """
+    if not _retention_has_leading_time_index(
+        db, "trading_exit_parity_log", "created_at", require_id_second=True,
+    ):
+        return {
+            "backtest_retain_days": backtest_days,
+            "live_retain_days": live_days,
+            "eligible_batch": 0,
+            "deleted": 0,
+            "skipped": 1,
+        }
+
+    resolved_batch = _safe_positive_int(
+        batch_size, DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
+    )
+    backtest_cutoff = datetime.utcnow() - timedelta(days=backtest_days)
+    live_cutoff = datetime.utcnow() - timedelta(days=live_days)
+    where_clause = """
+        (
+            source = 'backtest'
+            AND created_at < :backtest_cutoff
+        )
+        OR (
+            COALESCE(source, '') <> 'backtest'
+            AND created_at < :live_cutoff
+        )
+    """
+    count_q = text(f"""
+        SELECT COUNT(*)
+        FROM (
+            SELECT 1
+            FROM trading_exit_parity_log
+            WHERE {where_clause}
+            ORDER BY created_at ASC, id ASC
+            LIMIT :limit
+        ) limited
+    """)
+    params = {
+        "backtest_cutoff": backtest_cutoff,
+        "live_cutoff": live_cutoff,
+        "limit": resolved_batch,
+    }
+    try:
+        eligible_batch = int(db.execute(count_q, params).scalar() or 0)
+    except Exception:
+        return {
+            "backtest_retain_days": backtest_days,
+            "live_retain_days": live_days,
+            "eligible_batch": 0,
+            "deleted": 0,
+        }
+
+    deleted = 0
+    if not dry_run and eligible_batch > 0:
+        result = db.execute(text(f"""
+            WITH doomed AS (
+                SELECT ctid
+                FROM trading_exit_parity_log
+                WHERE {where_clause}
+                ORDER BY created_at ASC, id ASC
+                LIMIT :limit
+            )
+            DELETE FROM trading_exit_parity_log t
+            USING doomed
+            WHERE t.ctid = doomed.ctid
+        """), params)
+        deleted = int(result.rowcount or 0)
+
+    return {
+        "backtest_retain_days": backtest_days,
+        "live_retain_days": live_days,
+        "eligible_batch": eligible_batch,
+        "deleted": deleted,
+    }
 
 
 def _prune_batch_job_payloads(db: Session, retain_days: int, dry_run: bool) -> dict[str, int]:
