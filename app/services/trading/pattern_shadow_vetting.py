@@ -388,12 +388,39 @@ def run_shadow_vetting_cycle(
 
     now = now or datetime.utcnow()
     candidates = select_shadow_vetting_candidates(db, settings_=settings_)
+    alpha_gate_snapshot: dict[str, Any] | None = None
+    alpha_gate_allows_risk = True
+    if bool(getattr(settings_, "chili_alpha_portfolio_gate_enabled", False)):
+        try:
+            from .alpha_portfolio_gate import broker_risk_allowed
+
+            alpha_gate_allows_risk, alpha_gate_snapshot = broker_risk_allowed(
+                db, settings_=settings_,
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.warning(
+                "%s alpha portfolio gate failed: %s",
+                LOG_PREFIX,
+                exc,
+                exc_info=True,
+            )
+            alpha_gate_allows_risk = False
+            alpha_gate_snapshot = {
+                "ok": False,
+                "error": f"alpha_portfolio_gate_failed:{type(exc).__name__}",
+            }
+
     promoted_ids: list[int] = []
     pilot_ids: list[int] = []
     collecting = 0
     held = 0
 
     for row in candidates:
+        if not alpha_gate_allows_risk:
+            row["eligible"] = False
+            row["pilot_eligible"] = False
+            row["alpha_portfolio_blocked"] = True
         pid = int(row["scan_pattern_id"])
         pattern = db.get(ScanPattern, pid)
         if pattern is None:
@@ -479,6 +506,15 @@ def run_shadow_vetting_cycle(
         "pilot_ids": pilot_ids,
         "collecting_ev": collecting,
         "held": held,
+        "alpha_portfolio_gate": {
+            "enabled": bool(getattr(settings_, "chili_alpha_portfolio_gate_enabled", False)),
+            "broker_risk_allowed": alpha_gate_allows_risk,
+            "block_reasons": (
+                (alpha_gate_snapshot or {}).get("full_promotion_block_reasons")
+                if alpha_gate_snapshot
+                else []
+            ),
+        },
     }
     logger.info("%s cycle: %s", LOG_PREFIX, result)
     return result

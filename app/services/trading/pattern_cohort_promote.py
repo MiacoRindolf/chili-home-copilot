@@ -25,11 +25,12 @@ A pattern is eligible if and ONLY if:
 Selection + observation
 -----------------------
 
-Sort eligible patterns by ``quality_composite_score`` DESC NULLS LAST, then
-CPCV strength and ``id`` ASC (deterministic tiebreaker). Stage all eligible
-patterns into ``shadow_promoted`` because shadow is not broker exposure; it is
-the evidence-collection lane. Downstream shadow vetting applies the adaptive
-target roster policy before a pattern can move to broker-eligible pilot or full
+Sort eligible patterns by the alpha portfolio gate score when present, then
+``quality_composite_score`` DESC NULLS LAST, CPCV strength, and ``id`` ASC
+(deterministic tiebreaker). Stage all eligible patterns into
+``shadow_promoted`` because shadow is not broker exposure; it is the
+evidence-collection lane. Downstream shadow vetting applies the adaptive target
+roster policy before a pattern can move to broker-eligible pilot or full
 promotion.
 
 Public API
@@ -124,6 +125,7 @@ def select_cohort_candidates(
               OR r.avg_pnl_pct > :max_negative_pct
           )
         ORDER BY
+          sp.portfolio_gate_score DESC NULLS LAST,
           sp.quality_composite_score DESC NULLS LAST,
           sp.cpcv_median_sharpe DESC NULLS LAST,
           sp.deflated_sharpe DESC NULLS LAST,

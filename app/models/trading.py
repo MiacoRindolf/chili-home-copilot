@@ -1010,6 +1010,16 @@ class ScanPattern(Base):
     # / decay components; ranked by the weekly cohort-promote job.
     quality_composite_score: Optional[float] = Column(Float, nullable=True)
 
+    # Alpha portfolio gate (mig 263): portfolio-aware promotion hygiene.
+    # These fields separate single-pattern quality from sleeve-level crowding,
+    # stale recert debt, and broker-risk readiness.
+    alpha_sleeve: Optional[str] = Column(String(40), nullable=True)
+    portfolio_gate_score: Optional[float] = Column(Float, nullable=True)
+    portfolio_gate_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    portfolio_gate_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
+    recert_required: bool = Column(Boolean, nullable=False, default=False)
+    recert_reason: Optional[str] = Column(Text, nullable=True)
+
     # f-canonical-outcome-layer Phase A (mig 241, 2026-05-14): split the
     # racing writers. ``corrected_*`` is authored exclusively by
     # ``learning.update_pattern_stats_from_closed_trades`` (which also
@@ -1039,6 +1049,34 @@ class ScanPattern(Base):
     payoff_ratio_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
 
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
+
+
+class AlphaPortfolioGateAudit(Base):
+    """Append-only audit of alpha-portfolio gate decisions.
+
+    Records why a pattern was scored, held for recert, or selected for the
+    broker-blocked shadow lane. It intentionally stores JSON payloads rather
+    than trying to squeeze decision context into narrow status columns.
+    """
+
+    __tablename__ = "trading_alpha_portfolio_gate_audit"
+    __table_args__ = (
+        Index("ix_alpha_portfolio_gate_run", "run_id"),
+        Index("ix_alpha_portfolio_gate_pattern_ts", "scan_pattern_id", "created_at"),
+        Index("ix_alpha_portfolio_gate_decision_ts", "decision", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: str = Column(String(64), nullable=False)
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True
+    )
+    alpha_sleeve: Optional[str] = Column(String(40), nullable=True)
+    lifecycle_stage: Optional[str] = Column(String(24), nullable=True)
+    portfolio_gate_score: Optional[float] = Column(Float, nullable=True)
+    decision: str = Column(String(40), nullable=False)
+    reasons_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class PatternTradeRow(Base):

@@ -2853,6 +2853,54 @@ class Settings(BaseSettings):
         default=10,
         validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_MAX_PER_WEEK"),
     )
+    # Alpha portfolio gate (2026-05-21): promotion quality should be a
+    # diversified portfolio decision, not only a single-pattern score. The
+    # gate marks stale promoted/pilot patterns for recert, ranks candidates by
+    # sleeve contribution, and blocks broker-risk promotion while recert debt
+    # or execution-quality uncertainty is unresolved. Shadow observation can
+    # still proceed because it is broker-blocked.
+    chili_alpha_portfolio_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_GATE_ENABLED"),
+    )
+    chili_alpha_portfolio_recert_stale_days: int = Field(
+        default=30,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_RECERT_STALE_DAYS"),
+    )
+    chili_alpha_portfolio_min_realized_trades: int = Field(
+        default=5,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MIN_REALIZED_TRADES"),
+    )
+    chili_alpha_portfolio_min_risk_sleeves: int = Field(
+        default=3,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MIN_RISK_SLEEVES"),
+    )
+    chili_alpha_portfolio_min_shadow_score: float = Field(
+        default=0.52,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MIN_SHADOW_SCORE"),
+    )
+    chili_alpha_portfolio_max_shadow_total: int = Field(
+        default=4,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MAX_SHADOW_TOTAL"),
+    )
+    chili_alpha_portfolio_max_shadow_per_sleeve: int = Field(
+        default=1,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MAX_SHADOW_PER_SLEEVE"),
+    )
+    chili_alpha_portfolio_execution_lookback_days: int = Field(
+        default=30,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_EXECUTION_LOOKBACK_DAYS"),
+    )
+    chili_alpha_portfolio_execution_min_samples: int = Field(
+        default=10,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_EXECUTION_MIN_SAMPLES"),
+    )
+    chili_alpha_portfolio_execution_max_p90_slippage_pct: float = Field(
+        default=0.75,
+        validation_alias=AliasChoices(
+            "CHILI_ALPHA_PORTFOLIO_EXECUTION_MAX_P90_SLIPPAGE_PCT"
+        ),
+    )
     # Shadow vetting finalizer. ``shadow_promoted`` is the broker-blocked
     # observation stage; this flag lets the scheduler advance fully scored,
     # top-pool shadow patterns to normal ``promoted`` lifecycle once their

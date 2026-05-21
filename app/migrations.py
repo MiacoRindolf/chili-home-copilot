@@ -18458,6 +18458,91 @@ def _migration_262_fast_orderbook_default_snapshot_id_retention(conn) -> None:
     conn.commit()
 
 
+def _migration_263_alpha_portfolio_gate(conn) -> None:
+    """Add portfolio-aware promotion gate state and audit trail.
+
+    This is intentionally additive: it does not demote or promote patterns.
+    The operator script/service can persist sleeve scores, mark stale recert
+    debt, and append audit rows after the schema exists.
+    """
+
+    tables = _tables(conn)
+    if "scan_patterns" in tables:
+        cols = _columns(conn, "scan_patterns")
+        if "alpha_sleeve" not in cols:
+            conn.execute(text(
+                "ALTER TABLE scan_patterns "
+                "ADD COLUMN alpha_sleeve VARCHAR(40) NULL"
+            ))
+        if "portfolio_gate_score" not in cols:
+            conn.execute(text(
+                "ALTER TABLE scan_patterns "
+                "ADD COLUMN portfolio_gate_score DOUBLE PRECISION NULL"
+            ))
+        if "portfolio_gate_json" not in cols:
+            conn.execute(text(
+                "ALTER TABLE scan_patterns "
+                "ADD COLUMN portfolio_gate_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+            ))
+        if "portfolio_gate_updated_at" not in cols:
+            conn.execute(text(
+                "ALTER TABLE scan_patterns "
+                "ADD COLUMN portfolio_gate_updated_at TIMESTAMP NULL"
+            ))
+        if "recert_required" not in cols:
+            conn.execute(text(
+                "ALTER TABLE scan_patterns "
+                "ADD COLUMN recert_required BOOLEAN NOT NULL DEFAULT FALSE"
+            ))
+        if "recert_reason" not in cols:
+            conn.execute(text(
+                "ALTER TABLE scan_patterns "
+                "ADD COLUMN recert_reason TEXT NULL"
+            ))
+        conn.commit()
+
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_patterns_alpha_sleeve "
+            "ON scan_patterns (alpha_sleeve)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_patterns_portfolio_gate_score "
+            "ON scan_patterns (portfolio_gate_score DESC NULLS LAST)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_scan_patterns_recert_required "
+            "ON scan_patterns (recert_required) WHERE recert_required IS TRUE"
+        ))
+        conn.commit()
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS trading_alpha_portfolio_gate_audit (
+            id BIGSERIAL PRIMARY KEY,
+            run_id VARCHAR(64) NOT NULL,
+            scan_pattern_id INTEGER NULL REFERENCES scan_patterns(id) ON DELETE SET NULL,
+            alpha_sleeve VARCHAR(40) NULL,
+            lifecycle_stage VARCHAR(24) NULL,
+            portfolio_gate_score DOUBLE PRECISION NULL,
+            decision VARCHAR(40) NOT NULL,
+            reasons_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_alpha_portfolio_gate_run "
+        "ON trading_alpha_portfolio_gate_audit (run_id)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_alpha_portfolio_gate_pattern_ts "
+        "ON trading_alpha_portfolio_gate_audit (scan_pattern_id, created_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_alpha_portfolio_gate_decision_ts "
+        "ON trading_alpha_portfolio_gate_audit (decision, created_at DESC)"
+    ))
+    conn.commit()
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -18764,6 +18849,8 @@ MIGRATIONS = [
      _migration_261_jsonb_string_payload_unwrap),
     ("262_fast_orderbook_default_snapshot_id_retention",
      _migration_262_fast_orderbook_default_snapshot_id_retention),
+    ("263_alpha_portfolio_gate",
+     _migration_263_alpha_portfolio_gate),
 ]
 
 
