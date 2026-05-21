@@ -2194,6 +2194,33 @@ class Settings(BaseSettings):
         le=86400,
         validation_alias=AliasChoices("CHILI_STUCK_ORDER_LIMIT_TIMEOUT_SECONDS"),
     )
+    # Coinbase AutoTrader maker-first fallback. A post-only entry at the bid
+    # controls fees/slippage, but a high-edge signal should not simply vanish
+    # when the bid does not fill. After the short maker window, the watchdog
+    # cancels the resting maker order and submits a bounded takerable limit only
+    # if the expected edge remains positive after fee + spread + safety costs.
+    chili_coinbase_maker_first_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_COINBASE_MAKER_FIRST_FALLBACK_ENABLED"),
+    )
+    chili_coinbase_maker_first_fallback_after_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_COINBASE_MAKER_FIRST_FALLBACK_AFTER_SECONDS"),
+    )
+    chili_coinbase_maker_first_min_net_after_cost_pct: float = Field(
+        default=0.0,
+        ge=-100.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_COINBASE_MAKER_FIRST_MIN_NET_AFTER_COST_PCT"),
+    )
+    chili_coinbase_maker_first_taker_price_buffer_bps: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=250.0,
+        validation_alias=AliasChoices("CHILI_COINBASE_MAKER_FIRST_TAKER_PRICE_BUFFER_BPS"),
+    )
 
     # P0.6 — execution-event lag telemetry. Measures recorded_at - event_at
     # lag on trading_execution_events; warns when the P95 lag crosses

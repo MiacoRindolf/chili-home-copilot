@@ -2467,6 +2467,28 @@ def _execute_new_entry(
         _entry_broker_status = "accepted" if _is_coinbase_entry else None
         _entry_filled_qty = 0.0 if _is_coinbase_entry else None
         _entry_remaining_qty = _broker_qty if _is_coinbase_entry else None
+        _entry_execution_snapshot = {
+            "broker_source": _broker_source_for_trade,
+            "client_order_id": res.get("client_order_id"),
+            "order_id": str(order_id_raw).strip(),
+            "order_type": (
+                "limit_post_only"
+                if _is_coinbase_entry and bool(res.get("_chili_maker_only"))
+                else ("market" if _is_coinbase_entry else None)
+            ),
+            "active_order_type": (
+                "limit_post_only"
+                if _is_coinbase_entry and bool(res.get("_chili_maker_only"))
+                else ("market" if _is_coinbase_entry else None)
+            ),
+            "coinbase_maker_only": bool(res.get("_chili_maker_only")),
+            "maker_limit_price": res.get("_chili_maker_limit_price") or res.get("limit_price"),
+            "broker_base_size": _broker_qty,
+            "entry_edge_expected_net_pct": snap.get("entry_edge_expected_net_pct"),
+            "cost_gate_fee_bps": snap.get("cost_gate_fee_bps"),
+            "cost_gate_threshold_bps": snap.get("cost_gate_threshold_bps"),
+            "cost_gate_tca_cost_bps": snap.get("cost_gate_tca_cost_bps"),
+        }
         # f-tca-writer-wiring (2026-05-18): capture the AUTOTRADER's decision
         # price ``px`` as the entry-side TCA reference. ``fill`` (above) is
         # the broker's actual fill price (or px as fallback); ``px`` is the
@@ -2500,6 +2522,7 @@ def _execute_new_entry(
             indicator_snapshot={
                 "breakout_alert": alert.indicator_snapshot,
                 "signals": alert.signals_snapshot,
+                "entry_execution": _entry_execution_snapshot,
             },
             tags="autotrader_v1",
             auto_trader_version=AUTOTRADER_VERSION,
