@@ -9319,6 +9319,11 @@ function loadImminentAlerts() {
       html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
       html += '<span class="mon-imm-ticker">' + escHtml(a.ticker) + '</span>';
       if (a.timeframe) html += '<span class="mon-tf-pill">' + escHtml(a.timeframe) + '</span>';
+      if (a.lifecycle_stage) {
+        var lifeColor = a.broker_eligible ? '#86efac' : '#fbbf24';
+        var lifeLabel = a.lifecycle_stage === 'shadow_promoted' ? 'observation-only' : a.lifecycle_stage;
+        html += '<span style="font-size:9px;font-weight:700;color:' + lifeColor + ';border:1px solid rgba(251,191,36,0.35);border-radius:999px;padding:1px 6px;">' + escHtml(lifeLabel) + '</span>';
+      }
       if (a.pattern_name) html += '<span style="font-size:10px;color:var(--text-secondary);">' + escHtml(a.pattern_name) + '</span>';
       html += '</div>';
       html += '<div class="mon-imm-meta">';
@@ -9328,6 +9333,9 @@ function loadImminentAlerts() {
       if (a.target_price != null) html += '<div>Target<b style="color:#86efac;">$' + sp(a.target_price) + '</b></div>';
       html += '</div>';
       if (a.regime) html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">Regime: ' + escHtml(a.regime) + '</div>';
+      if (a.autotrader_decision) {
+        html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">AutoTrader: ' + escHtml(a.autotrader_decision) + (a.autotrader_reason ? ' / ' + escHtml(a.autotrader_reason) : '') + '</div>';
+      }
       html += '</div>';
       html += '<div style="text-align:right;">';
       html += '<div class="mon-imm-score ' + scoreClass + '">' + (a.score != null ? Number(a.score).toFixed(0) : '—') + '</div>';

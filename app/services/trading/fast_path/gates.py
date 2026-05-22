@@ -394,6 +394,91 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
     return GateResult("cost_aware_admission", True, "", detail)
 
 
+def gate_live_alpha_evidence(alert: dict, ctx: ExecContext) -> GateResult:
+    """Live-only evidence floor.
+
+    Paper mode is allowed to explore weak/no-data buckets so the miner can
+    learn. Live mode is not: a live signal must have enough calibrated
+    samples for this ticker/alert_type/score bucket and its best horizon must
+    clear the current round-trip cost estimate. This is the circuit breaker
+    that keeps a manual "flip live" from bypassing the alpha lab.
+    """
+    if (ctx.mode or "paper").strip().lower() != "live":
+        return GateResult("live_alpha_evidence", True, "", {"verdict": "paper_mode"})
+    try:
+        from .settings import load as _load_fp_settings
+
+        fp_settings = _load_fp_settings()
+    except Exception as exc:
+        return GateResult(
+            "live_alpha_evidence", False, "settings_unavailable",
+            {"verdict": "settings_unavailable", "error": str(exc)[:120]},
+        )
+    if not getattr(fp_settings, "live_alpha_evidence_gate_enabled", True):
+        return GateResult("live_alpha_evidence", True, "", {"verdict": "disabled"})
+    if ctx.engine is None:
+        return GateResult(
+            "live_alpha_evidence", False, "no_engine",
+            {"verdict": "no_engine"},
+        )
+
+    ticker = str(alert.get("ticker") or "")
+    alert_type = str(alert.get("alert_type") or "")
+    signal_score = float(alert.get("signal_score") or 0.0)
+    exec_mode = str(getattr(fp_settings, "execution_mode", "taker") or "taker").strip().lower()
+    if exec_mode in ("maker_only", "maker_first_then_taker"):
+        fee_bps = float(getattr(fp_settings, "cost_aware_maker_fee_bps", 0.0) or 0.0)
+        decay_table = "fast_signal_decay_maker_filled"
+    else:
+        fee_bps = float(getattr(fp_settings, "cost_aware_taker_fee_bps", 0.0) or 0.0)
+        decay_table = "fast_signal_decay"
+    cost_bps = 2.0 * (fee_bps + float(ctx.spread_bps or 0.0))
+    min_net_bps = float(getattr(fp_settings, "live_alpha_min_net_bps", 0.0) or 0.0)
+    min_samples = int(getattr(fp_settings, "live_alpha_min_samples", 50) or 50)
+    try:
+        from .calibration import _best_sharpe_row, _fetch_bucket_rows
+        from .decay_miner import score_bucket as _score_bucket
+
+        bucket = _score_bucket(signal_score)
+        rows = _fetch_bucket_rows(
+            ctx.engine, ticker=ticker, alert_type=alert_type, bucket=bucket,
+            table=decay_table,
+        )
+        best = _best_sharpe_row(rows, min_samples=min_samples)
+    except Exception as exc:
+        return GateResult(
+            "live_alpha_evidence", False, "lookup_failed",
+            {"verdict": "lookup_failed", "error": str(exc)[:120],
+             "execution_mode": exec_mode, "decay_table": decay_table},
+        )
+    if best is None:
+        return GateResult(
+            "live_alpha_evidence", False, "insufficient_decay_evidence",
+            {"verdict": "insufficient_decay_evidence",
+             "min_samples": min_samples, "execution_mode": exec_mode,
+             "decay_table": decay_table},
+        )
+    mean_bps = float(best.get("mean_return") or 0.0) * 10000.0
+    net_bps = mean_bps - cost_bps
+    detail = {
+        "verdict": "cleared" if net_bps >= min_net_bps else "below_live_edge",
+        "score_bucket": bucket,
+        "best_horizon_s": int(best.get("horizon_s") or 0),
+        "sample_count": int(best.get("sample_count") or 0),
+        "mean_bps": round(mean_bps, 4),
+        "cost_bps": round(cost_bps, 4),
+        "net_bps": round(net_bps, 4),
+        "min_net_bps": round(min_net_bps, 4),
+        "execution_mode": exec_mode,
+        "decay_table": decay_table,
+    }
+    if net_bps < min_net_bps:
+        return GateResult(
+            "live_alpha_evidence", False, "below_live_edge", detail,
+        )
+    return GateResult("live_alpha_evidence", True, "", detail)
+
+
 def gate_spread_sanity(alert: dict, ctx: ExecContext,
                        *, max_spread_bps: float = MAX_SPREAD_BPS) -> GateResult:
     """Reject when the live book is too wide. We grab spread from
@@ -530,6 +615,7 @@ DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
     # postmortems; the calibrated gate's pre-existing detail is
     # preserved in gates_json regardless.
     gate_cost_aware_admission,
+    gate_live_alpha_evidence,
     # F8b: signal-class-specific ticker allowlist runs AFTER the
     # calibrated-edge gates so that a calibrated negative-edge or
     # not-tradeable verdict still reports as the primary reject
@@ -607,7 +693,7 @@ __all__ = [
     "GateResult", "ExecContext", "GateRunResult",
     "gate_recency", "gate_min_score", "gate_calibrated_tradeability",
     "gate_negative_edge_excluded", "gate_pullback_ticker_allowed",
-    "gate_cost_aware_admission",
+    "gate_cost_aware_admission", "gate_live_alpha_evidence",
     "gate_spread_sanity",
     "gate_capacity", "gate_daily_budget", "gate_mode_interlock",
     "DEFAULT_GATES", "run_gates",

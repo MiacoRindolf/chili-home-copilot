@@ -60,6 +60,119 @@ def _autotrader_tick_note(
         out["tick_last_alert_id"] = int(alert.id)
         out["tick_last_ticker"] = (alert.ticker or "").upper()
 
+
+_CANDIDATE_POOL_ZERO_DIAG_INTERVAL_S = 300.0
+_last_candidate_pool_zero_diag_at = 0.0
+
+
+def _candidate_pool_zero_context(
+    db: Session,
+    *,
+    uid: int,
+    lookback_minutes: int = 120,
+) -> dict[str, Any]:
+    """Explain whether an empty pool means no supply or consumed supply."""
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                ba.id AS alert_id,
+                ba.ticker,
+                ba.alerted_at,
+                ba.scan_pattern_id,
+                COALESCE(sp.lifecycle_stage, 'none') AS lifecycle_stage,
+                COALESCE(sp.active, TRUE) AS pattern_active,
+                COALESCE(sp.recert_required, FALSE) AS recert_required,
+                ar.id AS run_id,
+                ar.decision,
+                ar.reason,
+                ar.created_at AS processed_at
+            FROM trading_breakout_alerts ba
+            LEFT JOIN scan_patterns sp ON sp.id = ba.scan_pattern_id
+            LEFT JOIN trading_autotrader_runs ar ON ar.breakout_alert_id = ba.id
+            WHERE ba.alert_tier = 'pattern_imminent'
+              AND (ba.user_id = :uid OR ba.user_id IS NULL)
+              AND ba.alerted_at >= NOW() - (:lookback_minutes * INTERVAL '1 minute')
+            ORDER BY ba.id DESC
+            LIMIT 200
+            """
+        ),
+        {"uid": uid, "lookback_minutes": int(lookback_minutes)},
+    ).mappings().all()
+    lifecycle_counts: dict[str, int] = {}
+    processed = 0
+    unprocessed = 0
+    latest: dict[str, Any] | None = None
+    latest_unprocessed: dict[str, Any] | None = None
+    for row in rows:
+        r = dict(row)
+        is_processed = r.get("run_id") is not None
+        if is_processed:
+            processed += 1
+        else:
+            unprocessed += 1
+        stage = str(r.get("lifecycle_stage") or "none")
+        key = f"{stage}:{'processed' if is_processed else 'unprocessed'}"
+        lifecycle_counts[key] = lifecycle_counts.get(key, 0) + 1
+        compact = {
+            "alert_id": r.get("alert_id"),
+            "ticker": r.get("ticker"),
+            "scan_pattern_id": r.get("scan_pattern_id"),
+            "lifecycle_stage": stage,
+            "pattern_active": bool(r.get("pattern_active")),
+            "recert_required": bool(r.get("recert_required")),
+            "processed": is_processed,
+            "decision": r.get("decision"),
+            "reason": r.get("reason"),
+            "alerted_at": str(r.get("alerted_at")) if r.get("alerted_at") else None,
+            "processed_at": str(r.get("processed_at")) if r.get("processed_at") else None,
+        }
+        if latest is None:
+            latest = compact
+        if latest_unprocessed is None and not is_processed:
+            latest_unprocessed = compact
+    return {
+        "lookback_minutes": int(lookback_minutes),
+        "recent_alerts": len(rows),
+        "processed": processed,
+        "unprocessed": unprocessed,
+        "lifecycle_counts": lifecycle_counts,
+        "latest": latest,
+        "latest_unprocessed": latest_unprocessed,
+    }
+
+
+def _maybe_log_candidate_pool_zero(db: Session, *, uid: int) -> dict[str, Any] | None:
+    global _last_candidate_pool_zero_diag_at
+    now = time.monotonic()
+    if now - _last_candidate_pool_zero_diag_at < _CANDIDATE_POOL_ZERO_DIAG_INTERVAL_S:
+        return None
+    _last_candidate_pool_zero_diag_at = now
+    try:
+        diag = _candidate_pool_zero_context(db, uid=uid)
+    except Exception as exc:
+        logger.debug("[autotrader] candidate_pool_zero_diag failed: %s", exc, exc_info=True)
+        return None
+    latest = diag.get("latest") or {}
+    logger.info(
+        "[autotrader] candidate_pool_zero_diag uid=%s lookback_min=%s "
+        "recent_alerts=%s processed=%s unprocessed=%s latest_alert_id=%s "
+        "latest_ticker=%s latest_lifecycle=%s latest_decision=%s latest_reason=%s "
+        "lifecycle_counts=%s",
+        uid,
+        diag.get("lookback_minutes"),
+        diag.get("recent_alerts"),
+        diag.get("processed"),
+        diag.get("unprocessed"),
+        latest.get("alert_id") or "-",
+        latest.get("ticker") or "-",
+        latest.get("lifecycle_stage") or "-",
+        latest.get("decision") or "-",
+        latest.get("reason") or "-",
+        diag.get("lifecycle_counts") or {},
+    )
+    return diag
+
 # Namespace byte for advisory locks so we can't collide with other
 # subsystems that also use pg_advisory_lock on alert-shaped ints. The
 # lock key is (NAMESPACE << 32) | breakout_alert_id — fits a signed
@@ -305,7 +418,10 @@ def _maybe_open_paper_shadow(
             "shadow_decision": decision,
             "projected": snap.get("projected_profit_pct"),
         }
-        open_paper_trade(
+        shadow_max_open = int(
+            getattr(settings, "chili_autotrader_paper_shadow_max_open", 100) or 100
+        )
+        pt = open_paper_trade(
             db, uid, alert.ticker, px,
             scan_pattern_id=alert.scan_pattern_id,
             stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
@@ -314,7 +430,15 @@ def _maybe_open_paper_shadow(
             quantity=float(qty),
             signal_json=sig,
             paper_shadow_of_alert_id=int(alert.id),
+            max_open_trades=shadow_max_open,
         )
+        if pt is None:
+            logger.info(
+                "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
+                "decision=%s skipped reason=paper_open_failed_or_duplicate max_open=%s",
+                alert.id, alert.scan_pattern_id, alert.ticker, decision, shadow_max_open,
+            )
+            return
         logger.info(
             "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
             "qty=%s px=%s decision=%s opened",
@@ -727,6 +851,11 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         finally:
             _release_alert_claim(db, int(alert.id))
 
+    if candidate_pool == 0:
+        diag = _maybe_log_candidate_pool_zero(db, uid=uid)
+        if diag is not None:
+            out["candidate_pool_zero_diag"] = diag
+
     logger.info(
         "[autotrader] tick uid=%s candidate_pool=%d batch=%d processed=%d placed=%d "
         "scaled_in=%d skipped=%d last_kind=%s last_reason=%s last_alert_id=%s last_ticker=%s",
@@ -1033,7 +1162,7 @@ def _process_one_alert(
             # False for any stage != 'shadow_promoted', preserving
             # byte-identical behavior for promoted/live/challenged/etc.
             if is_shadow_promoted_pattern(_pat):
-                if live and bool(
+                if bool(
                     getattr(
                         settings,
                         "chili_autotrader_shadow_promoted_paper_observation_enabled",
@@ -2394,32 +2523,33 @@ def _execute_new_entry(
             snap["notional_effective"] = round(qty * px, 2)
         snap["qty_raw"] = round(qty_raw, 8)
 
-    if live:
-        if bool(getattr(alert, "_chili_shadow_observation_only", False)):
-            _reason = "selector:shadow_promoted_pattern_eval"
-            snap["paper_observation_reason"] = _reason
-            _audit(
-                db,
-                user_id=uid,
-                alert=alert,
-                decision="blocked",
-                reason=_reason,
-                rule_snapshot=snap,
-                llm_snapshot=llm_snap,
-            )
-            out["skipped"] += 1
-            _autotrader_tick_note(out, kind="blocked", reason=_reason, alert=alert)
-            _maybe_open_paper_shadow(
-                db,
-                uid=uid,
-                alert=alert,
-                qty=qty,
-                px=px,
-                snap=snap,
-                decision="blocked_shadow_promoted",
-            )
-            return
+    if bool(getattr(alert, "_chili_shadow_observation_only", False)):
+        _reason = "selector:shadow_promoted_pattern_eval"
+        snap["paper_observation_reason"] = _reason
+        snap["paper_observation_live_orders_effective"] = bool(live)
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="blocked",
+            reason=_reason,
+            rule_snapshot=snap,
+            llm_snapshot=llm_snap,
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(out, kind="blocked", reason=_reason, alert=alert)
+        _maybe_open_paper_shadow(
+            db,
+            uid=uid,
+            alert=alert,
+            qty=qty,
+            px=px,
+            snap=snap,
+            decision="blocked_shadow_promoted",
+        )
+        return
 
+    if live:
         if bool(getattr(alert, "_chili_recert_required", False)):
             _reason = "pattern_recert_required"
             snap["paper_observation_reason"] = _reason

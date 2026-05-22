@@ -379,6 +379,79 @@ def _mark_pending_exit_order(
     db.commit()
 
 
+def _resolve_equity_broker_quantity(trade: Trade) -> tuple[float | None, str]:
+    """Return broker-held equity quantity for *trade*.
+
+    ``None`` means the broker position surface itself was unavailable. A
+    missing ticker in a successfully fetched positions list is real broker
+    truth: the account holds zero shares, so callers can stop retrying a sell
+    that Robinhood can never accept.
+    """
+    ticker_up = (trade.ticker or "").upper().strip()
+    if not ticker_up:
+        return None, "missing_ticker"
+    try:
+        from ...services import broker_service
+
+        if not broker_service.is_connected():
+            return None, "broker_disconnected"
+        positions = broker_service.get_positions()
+    except Exception:
+        logger.debug(
+            "[rh_exit] FIX A-5 broker-position fetch failed for %s",
+            trade.ticker, exc_info=True,
+        )
+        return None, "position_fetch_failed"
+
+    if positions is None:
+        return None, "positions_unavailable"
+    for pos in positions:
+        pos_ticker = (
+            pos.get("ticker")
+            or pos.get("symbol")
+            or pos.get("instrument_symbol")
+            or ""
+        ).upper().strip()
+        if pos_ticker != ticker_up:
+            continue
+        qty = _safe_float(pos.get("quantity") or pos.get("shares") or pos.get("qty"))
+        if qty is None:
+            return None, "position_quantity_parse_failed"
+        return float(qty), "matched"
+
+    # The broker surface was available and this ticker was absent. Treat as
+    # zero position, not "unknown", or stale local envelopes defer forever.
+    return 0.0, "position_absent"
+
+
+def _mark_no_broker_position_closed(
+    db: Session,
+    trade: Trade,
+    *,
+    exit_reason: str,
+    now_utc: datetime,
+) -> None:
+    trade.status = "closed"
+    trade.exit_date = now_utc.replace(tzinfo=None)
+    trade.exit_reason = "broker_position_absent_at_exit"
+    trade.exit_price = None
+    trade.pnl = None
+    trade.pending_exit_order_id = None
+    trade.pending_exit_status = None
+    trade.pending_exit_requested_at = None
+    trade.pending_exit_reason = None
+    trade.pending_exit_limit_price = None
+    trade.last_broker_sync = now_utc.replace(tzinfo=None)
+    trade.broker_status = "no_position"
+    notes = (trade.notes or "").strip()
+    suffix = (
+        f"broker position absent during exit attempt; requested_reason={exit_reason}"
+    )
+    trade.notes = f"{notes}\n{suffix}".strip() if notes else suffix
+    db.add(trade)
+    db.commit()
+
+
 def _finalize_filled_exit(
     db: Session,
     trade: Trade,
@@ -713,114 +786,57 @@ def submit_robinhood_trade_exit(
     if qty <= 0:
         return {"ok": False, "error": "bad_qty"}
 
-    # FIX A-5 (2026-04-29 third-pass audit): clamp the sell qty to what
-    # the broker ACTUALLY holds. Audit found 15/24h "Not enough shares to
-    # sell" rejections from local Trade.quantity overshooting broker truth
-    # (partial fill, manual sale, stale broker_sync). Per the no-hardcoded-
-    # fallback rule: if broker qty unknown, defer (do not silently widen).
+    # FIX A-5 (2026-04-29 third-pass audit, hardened 2026-05-22):
+    # clamp the sell qty to broker truth, and distinguish "position list
+    # unavailable" from "ticker absent from fetched positions." The latter is
+    # terminal zero, not an unknown that should retry forever.
     is_crypto = (trade.ticker or "").upper().endswith("-USD")
     if not is_crypto:
-        try:
-            from ...services.broker_service import get_positions
-            _positions = get_positions() or []
-            _broker_qty = None
-            _ticker_up = (trade.ticker or "").upper()
-            for _p in _positions:
-                if (_p.get("ticker") or "").upper() == _ticker_up:
-                    try:
-                        _broker_qty = float(_p.get("quantity") or 0.0)
-                    except (TypeError, ValueError):
-                        _broker_qty = None
-                    break
-        except Exception:
-            logger.debug(
-                "[rh_exit] FIX A-5 broker-position fetch failed for %s",
-                trade.ticker, exc_info=True,
-            )
-            _broker_qty = None
-
+        _broker_qty, _broker_qty_reason = _resolve_equity_broker_quantity(trade)
         if _broker_qty is None:
             logger.warning(
                 "[rh_exit] FIX A-5: cannot resolve broker quantity for %s "
-                "(trade#%s local_qty=%s); deferring exit.",
-                trade.ticker, trade.id, qty,
+                "(trade#%s local_qty=%s reason=%s); deferring exit.",
+                trade.ticker, trade.id, qty, _broker_qty_reason,
             )
-            return {"ok": False, "error": "broker_qty_unknown_skip", "state": "deferred"}
-        if _broker_qty <= 0:
-            logger.warning(
-                "[rh_exit] FIX A-5: broker holds 0 shares of %s (trade#%s); "
-                "marking as no_position.",
-                trade.ticker, trade.id,
-            )
-            return {"ok": False, "error": "broker_holds_zero", "state": "no_position", "broker_qty": _broker_qty}
-        if _broker_qty < qty:
-            logger.warning(
-                "[rh_exit] FIX A-5: clamping sell qty for %s (trade#%s local=%s -> broker=%s)",
-                trade.ticker, trade.id, qty, _broker_qty,
-            )
-            qty = _broker_qty
-
-    # FIX A-5 (2026-04-29 third-pass audit): clamp the sell qty to what
-    # the broker ACTUALLY holds. The audit found 15/24h exit rejections
-    # with "Not enough shares to sell." -- the local Trade.quantity got
-    # ahead of the broker's filled quantity (partial fill, manual sale,
-    # or stale broker_sync). Submitting trade.quantity unconditionally
-    # makes the broker reject and the monitor retries every cycle.
-    #
-    # Per the no-hardcoded-fallback rule: if we cannot determine broker
-    # holdings (API failure, crypto sometimes), do NOT silently widen
-    # by assuming "the local row is correct" -- propagate the
-    # uncertainty by skipping the exit and letting the next monitor pass
-    # retry once positions cache refreshes.
-    is_crypto = (trade.ticker or "").upper().endswith("-USD")
-    if not is_crypto:
-        try:
-            from ...services.broker_service import get_positions
-            _positions = get_positions() or []
-            _broker_qty = None
-            _ticker_up = (trade.ticker or "").upper()
-            for _p in _positions:
-                if (_p.get("ticker") or "").upper() == _ticker_up:
-                    try:
-                        _broker_qty = float(_p.get("quantity") or 0.0)
-                    except (TypeError, ValueError):
-                        _broker_qty = None
-                    break
-        except Exception:
-            logger.debug(
-                "[rh_exit] FIX A-5 broker-position fetch failed for %s",
-                trade.ticker, exc_info=True,
-            )
-            _broker_qty = None
-
-        if _broker_qty is None:
-            logger.warning(
-                "[rh_exit] FIX A-5: cannot resolve broker quantity for %s "
-                "(trade#%s local_qty=%s); deferring exit until next pass.",
-                trade.ticker, trade.id, qty,
+            _mark_deferred_exit(
+                db,
+                trade,
+                exit_reason=exit_reason,
+                execution_reason=f"broker_qty_unknown:{_broker_qty_reason}",
+                now_utc=now,
             )
             return {
-                "ok": False,
+                "ok": True,
                 "error": "broker_qty_unknown_skip",
                 "state": "deferred",
+                "broker_qty_reason": _broker_qty_reason,
             }
         if _broker_qty <= 0:
             logger.warning(
                 "[rh_exit] FIX A-5: broker holds 0 shares of %s "
-                "(trade#%s local_qty=%s); marking trade closed without sell.",
-                trade.ticker, trade.id, qty,
+                "(trade#%s local_qty=%s reason=%s); closing local envelope "
+                "without submitting a sell.",
+                trade.ticker, trade.id, qty, _broker_qty_reason,
+            )
+            _mark_no_broker_position_closed(
+                db,
+                trade,
+                exit_reason=exit_reason,
+                now_utc=now,
             )
             return {
-                "ok": False,
+                "ok": True,
                 "error": "broker_holds_zero",
-                "state": "no_position",
+                "state": "filled",
                 "broker_qty": _broker_qty,
+                "broker_qty_reason": _broker_qty_reason,
             }
         if _broker_qty < qty:
             logger.warning(
                 "[rh_exit] FIX A-5: clamping sell qty for %s "
-                "(trade#%s local=%s -> broker=%s)",
-                trade.ticker, trade.id, qty, _broker_qty,
+                "(trade#%s local=%s -> broker=%s reason=%s)",
+                trade.ticker, trade.id, qty, _broker_qty, _broker_qty_reason,
             )
             qty = _broker_qty
 

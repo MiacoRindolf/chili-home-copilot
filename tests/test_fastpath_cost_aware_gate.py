@@ -14,6 +14,7 @@ from app.services.trading.fast_path.gates import (
     ExecContext,
     gate_cost_aware_admission,
     gate_calibrated_tradeability,
+    gate_live_alpha_evidence,
     gate_pullback_ticker_allowed,
 )
 
@@ -28,18 +29,21 @@ def _alert(*, ticker="BTC-USD", alert_type="volume_breakout_long",
     }
 
 
-def _ctx(*, spread_bps=5.0, engine="fake_engine_object"):
+def _ctx(*, spread_bps=5.0, engine="fake_engine_object", mode="paper"):
     return ExecContext(
         now_wall=datetime.utcnow(),
         best_bid=100.0,
         best_ask=100.05,
         spread_bps=spread_bps,
         engine=engine,
+        mode=mode,
     )
 
 
 def _stub_fp_settings(
     *, enabled: bool = True, taker_fee_bps: float = 5.0,
+    live_alpha_gate: bool = True, live_min_samples: int = 50,
+    live_min_net_bps: float = 0.0,
 ):
     """Patch fast_path.settings.load to return a stub with the given knobs."""
     from app.services.trading.fast_path.settings import FastPathSettings
@@ -47,6 +51,9 @@ def _stub_fp_settings(
     return FastPathSettings(
         cost_aware_admission_enabled=enabled,
         cost_aware_taker_fee_bps=taker_fee_bps,
+        live_alpha_evidence_gate_enabled=live_alpha_gate,
+        live_alpha_min_samples=live_min_samples,
+        live_alpha_min_net_bps=live_min_net_bps,
     )
 
 
@@ -93,6 +100,66 @@ def test_pullback_allowlist_keeps_sol():
         _ctx(),
     )
     assert result.allow is True
+
+
+def test_live_alpha_evidence_allows_paper_exploration_without_engine():
+    result = gate_live_alpha_evidence(_alert(), _ctx(engine=None, mode="paper"))
+    assert result.allow is True
+    assert result.detail["verdict"] == "paper_mode"
+
+
+def test_live_alpha_evidence_blocks_live_without_engine():
+    with patch(
+        "app.services.trading.fast_path.settings.load",
+        return_value=_stub_fp_settings(live_alpha_gate=True),
+    ):
+        result = gate_live_alpha_evidence(_alert(), _ctx(engine=None, mode="live"))
+    assert result.allow is False
+    assert result.reason == "no_engine"
+
+
+def test_live_alpha_evidence_blocks_insufficient_decay_samples():
+    with patch(
+        "app.services.trading.fast_path.settings.load",
+        return_value=_stub_fp_settings(
+            enabled=True, taker_fee_bps=5.0, live_min_samples=50,
+        ),
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_bucket_rows",
+        return_value=[],
+    ), patch(
+        "app.services.trading.fast_path.calibration._best_sharpe_row",
+        return_value=None,
+    ), patch(
+        "app.services.trading.fast_path.decay_miner.score_bucket",
+        return_value="high",
+    ):
+        result = gate_live_alpha_evidence(_alert(), _ctx(spread_bps=2.0, mode="live"))
+    assert result.allow is False
+    assert result.reason == "insufficient_decay_evidence"
+
+
+def test_live_alpha_evidence_allows_live_when_bucket_clears_cost():
+    best = {"horizon_s": 60, "sample_count": 75, "mean_return": 0.003}
+    with patch(
+        "app.services.trading.fast_path.settings.load",
+        return_value=_stub_fp_settings(
+            enabled=True, taker_fee_bps=5.0, live_min_samples=50,
+            live_min_net_bps=0.0,
+        ),
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_bucket_rows",
+        return_value=[best],
+    ), patch(
+        "app.services.trading.fast_path.calibration._best_sharpe_row",
+        return_value=best,
+    ), patch(
+        "app.services.trading.fast_path.decay_miner.score_bucket",
+        return_value="high",
+    ):
+        result = gate_live_alpha_evidence(_alert(), _ctx(spread_bps=2.0, mode="live"))
+    assert result.allow is True
+    assert result.detail["net_bps"] == pytest.approx(16.0)
 
 
 # ---------------------------------------------------------------------------

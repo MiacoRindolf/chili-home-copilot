@@ -29,7 +29,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...config import settings
-from ...models.trading import PaperTrade, ScanPattern
+from ...models.trading import BreakoutAlert, PaperTrade, ScanPattern
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,19 @@ DEFAULT_SLIPPAGE_PCT = 0.05
 DEFAULT_ATR_STOP_MULT = 2.0
 DEFAULT_ATR_TARGET_MULT = 3.0
 TRAILING_STOP_ACTIVATION_R = 1.0  # activate trailing after 1R move
+
+
+def _utc_iso(ts: datetime | None = None) -> str:
+    return (ts or datetime.utcnow()).replace(microsecond=0).isoformat()
+
+
+def _parse_utc_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", ""))
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_pattern_exit_config(db: Session, scan_pattern_id: int | None) -> dict:
@@ -117,14 +130,16 @@ def open_paper_trade(
     quantity: int = 100,
     signal_json: dict | None = None,
     paper_shadow_of_alert_id: int | None = None,
+    max_open_trades: int | None = None,
 ) -> PaperTrade | None:
     """Open a simulated paper trade with ATR-based adaptive levels."""
+    open_limit = MAX_OPEN_PAPER_TRADES if max_open_trades is None else int(max_open_trades)
     open_count = db.query(PaperTrade).filter(
         PaperTrade.user_id == user_id,
         PaperTrade.status == "open",
     ).count()
-    if open_count >= MAX_OPEN_PAPER_TRADES:
-        logger.debug("[paper] Max open paper trades (%d) reached", MAX_OPEN_PAPER_TRADES)
+    if open_count >= open_limit:
+        logger.debug("[paper] Max open paper trades (%d) reached", open_limit)
         return None
 
     existing = db.query(PaperTrade).filter(
@@ -209,6 +224,397 @@ def open_paper_trade(
     return pt
 
 
+def _paper_dynamic_monitor_candidate(pt: PaperTrade) -> bool:
+    """True for paper rows that should mimic live dynamic monitoring."""
+    if not bool(getattr(settings, "chili_autotrader_paper_dynamic_monitor_enabled", True)):
+        return False
+    sig = pt.signal_json if isinstance(pt.signal_json, dict) else {}
+    return bool(
+        sig.get("auto_trader_v1")
+        or sig.get("paper_shadow")
+        or pt.paper_shadow_of_alert_id
+    )
+
+
+def _paper_dynamic_near_stop_exit(pt: PaperTrade, price: float) -> dict[str, Any] | None:
+    """Mirror the live plan-level monitor's near-stop risk trigger."""
+    stop = float(pt.stop_price or 0.0)
+    if stop <= 0 or price <= 0:
+        return None
+    side = (pt.direction or "long").lower()
+    if side == "short":
+        if price < stop:
+            dist_pct = (stop - price) / stop * 100.0
+        else:
+            return None
+    else:
+        if price > stop:
+            dist_pct = (price - stop) / stop * 100.0
+        else:
+            return None
+    if 0 < dist_pct <= 2.0:
+        return {
+            "action": "exit_now",
+            "reason": "plan_levels_near_stop",
+            "confidence": 0.85,
+            "decision_source": "plan_levels",
+            "detail": {"distance_to_stop_pct": round(dist_pct, 4)},
+        }
+    return None
+
+
+def _update_paper_dynamic_monitor_meta(
+    pt: PaperTrade,
+    *,
+    action: str,
+    source: str,
+    reason: str | None,
+    price: float,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    sig = dict(pt.signal_json or {})
+    paper_meta = dict(sig.get("_paper_meta") or {})
+    monitor_meta = dict(paper_meta.get("dynamic_monitor") or {})
+    now_s = _utc_iso()
+    event = {
+        "checked_at": now_s,
+        "action": action,
+        "source": source,
+        "reason": reason,
+        "price": round(float(price), 8),
+    }
+    if extra:
+        event.update(extra)
+    history = list(monitor_meta.get("history") or [])
+    history.append(event)
+    monitor_meta["history"] = history[-20:]
+    monitor_meta["last_checked_at"] = now_s
+    monitor_meta["last_action"] = action
+    monitor_meta["last_source"] = source
+    monitor_meta["last_reason"] = reason
+    monitor_meta["last_price"] = round(float(price), 8)
+    for key in (
+        "health_score",
+        "health_delta",
+        "plan_health_score",
+        "static_health_score",
+        "vitals_composite",
+        "signal_signature",
+    ):
+        if extra and key in extra:
+            monitor_meta[f"last_{key}"] = extra[key]
+    paper_meta["dynamic_monitor"] = monitor_meta
+    sig["_paper_meta"] = paper_meta
+    pt.signal_json = sig
+
+
+def _paper_dynamic_monitor_decision(
+    db: Session,
+    pt: PaperTrade,
+    *,
+    price: float,
+    quote_source: str,
+) -> dict[str, Any] | None:
+    """Evaluate the live-style dynamic monitor for an autotrader paper row.
+
+    The live monitor often exits on pattern health deterioration, not only on
+    the original bracket. Paper-shadow learning should therefore be labeled by
+    this dynamic policy too. This helper deliberately uses deterministic
+    monitor paths only: plan-level near-stop, learned mechanical rules, and the
+    heuristic pre-filter. It does not call the premium LLM from the paper loop.
+    """
+    if not _paper_dynamic_monitor_candidate(pt):
+        return None
+
+    sig = pt.signal_json if isinstance(pt.signal_json, dict) else {}
+    paper_meta = sig.get("_paper_meta") if isinstance(sig.get("_paper_meta"), dict) else {}
+    monitor_meta = (
+        paper_meta.get("dynamic_monitor")
+        if isinstance(paper_meta.get("dynamic_monitor"), dict)
+        else {}
+    )
+
+    near_stop = _paper_dynamic_near_stop_exit(pt, price)
+    cooldown_min = int(
+        getattr(settings, "chili_autotrader_paper_dynamic_monitor_cooldown_minutes", 5)
+        or 0
+    )
+    last_checked = _parse_utc_iso(monitor_meta.get("last_checked_at"))
+    if cooldown_min > 0 and last_checked is not None and near_stop is None:
+        age_s = (datetime.utcnow() - last_checked).total_seconds()
+        if age_s < cooldown_min * 60:
+            return None
+
+    decision: dict[str, Any] | None = None
+    alert_id = (
+        pt.paper_shadow_of_alert_id
+        or sig.get("breakout_alert_id")
+        or sig.get("shadow_of_alert_id")
+    )
+    alert: BreakoutAlert | None = None
+    pattern: ScanPattern | None = None
+    if alert_id:
+        try:
+            alert = db.get(BreakoutAlert, int(alert_id))
+        except Exception:
+            alert = None
+    pattern_id = pt.scan_pattern_id or (alert.scan_pattern_id if alert else None)
+    if pattern_id:
+        try:
+            pattern = db.get(ScanPattern, int(pattern_id))
+        except Exception:
+            pattern = None
+
+    if pattern is not None and getattr(pattern, "rules_json", None):
+        try:
+            from .market_data import get_indicator_snapshot
+            from .monitor_rules_engine import (
+                apply_level_ratios,
+                build_signal_snapshot,
+                compute_signal_signature,
+                get_graduation_status,
+                heuristic_adjustment,
+                is_pattern_simple,
+                lookup_rule,
+            )
+            from .pattern_condition_monitor import evaluate_pattern_health, evaluate_trade_plan
+            from .pattern_position_monitor import (
+                _effective_monitor_health_score,
+                _flatten_indicators,
+            )
+            from .scanner import get_adaptive_weight
+            from .setup_vitals import get_or_compute_ticker_vitals
+
+            timeframe = (
+                getattr(pattern, "timeframe", None)
+                or (paper_meta.get("exit_config") or {}).get("timeframe")
+                or "1d"
+            )
+            indicators = get_indicator_snapshot(pt.ticker, str(timeframe))
+            flat = _flatten_indicators(indicators or {})
+            trade_plan = None
+            if alert is not None:
+                trade_plan = alert.trade_plan or alert.trade_plan_mechanical
+
+            vitals = None
+            try:
+                vitals = get_or_compute_ticker_vitals(db, pt.ticker, str(timeframe))
+            except Exception:
+                vitals = None
+
+            prev_health = monitor_meta.get("last_health_score")
+            try:
+                prev_health_f = float(prev_health) if prev_health is not None else None
+            except (TypeError, ValueError):
+                prev_health_f = None
+
+            health = evaluate_pattern_health(
+                pattern.rules_json,
+                flat,
+                previous_health=prev_health_f,
+            )
+            plan_health = evaluate_trade_plan(trade_plan, flat, price, vitals=vitals)
+            static_health_score = float(health.health_score)
+            effective_score, health_source = _effective_monitor_health_score(
+                condition_health=health,
+                plan_health=plan_health,
+                vitals=vitals,
+            )
+            health.health_score = effective_score
+            health.health_delta = (
+                round(effective_score - prev_health_f, 4)
+                if prev_health_f is not None
+                else None
+            )
+
+            delta_urgent = float(get_adaptive_weight("monitor_delta_urgent"))
+            health_weakening = float(get_adaptive_weight("monitor_health_weakening"))
+            health_healthy = float(get_adaptive_weight("monitor_health_healthy"))
+            needs_action = bool(
+                plan_health.has_critical_invalidation
+                or plan_health.has_any_invalidation
+                or plan_health.caution_signals_changed
+                or (
+                    health.health_delta is not None
+                    and float(health.health_delta) <= delta_urgent
+                )
+                or float(health.health_score) < health_weakening
+            )
+
+            bearish_div = False
+            overextended_fading = False
+            if vitals is not None:
+                try:
+                    bearish_div = any(
+                        isinstance(d, dict) and d.get("type") == "bearish"
+                        for d in (getattr(vitals, "divergences", None) or [])
+                    )
+                    overextended_fading = (
+                        float(getattr(vitals, "overextension_risk", 0) or 0) > 0.8
+                        and float(getattr(vitals, "momentum_score", 0) or 0) < -0.2
+                    )
+                except Exception:
+                    bearish_div = False
+                    overextended_fading = False
+            needs_action = bool(needs_action or bearish_div or overextended_fading)
+
+            sig_snap = build_signal_snapshot(
+                plan_health=plan_health,
+                condition_health=health,
+                pnl_pct=(
+                    ((price - float(pt.entry_price)) / float(pt.entry_price) * 100.0)
+                    if pt.entry_price
+                    else None
+                ),
+                current_price=price,
+                stop_price=pt.stop_price or (alert.stop_loss if alert else None),
+                target_price=pt.target_price or (alert.target_price if alert else None),
+                vitals=vitals,
+            )
+            signal_sig = compute_signal_signature(sig_snap)
+            pattern_type = (pattern.name or f"pattern_{pattern.id}")[:120]
+
+            primary = None
+            decision_source = "dynamic_monitor_hold"
+            if needs_action:
+                mech = lookup_rule(db, pattern_type, signal_sig)
+                if mech and mech.rule_id:
+                    mech = apply_level_ratios(
+                        mech,
+                        mech.rule_id,
+                        price,
+                        pt.stop_price or (alert.stop_loss if alert else None),
+                        db,
+                    )
+                simple = is_pattern_simple(
+                    pattern.rules_json if isinstance(pattern.rules_json, dict) else None
+                )
+                grad_status = get_graduation_status(db, pattern_type, signal_sig)
+                if (
+                    grad_status == "graduated"
+                    and mech
+                ) or (simple and mech and grad_status == "shadow"):
+                    primary = mech
+                    decision_source = "mechanical"
+                else:
+                    primary = heuristic_adjustment(
+                        plan_health=plan_health,
+                        condition_health=health,
+                        pnl_pct=(
+                            ((price - float(pt.entry_price)) / float(pt.entry_price) * 100.0)
+                            if pt.entry_price
+                            else None
+                        ),
+                        current_price=price,
+                        current_stop=pt.stop_price,
+                        current_target=pt.target_price,
+                        pattern_stop=pt.stop_price or (alert.stop_loss if alert else None),
+                        delta_urgent=delta_urgent,
+                        health_healthy=health_healthy,
+                        trade_direction=pt.direction or "long",
+                        vitals=vitals,
+                        vitals_degradation={},
+                    )
+                    decision_source = "heuristic" if primary else "dynamic_monitor_no_llm"
+
+            extra = {
+                "health_score": round(float(health.health_score), 4),
+                "health_delta": health.health_delta,
+                "plan_health_score": round(float(plan_health.plan_health_score), 4),
+                "static_health_score": round(static_health_score, 4),
+                "health_source": health_source,
+                "signal_signature": signal_sig,
+                "quote_source": quote_source,
+            }
+            if vitals is not None:
+                try:
+                    extra["vitals_composite"] = round(float(vitals.composite_health), 4)
+                except Exception:
+                    pass
+
+            if primary is not None and primary.action in {
+                "exit_now",
+                "tighten_stop",
+                "loosen_target",
+            }:
+                decision = {
+                    "action": primary.action,
+                    "reason": primary.reasoning or primary.action,
+                    "confidence": float(primary.confidence or 0.0),
+                    "decision_source": decision_source,
+                    "new_stop": primary.new_stop,
+                    "new_target": getattr(primary, "new_target", None),
+                    "detail": extra,
+                }
+            else:
+                _update_paper_dynamic_monitor_meta(
+                    pt,
+                    action="hold",
+                    source=decision_source,
+                    reason="no_dynamic_exit",
+                    price=price,
+                    extra=extra,
+                )
+        except Exception:
+            logger.debug(
+                "[paper_dynamic_monitor] evaluation failed paper_trade=%s ticker=%s",
+                getattr(pt, "id", None),
+                pt.ticker,
+                exc_info=True,
+            )
+
+    if (decision is None or decision.get("action") == "hold") and near_stop is not None:
+        decision = near_stop
+
+    if decision is None:
+        return None
+
+    action = str(decision.get("action") or "hold")
+    if action == "tighten_stop" and decision.get("new_stop") is not None:
+        try:
+            new_stop = float(decision["new_stop"])
+            side = (pt.direction or "long").lower()
+            current_stop = float(pt.stop_price or 0.0)
+            tightens = (
+                current_stop <= 0
+                or (side != "short" and current_stop < new_stop < price)
+                or (side == "short" and price < new_stop < current_stop)
+            )
+            if tightens:
+                pt.stop_price = round(new_stop, 4)
+        except (TypeError, ValueError):
+            pass
+    elif action == "loosen_target" and decision.get("new_target") is not None:
+        try:
+            new_target = float(decision["new_target"])
+            side = (pt.direction or "long").lower()
+            current_target = float(pt.target_price or 0.0)
+            loosens = (
+                current_target <= 0
+                or (side != "short" and new_target > current_target)
+                or (side == "short" and 0 < new_target < current_target)
+            )
+            if loosens:
+                pt.target_price = round(new_target, 4)
+        except (TypeError, ValueError):
+            pass
+
+    _update_paper_dynamic_monitor_meta(
+        pt,
+        action=action,
+        source=str(decision.get("decision_source") or "dynamic_monitor"),
+        reason=str(decision.get("reason") or action),
+        price=price,
+        extra={
+            **(decision.get("detail") or {}),
+            "confidence": decision.get("confidence"),
+            "new_stop": decision.get("new_stop"),
+            "new_target": decision.get("new_target"),
+        },
+    )
+    return decision
+
+
 def check_paper_exits(
     db: Session,
     user_id: int | None = None,
@@ -264,6 +670,20 @@ def check_paper_exits(
 
             price = float(quote["price"])
             is_long = pt.direction == "long"
+
+            dynamic_decision = _paper_dynamic_monitor_decision(
+                db,
+                pt,
+                price=price,
+                quote_source="market_data",
+            )
+            if dynamic_decision and dynamic_decision.get("action") == "exit_now":
+                exit_p = _apply_slippage(price, pt.direction, is_entry=False)
+                _close_paper_trade(pt, exit_p, "pattern_exit_now")
+                _paper_close_ledger(db, pt)
+                closed += 1
+                continue
+            meta = (pt.signal_json or {}).get("_paper_meta", {})
 
             # --- Trailing stop logic ---
             trail_enabled = meta.get("trailing_enabled", False)

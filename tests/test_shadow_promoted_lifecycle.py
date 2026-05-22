@@ -31,6 +31,7 @@ from app.config import settings
 from app.models.trading import (
     AutoTraderRun,
     BreakoutAlert,
+    PaperTrade,
     ScanPattern,
     Trade,
 )
@@ -215,6 +216,8 @@ def _autotrader_scaffold_patches():
             auto_trader, "run_revalidation_llm", return_value=(True, {}),
         ),
         patch.object(auto_trader, "_maybe_check_feature_parity", return_value=None),
+        patch.object(auto_trader, "_emit_netedge_shadow_score", return_value=None),
+        patch.object(auto_trader, "_maybe_emit_regime_diagnostic", return_value=None),
         patch.object(
             auto_trader,
             "check_autopilot_entry_gate",
@@ -226,9 +229,17 @@ def _autotrader_scaffold_patches():
 def test_autotrader_routes_shadow_promoted_to_shadow_log_no_broker_call(
     db, monkeypatch
 ):
-    """A ``shadow_promoted`` pattern's alert is diverted to shadow-log
-    audit only: no Trade row, no broker call, no _execute_new_entry."""
+    """A ``shadow_promoted`` pattern is broker-blocked but still produces
+    a paper-shadow observation for learning."""
     monkeypatch.setattr(settings, "chili_shadow_promoted_lifecycle_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_autotrader_shadow_promoted_paper_observation_enabled", True,
+    )
+    monkeypatch.setattr(settings, "chili_autotrader_paper_shadow_enabled", False)
+    monkeypatch.setattr(
+        settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(settings, "chili_autotrader_paper_shadow_max_open", 100)
 
     u = _make_user(db, name="shadow_route_user")
     pat = _make_pattern(
@@ -239,24 +250,50 @@ def test_autotrader_routes_shadow_promoted_to_shadow_log_no_broker_call(
     out = {"scaled_in": 0, "skipped": 0, "entered": 0}
     runtime = {"live_orders_effective": True, "paper_mode_effective": False}
 
-    exec_calls: list[dict] = []
+    from app.services.trading import paper_trading as pt_mod
 
-    def _fail_exec(db_, uid, alert_, px, snap, llm_snap, live, out_):
-        exec_calls.append({"alert_id": alert_.id})
+    broker_buy = None
+    patches = list(_autotrader_scaffold_patches())
+    patches.extend([
+        patch.object(
+            auto_trader,
+            "_resolve_entry_risk_notional",
+            return_value=(100.0, {
+                "notional_capital_usd": 10_000.0,
+                "notional_explicit_fallback_usd": 100.0,
+                "notional_risk_pct": 1.0,
+            }),
+        ),
+        patch.object(pt_mod, "_compute_atr_levels", return_value=(9.0, 12.0, 1.0)),
+        patch.object(
+            pt_mod,
+            "_apply_slippage",
+            side_effect=lambda price, direction, is_entry: price,
+        ),
+        patch(
+            "app.services.trading.position_sizer_emitter.emit_shadow_proposal",
+            return_value=None,
+        ),
+        patch(
+            "app.services.trading.position_sizer_writer.mode_is_authoritative",
+            return_value=False,
+        ),
+    ])
+    for p in patches:
+        p.start()
+    broker_patch = patch.object(auto_trader, "_execute_broker_buy")
+    broker_buy = broker_patch.start()
+    try:
+        auto_trader._process_one_alert(db, u.id, alert, out, runtime)
+    finally:
+        broker_patch.stop()
+        patch.stopall()
 
-    with patch.object(auto_trader, "_execute_new_entry", side_effect=_fail_exec):
-        for p in _autotrader_scaffold_patches():
-            p.start()
-        try:
-            auto_trader._process_one_alert(db, u.id, alert, out, runtime)
-        finally:
-            patch.stopall()
-
-    # Diverted to shadow-log: blocked decision with the eval reason,
-    # no _execute_new_entry, no Trade row.
+    # Blocked decision with the eval reason, no live Trade row, plus one
+    # tagged paper-shadow observation for the learner.
     assert out["skipped"] == 1
     assert out["entered"] == 0
-    assert exec_calls == []
+    broker_buy.assert_not_called()
     runs = (
         db.query(AutoTraderRun)
         .filter(AutoTraderRun.breakout_alert_id == alert.id)
@@ -267,6 +304,15 @@ def test_autotrader_routes_shadow_promoted_to_shadow_log_no_broker_call(
     assert runs[0].reason == "selector:shadow_promoted_pattern_eval"
     trades = db.query(Trade).filter(Trade.ticker == "SHDW1").all()
     assert trades == []
+    shadows = (
+        db.query(PaperTrade)
+        .filter(PaperTrade.paper_shadow_of_alert_id == alert.id)
+        .all()
+    )
+    assert len(shadows) == 1
+    assert shadows[0].ticker == "SHDW1"
+    assert shadows[0].scan_pattern_id == pat.id
+    assert shadows[0].signal_json["shadow_decision"] == "blocked_shadow_promoted"
 
 
 def test_autotrader_byte_identical_for_live_pattern(db, monkeypatch):
@@ -410,11 +456,15 @@ def test_autotrader_mixed_alerts_route_independently(db, monkeypatch):
     out = {"scaled_in": 0, "skipped": 0, "entered": 0}
     runtime = {"live_orders_effective": True, "paper_mode_effective": False}
 
-    exec_calls: list[int] = []
+    exec_calls: list[tuple[int, bool]] = []
 
     def _spy(db_, uid, alert_, px, snap, llm_snap, live, out_):
-        exec_calls.append(int(alert_.id))
-        out_["entered"] = out_.get("entered", 0) + 1
+        observation = bool(getattr(alert_, "_chili_shadow_observation_only", False))
+        exec_calls.append((int(alert_.id), observation))
+        if observation:
+            out_["skipped"] = out_.get("skipped", 0) + 1
+        else:
+            out_["entered"] = out_.get("entered", 0) + 1
 
     patches = list(_autotrader_scaffold_patches())
     patches.append(patch.object(auto_trader, "_execute_new_entry", side_effect=_spy))
@@ -426,21 +476,23 @@ def test_autotrader_mixed_alerts_route_independently(db, monkeypatch):
     finally:
         patch.stopall()
 
-    # Live alert executes exactly once. Shadow alert does not execute.
-    assert exec_calls == [int(alert_live.id)]
+    # Shadow alert reaches execution in observation mode so quote/sizing can
+    # create paper evidence; live alert reaches normal execution.
+    assert exec_calls == [
+        (int(alert_shadow.id), True),
+        (int(alert_live.id), False),
+    ]
     assert out["entered"] == 1
     assert out["skipped"] == 1
 
-    # Audit rows: shadow_promoted_pattern_eval for the shadow alert,
-    # nothing blocked for the live alert (it reached _execute_new_entry).
+    # The stubbed execution layer owns terminal audit rows in this test, so
+    # _process_one_alert itself should not early-block either alert.
     shadow_runs = (
         db.query(AutoTraderRun)
         .filter(AutoTraderRun.breakout_alert_id == alert_shadow.id)
         .all()
     )
-    assert len(shadow_runs) == 1
-    assert shadow_runs[0].decision == "blocked"
-    assert shadow_runs[0].reason == "selector:shadow_promoted_pattern_eval"
+    assert shadow_runs == []
 
     live_runs_blocked = (
         db.query(AutoTraderRun)

@@ -822,6 +822,30 @@ def _run_drift_monitor_daily_job():
     run_scheduler_job_guarded("drift_monitor_daily", _work)
 
 
+def _run_recert_queue_dispatch_job():
+    """Dispatch proposed recert rows into the backtest priority queue."""
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.recert_queue_consumer import dispatch_due_recerts
+
+        db = SessionLocal()
+        try:
+            out = dispatch_due_recerts(db)
+            if not out.get("skipped"):
+                logger.info("[scheduler] recert_queue_dispatch result=%s", out)
+        except Exception:
+            logger.exception("[scheduler] recert_queue_dispatch failed")
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("recert_queue_dispatch", _work)
+
+
 def _run_divergence_sweep_daily_job():
     """Phase K - daily divergence-panel sweep (shadow mode only).
 
@@ -4608,6 +4632,27 @@ def start_scheduler():
                 )
         except Exception:
             logger.exception("[scheduler] failed to register drift_monitor_daily job")
+
+        # Phase J.2-lite: recert proposals should not sit inert; dispatch
+        # them into the existing backtest priority queue in shadow/compare.
+        try:
+            _rq_mode = (getattr(settings, "brain_recert_queue_mode", "off") or "off").lower()
+            if include_web_light and _rq_mode not in ("off", "authoritative"):
+                _rq_interval = max(
+                    15,
+                    int(getattr(settings, "brain_recert_queue_dispatch_interval_minutes", 60) or 60),
+                )
+                _scheduler.add_job(
+                    _run_recert_queue_dispatch_job,
+                    trigger=IntervalTrigger(minutes=_rq_interval),
+                    id="recert_queue_dispatch",
+                    name=f"Recert queue dispatch (every {_rq_interval}min; mode={_rq_mode})",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=150),
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register recert_queue_dispatch job")
 
         # Phase K: daily divergence panel sweep (shadow mode only).
         try:

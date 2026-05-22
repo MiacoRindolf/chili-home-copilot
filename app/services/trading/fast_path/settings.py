@@ -205,6 +205,21 @@ class FastPathSettings:
     (rebate-eligible at higher tiers; check the live schedule for the
     operator's account)."""
 
+    live_alpha_evidence_gate_enabled: bool = True
+    """When True, live fast-path execution requires calibrated decay evidence
+    for the exact ticker / alert_type / score bucket. Paper can continue to
+    explore no-data buckets; live cannot. This prevents a mode flip from
+    turning cold-start or decayed signals into real orders."""
+
+    live_alpha_min_samples: int = 50
+    """Minimum decay samples required before a live fast-path signal can pass
+    ``gate_live_alpha_evidence``."""
+
+    live_alpha_min_net_bps: float = 0.0
+    """Minimum edge left after the estimated round-trip fee + spread cost.
+    Keep at 0 by default because ``gate_cost_aware_admission`` already owns
+    the economic line; raise this for a larger live safety margin."""
+
     maker_cancel_on_timeout_s: int = 10
     """Cancel a resting maker order after this many seconds if unfilled.
     The trade-off: longer = higher fill rate but more adverse-selection
@@ -290,6 +305,12 @@ def load() -> FastPathSettings:
         ).strip().lower(),
         cost_aware_maker_fee_bps=_env_float(
             "CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS", 40.0),
+        live_alpha_evidence_gate_enabled=_env_bool(
+            "CHILI_FAST_PATH_LIVE_ALPHA_EVIDENCE_GATE_ENABLED", True),
+        live_alpha_min_samples=_env_int(
+            "CHILI_FAST_PATH_LIVE_ALPHA_MIN_SAMPLES", 50),
+        live_alpha_min_net_bps=_env_float(
+            "CHILI_FAST_PATH_LIVE_ALPHA_MIN_NET_BPS", 0.0),
         maker_cancel_on_timeout_s=_env_int(
             "CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S", 10),
         maker_first_taker_fallback_s=_env_int(

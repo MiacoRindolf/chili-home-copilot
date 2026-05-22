@@ -11,7 +11,13 @@ from sqlalchemy import and_, exists, or_
 from sqlalchemy.orm import Session
 
 from ...deps import get_db, get_identity_ctx
-from ...models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade
+from ...models.trading import (
+    AutoTraderRun,
+    BreakoutAlert,
+    PatternMonitorDecision,
+    ScanPattern,
+    Trade,
+)
 from ...services import trading_service as ts
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
@@ -435,10 +441,25 @@ def api_monitor_imminent_alerts(
     if pat_ids:
         for p in db.query(ScanPattern).filter(ScanPattern.id.in_(pat_ids)).all():
             patterns[p.id] = p
+    alert_ids = [int(a.id) for a in alerts]
+    runs_by_alert: dict[int, AutoTraderRun] = {}
+    if alert_ids:
+        runs = (
+            db.query(AutoTraderRun)
+            .filter(AutoTraderRun.breakout_alert_id.in_(alert_ids))
+            .order_by(AutoTraderRun.breakout_alert_id.asc(), AutoTraderRun.created_at.desc())
+            .all()
+        )
+        for run in runs:
+            aid = int(run.breakout_alert_id)
+            if aid not in runs_by_alert:
+                runs_by_alert[aid] = run
 
     items: list[dict[str, Any]] = []
     for a in alerts:
         pat = patterns.get(a.scan_pattern_id) if a.scan_pattern_id else None
+        run = runs_by_alert.get(int(a.id))
+        lifecycle = (pat.lifecycle_stage if pat else None) or None
         items.append(
             {
                 "id": a.id,
@@ -454,6 +475,13 @@ def api_monitor_imminent_alerts(
                 "regime": a.regime_at_alert,
                 "pattern_id": a.scan_pattern_id,
                 "pattern_name": pat.name if pat else None,
+                "lifecycle_stage": lifecycle,
+                "broker_eligible": lifecycle in ("live", "promoted", "pilot_promoted"),
+                "autotrader_decision": run.decision if run else None,
+                "autotrader_reason": run.reason if run else None,
+                "autotrader_processed_at": (
+                    run.created_at.isoformat() if run and run.created_at else None
+                ),
                 "trade_plan": a.trade_plan,
             }
         )

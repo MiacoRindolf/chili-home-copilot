@@ -514,6 +514,9 @@ class Settings(BaseSettings):
     brain_recert_queue_mode: str = "shadow"
     brain_recert_queue_ops_log_enabled: bool = True
     brain_recert_queue_include_yellow: bool = False
+    brain_recert_queue_dispatch_interval_minutes: int = 60
+    brain_recert_queue_dispatch_limit: int = 5
+    brain_recert_queue_backtest_priority: int = 250
 
     # Phase K - Divergence panel + ops health endpoint (shadow rollout).
     brain_divergence_scorer_mode: str = "shadow"
@@ -2048,11 +2051,18 @@ class Settings(BaseSettings):
     # trade tagged with ``paper_shadow_of_alert_id``. Used to measure
     # execution-alpha-drag, provide pure-strategy pattern evidence, and
     # unstarve brain learning during low-live-placement-rate periods.
-    # Default off; opt-in only. No effect when live=False (the paper
-    # branch already creates non-shadow paper trades directly).
+    # Default off; opt-in only. Shadow-promoted evidence may also use this
+    # path while live orders are disabled so learning can keep collecting
+    # samples without turning broker execution on.
     chili_autotrader_paper_shadow_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_ENABLED"),
+    )
+    chili_autotrader_paper_shadow_max_open: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_MAX_OPEN"),
     )
     # Open paper-shadow evidence for live-qualified signals that are blocked
     # by portfolio/execution authority gates such as recert debt or venue caps.
@@ -2061,6 +2071,20 @@ class Settings(BaseSettings):
     chili_autotrader_paper_shadow_qualified_blocks_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_QUALIFIED_BLOCKS_ENABLED"),
+    )
+    # Paper-shadow evidence should be scored against the same kind of dynamic
+    # position management used live, not only against the original stop/target.
+    # This lightweight overlay lets autotrader-tagged PaperTrade rows react to
+    # pattern-monitor risk states (exit_now / tighten_stop) before static exits.
+    chili_autotrader_paper_dynamic_monitor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_DYNAMIC_MONITOR_ENABLED"),
+    )
+    chili_autotrader_paper_dynamic_monitor_cooldown_minutes: int = Field(
+        default=5,
+        ge=0,
+        le=240,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_DYNAMIC_MONITOR_COOLDOWN_MINUTES"),
     )
     # f-handler-live-drift + f-handler-execution-robustness (Phase 2
     # #8/#9, 2026-05-06): trade-close-driven observability. Both share
