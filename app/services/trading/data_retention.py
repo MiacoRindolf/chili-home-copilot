@@ -80,6 +80,30 @@ def run_retention_policy(
         batch_size=settings.brain_retention_exit_parity_delete_batch_size,
         dry_run=dry_run,
     )
+    results["bracket_reconciliation_log"] = _prune_operational_time_log(
+        db,
+        table="trading_bracket_reconciliation_log",
+        ts_col="observed_at",
+        retain_days=settings.brain_retention_bracket_reconciliation_days,
+        batch_size=DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
+        dry_run=dry_run,
+    )
+    results["execution_events"] = _prune_operational_time_log(
+        db,
+        table="trading_execution_events",
+        ts_col="recorded_at",
+        retain_days=settings.brain_retention_execution_event_days,
+        batch_size=DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
+        dry_run=dry_run,
+    )
+    results["pattern_trades"] = _prune_operational_time_log(
+        db,
+        table="trading_pattern_trades",
+        ts_col="created_at",
+        retain_days=settings.brain_retention_pattern_trade_days,
+        batch_size=DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
+        dry_run=dry_run,
+    )
     results["setup_vitals_history"] = _prune_setup_vitals_history(db, 90, dry_run)
     results["ticker_vitals_stale"] = _prune_stale_ticker_vitals(db, 7, dry_run)
     results["fast_path"] = _prune_fast_path_tables(db, dry_run)
@@ -699,6 +723,70 @@ def _prune_exit_parity_log(
     return {
         "backtest_retain_days": backtest_days,
         "live_retain_days": live_days,
+        "eligible_batch": eligible_batch,
+        "deleted": deleted,
+    }
+
+
+def _prune_operational_time_log(
+    db: Session,
+    *,
+    table: str,
+    ts_col: str,
+    retain_days: int,
+    batch_size: int,
+    dry_run: bool,
+) -> dict[str, int]:
+    """Batch-delete old operational rows once a timestamp+id index exists."""
+    if not _retention_has_leading_time_index(
+        db, table, ts_col, require_id_second=True,
+    ):
+        return {
+            "retain_days": retain_days,
+            "eligible_batch": 0,
+            "deleted": 0,
+            "skipped": 1,
+        }
+
+    cutoff = datetime.utcnow() - timedelta(days=retain_days)
+    resolved_batch = _safe_positive_int(
+        batch_size, DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
+    )
+    quoted_table = _quote_ident(table)
+    quoted_ts = _quote_ident(ts_col)
+    params = {"cutoff": cutoff, "limit": resolved_batch}
+    try:
+        eligible_batch = int(db.execute(text(f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT 1
+                FROM {quoted_table}
+                WHERE {quoted_ts} < :cutoff
+                ORDER BY {quoted_ts} ASC, id ASC
+                LIMIT :limit
+            ) limited
+        """), params).scalar() or 0)
+    except Exception:
+        return {"retain_days": retain_days, "eligible_batch": 0, "deleted": 0}
+
+    deleted = 0
+    if not dry_run and eligible_batch > 0:
+        result = db.execute(text(f"""
+            WITH doomed AS (
+                SELECT ctid
+                FROM {quoted_table}
+                WHERE {quoted_ts} < :cutoff
+                ORDER BY {quoted_ts} ASC, id ASC
+                LIMIT :limit
+            )
+            DELETE FROM {quoted_table} t
+            USING doomed
+            WHERE t.ctid = doomed.ctid
+        """), params)
+        deleted = int(result.rowcount or 0)
+
+    return {
+        "retain_days": retain_days,
         "eligible_batch": eligible_batch,
         "deleted": deleted,
     }

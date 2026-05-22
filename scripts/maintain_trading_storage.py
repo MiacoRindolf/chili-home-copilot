@@ -64,6 +64,11 @@ INDEX_SPECS = [
         "ix_pattern_trades_created_retention",
         ("created_at", "id"),
     ),
+    IndexSpec(
+        "trading_execution_events",
+        "ix_execution_events_recorded_retention",
+        ("recorded_at", "id"),
+    ),
 ]
 
 INDEX_TARGET_TABLES = {
@@ -71,6 +76,7 @@ INDEX_TARGET_TABLES = {
     "exit-parity": {"trading_exit_parity_log"},
     "bracket-reconciliation": {"trading_bracket_reconciliation_log"},
     "pattern-trades": {"trading_pattern_trades"},
+    "execution-events": {"trading_execution_events"},
 }
 
 

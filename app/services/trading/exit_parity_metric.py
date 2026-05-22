@@ -16,6 +16,7 @@ direction-aware sign flip for shorts.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import NamedTuple, Optional
 
 
@@ -105,4 +106,67 @@ def compute_parity_v2_fields(
     )
 
 
-__all__ = ["compute_parity_v2_fields", "ParityV2Fields"]
+def should_persist_parity_row(
+    *,
+    sample_pct: float,
+    action_class: str | None,
+    agree_bool: bool,
+    legacy_action: str,
+    canonical_action: str,
+    source: str,
+    ticker: str,
+    position_id: int | None = None,
+    scan_pattern_id: int | None = None,
+    bar_idx: int | None = None,
+    config_hash: str | None = None,
+    sample_salt: str | None = None,
+) -> bool:
+    """Return whether a parity row should be persisted.
+
+    Disagreements and actual exits are always kept. Sampling only applies to
+    low-information ``hold``/``hold`` rows where both engines agree, which are
+    the source of most table growth and are not used by the cutover drift
+    statistics.
+    """
+    boring_agreed_hold = (
+        bool(agree_bool)
+        and (action_class in (None, "", "both_hold"))
+        and legacy_action == "hold"
+        and canonical_action == "hold"
+    )
+    if not boring_agreed_hold:
+        return True
+
+    try:
+        pct = float(sample_pct)
+    except (TypeError, ValueError):
+        pct = 1.0
+    if pct >= 1.0:
+        return True
+    if pct <= 0.0:
+        return False
+
+    key = "|".join(
+        str(part)
+        for part in (
+            source,
+            ticker,
+            position_id,
+            scan_pattern_id,
+            bar_idx,
+            config_hash,
+            sample_salt,
+            legacy_action,
+            canonical_action,
+        )
+    )
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    bucket = int.from_bytes(digest, "big") / float(1 << 64)
+    return bucket < pct
+
+
+__all__ = [
+    "compute_parity_v2_fields",
+    "should_persist_parity_row",
+    "ParityV2Fields",
+]

@@ -292,7 +292,9 @@ class Settings(BaseSettings):
     # the legacy backtest/live paths. See docs/TRADING_BRAIN_EXIT_ENGINE_ROLLOUT.md.
     brain_exit_engine_mode: str = "shadow"
     brain_exit_engine_ops_log_enabled: bool = True
-    brain_exit_engine_parity_sample_pct: float = 1.0
+    # Applies only to boring hold/hold agreement rows; disagreements and
+    # actual exits are always persisted for cutover statistics.
+    brain_exit_engine_parity_sample_pct: float = 0.05
 
     # Economic-truth ledger (Phase A) — canonical append-only ledger of
     # entry/exit fills + fees + cash-delta + realized-PnL-delta. Shadow-only
@@ -2052,6 +2054,14 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_ENABLED"),
     )
+    # Open paper-shadow evidence for live-qualified signals that are blocked
+    # by portfolio/execution authority gates such as recert debt or venue caps.
+    # This does not mirror ordinary skipped/no-edge alerts and never places a
+    # broker order; it exists to speed learning without loosening live gates.
+    chili_autotrader_paper_shadow_qualified_blocks_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_QUALIFIED_BLOCKS_ENABLED"),
+    )
     # f-handler-live-drift + f-handler-execution-robustness (Phase 2
     # #8/#9, 2026-05-06): trade-close-driven observability. Both share
     # the trade-close batch size with demote/regime_ledger via
@@ -2928,6 +2938,14 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_BLOCK_LIVE_ON_CAPITAL_FALLBACK"),
     )
+    chili_autotrader_block_live_on_recert_required: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_BLOCK_LIVE_ON_RECERT_REQUIRED"),
+    )
+    chili_autotrader_shadow_promoted_paper_observation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SHADOW_PROMOTED_PAPER_OBSERVATION_ENABLED"),
+    )
     chili_autotrader_live_require_venue_health_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_REQUIRE_VENUE_HEALTH_ENABLED"),
@@ -3472,6 +3490,8 @@ class Settings(BaseSettings):
     brain_retention_exit_parity_backtest_days: int = 7
     brain_retention_exit_parity_live_days: int = 30
     brain_retention_exit_parity_delete_batch_size: int = 50_000
+    brain_retention_bracket_reconciliation_days: int = 30
+    brain_retention_execution_event_days: int = 180
     brain_retention_fast_snapshot_days: int = 30
     brain_retention_fast_orderbook_days: int = 3
     brain_retention_fast_alert_days: int = 14

@@ -60,6 +60,7 @@ def test_operational_retention_index_migration_defers_heavy_tables():
     assert "ix_exit_parity_created_retention" in src
     assert "ix_bracket_reconciliation_observed_retention" in src
     assert "ix_pattern_trades_created_retention" in src
+    assert "ix_execution_events_recorded_retention" in src
     assert "CHILI_MIGRATION_BUILD_HEAVY_OPERATIONAL_INDEXES" in src
     assert "deferred heavy startup index" in src
 

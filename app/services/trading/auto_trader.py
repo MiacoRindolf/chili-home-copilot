@@ -37,6 +37,12 @@ from .ops_log_prefixes import CHILI_MARKET_DATA
 
 logger = logging.getLogger(__name__)
 
+QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
+    "blocked_coinbase_cap",
+    "blocked_recert_required",
+    "blocked_shadow_promoted",
+})
+
 AUTOTRADER_VERSION = "v1"
 
 
@@ -279,7 +285,13 @@ def _maybe_open_paper_shadow(
     existing dedupe in ``open_paper_trade``. Failures swallowed at this
     boundary -- shadow must never break the live decision flow.
     """
-    if not getattr(settings, "chili_autotrader_paper_shadow_enabled", False):
+    base_enabled = bool(getattr(settings, "chili_autotrader_paper_shadow_enabled", False))
+    qualified_enabled = bool(
+        getattr(settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True)
+    )
+    if not base_enabled and not (
+        qualified_enabled and decision in QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+    ):
         return
     if uid is None:
         return
@@ -1006,6 +1018,12 @@ def _process_one_alert(
         _pat = db.query(ScanPattern).filter(ScanPattern.id == int(alert.scan_pattern_id)).first()
         if _pat is not None:
             _stage = (_pat.lifecycle_stage or "").strip().lower()
+            if not bool(getattr(_pat, "active", True)):
+                _reason = "pattern_inactive"
+                _audit(db, user_id=uid, alert=alert, decision="skipped", reason=_reason)
+                out["skipped"] += 1
+                _autotrader_tick_note(out, kind="skipped", reason=_reason, alert=alert)
+                return
             # f-promotion-pipeline-rebalance Phase 3 (2026-05-10):
             # shadow_promoted patterns fire imminent alerts but are
             # routed to shadow-log only — no broker call, no Trade row.
@@ -1015,16 +1033,34 @@ def _process_one_alert(
             # False for any stage != 'shadow_promoted', preserving
             # byte-identical behavior for promoted/live/challenged/etc.
             if is_shadow_promoted_pattern(_pat):
-                _shadow_reason = "selector:shadow_promoted_pattern_eval"
-                _audit(db, user_id=uid, alert=alert,
-                       decision="blocked", reason=_shadow_reason)
-                out["skipped"] += 1
-                _autotrader_tick_note(
-                    out, kind="blocked", reason=_shadow_reason, alert=alert,
-                )
-                return
+                if live and bool(
+                    getattr(
+                        settings,
+                        "chili_autotrader_shadow_promoted_paper_observation_enabled",
+                        True,
+                    )
+                ):
+                    setattr(alert, "_chili_shadow_observation_only", True)
+                else:
+                    _shadow_reason = "selector:shadow_promoted_pattern_eval"
+                    _audit(db, user_id=uid, alert=alert,
+                           decision="blocked", reason=_shadow_reason)
+                    out["skipped"] += 1
+                    _autotrader_tick_note(
+                        out, kind="blocked", reason=_shadow_reason, alert=alert,
+                    )
+                    return
+            elif (
+                live
+                and bool(getattr(_pat, "recert_required", False))
+                and bool(getattr(settings, "chili_autotrader_block_live_on_recert_required", True))
+            ):
+                setattr(alert, "_chili_recert_required", True)
             _allowed = _eligible_lifecycle_stages(live=live)
-            if _stage not in _allowed:
+            if (
+                not bool(getattr(alert, "_chili_shadow_observation_only", False))
+                and _stage not in _allowed
+            ):
                 _prefix = (
                     "pattern_lifecycle_not_live_approved"
                     if live and bool(getattr(settings, "chili_autotrader_live_requires_live_lifecycle", True))
@@ -1709,6 +1745,15 @@ def _execute_broker_buy(
             _autotrader_tick_note(
                 out, kind="blocked", reason=_cap_reason, alert=alert,
             )
+            _maybe_open_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                qty=qty,
+                px=float(_cap_px),
+                snap=snap,
+                decision="blocked_coinbase_cap",
+            )
             logger.info(
                 "[autotrader] Coinbase cap blocked alert ticker=%s "
                 "current_positions=%d current_notional_usd=%.2f reason=%s",
@@ -2350,6 +2395,56 @@ def _execute_new_entry(
         snap["qty_raw"] = round(qty_raw, 8)
 
     if live:
+        if bool(getattr(alert, "_chili_shadow_observation_only", False)):
+            _reason = "selector:shadow_promoted_pattern_eval"
+            snap["paper_observation_reason"] = _reason
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=_reason,
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(out, kind="blocked", reason=_reason, alert=alert)
+            _maybe_open_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                qty=qty,
+                px=px,
+                snap=snap,
+                decision="blocked_shadow_promoted",
+            )
+            return
+
+        if bool(getattr(alert, "_chili_recert_required", False)):
+            _reason = "pattern_recert_required"
+            snap["paper_observation_reason"] = _reason
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=_reason,
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(out, kind="blocked", reason=_reason, alert=alert)
+            _maybe_open_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                qty=qty,
+                px=px,
+                snap=snap,
+                decision="blocked_recert_required",
+            )
+            return
+
         from .governance import is_kill_switch_active
 
         if is_kill_switch_active():

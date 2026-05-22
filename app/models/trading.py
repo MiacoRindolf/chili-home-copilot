@@ -462,6 +462,7 @@ class TradingExecutionEvent(Base):
         Index("ix_trading_execution_events_trade_ts", "trade_id", "recorded_at"),
         Index("ix_trading_execution_events_order_ts", "broker_source", "order_id", "recorded_at"),
         Index("ix_trading_execution_events_pattern_ts", "scan_pattern_id", "recorded_at"),
+        Index("ix_execution_events_recorded_retention", "recorded_at", "id"),
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)

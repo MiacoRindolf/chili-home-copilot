@@ -82,23 +82,52 @@ class RecertQueueResult:
 
 
 def _already_queued(
-    db: Session, *, recert_id: str,
-) -> int | None:
+    db: Session, *, prop: RecertProposal, mode: str,
+) -> RecertQueueResult | None:
     row = db.execute(text(
-        "SELECT id FROM trading_pattern_recert_log "
-        "WHERE recert_id = :rid ORDER BY id DESC LIMIT 1"
-    ), {"rid": recert_id}).fetchone()
+        """
+        SELECT id, recert_id, scan_pattern_id, mode, status
+        FROM trading_pattern_recert_log
+        WHERE recert_id = :rid
+           OR (
+               scan_pattern_id = :pid
+               AND source = :source
+               AND status IN ('proposed', 'dispatched')
+               AND (mode = :mode OR mode IS NULL)
+           )
+        ORDER BY
+          CASE WHEN recert_id = :rid THEN 0 ELSE 1 END,
+          id DESC
+        LIMIT 1
+        """
+    ), {
+        "rid": prop.recert_id,
+        "pid": int(prop.scan_pattern_id),
+        "source": prop.source,
+        "mode": mode,
+    }).fetchone()
     if row is None:
         return None
-    return int(row[0])
+    return RecertQueueResult(
+        log_id=int(row[0]),
+        recert_id=str(row[1]),
+        scan_pattern_id=int(row[2]),
+        mode=str(row[3] or mode),
+        status=str(row[4]),
+    )
 
 
 def _persist(
     db: Session, prop: RecertProposal, mode: str,
 ) -> RecertQueueResult:
-    existing = _already_queued(db, recert_id=prop.recert_id)
+    existing = _already_queued(db, prop=prop, mode=mode)
     if existing is not None:
         if _ops_log_enabled():
+            reason = (
+                "duplicate"
+                if existing.recert_id == prop.recert_id
+                else "open_pattern_source_duplicate"
+            )
             logger.info(
                 format_recert_queue_ops_line(
                     event="recert_skipped",
@@ -110,16 +139,12 @@ def _persist(
                     source=prop.source,
                     status=prop.status,
                     drift_log_id=prop.drift_log_id,
-                    reason="duplicate",
+                    reason=reason,
+                    existing_recert_id=existing.recert_id,
+                    existing_log_id=existing.log_id,
                 )
             )
-        return RecertQueueResult(
-            log_id=existing,
-            recert_id=prop.recert_id,
-            scan_pattern_id=prop.scan_pattern_id,
-            mode=mode,
-            status=prop.status,
-        )
+        return existing
 
     now = datetime.utcnow()
     as_of_str = prop.as_of_date.isoformat()

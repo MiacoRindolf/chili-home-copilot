@@ -24,6 +24,7 @@ import pytest
 from app.services.trading.exit_parity_metric import (
     ParityV2Fields,
     compute_parity_v2_fields,
+    should_persist_parity_row,
 )
 
 
@@ -366,3 +367,51 @@ def test_verdict_gate_insufficient_data():
         legacy_only_n=50,
     )
     assert v == "INSUFFICIENT_DATA"
+
+
+def test_parity_sampling_keeps_interesting_rows():
+    assert should_persist_parity_row(
+        sample_pct=0.0,
+        action_class="canonical_only_close",
+        agree_bool=False,
+        legacy_action="hold",
+        canonical_action="stop_loss",
+        source="backtest",
+        ticker="KEEP",
+    ) is True
+
+    assert should_persist_parity_row(
+        sample_pct=0.0,
+        action_class="both_close",
+        agree_bool=True,
+        legacy_action="stop_loss",
+        canonical_action="stop_loss",
+        source="live",
+        ticker="KEEP",
+    ) is True
+
+
+def test_parity_sampling_can_drop_boring_agreed_holds():
+    assert should_persist_parity_row(
+        sample_pct=0.0,
+        action_class="both_hold",
+        agree_bool=True,
+        legacy_action="hold",
+        canonical_action="hold",
+        source="backtest",
+        ticker="DROP",
+        bar_idx=1,
+        config_hash="cfg",
+    ) is False
+
+    assert should_persist_parity_row(
+        sample_pct=1.0,
+        action_class="both_hold",
+        agree_bool=True,
+        legacy_action="hold",
+        canonical_action="hold",
+        source="backtest",
+        ticker="DROP",
+        bar_idx=1,
+        config_hash="cfg",
+    ) is True

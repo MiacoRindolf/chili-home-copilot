@@ -23,6 +23,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app import models
 from app.models.trading import (
     BreakoutAlert, PaperTrade, ScanPattern,
 )
@@ -37,6 +38,9 @@ REPO = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 
 def _seed_pattern_and_alert(db) -> tuple[ScanPattern, BreakoutAlert]:
+    user = models.User(name="psm_user")
+    db.add(user)
+    db.flush()
     pat = ScanPattern(
         name="psm_pat",
         rules_json={},
@@ -53,7 +57,11 @@ def _seed_pattern_and_alert(db) -> tuple[ScanPattern, BreakoutAlert]:
     alert = BreakoutAlert(
         ticker="TEST",
         alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=100.0,
+        entry_price=100.0,
         alerted_at=datetime.utcnow(),
+        user_id=user.id,
         scan_pattern_id=pat.id,
         stop_loss=95.0,
         target_price=110.0,
@@ -75,7 +83,7 @@ def test_helper_no_op_when_flag_off(db, monkeypatch):
         at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
     )
     _maybe_open_paper_shadow(
-        db, uid=1, alert=alert, qty=1, px=100.0,
+        db, uid=alert.user_id, alert=alert, qty=1, px=100.0,
         snap={}, decision="placed",
     )
     rows = db.query(PaperTrade).filter(
@@ -108,7 +116,7 @@ def test_helper_creates_shadow_when_flag_on_placed(db, monkeypatch):
     )
 
     _maybe_open_paper_shadow(
-        db, uid=1, alert=alert, qty=1, px=100.0,
+        db, uid=alert.user_id, alert=alert, qty=1, px=100.0,
         snap={"projected_profit_pct": 5.0}, decision="placed",
     )
     db.commit()
@@ -147,7 +155,7 @@ def test_helper_creates_shadow_on_blocked_decisions(db, monkeypatch, decision):
     )
 
     _maybe_open_paper_shadow(
-        db, uid=1, alert=alert, qty=1, px=100.0,
+        db, uid=alert.user_id, alert=alert, qty=1, px=100.0,
         snap={}, decision=decision,
     )
     db.commit()
@@ -156,6 +164,40 @@ def test_helper_creates_shadow_on_blocked_decisions(db, monkeypatch, decision):
     ).all()
     assert len(rows) == 1
     assert rows[0].signal_json.get("shadow_decision") == decision
+
+
+def test_helper_creates_shadow_for_qualified_block_when_base_flag_off(db, monkeypatch):
+    pat, alert = _seed_pattern_and_alert(db)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    from app.services.trading import paper_trading as pt_mod
+    monkeypatch.setattr(
+        pt_mod, "_compute_atr_levels",
+        lambda ticker, entry_price, exit_cfg: (
+            entry_price * 0.97, entry_price * 1.10, 1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        pt_mod, "_apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    _maybe_open_paper_shadow(
+        db, uid=alert.user_id, alert=alert, qty=1, px=100.0,
+        snap={}, decision="blocked_coinbase_cap",
+    )
+    db.commit()
+
+    rows = db.query(PaperTrade).filter(
+        PaperTrade.paper_shadow_of_alert_id == alert.id
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].scan_pattern_id == pat.id
+    assert rows[0].signal_json.get("shadow_decision") == "blocked_coinbase_cap"
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +235,7 @@ def test_evidence_aggregation_doesnt_read_paper_trades():
     future edit adds a PaperTrade union, the f-add-paper-shadow-mode
     comment must stay (or the filter for paper_shadow_of_alert_id must
     be added). This test pins both."""
-    src = (REPO / "app/services/trading/learning.py").read_text()
+    src = (REPO / "app/services/trading/learning.py").read_text(encoding="utf-8")
     # Find the function body.
     fn_start = src.find("def update_pattern_stats_from_closed_trades")
     assert fn_start > 0

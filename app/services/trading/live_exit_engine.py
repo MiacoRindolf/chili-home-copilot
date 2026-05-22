@@ -440,7 +440,7 @@ def _phase_b_shadow_parity(
         # f-exit-parity-metric-v2 (Migration 230): compute the four new
         # parity-decomposition fields via the shared pure helper so the
         # live and backtest paths stay byte-identical on this logic.
-        from .exit_parity_metric import compute_parity_v2_fields
+        from .exit_parity_metric import compute_parity_v2_fields, should_persist_parity_row
         v2 = compute_parity_v2_fields(
             legacy_action=legacy_action,
             canonical_action=canonical_action,
@@ -478,17 +478,31 @@ def _phase_b_shadow_parity(
             },
         )
 
-        # Use a fresh SessionLocal so the parity write commits independently
-        # of the caller's transaction. The caller chain (trading_scheduler ->
-        # _run_paper_trade_check_job) wraps ``check_paper_exits`` writes in
-        # the same db, and a ``db.commit()`` here would prematurely flush
-        # those. ``db.flush()`` (the previous behaviour) sends to server
-        # state but rolls back if the caller never commits -- which is why
-        # 0 live parity rows ever landed.
-        from ...db import SessionLocal as _SL
-        with _SL() as parity_db:
-            parity_db.add(ExitParityLog(**row_kwargs))
-            parity_db.commit()
+        persisted = should_persist_parity_row(
+            sample_pct=sample_pct,
+            action_class=v2.action_class,
+            agree_bool=bool(agree),
+            legacy_action=legacy_action,
+            canonical_action=canonical_action,
+            source="live",
+            ticker=str(trade.ticker),
+            position_id=row_kwargs["position_id"],
+            scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+            config_hash=config_hash,
+            sample_salt=f"{bars_held}:{current_price}",
+        )
+        if persisted:
+            # Use a fresh SessionLocal so the parity write commits independently
+            # of the caller's transaction. The caller chain (trading_scheduler ->
+            # _run_paper_trade_check_job) wraps ``check_paper_exits`` writes in
+            # the same db, and a ``db.commit()`` here would prematurely flush
+            # those. ``db.flush()`` (the previous behaviour) sends to server
+            # state but rolls back if the caller never commits -- which is why
+            # 0 live parity rows ever landed.
+            from ...db import SessionLocal as _SL
+            with _SL() as parity_db:
+                parity_db.add(ExitParityLog(**row_kwargs))
+                parity_db.commit()
 
         if ops_log_enabled:
             line = format_exit_engine_ops_line(
@@ -502,7 +516,7 @@ def _phase_b_shadow_parity(
                 config_hash=config_hash,
                 sample_pct=sample_pct,
             )
-            # Parity row is always persisted to ExitParityLog above; only escalate
+            # Parity rows are sampled for boring hold/hold agreement. Only escalate
             # the INFO line for interesting cases (disagreements or actual exits).
             # Per-bar hold+hold+agree is ~90% of all lines and pure noise.
             boring = (

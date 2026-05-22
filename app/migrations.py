@@ -18100,14 +18100,14 @@ def _migration_260_operational_retention_time_indexes(conn) -> None:
     creates the same indexes concurrently during a maintenance window.
     """
 
-    def has_leading_btree_index(table: str, ts_col: str) -> bool:
+    def has_leading_btree_index(table: str, ts_col: str, id_col: str) -> bool:
         rows = conn.execute(text("""
             SELECT indexdef
             FROM pg_indexes
             WHERE schemaname = ANY(current_schemas(false))
               AND tablename = :table_name
         """), {"table_name": table}).fetchall()
-        needle = f"using btree ({ts_col.lower()}"
+        needle = f"using btree ({ts_col.lower()}, {id_col.lower()}"
         return any(needle in str(row[0] or "").lower() for row in rows)
 
     tables = _tables(conn)
@@ -18130,6 +18130,12 @@ def _migration_260_operational_retention_time_indexes(conn) -> None:
             "created_at",
             "id",
         ),
+        (
+            "trading_execution_events",
+            "ix_execution_events_recorded_retention",
+            "recorded_at",
+            "id",
+        ),
     ]
     heavy_limit_bytes = int(
         os.environ.get(
@@ -18147,7 +18153,7 @@ def _migration_260_operational_retention_time_indexes(conn) -> None:
     for table, index_name, ts_col, id_col in index_specs:
         if table not in tables:
             continue
-        if has_leading_btree_index(table, ts_col):
+        if has_leading_btree_index(table, ts_col, id_col):
             continue
         table_bytes = int(
             conn.execute(

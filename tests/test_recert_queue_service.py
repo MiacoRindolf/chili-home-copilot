@@ -137,6 +137,32 @@ class TestIdempotencyAndManual:
         )).scalar_one()
         assert count == 1
 
+    def test_open_manual_recert_for_pattern_source_is_reused(self, db, monkeypatch):
+        _cleanup(db)
+        _force_mode(monkeypatch, "shadow")
+        r1 = queue_manual(
+            db,
+            scan_pattern_id=902,
+            pattern_name="op_pattern",
+            as_of_date=date(2026, 4, 17),
+            reason="operator initiated",
+        )
+        r2 = queue_manual(
+            db,
+            scan_pattern_id=902,
+            pattern_name="op_pattern",
+            as_of_date=date(2026, 4, 18),
+            reason="still required",
+        )
+        assert r1 is not None and r2 is not None
+        assert r1.log_id == r2.log_id
+        assert r1.recert_id == r2.recert_id
+        count = db.execute(text(
+            "SELECT COUNT(*) FROM trading_pattern_recert_log "
+            "WHERE scan_pattern_id = 902"
+        )).scalar_one()
+        assert count == 1
+
     def test_manual_writes_row(self, db, monkeypatch):
         _cleanup(db)
         _force_mode(monkeypatch, "shadow")

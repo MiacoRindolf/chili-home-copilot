@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app import models
-from app.models.trading import AutoTraderRun, BreakoutAlert
+from app.models.trading import AutoTraderRun, BreakoutAlert, ScanPattern
 from app.services.trading import auto_trader as at_mod
 
 
@@ -246,6 +246,73 @@ def test_feature_parity_uses_decision_snapshot_not_recomputed(monkeypatch):
         "price": 103.0,
     }
     assert captured["features"] == {"rsi_14", "ema_stack", "price"}
+
+
+def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db, monkeypatch):
+    u = models.User(name="recert_block_u")
+    db.add(u)
+    db.flush()
+    pat = ScanPattern(
+        name="Needs recert",
+        rules_json={},
+        lifecycle_stage="live",
+        active=True,
+        recert_required=True,
+    )
+    db.add(pat)
+    db.flush()
+    alert = BreakoutAlert(
+        ticker="RCERT",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=50.0,
+        entry_price=50.0,
+        stop_loss=48.0,
+        target_price=55.0,
+        user_id=u.id,
+        scan_pattern_id=pat.id,
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+
+    settings = _minimal_settings(u.id)
+    settings.chili_autotrader_block_live_on_recert_required = True
+    settings.chili_autotrader_paper_shadow_qualified_blocks_enabled = False
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_entry_risk_notional",
+        lambda *a, **k: (100.0, {
+            "notional_capital_usd": 10_000.0,
+            "notional_explicit_fallback_usd": 0.0,
+            "notional_risk_pct": 1.0,
+            "notional_source": "test",
+            "notional_capital_source": "test",
+        }),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_execute_broker_buy",
+        lambda *a, **k: pytest.fail("recert block should happen before broker buy"),
+    )
+    shadow_calls: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *a, **k: shadow_calls.append(k),
+    )
+
+    out = {"skipped": 0, "blocked": 0}
+    setattr(alert, "_chili_recert_required", True)
+    at_mod._execute_new_entry(db, u.id, alert, 50.0, {}, None, True, out)
+
+    runs = db.query(AutoTraderRun).filter(AutoTraderRun.breakout_alert_id == alert.id).all()
+    assert runs
+    assert {r.reason for r in runs} == {"pattern_recert_required"}
+    assert shadow_calls
+    assert shadow_calls[0]["decision"] == "blocked_recert_required"
 
 
 def test_feature_parity_blocks_price_only_snapshot_when_required(monkeypatch):

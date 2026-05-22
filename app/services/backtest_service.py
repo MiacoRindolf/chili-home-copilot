@@ -1466,7 +1466,10 @@ def _phase_b_bt_shadow_parity(
         # f-exit-parity-metric-v2 (Migration 230): compute the four
         # parity-decomposition fields via the shared pure helper so the
         # live and backtest paths stay byte-identical on this logic.
-        from .trading.exit_parity_metric import compute_parity_v2_fields
+        from .trading.exit_parity_metric import (
+            compute_parity_v2_fields,
+            should_persist_parity_row,
+        )
         v2 = compute_parity_v2_fields(
             legacy_action=legacy_action,
             canonical_action=canonical_action,
@@ -1476,8 +1479,23 @@ def _phase_b_bt_shadow_parity(
             direction=state.direction,
         )
 
+        sample_pct = float(getattr(settings, "brain_exit_engine_parity_sample_pct", 1.0) or 1.0)
+        persist_row = should_persist_parity_row(
+            sample_pct=sample_pct,
+            action_class=v2.action_class,
+            agree_bool=bool(agree),
+            legacy_action=legacy_action,
+            canonical_action=canonical_action,
+            source="backtest",
+            ticker=getattr(strategy, "_ticker", "") or "",
+            position_id=None,
+            scan_pattern_id=getattr(strategy, "_scan_pattern_id", None),
+            bar_idx=i,
+            config_hash=config_hash,
+        )
+
         sink = getattr(strategy, "_parity_sink", None)
-        if sink is not None:
+        if sink is not None and persist_row:
             sink.append({
                 "source": "backtest",
                 "position_id": None,
@@ -1503,7 +1521,6 @@ def _phase_b_bt_shadow_parity(
             from ..trading_brain.infrastructure.exit_engine_ops_log import (
                 format_exit_engine_ops_line,
             )
-            sample_pct = float(getattr(settings, "brain_exit_engine_parity_sample_pct", 1.0) or 1.0)
             line = format_exit_engine_ops_line(
                 mode=mode,
                 source="backtest",
@@ -1515,8 +1532,9 @@ def _phase_b_bt_shadow_parity(
                 config_hash=config_hash,
                 sample_pct=sample_pct,
             )
-            # Parity data is always persisted via the strategy parity sink above;
-            # only INFO-log interesting bars (disagreements or actual exits).
+            # Parity data is sampled for boring hold/hold agreement before it
+            # reaches the strategy sink. Only INFO-log interesting bars
+            # (disagreements or actual exits).
             # Backtest refresh fires one hook per bar per path, so hold+hold+agree
             # dominates the log — route those to DEBUG to keep the contract shape
             # without the per-bar spam.
