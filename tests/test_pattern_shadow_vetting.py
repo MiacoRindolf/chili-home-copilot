@@ -7,11 +7,13 @@ composite score clears the adaptive top-pool policy.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from app.services.trading.pattern_shadow_vetting import (
     pilot_promoted_risk_multiplier,
     run_shadow_vetting_cycle,
+    select_shadow_vetting_candidates,
 )
 from tests.test_pattern_cohort_promote import (
     _make_pattern,
@@ -61,6 +63,116 @@ def test_shadow_vetting_advances_strong_shadow_to_pilot_before_full_ev(db, monke
     mult = pilot_promoted_risk_multiplier(db, pat.id, settings_=_settings())
     assert mult is not None
     assert 0.0 < mult <= 1.0
+
+
+def test_shadow_vetting_uses_fresh_weighted_evidence_before_30_samples(db, monkeypatch):
+    _truncate_phase4_state(db)
+    now = datetime.utcnow().replace(microsecond=0)
+    fresh = _make_pattern(
+        db,
+        name="fresh_less_than_30",
+        lifecycle="shadow_promoted",
+        cpcv=1.8,
+        dsr=1.0,
+        pbo=0.02,
+        quality_score=None,
+    )
+    stale = _make_pattern(
+        db,
+        name="stale_less_than_30",
+        lifecycle="shadow_promoted",
+        cpcv=1.8,
+        dsr=1.0,
+        pbo=0.02,
+        quality_score=None,
+    )
+    _seed_directional_outcomes(
+        db,
+        pattern_id=fresh.id,
+        n_correct=7,
+        n_incorrect=2,
+        base_time=now,
+    )
+    _seed_directional_outcomes(
+        db,
+        pattern_id=stale.id,
+        n_correct=7,
+        n_incorrect=2,
+        base_time=now - timedelta(days=45),
+    )
+
+    monkeypatch.setattr(
+        "app.services.trading.pattern_quality_score.compute_and_persist_scores",
+        lambda *_args, **_kwargs: {"ok": True, "scored": 0},
+    )
+
+    candidates = {
+        row["scan_pattern_id"]: row
+        for row in select_shadow_vetting_candidates(
+            db,
+            settings_=_settings(chili_cpcv_target_promotion_pool_pct=0.50),
+            now=now,
+        )
+    }
+
+    assert candidates[fresh.id]["raw_sample_n"] == 9
+    assert candidates[fresh.id]["effective_sample_n"] > 0
+    assert candidates[fresh.id]["pilot_score"] > candidates[stale.id]["pilot_score"]
+    assert candidates[fresh.id]["freshness"] > candidates[stale.id]["freshness"]
+
+    out = run_shadow_vetting_cycle(
+        db,
+        settings_=_settings(chili_cpcv_target_promotion_pool_pct=0.50),
+        now=now,
+    )
+
+    db.refresh(fresh)
+    db.refresh(stale)
+    assert fresh.id in out["pilot_ids"]
+    assert fresh.lifecycle_stage == "pilot_promoted"
+    assert fresh.promotion_status == "pilot_via_shadow_vetting"
+    assert stale.lifecycle_stage == "shadow_promoted"
+
+
+def test_shadow_vetting_allows_pilot_when_alpha_gate_only_needs_more_samples(
+    db, monkeypatch,
+):
+    _truncate_phase4_state(db)
+    pat = _make_pattern(
+        db,
+        name="pilot_soft_alpha_gate",
+        lifecycle="shadow_promoted",
+        quality_score=None,
+    )
+
+    monkeypatch.setattr(
+        "app.services.trading.pattern_quality_score.compute_and_persist_scores",
+        lambda *_args, **_kwargs: {"ok": True, "scored": 0},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.alpha_portfolio_gate.broker_risk_allowed",
+        lambda *_args, **_kwargs: (
+            False,
+            {
+                "full_promotion_block_reasons": [
+                    "recert_required",
+                    "insufficient_execution_quality_samples",
+                ]
+            },
+        ),
+    )
+
+    out = run_shadow_vetting_cycle(
+        db,
+        settings_=_settings(chili_alpha_portfolio_gate_enabled=True),
+    )
+
+    db.refresh(pat)
+    assert out["promoted_count"] == 0
+    assert out["pilot_ids"] == [pat.id]
+    assert out["alpha_portfolio_gate"]["full_risk_allowed"] is False
+    assert out["alpha_portfolio_gate"]["pilot_risk_allowed"] is True
+    assert pat.lifecycle_stage == "pilot_promoted"
 
 
 def test_shadow_vetting_promotes_scored_top_pool_shadow(db, monkeypatch):

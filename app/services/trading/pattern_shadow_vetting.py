@@ -43,6 +43,16 @@ def _is_number(value: Any) -> bool:
         return False
 
 
+def _safe_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        out = float(value)
+        if math.isnan(out):
+            return default
+        return out
+    except Exception:
+        return default
+
+
 def _empirical_percentile(values: list[float], q: float) -> float | None:
     """Linear-interpolated empirical percentile for small pattern pools."""
     arr = sorted(float(v) for v in values if _is_number(v))
@@ -79,24 +89,181 @@ def _weight(settings_: Any, key: str, default: float) -> float:
 
 
 def _pilot_weights(settings_: Any) -> dict[str, float]:
-    """Existing composite weights, renormalized without decay.
+    """Existing composite weights, renormalized for adaptive vetting.
 
-    No new pilot threshold is introduced: pilot uses the operator's existing
-    preference weights for CPCV, DSR, PBO, and directional correctness.
+    No new raw sample threshold is introduced: pilot/full staging uses the
+    operator's existing preference weights for CPCV, DSR, PBO, directional
+    correctness, and decay/freshness. Evidence quality affects the score
+    continuously through Bayesian shrinkage and time decay.
     """
     raw = {
         "cpcv": _weight(settings_, "chili_cohort_score_weight_cpcv_sharpe", 0.30),
         "dsr": _weight(settings_, "chili_cohort_score_weight_deflated_sharpe", 0.20),
         "pbo": _weight(settings_, "chili_cohort_score_weight_pbo_inverse", 0.15),
         "directional": _weight(settings_, "chili_cohort_score_weight_directional_wr", 0.25),
+        "decay": _weight(settings_, "chili_cohort_score_weight_decay_inverse", 0.10),
     }
     total = sum(raw.values())
     if total <= 0:
-        return {"cpcv": 0.0, "dsr": 0.0, "pbo": 0.0, "directional": 0.0}
+        return {
+            "cpcv": 0.0,
+            "dsr": 0.0,
+            "pbo": 0.0,
+            "directional": 0.0,
+            "decay": 0.0,
+        }
     return {k: v / total for k, v in raw.items()}
 
 
-def _load_pilot_rows(db: Session) -> list[dict[str, Any]]:
+def _median(values: list[float], default: float) -> float:
+    arr = sorted(v for v in values if _is_number(v) and v > 0)
+    if not arr:
+        return float(default)
+    mid = len(arr) // 2
+    if len(arr) % 2:
+        return float(arr[mid])
+    return float((arr[mid - 1] + arr[mid]) / 2.0)
+
+
+def _weighted_rate(rows: list[dict[str, Any]], half_life_hours: float, now: datetime) -> tuple[float, float, float]:
+    """Return weighted correct rate, weighted total, and Kish effective N."""
+    total_w = 0.0
+    total_w2 = 0.0
+    correct_w = 0.0
+    hl = max(1e-6, float(half_life_hours))
+    for row in rows:
+        ts = row.get("evaluated_at") or row.get("alert_at") or now
+        age_h = max(0.0, (now - ts).total_seconds() / 3600.0)
+        w = math.exp(-math.log(2.0) * age_h / hl)
+        total_w += w
+        total_w2 += w * w
+        if bool(row.get("directional_correct")):
+            correct_w += w
+    if total_w <= 0:
+        return 0.5, 0.0, 0.0
+    kish_n = (total_w * total_w / total_w2) if total_w2 > 0 else total_w
+    return correct_w / total_w, total_w, kish_n
+
+
+def _load_directional_evidence(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Time-decayed directional evidence per pattern.
+
+    This replaces the old "30 rows then decide" cliff. Evidence contributes
+    as soon as it exists, but stale samples decay, deteriorating recent
+    behavior is penalized, and thin evidence carries wider uncertainty.
+    """
+    now = now or datetime.utcnow()
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                scan_pattern_id,
+                directional_correct,
+                alert_at,
+                evaluated_at,
+                hold_window_hours,
+                window_max_favorable_pct,
+                window_max_adverse_pct
+            FROM pattern_alert_directional_outcome
+            WHERE directional_correct IS NOT NULL
+            ORDER BY scan_pattern_id, alert_at DESC
+            """
+        )
+    ).mappings().all()
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        pid = int(r["scan_pattern_id"])
+        grouped.setdefault(pid, []).append(
+            {
+                "directional_correct": bool(r["directional_correct"]),
+                "alert_at": r["alert_at"],
+                "evaluated_at": r["evaluated_at"],
+                "hold_window_hours": _safe_float(r["hold_window_hours"], 0.0) or 0.0,
+                "window_max_favorable_pct": _safe_float(r["window_max_favorable_pct"]),
+                "window_max_adverse_pct": _safe_float(r["window_max_adverse_pct"]),
+            }
+        )
+
+    evidence: dict[int, dict[str, Any]] = {}
+    for pid, items in grouped.items():
+        alert_times = sorted(
+            [r["alert_at"] for r in items if r.get("alert_at") is not None],
+            reverse=True,
+        )
+        gaps_h: list[float] = []
+        for newer, older in zip(alert_times, alert_times[1:]):
+            gap = (newer - older).total_seconds() / 3600.0
+            if gap > 0:
+                gaps_h.append(gap)
+        hold_h = _median([float(r.get("hold_window_hours") or 0.0) for r in items], 24.0)
+        cadence_h = _median(gaps_h, hold_h)
+        # The half-life is derived from the strategy's own hold window and
+        # observed alert cadence. A bursty 5m pattern forgets old evidence
+        # quickly; a slower swing pattern keeps it longer.
+        half_life_h = max(hold_h, cadence_h * math.log2(len(items) + 1.0))
+
+        weighted_wr, weighted_n, effective_n = _weighted_rate(items, half_life_h, now)
+        fast_wr, _, _ = _weighted_rate(items, max(1e-6, half_life_h / 2.0), now)
+        slow_wr, _, _ = _weighted_rate(items, half_life_h * 2.0, now)
+        directional_decay = _clip(slow_wr - fast_wr)
+
+        latest_ts = max(
+            [
+                r.get("evaluated_at") or r.get("alert_at")
+                for r in items
+                if r.get("evaluated_at") is not None or r.get("alert_at") is not None
+            ],
+            default=now,
+        )
+        last_age_h = max(0.0, (now - latest_ts).total_seconds() / 3600.0)
+        freshness = math.exp(-math.log(2.0) * last_age_h / max(1e-6, half_life_h))
+
+        fav_weighted = 0.0
+        adv_weighted = 0.0
+        path_w = 0.0
+        for row in items:
+            fav = _safe_float(row.get("window_max_favorable_pct"))
+            adv = _safe_float(row.get("window_max_adverse_pct"))
+            if fav is None or adv is None:
+                continue
+            ts = row.get("evaluated_at") or row.get("alert_at") or now
+            age_h = max(0.0, (now - ts).total_seconds() / 3600.0)
+            w = math.exp(-math.log(2.0) * age_h / max(1e-6, half_life_h))
+            fav_weighted += w * max(0.0, float(fav))
+            adv_weighted += w * abs(min(0.0, float(adv)))
+            path_w += w
+        if path_w > 0 and (fav_weighted + adv_weighted) > 0:
+            path_quality = fav_weighted / (fav_weighted + adv_weighted)
+        else:
+            path_quality = 0.5
+
+        evidence[pid] = {
+            "raw_sample_n": len(items),
+            "weighted_sample_n": weighted_n,
+            "effective_sample_n": effective_n,
+            "weighted_directional_wr": weighted_wr,
+            "recent_directional_wr": fast_wr,
+            "slow_directional_wr": slow_wr,
+            "directional_decay": directional_decay,
+            "freshness": _clip(freshness),
+            "path_quality": _clip(path_quality),
+            "half_life_hours": half_life_h,
+            "last_evaluated_at": latest_ts,
+        }
+    return evidence
+
+
+def _load_pilot_rows(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    evidence_by_id = _load_directional_evidence(db, now=now)
     rows = db.execute(
         text(
             """
@@ -107,20 +274,8 @@ def _load_pilot_rows(db: Session) -> list[dict[str, Any]]:
                 sp.cpcv_n_paths,
                 sp.cpcv_median_sharpe,
                 sp.deflated_sharpe,
-                sp.pbo,
-                COALESCE(q.rolling_sample_n, 0) AS rolling_sample_n,
-                q.rolling_directional_wr,
-                COALESCE(o.correct_n, 0) AS correct_n
+                sp.pbo
             FROM scan_patterns sp
-            LEFT JOIN pattern_directional_quality_v q
-              ON q.scan_pattern_id = sp.id
-            LEFT JOIN (
-                SELECT scan_pattern_id,
-                       SUM(CASE WHEN directional_correct THEN 1 ELSE 0 END) AS correct_n
-                FROM pattern_alert_directional_outcome
-                WHERE directional_correct IS NOT NULL
-                GROUP BY scan_pattern_id
-            ) o ON o.scan_pattern_id = sp.id
             WHERE sp.active IS TRUE
               AND sp.cpcv_n_paths IS NOT NULL
               AND sp.cpcv_median_sharpe IS NOT NULL
@@ -138,9 +293,19 @@ def _load_pilot_rows(db: Session) -> list[dict[str, Any]]:
             "cpcv_median_sharpe": float(r[4]),
             "deflated_sharpe": float(r[5]),
             "pbo": float(r[6]),
-            "rolling_sample_n": int(r[7] or 0),
-            "rolling_directional_wr": float(r[8]) if r[8] is not None else None,
-            "correct_n": int(r[9] or 0),
+            "evidence": evidence_by_id.get(int(r[0]), {
+                "raw_sample_n": 0,
+                "weighted_sample_n": 0.0,
+                "effective_sample_n": 0.0,
+                "weighted_directional_wr": 0.5,
+                "recent_directional_wr": 0.5,
+                "slow_directional_wr": 0.5,
+                "directional_decay": 0.0,
+                "freshness": 0.5,
+                "path_quality": 0.5,
+                "half_life_hours": 24.0,
+                "last_evaluated_at": None,
+            }),
         }
         for r in rows
     ]
@@ -168,6 +333,7 @@ def _pilot_score_for_row(
     cpcv_component = _clip(float(row["cpcv_median_sharpe"]) / 2.0)
     dsr_component = _clip(float(row["deflated_sharpe"]))
     pbo_component = 1.0 - _clip(float(row["pbo"]))
+    evidence = dict(row.get("evidence") or {})
 
     non_directional_weight = weights["cpcv"] + weights["dsr"] + weights["pbo"]
     if non_directional_weight > 0:
@@ -179,45 +345,71 @@ def _pilot_score_for_row(
     else:
         cpcv_prior_mean = 0.0
 
-    n_obs = int(row.get("rolling_sample_n") or 0)
-    correct_n = int(row.get("correct_n") or 0)
+    n_obs = max(0.0, float(evidence.get("effective_sample_n") or 0.0))
+    directional_wr = _clip(float(evidence.get("weighted_directional_wr") or 0.5))
     n_prior = min(max(1.0, float(row.get("cpcv_n_paths") or 0)), max(1.0, prior_strength))
     posterior_mean = (
-        cpcv_prior_mean * n_prior + float(correct_n)
+        cpcv_prior_mean * n_prior + directional_wr * n_obs
     ) / (n_prior + float(n_obs))
     directional_lcb = _lower_confidence_bound(
         posterior_mean,
         n_prior + float(n_obs),
         float(getattr(settings_, "chili_cpcv_ci_level", 0.90)),
     )
+    temporal_component = _clip(
+        float(evidence.get("freshness") or 0.0)
+        * (1.0 - _clip(float(evidence.get("directional_decay") or 0.0)))
+        * (0.5 + 0.5 * _clip(float(evidence.get("path_quality") or 0.5)))
+    )
     return _clip(
         weights["cpcv"] * cpcv_component
         + weights["dsr"] * dsr_component
         + weights["pbo"] * pbo_component
         + weights["directional"] * directional_lcb
+        + weights["decay"] * temporal_component
     )
 
 
-def _pilot_policy(db: Session, *, settings_: Any) -> dict[str, Any]:
-    rows = _load_pilot_rows(db)
+def _evidence_maturity(row: dict[str, Any], prior_strength: float) -> float:
+    evidence = dict(row.get("evidence") or {})
+    n_obs = max(0.0, float(evidence.get("effective_sample_n") or 0.0))
+    n_prior = min(max(1.0, float(row.get("cpcv_n_paths") or 0)), max(1.0, prior_strength))
+    return _clip(n_obs / (n_obs + n_prior))
+
+
+def _pilot_policy(
+    db: Session,
+    *,
+    settings_: Any,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    rows = _load_pilot_rows(db, now=now)
     prior_strength = _pilot_prior_strength(rows)
-    scored = [
-        {
+    scored = []
+    for row in rows:
+        pilot_score = _pilot_score_for_row(
+            row, prior_strength=prior_strength, settings_=settings_
+        )
+        maturity = _evidence_maturity(row, prior_strength)
+        scored.append({
             **row,
-            "pilot_score": _pilot_score_for_row(
-                row, prior_strength=prior_strength, settings_=settings_
-            ),
-        }
-        for row in rows
-    ]
+            "pilot_score": pilot_score,
+            "evidence_maturity": maturity,
+            "full_score": _clip(pilot_score * maturity),
+        })
     pct = float(getattr(settings_, "chili_cpcv_target_promotion_pool_pct", 0.05))
     threshold = _empirical_percentile(
         [float(r["pilot_score"]) for r in scored],
         1.0 - max(0.0, min(1.0, pct)),
     )
+    full_threshold = _empirical_percentile(
+        [float(r["full_score"]) for r in scored],
+        1.0 - max(0.0, min(1.0, pct)),
+    )
     return {
         "rows": scored,
         "threshold": threshold,
+        "full_threshold": full_threshold,
         "prior_strength": prior_strength,
     }
 
@@ -230,9 +422,10 @@ def pilot_promoted_risk_multiplier(
 ) -> float | None:
     """Return a pilot sizing multiplier in [0, 1], or None for non-pilot.
 
-    The multiplier is the current Bayesian pilot score itself: full
-    ``promoted`` patterns get normal sizing, while pilot patterns get exposure
-    proportional to evidence confidence. No separate arbitrary cap is needed.
+    The multiplier composes the Bayesian pilot score with evidence support:
+    CPCV prior support can open a small reversible pilot, and forward evidence
+    increases exposure continuously. Full ``promoted`` patterns get normal
+    sizing through the regular path.
     """
     if not scan_pattern_id:
         return None
@@ -251,7 +444,16 @@ def pilot_promoted_risk_multiplier(
         threshold = policy["threshold"]
         if threshold is None or float(row["pilot_score"]) < float(threshold):
             return 0.0
-        return _clip(float(row["pilot_score"]))
+        n_prior = min(
+            max(1.0, float(row.get("cpcv_n_paths") or 0)),
+            max(1.0, float(policy.get("prior_strength") or 1.0)),
+        )
+        prior_support = n_prior / (n_prior + max(1.0, float(policy.get("prior_strength") or 1.0)))
+        forward_support = _clip(float(row.get("evidence_maturity") or 0.0))
+        exposure_support = _clip(
+            prior_support + forward_support - prior_support * forward_support
+        )
+        return _clip(float(row["pilot_score"]) * exposure_support)
     return None
 
 
@@ -282,6 +484,7 @@ def select_shadow_vetting_candidates(
     db: Session,
     *,
     settings_: Any = None,
+    now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Read shadow/pilot patterns with their directional evidence state."""
     if settings_ is None:
@@ -290,7 +493,7 @@ def select_shadow_vetting_candidates(
         settings_ = _settings
 
     threshold = _score_threshold_from_pool(db, settings_=settings_)
-    pilot_policy = _pilot_policy(db, settings_=settings_)
+    pilot_policy = _pilot_policy(db, settings_=settings_, now=now)
     pilot_by_id = {int(r["scan_pattern_id"]): r for r in pilot_policy["rows"]}
     rows = db.execute(
         text(
@@ -301,12 +504,8 @@ def select_shadow_vetting_candidates(
                 sp.promotion_gate_passed,
                 sp.cpcv_median_sharpe,
                 sp.deflated_sharpe,
-                sp.pbo,
-                q.rolling_sample_n,
-                q.rolling_directional_wr
+                sp.pbo
             FROM scan_patterns sp
-            LEFT JOIN pattern_directional_quality_v q
-              ON q.scan_pattern_id = sp.id
             WHERE sp.active IS TRUE
               AND sp.lifecycle_stage IN ('shadow_promoted', 'pilot_promoted')
             ORDER BY
@@ -324,14 +523,27 @@ def select_shadow_vetting_candidates(
         pilot_row = pilot_by_id.get(pid)
         pilot_score = float(pilot_row["pilot_score"]) if pilot_row else None
         pilot_threshold = pilot_policy["threshold"]
-        full_eligible = (
+        adaptive_full_score = (
+            float(pilot_row["full_score"]) if pilot_row and pilot_row.get("full_score") is not None
+            else None
+        )
+        adaptive_full_threshold = pilot_policy.get("full_threshold")
+        quality_full_eligible = (
             score is not None
             and threshold is not None
             and score >= threshold
-            and int(row[6] or 0) >= 30
             and bool(row[2])
             and all(row[i] is not None for i in (3, 4, 5))
         )
+        adaptive_full_eligible = (
+            adaptive_full_score is not None
+            and adaptive_full_threshold is not None
+            and adaptive_full_score >= float(adaptive_full_threshold)
+            and (pilot_row or {}).get("lifecycle_stage") == "pilot_promoted"
+            and bool(row[2])
+            and all(row[i] is not None for i in (3, 4, 5))
+        )
+        full_eligible = quality_full_eligible or adaptive_full_eligible
         pilot_eligible = (
             bool(getattr(settings_, "chili_pilot_promoted_enabled", True))
             and pilot_score is not None
@@ -340,6 +552,7 @@ def select_shadow_vetting_candidates(
             and bool(row[2])
             and all(row[i] is not None for i in (3, 4, 5))
         )
+        evidence = dict((pilot_row or {}).get("evidence") or {})
         out.append(
             {
                 "scan_pattern_id": pid,
@@ -347,11 +560,29 @@ def select_shadow_vetting_candidates(
                 "quality_composite_score": score,
                 "promotion_gate_passed": bool(row[2]),
                 "cpcv_ready": all(row[i] is not None for i in (3, 4, 5)),
-                "rolling_sample_n": int(row[6] or 0),
-                "rolling_directional_wr": float(row[7]) if row[7] is not None else None,
+                "raw_sample_n": int(evidence.get("raw_sample_n") or 0),
+                "effective_sample_n": float(evidence.get("effective_sample_n") or 0.0),
+                "weighted_directional_wr": float(
+                    evidence.get("weighted_directional_wr")
+                    if evidence.get("weighted_directional_wr") is not None
+                    else 0.5
+                ),
+                "recent_directional_wr": float(
+                    evidence.get("recent_directional_wr")
+                    if evidence.get("recent_directional_wr") is not None
+                    else 0.5
+                ),
+                "directional_decay": float(evidence.get("directional_decay") or 0.0),
+                "freshness": float(evidence.get("freshness") or 0.0),
+                "path_quality": float(evidence.get("path_quality") or 0.5),
+                "evidence_maturity": float((pilot_row or {}).get("evidence_maturity") or 0.0),
                 "score_threshold": threshold,
                 "pilot_score": pilot_score,
                 "pilot_score_threshold": pilot_threshold,
+                "adaptive_full_score": adaptive_full_score,
+                "adaptive_full_threshold": adaptive_full_threshold,
+                "quality_full_eligible": quality_full_eligible,
+                "adaptive_full_eligible": adaptive_full_eligible,
                 "eligible": full_eligible,
                 "pilot_eligible": pilot_eligible,
             }
@@ -387,16 +618,35 @@ def run_shadow_vetting_cycle(
         return {"ok": False, "error": f"score_refresh_failed:{type(exc).__name__}"}
 
     now = now or datetime.utcnow()
-    candidates = select_shadow_vetting_candidates(db, settings_=settings_)
+    candidates = select_shadow_vetting_candidates(db, settings_=settings_, now=now)
     alpha_gate_snapshot: dict[str, Any] | None = None
-    alpha_gate_allows_risk = True
+    alpha_gate_allows_full_risk = True
+    alpha_gate_allows_pilot_risk = True
+    alpha_gate_full_block_reasons: list[str] = []
+    alpha_gate_pilot_block_reasons: list[str] = []
     if bool(getattr(settings_, "chili_alpha_portfolio_gate_enabled", False)):
         try:
             from .alpha_portfolio_gate import broker_risk_allowed
 
-            alpha_gate_allows_risk, alpha_gate_snapshot = broker_risk_allowed(
+            alpha_gate_allows_full_risk, alpha_gate_snapshot = broker_risk_allowed(
                 db, settings_=settings_,
             )
+            alpha_gate_full_block_reasons = list(
+                (alpha_gate_snapshot or {}).get("full_promotion_block_reasons") or []
+            )
+            # Full promoted risk still obeys the portfolio gate strictly.
+            # Pilot risk is intentionally smaller and reversible; stale recert
+            # debt and missing execution samples should not prevent the system
+            # from collecting the very live/paper evidence that resolves them.
+            pilot_hard_blocks = {
+                "p90_slippage_above_limit",
+                "execution_health_query_failed",
+                "execution_health_not_clean",
+            }
+            alpha_gate_pilot_block_reasons = sorted(
+                set(alpha_gate_full_block_reasons).intersection(pilot_hard_blocks)
+            )
+            alpha_gate_allows_pilot_risk = not alpha_gate_pilot_block_reasons
         except Exception as exc:
             db.rollback()
             logger.warning(
@@ -405,7 +655,10 @@ def run_shadow_vetting_cycle(
                 exc,
                 exc_info=True,
             )
-            alpha_gate_allows_risk = False
+            alpha_gate_allows_full_risk = False
+            alpha_gate_allows_pilot_risk = False
+            alpha_gate_full_block_reasons = [f"alpha_portfolio_gate_failed:{type(exc).__name__}"]
+            alpha_gate_pilot_block_reasons = list(alpha_gate_full_block_reasons)
             alpha_gate_snapshot = {
                 "ok": False,
                 "error": f"alpha_portfolio_gate_failed:{type(exc).__name__}",
@@ -417,10 +670,12 @@ def run_shadow_vetting_cycle(
     held = 0
 
     for row in candidates:
-        if not alpha_gate_allows_risk:
+        if not alpha_gate_allows_full_risk:
             row["eligible"] = False
-            row["pilot_eligible"] = False
             row["alpha_portfolio_blocked"] = True
+        if not alpha_gate_allows_pilot_risk:
+            row["pilot_eligible"] = False
+            row["alpha_portfolio_pilot_blocked"] = True
         pid = int(row["scan_pattern_id"])
         pattern = db.get(ScanPattern, pid)
         if pattern is None:
@@ -447,8 +702,16 @@ def run_shadow_vetting_cycle(
                     extra={
                         "quality_composite_score": row["quality_composite_score"],
                         "score_threshold": row["score_threshold"],
-                        "rolling_sample_n": row["rolling_sample_n"],
-                        "rolling_directional_wr": row["rolling_directional_wr"],
+                        "adaptive_full_score": row["adaptive_full_score"],
+                        "adaptive_full_threshold": row["adaptive_full_threshold"],
+                        "quality_full_eligible": row["quality_full_eligible"],
+                        "adaptive_full_eligible": row["adaptive_full_eligible"],
+                        "raw_sample_n": row["raw_sample_n"],
+                        "effective_sample_n": row["effective_sample_n"],
+                        "weighted_directional_wr": row["weighted_directional_wr"],
+                        "recent_directional_wr": row["recent_directional_wr"],
+                        "directional_decay": row["directional_decay"],
+                        "freshness": row["freshness"],
                     },
                 )
             except Exception:
@@ -475,8 +738,14 @@ def run_shadow_vetting_cycle(
                         extra={
                             "pilot_score": row["pilot_score"],
                             "pilot_score_threshold": row["pilot_score_threshold"],
-                            "rolling_sample_n": row["rolling_sample_n"],
-                            "rolling_directional_wr": row["rolling_directional_wr"],
+                            "evidence_maturity": row["evidence_maturity"],
+                            "raw_sample_n": row["raw_sample_n"],
+                            "effective_sample_n": row["effective_sample_n"],
+                            "weighted_directional_wr": row["weighted_directional_wr"],
+                            "recent_directional_wr": row["recent_directional_wr"],
+                            "directional_decay": row["directional_decay"],
+                            "freshness": row["freshness"],
+                            "path_quality": row["path_quality"],
                         },
                     )
                 except Exception:
@@ -508,12 +777,10 @@ def run_shadow_vetting_cycle(
         "held": held,
         "alpha_portfolio_gate": {
             "enabled": bool(getattr(settings_, "chili_alpha_portfolio_gate_enabled", False)),
-            "broker_risk_allowed": alpha_gate_allows_risk,
-            "block_reasons": (
-                (alpha_gate_snapshot or {}).get("full_promotion_block_reasons")
-                if alpha_gate_snapshot
-                else []
-            ),
+            "full_risk_allowed": alpha_gate_allows_full_risk,
+            "pilot_risk_allowed": alpha_gate_allows_pilot_risk,
+            "full_block_reasons": alpha_gate_full_block_reasons,
+            "pilot_block_reasons": alpha_gate_pilot_block_reasons,
         },
     }
     logger.info("%s cycle: %s", LOG_PREFIX, result)
