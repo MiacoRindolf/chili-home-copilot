@@ -18543,6 +18543,239 @@ def _migration_263_alpha_portfolio_gate(conn) -> None:
     conn.commit()
 
 
+def _migration_264_position_identity_phase5b_read_models(conn) -> None:
+    """Position-identity Phase 5B -- read-only envelope semantics.
+
+    This is deliberately not a physical rename. It gives reporting and future
+    app-layer helpers a semantic envelope surface while ``trading_trades``
+    remains the live table. The compatibility alias is a view, and the joined
+    read model lets us inspect decision -> envelope -> position attribution
+    before any high-blast-radius schema rename.
+    """
+    conn.execute(text("""
+        DO $$
+        DECLARE
+            existing_kind "char";
+        BEGIN
+            SELECT c.relkind
+              INTO existing_kind
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = ANY(current_schemas(false))
+               AND c.relname = 'trading_management_envelopes'
+             LIMIT 1;
+
+            IF existing_kind IS NULL THEN
+                CREATE VIEW trading_management_envelopes AS
+                SELECT * FROM trading_trades;
+            ELSIF existing_kind = 'v' THEN
+                DROP VIEW IF EXISTS trading_management_envelopes;
+                CREATE VIEW trading_management_envelopes AS
+                SELECT * FROM trading_trades;
+            ELSIF existing_kind = 'm' THEN
+                DROP MATERIALIZED VIEW IF EXISTS trading_management_envelopes;
+                CREATE VIEW trading_management_envelopes AS
+                SELECT * FROM trading_trades;
+            ELSE
+                RAISE NOTICE
+                    'trading_management_envelopes exists as relkind %, leaving intact',
+                    existing_kind;
+            END IF;
+        END $$;
+    """))
+
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_phase5b_decision_envelope_position AS
+        SELECT
+            d.id AS decision_id,
+            d.source_trade_id,
+            d.user_id AS decision_user_id,
+            d.ticker AS decision_ticker,
+            d.direction AS decision_direction,
+            d.entry_date AS decision_entry_date,
+            d.scan_pattern_id,
+            d.related_alert_id,
+            d.strategy_proposal_id,
+            d.pattern_tags AS decision_pattern_tags,
+            d.mesh_entry_correlation_id,
+            d.auto_trader_version,
+            d.asset_kind AS decision_asset_kind,
+            e.id AS envelope_id,
+            e.user_id AS envelope_user_id,
+            e.ticker AS envelope_ticker,
+            e.direction AS envelope_direction,
+            e.broker_source,
+            e.asset_kind AS envelope_asset_kind,
+            e.status AS envelope_status,
+            e.entry_price AS envelope_entry_price,
+            e.exit_price AS envelope_exit_price,
+            e.quantity AS envelope_quantity,
+            e.entry_date AS envelope_entry_date,
+            e.exit_date AS envelope_exit_date,
+            e.pnl AS envelope_pnl,
+            e.exit_reason,
+            e.management_scope,
+            e.decision_id AS envelope_decision_id,
+            e.position_id AS envelope_position_id,
+            e.tca_entry_slippage_bps,
+            e.tca_exit_slippage_bps,
+            p.id AS position_id,
+            p.user_id AS position_user_id,
+            p.broker_source AS position_broker_source,
+            p.account_type AS position_account_type,
+            p.ticker AS position_ticker,
+            p.direction AS position_direction,
+            p.state AS position_state,
+            p.current_quantity AS position_current_quantity,
+            p.current_avg_price AS position_current_avg_price,
+            p.current_envelope_id,
+            p.last_observed_at AS position_last_observed_at,
+            CASE
+                WHEN e.id IS NULL THEN 'decision_without_envelope'
+                WHEN e.decision_id IS DISTINCT FROM d.id THEN 'envelope_decision_mismatch'
+                WHEN e.broker_source IS NOT NULL
+                     AND btrim(e.broker_source) <> ''
+                     AND e.position_id IS NULL
+                     AND e.status = 'open' THEN 'broker_envelope_missing_position'
+                WHEN e.broker_source IS NOT NULL
+                     AND btrim(e.broker_source) <> ''
+                     AND e.position_id IS NULL THEN 'historical_broker_envelope_missing_position'
+                WHEN e.position_id IS NOT NULL
+                     AND p.id IS NULL THEN 'position_fk_missing'
+                WHEN p.id IS NOT NULL
+                     AND p.current_envelope_id IS NOT NULL
+                     AND p.current_envelope_id <> e.id
+                     AND e.status = 'open'
+                     AND p.state = 'open' THEN 'open_position_envelope_mismatch'
+                ELSE 'linked'
+            END AS linkage_status
+        FROM trading_decisions d
+        LEFT JOIN trading_trades e ON e.id = d.source_trade_id
+        LEFT JOIN trading_positions p ON p.id = e.position_id
+    """))
+
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_phase5b_pattern_decision_performance AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*)::bigint AS decisions,
+            COUNT(*) FILTER (WHERE envelope_id IS NOT NULL)::bigint AS envelopes,
+            COUNT(*) FILTER (WHERE envelope_status = 'closed')::bigint AS closed_envelopes,
+            COUNT(*) FILTER (WHERE envelope_status = 'open')::bigint AS open_envelopes,
+            ROUND(SUM(COALESCE(envelope_pnl, 0))::numeric, 4) AS total_pnl,
+            ROUND(AVG(envelope_pnl)::numeric, 4) AS avg_pnl_closed_or_marked,
+            ROUND(AVG(tca_entry_slippage_bps)::numeric, 2) AS avg_entry_slippage_bps,
+            ROUND(AVG(tca_exit_slippage_bps)::numeric, 2) AS avg_exit_slippage_bps,
+            COUNT(*) FILTER (WHERE linkage_status <> 'linked')::bigint AS linkage_issues
+        FROM trading_phase5b_decision_envelope_position
+        GROUP BY scan_pattern_id
+    """))
+
+    conn.commit()
+    logger.info("[mig264] Phase 5B read-only envelope views installed")
+
+
+def _migration_265_position_identity_phase5b_linkage_statuses(conn) -> None:
+    """Separate hard live linkage issues from closed historical envelope debt."""
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_phase5b_decision_envelope_position AS
+        SELECT
+            d.id AS decision_id,
+            d.source_trade_id,
+            d.user_id AS decision_user_id,
+            d.ticker AS decision_ticker,
+            d.direction AS decision_direction,
+            d.entry_date AS decision_entry_date,
+            d.scan_pattern_id,
+            d.related_alert_id,
+            d.strategy_proposal_id,
+            d.pattern_tags AS decision_pattern_tags,
+            d.mesh_entry_correlation_id,
+            d.auto_trader_version,
+            d.asset_kind AS decision_asset_kind,
+            e.id AS envelope_id,
+            e.user_id AS envelope_user_id,
+            e.ticker AS envelope_ticker,
+            e.direction AS envelope_direction,
+            e.broker_source,
+            e.asset_kind AS envelope_asset_kind,
+            e.status AS envelope_status,
+            e.entry_price AS envelope_entry_price,
+            e.exit_price AS envelope_exit_price,
+            e.quantity AS envelope_quantity,
+            e.entry_date AS envelope_entry_date,
+            e.exit_date AS envelope_exit_date,
+            e.pnl AS envelope_pnl,
+            e.exit_reason,
+            e.management_scope,
+            e.decision_id AS envelope_decision_id,
+            e.position_id AS envelope_position_id,
+            e.tca_entry_slippage_bps,
+            e.tca_exit_slippage_bps,
+            p.id AS position_id,
+            p.user_id AS position_user_id,
+            p.broker_source AS position_broker_source,
+            p.account_type AS position_account_type,
+            p.ticker AS position_ticker,
+            p.direction AS position_direction,
+            p.state AS position_state,
+            p.current_quantity AS position_current_quantity,
+            p.current_avg_price AS position_current_avg_price,
+            p.current_envelope_id,
+            p.last_observed_at AS position_last_observed_at,
+            CASE
+                WHEN e.id IS NULL THEN 'decision_without_envelope'
+                WHEN e.decision_id IS DISTINCT FROM d.id THEN 'envelope_decision_mismatch'
+                WHEN e.broker_source IS NOT NULL
+                     AND btrim(e.broker_source) <> ''
+                     AND e.position_id IS NULL
+                     AND e.status = 'open' THEN 'broker_envelope_missing_position'
+                WHEN e.broker_source IS NOT NULL
+                     AND btrim(e.broker_source) <> ''
+                     AND e.position_id IS NULL THEN 'historical_broker_envelope_missing_position'
+                WHEN e.position_id IS NOT NULL
+                     AND p.id IS NULL THEN 'position_fk_missing'
+                WHEN p.id IS NOT NULL
+                     AND p.current_envelope_id IS NOT NULL
+                     AND p.current_envelope_id <> e.id
+                     AND e.status = 'open'
+                     AND p.state = 'open' THEN 'open_position_envelope_mismatch'
+                ELSE 'linked'
+            END AS linkage_status
+        FROM trading_decisions d
+        LEFT JOIN trading_trades e ON e.id = d.source_trade_id
+        LEFT JOIN trading_positions p ON p.id = e.position_id
+    """))
+
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_phase5b_pattern_decision_performance AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*)::bigint AS decisions,
+            COUNT(*) FILTER (WHERE envelope_id IS NOT NULL)::bigint AS envelopes,
+            COUNT(*) FILTER (WHERE envelope_status = 'closed')::bigint AS closed_envelopes,
+            COUNT(*) FILTER (WHERE envelope_status = 'open')::bigint AS open_envelopes,
+            ROUND(SUM(COALESCE(envelope_pnl, 0))::numeric, 4) AS total_pnl,
+            ROUND(AVG(envelope_pnl)::numeric, 4) AS avg_pnl_closed_or_marked,
+            ROUND(AVG(tca_entry_slippage_bps)::numeric, 2) AS avg_entry_slippage_bps,
+            ROUND(AVG(tca_exit_slippage_bps)::numeric, 2) AS avg_exit_slippage_bps,
+            COUNT(*) FILTER (
+                WHERE linkage_status NOT IN (
+                    'linked',
+                    'historical_broker_envelope_missing_position'
+                )
+            )::bigint AS linkage_issues,
+            COUNT(*) FILTER (
+                WHERE linkage_status = 'historical_broker_envelope_missing_position'
+            )::bigint AS historical_linkage_debt
+        FROM trading_phase5b_decision_envelope_position
+        GROUP BY scan_pattern_id
+    """))
+
+    conn.commit()
+    logger.info("[mig265] Phase 5B linkage statuses separated")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -18851,6 +19084,10 @@ MIGRATIONS = [
      _migration_262_fast_orderbook_default_snapshot_id_retention),
     ("263_alpha_portfolio_gate",
      _migration_263_alpha_portfolio_gate),
+    ("264_position_identity_phase5b_read_models",
+     _migration_264_position_identity_phase5b_read_models),
+    ("265_position_identity_phase5b_linkage_statuses",
+     _migration_265_position_identity_phase5b_linkage_statuses),
 ]
 
 
