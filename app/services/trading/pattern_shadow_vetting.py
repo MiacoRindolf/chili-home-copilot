@@ -149,6 +149,7 @@ def _load_directional_evidence(
     db: Session,
     *,
     now: datetime | None = None,
+    settings_: Any = None,
 ) -> dict[int, dict[str, Any]]:
     """Time-decayed directional evidence per pattern.
 
@@ -156,6 +157,10 @@ def _load_directional_evidence(
     as soon as it exists, but stale samples decay, deteriorating recent
     behavior is penalized, and thin evidence carries wider uncertainty.
     """
+    if settings_ is None:
+        from ...config import settings as _settings
+
+        settings_ = _settings
     now = now or datetime.utcnow()
     rows = db.execute(
         text(
@@ -186,8 +191,59 @@ def _load_directional_evidence(
                 "hold_window_hours": _safe_float(r["hold_window_hours"], 0.0) or 0.0,
                 "window_max_favorable_pct": _safe_float(r["window_max_favorable_pct"]),
                 "window_max_adverse_pct": _safe_float(r["window_max_adverse_pct"]),
+                "source": "directional_outcome",
             }
         )
+
+    if bool(getattr(settings_, "chili_shadow_vetting_include_paper_dynamic_outcomes", True)):
+        try:
+            paper_rows = db.execute(
+                text(
+                    """
+                    SELECT
+                        scan_pattern_id,
+                        pnl,
+                        pnl_pct,
+                        entry_date,
+                        exit_date,
+                        exit_reason,
+                        EXTRACT(EPOCH FROM (exit_date - entry_date)) / 3600.0 AS hold_window_hours
+                    FROM trading_paper_trades
+                    WHERE status = 'closed'
+                      AND scan_pattern_id IS NOT NULL
+                      AND scan_pattern_id != -1
+                      AND entry_date IS NOT NULL
+                      AND exit_date IS NOT NULL
+                      AND pnl IS NOT NULL
+                      AND entry_price > 0
+                      AND quantity > 0
+                      AND (
+                        paper_shadow_of_alert_id IS NOT NULL
+                        OR COALESCE(signal_json, '{}'::jsonb) @> '{"auto_trader_v1": true}'::jsonb
+                        OR COALESCE(signal_json, '{}'::jsonb) @> '{"paper_shadow": true}'::jsonb
+                      )
+                    ORDER BY scan_pattern_id, entry_date DESC
+                    """
+                )
+            ).mappings().all()
+        except Exception:
+            paper_rows = []
+            logger.debug("%s paper dynamic evidence query failed", LOG_PREFIX, exc_info=True)
+        for r in paper_rows:
+            pid = int(r["scan_pattern_id"])
+            pnl_pct = _safe_float(r.get("pnl_pct"), 0.0) or 0.0
+            grouped.setdefault(pid, []).append(
+                {
+                    "directional_correct": (_safe_float(r.get("pnl"), 0.0) or 0.0) > 0.0,
+                    "alert_at": r.get("entry_date"),
+                    "evaluated_at": r.get("exit_date"),
+                    "hold_window_hours": _safe_float(r.get("hold_window_hours"), 0.0) or 0.0,
+                    "window_max_favorable_pct": max(0.0, pnl_pct),
+                    "window_max_adverse_pct": min(0.0, pnl_pct),
+                    "source": "autotrader_paper_dynamic",
+                    "exit_reason": r.get("exit_reason"),
+                }
+            )
 
     evidence: dict[int, dict[str, Any]] = {}
     for pid, items in grouped.items():
@@ -244,6 +300,15 @@ def _load_directional_evidence(
 
         evidence[pid] = {
             "raw_sample_n": len(items),
+            "paper_dynamic_sample_n": sum(
+                1 for r in items if r.get("source") == "autotrader_paper_dynamic"
+            ),
+            "paper_dynamic_exit_sample_n": sum(
+                1
+                for r in items
+                if r.get("source") == "autotrader_paper_dynamic"
+                and r.get("exit_reason") == "pattern_exit_now"
+            ),
             "weighted_sample_n": weighted_n,
             "effective_sample_n": effective_n,
             "weighted_directional_wr": weighted_wr,
@@ -262,8 +327,9 @@ def _load_pilot_rows(
     db: Session,
     *,
     now: datetime | None = None,
+    settings_: Any = None,
 ) -> list[dict[str, Any]]:
-    evidence_by_id = _load_directional_evidence(db, now=now)
+    evidence_by_id = _load_directional_evidence(db, now=now, settings_=settings_)
     rows = db.execute(
         text(
             """
@@ -295,6 +361,8 @@ def _load_pilot_rows(
             "pbo": float(r[6]),
             "evidence": evidence_by_id.get(int(r[0]), {
                 "raw_sample_n": 0,
+                "paper_dynamic_sample_n": 0,
+                "paper_dynamic_exit_sample_n": 0,
                 "weighted_sample_n": 0.0,
                 "effective_sample_n": 0.0,
                 "weighted_directional_wr": 0.5,
@@ -383,7 +451,7 @@ def _pilot_policy(
     settings_: Any,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    rows = _load_pilot_rows(db, now=now)
+    rows = _load_pilot_rows(db, now=now, settings_=settings_)
     prior_strength = _pilot_prior_strength(rows)
     scored = []
     for row in rows:
@@ -561,6 +629,10 @@ def select_shadow_vetting_candidates(
                 "promotion_gate_passed": bool(row[2]),
                 "cpcv_ready": all(row[i] is not None for i in (3, 4, 5)),
                 "raw_sample_n": int(evidence.get("raw_sample_n") or 0),
+                "paper_dynamic_sample_n": int(evidence.get("paper_dynamic_sample_n") or 0),
+                "paper_dynamic_exit_sample_n": int(
+                    evidence.get("paper_dynamic_exit_sample_n") or 0
+                ),
                 "effective_sample_n": float(evidence.get("effective_sample_n") or 0.0),
                 "weighted_directional_wr": float(
                     evidence.get("weighted_directional_wr")

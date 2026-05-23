@@ -346,6 +346,8 @@ def _resolve_weights(settings_: Any) -> dict:
 def _load_realized_pnl_map(
     db: Session,
     window_days: int,
+    *,
+    include_autotrader_paper_dynamic: bool = False,
 ) -> dict[int, dict[str, Any]]:
     """Per-pattern realized PnL stats over the trailing window.
 
@@ -388,7 +390,63 @@ def _load_realized_pnl_map(
             "n": int(r[1] or 0),
             "avg_pnl_pct": float(r[2]) if r[2] is not None else None,
             "total_pnl": float(r[3]) if r[3] is not None else 0.0,
+            "live_n": int(r[1] or 0),
+            "paper_dynamic_n": 0,
         }
+    if include_autotrader_paper_dynamic:
+        paper_rows = db.execute(
+            text(
+                """
+                SELECT scan_pattern_id,
+                       COUNT(*) AS n,
+                       AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct,
+                       SUM(pnl) AS total_pnl
+                FROM trading_paper_trades
+                WHERE scan_pattern_id IS NOT NULL
+                  AND scan_pattern_id != -1
+                  AND status = 'closed'
+                  AND pnl IS NOT NULL
+                  AND entry_price > 0
+                  AND quantity > 0
+                  AND exit_date > NOW() - make_interval(days => :window_days)
+                  AND (
+                    paper_shadow_of_alert_id IS NOT NULL
+                    OR COALESCE(signal_json, '{}'::jsonb) @> '{"auto_trader_v1": true}'::jsonb
+                    OR COALESCE(signal_json, '{}'::jsonb) @> '{"paper_shadow": true}'::jsonb
+                  )
+                GROUP BY scan_pattern_id
+                """
+            ),
+            {"window_days": int(window_days)},
+        ).fetchall()
+        for r in paper_rows:
+            pid = int(r[0])
+            paper_n = int(r[1] or 0)
+            paper_avg = float(r[2]) if r[2] is not None else None
+            paper_total = float(r[3]) if r[3] is not None else 0.0
+            if paper_n <= 0 or paper_avg is None:
+                continue
+            cur = out.get(pid)
+            if not cur:
+                out[pid] = {
+                    "n": paper_n,
+                    "avg_pnl_pct": paper_avg,
+                    "total_pnl": paper_total,
+                    "live_n": 0,
+                    "paper_dynamic_n": paper_n,
+                }
+                continue
+            live_n = int(cur.get("n") or 0)
+            live_avg = cur.get("avg_pnl_pct")
+            total_n = live_n + paper_n
+            if total_n <= 0:
+                continue
+            cur["avg_pnl_pct"] = (
+                (float(live_avg or 0.0) * live_n) + (paper_avg * paper_n)
+            ) / total_n
+            cur["n"] = total_n
+            cur["total_pnl"] = float(cur.get("total_pnl") or 0.0) + paper_total
+            cur["paper_dynamic_n"] = int(cur.get("paper_dynamic_n") or 0) + paper_n
     return out
 
 
@@ -457,8 +515,13 @@ def compute_and_persist_scores(
 
     dq_map = _load_directional_quality_map(db)
     decay_map = _load_decay_map(db)
+    include_paper_dynamic = bool(
+        getattr(settings_, "chili_cohort_score_include_autotrader_paper_dynamic", True)
+    )
     realized_map = _load_realized_pnl_map(
-        db, int(weights.get("realized_window_days", 90)),
+        db,
+        int(weights.get("realized_window_days", 90)),
+        include_autotrader_paper_dynamic=include_paper_dynamic,
     )
 
     patterns = (
@@ -528,6 +591,7 @@ def compute_and_persist_scores(
         "cleared_to_null": cleared,
         "weight_sum": round(weight_sum, 4),
         "realized_window_days": int(weights.get("realized_window_days", 90)),
+        "include_autotrader_paper_dynamic": include_paper_dynamic,
         "min_realized_n": min_realized_n,
     }
     logger.info("[pattern_quality_score] refresh: %s", result)
@@ -582,8 +646,13 @@ def compute_and_persist_scores_streaming(
 
     dq_map = _load_directional_quality_map(db)
     decay_map = _load_decay_map(db)
+    include_paper_dynamic = bool(
+        getattr(settings_, "chili_cohort_score_include_autotrader_paper_dynamic", True)
+    )
     realized_map = _load_realized_pnl_map(
-        db, int(weights.get("realized_window_days", 90)),
+        db,
+        int(weights.get("realized_window_days", 90)),
+        include_autotrader_paper_dynamic=include_paper_dynamic,
     )
 
     patterns = (
@@ -702,6 +771,7 @@ def compute_and_persist_scores_streaming(
         "stopped_by_flag": stopped,
         "weight_sum": round(weight_sum, 4),
         "min_realized_n": min_realized_n,
+        "include_autotrader_paper_dynamic": include_paper_dynamic,
         "pending_changes_sample": pending_changes[:8],
     }
     logger.info(

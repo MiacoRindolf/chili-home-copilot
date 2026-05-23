@@ -825,17 +825,38 @@ def evaluate_entry_edge(
         db, ticker=alert.ticker, settings=settings,
     )
 
-    expected_net = prob * reward - (1.0 - prob) * loss - cost_fraction
+    expected_reward = prob * reward
+    expected_loss = (1.0 - prob) * loss
+    expected_net = expected_reward - expected_loss - cost_fraction
+    breakeven_denom = reward + loss
+    breakeven_probability = (
+        (loss + cost_fraction) / breakeven_denom
+        if breakeven_denom > 0
+        else None
+    )
     snap.update(
         probability=round(prob, 6),
         probability_source=prob_source,
         probability_sample_n=sample_n,
         reward_fraction=round(reward, 8),
         stop_loss_fraction=round(loss, 8),
+        expected_reward_fraction=round(expected_reward, 8),
+        expected_loss_fraction=round(expected_loss, 8),
         empirical_cost_fraction=round(cost_fraction, 8),
+        cost_fraction=round(cost_fraction, 8),
         empirical_cost=cost_snapshot,
         expected_net_fraction=round(expected_net, 8),
         expected_net_pct=round(expected_net * 100.0, 4),
+        breakeven_probability=(
+            round(float(breakeven_probability), 6)
+            if breakeven_probability is not None
+            else None
+        ),
+        probability_edge=(
+            round(prob - float(breakeven_probability), 6)
+            if breakeven_probability is not None
+            else None
+        ),
         reward_risk=round(reward / loss, 6) if loss > 0 else None,
     )
     if expected_net <= 0.0:

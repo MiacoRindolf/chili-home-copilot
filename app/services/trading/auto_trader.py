@@ -415,7 +415,10 @@ def _maybe_open_paper_shadow(
     if uid is None:
         return
     try:
-        from .paper_trading import open_paper_trade
+        from .paper_trading import (
+            open_paper_trade,
+            prune_autotrader_paper_shadow_capacity,
+        )
         sig = {
             "auto_trader_v1": True,
             "breakout_alert_id": int(alert.id),
@@ -427,6 +430,28 @@ def _maybe_open_paper_shadow(
         shadow_max_open = int(
             getattr(settings, "chili_autotrader_paper_shadow_max_open", 100) or 100
         )
+        if bool(getattr(settings, "chili_autotrader_paper_shadow_janitor_enabled", True)):
+            prune_autotrader_paper_shadow_capacity(
+                db,
+                uid,
+                max_open=shadow_max_open,
+                max_age_hours=int(
+                    getattr(
+                        settings,
+                        "chili_autotrader_paper_shadow_janitor_max_age_hours",
+                        72,
+                    )
+                    or 72
+                ),
+                buffer=int(
+                    getattr(
+                        settings,
+                        "chili_autotrader_paper_shadow_janitor_buffer",
+                        5,
+                    )
+                    or 0
+                ),
+            )
         pt = open_paper_trade(
             db, uid, alert.ticker, px,
             scan_pattern_id=alert.scan_pattern_id,
@@ -1226,6 +1251,29 @@ def is_shadow_promoted_pattern(pat: ScanPattern) -> bool:
     return bool(getattr(settings, "chili_shadow_promoted_lifecycle_enabled", True))
 
 
+def _log_expected_edge_reject(alert: BreakoutAlert, snap: dict[str, Any] | None) -> None:
+    edge = (snap or {}).get("entry_edge") if isinstance(snap, dict) else None
+    if not isinstance(edge, dict):
+        edge = snap if isinstance(snap, dict) else {}
+    logger.info(
+        "[autotrader_edge_reject] alert_id=%s pattern_id=%s ticker=%s "
+        "prob=%s breakeven=%s prob_edge=%s reward=%s loss=%s cost=%s "
+        "expected_net_pct=%s source=%s sample_n=%s",
+        getattr(alert, "id", None),
+        getattr(alert, "scan_pattern_id", None),
+        getattr(alert, "ticker", None),
+        edge.get("probability"),
+        edge.get("breakeven_probability"),
+        edge.get("probability_edge"),
+        edge.get("reward_fraction"),
+        edge.get("stop_loss_fraction"),
+        edge.get("cost_fraction", edge.get("empirical_cost_fraction")),
+        edge.get("expected_net_pct"),
+        edge.get("probability_source"),
+        edge.get("probability_sample_n"),
+    )
+
+
 def _process_one_alert(
     db: Session,
     uid: int,
@@ -1454,6 +1502,8 @@ def _process_one_alert(
         db, alert, settings=settings, ctx=ctx, for_new_entry=for_new, fallback_user_id=uid,
     )
     if not ok:
+        if reason == "non_positive_expected_edge":
+            _log_expected_edge_reject(alert, snap)
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)
         if live:
             _maybe_open_reject_paper_shadow(

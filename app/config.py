@@ -2064,6 +2064,22 @@ class Settings(BaseSettings):
         le=1000,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_MAX_OPEN"),
     )
+    chili_autotrader_paper_shadow_janitor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_JANITOR_ENABLED"),
+    )
+    chili_autotrader_paper_shadow_janitor_max_age_hours: int = Field(
+        default=72,
+        ge=1,
+        le=24 * 30,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_JANITOR_MAX_AGE_HOURS"),
+    )
+    chili_autotrader_paper_shadow_janitor_buffer: int = Field(
+        default=5,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_JANITOR_BUFFER"),
+    )
     # Open paper-shadow evidence for live candidates that are blocked by
     # portfolio/execution authority gates such as recert debt or venue caps,
     # plus explicitly allowlisted reject classes such as no-edge and duplicate
@@ -2895,6 +2911,12 @@ class Settings(BaseSettings):
             "CHILI_COHORT_SCORE_REALIZED_WINDOW_DAYS"
         ),
     )
+    chili_cohort_score_include_autotrader_paper_dynamic: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_SCORE_INCLUDE_AUTOTRADER_PAPER_DYNAMIC"
+        ),
+    )
     chili_cohort_promote_min_realized_trades_for_floor: int = Field(
         default=5,
         validation_alias=AliasChoices(
@@ -2973,6 +2995,12 @@ class Settings(BaseSettings):
     chili_shadow_vetting_finalize_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_SHADOW_VETTING_FINALIZE_ENABLED"),
+    )
+    chili_shadow_vetting_include_paper_dynamic_outcomes: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_INCLUDE_PAPER_DYNAMIC_OUTCOMES"
+        ),
     )
     # Pilot stage: broker-eligible but confidence-sized. This is the
     # non-binary ramp between broker-blocked shadow observation and full
@@ -3634,6 +3662,13 @@ class Settings(BaseSettings):
     pattern_imminent_allow_evaluable_shortcut: bool = True
     pattern_imminent_max_per_ticker_per_run: int = 2
     pattern_imminent_max_per_pattern_per_run: int = 3
+    pattern_imminent_shadow_observation_enabled: bool = True
+    pattern_imminent_shadow_reserve_per_run: int = 4
+    pattern_imminent_shadow_extra_per_run: int = 4
+    pattern_imminent_shadow_max_per_ticker_per_run: int = 2
+    pattern_imminent_shadow_max_per_pattern_per_run: int = 2
+    pattern_imminent_shadow_cooldown_hours: float = 1.0
+    pattern_imminent_shadow_cooldown_hours_crypto: float = 0.25
     pattern_imminent_research_mode: bool = False
     pattern_imminent_research_nearmiss_log: bool = False
     pattern_imminent_debug_dry_run: bool = False

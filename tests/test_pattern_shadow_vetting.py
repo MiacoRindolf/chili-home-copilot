@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+from app.models.trading import PaperTrade
 from app.services.trading.pattern_shadow_vetting import (
     pilot_promoted_risk_multiplier,
     run_shadow_vetting_cycle,
@@ -36,6 +37,55 @@ def _settings(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def test_shadow_vetting_counts_autotrader_paper_dynamic_outcomes(db):
+    _truncate_phase4_state(db)
+    now = datetime.utcnow().replace(microsecond=0)
+    pat = _make_pattern(
+        db,
+        name="paper_dynamic_shadow",
+        lifecycle="shadow_promoted",
+        cpcv=1.5,
+        dsr=0.8,
+        pbo=0.1,
+        quality_score=None,
+    )
+    db.add(
+        PaperTrade(
+            user_id=None,
+            scan_pattern_id=pat.id,
+            ticker="TEST",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1.0,
+            status="closed",
+            entry_date=now - timedelta(hours=1),
+            exit_date=now,
+            exit_price=102.0,
+            exit_reason="pattern_exit_now",
+            pnl=2.0,
+            pnl_pct=2.0,
+            signal_json={"auto_trader_v1": True, "paper_shadow": True},
+            paper_shadow_of_alert_id=None,
+        )
+    )
+    db.commit()
+
+    rows = select_shadow_vetting_candidates(
+        db,
+        settings_=_settings(
+            chili_shadow_vetting_include_paper_dynamic_outcomes=True,
+        ),
+        now=now,
+    )
+    row = next(r for r in rows if r["scan_pattern_id"] == pat.id)
+    assert row["raw_sample_n"] == 1
+    assert row["paper_dynamic_sample_n"] == 1
+    assert row["paper_dynamic_exit_sample_n"] == 1
+    assert row["weighted_directional_wr"] > 0.5
 
 
 def test_shadow_vetting_advances_strong_shadow_to_pilot_before_full_ev(db, monkeypatch):

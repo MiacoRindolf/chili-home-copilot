@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.models.trading import AlertHistory
+from app.services.trading import pattern_imminent_alerts as imminent_mod
 from app.services.trading.alerts import PATTERN_BREAKOUT_IMMINENT
 from app.services.trading.pattern_imminent_alerts import (
     _cooldown_active,
@@ -120,7 +121,7 @@ def test_cooldown_ignores_failed_imminent_delivery(db) -> None:
     assert _cooldown_active(db, 1, "SPY", 52, 3.0) is True
 
 
-def test_run_pattern_imminent_scan_does_not_count_failed_delivery_as_sent(
+def test_run_pattern_imminent_scan_counts_persisted_alert_when_delivery_fails(
     db,
     monkeypatch,
 ) -> None:
@@ -173,6 +174,84 @@ def test_run_pattern_imminent_scan_does_not_count_failed_delivery_as_sent(
     result = run_pattern_imminent_scan(db, user_id=1)
 
     assert result["candidates"] == 1
-    assert result["alerts_sent"] == 0
+    assert result["alerts_sent"] == 1
     assert result["delivery_failed"] == 1
-    assert inserted == []
+    assert inserted == [("AAOI", 52)]
+
+
+def test_run_pattern_imminent_scan_reserves_shadow_observation_slots(
+    db,
+    monkeypatch,
+) -> None:
+    inserted: list[tuple[str, int, str]] = []
+
+    def _candidate(pattern_id: int, ticker: str, composite: float, stage: str):
+        pattern = SimpleNamespace(
+            id=pattern_id,
+            name=f"Pattern {pattern_id}",
+            description="Test imminent pattern",
+            lifecycle_stage=stage,
+        )
+        return {
+            "pattern": pattern,
+            "ticker": ticker,
+            "eta_lo": 0.5,
+            "eta_hi": 1.0,
+            "score": {
+                "price": 100.0,
+                "entry_price": 101.0,
+                "stop_loss": 97.5,
+                "take_profit": 110.0,
+                "signals": ["Tight range", "Volume building"],
+            },
+            "trade_type": "swing",
+            "duration_estimate": "2-5 days",
+            "hold_label": "2-5 days",
+            "composite": composite,
+            "readiness": 0.82,
+            "flat": {"price": 100.0},
+            "score_breakdown": {"quality": composite},
+            "coverage_ratio": 0.75,
+        }
+
+    candidates = [
+        _candidate(11, "MAIN1", 0.91, "promoted"),
+        _candidate(12, "MAIN2", 0.90, "promoted"),
+        _candidate(99, "SHADOW", 0.62, "shadow_promoted"),
+    ]
+
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_max_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_observation_enabled", True)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_reserve_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_extra_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_max_per_ticker_per_run", 2)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_max_per_pattern_per_run", 2)
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts.gather_imminent_candidate_rows",
+        lambda *args, **kwargs: (
+            candidates,
+            {"patterns_active": 3, "tickers_scored": 3},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts._cooldown_active",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts.dispatch_alert",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts._insert_imminent_breakout_alert",
+        lambda db, user_id, pat, ticker, *args, **kwargs: inserted.append(
+            (ticker, pat.id, pat.lifecycle_stage)
+        ),
+    )
+
+    result = run_pattern_imminent_scan(db, user_id=1)
+
+    assert result["alerts_sent"] == 2
+    assert result["main_alerts_sent"] == 1
+    assert result["shadow_alerts_sent"] == 1
+    assert inserted[0] == ("SHADOW", 99, "shadow_promoted")
+    assert ("MAIN1", 11, "promoted") in inserted

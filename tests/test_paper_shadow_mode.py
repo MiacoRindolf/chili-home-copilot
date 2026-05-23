@@ -30,6 +30,7 @@ from app.models.trading import (
 )
 from app.services.trading import auto_trader as at_mod
 from app.services.trading.auto_trader import _maybe_open_paper_shadow
+from app.services.trading.paper_trading import prune_autotrader_paper_shadow_capacity
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -399,6 +400,64 @@ def test_shadow_failure_swallowed(db, monkeypatch, caplog):
         PaperTrade.paper_shadow_of_alert_id == alert.id
     ).all()
     assert len(rows) == 0
+
+
+def test_shadow_janitor_only_closes_stale_autotrader_shadow_rows(db, monkeypatch):
+    pat, alert = _seed_pattern_and_alert(db)
+    stale_at = datetime.utcnow() - timedelta(hours=5)
+    shadow = PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pat.id,
+        ticker="TEST",
+        direction="long",
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        quantity=1,
+        status="open",
+        entry_date=stale_at,
+        signal_json={"auto_trader_v1": True, "paper_shadow": True},
+        paper_shadow_of_alert_id=alert.id,
+    )
+    ordinary = PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pat.id,
+        ticker="PLAIN",
+        direction="long",
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        quantity=1,
+        status="open",
+        entry_date=stale_at,
+        signal_json={},
+    )
+    db.add_all([shadow, ordinary])
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.market_data.fetch_quote",
+        lambda ticker: {"price": 101.0},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.paper_trading._apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    result = prune_autotrader_paper_shadow_capacity(
+        db,
+        alert.user_id,
+        max_open=100,
+        max_age_hours=1,
+        buffer=5,
+    )
+
+    db.refresh(shadow)
+    db.refresh(ordinary)
+    assert result["closed"] == 1
+    assert shadow.status == "closed"
+    assert shadow.exit_reason == "shadow_capacity_janitor"
+    assert ordinary.status == "open"
 
 
 # ---------------------------------------------------------------------------

@@ -224,6 +224,116 @@ def open_paper_trade(
     return pt
 
 
+def _is_autotrader_paper_shadow_row(pt: PaperTrade) -> bool:
+    sig = pt.signal_json if isinstance(pt.signal_json, dict) else {}
+    return bool(
+        pt.paper_shadow_of_alert_id
+        or sig.get("auto_trader_v1")
+        or sig.get("paper_shadow")
+        or sig.get("shadow_of_alert_id")
+    )
+
+
+def _paper_close_ledger_safe(db: Session, pt: PaperTrade) -> None:
+    try:
+        from .brain_work.execution_hooks import on_paper_trade_closed
+
+        on_paper_trade_closed(db, pt)
+    except Exception:
+        pass
+
+
+def prune_autotrader_paper_shadow_capacity(
+    db: Session,
+    user_id: int | None,
+    *,
+    max_open: int,
+    max_age_hours: int,
+    buffer: int = 5,
+) -> dict[str, Any]:
+    """Close stale autotrader paper-shadow rows before opening more evidence.
+
+    This janitor is intentionally scoped to rows tagged as autotrader/shadow
+    observations. It never touches the user's ordinary paper-trading positions.
+    """
+    open_limit = max(1, int(max_open or 1))
+    target_open = max(0, open_limit - max(0, int(buffer or 0)))
+    age_limit_h = max(1.0, float(max_age_hours or 1))
+    now = datetime.utcnow()
+
+    q = db.query(PaperTrade).filter(PaperTrade.status == "open")
+    if user_id is not None:
+        q = q.filter(PaperTrade.user_id == user_id)
+    rows = [pt for pt in q.all() if _is_autotrader_paper_shadow_row(pt)]
+    if not rows:
+        return {
+            "checked": 0,
+            "closed": 0,
+            "stale_closed": 0,
+            "capacity_closed": 0,
+            "max_open": open_limit,
+        }
+
+    stale: list[PaperTrade] = []
+    for pt in rows:
+        entry_dt = pt.entry_date or now
+        age_h = max(0.0, (now - entry_dt).total_seconds() / 3600.0)
+        if age_h >= age_limit_h:
+            stale.append(pt)
+
+    to_close: list[tuple[PaperTrade, str]] = [(pt, "stale") for pt in stale]
+    selected_ids = {int(pt.id) for pt, _ in to_close if pt.id is not None}
+    remaining_open = len(rows) - len(selected_ids)
+    if remaining_open >= open_limit:
+        excess = max(0, remaining_open - target_open)
+        capacity_pool = sorted(
+            [pt for pt in rows if int(pt.id or 0) not in selected_ids],
+            key=lambda pt: pt.entry_date or datetime.min,
+        )
+        for pt in capacity_pool[:excess]:
+            to_close.append((pt, "capacity"))
+            if pt.id is not None:
+                selected_ids.add(int(pt.id))
+
+    if not to_close:
+        return {
+            "checked": len(rows),
+            "closed": 0,
+            "stale_closed": 0,
+            "capacity_closed": 0,
+            "max_open": open_limit,
+        }
+
+    from .market_data import fetch_quote
+
+    stale_closed = 0
+    capacity_closed = 0
+    for pt, kind in to_close:
+        try:
+            quote = fetch_quote(pt.ticker)
+            raw_exit = float((quote or {}).get("price") or pt.entry_price)
+        except Exception:
+            raw_exit = float(pt.entry_price)
+        exit_p = _apply_slippage(raw_exit, pt.direction or "long", is_entry=False)
+        _close_paper_trade(pt, exit_p, "shadow_capacity_janitor")
+        _paper_close_ledger_safe(db, pt)
+        if kind == "stale":
+            stale_closed += 1
+        else:
+            capacity_closed += 1
+
+    db.commit()
+    result = {
+        "checked": len(rows),
+        "closed": len(to_close),
+        "stale_closed": stale_closed,
+        "capacity_closed": capacity_closed,
+        "max_open": open_limit,
+    }
+    logger.info("[paper_shadow_janitor] %s", result)
+    return result
+
+
 def _paper_dynamic_monitor_candidate(pt: PaperTrade) -> bool:
     """True for paper rows that should mimic live dynamic monitoring."""
     if not bool(getattr(settings, "chili_autotrader_paper_dynamic_monitor_enabled", True)):

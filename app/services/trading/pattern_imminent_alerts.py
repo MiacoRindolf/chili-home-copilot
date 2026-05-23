@@ -699,6 +699,50 @@ def gather_imminent_candidate_rows(
     return candidates, meta
 
 
+def _candidate_pattern_stage(candidate: dict[str, Any]) -> str:
+    pat = candidate.get("pattern")
+    return (getattr(pat, "lifecycle_stage", None) or "").strip().lower()
+
+
+def _is_shadow_observation_candidate(candidate: dict[str, Any]) -> bool:
+    return _candidate_pattern_stage(candidate) == "shadow_promoted"
+
+
+def _candidate_identity(candidate: dict[str, Any]) -> tuple[int, str]:
+    pat = candidate.get("pattern")
+    try:
+        pid = int(getattr(pat, "id", 0) or 0)
+    except Exception:
+        pid = 0
+    return pid, str(candidate.get("ticker") or "").upper()
+
+
+def _shadow_reserved_dispatch_order(
+    candidates: list[dict[str, Any]],
+    *,
+    shadow_reserve: int,
+) -> list[dict[str, Any]]:
+    """Pull top shadow-promoted observations forward without changing scores."""
+    reserve = max(0, int(shadow_reserve or 0))
+    if reserve <= 0:
+        return list(candidates)
+    picked: list[dict[str, Any]] = []
+    picked_ids: set[tuple[int, str]] = set()
+    for c in candidates:
+        if len(picked) >= reserve:
+            break
+        if not _is_shadow_observation_candidate(c):
+            continue
+        ident = _candidate_identity(c)
+        if ident in picked_ids:
+            continue
+        picked.append(c)
+        picked_ids.add(ident)
+    if not picked:
+        return list(candidates)
+    return picked + [c for c in candidates if _candidate_identity(c) not in picked_ids]
+
+
 def run_pattern_imminent_scan(
     db: Session,
     user_id: int | None,
@@ -723,6 +767,20 @@ def run_pattern_imminent_scan(
     cooldown_h_crypto = float(getattr(settings, "pattern_imminent_cooldown_hours_crypto", 0.5))
     max_per_ticker = max(1, int(getattr(settings, "pattern_imminent_max_per_ticker_per_run", 2)))
     max_per_pattern = max(1, int(getattr(settings, "pattern_imminent_max_per_pattern_per_run", 3)))
+    shadow_enabled = bool(getattr(settings, "pattern_imminent_shadow_observation_enabled", True))
+    shadow_reserve = max(0, int(getattr(settings, "pattern_imminent_shadow_reserve_per_run", 4) or 0))
+    shadow_extra = max(0, int(getattr(settings, "pattern_imminent_shadow_extra_per_run", 4) or 0))
+    shadow_quota = shadow_reserve + shadow_extra
+    shadow_max_per_ticker = max(
+        1, int(getattr(settings, "pattern_imminent_shadow_max_per_ticker_per_run", 2) or 2)
+    )
+    shadow_max_per_pattern = max(
+        1, int(getattr(settings, "pattern_imminent_shadow_max_per_pattern_per_run", 2) or 2)
+    )
+    shadow_cooldown_h = float(getattr(settings, "pattern_imminent_shadow_cooldown_hours", 1.0))
+    shadow_cooldown_h_crypto = float(
+        getattr(settings, "pattern_imminent_shadow_cooldown_hours_crypto", 0.25)
+    )
     max_eta = float(settings.pattern_imminent_max_eta_hours)
     min_rd = float(settings.pattern_imminent_min_readiness)
     cap_rd = float(settings.pattern_imminent_readiness_cap)
@@ -739,28 +797,67 @@ def run_pattern_imminent_scan(
     )
 
     sent = 0
+    main_sent = 0
+    shadow_sent = 0
     delivery_failed = 0
     skipped_cd = 0
+    shadow_skipped_cd = 0
     per_ticker: dict[str, int] = {}
     per_pattern: dict[int, int] = {}
+    shadow_per_ticker: dict[str, int] = {}
+    shadow_per_pattern: dict[int, int] = {}
     diversity_skipped = 0
+    shadow_diversity_skipped = 0
+    main_quota_skipped = 0
+    shadow_quota_skipped = 0
+    dispatch_candidates = (
+        _shadow_reserved_dispatch_order(candidates, shadow_reserve=shadow_reserve)
+        if shadow_enabled and shadow_quota > 0
+        else candidates
+    )
 
-    for c in candidates:
-        if sent >= max_alerts:
+    for c in dispatch_candidates:
+        is_shadow = shadow_enabled and _is_shadow_observation_candidate(c)
+        if sent >= max_alerts + shadow_extra:
             break
+        if is_shadow:
+            if shadow_sent >= shadow_quota:
+                shadow_quota_skipped += 1
+                continue
+        elif main_sent >= max_alerts:
+            main_quota_skipped += 1
+            continue
         pat = c["pattern"]
         ticker = c["ticker"]
         # R33: pick crypto cooldown for crypto tickers, equity cooldown otherwise.
-        ticker_cooldown_h = cooldown_h_crypto if is_crypto(ticker) else cooldown_h
+        if is_shadow:
+            ticker_cooldown_h = (
+                shadow_cooldown_h_crypto if is_crypto(ticker) else shadow_cooldown_h
+            )
+        else:
+            ticker_cooldown_h = cooldown_h_crypto if is_crypto(ticker) else cooldown_h
         if _cooldown_active(db, user_id, ticker, pat.id, ticker_cooldown_h):
-            skipped_cd += 1
+            if is_shadow:
+                shadow_skipped_cd += 1
+            else:
+                skipped_cd += 1
             continue
-        if per_ticker.get(ticker, 0) >= max_per_ticker:
-            diversity_skipped += 1
-            continue
-        if per_pattern.get(pat.id, 0) >= max_per_pattern:
-            diversity_skipped += 1
-            continue
+        if is_shadow:
+            if shadow_per_ticker.get(ticker, 0) >= shadow_max_per_ticker:
+                shadow_diversity_skipped += 1
+                diversity_skipped += 1
+                continue
+            if shadow_per_pattern.get(pat.id, 0) >= shadow_max_per_pattern:
+                shadow_diversity_skipped += 1
+                diversity_skipped += 1
+                continue
+        else:
+            if per_ticker.get(ticker, 0) >= max_per_ticker:
+                diversity_skipped += 1
+                continue
+            if per_pattern.get(pat.id, 0) >= max_per_pattern:
+                diversity_skipped += 1
+                continue
 
         eta_txt = format_eta_range(c["eta_lo"], c["eta_hi"])
         sc = c["score"]
@@ -840,8 +937,14 @@ def run_pattern_imminent_scan(
             )
             if not delivered:
                 delivery_failed += 1
-        per_ticker[ticker] = per_ticker.get(ticker, 0) + 1
-        per_pattern[pat.id] = per_pattern.get(pat.id, 0) + 1
+        if is_shadow:
+            shadow_per_ticker[ticker] = shadow_per_ticker.get(ticker, 0) + 1
+            shadow_per_pattern[pat.id] = shadow_per_pattern.get(pat.id, 0) + 1
+            shadow_sent += 1
+        else:
+            per_ticker[ticker] = per_ticker.get(ticker, 0) + 1
+            per_pattern[pat.id] = per_pattern.get(pat.id, 0) + 1
+            main_sent += 1
         # Count as sent whenever we persisted the DB row — that is the
         # autotrader's contract. delivery_failed separately tracks the
         # external-channel outcome for observability.
@@ -853,9 +956,18 @@ def run_pattern_imminent_scan(
         "dry_run": do_dry,
         "candidates": len(candidates),
         "alerts_sent": sent,
+        "main_alerts_sent": main_sent,
+        "shadow_alerts_sent": shadow_sent,
         "delivery_failed": delivery_failed,
         "cooldown_skipped": skipped_cd,
+        "shadow_cooldown_skipped": shadow_skipped_cd,
         "diversity_skipped": diversity_skipped,
+        "shadow_diversity_skipped": shadow_diversity_skipped,
+        "main_quota_skipped": main_quota_skipped,
+        "shadow_quota_skipped": shadow_quota_skipped,
+        "shadow_observation_enabled": shadow_enabled,
+        "shadow_reserve_per_run": shadow_reserve,
+        "shadow_extra_per_run": shadow_extra,
         "us_session_context": describe_us_session_context(),
         "thresholds": {
             "min_readiness": min_rd,

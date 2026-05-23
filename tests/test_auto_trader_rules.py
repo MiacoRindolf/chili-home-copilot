@@ -142,6 +142,8 @@ def test_passes_rule_gate_expected_edge_fail(_mock_port, _mock_rth):
     assert not ok
     assert reason == "non_positive_expected_edge"
     assert snap["entry_edge"]["expected_net_pct"] < 0
+    assert snap["entry_edge"]["breakeven_probability"] is not None
+    assert snap["entry_edge"]["probability_edge"] < 0
 
 
 # VV — per-lane concurrency cap tests. The rule gate should bucket the
