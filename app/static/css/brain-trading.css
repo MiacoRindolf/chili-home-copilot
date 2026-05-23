@@ -117,6 +117,212 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   background: var(--bg);
 }
 
+/* ── Above-the-fold two-column grid ── */
+.bx-above-fold {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: var(--brain-space-6);
+  padding: var(--brain-space-6) var(--brain-space-10);
+  align-items: start;
+}
+.bx-edge-card,
+.bx-activity-card {
+  background: var(--card, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: var(--brain-radius-lg);
+  padding: var(--brain-space-5) var(--brain-space-6);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--brain-space-4);
+}
+.bx-card-header {
+  display: flex; align-items: center; gap: var(--brain-space-2);
+  flex-wrap: wrap;
+  font-size: var(--brain-font-md);
+}
+.bx-card-header strong { color: var(--text); }
+.bx-card-header-hint {
+  font-size: var(--brain-font-xs);
+  color: var(--text-muted);
+  font-weight: var(--brain-font-weight-normal);
+}
+.bx-card-refresh {
+  margin-left: auto;
+  padding: var(--brain-space-1) var(--brain-space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--brain-radius-sm);
+  background: var(--bg); color: var(--text);
+  font-size: var(--brain-font-xs);
+  font-weight: var(--brain-font-weight-bold);
+  cursor: pointer;
+  transition: var(--brain-transition-normal);
+}
+.bx-card-refresh:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Edge card: spec-movers accordion ── */
+.bx-edge-card-accordion {
+  border-top: 1px solid var(--border);
+  padding-top: var(--brain-space-3);
+}
+.bx-edge-card-accordion summary {
+  display: flex; align-items: center; gap: var(--brain-space-2);
+  flex-wrap: wrap; cursor: pointer;
+  font-size: var(--brain-font-sm);
+  list-style: none;
+}
+.bx-edge-card-accordion summary::-webkit-details-marker { display: none; }
+.bx-edge-card-accordion summary::before {
+  content: '\25B6';
+  font-size: var(--brain-font-2xs);
+  color: var(--text-muted);
+  transition: var(--brain-transition-fast);
+}
+.bx-edge-card-accordion[open] summary::before { transform: rotate(90deg); }
+
+/* ── Activity card: progress + work ledger + queue + gate summary ── */
+.bx-activity-step {
+  padding: var(--brain-space-3) var(--brain-space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--brain-radius-md);
+  background: var(--bg-secondary, rgba(0,0,0,.03));
+}
+.bx-progress-track { overflow: hidden; }
+.bx-work-ledger { /* preserved id brain-work-ledger-strip */ }
+.bx-queue-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--brain-space-2);
+}
+.bx-queue-pill-tile {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 2px;
+  padding: var(--brain-space-3) var(--brain-space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--brain-radius-md);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--brain-font-sans);
+  transition: var(--brain-transition-normal);
+  min-height: 44px;
+}
+.bx-queue-pill-tile:hover { border-color: var(--accent); }
+.bx-queue-tile-val {
+  font-size: var(--brain-font-lg);
+  font-weight: var(--brain-font-weight-heavy);
+}
+.bx-queue-tile-lbl {
+  font-size: var(--brain-font-2xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--brain-letter-spacing-caps);
+}
+.bx-queue-pill-tile.pending    .bx-queue-tile-val { color: var(--brain-color-pending); }
+.bx-queue-pill-tile.processing .bx-queue-tile-val { color: var(--accent); }
+.bx-queue-pill-tile.retry      .bx-queue-tile-val { color: var(--brain-color-pending); }
+.bx-queue-pill-tile.dead       .bx-queue-tile-val { color: var(--brain-color-bearish); }
+
+.bx-pattern-gate-summary {
+  display: flex; align-items: center; gap: var(--brain-space-3);
+  width: 100%;
+  padding: var(--brain-space-3) var(--brain-space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--brain-radius-md);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--brain-font-sm);
+  font-weight: var(--brain-font-weight-bold);
+  cursor: pointer;
+  text-align: left;
+  transition: var(--brain-transition-normal);
+  min-height: 44px;
+}
+.bx-pattern-gate-summary:hover { border-color: var(--accent); }
+.bx-pattern-gate-summary .bx-pgs-text { flex: 1; min-width: 0; }
+.bx-pattern-gate-summary .bx-pgs-chevron {
+  color: var(--text-muted);
+  font-size: var(--brain-font-lg);
+}
+.bx-activity-footer { margin-top: auto; }
+
+/* ── Diagnostics drawer (slide-in from right) ── */
+.bx-diagnostics-drawer-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, .35);
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s ease;
+  z-index: calc(var(--brain-z-modal) - 1);
+}
+.bx-diagnostics-drawer-backdrop.open {
+  opacity: 1; pointer-events: auto;
+}
+.bx-diagnostics-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: min(540px, 92vw);
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--brain-shadow-xl);
+  transform: translateX(100%);
+  transition: transform .2s ease;
+  z-index: var(--brain-z-modal);
+  display: flex; flex-direction: column;
+}
+.bx-diagnostics-drawer.open {
+  transform: translateX(0);
+}
+.bx-diagnostics-drawer-header {
+  display: flex; align-items: center; gap: var(--brain-space-2);
+  padding: var(--brain-space-5) var(--brain-space-6);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--brain-font-md);
+}
+.bx-diagnostics-drawer-close {
+  margin-left: auto;
+  width: 32px; height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--brain-radius-md);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--brain-font-xl);
+  line-height: 1;
+  cursor: pointer;
+  transition: var(--brain-transition-normal);
+}
+.bx-diagnostics-drawer-close:hover { border-color: var(--accent); color: var(--accent); }
+.bx-diagnostics-drawer-body {
+  padding: var(--brain-space-5) var(--brain-space-6);
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* ── Help modal body (used by openRuntimeHelpModal) ── */
+.bx-runtime-help-body h4 {
+  font-weight: var(--brain-font-weight-heavy);
+  color: var(--text);
+}
+.bx-runtime-help-body code {
+  background: var(--brain-accent-ghost);
+  padding: 0 4px; border-radius: var(--brain-radius-xs);
+}
+
+/* ── Mobile (≤768px): single-column above-the-fold, full-width drawer ── */
+@media (max-width: 768px) {
+  .bx-runtime-header {
+    padding: var(--brain-space-4) var(--brain-space-6);
+    gap: var(--brain-space-3);
+  }
+  .bx-above-fold {
+    grid-template-columns: 1fr;
+    padding: var(--brain-space-4) var(--brain-space-6);
+    gap: var(--brain-space-4);
+  }
+  .bx-ctrl-btn { min-height: 44px; padding: var(--brain-space-3) var(--brain-space-5); }
+  .bx-queue-pill { min-height: 44px; }
+  .bx-help-btn { width: 44px; height: 44px; }
+  .bx-diagnostics-drawer { width: 100vw; }
+}
+
 
 /* â”€â”€ Layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .b-header {

@@ -1,128 +1,13 @@
 <!--
-  Runtime tab surfacing: Phase 4 of f-adaptive-promotion-architecture.
-  Read-only dashboards over the new gate machinery:
-    - Pattern Gate Status (PTR-ready-but-ungated + adaptive/legacy verdict diff)
-    - Dispatch Queue Health (brain_work_events depth by event_type)
+  Runtime tab redesign 2026-05-23 (Phase B): the <section> wrapper and the table
+  markup have moved into _trading_diagnostics_drawer.html. Only the polling IIFE
+  remains here; it targets ids via getElementById, so location of the markup
+  (drawer vs activity card) is irrelevant.
+
+  The IIFE also writes the at-a-glance headlines used outside the drawer:
+    - #bx-queue-pill-text / #bx-queue-pill-dot          (sticky header)
+    - #bx-pattern-gate-summary-text                     (activity card)
 -->
-<section id="brain-runtime-gates" class="brain-section brain-runtime-gates" role="region"
-         aria-label="Runtime gate dashboards" style="margin-bottom:12px">
-  <div class="brain-runtime-gates-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px">
-
-    <!-- Section A: Pattern Gate Status -->
-    <div class="brain-thesis-card neutral" id="brain-pattern-gate-card" style="padding:10px 12px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-        <span class="bs-icon" aria-hidden="true">&#x1F6E1;</span>
-        <strong style="font-size:var(--brain-font-md)">Pattern Gate Status</strong>
-        <div class="brain-runtime-gates-tabs" role="tablist" aria-label="Pattern gate views"
-             style="margin-left:8px;display:flex;gap:4px;flex-wrap:wrap">
-          <button type="button" class="brain-runtime-gates-tab brain-nav-btn active"
-                  data-pgate-view="stuck" aria-selected="true" role="tab"
-                  onclick="brainRuntimeGates.switchView('stuck')"
-                  style="padding:2px 8px;font-size:var(--brain-font-sm)">Stuck patterns</button>
-          <button type="button" class="brain-runtime-gates-tab brain-nav-btn"
-                  data-pgate-view="diff" aria-selected="false" role="tab"
-                  onclick="brainRuntimeGates.switchView('diff')"
-                  style="padding:2px 8px;font-size:var(--brain-font-sm)">Verdict diff</button>
-        </div>
-        <button type="button" id="brain-pattern-gate-refresh"
-                onclick="brainRuntimeGates.refreshPatterns()"
-                title="Reload pattern gate data"
-                style="margin-left:auto;padding:2px 10px;font-size:var(--brain-font-sm);cursor:pointer">
-          Refresh
-        </button>
-      </div>
-      <div id="brain-pattern-gate-status" style="font-size:var(--brain-font-sm);color:var(--text-muted);margin-bottom:6px">
-        Click Refresh to load.
-      </div>
-
-      <div id="brain-pattern-gate-view-stuck" class="brain-pattern-gate-view" role="tabpanel">
-        <div style="font-size:var(--brain-font-sm);color:var(--text-muted);margin-bottom:4px">
-          Patterns with &ge;30 PTR rows but no CPCV verdict (dispatcher residue).
-        </div>
-        <div style="overflow-x:auto;max-height:240px;overflow-y:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:var(--brain-font-sm)">
-            <thead>
-              <tr style="text-align:left;border-bottom:1px solid var(--border)">
-                <th style="padding:4px 6px">Pattern</th>
-                <th style="padding:4px 6px">Stage</th>
-                <th style="padding:4px 6px;text-align:right">PTR rows</th>
-                <th style="padding:4px 6px">Last backtest</th>
-              </tr>
-            </thead>
-            <tbody id="brain-pattern-gate-stuck-tbody">
-              <tr><td colspan="4" style="padding:6px;color:var(--text-muted)">No data loaded.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div id="brain-pattern-gate-view-diff" class="brain-pattern-gate-view" role="tabpanel" style="display:none">
-        <div style="font-size:var(--brain-font-sm);color:var(--text-muted);margin-bottom:4px">
-          Legacy vs adaptive CPCV verdict (most-recent eval per pattern).
-        </div>
-        <div id="brain-pattern-gate-diff-summary" style="font-size:var(--brain-font-sm);margin-bottom:4px"></div>
-        <div style="overflow-x:auto;max-height:240px;overflow-y:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:var(--brain-font-sm)">
-            <thead>
-              <tr style="text-align:left;border-bottom:1px solid var(--border)">
-                <th style="padding:4px 6px">Pattern</th>
-                <th style="padding:4px 6px">Legacy</th>
-                <th style="padding:4px 6px">Adaptive</th>
-                <th style="padding:4px 6px;text-align:right">DSR</th>
-                <th style="padding:4px 6px;text-align:right">PBO</th>
-                <th style="padding:4px 6px;text-align:right">Med Sh</th>
-                <th style="padding:4px 6px;text-align:right">Quality</th>
-                <th style="padding:4px 6px">Pareto</th>
-              </tr>
-            </thead>
-            <tbody id="brain-pattern-gate-diff-tbody">
-              <tr><td colspan="8" style="padding:6px;color:var(--text-muted)">No data loaded.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- Section B: Dispatch Queue Health -->
-    <div class="brain-thesis-card neutral" id="brain-dispatch-queue-card" style="padding:10px 12px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-        <span class="bs-icon" aria-hidden="true">&#x1F4E1;</span>
-        <strong style="font-size:var(--brain-font-md)">Dispatch Queue Health</strong>
-        <span id="brain-dispatch-queue-health-dot"
-              title="Queue health: green &lt;2min oldest, yellow &lt;10min, red &gt;10min"
-              style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#94a3b8"></span>
-        <span id="brain-dispatch-queue-oldest" style="font-size:var(--brain-font-sm);color:var(--text-muted)"></span>
-        <span id="brain-dispatch-queue-updated"
-              style="margin-left:auto;font-size:var(--brain-font-xs);color:var(--text-muted)"></span>
-      </div>
-      <div id="brain-dispatch-queue-totals"
-           style="display:flex;gap:12px;flex-wrap:wrap;font-size:var(--brain-font-sm);margin-bottom:6px">
-        <span><strong id="brain-dq-total-pending">--</strong> pending</span>
-        <span><strong id="brain-dq-total-processing">--</strong> processing</span>
-        <span><strong id="brain-dq-total-retry">--</strong> retry_wait</span>
-        <span><strong id="brain-dq-total-dead">--</strong> dead</span>
-      </div>
-      <div style="overflow-x:auto;max-height:200px;overflow-y:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:var(--brain-font-sm)">
-          <thead>
-            <tr style="text-align:left;border-bottom:1px solid var(--border)">
-              <th style="padding:4px 6px">event_type</th>
-              <th style="padding:4px 6px">kind</th>
-              <th style="padding:4px 6px">status</th>
-              <th style="padding:4px 6px;text-align:right">count</th>
-              <th style="padding:4px 6px;text-align:right">oldest</th>
-            </tr>
-          </thead>
-          <tbody id="brain-dispatch-queue-tbody">
-            <tr><td colspan="5" style="padding:6px;color:var(--text-muted)">Loading...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-  </div>
-</section>
-
 <script>
 (function () {
   if (window.brainRuntimeGates) return;
@@ -159,11 +44,18 @@
 
   function _setHealthDot(level) {
     var el = document.getElementById('brain-dispatch-queue-health-dot');
-    if (!el) return;
-    var color = level === 'red' ? '#f87171'
-              : level === 'yellow' ? '#facc15'
-              : '#22c55e';
-    el.style.background = color;
+    if (el) {
+      var color = level === 'red' ? '#f87171'
+                : level === 'yellow' ? '#facc15'
+                : '#22c55e';
+      el.style.background = color;
+    }
+    /* Activity-card header pill mirror */
+    var pillDot = document.getElementById('bx-queue-pill-dot');
+    if (pillDot) {
+      pillDot.classList.remove('green', 'yellow', 'red');
+      pillDot.classList.add(level === 'red' ? 'red' : level === 'yellow' ? 'yellow' : 'green');
+    }
   }
 
   function _escape(s) {
@@ -186,78 +78,95 @@
     var status = document.getElementById('brain-pattern-gate-status');
     if (status) status.textContent = 'Loading...';
 
-    fetch('/api/brain/patterns/ptr-ready-but-ungated', { credentials: 'same-origin' })
+    var stuckPromise = fetch('/api/brain/patterns/ptr-ready-but-ungated', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         var tbody = document.getElementById('brain-pattern-gate-stuck-tbody');
-        if (!tbody) return;
-        if (!d || d.ok === false) {
-          tbody.innerHTML = '<tr><td colspan="4" style="padding:6px;color:#f87171">Error: ' + _escape((d && d.error) || 'unknown') + '</td></tr>';
-          return;
+        if (tbody) {
+          if (!d || d.ok === false) {
+            tbody.innerHTML = '<tr><td colspan="4" style="padding:6px;color:#f87171">Error: ' + _escape((d && d.error) || 'unknown') + '</td></tr>';
+          } else {
+            var rows = d.patterns || [];
+            if (!rows.length) {
+              tbody.innerHTML = '<tr><td colspan="4" style="padding:6px;color:var(--text-muted)">No stuck patterns. (' + _escape(d.count) + ' total)</td></tr>';
+            } else {
+              tbody.innerHTML = rows.map(function (p) {
+                return '<tr style="border-bottom:1px solid var(--border-faint,rgba(0,0,0,.05))">' +
+                  '<td style="padding:4px 6px">' + _escape(p.name) + ' <span style="color:var(--text-muted)">#' + _escape(p.pattern_id) + '</span></td>' +
+                  '<td style="padding:4px 6px">' + _escape(p.lifecycle_stage || '--') + '</td>' +
+                  '<td style="padding:4px 6px;text-align:right">' + _escape(p.ptr_rows) + '</td>' +
+                  '<td style="padding:4px 6px">' + _escape(_shortDate(p.last_backtest_at)) + '</td>' +
+                  '</tr>';
+              }).join('');
+            }
+          }
         }
-        var rows = d.patterns || [];
-        if (!rows.length) {
-          tbody.innerHTML = '<tr><td colspan="4" style="padding:6px;color:var(--text-muted)">No stuck patterns. (' + _escape(d.count) + ' total)</td></tr>';
-        } else {
-          tbody.innerHTML = rows.map(function (p) {
-            return '<tr style="border-bottom:1px solid var(--border-faint,rgba(0,0,0,.05))">' +
-              '<td style="padding:4px 6px">' + _escape(p.name) + ' <span style="color:var(--text-muted)">#' + _escape(p.pattern_id) + '</span></td>' +
-              '<td style="padding:4px 6px">' + _escape(p.lifecycle_stage || '--') + '</td>' +
-              '<td style="padding:4px 6px;text-align:right">' + _escape(p.ptr_rows) + '</td>' +
-              '<td style="padding:4px 6px">' + _escape(_shortDate(p.last_backtest_at)) + '</td>' +
-              '</tr>';
-          }).join('');
-        }
+        return d || {};
       })
-      .catch(function (e) {
+      .catch(function () {
         var tbody = document.getElementById('brain-pattern-gate-stuck-tbody');
         if (tbody) tbody.innerHTML = '<tr><td colspan="4" style="padding:6px;color:#f87171">Fetch failed</td></tr>';
+        return {};
       });
 
-    fetch('/api/brain/patterns/cpcv-verdict-diff', { credentials: 'same-origin' })
+    var diffPromise = fetch('/api/brain/patterns/cpcv-verdict-diff', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         var tbody = document.getElementById('brain-pattern-gate-diff-tbody');
         var summary = document.getElementById('brain-pattern-gate-diff-summary');
-        if (!tbody) return;
-        if (!d || d.ok === false) {
-          tbody.innerHTML = '<tr><td colspan="8" style="padding:6px;color:#f87171">Error: ' + _escape((d && d.error) || 'unknown') + '</td></tr>';
-          if (summary) summary.textContent = '';
-          return;
+        if (tbody) {
+          if (!d || d.ok === false) {
+            tbody.innerHTML = '<tr><td colspan="8" style="padding:6px;color:#f87171">Error: ' + _escape((d && d.error) || 'unknown') + '</td></tr>';
+            if (summary) summary.textContent = '';
+          } else {
+            if (summary) {
+              summary.innerHTML = 'Agree: <strong>' + _escape(d.agree) + '</strong>' +
+                                  ' &middot; Disagree: <strong style="color:' + (d.disagree ? '#facc15' : 'inherit') + '">' + _escape(d.disagree) + '</strong>' +
+                                  ' &middot; Total: <strong>' + _escape(d.count) + '</strong>';
+            }
+            var rows = d.patterns || [];
+            if (!rows.length) {
+              tbody.innerHTML = '<tr><td colspan="8" style="padding:6px;color:var(--text-muted)">No adaptive-eval data. (Flag may be off.)</td></tr>';
+            } else {
+              tbody.innerHTML = rows.map(function (p) {
+                var paretoTxt = p.pareto_dominant === null ? '--'
+                              : (p.pareto_dominant ? 'yes' : 'no');
+                return '<tr style="border-bottom:1px solid var(--border-faint,rgba(0,0,0,.05))">' +
+                  '<td style="padding:4px 6px">' + _escape(p.name) + ' <span style="color:var(--text-muted)">#' + _escape(p.pattern_id) + '</span></td>' +
+                  '<td style="padding:4px 6px">' + _verdictBadge(p.legacy_pass) + '</td>' +
+                  '<td style="padding:4px 6px">' + _verdictBadge(p.adaptive_pass) + '</td>' +
+                  '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtNumber(p.shrunken_dsr)) + '</td>' +
+                  '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtNumber(p.shrunken_pbo)) + '</td>' +
+                  '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtNumber(p.shrunken_med_sharpe)) + '</td>' +
+                  '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtNumber(p.composite_score, 3)) + '</td>' +
+                  '<td style="padding:4px 6px">' + _escape(paretoTxt) + '</td>' +
+                  '</tr>';
+              }).join('');
+            }
+          }
         }
-        if (summary) {
-          summary.innerHTML = 'Agree: <strong>' + _escape(d.agree) + '</strong>' +
-                              ' &middot; Disagree: <strong style="color:' + (d.disagree ? '#facc15' : 'inherit') + '">' + _escape(d.disagree) + '</strong>' +
-                              ' &middot; Total: <strong>' + _escape(d.count) + '</strong>';
-        }
-        var rows = d.patterns || [];
-        if (!rows.length) {
-          tbody.innerHTML = '<tr><td colspan="8" style="padding:6px;color:var(--text-muted)">No adaptive-eval data. (Flag may be off.)</td></tr>';
-        } else {
-          tbody.innerHTML = rows.map(function (p) {
-            var paretoTxt = p.pareto_dominant === null ? '--'
-                          : (p.pareto_dominant ? 'yes' : 'no');
-            return '<tr style="border-bottom:1px solid var(--border-faint,rgba(0,0,0,.05))">' +
-              '<td style="padding:4px 6px">' + _escape(p.name) + ' <span style="color:var(--text-muted)">#' + _escape(p.pattern_id) + '</span></td>' +
-              '<td style="padding:4px 6px">' + _verdictBadge(p.legacy_pass) + '</td>' +
-              '<td style="padding:4px 6px">' + _verdictBadge(p.adaptive_pass) + '</td>' +
-              '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtNumber(p.shrunken_dsr)) + '</td>' +
-              '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtNumber(p.shrunken_pbo)) + '</td>' +
-              '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtNumber(p.shrunken_med_sharpe)) + '</td>' +
-              '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtNumber(p.composite_score, 3)) + '</td>' +
-              '<td style="padding:4px 6px">' + _escape(paretoTxt) + '</td>' +
-              '</tr>';
-          }).join('');
-        }
+        return d || {};
       })
       .catch(function () {
         var tbody = document.getElementById('brain-pattern-gate-diff-tbody');
         if (tbody) tbody.innerHTML = '<tr><td colspan="8" style="padding:6px;color:#f87171">Fetch failed</td></tr>';
-      })
-      .finally(function () {
-        var st = document.getElementById('brain-pattern-gate-status');
-        if (st) st.textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
+        return {};
       });
+
+    return Promise.all([stuckPromise, diffPromise]).then(function (results) {
+      var stuckData = results[0] || {};
+      var diffData  = results[1] || {};
+      var stuckCount = (stuckData.patterns && stuckData.patterns.length) || 0;
+      var disagree   = diffData.disagree || 0;
+
+      var summaryText = document.getElementById('bx-pattern-gate-summary-text');
+      if (summaryText) {
+        summaryText.innerHTML = 'Pattern gates &mdash; ' + stuckCount + ' stuck &middot; ' + disagree + ' disagree';
+      }
+
+      var st = document.getElementById('brain-pattern-gate-status');
+      if (st) st.textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
+    });
   }
 
   function refreshQueueDepth() {
@@ -265,9 +174,8 @@
       .then(function (r) { return r.json(); })
       .then(function (d) {
         var tbody = document.getElementById('brain-dispatch-queue-tbody');
-        if (!tbody) return;
         if (!d || d.ok === false) {
-          tbody.innerHTML = '<tr><td colspan="5" style="padding:6px;color:#f87171">Error: ' + _escape((d && d.error) || 'unknown') + '</td></tr>';
+          if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="padding:6px;color:#f87171">Error: ' + _escape((d && d.error) || 'unknown') + '</td></tr>';
           _setHealthDot('red');
           return;
         }
@@ -289,19 +197,28 @@
         var upd = document.getElementById('brain-dispatch-queue-updated');
         if (upd) upd.textContent = 'updated ' + new Date().toLocaleTimeString();
 
+        /* Sticky header pill mirror */
+        var pillText = document.getElementById('bx-queue-pill-text');
+        if (pillText) {
+          var pendN = (totals.pending == null ? 0 : Number(totals.pending));
+          pillText.textContent = 'Queue ' + pendN + ' pending';
+        }
+
         var buckets = d.buckets || [];
-        if (!buckets.length) {
-          tbody.innerHTML = '<tr><td colspan="5" style="padding:6px;color:var(--text-muted)">Queue empty.</td></tr>';
-        } else {
-          tbody.innerHTML = buckets.map(function (b) {
-            return '<tr style="border-bottom:1px solid var(--border-faint,rgba(0,0,0,.05))">' +
-              '<td style="padding:4px 6px">' + _escape(b.event_type) + '</td>' +
-              '<td style="padding:4px 6px">' + _escape(b.event_kind) + '</td>' +
-              '<td style="padding:4px 6px">' + _escape(b.status) + '</td>' +
-              '<td style="padding:4px 6px;text-align:right">' + _escape(b.count) + '</td>' +
-              '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtAge(b.oldest_age_seconds)) + '</td>' +
-              '</tr>';
-          }).join('');
+        if (tbody) {
+          if (!buckets.length) {
+            tbody.innerHTML = '<tr><td colspan="5" style="padding:6px;color:var(--text-muted)">Queue empty.</td></tr>';
+          } else {
+            tbody.innerHTML = buckets.map(function (b) {
+              return '<tr style="border-bottom:1px solid var(--border-faint,rgba(0,0,0,.05))">' +
+                '<td style="padding:4px 6px">' + _escape(b.event_type) + '</td>' +
+                '<td style="padding:4px 6px">' + _escape(b.event_kind) + '</td>' +
+                '<td style="padding:4px 6px">' + _escape(b.status) + '</td>' +
+                '<td style="padding:4px 6px;text-align:right">' + _escape(b.count) + '</td>' +
+                '<td style="padding:4px 6px;text-align:right">' + _escape(_fmtAge(b.oldest_age_seconds)) + '</td>' +
+                '</tr>';
+            }).join('');
+          }
         }
       })
       .catch(function () {
@@ -327,12 +244,14 @@
 
   function start() {
     refreshQueueDepth();
+    refreshPatterns();
     if (_timer) clearInterval(_timer);
     _timer = setInterval(refreshQueueDepth, POLL_MS);
   }
 
   window.brainRuntimeGates = {
     refreshPatterns: refreshPatterns,
+    refreshQueueDepth: refreshQueueDepth,
     switchView: switchView,
     start: start,
   };

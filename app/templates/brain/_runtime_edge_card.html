@@ -1,0 +1,55 @@
+<!--
+  Runtime tab redesign 2026-05-23 (Phase B): Today's Edge above-the-fold card.
+  Contents (moved from _trading_opportunities.html):
+    - Opportunity board (Tier A/B/C/D + banners + operator strip)
+    - Speculative movers as a collapsed accordion
+  All inner ids preserved verbatim so the existing loaders (loadOpportunityBoard,
+  oppExpandTier, renderSpeculativeMoversPanel, setOppStatusChips) keep working.
+-->
+<section class="bx-edge-card" id="bx-edge-card" aria-label="Today's Edge">
+  <header class="bx-card-header">
+    <span class="bs-icon" aria-hidden="true">&#x1F3AF;</span>
+    <strong>Today&rsquo;s Edge</strong>
+    <span class="bx-card-header-hint">Tier A&ndash;C = core repeatable edge engine. Tier D = pattern incubation.</span>
+    <button type="button" class="bx-card-refresh" onclick="loadOpportunityBoard()" title="Reload board from server">Refresh</button>
+  </header>
+
+  <div class="brain-section" id="brain-opportunity-board" style="margin-top:8px;padding:0">
+    <div id="opp-stale-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);font-size:11px;color:#b45309"></div>
+    <div id="opp-refresh-failed-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);font-size:11px;color:#b91c1c"></div>
+    <div id="opp-operator-strip" style="font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
+      <span id="opp-op-sum">Loading opportunity board&hellip;</span>
+    </div>
+    <div id="opp-no-trade" style="display:none;font-size:11px;color:var(--text-muted);margin-bottom:10px;padding:10px;border:1px dashed var(--border);border-radius:8px"></div>
+
+    <div id="opp-tier-a-wrap" style="margin-bottom:12px">
+      <div style="font-size:10px;font-weight:700;color:#22c55e;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier A &mdash; Actionable now</div>
+      <div id="opp-tier-a"></div>
+      <button type="button" id="opp-more-a" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('A')">Show more</button>
+    </div>
+    <details id="opp-tier-b-wrap" open style="margin-bottom:12px">
+      <summary style="font-size:10px;font-weight:700;color:#38bdf8;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em;cursor:pointer">Tier B &mdash; Watch soon</summary>
+      <div id="opp-tier-b"></div>
+      <button type="button" id="opp-more-b" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('B')">Show more</button>
+    </details>
+    <details id="opp-tier-c-wrap" style="margin-bottom:12px">
+      <summary style="font-size:10px;font-weight:700;color:#a78bfa;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em;cursor:pointer">Tier C &mdash; Watch today / context</summary>
+      <div id="opp-tier-c"></div>
+      <button type="button" id="opp-more-c" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('C')">Show more</button>
+    </details>
+    <div id="opp-tier-d-wrap" style="display:none;margin-bottom:12px">
+      <div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier D &mdash; Pattern incubation</div>
+      <div id="opp-tier-d"></div>
+    </div>
+  </div>
+
+  <details class="bx-edge-card-accordion spec-movers-section" id="speculative-movers-section">
+    <summary>
+      <span class="bs-icon" aria-hidden="true">&#x1F680;</span>
+      <strong>Explosive / speculative movers</strong>
+      <span class="bx-card-header-hint" style="font-weight:500">Separate heuristic plane &mdash; do not blind-chase.</span>
+    </summary>
+    <p style="font-size:10px;color:var(--text-muted);margin:6px 0 8px 0;line-height:1.45" id="spec-movers-methodology"></p>
+    <div id="spec-movers-body" style="font-size:11px;color:var(--text-muted)">Loads with the opportunity board&hellip;</div>
+  </details>
+</section>

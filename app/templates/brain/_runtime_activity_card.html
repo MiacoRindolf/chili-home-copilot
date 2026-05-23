@@ -1,0 +1,64 @@
+<!--
+  Runtime tab redesign 2026-05-23 (Phase B): Brain Activity above-the-fold card.
+  Re-homes:
+    - brain-learning-step / brain-learning-progress / brain-progress-bar (preserved ids)
+    - brain-work-ledger-strip / brain-work-ledger-text (preserved ids)
+  Adds:
+    - bx-queue-summary (pending/processing/retry/dead pills — inner ids brain-dq-total-*
+      remain preserved and are written by the runtime-gates IIFE)
+    - bx-pattern-gate-summary (headline written by the runtime-gates IIFE)
+    - bx-open-diagnostics-btn (opens the slide-in diagnostics drawer)
+-->
+<section class="bx-activity-card" id="bx-activity-card" aria-label="Brain Activity">
+  <header class="bx-card-header">
+    <span class="bs-icon" aria-hidden="true">&#x1F9E0;</span>
+    <strong>Brain Activity</strong>
+    <span class="bx-card-header-hint">Live worker step + queue + gates.</span>
+  </header>
+
+  <div class="bx-activity-step" id="brain-pipeline-section" style="display:none;margin-top:8px">
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <span id="brain-learning-step" class="bx-current-step" style="font-size:11px;font-weight:600;color:#a78bfa">&mdash;</span>
+      <span id="brain-learning-progress" style="font-size:10px;color:var(--text-muted)"></span>
+    </div>
+    <div class="bx-progress-track" style="height:3px;background:var(--border);border-radius:2px;margin-top:6px">
+      <div id="brain-progress-bar" style="height:100%;background:var(--brain-gradient-progress);border-radius:2px;transition:var(--brain-transition-bar);width:0%"></div>
+    </div>
+  </div>
+
+  <div id="brain-work-ledger-strip" class="bx-work-ledger" style="display:none;margin-top:8px;padding:6px 8px;border-radius:6px;background:var(--bg-secondary, rgba(0,0,0,.04));border:1px solid var(--border);font-size:10px;color:var(--text-secondary);line-height:1.4">
+    <span style="font-weight:700;color:var(--text-muted);text-transform:uppercase;font-size:9px;letter-spacing:.04em">Brain activity</span>
+    <span id="brain-work-ledger-text" style="margin-left:8px">--</span>
+  </div>
+
+  <div class="bx-queue-summary" id="bx-queue-summary" aria-label="Dispatch queue summary">
+    <button type="button" class="bx-queue-pill-tile pending" id="bx-queue-tile-pending" onclick="openBxDiagnosticsDrawer('queue')" title="Pending events">
+      <span class="bx-queue-tile-val" id="brain-dq-total-pending">--</span>
+      <span class="bx-queue-tile-lbl">pending</span>
+    </button>
+    <button type="button" class="bx-queue-pill-tile processing" id="bx-queue-tile-processing" onclick="openBxDiagnosticsDrawer('queue')" title="Processing">
+      <span class="bx-queue-tile-val" id="brain-dq-total-processing">--</span>
+      <span class="bx-queue-tile-lbl">processing</span>
+    </button>
+    <button type="button" class="bx-queue-pill-tile retry" id="bx-queue-tile-retry" onclick="openBxDiagnosticsDrawer('queue')" title="Retry-wait">
+      <span class="bx-queue-tile-val" id="brain-dq-total-retry">--</span>
+      <span class="bx-queue-tile-lbl">retry</span>
+    </button>
+    <button type="button" class="bx-queue-pill-tile dead" id="bx-queue-tile-dead" onclick="openBxDiagnosticsDrawer('queue')" title="Dead-lettered">
+      <span class="bx-queue-tile-val" id="brain-dq-total-dead">--</span>
+      <span class="bx-queue-tile-lbl">dead</span>
+    </button>
+  </div>
+
+  <button type="button" class="bx-pattern-gate-summary" id="bx-pattern-gate-summary" onclick="openBxDiagnosticsDrawer('patterns')" aria-label="Open pattern gate diagnostics">
+    <span class="bs-icon" aria-hidden="true">&#x1F6E1;</span>
+    <span class="bx-pgs-text" id="bx-pattern-gate-summary-text">Pattern gates &mdash; loading&hellip;</span>
+    <span class="bx-pgs-chevron" aria-hidden="true">&rsaquo;</span>
+  </button>
+
+  <div class="bx-activity-footer">
+    <button type="button" class="bx-ctrl-btn" id="bx-open-diagnostics-btn" onclick="openBxDiagnosticsDrawer()">
+      <span aria-hidden="true">&#x1F50D;</span> Open diagnostics
+    </button>
+  </div>
+</section>
