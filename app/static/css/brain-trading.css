@@ -375,6 +375,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   .bx-diagnostics-drawer { width: 100vw; }
 }
 
+/* ── Reduced motion: drawer opens/closes instantly (no slide, no fade) ── */
+@media (prefers-reduced-motion: reduce) {
+  .bx-diagnostics-drawer,
+  .bx-diagnostics-drawer-backdrop {
+    transition: none;
+  }
+}
+
 
 /* â”€â”€ Layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .b-header {
