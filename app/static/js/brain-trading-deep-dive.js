@@ -4,10 +4,12 @@ var _bddActiveTab = null;
 
 function switchDeepDiveTab(tab) {
   _bddActiveTab = tab;
-  document.querySelectorAll('#bdd-tabs .bdd-tab').forEach(function(btn) {
-    btn.classList.toggle('active', btn.getAttribute('data-bdd') === tab);
+  document.querySelectorAll('#bx-drilldown-tabs .bx-drilldown-tab').forEach(function(btn) {
+    var on = btn.getAttribute('data-bdd') === tab;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
   });
-  document.querySelectorAll('#bdd-content .bdd-panel').forEach(function(p) {
+  document.querySelectorAll('#bx-drilldown-content .bx-drilldown-panel').forEach(function(p) {
     p.style.display = p.id === ('bdd-' + tab) ? '' : 'none';
   });
   if (!_bddLoaded[tab]) {
@@ -24,6 +26,13 @@ function switchDeepDiveTab(tab) {
       _wireOpsTab();
       _startOpsPolling();
     } else if (tab === 'research') {
+      /* bx-research-extras (re-homed from Opportunities panel, phase C) */
+      if (typeof loadPlaybook === 'function') loadPlaybook();
+      if (typeof loadPerfDashboard === 'function') loadPerfDashboard();
+      if (typeof loadShadowPromotedPatterns === 'function') loadShadowPromotedPatterns();
+      if (typeof loadBrainPredictions === 'function') loadBrainPredictions();
+      if (typeof loadTradeablePatterns === 'function') loadTradeablePatterns();
+      if (typeof loadResearchEdgePatterns === 'function') loadResearchEdgePatterns();
       _loadResearchData();
     } else if (tab === 'analytics') {
       loadBrainThesis();

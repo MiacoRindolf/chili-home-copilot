@@ -604,20 +604,16 @@ var brainPollInterval = null;
 var _predShowAll = false, _PRED_INITIAL = 30;
 
 function loadBrainDashboard() {
-  /* Zone 1: status bar â€” worker status + regime chip */
+  /* Runtime tab redesign 2026-05-23 (Phase C):
+   * Above-the-fold loaders run here unconditionally (header + edge card +
+   * thesis). Research-tab-only loaders (playbook, perf, predictions, tradeable,
+   * research-edge, shadow-promoted) are now lazy and fire from switchDeepDiveTab('research').
+   */
   startBwPolling();
   _loadRegimeChip();
-
-  /* Zone 2: Playbook + P&L + Predictions + Tradeable */
-  loadPlaybook();
-  loadPerfDashboard();
   loadOpportunityBoard();
-  loadBrainPredictions();
-  loadShadowPromotedPatterns();
-  loadTradeablePatterns();
-  loadResearchEdgePatterns();
 
-  /* Polling: learning status (status bar only) */
+  /* Polling: learning status (header pipeline) */
   pollLearningStatus().catch(function(){});
   if (brainPollInterval) clearInterval(brainPollInterval);
   brainPollInterval = setInterval(function() {
@@ -627,11 +623,13 @@ function loadBrainDashboard() {
   /* Opportunity board: soft auto-refresh while tab visible (no overlap with in-flight; see loadOpportunityBoard) */
   _schedOppBoardSoftAutoRefresh();
 
-  /* Tradeable auto-refresh */
+  /* Tradeable auto-refresh remains scheduled but only fires updates when the Research tab is mounted (loaders check element presence). */
   if (window._tradeablePatternsInterval) clearInterval(window._tradeablePatternsInterval);
   window._tradeablePatternsInterval = setInterval(function() {
-    loadShadowPromotedPatterns();
-    loadTradeablePatterns();
+    if (_bddActiveTab === 'research') {
+      loadShadowPromotedPatterns();
+      loadTradeablePatterns();
+    }
   }, 120000);
 
   /* Reset deep-dive tab state so tabs lazy-load fresh */

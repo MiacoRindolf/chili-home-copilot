@@ -19,7 +19,7 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
 window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
 </script>
 
-<a href="#brain-panel-overview" class="skip-nav">Skip to main content</a>
+<a href="#bx-runtime-header" class="skip-nav">Skip to main content</a>
 {% include "brain/_header.html" %}
 
 <div class="b-body">
@@ -77,35 +77,9 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       <!-- Runtime gates polling IIFE (markup moved to drawer; script targets ids by getElementById) -->
       {% include "brain/_trading_runtime_gates.html" %}
 
-      <!-- Section navigation (deprecated in phase C; retained through phase B) -->
-      <nav class="brain-section-nav" id="brain-section-nav" role="tablist" aria-label="Trading brain sections">
-        <button class="brain-nav-btn active" data-panel="overview" role="tab" aria-selected="true" onclick="switchBrainPanel('overview')">Overview</button>
-        <button class="brain-nav-btn" data-panel="opportunities" role="tab" aria-selected="false" onclick="switchBrainPanel('opportunities')">Opportunities</button>
-        <button class="brain-nav-btn" data-panel="deep-dive" role="tab" aria-selected="false" onclick="switchBrainPanel('deep-dive')">Deep Dive</button>
-      </nav>
-
-      <!-- Panel: Overview (operator desk removed in phase A; cards now live above the fold) -->
-      <div class="brain-content-panel active" id="brain-panel-overview" role="tabpanel">
-      <div class="trading-main-content">
-        <div style="font-size:11px;color:var(--text-muted);padding:24px 8px;text-align:center">
-          Overview is now above the fold &mdash; see Today&rsquo;s Edge + Brain Activity cards at the top. Drill-down content lives under <a href="#" onclick="switchBrainPanel('deep-dive');return false;" style="color:var(--accent)">Deep Dive</a>.
-        </div>
-      </div>
-      </div>
-
-      <!-- Panel: Opportunities (board + speculative movers + predictions + tradeable + research edge) -->
-      <div class="brain-content-panel" id="brain-panel-opportunities" role="tabpanel">
-      <div class="trading-main-content">
-        {% include "brain/_trading_opportunities.html" %}
-        {% include "brain/_trading_sections.html" %}
-      </div>
-      </div>
-
-      <!-- Panel: Deep Dive (patterns, cycles, ops, research, analytics, debug) -->
-      <div class="brain-content-panel" id="brain-panel-deep-dive" role="tabpanel">
+      <!-- Single drill-down tabstrip (Patterns / Cycles / Operations / Research / Analytics / Debug) -->
       <div class="trading-main-content">
         {% include "brain/_trading_deep_dive.html" %}
-      </div>
       </div>
 
       </div>

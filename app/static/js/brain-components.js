@@ -163,11 +163,11 @@ function brainFetch(url, opts) {
 }
 
 /* ── Loading state helpers ── */
-/* ── Keyboard navigation for section nav ── */
+/* ── Keyboard navigation for drill-down tabstrip (Runtime tab redesign 2026-05-23) ── */
 document.addEventListener('keydown', function(e) {
-  var nav = document.getElementById('brain-section-nav');
+  var nav = document.getElementById('bx-drilldown-tabs');
   if (!nav || !nav.contains(document.activeElement)) return;
-  var btns = Array.prototype.slice.call(nav.querySelectorAll('.brain-nav-btn'));
+  var btns = Array.prototype.slice.call(nav.querySelectorAll('.bx-drilldown-tab'));
   var idx = btns.indexOf(document.activeElement);
   if (idx < 0) return;
   var next = -1;
