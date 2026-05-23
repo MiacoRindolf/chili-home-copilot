@@ -13,7 +13,8 @@ Integration (DB; ``_test``-suffixed):
   - first cycle stages all adaptive-passed candidates for observation
   - eligibility allows thin/no directional evidence for shadow-observation bootstrap
   - eligibility trusts the adaptive CPCV verdict instead of a median-sharpe floor
-  - eligibility excludes promotion_gate_passed False
+  - strict eligibility excludes promotion_gate_passed False
+  - bootstrap eligibility admits top pool-relative gate-failed near-misses
   - eligibility excludes already-shadow_promoted / promoted / live
   - observation staging ignores pilot/full roster target
   - tied scores → tiebreaker by id ASC
@@ -57,6 +58,10 @@ def _settings_stub(**overrides):
         chili_cohort_score_weight_pbo_inverse=0.15,
         chili_cohort_score_weight_directional_wr=0.25,
         chili_cohort_score_weight_decay_inverse=0.10,
+        chili_cohort_promote_bootstrap_near_miss_enabled=True,
+        chili_cohort_promote_bootstrap_min_cpcv_sharpe=0.0,
+        chili_cohort_promote_bootstrap_min_deflated_sharpe=0.0,
+        chili_cohort_promote_bootstrap_max_pbo=1.0,
         chili_cpcv_target_promotion_pool_pct=1.0,
     )
     base.update(overrides)
@@ -431,14 +436,16 @@ def test_eligibility_recovers_stale_challenged_when_adaptive_gate_passes(db):
         quality_score=0.8,
         promotion_gate=False,
     )
-    cfg = _settings_stub()
+    cfg = _settings_stub(
+        chili_cohort_promote_bootstrap_near_miss_enabled=False,
+    )
     candidates = select_cohort_candidates(db, settings_=cfg)
     cand_ids = {p.id for p in candidates}
     assert p_challenged_now_passed.id in cand_ids
     assert p_challenged_still_failed.id not in cand_ids
 
 
-def test_eligibility_filter_excludes_promotion_gate_failed(db):
+def test_strict_eligibility_filter_excludes_promotion_gate_failed(db):
     _truncate_phase4_state(db)
     p_passed = _make_pattern(
         db, name="passed", promotion_gate=True, quality_score=0.7,
@@ -452,11 +459,62 @@ def test_eligibility_filter_excludes_promotion_gate_failed(db):
     _seed_directional_outcomes(
         db, pattern_id=p_failed.id, n_correct=20, n_incorrect=10,
     )
-    cfg = _settings_stub()
+    cfg = _settings_stub(
+        chili_cohort_promote_bootstrap_near_miss_enabled=False,
+    )
     candidates = select_cohort_candidates(db, settings_=cfg)
     cand_ids = {p.id for p in candidates}
     assert p_passed.id in cand_ids
     assert p_failed.id not in cand_ids
+
+
+def test_bootstrap_near_miss_admits_top_pool_relative_gate_failures(db):
+    _truncate_phase4_state(db)
+    p_passed = _make_pattern(
+        db,
+        name="gate_passed_mid_pool",
+        promotion_gate=True,
+        quality_score=None,
+        cpcv=1.0,
+        dsr=0.6,
+        pbo=0.5,
+    )
+    p_near_miss = _make_pattern(
+        db,
+        name="bootstrap_near_miss",
+        promotion_gate=False,
+        quality_score=None,
+        cpcv=3.0,
+        dsr=1.5,
+        pbo=0.0,
+    )
+    p_weak = _make_pattern(
+        db,
+        name="weak_gate_failed",
+        promotion_gate=False,
+        quality_score=None,
+        cpcv=-1.0,
+        dsr=0.0,
+        pbo=0.95,
+    )
+    p_wrong_sign = _make_pattern(
+        db,
+        name="wrong_sign_dsr",
+        promotion_gate=False,
+        quality_score=None,
+        cpcv=4.0,
+        dsr=0.0,
+        pbo=0.0,
+    )
+
+    cfg = _settings_stub(chili_cpcv_target_promotion_pool_pct=0.5)
+    candidates = select_cohort_candidates(db, settings_=cfg)
+    cand_ids = [p.id for p in candidates]
+    assert p_near_miss.id in cand_ids
+    assert p_passed.id in cand_ids
+    assert p_weak.id not in cand_ids
+    assert p_wrong_sign.id not in cand_ids
+    assert cand_ids.index(p_near_miss.id) < cand_ids.index(p_passed.id)
 
 
 def test_eligibility_filter_excludes_promoted_and_shadow_promoted(db):

@@ -2808,6 +2808,36 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_ENABLED"),
     )
+    # Discovery bootstrap: the cohort job may advance top pool-relative CPCV
+    # near-misses into broker-blocked ``shadow_promoted`` even when the stored
+    # promotion_gate_passed flag is stale/false. This is not broker risk; it
+    # only lets the imminent scanner collect directional evidence so shadow
+    # vetting can decide whether the pattern deserves a pilot.
+    chili_cohort_promote_bootstrap_near_miss_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_PROMOTE_BOOTSTRAP_NEAR_MISS_ENABLED"
+        ),
+    )
+    # Sign-based floors for the discovery bootstrap lane. These are deliberately
+    # not high confidence gates; they only keep the near-miss lane from staging
+    # patterns whose CPCV/DSR/PBO evidence has the wrong sign.
+    chili_cohort_promote_bootstrap_min_cpcv_sharpe: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_PROMOTE_BOOTSTRAP_MIN_CPCV_SHARPE"
+        ),
+    )
+    chili_cohort_promote_bootstrap_min_deflated_sharpe: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_PROMOTE_BOOTSTRAP_MIN_DEFLATED_SHARPE"
+        ),
+    )
+    chili_cohort_promote_bootstrap_max_pbo: float = Field(
+        default=1.0,
+        validation_alias=AliasChoices("CHILI_COHORT_PROMOTE_BOOTSTRAP_MAX_PBO"),
+    )
     chili_cohort_score_weight_cpcv_sharpe: float = Field(
         default=0.10,
         validation_alias=AliasChoices(

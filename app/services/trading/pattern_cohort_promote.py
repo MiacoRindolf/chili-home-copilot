@@ -1,22 +1,24 @@
 """f-promotion-pipeline-rebalance Phase 4 (2026-05-10).
 
 Adaptive cohort auto-promote. Ranks eligible candidates by composite score
-when available, then CPCV strength, and advances every adaptive-gate-passed
-candidate to broker-blocked observation. Candidates move first to
-``shadow_promoted``; they do not jump directly to ``promoted`` / ``live``.
+when available, then CPCV strength, and advances adaptive-gate-passed plus
+top bootstrap near-miss candidates to broker-blocked observation. Candidates
+move first to ``shadow_promoted``; they do not jump directly to ``promoted`` /
+``live``.
 
 Eligibility filter
 ------------------
 
-A pattern is eligible if and ONLY if:
+A pattern is eligible for broker-blocked observation if:
 
 - ``active=True``
 - ``lifecycle_stage IN ('backtested', 'candidate')``, plus stale
   ``challenged`` rows whose adaptive CPCV verdict now passes
-- ``promotion_gate_passed=True``
 - ``cpcv_median_sharpe`` is non-NULL
 - ``deflated_sharpe`` is non-NULL
 - ``pbo`` is non-NULL
+- either ``promotion_gate_passed=True`` OR the pool-relative bootstrap policy
+  ranks the pattern as a top CPCV/DSR/PBO near-miss
 - directional outcomes are NOT required; ``shadow_promoted`` is the
   broker-blocked observation stage that collects them
 - ``quality_composite_score`` is optional; scored candidates rank first,
@@ -43,7 +45,9 @@ Public API
 """
 from __future__ import annotations
 
+import bisect
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -56,6 +60,139 @@ logger = logging.getLogger(__name__)
 
 
 COHORT_ELIGIBLE_LIFECYCLE_STAGES = ("backtested", "candidate", "challenged")
+
+
+def _is_number(value: Any) -> bool:
+    try:
+        return value is not None and not math.isnan(float(value))
+    except Exception:
+        return False
+
+
+def _clip(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, float(value)))
+
+
+def _empirical_percentile(values: list[float], q: float) -> float | None:
+    arr = sorted(float(v) for v in values if _is_number(v))
+    if not arr:
+        return None
+    if len(arr) == 1:
+        return arr[0]
+    pos = _clip(float(q)) * (len(arr) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return arr[lo]
+    frac = pos - lo
+    return arr[lo] * (1.0 - frac) + arr[hi] * frac
+
+
+def _rank_pct(sorted_values: list[float], value: Any) -> float:
+    """Return pool-relative percentile rank, higher-is-better input."""
+    if not _is_number(value):
+        return 0.0
+    arr = sorted_values
+    if not arr:
+        return 0.0
+    if len(arr) == 1:
+        return 1.0
+    val = float(value)
+    lo = bisect.bisect_left(arr, val)
+    hi = bisect.bisect_right(arr, val)
+    if lo == hi:
+        idx = max(0.0, min(float(len(arr) - 1), float(lo)))
+    else:
+        idx = (lo + hi - 1) / 2.0
+    return _clip(idx / (len(arr) - 1))
+
+
+def _bootstrap_weights(settings_: Any) -> dict[str, float]:
+    raw = {
+        "cpcv": max(0.0, float(getattr(
+            settings_, "chili_cohort_score_weight_cpcv_sharpe", 0.10,
+        ))),
+        "dsr": max(0.0, float(getattr(
+            settings_, "chili_cohort_score_weight_deflated_sharpe", 0.05,
+        ))),
+        "pbo_inverse": max(0.0, float(getattr(
+            settings_, "chili_cohort_score_weight_pbo_inverse", 0.05,
+        ))),
+    }
+    total = sum(raw.values())
+    if total <= 0.0:
+        return {k: 0.0 for k in raw}
+    return {k: v / total for k, v in raw.items()}
+
+
+def _bootstrap_policy(
+    records: list[dict[str, Any]],
+    *,
+    settings_: Any,
+) -> dict[str, Any]:
+    """Pool-relative CPCV discovery gate for shadow-only observation.
+
+    This intentionally does not look at live trade outcomes. Shadow promotion
+    is the mechanism that creates those outcomes, so requiring them here creates
+    a bootstrap deadlock. The operator's existing target promotion pool percent
+    controls how selective this observation lane is.
+    """
+    enabled = bool(getattr(
+        settings_, "chili_cohort_promote_bootstrap_near_miss_enabled", True,
+    ))
+    metric_ready = [
+        r for r in records
+        if all(
+            _is_number(r.get(k))
+            for k in ("cpcv_median_sharpe", "deflated_sharpe", "pbo")
+        )
+    ]
+    if not enabled or not metric_ready:
+        return {"enabled": enabled, "threshold": None, "scores": {}}
+
+    min_cpcv = float(getattr(
+        settings_, "chili_cohort_promote_bootstrap_min_cpcv_sharpe", 0.0,
+    ))
+    min_dsr = float(getattr(
+        settings_, "chili_cohort_promote_bootstrap_min_deflated_sharpe", 0.0,
+    ))
+    max_pbo = float(getattr(
+        settings_, "chili_cohort_promote_bootstrap_max_pbo", 1.0,
+    ))
+    floor_passed_ids = {
+        int(r["id"]) for r in metric_ready
+        if (
+            float(r["cpcv_median_sharpe"]) > min_cpcv
+            and float(r["deflated_sharpe"]) > min_dsr
+            and float(r["pbo"]) < max_pbo
+        )
+    }
+
+    cpcv_vals = sorted(float(r["cpcv_median_sharpe"]) for r in metric_ready)
+    dsr_vals = sorted(float(r["deflated_sharpe"]) for r in metric_ready)
+    pbo_inv_vals = sorted(1.0 - _clip(float(r["pbo"])) for r in metric_ready)
+    weights = _bootstrap_weights(settings_)
+
+    scores: dict[int, float] = {}
+    for r in metric_ready:
+        pbo_inv = 1.0 - _clip(float(r["pbo"]))
+        score = (
+            weights["cpcv"] * _rank_pct(cpcv_vals, r["cpcv_median_sharpe"])
+            + weights["dsr"] * _rank_pct(dsr_vals, r["deflated_sharpe"])
+            + weights["pbo_inverse"] * _rank_pct(pbo_inv_vals, pbo_inv)
+        )
+        scores[int(r["id"])] = _clip(score)
+
+    pct = float(getattr(settings_, "chili_cpcv_target_promotion_pool_pct", 0.05))
+    threshold = _empirical_percentile(list(scores.values()), 1.0 - _clip(pct))
+    return {
+        "enabled": enabled,
+        "threshold": threshold,
+        "scores": scores,
+        "weights": weights,
+        "metric_ready_count": len(metric_ready),
+        "floor_passed_ids": sorted(floor_passed_ids),
+    }
 
 
 def select_cohort_candidates(
@@ -93,8 +230,9 @@ def select_cohort_candidates(
     # Do not require directional outcomes here. shadow_promoted is the
     # observation stage that lets a pattern collect those outcomes without
     # broker exposure; requiring them here creates a bootstrap deadlock.
-    # Stale ``challenged`` rows are eligible only when the current adaptive
-    # verdict says they pass.
+    # Stored promotion_gate_passed is honored, and a separate pool-relative
+    # CPCV bootstrap policy can also admit near-misses for shadow-only
+    # observation when the stored gate is stale or path-count constrained.
     sql = text(
         """
         WITH realized AS (
@@ -111,12 +249,18 @@ def select_cohort_candidates(
               AND exit_date > NOW() - make_interval(days => :window_days)
             GROUP BY scan_pattern_id
         )
-        SELECT sp.id
+        SELECT
+            sp.id,
+            sp.promotion_gate_passed,
+            sp.portfolio_gate_score,
+            sp.quality_composite_score,
+            sp.cpcv_median_sharpe,
+            sp.deflated_sharpe,
+            sp.pbo
         FROM scan_patterns sp
         LEFT JOIN realized r ON r.scan_pattern_id = sp.id
         WHERE sp.active IS TRUE
           AND sp.lifecycle_stage IN ('backtested', 'candidate', 'challenged')
-          AND sp.promotion_gate_passed IS TRUE
           AND sp.cpcv_median_sharpe IS NOT NULL
           AND sp.deflated_sharpe IS NOT NULL
           AND sp.pbo IS NOT NULL
@@ -124,24 +268,58 @@ def select_cohort_candidates(
               COALESCE(r.n_realized, 0) < :min_n_floor
               OR r.avg_pnl_pct > :max_negative_pct
           )
-        ORDER BY
-          sp.portfolio_gate_score DESC NULLS LAST,
-          sp.quality_composite_score DESC NULLS LAST,
-          sp.cpcv_median_sharpe DESC NULLS LAST,
-          sp.deflated_sharpe DESC NULLS LAST,
-          sp.pbo ASC NULLS LAST,
-          sp.id ASC
         """
     )
-    rows = db.execute(
+    rows = [dict(r) for r in db.execute(
         sql,
         {
             "window_days": window_days,
             "min_n_floor": min_n_floor,
             "max_negative_pct": max_negative_pct,
         },
-    ).fetchall()
-    ids = [int(r[0]) for r in rows]
+    ).mappings().all()]
+    bootstrap = _bootstrap_policy(rows, settings_=settings_)
+    bootstrap_scores: dict[int, float] = dict(bootstrap.get("scores") or {})
+    bootstrap_threshold = bootstrap.get("threshold")
+    bootstrap_floor_ids = set(bootstrap.get("floor_passed_ids") or ())
+
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        pid = int(row["id"])
+        gate_passed = bool(row.get("promotion_gate_passed"))
+        bootstrap_score = bootstrap_scores.get(pid)
+        bootstrap_passed = (
+            bool(bootstrap.get("enabled"))
+            and pid in bootstrap_floor_ids
+            and bootstrap_score is not None
+            and bootstrap_threshold is not None
+            and float(bootstrap_score) >= float(bootstrap_threshold)
+        )
+        if not gate_passed and not bootstrap_passed:
+            continue
+        row["bootstrap_score"] = float(bootstrap_score or 0.0)
+        row["bootstrap_promoted"] = bool(bootstrap_passed and not gate_passed)
+        eligible.append(row)
+
+    def _desc_optional(value: Any) -> float:
+        return float(value) if _is_number(value) else float("-inf")
+
+    eligible.sort(
+        key=lambda r: (
+            -_desc_optional(r.get("portfolio_gate_score")),
+            -_desc_optional(r.get("quality_composite_score")),
+            -_desc_optional(r.get("bootstrap_score")),
+            -_desc_optional(r.get("cpcv_median_sharpe")),
+            -_desc_optional(r.get("deflated_sharpe")),
+            (
+                _desc_optional(r.get("pbo"))
+                if _is_number(r.get("pbo"))
+                else float("inf")
+            ),
+            int(r["id"]),
+        )
+    )
+    ids = [int(r["id"]) for r in eligible]
     if not ids:
         return []
     pats = (
