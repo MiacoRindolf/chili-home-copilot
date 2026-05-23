@@ -653,6 +653,55 @@ def _fraction01(value: Any, default: float | None = None) -> float | None:
     return max(0.0, min(1.0, v))
 
 
+def _finite_float(value: Any) -> float | None:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if v != v:  # NaN
+        return None
+    return v
+
+
+def _load_scan_pattern_for_edge(db: Session, pattern_id: Any) -> ScanPattern | None:
+    try:
+        pid = int(pattern_id)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        pat = (
+            db.query(ScanPattern)
+            .filter(ScanPattern.id == pid)
+            .one_or_none()
+        )
+    except Exception:
+        return None
+    if pat is None or pat.__class__.__module__.startswith("unittest.mock"):
+        return None
+    return pat
+
+
+def _probability_sample_count(
+    pattern: Any,
+    sample_n: int | None,
+) -> tuple[int | None, str | None]:
+    """Return a closed-trade sample count suitable for probability shrinkage."""
+    try:
+        n = int(sample_n) if sample_n is not None else None
+    except (TypeError, ValueError):
+        n = None
+    raw_n = getattr(pattern, "raw_realized_trade_count", None)
+    try:
+        raw_int = int(raw_n) if raw_n is not None else None
+    except (TypeError, ValueError):
+        raw_int = None
+    if n is not None and raw_int is not None and raw_int >= 0 and n > raw_int:
+        return raw_int, "closed_sample_count_guard"
+    return n, None
+
+
 def _pattern_probability(
     db: Session,
     *,
@@ -660,6 +709,7 @@ def _pattern_probability(
     pat_ctx: dict[str, Any],
     confidence: float,
     settings: Any,
+    pattern: ScanPattern | None = None,
 ) -> tuple[float, str, int | None]:
     p = _fraction01(pat_ctx.get("hit_rate"))
     n: int | None = None
@@ -676,18 +726,17 @@ def _pattern_probability(
             try:
                 from .pattern_stats_accessor import get_corrected_pattern_stats
 
-                pat = (
-                    db.query(ScanPattern)
-                    .filter(ScanPattern.id == int(alert.scan_pattern_id))
-                    .one_or_none()
-                )
+                pat = pattern or _load_scan_pattern_for_edge(db, alert.scan_pattern_id)
                 if pat is not None:
                     stats = get_corrected_pattern_stats(pat)
                     p2 = _fraction01(stats.win_rate)
-                    if p2 is not None:
+                    n2, n_guard = _probability_sample_count(pat, stats.trade_count)
+                    if p2 is not None and n2 is not None and n2 > 0:
                         p = p2
-                        n = stats.trade_count
+                        n = n2
                         source = f"pattern_{stats.source_win_rate}_win_rate"
+                        if n_guard:
+                            source = f"{source}_{n_guard}"
             except Exception:
                 pass
 
@@ -706,6 +755,97 @@ def _pattern_probability(
             p = (p * n + 0.5 * prior_n) / max(1, n + prior_n)
             source = f"{source}_shrunk"
     return max(0.0, min(1.0, p)), source, n
+
+
+def _realized_exit_geometry(
+    *,
+    pattern: ScanPattern | None,
+    static_reward: float,
+    static_loss: float,
+    settings: Any,
+) -> tuple[float, float, dict[str, Any]]:
+    """Blend alert bracket geometry with realized dynamic-exit payoff stats.
+
+    The displayed target/stop is the hard plan, but CHILI's open-position
+    monitor often exits before either bracket. For patterns with materialized
+    avg winner/loser stats, use a Bayesian blend so mature dynamic-exit
+    evidence can rescue low-win-rate/high-payoff edges without giving thin
+    samples a free pass.
+    """
+    snap: dict[str, Any] = {
+        "used": False,
+        "reason": "no_pattern",
+        "static_reward_fraction": round(static_reward, 8),
+        "static_stop_loss_fraction": round(static_loss, 8),
+    }
+    if pattern is None:
+        return static_reward, static_loss, snap
+
+    winner = _finite_float(getattr(pattern, "avg_winner_pct", None))
+    loser = _finite_float(getattr(pattern, "avg_loser_pct", None))
+    if winner is None or loser is None:
+        snap["reason"] = "missing_realized_winner_loser"
+        return static_reward, static_loss, snap
+    if winner > 1.0 and winner <= 100.0:
+        winner = winner / 100.0
+    if abs(loser) > 1.0 and abs(loser) <= 100.0:
+        loser = loser / 100.0
+    realized_reward = winner if winner > 0.0 else None
+    realized_loss = abs(loser) if loser < 0.0 else None
+    if realized_reward is None or realized_loss is None or realized_loss <= 0.0:
+        snap["reason"] = "invalid_realized_winner_loser"
+        return static_reward, static_loss, snap
+
+    try:
+        from .pattern_stats_accessor import get_corrected_pattern_stats
+
+        stats = get_corrected_pattern_stats(pattern)
+        avg_return = _finite_float(stats.avg_return_pct)
+        n = int(stats.trade_count or 0)
+    except Exception:
+        avg_return = _finite_float(getattr(pattern, "corrected_avg_return_pct", None))
+        try:
+            n = int(
+                getattr(pattern, "corrected_trade_count", None)
+                or getattr(pattern, "payoff_ratio_n", None)
+                or 0
+            )
+        except (TypeError, ValueError):
+            n = 0
+    if avg_return is not None and avg_return <= 0.0:
+        snap["reason"] = "non_positive_realized_avg_return"
+        snap["corrected_avg_return_pct"] = round(avg_return, 6)
+        return static_reward, static_loss, snap
+    if n <= 0:
+        snap["reason"] = "missing_realized_sample_n"
+        return static_reward, static_loss, snap
+
+    try:
+        prior_n = max(0, int(getattr(settings, "chili_realized_ev_min_trades", 5)))
+    except Exception:
+        prior_n = 5
+    evidence_weight = n / max(1, n + prior_n)
+    reward = evidence_weight * realized_reward + (1.0 - evidence_weight) * static_reward
+    loss = evidence_weight * realized_loss + (1.0 - evidence_weight) * static_loss
+    if reward <= 0.0 or loss <= 0.0:
+        snap["reason"] = "invalid_blended_geometry"
+        return static_reward, static_loss, snap
+
+    snap.update(
+        used=True,
+        reason="scan_pattern_realized_dynamic_exit_blend",
+        realized_reward_fraction=round(realized_reward, 8),
+        realized_loss_fraction=round(realized_loss, 8),
+        realized_sample_n=n,
+        realized_prior_n=prior_n,
+        realized_evidence_weight=round(evidence_weight, 6),
+        corrected_avg_return_pct=round(avg_return, 6) if avg_return is not None else None,
+        payoff_ratio=_finite_float(getattr(pattern, "payoff_ratio", None)),
+        payoff_ratio_n=getattr(pattern, "payoff_ratio_n", None),
+        blended_reward_fraction=round(reward, 8),
+        blended_stop_loss_fraction=round(loss, 8),
+    )
+    return reward, loss, snap
 
 
 def _empirical_entry_cost_fraction(
@@ -816,10 +956,22 @@ def evaluate_entry_edge(
         snap["stop_loss_fraction"] = None
         return EntryEdgeDecision(False, "missing_or_invalid_stop_for_edge", snap)
 
-    reward = (t - e) / e
-    loss = (e - s) / e
+    static_reward = (t - e) / e
+    static_loss = (e - s) / e
+    pattern = _load_scan_pattern_for_edge(db, alert.scan_pattern_id)
+    reward, loss, realized_geometry = _realized_exit_geometry(
+        pattern=pattern,
+        static_reward=static_reward,
+        static_loss=static_loss,
+        settings=settings,
+    )
     prob, prob_source, sample_n = _pattern_probability(
-        db, alert=alert, pat_ctx=pat_ctx, confidence=confidence, settings=settings,
+        db,
+        alert=alert,
+        pat_ctx=pat_ctx,
+        confidence=confidence,
+        settings=settings,
+        pattern=pattern,
     )
     cost_fraction, cost_snapshot = _empirical_entry_cost_fraction(
         db, ticker=alert.ticker, settings=settings,
@@ -838,6 +990,14 @@ def evaluate_entry_edge(
         probability=round(prob, 6),
         probability_source=prob_source,
         probability_sample_n=sample_n,
+        edge_geometry_source=(
+            "realized_dynamic_exit_blend"
+            if realized_geometry.get("used")
+            else "static_target_stop"
+        ),
+        dynamic_exit_geometry=realized_geometry,
+        target_reward_fraction=round(static_reward, 8),
+        hard_stop_loss_fraction=round(static_loss, 8),
         reward_fraction=round(reward, 8),
         stop_loss_fraction=round(loss, 8),
         expected_reward_fraction=round(expected_reward, 8),

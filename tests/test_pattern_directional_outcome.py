@@ -36,6 +36,7 @@ from app.models.trading import AlertHistory, ScanPattern
 from app.services.trading.pattern_directional_outcome import (
     _compute_window_outcome,
     _entry_price_from_df,
+    _hold_hours_from_duration_estimate,
     _resolve_predicted_direction,
     evaluate_directional_outcomes,
     get_rolling_directional_quality,
@@ -189,6 +190,14 @@ def test_compute_outcome_returns_none_when_window_empty():
     assert out is None
 
 
+def test_hold_hours_from_duration_estimate_uses_upper_bound():
+    kwargs = {"default_hold_hours": 24, "max_lookback_hours": 168}
+    assert _hold_hours_from_duration_estimate("~1-6 hours (low conf.)", **kwargs) == 6
+    assert _hold_hours_from_duration_estimate("~15-35 min", **kwargs) == pytest.approx(35 / 60)
+    assert _hold_hours_from_duration_estimate("~1-2 days", **kwargs) == 48
+    assert _hold_hours_from_duration_estimate(None, **kwargs) == 24
+
+
 def test_entry_price_picks_last_close_at_or_before_alert():
     df = pd.DataFrame(
         {
@@ -227,12 +236,13 @@ def _make_pattern(db, *, name="test_pattern_up", rules=None):
     return pat
 
 
-def _make_alert(db, *, pattern_id, ticker, created_at):
+def _make_alert(db, *, pattern_id, ticker, created_at, duration_estimate=None):
     a = AlertHistory(
         alert_type="pattern_breakout_imminent",
         ticker=ticker,
         message=f"imminent breakout for {ticker}",
         scan_pattern_id=pattern_id,
+        duration_estimate=duration_estimate,
         sent_via="log_only",
         success=True,
     )
@@ -334,6 +344,45 @@ def test_evaluator_inserts_correct_outcome_for_up_pattern(db):
     assert row[7] == 24
 
 
+def test_evaluator_uses_duration_estimate_for_intraday_alert(db):
+    pat = _make_pattern(db, name="intraday_up", rules={"direction": "up"})
+    now = datetime.utcnow().replace(microsecond=0)
+    alert_at = now - timedelta(hours=7)
+    _make_alert(
+        db,
+        pattern_id=pat.id,
+        ticker="BTC-USD",
+        created_at=alert_at,
+        duration_estimate="~1-6 hours (low conf.)",
+    )
+    db.commit()
+
+    def fake_fetch(ticker, *, start, end):
+        return _build_ohlc_window(
+            start=alert_at - timedelta(hours=1),
+            n_bars=8,
+            entry_price=100.0,
+            high_pct=3.0,
+            low_pct=-0.5,
+        )
+
+    summary = evaluate_directional_outcomes(
+        db, now=now, fetch_ohlcv=fake_fetch, settings_=_settings_stub()
+    )
+
+    assert summary["candidates"] == 1
+    assert summary["evaluated"] == 1
+    row = db.execute(
+        text(
+            "SELECT hold_window_hours, window_close_at, directional_correct "
+            "FROM pattern_alert_directional_outcome"
+        )
+    ).fetchone()
+    assert row[0] == 6
+    assert row[1] == alert_at + timedelta(hours=6)
+    assert row[2] is True
+
+
 def test_evaluator_skips_when_window_still_open(db):
     pat = _make_pattern(db)
     now = datetime.utcnow().replace(microsecond=0)
@@ -347,7 +396,8 @@ def test_evaluator_skips_when_window_still_open(db):
     summary = evaluate_directional_outcomes(
         db, now=now, fetch_ohlcv=fake_fetch, settings_=_settings_stub()
     )
-    assert summary["candidates"] == 0  # SQL prefilter excludes window-open alerts
+    assert summary["candidates"] == 1
+    assert summary["skipped_window_open"] == 1
     rows = db.execute(
         text("SELECT COUNT(*) FROM pattern_alert_directional_outcome")
     ).fetchone()

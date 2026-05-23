@@ -5523,12 +5523,11 @@ def _evidence_correction_persist(
     after_wr = round(stats.win_rate, 4)
     after_avg = round(stats.avg_return_pct, 2)
 
-    actual_trade_count = (
-        db.query(func.count(Trade.id))
-        .filter(Trade.scan_pattern_id == pattern.id)
-        .scalar() or 0
-    )
-    after_n = int(actual_trade_count)
+    # ``stats`` is built from the closed-trade bucket above. Keep the
+    # canonical sample count on that same population; counting all Trade rows
+    # here incorrectly includes still-open positions and makes a 1-loss pattern
+    # look like 6 closed losses.
+    after_n = int(stats.n)
 
     # Coverage gate: when more than half of the overheld trades had no
     # counterfactual data, the corrected stats are biased. Don't apply
@@ -10668,5 +10667,4 @@ def run_learning_cycle(
             except Exception:
                 logger.debug("[learning] run_learning_cycle: non-critical operation failed", exc_info=True)
     return {"ok": True, **report}
-
 

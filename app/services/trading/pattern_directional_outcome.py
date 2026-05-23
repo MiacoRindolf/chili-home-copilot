@@ -50,6 +50,8 @@ Robustness
 from __future__ import annotations
 
 import logging
+import math
+import re
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Callable, Optional
@@ -184,6 +186,47 @@ def _compute_window_outcome(
     }
 
 
+def _hold_hours_from_duration_estimate(
+    duration_estimate: Any,
+    *,
+    default_hold_hours: int,
+    max_lookback_hours: int,
+) -> float:
+    """Resolve alert duration text into a hold window in hours.
+
+    Imminent-alert labels can be intraday ("~15-35 min", "~1-6 hours") or
+    swing-style ("~1-2 days"). Use the upper bound so the outcome window gives
+    the setup its advertised time to work, while still clamping to the
+    evaluator's configured lookback budget.
+    """
+    default = max(1.0, float(default_hold_hours))
+    text_value = str(duration_estimate or "").strip().lower()
+    if not text_value:
+        return min(default, float(max_lookback_hours))
+    text_value = (
+        text_value
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("hrs", "hours")
+        .replace("hr", "hours")
+    )
+    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", text_value)]
+    if not nums:
+        return min(default, float(max_lookback_hours))
+    upper = max(nums)
+    if "min" in text_value:
+        hours = upper / 60.0
+    elif "day" in text_value:
+        hours = upper * 24.0
+    elif "hour" in text_value:
+        hours = upper
+    else:
+        hours = default
+    if not math.isfinite(hours) or hours <= 0.0:
+        hours = default
+    return min(max(hours, 1.0 / 60.0), float(max_lookback_hours))
+
+
 def _default_fetch_ohlcv(
     ticker: str, *, start: datetime, end: datetime
 ) -> pd.DataFrame:
@@ -246,14 +289,12 @@ def evaluate_directional_outcomes(
     fetcher = fetch_ohlcv or _default_fetch_ohlcv
     now = now or datetime.utcnow()
     lookback_floor = now - timedelta(hours=max_lookback_hours)
-    window_close_floor = now - timedelta(hours=default_hold_hours)
-
     import time as _t
     t0 = _t.monotonic()
 
-    # Closed-window candidates not yet evaluated. We compute hold per
-    # alert below, but use the default-hold floor as a coarse SQL
-    # prefilter to keep the candidate set small.
+    # Candidates not yet evaluated. Hold windows are duration-aware per alert,
+    # so SQL cannot safely prefilter by a single default-hold floor: a 15-minute
+    # setup should not wait behind a 24h default.
     rows = db.execute(
         text(
             """
@@ -265,7 +306,6 @@ def evaluate_directional_outcomes(
               AND a.scan_pattern_id IS NOT NULL
               AND a.ticker IS NOT NULL
               AND a.created_at >= :lookback_floor
-              AND a.created_at <= :window_close_floor
               AND p.alert_id IS NULL
             ORDER BY a.created_at ASC
             LIMIT :max_per_run
@@ -274,7 +314,6 @@ def evaluate_directional_outcomes(
         {
             "atype": ALERT_TYPE_PATTERN_BREAKOUT_IMMINENT,
             "lookback_floor": lookback_floor,
-            "window_close_floor": window_close_floor,
             "max_per_run": max_per_run,
         },
     ).fetchall()
@@ -316,7 +355,11 @@ def evaluate_directional_outcomes(
             if pat is None:
                 skipped_no_pattern += 1
                 continue
-            hold_hours = default_hold_hours
+            hold_hours = _hold_hours_from_duration_estimate(
+                _duration,
+                default_hold_hours=default_hold_hours,
+                max_lookback_hours=max_lookback_hours,
+            )
             window_close_at = created_at + timedelta(hours=hold_hours)
             if window_close_at > now:
                 skipped_window_open += 1
@@ -373,7 +416,7 @@ def evaluate_directional_outcomes(
                     "alert_at": created_at,
                     "predicted_direction": direction,
                     "entry_price": Decimal(str(round(entry_price, 8))),
-                    "hold_window_hours": int(hold_hours),
+                    "hold_window_hours": int(math.ceil(hold_hours)),
                     "window_close_at": window_close_at,
                     "max_fav": Decimal(str(outcome["max_favorable_pct"])),
                     "max_adv": Decimal(str(outcome["max_adverse_pct"])),

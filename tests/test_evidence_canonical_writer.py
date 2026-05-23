@@ -270,6 +270,44 @@ def test_update_writes_one_audit_row_and_updates_pattern(db):
     assert r.counterfactual_unavailable_count == 0
 
 
+def test_update_counts_only_closed_trades_in_corrected_sample(db):
+    pat = _seed_pattern(db, timeframe="1d", win_rate=0.5, avg_return_pct=0.0)
+    _seed_closed_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=100.0,
+        exit_price=90.0,
+        entry_offset=timedelta(days=2),
+        held_for=timedelta(days=1),
+    )
+    for i in range(5):
+        db.add(
+            Trade(
+                ticker=f"OPEN{i}",
+                direction="long",
+                entry_price=100.0,
+                quantity=1.0,
+                status="open",
+                entry_date=datetime.utcnow() - timedelta(hours=1),
+                scan_pattern_id=pat.id,
+            )
+        )
+    db.commit()
+
+    out = learning_mod.update_pattern_stats_from_closed_trades(db, user_id=None)
+    assert out["patterns_updated"] == 1
+    db.refresh(pat)
+    assert pat.trade_count == 1
+    assert pat.corrected_trade_count == 1
+    assert pat.win_rate == 0.0
+
+    row = db.query(PatternEvidenceCorrection).filter_by(
+        scan_pattern_id=pat.id,
+    ).one()
+    assert row.closed_trades_considered == 1
+    assert row.after_trade_count == 1
+
+
 # ---------------------------------------------------------------------------
 # 8. First-run detection
 # ---------------------------------------------------------------------------

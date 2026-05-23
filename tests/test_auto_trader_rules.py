@@ -10,6 +10,7 @@ from app.models.trading import BreakoutAlert
 from app.services.trading.auto_trader_rules import (
     RuleGateContext,
     alert_confidence_from_score,
+    evaluate_entry_edge,
     projected_profit_pct,
     passes_rule_gate,
 )
@@ -144,6 +145,142 @@ def test_passes_rule_gate_expected_edge_fail(_mock_port, _mock_rth):
     assert snap["entry_edge"]["expected_net_pct"] < 0
     assert snap["entry_edge"]["breakeven_probability"] is not None
     assert snap["entry_edge"]["probability_edge"] < 0
+
+
+def test_evaluate_entry_edge_uses_dynamic_exit_payoff_distribution():
+    class _EmptyExec:
+        def mappings(self):
+            return self
+
+        def first(self):
+            return None
+
+    class _Query:
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return self._pattern
+
+    class _Db:
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def query(self, *_args, **_kwargs):
+            return _Query(self._pattern)
+
+        def execute(self, *_args, **_kwargs):
+            return _EmptyExec()
+
+    pattern = SimpleNamespace(
+        corrected_trade_count=87,
+        corrected_win_rate=0.3908,
+        corrected_avg_return_pct=1.56,
+        trade_count=87,
+        win_rate=0.3908,
+        avg_return_pct=1.56,
+        avg_winner_pct=0.06830689055415255,
+        avg_loser_pct=-0.015172948222159992,
+        payoff_ratio=4.501886486002159,
+        payoff_ratio_n=87,
+    )
+    alert = BreakoutAlert(
+        ticker="TRUMP-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=585,
+        score_at_alert=0.5,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=80.0,
+        target_price=120.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(chili_realized_ev_min_trades=5)
+
+    decision = evaluate_entry_edge(
+        _Db(pattern),
+        alert,
+        settings=settings,
+        pat_ctx={},
+        confidence=0.5,
+    )
+
+    assert decision.allowed
+    assert decision.reason == "positive_expected_edge"
+    assert decision.snapshot["edge_geometry_source"] == "realized_dynamic_exit_blend"
+    assert decision.snapshot["dynamic_exit_geometry"]["used"] is True
+    assert decision.snapshot["breakeven_probability"] < 0.4
+    assert decision.snapshot["expected_net_pct"] > 0
+
+
+def test_evaluate_entry_edge_guards_probability_sample_count_to_closed_trades():
+    class _EmptyExec:
+        def mappings(self):
+            return self
+
+        def first(self):
+            return None
+
+    class _Query:
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return self._pattern
+
+    class _Db:
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def query(self, *_args, **_kwargs):
+            return _Query(self._pattern)
+
+        def execute(self, *_args, **_kwargs):
+            return _EmptyExec()
+
+    pattern = SimpleNamespace(
+        corrected_trade_count=6,
+        corrected_win_rate=0.0,
+        corrected_avg_return_pct=-1.28,
+        raw_realized_trade_count=1,
+        raw_realized_win_rate=0.0,
+        raw_realized_avg_return_pct=-1.275,
+        avg_winner_pct=None,
+        avg_loser_pct=-0.01275,
+    )
+    alert = BreakoutAlert(
+        ticker="00-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=1248,
+        score_at_alert=0.55,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=85.0,
+        target_price=118.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(chili_realized_ev_min_trades=5)
+
+    decision = evaluate_entry_edge(
+        _Db(pattern),
+        alert,
+        settings=settings,
+        pat_ctx={},
+        confidence=0.82,
+    )
+
+    assert decision.snapshot["probability_sample_n"] == 1
+    assert decision.snapshot["probability"] == pytest.approx(2.5 / 6, rel=1e-6)
+    assert "closed_sample_count_guard" in decision.snapshot["probability_source"]
+    assert decision.snapshot["expected_net_pct"] > -2.0
 
 
 # VV — per-lane concurrency cap tests. The rule gate should bucket the
