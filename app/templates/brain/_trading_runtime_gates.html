@@ -235,7 +235,7 @@
     var diff  = document.getElementById('brain-pattern-gate-view-diff');
     if (stuck) stuck.style.display = (which === 'stuck' ? '' : 'none');
     if (diff)  diff.style.display  = (which === 'diff'  ? '' : 'none');
-    document.querySelectorAll('.brain-runtime-gates-tab').forEach(function (btn) {
+    document.querySelectorAll('.bx-drawer-tab').forEach(function (btn) {
       var on = btn.getAttribute('data-pgate-view') === which;
       btn.classList.toggle('active', on);
       btn.setAttribute('aria-selected', on ? 'true' : 'false');
