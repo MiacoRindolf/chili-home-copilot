@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
@@ -38,11 +39,12 @@ REPO = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 
 def _seed_pattern_and_alert(db) -> tuple[ScanPattern, BreakoutAlert]:
-    user = models.User(name="psm_user")
+    suffix = uuid4().hex[:12]
+    user = models.User(name=f"psm_user_{suffix}")
     db.add(user)
     db.flush()
     pat = ScanPattern(
-        name="psm_pat",
+        name=f"psm_pat_{suffix}",
         rules_json={},
         origin="test",
         asset_class="all",
@@ -75,6 +77,19 @@ def _seed_pattern_and_alert(db) -> tuple[ScanPattern, BreakoutAlert]:
 # ---------------------------------------------------------------------------
 # 1. Flag off: helper is a no-op
 # ---------------------------------------------------------------------------
+
+def test_reject_shadow_decision_map():
+    assert at_mod._qualified_reject_shadow_decision(
+        "non_positive_expected_edge"
+    ) == "skipped_non_positive_expected_edge"
+    assert at_mod._qualified_reject_shadow_decision(
+        "duplicate_pattern_already_open"
+    ) == "skipped_duplicate_pattern_already_open"
+    assert at_mod._qualified_reject_shadow_decision(
+        "max_concurrent_crypto"
+    ) == "blocked_max_concurrent_crypto"
+    assert at_mod._qualified_reject_shadow_decision("no_quote") is None
+
 
 def test_helper_no_op_when_flag_off(db, monkeypatch):
     pat, alert = _seed_pattern_and_alert(db)
@@ -166,7 +181,18 @@ def test_helper_creates_shadow_on_blocked_decisions(db, monkeypatch, decision):
     assert rows[0].signal_json.get("shadow_decision") == decision
 
 
-def test_helper_creates_shadow_for_qualified_block_when_base_flag_off(db, monkeypatch):
+@pytest.mark.parametrize(
+    "decision",
+    [
+        "blocked_coinbase_cap",
+        "blocked_max_concurrent_crypto",
+        "skipped_non_positive_expected_edge",
+        "skipped_duplicate_pattern_already_open",
+    ],
+)
+def test_helper_creates_shadow_for_qualified_block_when_base_flag_off(
+    db, monkeypatch, decision,
+):
     pat, alert = _seed_pattern_and_alert(db)
     monkeypatch.setattr(
         at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
@@ -188,7 +214,7 @@ def test_helper_creates_shadow_for_qualified_block_when_base_flag_off(db, monkey
 
     _maybe_open_paper_shadow(
         db, uid=alert.user_id, alert=alert, qty=1, px=100.0,
-        snap={}, decision="blocked_coinbase_cap",
+        snap={}, decision=decision,
     )
     db.commit()
 
@@ -197,7 +223,93 @@ def test_helper_creates_shadow_for_qualified_block_when_base_flag_off(db, monkey
     ).all()
     assert len(rows) == 1
     assert rows[0].scan_pattern_id == pat.id
-    assert rows[0].signal_json.get("shadow_decision") == "blocked_coinbase_cap"
+    assert rows[0].signal_json.get("shadow_decision") == decision
+
+
+def test_rule_gate_reject_opens_qualified_paper_shadow(db, monkeypatch):
+    pat, alert = _seed_pattern_and_alert(db)
+    pat.lifecycle_stage = "live"
+    alert.alert_tier = "pattern_imminent"
+    alert.asset_type = "crypto"
+    alert.ticker = "EDGE-USD"
+    db.commit()
+
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_max_open", 100,
+    )
+    monkeypatch.setattr(at_mod, "_current_price", lambda ticker: 100.0)
+    monkeypatch.setattr(at_mod, "_maybe_substitute_with_options", lambda *a, **k: None)
+    monkeypatch.setattr(at_mod, "count_autotrader_v1_open", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        at_mod, "count_autotrader_v1_open_by_lane", lambda *a, **k: {},
+    )
+    monkeypatch.setattr(at_mod, "autotrader_realized_pnl_today_et", lambda *a, **k: 0.0)
+    monkeypatch.setattr(at_mod, "find_open_autotrader_trade", lambda *a, **k: None)
+    monkeypatch.setattr(at_mod, "maybe_scale_in", lambda *a, **k: None)
+    monkeypatch.setattr(
+        at_mod,
+        "check_autopilot_entry_gate",
+        lambda *a, **k: {"allowed": True, "reason": "free", "owner": None},
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "passes_rule_gate",
+        lambda *a, **k: (
+            False,
+            "non_positive_expected_edge",
+            {"expected_net_pct": -0.12},
+        ),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_entry_risk_notional",
+        lambda *a, **k: (
+            100.0,
+            {
+                "notional_capital_usd": 10_000.0,
+                "notional_explicit_fallback_usd": 0.0,
+                "notional_risk_pct": 1.0,
+                "notional_source": "test",
+            },
+        ),
+    )
+    from app.services.trading import paper_trading as pt_mod
+
+    monkeypatch.setattr(
+        pt_mod, "_compute_atr_levels",
+        lambda ticker, entry_price, exit_cfg: (
+            entry_price * 0.97, entry_price * 1.10, 1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        pt_mod, "_apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    out = {"scaled_in": 0, "skipped": 0, "entered": 0}
+    at_mod._process_one_alert(
+        db,
+        alert.user_id,
+        alert,
+        out,
+        {"live_orders_effective": True, "paper_mode_effective": False},
+    )
+
+    rows = db.query(PaperTrade).filter(
+        PaperTrade.paper_shadow_of_alert_id == alert.id
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].ticker == "EDGE-USD"
+    assert rows[0].signal_json.get("shadow_decision") == (
+        "skipped_non_positive_expected_edge"
+    )
+    assert rows[0].signal_json["_paper_meta"]["original_entry"] == 100.0
 
 
 # ---------------------------------------------------------------------------

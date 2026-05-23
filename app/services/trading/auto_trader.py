@@ -39,8 +39,14 @@ logger = logging.getLogger(__name__)
 
 QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_coinbase_cap",
+    "blocked_max_concurrent_crypto",
+    "blocked_max_concurrent_equity",
+    "blocked_max_concurrent_global",
+    "blocked_max_concurrent_options",
     "blocked_recert_required",
     "blocked_shadow_promoted",
+    "skipped_duplicate_pattern_already_open",
+    "skipped_non_positive_expected_edge",
 })
 
 AUTOTRADER_VERSION = "v1"
@@ -439,16 +445,106 @@ def _maybe_open_paper_shadow(
                 alert.id, alert.scan_pattern_id, alert.ticker, decision, shadow_max_open,
             )
             return
+        db.commit()
         logger.info(
             "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
             "qty=%s px=%s decision=%s opened",
             alert.id, alert.scan_pattern_id, alert.ticker, qty, px, decision,
         )
     except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.debug(
             "[autotrader_paper_shadow] open failed alert_id=%s decision=%s",
             getattr(alert, "id", None), decision, exc_info=True,
         )
+
+
+def _qualified_reject_shadow_decision(reason: str | None) -> str | None:
+    """Map live-only reject reasons to safe paper-shadow observation labels."""
+    r = (reason or "").strip()
+    if r in {
+        "duplicate_pattern_already_open",
+        "non_positive_expected_edge",
+    }:
+        return f"skipped_{r}"
+    if r in {
+        "max_concurrent_crypto",
+        "max_concurrent_equity",
+        "max_concurrent_global",
+        "max_concurrent_options",
+    }:
+        return f"blocked_{r}"
+    return None
+
+
+def _maybe_open_reject_paper_shadow(
+    db: Session,
+    *,
+    uid: int | None,
+    alert: BreakoutAlert,
+    px: float,
+    snap: dict[str, Any] | None,
+    reason: str | None,
+    existing_qty: float | None = None,
+) -> None:
+    """Paper-shadow live rejects that are useful for learning, not execution.
+
+    This deliberately does not loosen the live gate. It records a counterfactual
+    paper observation for candidate classes the operator needs to study:
+    edge-model rejects, duplicate same-pattern live alerts, and cap rejects.
+    """
+    decision = _qualified_reject_shadow_decision(reason)
+    if decision is None or uid is None:
+        return
+    try:
+        px_f = float(px or 0.0)
+    except (TypeError, ValueError):
+        px_f = 0.0
+    if px_f <= 0.0:
+        return
+
+    shadow_snap = dict(snap or {})
+    shadow_snap["paper_shadow_reject_reason"] = reason
+    qty = 0.0
+    if existing_qty is not None:
+        try:
+            qty = float(existing_qty or 0.0)
+            shadow_snap["paper_shadow_qty_source"] = "existing_live_position"
+        except (TypeError, ValueError):
+            qty = 0.0
+    if qty <= 0.0:
+        try:
+            notional, notional_snap = _resolve_entry_risk_notional(db, uid=uid)
+            shadow_snap.update({
+                f"paper_shadow_{k}": v
+                for k, v in (notional_snap or {}).items()
+            })
+            if notional > 0.0:
+                from .tick_normalizer import normalize_quantity
+
+                qty = float(normalize_quantity(float(notional) / px_f, alert.ticker))
+                shadow_snap["paper_shadow_qty_source"] = "risk_notional"
+        except Exception:
+            logger.debug(
+                "[autotrader_paper_shadow] reject qty resolve failed "
+                "alert_id=%s reason=%s",
+                getattr(alert, "id", None), reason, exc_info=True,
+            )
+            return
+    if qty <= 0.0:
+        return
+    _maybe_open_paper_shadow(
+        db,
+        uid=uid,
+        alert=alert,
+        qty=qty,
+        px=px_f,
+        snap=shadow_snap,
+        decision=decision,
+    )
 
 
 def _audit(
@@ -1274,6 +1370,21 @@ def _process_one_alert(
     if existing_trade is not None:
         if int(existing_trade.scan_pattern_id or 0) == int(alert.scan_pattern_id or 0):
             _audit(db, user_id=uid, alert=alert, decision="skipped", reason="duplicate_pattern_already_open")
+            _maybe_open_reject_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                px=px,
+                snap={
+                    "existing_trade_id": getattr(existing_trade, "id", None),
+                    "existing_trade_entry_date": (
+                        existing_trade.entry_date.isoformat()
+                        if getattr(existing_trade, "entry_date", None) else None
+                    ),
+                },
+                reason="duplicate_pattern_already_open",
+                existing_qty=getattr(existing_trade, "quantity", None),
+            )
             out["skipped"] += 1
             _autotrader_tick_note(
                 out, kind="skipped", reason="duplicate_pattern_already_open", alert=alert
@@ -1344,6 +1455,15 @@ def _process_one_alert(
     )
     if not ok:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)
+        if live:
+            _maybe_open_reject_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                px=px,
+                snap=snap,
+                reason=reason,
+            )
         out["skipped"] += 1
         _autotrader_tick_note(out, kind="skipped", reason=str(reason), alert=alert)
         return

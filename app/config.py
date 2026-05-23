@@ -2064,10 +2064,11 @@ class Settings(BaseSettings):
         le=1000,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_MAX_OPEN"),
     )
-    # Open paper-shadow evidence for live-qualified signals that are blocked
-    # by portfolio/execution authority gates such as recert debt or venue caps.
-    # This does not mirror ordinary skipped/no-edge alerts and never places a
-    # broker order; it exists to speed learning without loosening live gates.
+    # Open paper-shadow evidence for live candidates that are blocked by
+    # portfolio/execution authority gates such as recert debt or venue caps,
+    # plus explicitly allowlisted reject classes such as no-edge and duplicate
+    # same-pattern alerts. This never places a broker order; it exists to speed
+    # learning and false-negative audits without loosening live gates.
     chili_autotrader_paper_shadow_qualified_blocks_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_QUALIFIED_BLOCKS_ENABLED"),
