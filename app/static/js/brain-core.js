@@ -944,22 +944,18 @@ function switchBrainPanel(panelId) {
   if (target) target.classList.add('active');
 }
 
-/* -- Summary bar sync (called from desk polling) -- */
+/* -- Runtime header sync (called from desk polling) -- */
 function updateBrainSummaryBar(data) {
-  var dot = document.getElementById('bsb-summary-dot');
-  var worker = document.getElementById('bsb-summary-worker');
-  var regime = document.getElementById('bsb-summary-regime');
-  var actionable = document.getElementById('bsb-summary-actionable');
-  var watch = document.getElementById('bsb-summary-watch');
-  var cycle = document.getElementById('bsb-summary-cycle');
   if (!data) return;
+  var dot = document.getElementById('bx-status-dot');
+  var label = document.getElementById('bx-status-label');
+  var regime = document.getElementById('bx-regime-chip');
+  var cycle = document.getElementById('bx-last-cycle');
   if (dot && data.workerStatus) {
-    dot.className = 'bsb-dot ' + (data.workerStatus === 'running' ? 'running' : data.workerStatus === 'idle' ? 'idle' : 'stopped');
+    dot.className = 'bx-status-dot ' + (data.workerStatus === 'running' ? 'running' : data.workerStatus === 'idle' ? 'idle' : 'stopped');
   }
-  if (worker && data.workerLabel) worker.textContent = data.workerLabel;
+  if (label && data.workerLabel) label.textContent = data.workerLabel;
   if (regime && data.regime) regime.textContent = data.regime;
-  if (actionable && data.actionable != null) actionable.textContent = data.actionable;
-  if (watch && data.watch != null) watch.textContent = data.watch;
   if (cycle && data.lastCycle) cycle.textContent = data.lastCycle;
 }
 

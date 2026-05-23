@@ -1,0 +1,62 @@
+<!--
+  Runtime tab redesign 2026-05-23: "How to read this desk" copy is now a modal
+  triggered by #bx-help-btn instead of a sticky <details> at the top of the desk.
+  Content is stored in a hidden div; openRuntimeHelpModal() copies it into the
+  shared brain modal (#brain-modal-overlay).
+-->
+<div id="bx-runtime-help-content" style="display:none" aria-hidden="true">
+  <div class="bx-runtime-help-body">
+    <p style="font-size:var(--brain-font-md);line-height:1.55;margin:0 0 12px 0">
+      The Runtime tab is a single hierarchy now: a sticky header that owns worker
+      status &amp; controls, one thesis line, two above-the-fold cards, and one
+      drill-down tab strip. Everything else has been folded in.
+    </p>
+
+    <h4 style="font-size:var(--brain-font-md);margin:14px 0 4px 0">Worker controls (header)</h4>
+    <p style="font-size:var(--brain-font-sm);line-height:1.5;margin:0 0 8px 0;color:var(--text-secondary)">
+      <strong>Start / Stop / Pause / Wake</strong> drive the Docker Compose
+      <code style="font-size:var(--brain-font-xs)">brain-worker</code> service. Each
+      iteration runs a work-ledger dispatch round, then a full reconcile pass, then
+      maintenance subtasks. <strong>Wake</strong> only skips idle sleep between
+      iterations.
+    </p>
+
+    <h4 style="font-size:var(--brain-font-md);margin:14px 0 4px 0">Today&rsquo;s Edge tiers</h4>
+    <ul style="font-size:var(--brain-font-sm);line-height:1.5;margin:0 0 8px 18px;padding:0;color:var(--text-secondary)">
+      <li><strong style="color:var(--brain-tier-a)">Tier A &mdash; Actionable now.</strong> Promoted patterns meeting size / OOS / freshness gates. Trade these.</li>
+      <li><strong style="color:var(--brain-tier-b)">Tier B &mdash; Watch soon.</strong> Composite imminent score above the watch threshold but below actionable.</li>
+      <li><strong style="color:var(--brain-tier-c)">Tier C &mdash; Watch today / context.</strong> Lower-conviction context signals.</li>
+      <li><strong style="color:var(--text-muted)">Tier D &mdash; Pattern incubation.</strong> Lifecycle &lt; promoted. Display-only.</li>
+    </ul>
+
+    <h4 style="font-size:var(--brain-font-md);margin:14px 0 4px 0">Brain Activity card</h4>
+    <p style="font-size:var(--brain-font-sm);line-height:1.5;margin:0 0 8px 0;color:var(--text-secondary)">
+      Current learning step + work-ledger strip + dispatch queue summary
+      (pending / processing / retry / dead) + pattern-gate summary
+      (stuck + adaptive-vs-legacy disagreement count). Click the gate summary
+      or the queue pill to open the diagnostics drawer with full tables.
+    </p>
+
+    <h4 style="font-size:var(--brain-font-md);margin:14px 0 4px 0">Diagnostics drawer</h4>
+    <p style="font-size:var(--brain-font-sm);line-height:1.5;margin:0 0 8px 0;color:var(--text-secondary)">
+      Slide-in panel on the right. Three sub-views: stuck patterns (PTR-ready,
+      no CPCV verdict), CPCV verdict diff (legacy vs adaptive), and dispatch
+      queue buckets by event type. Polls every 10s on its own; you do not need
+      to keep it open.
+    </p>
+
+    <h4 style="font-size:var(--brain-font-md);margin:14px 0 4px 0">Where things moved</h4>
+    <ul style="font-size:var(--brain-font-sm);line-height:1.5;margin:0 0 8px 18px;padding:0;color:var(--text-secondary)">
+      <li>Daily playbook, P&amp;L, shadow-promoted, predictions, tradeable, research-edge &rarr; <strong>Research</strong> drill-down tab.</li>
+      <li>Patterns &middot; Cycles &middot; Operations &middot; Analytics &middot; Debug &rarr; same drill-down tab strip.</li>
+      <li>Neural mesh graph &rarr; <strong>Network</strong> sub-tab (tabstrip above this view).</li>
+    </ul>
+  </div>
+</div>
+<script>
+function openRuntimeHelpModal() {
+  var src = document.getElementById('bx-runtime-help-content');
+  if (!src || typeof openBrainModal !== 'function') return;
+  openBrainModal('How to read this desk', src.innerHTML);
+}
+</script>

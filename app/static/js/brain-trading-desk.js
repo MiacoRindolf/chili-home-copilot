@@ -9,8 +9,8 @@ function toggleBwDetails() {
 }
 
 function updateBrainWorkerUI(data) {
-  var dot = document.getElementById('bw-status-dot');
-  var statusEl = document.getElementById('bw-status');
+  var dot = document.getElementById('bx-status-dot');
+  var statusEl = document.getElementById('bx-status-label');
   var startBtn = document.getElementById('bw-start-btn');
   var wakeBtn = document.getElementById('bw-wake-btn');
   var pauseBtn = document.getElementById('bw-pause-btn');
@@ -20,10 +20,10 @@ function updateBrainWorkerUI(data) {
   var progressEl = document.getElementById('bw-current-progress');
   var uptimeEl = document.getElementById('bw-uptime');
   var cyclesEl = document.getElementById('bw-cycles');
-  
+
   var status = data.status || 'stopped';
-  dot.className = 'bw-status-dot ' + status;
-  statusEl.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+  if (dot) dot.className = 'bx-status-dot ' + status;
+  if (statusEl) statusEl.textContent = status.charAt(0).toUpperCase() + status.slice(1);
   
   if (status === 'running' || status === 'paused') {
     startBtn.style.display = 'none';
@@ -642,10 +642,10 @@ function loadBrainDashboard() {
 function _loadRegimeChip() {
   fetch('/api/trading/brain/thesis').then(parseFetchJson).then(function(d) {
     if (!d.ok) {
-      var chip0 = document.getElementById('bsb-regime');
+      var chip0 = document.getElementById('bx-regime-chip');
       if (chip0) {
         chip0.innerHTML = '<span style="font-size:10px;color:var(--text-muted)">Thesis unavailable</span>';
-        chip0.className = 'bsb-chip';
+        chip0.className = 'bx-regime-chip';
       }
       return;
     }
@@ -653,12 +653,12 @@ function _loadRegimeChip() {
     if (typeof renderOperatorDeskFromBoard === 'function' && window._oppBoardLastGoodPayload) {
       renderOperatorDeskFromBoard(window._oppBoardLastGoodPayload);
     }
-    var chip = document.getElementById('bsb-regime');
+    var chip = document.getElementById('bx-regime-chip');
     if (!chip) return;
     var icons = {bullish:'&#x1F7E2;', bearish:'&#x1F534;', neutral:'&#x1F7E1;'};
-    var cls = {bullish:'bsb-chip-bull', bearish:'bsb-chip-bear'};
+    var cls = {bullish:'bx-regime-chip-bull', bearish:'bx-regime-chip-bear'};
     chip.innerHTML = (icons[d.stance]||'&#x1F7E1;') + ' ' + (d.stance||'neutral').charAt(0).toUpperCase() + (d.stance||'neutral').slice(1);
-    chip.className = 'bsb-chip ' + (cls[d.stance]||'');
+    chip.className = 'bx-regime-chip ' + (cls[d.stance]||'');
 
     /* Also fill the full thesis card in Analytics tab */
     var stanceEl = document.getElementById('thesis-stance');
@@ -695,18 +695,17 @@ function _loadRegimeChip() {
     }
   }).catch(function(err) {
     var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
-    var chipE = document.getElementById('bsb-regime');
+    var chipE = document.getElementById('bx-regime-chip');
     if (chipE) {
       chipE.innerHTML = '<span style="font-size:10px;color:var(--text-muted)">Thesis failed</span><br/><span style="font-size:8px;opacity:.85">' + hint + '</span>';
-      chipE.className = 'bsb-chip';
+      chipE.className = 'bx-regime-chip';
     }
   });
   fetch('/api/trading/brain/volatility').then(parseFetchJson).then(function(v) {
     if (!v.ok) return;
     window._brainVixData = v;
-    var chip = document.getElementById('bsb-regime');
+    var chip = document.getElementById('bx-regime-chip');
     if (chip) {
-      var regimeColors = {low:'#22c55e', normal:'#f59e0b', elevated:'#f97316', extreme:'#ef4444', unknown:'#6b7280'};
       chip.innerHTML += ' <span style="font-size:8px;opacity:.8">VIX ' + (v.vix||'?') + '</span>';
     }
     var stanceEl = document.getElementById('thesis-stance');
@@ -716,7 +715,7 @@ function _loadRegimeChip() {
     }
   }).catch(function(err) {
     var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
-    var chipV = document.getElementById('bsb-regime');
+    var chipV = document.getElementById('bx-regime-chip');
     if (chipV) {
       chipV.innerHTML += '<br/><span style="font-size:8px;opacity:.85;color:#b45309">Volatility failed: ' + hint + '</span>';
     }
@@ -1386,7 +1385,7 @@ function renderOperatorDeskFromBoard(d) {
   var top3 = pool.slice(0, 3);
 
   var th = window._brainThesisData || {};
-  var thesisLine = document.getElementById('odh-thesis-line');
+  var thesisLine = document.getElementById('bx-thesis-line');
   if (thesisLine) {
     if (th.thesis) {
       var plain = String(th.thesis).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
