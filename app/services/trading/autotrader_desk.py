@@ -21,6 +21,7 @@ from .autopilot_scope import (
     classify_live_autopilot_trade_scope,
     live_autopilot_trade_filter,
 )
+from .broker_position_truth import filter_broker_stale_open_trades
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,12 @@ def set_desk_live_orders(db: Session, live_orders: bool | None, *, updated_by: s
 
 def _rh_quote_prices_for_trades(trades: list[Trade]) -> dict[str, float]:
     """Batched Robinhood quote lookup for live stock tickers. Safe if adapter off."""
-    if not trades:
+    rh_stock_trades = [
+        t for t in trades
+        if (t.broker_source or "").strip().lower() == "robinhood"
+        and not (t.ticker or "").upper().endswith("-USD")
+    ]
+    if not rh_stock_trades:
         return {}
     try:
         from .venue.robinhood_spot import RobinhoodSpotAdapter
@@ -114,7 +120,7 @@ def _rh_quote_prices_for_trades(trades: list[Trade]) -> dict[str, float]:
         adapter = RobinhoodSpotAdapter()
         if not adapter.is_enabled():
             return {}
-        tickers = sorted({(t.ticker or "").upper() for t in trades if t.ticker})
+        tickers = sorted({(t.ticker or "").upper() for t in rh_stock_trades if t.ticker})
         if not tickers:
             return {}
         return adapter.get_quote_prices_batch(tickers)
@@ -188,6 +194,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
         .order_by(Trade.id.desc())
         .all()
     )
+    trades, suppressed_stale_trades = filter_broker_stale_open_trades(db, trades)
 
     papers = (
         db.query(PaperTrade)
@@ -310,4 +317,8 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
             }
         )
 
-    return {"trades": out_trades, "paper_trades": out_paper}
+    return {
+        "trades": out_trades,
+        "paper_trades": out_paper,
+        "suppressed_stale_trades": suppressed_stale_trades,
+    }

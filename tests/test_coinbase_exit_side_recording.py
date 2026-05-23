@@ -89,9 +89,11 @@ def test_coinbase_service_stale_close_writes_sell_side_event():
     )
 
     # The event_type label + the synthetic marker:
-    assert "coinbase_position_sync_gone_close" in text, (
+    event_type = "coinbase_sync_gone_close"
+    assert len(event_type) <= 32
+    assert event_type in text, (
         "coinbase_service.py is missing the "
-        "`coinbase_position_sync_gone_close` event_type label. Don't "
+        "`coinbase_sync_gone_close` event_type label. Don't "
         "rename without updating audit queries."
     )
     assert re.search(r'"synthetic"\s*:\s*True', text), (

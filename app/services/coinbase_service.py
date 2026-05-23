@@ -8,10 +8,10 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -47,6 +47,21 @@ _CACHE_TTL = 300
 # round-trip. Operator can raise via env override if needed; staying
 # hardcoded for now keeps the contract obvious.
 _MIN_AUTO_CREATE_NOTIONAL_USD = 1.0
+
+# Coinbase has the same partial-list failure mode Robinhood had: one
+# truncated non-empty wallet snapshot can omit an otherwise-live product.
+# Reuse the RH guard knob so both broker reconcilers require consecutive
+# misses before marking a local management envelope closed.
+_COINBASE_RECONCILE_MISSING_STREAK_MIN = int(
+    getattr(settings, "chili_reconcile_partial_list_streak_min", 2)
+)
+_COINBASE_RECONCILE_CONFIRM_WINDOW = int(
+    getattr(settings, "broker_reconcile_confirm_seconds", 300)
+)
+
+# Recent bookkeeping closes are eligible for inverse reconcile when Coinbase
+# still reports the position and no real sell fill is recorded.
+_COINBASE_BOOKKEEPING_REOPEN_LOOKBACK_HOURS = 72
 
 
 def _cache_get(key: str) -> Any | None:
@@ -1232,12 +1247,256 @@ def _coinbase_has_working_sell_orders(ticker: str | None) -> bool:
     return False
 
 
+def _coinbase_trade_has_recorded_real_sell(db: Session, trade: Any) -> bool:
+    """True only when a non-synthetic broker sell fill is attached to trade."""
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT 1 FROM trading_execution_events
+                WHERE trade_id = :tid
+                  AND status = 'filled'
+                  AND LOWER(payload_json->>'side') = 'sell'
+                  AND COALESCE(LOWER(payload_json->>'synthetic'), 'false') NOT IN (
+                      'true', '1', 'yes'
+                  )
+                  AND COALESCE(LOWER(payload_json->>'source'), '') NOT IN (
+                      'coinbase_position_sync_gone',
+                      'broker_reconcile_position_gone',
+                      'broker_reconcile_no_exit_price',
+                      'forced_unwind_reconcile',
+                      'zombie_reconcile_orphan'
+                  )
+                LIMIT 1
+                """
+            ),
+            {"tid": int(getattr(trade, "id"))},
+        ).first()
+        return row is not None
+    except Exception:
+        logger.debug(
+            "[coinbase] real-sell check failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+        return True
+
+
+def _coinbase_position_has_recorded_real_sell(db: Session, trade: Any) -> bool:
+    """Position-level real-sell check; falls back to trade-level audit."""
+    try:
+        from .trading.position_resolver import (
+            position_has_recorded_sell,
+            resolve_position_id,
+        )
+
+        position_id = getattr(trade, "position_id", None)
+        if position_id is None:
+            position_id = resolve_position_id(
+                db,
+                trade=trade,
+                user_id=getattr(trade, "user_id", None),
+                ticker=getattr(trade, "ticker", None),
+                broker_source="coinbase",
+                direction=getattr(trade, "direction", None) or "long",
+            )
+        if position_id is not None:
+            return bool(position_has_recorded_sell(db, int(position_id)))
+    except Exception:
+        logger.debug(
+            "[coinbase] position real-sell check failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+        return True
+    return _coinbase_trade_has_recorded_real_sell(db, trade)
+
+
+def _try_reopen_coinbase_bookkeeping_trade(
+    db: Session,
+    *,
+    canonical_user_id: int | None,
+    ticker: str,
+    qty: float,
+    avg_price: float | None,
+    broker_payload: dict[str, Any] | None,
+) -> Any | None:
+    """Inverse-reconcile a recent Coinbase bookkeeping close.
+
+    If Coinbase still reports inventory for ``ticker`` and the most recent
+    local row was closed only by ``coinbase_position_sync_gone`` with no real
+    sell fill recorded, reopen the existing management envelope rather than
+    creating a new one. This preserves the pattern/bracket lineage that the
+    monitor and learning loops need.
+    """
+    try:
+        from ..models.trading import Trade
+
+        cutoff = datetime.utcnow() - timedelta(
+            hours=_COINBASE_BOOKKEEPING_REOPEN_LOOKBACK_HOURS
+        )
+        q = db.query(Trade).filter(
+            Trade.ticker == ticker,
+            Trade.broker_source == "coinbase",
+            Trade.status == "closed",
+            Trade.exit_reason == "coinbase_position_sync_gone",
+            Trade.exit_date.isnot(None),
+            Trade.exit_date >= cutoff,
+        )
+        if canonical_user_id is not None:
+            q = q.filter(or_(Trade.user_id == canonical_user_id, Trade.user_id.is_(None)))
+        else:
+            q = q.filter(Trade.user_id.is_(None))
+        candidate = q.order_by(Trade.exit_date.desc(), Trade.id.desc()).first()
+        if candidate is None:
+            return None
+
+        local_qty = float(getattr(candidate, "quantity", 0.0) or 0.0)
+        broker_qty = float(qty or 0.0)
+        qty_match = abs(local_qty - broker_qty) <= max(1e-8, broker_qty * 1e-6)
+        if not qty_match:
+            logger.warning(
+                "[coinbase] inverse reconcile skipped for %s trade#%s: "
+                "qty mismatch local=%s broker=%s",
+                ticker,
+                candidate.id,
+                local_qty,
+                broker_qty,
+            )
+            return None
+
+        if _coinbase_position_has_recorded_real_sell(db, candidate):
+            logger.error(
+                "[coinbase] inverse reconcile contradiction for %s trade#%s: "
+                "Coinbase reports qty=%s but a real sell is recorded. "
+                "Leaving row closed for operator review.",
+                ticker,
+                candidate.id,
+                broker_qty,
+            )
+            return None
+
+        prior_exit_reason = candidate.exit_reason or "<unset>"
+        candidate.status = "open"
+        candidate.exit_date = None
+        candidate.exit_price = None
+        candidate.exit_reason = None
+        candidate.pnl = None
+        candidate.quantity = broker_qty
+        if avg_price is not None and avg_price > 0:
+            candidate.entry_price = float(avg_price)
+        candidate.broker_status = "filled"
+        candidate.last_broker_sync = datetime.utcnow()
+        candidate.broker_sync_missing_streak = 0
+        if candidate.user_id is None and canonical_user_id is not None:
+            candidate.user_id = canonical_user_id
+        _clear_pending_exit_fields(candidate)
+        db.add(candidate)
+        db.flush()
+
+        if not candidate.related_alert_id:
+            _link_latest_alert(db, candidate)
+        position_id = _ensure_coinbase_position_identity(
+            db,
+            trade=candidate,
+            broker_payload=broker_payload,
+        )
+        _ensure_coinbase_sync_entry_event(
+            db,
+            trade=candidate,
+            broker_payload=broker_payload,
+            position_id=position_id,
+        )
+        db.execute(
+            text(
+                "UPDATE trading_bracket_intents "
+                "SET intent_state = 'intent', "
+                "    quantity = :qty, "
+                "    entry_price = COALESCE(:avg, entry_price), "
+                "    position_id = COALESCE(:pid, position_id), "
+                "    last_diff_reason = 'coinbase_inverse_reconcile_reopen', "
+                "    updated_at = NOW() "
+                "WHERE trade_id = :tid "
+                "  AND intent_state IN ('closed','reconciled','terminal_reject')"
+            ),
+            {
+                "tid": int(candidate.id),
+                "qty": broker_qty,
+                "avg": float(avg_price) if avg_price is not None and avg_price > 0 else None,
+                "pid": int(position_id) if position_id is not None else None,
+            },
+        )
+        logger.warning(
+            "[coinbase] INVERSE RECONCILE: re-opened trade#%s %s qty=%s avg=%s "
+            "(prior exit_reason=%s; broker still reports position)",
+            candidate.id,
+            ticker,
+            broker_qty,
+            avg_price,
+            prior_exit_reason,
+        )
+        return candidate
+    except Exception:
+        logger.exception("[coinbase] inverse reconcile failed for %s", ticker)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _close_coinbase_position_identity_for_trade(db: Session, trade: Any) -> None:
+    """Close the position-identity row only after a confirmed Trade close."""
+    try:
+        from .trading.position_resolver import resolve_position_id
+
+        position_id = getattr(trade, "position_id", None)
+        if position_id is None:
+            position_id = resolve_position_id(
+                db,
+                trade=trade,
+                user_id=getattr(trade, "user_id", None),
+                ticker=getattr(trade, "ticker", None),
+                broker_source="coinbase",
+                direction=getattr(trade, "direction", None) or "long",
+            )
+        if position_id is None:
+            return
+        db.execute(
+            text(
+                "UPDATE trading_positions "
+                "SET state = 'closed', current_quantity = 0, "
+                "    last_state_transition_at = NOW(), updated_at = NOW() "
+                "WHERE id = :pid AND state = 'open'"
+            ),
+            {"pid": int(position_id)},
+        )
+        db.execute(
+            text(
+                "INSERT INTO trading_position_events ("
+                "  position_id, event_type, transition_reason, quantity, "
+                "  envelope_id, observed_at"
+                ") VALUES ("
+                "  :pid, 'closed', 'coinbase_position_sync_gone', 0, "
+                "  :tid, NOW()"
+                ")"
+            ),
+            {"pid": int(position_id), "tid": int(getattr(trade, "id"))},
+        )
+    except Exception:
+        logger.debug(
+            "[coinbase] position-identity close failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Coinbase positions into local Trade model."""
     from ..models.trading import BreakoutAlert, Trade
 
     if not is_connected():
-        return {"created": 0, "updated": 0, "closed": 0}
+        return {"created": 0, "updated": 0, "closed": 0, "reopened": 0}
 
     canonical_user_id = _canonical_coinbase_user_id(db, user_id)
 
@@ -1249,7 +1508,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     )
 
     all_positions = dedupe_positions_by_ticker(get_positions())
-    created = updated = closed = 0
+    created = updated = closed = reopened = 0
     cb_tickers: set[str] = set()
 
     for pos in all_positions:
@@ -1280,6 +1539,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             if existing.user_id is None and canonical_user_id is not None:
                 existing.user_id = canonical_user_id
             existing.quantity = qty
+            existing.last_broker_sync = datetime.utcnow()
             avg_price = pos.get("average_buy_price", 0)
             if avg_price and avg_price > 0 and (not existing.entry_price or existing.entry_price == 0):
                 existing.entry_price = avg_price
@@ -1299,6 +1559,17 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     "[coinbase] Skipping auto-create for %s: cost basis unavailable",
                     ticker,
                 )
+                continue
+            reopened_trade = _try_reopen_coinbase_bookkeeping_trade(
+                db,
+                canonical_user_id=canonical_user_id,
+                ticker=ticker,
+                qty=qty,
+                avg_price=avg_price,
+                broker_payload=pos,
+            )
+            if reopened_trade is not None:
+                reopened += 1
                 continue
             # f-coinbase-dust-auto-create-skip (2026-05-19): refuse auto-
             # create when the notional dollar value (avg_price * qty) is
@@ -1335,6 +1606,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 broker_source="coinbase",
                 tags="coinbase-sync",
                 stop_model="atr_crypto_breakout",
+                last_broker_sync=datetime.utcnow(),
                 notes=f"Auto-synced from Coinbase on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
             )
             db.add(trade)
@@ -1347,6 +1619,40 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 db, trade=trade, broker_payload=pos, position_id=position_id,
             )
             created += 1
+
+    if cb_tickers:
+        try:
+            db.query(Trade).filter(
+                Trade.broker_source == "coinbase",
+                Trade.status == "open",
+                Trade.ticker.notin_(cb_tickers),
+            ).update(
+                {
+                    Trade.broker_sync_missing_streak:
+                        func.coalesce(Trade.broker_sync_missing_streak, 0) + 1
+                },
+                synchronize_session=False,
+            )
+            db.query(Trade).filter(
+                Trade.broker_source == "coinbase",
+                Trade.status == "open",
+                Trade.ticker.in_(cb_tickers),
+            ).update(
+                {Trade.broker_sync_missing_streak: 0},
+                synchronize_session=False,
+            )
+            logger.debug(
+                "[coinbase] partial-list streak updated; "
+                "cb_tickers_size=%d threshold=%d",
+                len(cb_tickers),
+                _COINBASE_RECONCILE_MISSING_STREAK_MIN,
+            )
+        except Exception:
+            logger.warning(
+                "[coinbase] partial-list streak bulk UPDATE failed; "
+                "stale-close gate will use existing streak values",
+                exc_info=True,
+            )
 
     if cb_tickers:
         stale = (
@@ -1384,6 +1690,33 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         stale = []
 
     for trade in stale:
+        streak = getattr(trade, "broker_sync_missing_streak", 0) or 0
+        if streak < _COINBASE_RECONCILE_MISSING_STREAK_MIN:
+            logger.debug(
+                "[coinbase] %s missing from Coinbase but streak=%d < threshold=%d "
+                "(partial-list guard) -- deferring close",
+                trade.ticker,
+                streak,
+                _COINBASE_RECONCILE_MISSING_STREAK_MIN,
+            )
+            continue
+        refs = [
+            getattr(trade, "last_broker_sync", None),
+            getattr(trade, "submitted_at", None),
+            getattr(trade, "entry_date", None),
+        ]
+        ref_ts = max((r for r in refs if r is not None), default=None)
+        if ref_ts is not None and (
+            (datetime.utcnow() - ref_ts).total_seconds()
+            < _COINBASE_RECONCILE_CONFIRM_WINDOW
+        ):
+            logger.debug(
+                "[coinbase] %s missing from Coinbase but within %ds confirm "
+                "window -- deferring close",
+                trade.ticker,
+                _COINBASE_RECONCILE_CONFIRM_WINDOW,
+            )
+            continue
         if _coinbase_has_working_sell_orders(trade.ticker):
             logger.warning(
                 "[coinbase] Skipping stale-close for %s trade#%s: ticker "
@@ -1422,6 +1755,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         )
         if close_fill is not None:
             trade.notes += f" [exit priced from {close_fill['source']}]"
+        _clear_pending_exit_fields(trade)
         try:
             from .trading.brain_work.execution_hooks import on_broker_reconciled_close
 
@@ -1437,6 +1771,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         # treat it as a sell -- the position IS closed at the broker.
         # Wrapped in try/except: this is observability-only and must
         # never block the close.
+        _event_trade_id = int(getattr(trade, "id", 0) or 0)
         try:
             from .trading.execution_audit import record_execution_event
 
@@ -1449,61 +1784,72 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             _payload = {
                 "side": "sell",
                 "source": "coinbase_position_sync_gone",
-                "trade_id": int(getattr(trade, "id", 0) or 0),
+                "trade_id": _event_trade_id,
                 "exit_reason": trade.exit_reason,
                 "synthetic": True,
             }
             if close_fill is not None:
                 _payload["close_fill_source"] = close_fill.get("source")
-            record_execution_event(
-                db,
-                user_id=trade.user_id,
-                ticker=trade.ticker,
-                trade=trade,
-                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
-                broker_source="coinbase",
-                event_type="coinbase_position_sync_gone_close",
-                status="filled",
-                average_fill_price=_exit_px,
-                cumulative_filled_quantity=_exit_qty,
-                payload_json=_payload,
-            )
+            with db.begin_nested():
+                record_execution_event(
+                    db,
+                    user_id=trade.user_id,
+                    ticker=trade.ticker,
+                    trade=trade,
+                    scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                    broker_source="coinbase",
+                    event_type="coinbase_sync_gone_close",
+                    status="filled",
+                    average_fill_price=_exit_px,
+                    cumulative_filled_quantity=_exit_qty,
+                    payload_json=_payload,
+                )
         except Exception:
             logger.debug(
                 "[coinbase] sell-side execution_event write failed for trade#%s "
                 "(non-fatal — Phase 4 visibility only)",
-                getattr(trade, "id", None), exc_info=True,
+                _event_trade_id, exc_info=True,
             )
 
-        closed += 1
-
-    try:
-        from . import broker_service as _bs
-
-        _bs._phase1_close_dropped_positions(
-            db,
-            user_id=canonical_user_id,
-            broker_source="coinbase",
-            observed_tickers=cb_tickers,
-        )
-    except Exception:
-        logger.debug("[coinbase] position-identity close sidecar failed", exc_info=True)
         try:
-            db.rollback()
+            from .trading.bracket_intent_writer import mark_closed
+
+            _intent_ids = db.execute(
+                text(
+                    "SELECT id FROM trading_bracket_intents "
+                    "WHERE trade_id = :tid AND intent_state <> 'closed'"
+                ),
+                {"tid": int(getattr(trade, "id"))},
+            ).scalars().all()
+            for _intent_id in _intent_ids:
+                mark_closed(
+                    db,
+                    int(_intent_id),
+                    reason=str(trade.exit_reason or "coinbase_position_sync_close")[:128],
+                )
         except Exception:
-            pass
+            logger.debug(
+                "[coinbase] bracket intent close failed for trade#%s",
+                getattr(trade, "id", None),
+                exc_info=True,
+            )
+
+        _close_coinbase_position_identity_for_trade(db, trade)
+        closed += 1
 
     db.commit()
     logger.info(
-        "[coinbase] Position sync: %d created, %d updated, %d closed, %d duplicates cancelled",
+        "[coinbase] Position sync: %d created, %d updated, %d reopened, %d closed, %d duplicates cancelled",
         created,
         updated,
+        reopened,
         closed,
         cleanup["cancelled"],
     )
     return {
         "created": created,
         "updated": updated,
+        "reopened": reopened,
         "closed": closed,
         "deduped": cleanup["cancelled"],
         "_live_tickers": cb_tickers,

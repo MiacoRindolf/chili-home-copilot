@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.models.trading import BrainRuntimeMode, BreakoutAlert, Trade
+from app.models.trading import BrainRuntimeMode, BreakoutAlert, Trade, TradingPosition
 from app.services.trading.autotrader_desk import AUTOTRADER_DESK_SLICE
 
 
@@ -118,3 +118,47 @@ def test_autotrader_desk_lists_plan_level_trade(paired_client, db: Session) -> N
     assert row["monitor_scope"] == "plan_levels"
     assert row["scan_pattern_id"] is None
     assert row["related_alert_id"] is None
+
+
+def test_autotrader_desk_suppresses_closed_broker_position(
+    paired_client,
+    db: Session,
+) -> None:
+    c, user = paired_client
+    pos = TradingPosition(
+        user_id=user.id,
+        broker_source="robinhood",
+        account_type="cash",
+        ticker="GHOST",
+        direction="long",
+        current_quantity=0,
+        current_avg_price=10.0,
+        state="closed",
+    )
+    db.add(pos)
+    db.flush()
+    t = Trade(
+        user_id=user.id,
+        ticker="GHOST",
+        direction="long",
+        entry_price=10.0,
+        quantity=1.0,
+        status="open",
+        stop_loss=9.0,
+        take_profit=12.0,
+        broker_source="robinhood",
+        position_id=pos.id,
+    )
+    db.add(t)
+    db.commit()
+
+    r = c.get("/api/trading/autotrader/desk")
+    assert r.status_code == 200
+    payload = r.json()
+    tickers = [x["ticker"] for x in payload.get("trades", [])]
+    assert "GHOST" not in tickers
+    suppressed = payload.get("suppressed_stale_trades") or []
+    assert any(
+        row["ticker"] == "GHOST" and row["reason"] == "position_identity_closed"
+        for row in suppressed
+    )

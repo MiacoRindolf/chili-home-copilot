@@ -261,6 +261,11 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         )
         .all()
     )
+    from .broker_position_truth import filter_broker_stale_open_trades
+
+    open_rows, stale_broker_rows = filter_broker_stale_open_trades(db, open_rows)
+    if stale_broker_rows:
+        summary["skipped_stale_broker_positions"] = stale_broker_rows
 
     from .auto_trader_position_overrides import list_position_overrides
     from .robinhood_exit_execution import (

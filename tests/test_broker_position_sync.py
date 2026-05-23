@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+from sqlalchemy import text
+
 from app.models.trading import Trade
 from app.services.coinbase_service import sync_positions_to_db as sync_coinbase_positions_to_db
 from app.services.broker_service import sync_positions_to_db as sync_robinhood_positions_to_db
@@ -147,7 +149,12 @@ def test_coinbase_sync_dedupes_duplicate_incoming_positions(
     assert rows[0].quantity == 0.5
 
 
-@patch("app.services.coinbase_service.get_positions", return_value=[])
+@patch(
+    "app.services.coinbase_service.get_positions",
+    return_value=[
+        {"ticker": "XYZ-USD", "quantity": 2.0, "average_buy_price": 1.0},
+    ],
+)
 @patch("app.services.coinbase_service.is_connected", return_value=True)
 def test_coinbase_sync_scores_stale_close_from_sell_fills(
     _connected,
@@ -170,6 +177,7 @@ def test_coinbase_sync_scores_stale_close_from_sell_fills(
         status="open",
         broker_source="coinbase",
         broker_order_id="buy-1",
+        broker_sync_missing_streak=1,
     )
     db.add(trade)
     db.commit()
@@ -189,6 +197,7 @@ def test_coinbase_sync_scores_stale_close_from_sell_fills(
             }
 
     monkeypatch.setattr(coinbase_service, "_get_client", lambda: _FakeClient())
+    monkeypatch.setattr(coinbase_service, "_COINBASE_RECONCILE_MISSING_STREAK_MIN", 2)
     monkeypatch.setattr(
         execution_hooks,
         "on_broker_reconciled_close",
@@ -206,3 +215,149 @@ def test_coinbase_sync_scores_stale_close_from_sell_fills(
     assert trade.broker_status == "filled"
     assert trade.last_broker_sync is not None
     assert "exit priced from recent_sell_fills" in (trade.notes or "")
+
+
+@patch(
+    "app.services.coinbase_service.get_positions",
+    return_value=[
+        {"ticker": "XYZ-USD", "quantity": 1.0, "average_buy_price": 2.0},
+    ],
+)
+@patch("app.services.coinbase_service.is_connected", return_value=True)
+def test_coinbase_sync_partial_list_first_miss_defers_close(
+    _connected,
+    _positions,
+    db,
+    monkeypatch,
+):
+    from app.services import coinbase_service
+
+    old = datetime.utcnow() - timedelta(minutes=30)
+    trade = Trade(
+        user_id=None,
+        ticker="ABC-USD",
+        direction="long",
+        entry_price=1.0,
+        quantity=10.0,
+        entry_date=old,
+        last_broker_sync=old,
+        status="open",
+        broker_source="coinbase",
+        broker_sync_missing_streak=0,
+    )
+    db.add(trade)
+    db.commit()
+
+    monkeypatch.setattr(coinbase_service, "_COINBASE_RECONCILE_MISSING_STREAK_MIN", 2)
+    monkeypatch.setattr(coinbase_service, "_coinbase_has_working_sell_orders", lambda _ticker: False)
+
+    result = sync_coinbase_positions_to_db(db, user_id=None)
+    db.refresh(trade)
+
+    assert result["closed"] == 0
+    assert trade.status == "open"
+    assert trade.broker_sync_missing_streak == 1
+
+
+@patch(
+    "app.services.coinbase_service.get_positions",
+    return_value=[
+        {"ticker": "XYZ-USD", "quantity": 1.0, "average_buy_price": 2.0},
+    ],
+)
+@patch("app.services.coinbase_service.is_connected", return_value=True)
+def test_coinbase_sync_fresh_observation_window_defers_close(
+    _connected,
+    _positions,
+    db,
+    monkeypatch,
+):
+    from app.services import coinbase_service
+
+    trade = Trade(
+        user_id=None,
+        ticker="ABC-USD",
+        direction="long",
+        entry_price=1.0,
+        quantity=10.0,
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+        last_broker_sync=datetime.utcnow(),
+        status="open",
+        broker_source="coinbase",
+        broker_sync_missing_streak=5,
+    )
+    db.add(trade)
+    db.commit()
+
+    monkeypatch.setattr(coinbase_service, "_COINBASE_RECONCILE_MISSING_STREAK_MIN", 2)
+    monkeypatch.setattr(coinbase_service, "_COINBASE_RECONCILE_CONFIRM_WINDOW", 300)
+    monkeypatch.setattr(coinbase_service, "_coinbase_has_working_sell_orders", lambda _ticker: False)
+
+    result = sync_coinbase_positions_to_db(db, user_id=None)
+    db.refresh(trade)
+
+    assert result["closed"] == 0
+    assert trade.status == "open"
+    assert trade.exit_reason is None
+    assert trade.broker_sync_missing_streak == 6
+
+
+@patch(
+    "app.services.coinbase_service.get_positions",
+    return_value=[
+        {"ticker": "ABC-USD", "quantity": 10.0, "average_buy_price": 1.05},
+    ],
+)
+@patch("app.services.coinbase_service.is_connected", return_value=True)
+def test_coinbase_sync_reopens_recent_bookkeeping_close(
+    _connected,
+    _positions,
+    db,
+):
+    closed_at = datetime.utcnow() - timedelta(minutes=20)
+    trade = Trade(
+        user_id=None,
+        ticker="ABC-USD",
+        direction="long",
+        entry_price=1.0,
+        quantity=10.0,
+        entry_date=datetime.utcnow() - timedelta(hours=1),
+        exit_date=closed_at,
+        status="closed",
+        broker_source="coinbase",
+        exit_reason="coinbase_position_sync_gone",
+    )
+    db.add(trade)
+    db.commit()
+
+    db.execute(text("""
+        INSERT INTO trading_bracket_intents (
+            trade_id, ticker, direction, quantity, entry_price,
+            stop_price, target_price, intent_state, shadow_mode,
+            broker_source, payload_json, created_at, updated_at
+        ) VALUES (
+            :tid, 'ABC-USD', 'long', 10.0, 1.0,
+            0.9, 1.2, 'reconciled', false,
+            'coinbase', '{}'::jsonb, NOW(), NOW()
+        )
+    """), {"tid": trade.id})
+    db.commit()
+
+    result = sync_coinbase_positions_to_db(db, user_id=None)
+    db.refresh(trade)
+
+    assert result["reopened"] == 1
+    assert result["created"] == 0
+    assert trade.status == "open"
+    assert trade.exit_reason is None
+    assert trade.exit_date is None
+    assert trade.exit_price is None
+    assert trade.pnl is None
+    assert trade.quantity == 10.0
+    assert trade.entry_price == 1.05
+    assert trade.broker_sync_missing_streak == 0
+
+    intent_state = db.execute(text(
+        "SELECT intent_state FROM trading_bracket_intents WHERE trade_id = :tid"
+    ), {"tid": trade.id}).scalar()
+    assert intent_state == "intent"
