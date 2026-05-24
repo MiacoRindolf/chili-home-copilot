@@ -408,6 +408,9 @@ def test_maker_attempt_filter_ignores_zero_variance_drift():
     with patch(
         "app.services.trading.fast_path.calibration._fetch_maker_attempt_drift_rows",
         return_value=rows,
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_pooled_maker_attempt_drift_rows",
+        return_value=[],
     ):
         excluded, evidence = maker_attempt_adverse_selection_excluded(
             "fake_engine",
@@ -419,6 +422,84 @@ def test_maker_attempt_filter_ignores_zero_variance_drift():
     assert excluded is False
     assert evidence["verdict"] == "insufficient_statistical_evidence"
     assert evidence["minimum_requirement"] == "sample_count>=2 and nonzero_variance"
+
+
+def test_maker_attempt_filter_falls_back_to_pooled_when_ticker_is_sparse():
+    from app.services.trading.fast_path.calibration import (
+        maker_attempt_adverse_selection_excluded,
+    )
+
+    ticker_rows = [
+        {"side": "buy", "fill_outcome": "filled", "mid_drift_bps": -5.0,
+         "signal_score": 0.5},
+    ]
+    pooled_rows = [
+        {"side": "buy", "fill_outcome": "filled", "mid_drift_bps": -5.0,
+         "signal_score": 0.5},
+        {"side": "buy", "fill_outcome": "filled", "mid_drift_bps": -6.0,
+         "signal_score": 0.5},
+        {"side": "buy", "fill_outcome": "filled", "mid_drift_bps": -4.0,
+         "signal_score": 0.5},
+        {"side": "buy", "fill_outcome": "cancelled", "mid_drift_bps": 3.0,
+         "signal_score": 0.5},
+        {"side": "buy", "fill_outcome": "cancelled", "mid_drift_bps": 4.0,
+         "signal_score": 0.5},
+        {"side": "buy", "fill_outcome": "replaced", "mid_drift_bps": 5.0,
+         "signal_score": 0.5},
+    ]
+    with patch(
+        "app.services.trading.fast_path.calibration._fetch_maker_attempt_drift_rows",
+        return_value=ticker_rows,
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_pooled_maker_attempt_drift_rows",
+        return_value=pooled_rows,
+    ):
+        excluded, evidence = maker_attempt_adverse_selection_excluded(
+            "fake_engine",
+            ticker="TEST-USD",
+            alert_type="imbalance_long",
+            signal_score=0.5,
+            window_hours=24,
+        )
+
+    assert excluded is True
+    assert evidence["scope"] == "pooled"
+    assert evidence["ticker_scope_verdict"] == "insufficient_statistical_evidence"
+    assert evidence["ticker_scope_attempts"] == 1
+    assert "maker_fills_adversely" in evidence["blocked_reasons"]
+    assert "maker_misses_favorable_moves" in evidence["blocked_reasons"]
+
+
+def test_maker_attempt_filter_keeps_decisive_ticker_not_excluded_over_pooled():
+    from app.services.trading.fast_path.calibration import (
+        maker_attempt_adverse_selection_excluded,
+    )
+
+    ticker_rows = [
+        {"side": "buy", "fill_outcome": "filled", "mid_drift_bps": 4.0,
+         "signal_score": 0.5},
+        {"side": "buy", "fill_outcome": "filled", "mid_drift_bps": 6.0,
+         "signal_score": 0.5},
+        {"side": "buy", "fill_outcome": "filled", "mid_drift_bps": 5.0,
+         "signal_score": 0.5},
+    ]
+    with patch(
+        "app.services.trading.fast_path.calibration._fetch_maker_attempt_drift_rows",
+        return_value=ticker_rows,
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_pooled_maker_attempt_drift_rows",
+        side_effect=AssertionError("pooled should not be queried"),
+    ):
+        excluded, evidence = maker_attempt_adverse_selection_excluded(
+            "fake_engine",
+            ticker="TEST-USD",
+            alert_type="imbalance_long",
+            signal_score=0.5,
+        )
+
+    assert excluded is False
+    assert evidence["scope"] == "ticker"
+    assert evidence["verdict"] == "not_excluded"
 
 
 def test_maker_attempt_gate_denies_in_maker_mode_when_evidence_excludes():

@@ -303,35 +303,48 @@ def _fetch_maker_attempt_drift_rows(
     return [dict(r) for r in rows]
 
 
-def maker_attempt_adverse_selection_excluded(
+def _fetch_pooled_maker_attempt_drift_rows(
     engine: Engine,
     *,
-    ticker: str,
     alert_type: str,
-    signal_score: float,
-    window_hours: int = 24,
+    window_hours: int,
+) -> list[dict[str, Any]]:
+    sql = text("""
+        SELECT
+            m.ticker,
+            m.side,
+            m.fill_outcome,
+            m.mid_drift_bps,
+            a.signal_score
+        FROM fast_path_maker_attempts m
+        JOIN LATERAL (
+            SELECT alert_type, signal_score
+            FROM fast_alerts a
+            WHERE a.id = m.alert_id
+            ORDER BY fired_at DESC
+            LIMIT 1
+        ) a ON TRUE
+        WHERE a.alert_type = :alert_type
+          AND m.mid_drift_bps IS NOT NULL
+          AND m.placed_at >= NOW() - (:hours || ' hours')::interval
+        ORDER BY m.placed_at DESC
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {
+            "alert_type": alert_type,
+            "hours": int(window_hours),
+        }).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def _maker_attempt_adverse_selection_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    bucket: str,
+    scope: str,
+    window_hours: int,
+    ticker: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """Return whether recent maker attempts prove this lane is toxic.
-
-    Uses finite-sample confidence bounds on side-adjusted mid drift:
-
-      * filled attempts block when the upper confidence bound is below
-        zero, meaning passive fills are selected into adverse movement.
-      * cancelled/replaced attempts block when the lower confidence
-        bound is above zero, meaning the passive order tends to miss
-        favorable movement.
-
-    There is no fixed attempt-count quota. Sparse or zero-variance rows
-    simply produce no statistical verdict, matching the negative-edge
-    decay gate's finite-sample behavior.
-    """
-    bucket = score_bucket(signal_score)
-    rows = _fetch_maker_attempt_drift_rows(
-        engine,
-        ticker=ticker,
-        alert_type=alert_type,
-        window_hours=max(1, int(window_hours)),
-    )
     matching_rows = [
         row for row in rows
         if score_bucket(float(row.get("signal_score") or 0.0)) == bucket
@@ -339,6 +352,8 @@ def maker_attempt_adverse_selection_excluded(
     if not matching_rows:
         return False, {
             "verdict": "no_data",
+            "scope": scope,
+            "ticker": ticker if scope == "ticker" else None,
             "score_bucket": bucket,
             "window_hours": max(1, int(window_hours)),
         }
@@ -386,6 +401,8 @@ def maker_attempt_adverse_selection_excluded(
 
     return bool(blocked_reasons), {
         "verdict": verdict,
+        "scope": scope,
+        "ticker": ticker if scope == "ticker" else None,
         "score_bucket": bucket,
         "window_hours": max(1, int(window_hours)),
         "attempts": len(matching_rows),
@@ -396,6 +413,69 @@ def maker_attempt_adverse_selection_excluded(
         "blocked_reasons": blocked_reasons,
         "minimum_requirement": "sample_count>=2 and nonzero_variance",
     }
+
+
+def maker_attempt_adverse_selection_excluded(
+    engine: Engine,
+    *,
+    ticker: str,
+    alert_type: str,
+    signal_score: float,
+    window_hours: int = 24,
+    allow_pooled: bool = True,
+) -> tuple[bool, dict[str, Any]]:
+    """Return whether recent maker attempts prove this lane is toxic.
+
+    Uses finite-sample confidence bounds on side-adjusted mid drift:
+
+      * filled attempts block when the upper confidence bound is below
+        zero, meaning passive fills are selected into adverse movement.
+      * cancelled/replaced attempts block when the lower confidence
+        bound is above zero, meaning the passive order tends to miss
+        favorable movement.
+
+    There is no fixed attempt-count quota. Sparse or zero-variance rows
+    simply produce no statistical verdict, matching the negative-edge
+    decay gate's finite-sample behavior. When the exact ticker lane is
+    sparse, pooled evidence for the same alert type and score bucket can
+    still block a broadly toxic passive-execution pattern.
+    """
+    bucket = score_bucket(signal_score)
+    window_h = max(1, int(window_hours))
+    rows = _fetch_maker_attempt_drift_rows(
+        engine,
+        ticker=ticker,
+        alert_type=alert_type,
+        window_hours=window_h,
+    )
+    ticker_excluded, ticker_evidence = _maker_attempt_adverse_selection_from_rows(
+        rows,
+        bucket=bucket,
+        scope="ticker",
+        ticker=ticker,
+        window_hours=window_h,
+    )
+    if ticker_excluded or not allow_pooled:
+        return ticker_excluded, ticker_evidence
+    if str(ticker_evidence.get("verdict") or "") == "not_excluded":
+        return False, ticker_evidence
+
+    pooled_rows = _fetch_pooled_maker_attempt_drift_rows(
+        engine,
+        alert_type=alert_type,
+        window_hours=window_h,
+    )
+    pooled_excluded, pooled_evidence = _maker_attempt_adverse_selection_from_rows(
+        pooled_rows,
+        bucket=bucket,
+        scope="pooled",
+        window_hours=window_h,
+    )
+    if pooled_excluded:
+        pooled_evidence["ticker_scope_verdict"] = ticker_evidence.get("verdict")
+        pooled_evidence["ticker_scope_attempts"] = ticker_evidence.get("attempts", 0)
+        return True, pooled_evidence
+    return False, ticker_evidence
 
 
 def _most_negative_confidence_evidence(
