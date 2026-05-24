@@ -545,13 +545,129 @@ def _promotion_decay_source(settings) -> tuple[str, float]:
     return ("fast_signal_decay", fee_bps)
 
 
+_PROMOTION_EDGE_POSITIVE_VERDICT = "positive_edge_candidate"
+_PROMOTION_BLOCK_VERDICT_PRIORITY = {
+    "uncertain": 4,
+    "insufficient_statistical_evidence": 3,
+    "below_cost": 2,
+    "negative_edge": 1,
+}
+
+
+def _metric_from_summary(
+    summary: dict[str, Any],
+    section: str,
+    field: str,
+    default: float = float("-inf"),
+) -> float:
+    value = (summary.get(section) or {}).get(field)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _promotion_summary_sort_key(summary: dict[str, Any]) -> tuple[float, float, int]:
+    verdict = str(summary.get("verdict") or "")
+    if verdict == _PROMOTION_EDGE_POSITIVE_VERDICT:
+        decision_score = _metric_from_summary(
+            summary, "best_lower_net", "lower_net_bps",
+        )
+    else:
+        decision_score = _metric_from_summary(
+            summary, "best_upper_net", "upper_net_bps",
+        )
+    return (
+        float(_PROMOTION_BLOCK_VERDICT_PRIORITY.get(verdict, 0)),
+        decision_score,
+        int(summary.get("total_samples") or 0),
+    )
+
+
+def _promotion_edge_from_decay_rows(
+    rows: list[dict[str, Any]],
+    *,
+    ticker: str,
+    table: str,
+    fee_bps: float,
+    spread_bps: float,
+    min_net_bps: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Return active-promotion evidence from confidence-bound lane verdicts."""
+    from collections import Counter, defaultdict
+
+    from .signal_health import summarize_signal_group
+
+    if table not in ("fast_signal_decay", "fast_signal_decay_maker_filled"):
+        raise ValueError(f"unsupported promotion decay table: {table!r}")
+
+    cost_bps = 2.0 * (float(fee_bps or 0.0) + float(spread_bps or 0.0))
+    base = {
+        "decay_table": table,
+        "cost_bps": round(cost_bps, 4),
+        "fee_bps": round(float(fee_bps or 0.0), 4),
+        "spread_bps": round(float(spread_bps or 0.0), 4),
+        "min_net_bps": round(float(min_net_bps or 0.0), 4),
+    }
+    if not rows:
+        return False, {**base, "verdict": "no_decay_row"}
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        d = dict(row)
+        d.setdefault("ticker", ticker)
+        grouped[(str(d.get("alert_type")), str(d.get("score_bucket")))].append(d)
+
+    summaries = [
+        summarize_signal_group(
+            group,
+            table=table,
+            scope="ticker",
+            fee_bps=float(fee_bps or 0.0),
+            spread_bps=float(spread_bps or 0.0),
+            min_net_bps=float(min_net_bps or 0.0),
+        )
+        for group in grouped.values()
+    ]
+    positives = [
+        summary for summary in summaries
+        if str(summary.get("verdict") or "") == _PROMOTION_EDGE_POSITIVE_VERDICT
+    ]
+    selected = max(positives or summaries, key=_promotion_summary_sort_key)
+    best_mean = selected.get("best_mean_net") or {}
+    best_lower = selected.get("best_lower_net") or {}
+    best_upper = selected.get("best_upper_net") or {}
+    verdict_counts = Counter(str(s.get("verdict") or "unknown") for s in summaries)
+    ok = str(selected.get("verdict") or "") == _PROMOTION_EDGE_POSITIVE_VERDICT
+
+    evidence = {
+        **base,
+        "verdict": selected.get("verdict"),
+        "action": selected.get("action"),
+        "decision_basis": selected.get("decision_basis"),
+        "alert_type": selected.get("alert_type"),
+        "score_bucket": selected.get("score_bucket"),
+        "horizon_s": best_mean.get("horizon_s"),
+        "sample_count": int(selected.get("total_samples") or 0),
+        "mean_bps": best_mean.get("mean_bps"),
+        "net_bps": best_mean.get("mean_net_bps"),
+        "lower_net_bps": best_lower.get("lower_net_bps"),
+        "upper_net_bps": best_upper.get("upper_net_bps"),
+        "lane_verdict_counts": dict(verdict_counts),
+        "lane_count": len(summaries),
+    }
+    return ok, evidence
+
+
 def _promotion_edge_evidence(db, cand: _PairCandidate, settings) -> tuple[bool, dict[str, Any]]:
     """Ticker-level learned-edge check for shadow -> active promotion.
 
     A pair can look volatile and liquid yet still have no tradable signal.
-    Promotion therefore requires at least one calibrated
-    ticker/alert/bucket/horizon row whose mean forward return clears the
-    same cost model used by the executor gates.
+    Promotion therefore requires at least one ticker/alert/bucket lane
+    whose lower confidence bound clears the same cost model used by the
+    executor gates and signal-health diagnostics.
     """
     from sqlalchemy import text
 
@@ -559,48 +675,26 @@ def _promotion_edge_evidence(db, cand: _PairCandidate, settings) -> tuple[bool, 
     if table not in ("fast_signal_decay", "fast_signal_decay_maker_filled"):
         raise ValueError(f"unsupported promotion decay table: {table!r}")
 
-    min_samples = int(getattr(settings, "live_alpha_min_samples", 50) or 50)
     min_net_bps = float(getattr(settings, "live_alpha_min_net_bps", 0.0) or 0.0)
-    spread_bps = float(cand.spread_bps or 0.0)
-    cost_bps = 2.0 * (fee_bps + spread_bps)
-
-    row = db.execute(text(f"""
-        SELECT alert_type, score_bucket, horizon_s, sample_count, mean_return,
-               (mean_return * 10000.0) - :cost_bps AS net_bps
+    rows = db.execute(text(f"""
+        SELECT ticker, alert_type, score_bucket, horizon_s, sample_count,
+               mean_return, m2_return
         FROM {table}
         WHERE ticker = :ticker
-          AND sample_count >= :min_samples
-        ORDER BY net_bps DESC, sample_count DESC
-        LIMIT 1
+          AND sample_count > 0
+        ORDER BY alert_type, score_bucket, horizon_s
     """), {
         "ticker": cand.ticker,
-        "min_samples": min_samples,
-        "cost_bps": cost_bps,
-    }).mappings().one_or_none()
+    }).mappings().all()
 
-    base = {
-        "decay_table": table,
-        "min_samples": min_samples,
-        "cost_bps": round(cost_bps, 4),
-        "fee_bps": round(fee_bps, 4),
-        "spread_bps": round(spread_bps, 4),
-        "min_net_bps": round(min_net_bps, 4),
-    }
-    if row is None:
-        return False, {**base, "verdict": "no_decay_row"}
-
-    net_bps = float(row["net_bps"] or 0.0)
-    evidence = {
-        **base,
-        "verdict": "cleared" if net_bps >= min_net_bps else "below_cost",
-        "alert_type": row["alert_type"],
-        "score_bucket": row["score_bucket"],
-        "horizon_s": int(row["horizon_s"] or 0),
-        "sample_count": int(row["sample_count"] or 0),
-        "mean_bps": round(float(row["mean_return"] or 0.0) * 10000.0, 4),
-        "net_bps": round(net_bps, 4),
-    }
-    return net_bps >= min_net_bps, evidence
+    return _promotion_edge_from_decay_rows(
+        [dict(row) for row in rows],
+        ticker=cand.ticker,
+        table=table,
+        fee_bps=float(fee_bps or 0.0),
+        spread_bps=float(cand.spread_bps or 0.0),
+        min_net_bps=min_net_bps,
+    )
 
 
 def _shadow_edge_exhaustion_evidence(
@@ -833,9 +927,7 @@ def run_rotation_pass(
         "edge_exhausted_demotions": 0,
         "promotion_decay_table": None,
         "promotion_fee_bps": None,
-        "promotion_min_samples": int(
-            getattr(settings, "live_alpha_min_samples", 50) or 50
-        ),
+        "promotion_min_samples": None,
         "promotion_min_net_bps": float(
             getattr(settings, "live_alpha_min_net_bps", 0.0) or 0.0
         ),

@@ -34,6 +34,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from ...db import engine
+from ...services.trading.fast_path.universe_rotator import (
+    _promotion_edge_from_decay_rows,
+)
 from ...services.trading.fast_path.universe_status import (
     UNIVERSE_STATUS_ACTIVE,
     UNIVERSE_STATUS_INACTIVE,
@@ -607,7 +610,6 @@ def get_universe() -> JSONResponse:
             else:
                 decay_table = "fast_signal_decay"
             fee_bps = effective_fee_bps
-            min_samples = int(fp_settings.live_alpha_min_samples or 50)
             min_net_bps = float(fp_settings.live_alpha_min_net_bps or 0.0)
 
             def _implied_range_24h_bps(
@@ -625,41 +627,25 @@ def get_universe() -> JSONResponse:
                 return round(float(composite_score) / denom, 4)
 
             def _best_edge(ticker: str, spread_bps: float | None) -> dict[str, Any]:
-                cost_bps = 2.0 * (fee_bps + float(spread_bps or 0.0))
-                row = conn.execute(text(f"""
-                    SELECT alert_type, score_bucket, horizon_s, sample_count,
-                           mean_return,
-                           (mean_return * 10000.0) - :cost_bps AS net_bps
+                rows = conn.execute(text(f"""
+                    SELECT ticker, alert_type, score_bucket, horizon_s,
+                           sample_count, mean_return, m2_return
                     FROM {decay_table}
                     WHERE ticker = :ticker
-                      AND sample_count >= :min_samples
-                    ORDER BY net_bps DESC, sample_count DESC
-                    LIMIT 1
+                      AND sample_count > 0
+                    ORDER BY alert_type, score_bucket, horizon_s
                 """), {
                     "ticker": ticker,
-                    "min_samples": min_samples,
-                    "cost_bps": cost_bps,
-                }).mappings().one_or_none()
-                base = {
-                    "decay_table": decay_table,
-                    "min_samples": min_samples,
-                    "cost_bps": round(cost_bps, 4),
-                    "min_net_bps": round(min_net_bps, 4),
-                }
-                if row is None:
-                    return {**base, "verdict": "no_decay_row"}
-                mean_bps = float(row["mean_return"] or 0.0) * 10000.0
-                net_bps = float(row["net_bps"] or 0.0)
-                return {
-                    **base,
-                    "verdict": "cleared" if net_bps >= min_net_bps else "below_cost",
-                    "alert_type": row["alert_type"],
-                    "score_bucket": row["score_bucket"],
-                    "horizon_s": int(row["horizon_s"] or 0),
-                    "sample_count": int(row["sample_count"] or 0),
-                    "mean_bps": round(mean_bps, 4),
-                    "net_bps": round(net_bps, 4),
-                }
+                }).mappings().all()
+                _ok, evidence = _promotion_edge_from_decay_rows(
+                    [dict(row) for row in rows],
+                    ticker=ticker,
+                    table=decay_table,
+                    fee_bps=float(fee_bps or 0.0),
+                    spread_bps=float(spread_bps or 0.0),
+                    min_net_bps=min_net_bps,
+                )
+                return evidence
 
             # Active + shadow from the most recent rotation
             rows = conn.execute(text("""

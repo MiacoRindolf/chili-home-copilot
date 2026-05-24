@@ -523,16 +523,6 @@ def test_run_rotation_pass_shadow_fills_depth_shortfall_without_active_promotion
     db = _FakeRotationDB(
         previous={"THIN-USD": ("shadow", 1)},
         completed_shadows={"THIN-USD"},
-        edge_rows={
-            "THIN-USD": {
-                "alert_type": "imbalance_long",
-                "score_bucket": "high",
-                "horizon_s": 60,
-                "sample_count": 75,
-                "mean_return": 0.003,
-                "net_bps": 10.0,
-            },
-        },
     )
     s = _StubSettings(
         universe_top_n=2,
@@ -790,15 +780,16 @@ def test_completed_shadow_promotes_only_with_positive_maker_edge():
     db = _FakeRotationDB(
         previous={"VOL-USD": ("shadow", 1)},
         completed_shadows={"VOL-USD"},
-        edge_rows={
-            "VOL-USD": {
+        decay_rows={
+            "VOL-USD": [{
+                "ticker": "VOL-USD",
                 "alert_type": "imbalance_long",
                 "score_bucket": "high",
                 "horizon_s": 60,
                 "sample_count": 75,
                 "mean_return": 0.003,
-                "net_bps": 10.0,
-            },
+                "m2_return": 0.00000001,
+            }],
         },
     )
     s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
@@ -812,7 +803,7 @@ def test_completed_shadow_promotes_only_with_positive_maker_edge():
     assert out["promoted_to_active"] == 1
     assert out["edge_promotion_blocks"] == {}
     assert out["promotion_decay_table"] == "fast_signal_decay_maker_filled"
-    assert out["promotion_min_samples"] == 50
+    assert out["promotion_min_samples"] is None
     assert db.inserted_rows[0]["status"] == "active"
 
 
@@ -822,15 +813,16 @@ def test_completed_shadow_stays_shadow_without_positive_maker_edge():
     db = _FakeRotationDB(
         previous={"VOL-USD": ("shadow", 1)},
         completed_shadows={"VOL-USD"},
-        edge_rows={
-            "VOL-USD": {
+        decay_rows={
+            "VOL-USD": [{
+                "ticker": "VOL-USD",
                 "alert_type": "imbalance_long",
                 "score_bucket": "high",
                 "horizon_s": 60,
-                "sample_count": 75,
-                "mean_return": 0.001,
-                "net_bps": -10.0,
-            },
+                "sample_count": 5,
+                "mean_return": 0.002,
+                "m2_return": 0.0001,
+            }],
         },
     )
     s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
@@ -843,8 +835,40 @@ def test_completed_shadow_stays_shadow_without_positive_maker_edge():
 
     assert out["promoted_to_active"] == 0
     assert out["kept_shadow"] == 1
-    assert out["edge_promotion_blocks"] == {"below_cost": 1}
+    assert out["edge_promotion_blocks"] == {"uncertain": 1}
     assert db.inserted_rows[0]["status"] == "shadow"
+
+
+def test_completed_shadow_demotes_when_maker_edge_is_below_cost():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        previous={"VOL-USD": ("shadow", 1)},
+        completed_shadows={"VOL-USD"},
+        decay_rows={
+            "VOL-USD": [{
+                "ticker": "VOL-USD",
+                "alert_type": "imbalance_long",
+                "score_bucket": "high",
+                "horizon_s": 60,
+                "sample_count": 75,
+                "mean_return": 0.001,
+                "m2_return": 0.00000001,
+            }],
+        },
+    )
+    s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["VOL-USD"],
+        fetch_snapshot_fn=lambda t: _make_candidate(ticker=t),
+    )
+
+    assert out["promoted_to_active"] == 0
+    assert out["edge_exhausted_demotions"] == 1
+    assert out["edge_exhaustion_blocks"] == {"below_cost": 1}
+    assert db.inserted_rows[0]["status"] == "inactive"
 
 
 def test_shadow_window_pending_is_counted_before_edge_promotion_check():
@@ -853,15 +877,16 @@ def test_shadow_window_pending_is_counted_before_edge_promotion_check():
     db = _FakeRotationDB(
         previous={"VOL-USD": ("shadow", 1)},
         completed_shadows=set(),
-        edge_rows={
-            "VOL-USD": {
+        decay_rows={
+            "VOL-USD": [{
+                "ticker": "VOL-USD",
                 "alert_type": "imbalance_long",
                 "score_bucket": "high",
                 "horizon_s": 60,
                 "sample_count": 75,
                 "mean_return": 0.003,
-                "net_bps": 10.0,
-            },
+                "m2_return": 0.00000001,
+            }],
         },
     )
     s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)

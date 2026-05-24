@@ -97,6 +97,27 @@ def test_universe_empty_fallback_defaults_off():
     assert FastPathSettings().universe_empty_fallback_enabled is False
 
 
+def test_fast_path_pairs_default_empty_until_operator_configures():
+    """No baked-in static coin list: rotation owns symbol selection."""
+    assert FastPathSettings().pairs == []
+
+
+def test_fast_path_pairs_loader_default_matches_dataclass():
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("CHILI_FAST_PATH_PAIRS", None)
+        loaded = load()
+    assert loaded.pairs == FastPathSettings().pairs
+
+
+def test_fast_path_pairs_env_override_works():
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_PAIRS": "zec-usd; inj-usd, pendle-usd"},
+    ):
+        loaded = load()
+    assert loaded.pairs == ["ZEC-USD", "INJ-USD", "PENDLE-USD"]
+
+
 def test_universe_empty_fallback_env_override_works():
     with mock.patch.dict(
         os.environ,

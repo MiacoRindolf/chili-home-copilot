@@ -66,9 +66,13 @@ class FastPathSettings:
     this flag is read by F4+ execution code only. Surfaced here so the
     operator can flip the whole fast lane mode in one place."""
 
-    pairs: list[str] = field(default_factory=lambda: [
-        "BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "DOGE-USD",
-    ])
+    pairs: list[str] = field(default_factory=list)
+    """Explicit operator-configured fallback pairs.
+
+    The fast-path scalp lane should normally use the data-driven universe
+    rotator. Leaving this empty is intentional: an unset env var must not
+    resurrect a stale baked-in coin list.
+    """
 
     # ── Memory / queue bounds (see architecture doc) ─────────────────
     bar_window: int = 500
@@ -108,17 +112,18 @@ class FastPathSettings:
     # ── Universe rotation (f-fastpath-universe-rotation, 2026-05-07) ─
     universe_rotation_enabled: bool = False
     """Master flag for the data-driven universe rotation. When False
-    (default), the executor + ws_client read from ``pairs`` (the
+    (default), the executor + ws_client read from ``pairs`` (the explicit
     configured pair list). When True, ws_client reads
     ``fast_path_universe WHERE status='active'`` and the rotator runs
-    hourly. Rollback path: flip this False and the system reverts to
-    the configured pair list bit-identically."""
+    hourly. Rollback path: flip this False and provide
+    ``CHILI_FAST_PATH_PAIRS``; with no configured pairs, ingestion stays
+    paused instead of trading a baked-in symbol list."""
 
     universe_empty_fallback_enabled: bool = False
     """When universe rotation is enabled but ``fast_path_universe`` has
     no active/shadow rows, keep the feed paused instead of silently
-    subscribing to ``pairs``. The legacy fallback can be re-enabled for
-    emergency continuity via
+    subscribing to ``pairs``. The explicit configured-pair fallback can
+    be re-enabled for emergency continuity via
     ``CHILI_FAST_PATH_UNIVERSE_EMPTY_FALLBACK_ENABLED=true``."""
 
     universe_shadow_paper_fills_enabled: bool = False
@@ -384,9 +389,7 @@ def load() -> FastPathSettings:
     return FastPathSettings(
         enabled=_env_bool("CHILI_FAST_PATH_ENABLED", False),
         mode=(os.environ.get("CHILI_FAST_PATH_MODE") or "paper").strip().lower(),
-        pairs=_env_pairs("CHILI_FAST_PATH_PAIRS", [
-            "BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "DOGE-USD",
-        ]),
+        pairs=_env_pairs("CHILI_FAST_PATH_PAIRS", []),
         bar_window=_env_int("CHILI_FAST_PATH_BAR_WINDOW", 500),
         book_depth=_env_int("CHILI_FAST_PATH_BOOK_DEPTH", 25),
         queue_max=_env_int("CHILI_FAST_PATH_QUEUE_MAX", 10_000),
