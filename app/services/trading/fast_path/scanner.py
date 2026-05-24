@@ -46,7 +46,7 @@ from __future__ import annotations
 import heapq
 import logging
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
@@ -294,6 +294,7 @@ class MomentumScanner:
         self.fired_book_pressure_reclaim_long = 0
         self.suppressed_book_pressure_warmup = 0
         self.suppressed_book_pressure_condition = 0
+        self.suppressed_book_pressure_reasons: Counter[str] = Counter()
         self.suppressed_cooldown = 0
         self.suppressed_warmup = 0
         self.suppressed_bar_close_alerts_disabled = 0
@@ -539,18 +540,28 @@ class MomentumScanner:
             if first_best_bid > 0
             else 0.0
         )
-        if (
-            avg_imbalance < self._book_pressure_min_avg_imbalance
-            or avg_microprice_edge_bps < self._book_pressure_min_microprice_bps
-            or obs["microprice_edge_bps"] < self._book_pressure_min_microprice_bps
-            or max_spread_bps > self._book_pressure_max_spread_bps
-            or min_touch_notional_usd < self._book_pressure_min_touch_notional_usd
-            or mid_move_bps < self._book_pressure_min_mid_move_bps
-            or best_bid_move_bps < self._book_pressure_min_mid_move_bps
-            or mid_move_bps > self._book_pressure_max_spread_bps
-            or best_bid_move_bps > self._book_pressure_max_spread_bps
-        ):
+        failures: list[str] = []
+        if avg_imbalance < self._book_pressure_min_avg_imbalance:
+            failures.append("avg_imbalance_below")
+        if avg_microprice_edge_bps < self._book_pressure_min_microprice_bps:
+            failures.append("avg_microprice_below")
+        if obs["microprice_edge_bps"] < self._book_pressure_min_microprice_bps:
+            failures.append("current_microprice_below")
+        if max_spread_bps > self._book_pressure_max_spread_bps:
+            failures.append("max_spread_above")
+        if min_touch_notional_usd < self._book_pressure_min_touch_notional_usd:
+            failures.append("min_touch_below")
+        if mid_move_bps < self._book_pressure_min_mid_move_bps:
+            failures.append("mid_move_below")
+        if best_bid_move_bps < self._book_pressure_min_mid_move_bps:
+            failures.append("best_bid_move_below")
+        if mid_move_bps > self._book_pressure_max_spread_bps:
+            failures.append("mid_move_overextended")
+        if best_bid_move_bps > self._book_pressure_max_spread_bps:
+            failures.append("best_bid_move_overextended")
+        if failures:
             self.suppressed_book_pressure_condition += 1
+            self.suppressed_book_pressure_reasons.update(failures)
             return None
         if not self._cooldown_ok(
             state,
@@ -859,6 +870,8 @@ class MomentumScanner:
                 self.suppressed_book_pressure_warmup,
             "suppressed_book_pressure_condition":
                 self.suppressed_book_pressure_condition,
+            "suppressed_book_pressure_reasons":
+                dict(self.suppressed_book_pressure_reasons),
             "suppressed_cooldown": self.suppressed_cooldown,
             "suppressed_warmup": self.suppressed_warmup,
             "suppressed_bar_close_alerts_disabled":

@@ -110,6 +110,8 @@ def test_book_pressure_rejects_bid_wall_when_mid_deteriorates():
     stats = scanner.stats()
     assert stats["fired_book_pressure_reclaim_long"] == 0
     assert stats["suppressed_book_pressure_condition"] == 1
+    assert stats["suppressed_book_pressure_reasons"]["mid_move_below"] == 1
+    assert stats["suppressed_book_pressure_reasons"]["best_bid_move_below"] == 1
 
 
 def test_book_pressure_rejects_when_current_microprice_pressure_fades():
@@ -132,7 +134,11 @@ def test_book_pressure_rejects_when_current_microprice_pressure_fades():
         alerts = scanner.on_book_emit("TEST-USD", book, now_monotonic=float(i))
 
     assert _pressure_alerts(alerts) == []
-    assert scanner.stats()["suppressed_book_pressure_condition"] == 1
+    stats = scanner.stats()
+    assert stats["suppressed_book_pressure_condition"] == 1
+    assert stats["suppressed_book_pressure_reasons"][
+        "current_microprice_below"
+    ] == 1
 
 
 def test_book_pressure_rejects_when_mid_has_already_run_too_far():
@@ -149,7 +155,12 @@ def test_book_pressure_rejects_when_mid_has_already_run_too_far():
         alerts = scanner.on_book_emit("TEST-USD", book, now_monotonic=float(i))
 
     assert _pressure_alerts(alerts) == []
-    assert scanner.stats()["suppressed_book_pressure_condition"] == 1
+    stats = scanner.stats()
+    assert stats["suppressed_book_pressure_condition"] == 1
+    assert stats["suppressed_book_pressure_reasons"]["mid_move_overextended"] == 1
+    assert stats["suppressed_book_pressure_reasons"][
+        "best_bid_move_overextended"
+    ] == 1
 
 
 def test_book_pressure_rejects_dust_touch_liquidity():
@@ -172,7 +183,9 @@ def test_book_pressure_rejects_dust_touch_liquidity():
         alerts = scanner.on_book_emit("TEST-USD", book, now_monotonic=float(i))
 
     assert _pressure_alerts(alerts) == []
-    assert scanner.stats()["suppressed_book_pressure_condition"] == 1
+    stats = scanner.stats()
+    assert stats["suppressed_book_pressure_condition"] == 1
+    assert stats["suppressed_book_pressure_reasons"]["min_touch_below"] == 1
 
 
 def test_book_pressure_uses_depth_weighted_microprice_not_dust_top_level():
@@ -199,7 +212,54 @@ def test_book_pressure_uses_depth_weighted_microprice_not_dust_top_level():
         alerts = scanner.on_book_emit("TEST-USD", book, now_monotonic=float(i))
 
     assert _pressure_alerts(alerts) == []
-    assert scanner.stats()["suppressed_book_pressure_condition"] == 1
+    stats = scanner.stats()
+    assert stats["suppressed_book_pressure_condition"] == 1
+    assert stats["suppressed_book_pressure_reasons"][
+        "current_microprice_below"
+    ] == 1
+
+
+def test_book_pressure_stats_break_down_multiple_condition_reasons():
+    scanner = _scanner()
+    start = datetime(2026, 5, 23, 18, 0, 0)
+    books = [
+        _book(
+            best_bid=100.00,
+            best_ask=100.02,
+            bid_size=1.0,
+            ask_size=9.0,
+            imbalance=0.10,
+            at=start,
+        ),
+        _book(
+            best_bid=100.00,
+            best_ask=100.02,
+            bid_size=1.0,
+            ask_size=9.0,
+            imbalance=0.10,
+            at=start + timedelta(seconds=1),
+        ),
+        _book(
+            best_bid=100.00,
+            best_ask=100.02,
+            bid_size=1.0,
+            ask_size=9.0,
+            imbalance=0.10,
+            at=start + timedelta(seconds=2),
+        ),
+    ]
+
+    alerts: list[dict] = []
+    for i, book in enumerate(books):
+        alerts = scanner.on_book_emit("TEST-USD", book, now_monotonic=float(i))
+
+    assert _pressure_alerts(alerts) == []
+    reasons = scanner.stats()["suppressed_book_pressure_reasons"]
+    assert reasons["avg_imbalance_below"] == 1
+    assert reasons["avg_microprice_below"] == 1
+    assert reasons["current_microprice_below"] == 1
+    assert reasons["mid_move_below"] == 1
+    assert reasons["best_bid_move_below"] == 1
 
 
 def test_book_pressure_knobs_surface_in_stats_config():

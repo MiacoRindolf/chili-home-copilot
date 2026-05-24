@@ -419,6 +419,7 @@ class FastPathSupervisor:
                 "imb_long=%s imb_short=%s spread_squeeze=%s "
                 "book_pressure=%s book_pressure_warmup=%s "
                 "book_pressure_condition=%s "
+                "book_pressure_reasons=%s "
                 "suppressed_cooldown=%s suppressed_warmup=%s "
                 "suppressed_raw_imbalance_disabled=%s "
                 "suppressed_short_disabled=%s "
@@ -438,6 +439,7 @@ class FastPathSupervisor:
                 scanner_stats.get("fired_book_pressure_reclaim_long"),
                 scanner_stats.get("suppressed_book_pressure_warmup"),
                 scanner_stats.get("suppressed_book_pressure_condition"),
+                scanner_stats.get("suppressed_book_pressure_reasons"),
                 scanner_stats.get("suppressed_cooldown"),
                 scanner_stats.get("suppressed_warmup"),
                 scanner_stats.get("suppressed_raw_imbalance_disabled"),
