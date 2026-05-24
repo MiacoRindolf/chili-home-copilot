@@ -238,12 +238,38 @@ def test_candidate_rank_score_caps_depth_at_fillability_gate():
         volatile_fillable,
         fee_bps=40.0,
         top_of_book_cap_usd=5_000.0,
-        trade_count_cap=1_000.0,
     ) > _candidate_rank_score(
         quiet_deep,
         fee_bps=40.0,
         top_of_book_cap_usd=5_000.0,
-        trade_count_cap=1_000.0,
+    )
+
+
+def test_candidate_rank_score_treats_trade_count_as_admission_only():
+    from app.services.trading.fast_path.universe_rotator import _candidate_rank_score
+
+    busy_quiet = _make_candidate(
+        ticker="BUSY-USD",
+        trades_24h=1_000_000,
+        high_24h=101.0,
+        low_24h=99.0,
+    )
+    volatile_missing_trade_count = _make_candidate(
+        ticker="VOL-USD",
+        trades_24h=0,
+        high_24h=120.0,
+        low_24h=80.0,
+    )
+
+    assert busy_quiet.composite_score > volatile_missing_trade_count.composite_score
+    assert _candidate_rank_score(
+        volatile_missing_trade_count,
+        fee_bps=40.0,
+        top_of_book_cap_usd=5_000.0,
+    ) > _candidate_rank_score(
+        busy_quiet,
+        fee_bps=40.0,
+        top_of_book_cap_usd=5_000.0,
     )
 
 
@@ -645,8 +671,9 @@ def test_rotation_treats_depth_as_fillability_gate_for_ranking():
         fetch_snapshot_fn=lambda t: snapshots[t],
     )
 
-    assert out["rank_top_of_book_cap_usd"] == pytest.approx(5_000.0)
-    assert out["rank_trade_count_cap"] == pytest.approx(1_000.0)
+    assert out["rank_top_of_book_cap_usd"] == pytest.approx(25.0)
+    assert out["rank_shadow_top_of_book_cap_usd"] == pytest.approx(25.0)
+    assert out["rank_trade_count_multiplier"] == "admission_gate_only"
     assert out["ranked_n"] == 1
     assert db.inserted_rows[0]["ticker"] == "VOL-USD"
 

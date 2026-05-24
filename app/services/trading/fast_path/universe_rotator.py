@@ -12,10 +12,10 @@ One pass per invocation:
    settings-tunable thresholds.
 4. Score the survivors by data-derived opportunity per estimated
    round-trip cost: 24h range divided by live/configured fee + spread
-   cost, with top-of-book depth and measured trade count capped at the
-   configured fillability gates. Volume/depth/trade activity remain
-   admission gates so quiet mega-cap pairs cannot dominate solely by
-   size.
+   cost, with top-of-book depth capped at the configured probe-depth
+   gate. Full active-depth and measured trade count remain eligibility
+   gates, not ranking multipliers, so quiet mega-cap pairs cannot
+   dominate solely by size/activity.
 5. Diff against the previous pass's status. Apply hysteresis: a pair
    currently in ``status='active'`` only gets demoted if its new rank
    is at least ``universe_hysteresis_ranks`` worse than the cut.
@@ -184,14 +184,15 @@ def _candidate_rank_score(
     *,
     fee_bps: float,
     top_of_book_cap_usd: float | None = None,
-    trade_count_cap: float | None = None,
 ) -> float:
     """Opportunity per estimated round-trip cost, used for final ranking.
 
     The raw ``composite_score`` remains an audit metric. For ranking, depth
-    and trade count are capped at the configured fillability gates so they
-    prove the product is tradable without becoming unbounded substitutes for
-    volatility.
+    is capped at the configured probe-depth gate so it proves the product is
+    tradable without becoming an unbounded substitute for volatility. Trade
+    count is deliberately only an admission gate; when Coinbase reports it
+    for some products but not others, multiplying by it biases the universe
+    back toward busy majors instead of volatile scalp candidates.
     """
     if not cand.has_valid_opportunity_data:
         return 0.0
@@ -199,11 +200,7 @@ def _candidate_rank_score(
     depth_cap = _positive_cap_or_none(top_of_book_cap_usd)
     if depth_cap is not None:
         top_of_book_usd = min(top_of_book_usd, depth_cap)
-    trade_activity = float(cand.trades_24h) if cand.trades_24h > 0 else 1.0
-    trade_cap = _positive_cap_or_none(trade_count_cap)
-    if trade_cap is not None:
-        trade_activity = min(trade_activity, trade_cap)
-    opportunity_score = cand.range_24h_bps * top_of_book_usd * trade_activity
+    opportunity_score = cand.range_24h_bps * top_of_book_usd
     cost_bps = 2.0 * (max(float(fee_bps or 0.0), 0.0) + cand.spread_bps)
     if cost_bps <= 0.0:
         return opportunity_score
@@ -1007,7 +1004,7 @@ def run_rotation_pass(
         "shadow_min_top_of_book_usd": None,
         "rank_top_of_book_cap_usd": None,
         "rank_shadow_top_of_book_cap_usd": None,
-        "rank_trade_count_cap": None,
+        "rank_trade_count_multiplier": None,
         "rotation_at": rotation_at.isoformat(),
     }
 
@@ -1071,19 +1068,25 @@ def run_rotation_pass(
         float(getattr(settings, "universe_shadow_min_top_of_book_usd", 0.0) or 0.0),
         0.0,
     )
-    rank_top_of_book_cap_usd = _positive_cap_or_none(
-        getattr(settings, "universe_min_top_of_book_usd", None)
-    )
     rank_shadow_top_of_book_cap_usd = _positive_cap_or_none(
         shadow_min_top_of_book_usd
     )
-    rank_trade_count_cap = _positive_cap_or_none(
-        getattr(settings, "universe_min_trades_24h", None)
+    rank_top_of_book_cap_usd = rank_shadow_top_of_book_cap_usd
+    active_depth_cap_usd = _positive_cap_or_none(
+        getattr(settings, "universe_min_top_of_book_usd", None)
     )
+    if rank_top_of_book_cap_usd is None:
+        rank_top_of_book_cap_usd = active_depth_cap_usd
+    elif active_depth_cap_usd is not None:
+        rank_top_of_book_cap_usd = min(
+            rank_top_of_book_cap_usd,
+            active_depth_cap_usd,
+        )
+    rank_shadow_top_of_book_cap_usd = rank_top_of_book_cap_usd
     out["shadow_min_top_of_book_usd"] = shadow_min_top_of_book_usd
     out["rank_top_of_book_cap_usd"] = rank_top_of_book_cap_usd
     out["rank_shadow_top_of_book_cap_usd"] = rank_shadow_top_of_book_cap_usd
-    out["rank_trade_count_cap"] = rank_trade_count_cap
+    out["rank_trade_count_multiplier"] = "admission_gate_only"
 
     for snap in valid_snapshots:
         passed = passes_shadow_exploration_gates(
@@ -1164,7 +1167,6 @@ def run_rotation_pass(
                 c,
                 fee_bps=promotion_fee_bps,
                 top_of_book_cap_usd=rank_top_of_book_cap_usd,
-                trade_count_cap=rank_trade_count_cap,
             ),
             reverse=True,
         )
@@ -1189,7 +1191,6 @@ def run_rotation_pass(
                     c,
                     fee_bps=promotion_fee_bps,
                     top_of_book_cap_usd=rank_shadow_top_of_book_cap_usd,
-                    trade_count_cap=rank_trade_count_cap,
                 ),
                 reverse=True,
             )
@@ -1203,7 +1204,6 @@ def run_rotation_pass(
                 c,
                 fee_bps=promotion_fee_bps,
                 top_of_book_cap_usd=rank_shadow_top_of_book_cap_usd,
-                trade_count_cap=rank_trade_count_cap,
             ),
             reverse=True,
         )
