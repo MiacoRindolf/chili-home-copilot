@@ -119,6 +119,10 @@ _PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
     {
         "users",
         "devices",
+        "projects",
+        "project_files",
+        "conversations",
+        "messages",
         "plan_projects",
         "project_members",
         "plan_tasks",
@@ -354,6 +358,17 @@ def _test_prefers_targeted_cleanup(request) -> bool:
     return any(token in name for token in _PROJECT_DOMAIN_TARGETED_TESTS)
 
 
+def _reset_trading_test_process_state() -> None:
+    """Reset in-memory trading safety latches between DB-isolated tests."""
+    try:
+        from app.services.trading import portfolio_risk
+
+        portfolio_risk._breaker_tripped = False
+        portfolio_risk._breaker_reason = None
+    except Exception:
+        pass
+
+
 @pytest.fixture()
 def db(request):
     """Yield a DB session; tables are truncated at test start.
@@ -363,6 +378,7 @@ def db(request):
     teardown errors (lock timeout) after PASSED.
     """
     _bootstrap_test_schema()
+    _reset_trading_test_process_state()
     _truncate_app_tables(
         _PROJECT_DOMAIN_TARGETED_TABLES if _test_prefers_targeted_cleanup(request) else None
     )
@@ -372,6 +388,7 @@ def db(request):
         yield session
     finally:
         session.close()
+        _reset_trading_test_process_state()
 
 
 @pytest.fixture()

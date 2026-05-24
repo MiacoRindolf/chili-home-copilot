@@ -148,7 +148,12 @@ def place_sell_order(
         return result
 
     if target == BROKER_ROBINHOOD:
-        result = broker_service.place_sell_order(ticker, quantity, order_type, limit_price)
+        result = broker_service.place_sell_order(
+            ticker=ticker,
+            quantity=quantity,
+            order_type=order_type,
+            limit_price=limit_price,
+        )
         result["broker"] = BROKER_ROBINHOOD
         return result
 

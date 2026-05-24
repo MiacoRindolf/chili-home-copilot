@@ -121,6 +121,7 @@ from .trading_sub import (
     inspect_router, momentum_api, monitor_router, operator_router, patterns_router,
     scanning_router, trades_router, web3_router,
 )
+from .trading_sub.trades import api_sell_trade  # backwards-compatible import surface
 from ..schemas.trading import (
     AnalyzeRequest,
     PickRecheckRequest,

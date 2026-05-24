@@ -127,7 +127,9 @@ class Trade(Base):
     related_alert_id: Optional[int] = Column(
         Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    scale_in_count: int = Column(Integer, nullable=False, default=0)
+    scale_in_count: int = Column(
+        Integer, nullable=False, server_default="0", default=0
+    )
     auto_trader_version: Optional[str] = Column(String(32), nullable=True, index=True)
     pending_exit_order_id: Optional[str] = Column(String(100), nullable=True)
     pending_exit_status: Optional[str] = Column(String(30), nullable=True)
@@ -145,7 +147,9 @@ class Trade(Base):
     # are audit-only. Original ``quantity`` is reduced by the partial fraction
     # at fill time, so reconstructing pre-partial size is
     # ``quantity + partial_taken_qty``.
-    partial_taken: bool = Column(Boolean, nullable=False, default=False)
+    partial_taken: bool = Column(
+        Boolean, nullable=False, server_default=text("FALSE"), default=False
+    )
     partial_taken_at: Optional[datetime] = Column(DateTime, nullable=True)
     partial_taken_qty: Optional[float] = Column(Float, nullable=True)
     partial_taken_price: Optional[float] = Column(Float, nullable=True)
@@ -1233,15 +1237,22 @@ class PaperTrade(Base):
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
     )
     ticker: str = Column(String(32), nullable=False)
-    direction: str = Column(String(8), nullable=False, default="long")
+    direction: str = Column(
+        String(8), nullable=False, server_default="long", default="long"
+    )
     entry_price: float = Column(Float, nullable=False)
     stop_price: Optional[float] = Column(Float, nullable=True)
     target_price: Optional[float] = Column(Float, nullable=True)
     # Migration 226: widened from Integer -> Float so a fractional partial
     # at 1R is representable on the typical ``quantity=1`` paper position.
-    quantity: float = Column(Float, nullable=False, default=1.0)
-    status: str = Column(String(16), nullable=False, default="open")  # open, closed, expired
-    entry_date: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    quantity: float = Column(Float, nullable=False, server_default="1.0", default=1.0)
+    status: str = Column(
+        String(16), nullable=False, server_default="open", default="open"
+    )  # open, closed, expired
+    entry_date: datetime = Column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
+    )
     exit_date: Optional[datetime] = Column(DateTime, nullable=True)
     exit_price: Optional[float] = Column(Float, nullable=True)
     exit_reason: Optional[str] = Column(String(32), nullable=True)  # stop, target, expired, manual
@@ -1260,11 +1271,16 @@ class PaperTrade(Base):
     # Migration 226: partial-profit-taking at 1R. Same shape as on Trade
     # above. Single partial per paper trade; reconstruct pre-partial size
     # as ``quantity + partial_taken_qty``.
-    partial_taken: bool = Column(Boolean, nullable=False, default=False)
+    partial_taken: bool = Column(
+        Boolean, nullable=False, server_default=text("FALSE"), default=False
+    )
     partial_taken_at: Optional[datetime] = Column(DateTime, nullable=True)
     partial_taken_qty: Optional[float] = Column(Float, nullable=True)
     partial_taken_price: Optional[float] = Column(Float, nullable=True)
-    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: datetime = Column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
+    )
 
 
 class BrainBatchJob(Base):
@@ -3664,13 +3680,19 @@ class TradingPosition(Base):
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     broker_source: str = Column(String(20), nullable=False)
-    account_type: str = Column(String(20), nullable=False, default="cash")
+    account_type: str = Column(
+        String(20), nullable=False, server_default="cash", default="cash"
+    )
     ticker: str = Column(String(20), nullable=False)
-    direction: str = Column(String(10), nullable=False, default="long")
+    direction: str = Column(
+        String(10), nullable=False, server_default="long", default="long"
+    )
     asset_kind: Optional[str] = Column(String(20), nullable=True)
     current_quantity: Optional[float] = Column(Float, nullable=True)
     current_avg_price: Optional[float] = Column(Float, nullable=True)
-    state: str = Column(String(20), nullable=False, default="unknown")
+    state: str = Column(
+        String(20), nullable=False, server_default="unknown", default="unknown"
+    )
     current_envelope_id: Optional[int] = Column(
         BigInteger,
         ForeignKey("trading_trades.id", ondelete="SET NULL"),
@@ -3681,10 +3703,12 @@ class TradingPosition(Base):
         DateTime, nullable=True
     )
     created_at: datetime = Column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
     )
     updated_at: datetime = Column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
     )
 
 
@@ -3715,8 +3739,10 @@ class TradingPositionEvent(Base):
         nullable=True,
     )
     observed_at: datetime = Column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
     )
     recorded_at: datetime = Column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
     )
