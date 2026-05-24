@@ -106,6 +106,17 @@ def _make_gate_run():
     )
 
 
+def _make_denied_gate_run(*gate_names: str):
+    return GateRunResult(
+        allow=False,
+        deny_reason="negative_edge:negative_edge",
+        results=[
+            GateResult(name=name, allow=False, reason=name, detail={})
+            for name in gate_names
+        ],
+    )
+
+
 def _make_executor(settings, decay_miner=None):
     """Build an executor with a stubbed engine + book aggregator. The
     DB helpers are patched per-test so no real engine is needed.
@@ -225,6 +236,69 @@ def test_neutral_spread_squeeze_does_not_become_spot_short(monkeypatch):
     assert writes[0]["decision"] == "paper_fill"
     assert writes[0]["reject_reason"] is None
     assert writes[0]["side"] == SIDE_BUY
+
+
+def test_shadow_maker_probe_bypasses_learned_denials(monkeypatch):
+    """Shadow maker probes refresh maker-filled evidence despite pooled blocks."""
+    settings = replace(
+        _make_settings(execution_mode="maker_only"),
+        universe_rotation_enabled=True,
+    )
+    ex = _make_executor(settings)
+    ex._build_context = MagicMock(return_value=_make_ctx(spread_bps=2.0))
+    ex._latest_universe_status_sync = MagicMock(return_value=UNIVERSE_STATUS_SHADOW)
+    gate_run = _make_denied_gate_run(
+        "negative_edge",
+        "maker_attempt_adverse",
+        "cost_aware_admission",
+    )
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: gate_run)
+    calls = []
+
+    async def _record_maker_probe(**kwargs):
+        calls.append(kwargs)
+
+    async def _fail_reject(*_a, **_kw):
+        raise AssertionError("shadow learned denial should route to maker probe")
+
+    ex._process_alert_maker = _record_maker_probe
+    ex._write_decision = _fail_reject
+
+    asyncio.run(ex._process_alert(_make_alert()))
+
+    assert len(calls) == 1
+    assert calls[0]["gate_run"] is gate_run
+    assert calls[0]["execution_mode"] == "maker_only"
+    ex._latest_universe_status_sync.assert_called_once_with("BTC-USD")
+
+
+def test_shadow_maker_probe_keeps_operational_denials_blocking(monkeypatch):
+    settings = replace(
+        _make_settings(execution_mode="maker_only"),
+        universe_rotation_enabled=True,
+    )
+    ex = _make_executor(settings)
+    ex._build_context = MagicMock(return_value=_make_ctx(spread_bps=20.0))
+    ex._latest_universe_status_sync = MagicMock(return_value=UNIVERSE_STATUS_SHADOW)
+    gate_run = _make_denied_gate_run("negative_edge", "spread_sanity")
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: gate_run)
+    writes = []
+
+    async def _record_write(*_a, **kwargs):
+        writes.append(kwargs)
+
+    async def _fail_maker_probe(**_kwargs):
+        raise AssertionError("spread sanity denial must not be bypassed")
+
+    ex._write_decision = _record_write
+    ex._process_alert_maker = _fail_maker_probe
+
+    asyncio.run(ex._process_alert(_make_alert()))
+
+    assert len(writes) == 1
+    assert writes[0]["decision"] == "rejected"
+    assert writes[0]["reject_reason"] == "negative_edge:negative_edge"
+    assert ex._latest_universe_status_sync.call_count == 0
 
 
 def test_open_positions_refresh_uses_fast_exits_as_truth():

@@ -65,7 +65,7 @@ from .gates import (
 )
 from .order_book import OrderBookAggregator
 from .settings import FastPathSettings
-from .universe_status import UNIVERSE_STATUS_ACTIVE
+from .universe_status import UNIVERSE_STATUS_ACTIVE, UNIVERSE_STATUS_SHADOW
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,13 @@ POLL_INTERVAL_S = 1.0
 """How often the executor polls fast_alerts. 1s gives sub-2s typical
 end-to-end latency (ws -> scanner -> alert row -> poll -> decision)
 without hammering the DB."""
+
+_SHADOW_MAKER_PROBE_BYPASS_GATES = frozenset({
+    "negative_edge",
+    "maker_attempt_adverse",
+    "cost_aware_admission",
+})
+"""Learned denials that shadow maker probes are allowed to re-measure."""
 
 
 # ── Coinbase live placement ──────────────────────────────────────────
@@ -567,7 +574,12 @@ class FastPathExecutor:
         decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
         latency_ms = (time.monotonic() - t_start) * 1000.0
 
+        shadow_maker_probe = False
         if not gate_run.allow:
+            shadow_maker_probe = await self._shadow_maker_probe_allowed_async(
+                alert, ctx, gate_run,
+            )
+        if not gate_run.allow and not shadow_maker_probe:
             # Reject path
             await self._write_decision(
                 alert, ctx, decision="rejected",
@@ -729,6 +741,56 @@ class FastPathExecutor:
         self._metrics.last_decision_at = decided_at
 
     # ── Maker-only path (f-fastpath-maker-only-executor, 2026-05-08) ──
+
+    async def _shadow_maker_probe_allowed_async(
+        self,
+        alert: dict,
+        ctx: ExecContext,
+        gate_run: GateRunResult,
+    ) -> bool:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._shadow_maker_probe_allowed, alert, ctx, gate_run,
+        )
+
+    def _shadow_maker_probe_allowed(
+        self,
+        alert: dict,
+        ctx: ExecContext,
+        gate_run: GateRunResult,
+    ) -> bool:
+        """Allow paper shadow symbols to refresh maker-fill evidence.
+
+        This is intentionally narrow: it only applies to latest-rotation
+        shadow symbols in paper maker modes, and only when every denial is
+        a learned maker/economic gate. Operational denials still reject.
+        """
+        if (ctx.mode or "paper").strip().lower() != "paper":
+            return False
+        execution_mode = (self._settings.execution_mode or "taker").strip().lower()
+        if execution_mode not in ("maker_only", "maker_first_then_taker"):
+            return False
+        if not getattr(self._settings, "universe_rotation_enabled", False):
+            return False
+        denied = {r.name for r in gate_run.results if not r.allow}
+        if not denied:
+            return False
+        if not denied.issubset(_SHADOW_MAKER_PROBE_BYPASS_GATES):
+            return False
+        ticker = str(alert.get("ticker") or "")
+        if not ticker:
+            return False
+        try:
+            status = self._latest_universe_status_sync(ticker)
+        except Exception as exc:
+            self._metrics.db_errors += 1
+            logger.debug(
+                "[fast_path] shadow maker probe status lookup failed "
+                "ticker=%s: %s",
+                ticker, exc, exc_info=True,
+            )
+            return False
+        return status == UNIVERSE_STATUS_SHADOW
 
     async def _process_alert_maker(
         self,
