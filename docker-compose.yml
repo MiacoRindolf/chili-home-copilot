@@ -802,7 +802,9 @@ services:
       # in .env (or unset) to disable without editing this file.
       - CHILI_FAST_PATH_ENABLED=${CHILI_FAST_PATH_ENABLED:-1}
       - CHILI_FAST_PATH_MODE=paper
-      - CHILI_FAST_PATH_PAIRS=BTC-USD,ETH-USD,SOL-USD,AVAX-USD,DOGE-USD
+      # CHILI_FAST_PATH_PAIRS intentionally has no compose default.
+      # Set it explicitly only for configured-pair rollback/testing; the
+      # production scalp universe is selected from fast_path_universe.
       # Profitability guardrails: keep paper mode, but use maker-style
       # fills and the dynamic cost gate unless the operator overrides.
       - CHILI_FAST_PATH_EXECUTION_MODE=${CHILI_FAST_PATH_EXECUTION_MODE:-maker_only}

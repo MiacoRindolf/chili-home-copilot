@@ -5,9 +5,12 @@ tables. Standalone from the main chili process; restarts independently.
 
 Usage (local):
     CHILI_FAST_PATH_ENABLED=1 \\
-    CHILI_FAST_PATH_PAIRS=BTC-USD,ETH-USD \\
     DATABASE_URL=postgresql://... \\
     python scripts/fast_data_worker.py
+
+Set ``CHILI_FAST_PATH_PAIRS`` only when intentionally testing or
+rolling back to configured-pair subscriptions. The normal scalp
+universe is selected by the rotator and read from ``fast_path_universe``.
 
 In docker compose, the service ``fast-data-worker`` runs this with
 the env vars already configured.
