@@ -82,6 +82,13 @@ _SHADOW_MAKER_PROBE_BYPASS_GATES = frozenset({
 })
 """Learned denials that shadow maker probes are allowed to re-measure."""
 
+_SHADOW_MAKER_PROBE_TERMINAL_VERDICTS = frozenset({
+    "negative_edge",
+    "below_cost",
+    "adverse_selection",
+})
+"""Gate verdicts that are already conclusive enough to stop re-probing."""
+
 
 # ── Coinbase live placement ──────────────────────────────────────────
 
@@ -777,6 +784,8 @@ class FastPathExecutor:
             return False
         if not denied.issubset(_SHADOW_MAKER_PROBE_BYPASS_GATES):
             return False
+        if not self._shadow_maker_probe_denials_refreshable(gate_run):
+            return False
         ticker = str(alert.get("ticker") or "")
         if not ticker:
             return False
@@ -791,6 +800,18 @@ class FastPathExecutor:
             )
             return False
         return status == UNIVERSE_STATUS_SHADOW
+
+    @staticmethod
+    def _shadow_maker_probe_denials_refreshable(gate_run: GateRunResult) -> bool:
+        """Return False when learned gates already reached terminal evidence."""
+        for result in gate_run.results:
+            if result.allow:
+                continue
+            detail = result.detail if isinstance(result.detail, dict) else {}
+            verdict = str(detail.get("verdict") or "").strip().lower()
+            if verdict in _SHADOW_MAKER_PROBE_TERMINAL_VERDICTS:
+                return False
+        return True
 
     async def _process_alert_maker(
         self,

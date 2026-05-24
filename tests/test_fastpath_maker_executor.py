@@ -272,6 +272,47 @@ def test_shadow_maker_probe_bypasses_learned_denials(monkeypatch):
     ex._latest_universe_status_sync.assert_called_once_with("BTC-USD")
 
 
+def test_shadow_maker_probe_blocks_terminal_learned_denials(monkeypatch):
+    """Shadow probes should not keep sampling lanes already proven toxic."""
+    settings = replace(
+        _make_settings(execution_mode="maker_only"),
+        universe_rotation_enabled=True,
+    )
+    ex = _make_executor(settings)
+    ex._build_context = MagicMock(return_value=_make_ctx(spread_bps=2.0))
+    ex._latest_universe_status_sync = MagicMock(return_value=UNIVERSE_STATUS_SHADOW)
+    gate_run = GateRunResult(
+        allow=False,
+        deny_reason="negative_edge:negative_edge",
+        results=[
+            GateResult(
+                name="negative_edge",
+                allow=False,
+                reason="negative_edge",
+                detail={"verdict": "negative_edge"},
+            ),
+        ],
+    )
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: gate_run)
+    writes = []
+
+    async def _record_write(*_a, **kwargs):
+        writes.append(kwargs)
+
+    async def _fail_maker_probe(**_kwargs):
+        raise AssertionError("terminal learned denial must not be re-probed")
+
+    ex._write_decision = _record_write
+    ex._process_alert_maker = _fail_maker_probe
+
+    asyncio.run(ex._process_alert(_make_alert()))
+
+    assert len(writes) == 1
+    assert writes[0]["decision"] == "rejected"
+    assert writes[0]["reject_reason"] == "negative_edge:negative_edge"
+    ex._latest_universe_status_sync.assert_not_called()
+
+
 def test_shadow_maker_probe_keeps_operational_denials_blocking(monkeypatch):
     settings = replace(
         _make_settings(execution_mode="maker_only"),
