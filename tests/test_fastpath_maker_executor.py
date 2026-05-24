@@ -10,6 +10,8 @@ Pin the executor's maker-only / maker-first-then-taker path:
   * 1-outstanding-per-(ticker, side) cap — second signal rejected.
   * Cancel-on-timeout (paper) — book not crossed -> cancelled,
     book crossed -> filled.
+  * Adverse paper sweep — side-adjusted mid reaching our quote before
+    fill cancels early without waiting for timeout.
   * `decay_miner.record_maker_outcome` called on fill.
   * Hybrid taker fallback fires after `replaced`.
 
@@ -437,6 +439,87 @@ def test_paper_maker_sweep_resolves_crossed_book_before_timeout():
     assert ex._metrics.decisions_paper_fill == 1
     assert len(writes) == 1
     decay.record_maker_outcome.assert_called_once()
+
+
+def test_maker_adverse_cancel_threshold_is_quote_distance():
+    """The early-cancel threshold comes from the order's own quote distance."""
+    ctx_place = _make_ctx(best_bid=100.0, best_ask=100.10)
+    limit_price = 100.01
+    near_but_not_at_quote = _make_ctx(best_bid=99.99, best_ask=100.05)
+    at_quote_mid = _make_ctx(best_bid=99.98, best_ask=100.04)
+
+    assert FastPathExecutor._maker_quote_distance_bps(
+        "buy",
+        limit_price,
+        ctx_place,
+    ) == pytest.approx(((100.05 - 100.01) / 100.05) * 10_000.0)
+    assert not FastPathExecutor._maker_adverse_drift_reached_quote(
+        "buy",
+        limit_price,
+        ctx_place,
+        near_but_not_at_quote,
+    )
+    assert FastPathExecutor._maker_adverse_drift_reached_quote(
+        "buy",
+        limit_price,
+        ctx_place,
+        at_quote_mid,
+    )
+
+
+def test_paper_maker_sweep_cancels_adverse_drift_before_timeout():
+    """Cancel when mid reaches our passive quote before the book crosses."""
+    settings = _make_settings(
+        execution_mode="maker_only",
+        maker_cancel_on_timeout_s=120,
+    )
+    decay = MagicMock()
+    ex = _make_executor(settings, decay_miner=decay)
+
+    ctx_place = _make_ctx(best_bid=100.0, best_ask=100.10)
+    # Mid is exactly the passive buy quote, but ask has not traded
+    # through the quote yet, so this is an early cancel rather than a fill.
+    ctx_after = _make_ctx(best_bid=99.98, best_ask=100.04)
+    ex._build_context = MagicMock(return_value=ctx_after)
+
+    timeout_task = MagicMock()
+    attempt = {
+        "attempt_id": 7,
+        "alert_id": 1,
+        "ticker": "BTC-USD",
+        "side": "buy",
+        "limit_price": 100.01,
+        "broker_order_id": None,
+        "execution_mode": "maker_only",
+        "alert_type": "imbalance_long",
+        "signal_score": 0.85,
+        "fired_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        "placed_at": time.monotonic() - 0.25,
+        "quantity": 0.001,
+        "notional_usd": 10.0,
+        "timeout_task": timeout_task,
+        "_placement_ctx": ctx_place,
+        "_alert": _make_alert(),
+        "_gate_run": _make_gate_run(),
+        "_unfilled_outcome": "cancelled",
+    }
+    ex._outstanding_maker[("BTC-USD", "buy")] = attempt
+
+    asyncio.run(ex._sweep_paper_maker_fills())
+
+    timeout_task.cancel.assert_called_once()
+    payload = ex._update_maker_attempt_sync.call_args.args[0]
+    assert payload["fill_outcome"] == "cancelled"
+    assert payload["final_price"] is None
+    assert payload["time_to_fill_ms"] is None
+    assert payload["mid_drift_bps"] == pytest.approx(-3.998, abs=0.01)
+    assert attempt["resolved"] is True
+    assert attempt["_adverse_cancel"] is True
+    assert ("BTC-USD", "buy") not in ex._outstanding_maker
+    assert ex._metrics.maker_attempts_cancelled == 1
+    assert ex._metrics.maker_attempts_adverse_cancelled == 1
+    assert ex._metrics.maker_attempts_filled == 0
+    decay.record_maker_outcome.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

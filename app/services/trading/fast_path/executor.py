@@ -258,6 +258,7 @@ encodes the default; an operator override should NOT be needed since
 the gate already filters wide-spread pairs."""
 
 MAKER_TIMEOUT_TASK_NAME_PREFIX = "fast_path_maker_timeout"
+BPS_PER_UNIT = 10_000.0
 
 
 def _maker_default_tick_size(mid_price: float) -> float:
@@ -399,6 +400,7 @@ class _ExecutorMetrics:
     maker_attempts_replaced: int = 0
     maker_attempts_rejected: int = 0
     maker_attempts_capped: int = 0  # blocked by 1-outstanding-per-(ticker,side) cap
+    maker_attempts_adverse_cancelled: int = 0
     maker_observe_only_fills: int = 0
 
 
@@ -950,6 +952,8 @@ class FastPathExecutor:
           * Paper mode: peek at the in-memory book. If the BBO has
             traded through the passive limit on our side of the book,
             call it filled at the limit price. Else mark unfilled.
+            The sweep path may force a cancellation before timeout
+            when adverse mid drift reaches our passive quote first.
 
         On filled / partial: notify the decay_miner so the maker-filled
         forward-return obs accumulate.
@@ -991,11 +995,18 @@ class FastPathExecutor:
                 if (ctx.best_bid > 0 and ctx.best_ask > 0) else 0.0
             )
             if mid_at_place > 0:
-                mid_drift_bps = ((mid_now - mid_at_place) / mid_at_place) * 10_000.0
+                mid_drift_bps = (
+                    (mid_now - mid_at_place) / mid_at_place
+                ) * BPS_PER_UNIT
 
         if force_outcome in ("filled", "partial"):
             outcome = force_outcome
             final_price = limit_price
+        elif force_outcome in ("cancelled", "replaced"):
+            outcome = force_outcome
+            final_price = None
+            if ctx.mode == "live" and broker_order_id:
+                _cancel_coinbase_order_live(broker_order_id)
         elif ctx.mode == "live" and broker_order_id:
             # Poll broker for terminal state.
             try:
@@ -1092,6 +1103,8 @@ class FastPathExecutor:
             self._metrics.maker_attempts_replaced += 1
         elif outcome == "cancelled":
             self._metrics.maker_attempts_cancelled += 1
+            if attempt.get("_adverse_cancel"):
+                self._metrics.maker_attempts_adverse_cancelled += 1
 
         # Notify decay_miner so the maker-filled forward-return obs
         # accumulate. For unfilled outcomes the call is a no-op.
@@ -1174,12 +1187,12 @@ class FastPathExecutor:
         self._outstanding_maker.pop(cap_key, None)
 
     async def _sweep_paper_maker_fills(self) -> None:
-        """Resolve paper maker fills as soon as the current book crosses.
+        """Resolve paper maker orders when the current book invalidates them.
 
         The timeout handler still owns cancel/replaced outcomes. This
-        sweep only accelerates paper fills so fill-time and mid-drift
-        evidence are measured near the book event, not artificially at
-        the cancel deadline.
+        sweep accelerates paper fills and early adverse cancels so
+        fill-time and mid-drift evidence are measured near the book
+        event, not artificially at the cancel deadline.
         """
         if not self._outstanding_maker:
             return
@@ -1193,24 +1206,106 @@ class FastPathExecutor:
             side = str(attempt.get("side") or "")
             limit_price = float(attempt.get("limit_price") or 0.0)
             peek_ctx = self._build_context(ticker)
-            if not self._paper_maker_book_crossed(side, limit_price, peek_ctx):
-                continue
-            attempt["resolving"] = True
-            task = attempt.get("timeout_task")
-            if task is not None:
-                task.cancel()
-            await self._maker_timeout_handler(
-                cap_key=cap_key,
-                attempt=attempt,
-                timeout_s=0,
-                unfilled_outcome=str(
-                    attempt.get("_unfilled_outcome") or "cancelled"
-                ),
-                ctx=ctx,
-                alert=attempt.get("_alert") or {},
-                gate_run=attempt.get("_gate_run"),
-                force_outcome="filled",
-            )
+            force_outcome: str | None = None
+            if self._paper_maker_book_crossed(side, limit_price, peek_ctx):
+                force_outcome = "filled"
+            elif self._maker_adverse_drift_reached_quote(
+                side,
+                limit_price,
+                ctx,
+                peek_ctx,
+            ):
+                # If the mid has already moved all the way to our
+                # passive quote and we still are not filled, the maker
+                # premise has failed. Cancel rather than waiting to be
+                # selected into the next adverse print.
+                attempt["_adverse_cancel"] = True
+                force_outcome = "cancelled"
+            if force_outcome is not None:
+                attempt["resolving"] = True
+                task = attempt.get("timeout_task")
+                if task is not None:
+                    task.cancel()
+                await self._maker_timeout_handler(
+                    cap_key=cap_key,
+                    attempt=attempt,
+                    timeout_s=0,
+                    unfilled_outcome=str(
+                        attempt.get("_unfilled_outcome") or "cancelled"
+                    ),
+                    ctx=ctx,
+                    alert=attempt.get("_alert") or {},
+                    gate_run=attempt.get("_gate_run"),
+                    force_outcome=force_outcome,
+                )
+
+    @staticmethod
+    def _ctx_mid_price(ctx: ExecContext) -> float:
+        if ctx.best_bid <= 0.0 or ctx.best_ask <= 0.0:
+            return 0.0
+        return (ctx.best_bid + ctx.best_ask) / 2.0
+
+    @classmethod
+    def _maker_quote_distance_bps(
+        cls,
+        side: str,
+        limit_price: float,
+        placement_ctx: ExecContext,
+    ) -> float:
+        mid_at_place = cls._ctx_mid_price(placement_ctx)
+        if mid_at_place <= 0.0 or limit_price <= 0.0:
+            return 0.0
+        if side == "buy":
+            distance = mid_at_place - limit_price
+        elif side == "sell":
+            distance = limit_price - mid_at_place
+        else:
+            return 0.0
+        if distance <= 0.0:
+            return 0.0
+        return (distance / mid_at_place) * BPS_PER_UNIT
+
+    @classmethod
+    def _maker_side_adjusted_mid_drift_bps(
+        cls,
+        side: str,
+        placement_ctx: ExecContext,
+        peek_ctx: ExecContext,
+    ) -> float | None:
+        mid_at_place = cls._ctx_mid_price(placement_ctx)
+        mid_now = cls._ctx_mid_price(peek_ctx)
+        if mid_at_place <= 0.0 or mid_now <= 0.0:
+            return None
+        raw = ((mid_now - mid_at_place) / mid_at_place) * BPS_PER_UNIT
+        if side == "sell":
+            return -raw
+        if side == "buy":
+            return raw
+        return None
+
+    @classmethod
+    def _maker_adverse_drift_reached_quote(
+        cls,
+        side: str,
+        limit_price: float,
+        placement_ctx: ExecContext,
+        peek_ctx: ExecContext,
+    ) -> bool:
+        quote_distance_bps = cls._maker_quote_distance_bps(
+            side,
+            limit_price,
+            placement_ctx,
+        )
+        if quote_distance_bps <= 0.0:
+            return False
+        side_drift_bps = cls._maker_side_adjusted_mid_drift_bps(
+            side,
+            placement_ctx,
+            peek_ctx,
+        )
+        if side_drift_bps is None:
+            return False
+        return side_drift_bps <= -quote_distance_bps
 
     @staticmethod
     def _paper_maker_book_crossed(
@@ -1612,7 +1707,7 @@ class FastPathExecutor:
             best_ask = min(book.asks.keys())
             mid = (best_bid + best_ask) / 2.0 if (best_bid > 0 and best_ask > 0) else 0.0
             if mid > 0:
-                spread_bps = ((best_ask - best_bid) / mid) * 10_000.0
+                spread_bps = ((best_ask - best_bid) / mid) * BPS_PER_UNIT
         return ExecContext(
             now_wall=datetime.now(timezone.utc).replace(tzinfo=None),
             best_bid=best_bid,
@@ -1669,6 +1764,8 @@ class FastPathExecutor:
             "maker_attempts_replaced": self._metrics.maker_attempts_replaced,
             "maker_attempts_rejected": self._metrics.maker_attempts_rejected,
             "maker_attempts_capped": self._metrics.maker_attempts_capped,
+            "maker_attempts_adverse_cancelled":
+                self._metrics.maker_attempts_adverse_cancelled,
             "maker_observe_only_fills": self._metrics.maker_observe_only_fills,
             "maker_outstanding_count": len(self._outstanding_maker),
         }
