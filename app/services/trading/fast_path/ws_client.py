@@ -26,8 +26,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
+
+from sqlalchemy.engine import Engine
 
 try:
     import websockets
@@ -35,6 +38,7 @@ except ImportError:  # pragma: no cover - dependency added via requirements
     websockets = None  # type: ignore
 
 from .db_writer import AlertItem, BarItem, BookItem, FastPathDBWriter
+from .gates import ALERT_RECENCY_MAX_AGE_S
 from .order_book import OrderBookAggregator
 from .scanner import MomentumScanner
 from .settings import FastPathSettings
@@ -56,10 +60,12 @@ class CoinbaseWSClient:
         settings: FastPathSettings,
         db_writer: FastPathDBWriter,
         status: StatusTracker,
+        engine: Engine | None = None,
     ) -> None:
         self._settings = settings
         self._db_writer = db_writer
         self._status = status
+        self._engine = engine
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         # Per-ticker last persisted bar_close_at — dedupe across reconnects.
@@ -78,6 +84,56 @@ class CoinbaseWSClient:
         # flip CHILI_FAST_PATH_EMIT_SHORT_ALERTS=true.
         self._scanner = MomentumScanner(
             emit_short_alerts=getattr(settings, "emit_short_alerts", False),
+            vol_breakout_lookback=getattr(
+                settings, "scanner_vol_breakout_lookback", 20,
+            ),
+            vol_breakout_mult=getattr(
+                settings, "scanner_vol_breakout_mult", 2.0,
+            ),
+            imbalance_long_threshold=getattr(
+                settings, "scanner_imbalance_long_threshold", 0.65,
+            ),
+            imbalance_short_threshold=getattr(
+                settings, "scanner_imbalance_short_threshold", 0.35,
+            ),
+            imbalance_cooldown_s=getattr(
+                settings, "scanner_imbalance_cooldown_s", 30.0,
+            ),
+            spread_squeeze_bps=getattr(
+                settings, "scanner_spread_squeeze_bps", 1.5,
+            ),
+            spread_squeeze_vol_mult=getattr(
+                settings, "scanner_spread_squeeze_vol_mult", 1.2,
+            ),
+            spread_squeeze_cooldown_s=getattr(
+                settings, "scanner_spread_squeeze_cooldown_s", 60.0,
+            ),
+            book_pressure_enabled=getattr(
+                settings, "scanner_book_pressure_enabled", True,
+            ),
+            book_pressure_window=getattr(
+                settings, "scanner_book_pressure_window", 5,
+            ),
+            book_pressure_min_avg_imbalance=getattr(
+                settings, "scanner_book_pressure_min_avg_imbalance", 0.65,
+            ),
+            book_pressure_min_microprice_bps=getattr(
+                settings, "scanner_book_pressure_min_microprice_bps", 0.25,
+            ),
+            book_pressure_max_spread_bps=getattr(
+                settings, "scanner_book_pressure_max_spread_bps", 3.0,
+            ),
+            book_pressure_min_mid_move_bps=getattr(
+                settings, "scanner_book_pressure_min_mid_move_bps", 0.25,
+            ),
+            book_pressure_cooldown_s=getattr(
+                settings, "scanner_book_pressure_cooldown_s", 30.0,
+            ),
+            book_pressure_min_touch_notional_usd=getattr(
+                settings,
+                "scanner_book_pressure_min_touch_notional_usd",
+                25.0,
+            ),
         )
         # Diagnostic counters — surfaced via stats() so the supervisor
         # metrics line shows whether we're seeing raw traffic at all
@@ -87,16 +143,24 @@ class CoinbaseWSClient:
         self._raw_candles_total: int = 0
         self._candles_filtered_unclosed: int = 0
         self._candles_filtered_dedupe: int = 0
+        self._candles_scanned_warmup_only: int = 0
+        self._alerts_suppressed_negative_edge: int = 0
+        self._alerts_suppressed_maker_attempt_adverse: int = 0
         self._heartbeats_total: int = 0
         self._subscriptions_total: int = 0
         self._unknown_channel_total: int = 0
         self._last_unknown_channel: str | None = None
+        self._negative_edge_cache: dict[tuple[str, str, str, str], tuple[bool, float]] = {}
+        self._maker_attempt_adverse_cache: dict[
+            tuple[str, str, str, int], tuple[bool, float]
+        ] = {}
         # f-fastpath-universe-rotation (2026-05-07): cached active-pair
         # set. Resolved at start() and refreshed on each reconnect via
         # ``_resolve_active_pairs``. When ``universe_rotation_enabled``
-        # is False (default), this is identical to ``settings.pairs``;
-        # when True, it's read from ``fast_path_universe`` with the
-        # 5-pair fallback if the table is empty.
+        # is False (default), this is identical to ``settings.pairs``.
+        # When True, it is read from ``fast_path_universe``; an empty
+        # universe pauses subscription unless the operator explicitly
+        # enables the legacy fallback flag.
         self._active_pairs: list[str] = list(settings.pairs)
 
     def _resolve_active_pairs(self) -> list[str]:
@@ -104,8 +168,9 @@ class CoinbaseWSClient:
 
         - If ``universe_rotation_enabled`` is False -> ``settings.pairs``.
         - Else -> ``fast_path_universe.status IN ('active','shadow')``
-          from the most-recent rotation, falling back to ``settings.pairs``
-          if the table is empty (cold-start / rotator hasn't run yet).
+          from the most-recent rotation. If the table is empty, return
+          an empty set by default so the data worker exposes the rotator
+          failure instead of quietly trading stale configured pairs.
         """
         if not getattr(self._settings, "universe_rotation_enabled", False):
             return list(self._settings.pairs)
@@ -120,12 +185,31 @@ class CoinbaseWSClient:
                 db.close()
             if tickers:
                 return tickers
+            if getattr(self._settings, "universe_empty_fallback_enabled", False):
+                logger.warning(
+                    "[fast_path] universe rotation returned no pairs; "
+                    "using configured pairs because empty fallback is enabled"
+                )
+                return list(self._settings.pairs)
+            logger.warning(
+                "[fast_path] universe rotation returned no pairs; "
+                "WS subscription paused until rotator selects a universe"
+            )
+            return []
         except Exception as exc:
+            if getattr(self._settings, "universe_empty_fallback_enabled", False):
+                logger.warning(
+                    "[fast_path] universe-rotation read failed; "
+                    "using configured pairs because empty fallback is enabled: %s",
+                    exc,
+                )
+                return list(self._settings.pairs)
             logger.warning(
                 "[fast_path] universe-rotation read failed; "
-                "falling back to settings.pairs: %s", exc,
+                "WS subscription paused until rotator state is readable: %s",
+                exc,
             )
-        return list(self._settings.pairs)
+            return []
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -144,11 +228,14 @@ class CoinbaseWSClient:
             return
         # f-fastpath-universe-rotation (2026-05-07): resolve the active
         # subscription set at start() time so the WS lifecycle uses the
-        # rotator's selection rather than the hardcoded 5-pair fallback
+        # rotator's selection rather than the configured pair fallback
         # when the rotation flag is on.
         self._active_pairs = self._resolve_active_pairs()
-        for ticker in self._active_pairs:
-            self._status.register(ticker)
+        if self._active_pairs:
+            for ticker in self._active_pairs:
+                self._status.register(ticker)
+        else:
+            self._pause_configured_pairs("universe_rotation_empty")
         self._task = asyncio.create_task(self._run(), name="coinbase_ws_client")
 
     async def stop(self) -> None:
@@ -165,20 +252,28 @@ class CoinbaseWSClient:
     async def _run(self) -> None:
         backoff = self._settings.reconnect_min_s
         while not self._stop.is_set():
-            try:
-                await self._connect_and_consume()
-                # Clean exit (server closed cleanly) — reset backoff
-                backoff = self._settings.reconnect_min_s
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # Per-connection error — log + back off + retry.
-                for ticker in self._active_pairs:
-                    self._status.record_error(ticker, f"ws_loop:{type(exc).__name__}")
+            if not self._active_pairs:
+                self._pause_configured_pairs("universe_rotation_empty")
                 logger.warning(
-                    "[fast_path] ws connection error (backoff=%.1fs): %s",
-                    backoff, exc,
+                    "[fast_path] ws subscription paused: no active/shadow "
+                    "universe pairs (retry in %.1fs)",
+                    backoff,
                 )
+            else:
+                try:
+                    await self._connect_and_consume()
+                    # Clean exit (server closed cleanly) — reset backoff
+                    backoff = self._settings.reconnect_min_s
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Per-connection error — log + back off + retry.
+                    for ticker in self._active_pairs:
+                        self._status.record_error(ticker, f"ws_loop:{type(exc).__name__}")
+                    logger.warning(
+                        "[fast_path] ws connection error (backoff=%.1fs): %s",
+                        backoff, exc,
+                    )
             if self._stop.is_set():
                 break
             try:
@@ -196,6 +291,8 @@ class CoinbaseWSClient:
                 self._status.record_reconnect(ticker)
 
     async def _connect_and_consume(self) -> None:
+        if not self._active_pairs:
+            return
         url = self._settings.coinbase_ws_url
         # ping_interval keeps the connection alive; close_timeout caps clean shutdown.
         # max_size 32MB: Coinbase L2 snapshots for BTC-USD / ETH-USD on
@@ -218,12 +315,22 @@ class CoinbaseWSClient:
                 self._handle_message(raw)
 
     async def _subscribe(self, ws, channel: str) -> None:
+        if not self._active_pairs:
+            logger.warning(
+                "[fast_path] skipped %s subscription because active pair set is empty",
+                channel,
+            )
+            return
         msg = {
             "type": "subscribe",
             "product_ids": list(self._active_pairs),
             "channel": channel,
         }
         await ws.send(json.dumps(msg))
+
+    def _pause_configured_pairs(self, reason: str) -> None:
+        for ticker in self._settings.pairs:
+            self._status.mark_paused(ticker, reason)
 
     # ── Message routing ───────────────────────────────────────────────
 
@@ -381,13 +488,25 @@ class CoinbaseWSClient:
                     "low": float(bar.low_price),
                     "volume": float(bar.volume),
                 }
-                for alert_dict in self._scanner.on_bar_close(bar_dict):
+                emit_alerts = self._bar_fresh_enough_for_alerts(
+                    bar_close_ts=end_s,
+                    now_ts=now_ts,
+                )
+                if not emit_alerts:
+                    self._candles_scanned_warmup_only += 1
+                for alert_dict in self._scanner.on_bar_close(
+                    bar_dict,
+                    emit_alerts=emit_alerts,
+                ):
                     self._dispatch_alert(alert_dict)
         except (TypeError, ValueError) as exc:
             ticker = candle.get("product_id") or "_unknown"
             self._status.record_error(ticker, f"candle_parse:{type(exc).__name__}")
             logger.debug("[fast_path] candle parse failed: %s", exc, exc_info=True)
 
+    @staticmethod
+    def _bar_fresh_enough_for_alerts(*, bar_close_ts: float, now_ts: float) -> bool:
+        return (now_ts - bar_close_ts) <= ALERT_RECENCY_MAX_AGE_S
 
     def _dispatch_alert(self, alert_dict: dict[str, Any]) -> None:
         """Convert scanner-emitted dict into AlertItem and enqueue.
@@ -396,6 +515,10 @@ class CoinbaseWSClient:
         stays infra-free for unit tests; this method is the seam where
         we cross into the typed db_writer interface.
         """
+        if self._negative_edge_suppressed(alert_dict):
+            return
+        if self._maker_attempt_adverse_suppressed(alert_dict):
+            return
         try:
             item = AlertItem(
                 ticker=str(alert_dict["ticker"]),
@@ -414,6 +537,138 @@ class CoinbaseWSClient:
             item.ticker, item.alert_type, item.signal_score, item.features,
         )
 
+    def _negative_edge_suppressed(self, alert_dict: dict[str, Any]) -> bool:
+        """Suppress alerts the learned negative-edge gate would reject.
+
+        Executor gates remain authoritative. This is an upstream write-
+        saver for mature bad buckets, using the same calibration helper
+        and cache TTL from settings.
+        """
+        if self._engine is None:
+            return False
+        try:
+            from .calibration import (
+                decay_table_for_execution_mode,
+                is_negative_edge_excluded,
+            )
+            from .decay_miner import score_bucket
+
+            ticker = str(alert_dict.get("ticker") or "")
+            alert_type = str(alert_dict.get("alert_type") or "")
+            signal_score = float(alert_dict.get("signal_score") or 0.0)
+            bucket = score_bucket(signal_score)
+            decay_table = decay_table_for_execution_mode(
+                getattr(self._settings, "execution_mode", "taker"),
+            )
+            key = (ticker, alert_type, bucket, decay_table)
+            now = time.monotonic()
+            cached = self._negative_edge_cache.get(key)
+            if cached is not None:
+                suppressed, expires_at = cached
+                if now < expires_at:
+                    if suppressed:
+                        self._alerts_suppressed_negative_edge += 1
+                    return suppressed
+            excluded, _evidence = is_negative_edge_excluded(
+                self._engine,
+                ticker=ticker,
+                alert_type=alert_type,
+                signal_score=signal_score,
+                table=decay_table,
+                allow_pooled=True,
+            )
+            ttl_s = max(0.0, float(
+                getattr(self._settings, "negative_edge_filter_ttl_s", 30) or 0,
+            ))
+            self._negative_edge_cache[key] = (bool(excluded), now + ttl_s)
+            if excluded:
+                self._alerts_suppressed_negative_edge += 1
+                logger.debug(
+                    "[fast_path] alert suppressed by learned negative edge "
+                    "ticker=%s type=%s bucket=%s table=%s",
+                    ticker, alert_type, bucket, decay_table,
+                )
+                return True
+        except Exception as exc:
+            logger.debug(
+                "[fast_path] negative-edge alert prefilter skipped: %s",
+                exc,
+                exc_info=True,
+            )
+        return False
+
+    def _maker_attempt_adverse_suppressed(self, alert_dict: dict[str, Any]) -> bool:
+        """Suppress alerts whose maker attempts prove adverse selection.
+
+        Executor gates remain authoritative. This mirrors
+        ``gate_maker_attempt_adverse_selection`` upstream so mature
+        passive-execution failures do not keep burning alert writes.
+        """
+        if self._engine is None:
+            return False
+        exec_mode = str(
+            getattr(self._settings, "execution_mode", "taker") or "taker"
+        ).strip().lower()
+        if exec_mode not in ("maker_only", "maker_first_then_taker"):
+            return False
+        if not getattr(self._settings, "maker_attempt_adverse_filter_enabled", True):
+            return False
+        try:
+            from .calibration import maker_attempt_adverse_selection_excluded
+            from .decay_miner import score_bucket
+
+            ticker = str(alert_dict.get("ticker") or "")
+            alert_type = str(alert_dict.get("alert_type") or "")
+            signal_score = float(alert_dict.get("signal_score") or 0.0)
+            bucket = score_bucket(signal_score)
+            window_hours = max(1, int(
+                getattr(
+                    self._settings,
+                    "maker_attempt_adverse_filter_window_h",
+                    24,
+                ) or 24,
+            ))
+            key = (ticker, alert_type, bucket, window_hours)
+            now = time.monotonic()
+            cached = self._maker_attempt_adverse_cache.get(key)
+            if cached is not None:
+                suppressed, expires_at = cached
+                if now < expires_at:
+                    if suppressed:
+                        self._alerts_suppressed_maker_attempt_adverse += 1
+                    return suppressed
+            excluded, evidence = maker_attempt_adverse_selection_excluded(
+                self._engine,
+                ticker=ticker,
+                alert_type=alert_type,
+                signal_score=signal_score,
+                window_hours=window_hours,
+            )
+            ttl_s = max(0.0, float(
+                getattr(self._settings, "negative_edge_filter_ttl_s", 30) or 0,
+            ))
+            self._maker_attempt_adverse_cache[key] = (bool(excluded), now + ttl_s)
+            if excluded:
+                self._alerts_suppressed_maker_attempt_adverse += 1
+                logger.debug(
+                    "[fast_path] alert suppressed by maker-attempt "
+                    "adverse-selection evidence ticker=%s type=%s "
+                    "bucket=%s window_h=%s reasons=%s",
+                    ticker,
+                    alert_type,
+                    bucket,
+                    window_hours,
+                    (evidence or {}).get("blocked_reasons"),
+                )
+                return True
+        except Exception as exc:
+            logger.debug(
+                "[fast_path] maker-attempt alert prefilter skipped: %s",
+                exc,
+                exc_info=True,
+            )
+        return False
+
     def stats(self) -> dict[str, Any]:
         """Diagnostic counters — for the supervisor metrics line. Lets us
         distinguish "no live updates" (raw_messages_total stuck) vs
@@ -426,6 +681,14 @@ class CoinbaseWSClient:
             "raw_candles_total": self._raw_candles_total,
             "candles_filtered_unclosed": self._candles_filtered_unclosed,
             "candles_filtered_dedupe": self._candles_filtered_dedupe,
+            "candles_scanned_warmup_only": self._candles_scanned_warmup_only,
+            "alerts_suppressed_negative_edge": self._alerts_suppressed_negative_edge,
+            "alerts_suppressed_maker_attempt_adverse":
+                self._alerts_suppressed_maker_attempt_adverse,
+            "negative_edge_cache_size": len(self._negative_edge_cache),
+            "maker_attempt_adverse_cache_size": len(
+                self._maker_attempt_adverse_cache
+            ),
             "heartbeats_total": self._heartbeats_total,
             "subscriptions_total": self._subscriptions_total,
             "unknown_channel_total": self._unknown_channel_total,

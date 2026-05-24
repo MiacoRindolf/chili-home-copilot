@@ -29,6 +29,13 @@ Signals (initial set — more can layer in):
     Tight spread + volume often precedes a breakout. Per-ticker 60s
     cooldown.
 
+  ``book_pressure_reclaim_long``
+    Bid-heavy book pressure persists across a short book window while
+    current microprice leads mid and the mid reclaims without already
+    running beyond the configured spread cap. This is the
+    stricter successor hypothesis to raw ``imbalance_long``: pressure
+    alone is not enough; price has to confirm it.
+
 This module is intentionally pure-Python with no DB or broker imports —
 it must stay safe to unit test without spinning up infra.
 """
@@ -41,6 +48,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
+
+from .gates import ALERT_RECENCY_MAX_AGE_S
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +65,16 @@ IMBALANCE_COOLDOWN_S = 30.0
 SPREAD_SQUEEZE_BPS = 1.5
 SPREAD_SQUEEZE_VOL_MULT = 1.2
 SPREAD_SQUEEZE_COOLDOWN_S = 60.0
+BOOK_PRESSURE_RECLAIM_LONG = "book_pressure_reclaim_long"
+BOOK_PRESSURE_ENABLED = True
+BOOK_PRESSURE_WINDOW = 5
+BOOK_PRESSURE_MIN_AVG_IMBALANCE = IMBALANCE_LONG_THRESHOLD
+BOOK_PRESSURE_MIN_MICROPRICE_BPS = 0.25
+BOOK_PRESSURE_MAX_SPREAD_BPS = 3.0
+BOOK_PRESSURE_MIN_MID_MOVE_BPS = 0.25
+BOOK_PRESSURE_COOLDOWN_S = IMBALANCE_COOLDOWN_S
+BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD = 25.0
+BPS_PER_UNIT = 10_000.0
 
 # F8a: starting value for the pullback-fade experiment. F6 showed
 # volume_breakout_long has mean forward return ≈ −28.5 bps over n=120,
@@ -153,6 +172,11 @@ class _PerTickerState:
     # Most-recent observed spread_bps (for spread_squeeze; refreshed on
     # every book emit).
     last_spread_bps: float = 0.0
+    # Most-recent top-of-book pressure observations for the stricter
+    # long hypothesis. Maxlen is overridden by MomentumScanner._state_for.
+    recent_book_pressure: deque[dict[str, float]] = field(
+        default_factory=lambda: deque(maxlen=BOOK_PRESSURE_WINDOW)
+    )
 
 
 @dataclass(order=True)
@@ -192,9 +216,67 @@ class MomentumScanner:
         spot can't short, see 2026-05-17 ARCHITECT-FLAG).
     """
 
-    def __init__(self, *, emit_short_alerts: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        emit_short_alerts: bool = True,
+        vol_breakout_lookback: int = VOL_BREAKOUT_LOOKBACK,
+        vol_breakout_mult: float = VOL_BREAKOUT_MULT,
+        imbalance_long_threshold: float = IMBALANCE_LONG_THRESHOLD,
+        imbalance_short_threshold: float = IMBALANCE_SHORT_THRESHOLD,
+        imbalance_cooldown_s: float = IMBALANCE_COOLDOWN_S,
+        spread_squeeze_bps: float = SPREAD_SQUEEZE_BPS,
+        spread_squeeze_vol_mult: float = SPREAD_SQUEEZE_VOL_MULT,
+        spread_squeeze_cooldown_s: float = SPREAD_SQUEEZE_COOLDOWN_S,
+        book_pressure_enabled: bool = BOOK_PRESSURE_ENABLED,
+        book_pressure_window: int = BOOK_PRESSURE_WINDOW,
+        book_pressure_min_avg_imbalance: float = BOOK_PRESSURE_MIN_AVG_IMBALANCE,
+        book_pressure_min_microprice_bps: float = BOOK_PRESSURE_MIN_MICROPRICE_BPS,
+        book_pressure_max_spread_bps: float = BOOK_PRESSURE_MAX_SPREAD_BPS,
+        book_pressure_min_mid_move_bps: float = BOOK_PRESSURE_MIN_MID_MOVE_BPS,
+        book_pressure_cooldown_s: float = BOOK_PRESSURE_COOLDOWN_S,
+        book_pressure_min_touch_notional_usd: float = (
+            BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD
+        ),
+    ) -> None:
         self._state: dict[str, _PerTickerState] = {}
         self._emit_short_alerts = bool(emit_short_alerts)
+        self._vol_breakout_lookback = max(1, int(vol_breakout_lookback or 1))
+        self._vol_breakout_mult = max(0.0, float(vol_breakout_mult or 0.0))
+        self._imbalance_long_threshold = max(
+            0.0, min(1.0, float(imbalance_long_threshold))
+        )
+        self._imbalance_short_threshold = max(
+            0.0, min(1.0, float(imbalance_short_threshold))
+        )
+        self._imbalance_cooldown_s = max(0.0, float(imbalance_cooldown_s or 0.0))
+        self._spread_squeeze_bps = max(0.0, float(spread_squeeze_bps or 0.0))
+        self._spread_squeeze_vol_mult = max(
+            0.0, float(spread_squeeze_vol_mult or 0.0)
+        )
+        self._spread_squeeze_cooldown_s = max(
+            0.0, float(spread_squeeze_cooldown_s or 0.0)
+        )
+        self._book_pressure_enabled = bool(book_pressure_enabled)
+        self._book_pressure_window = max(1, int(book_pressure_window or 1))
+        self._book_pressure_min_avg_imbalance = max(
+            0.0, min(1.0, float(book_pressure_min_avg_imbalance))
+        )
+        self._book_pressure_min_microprice_bps = max(
+            0.0, float(book_pressure_min_microprice_bps or 0.0)
+        )
+        self._book_pressure_max_spread_bps = max(
+            0.0, float(book_pressure_max_spread_bps or 0.0)
+        )
+        self._book_pressure_min_mid_move_bps = max(
+            0.0, float(book_pressure_min_mid_move_bps or 0.0)
+        )
+        self._book_pressure_cooldown_s = max(
+            0.0, float(book_pressure_cooldown_s or 0.0)
+        )
+        self._book_pressure_min_touch_notional_usd = max(
+            0.0, float(book_pressure_min_touch_notional_usd or 0.0)
+        )
         # Diagnostic counters — surfaced via stats().
         self.bars_seen = 0
         self.books_seen = 0
@@ -204,8 +286,12 @@ class MomentumScanner:
         self.fired_imbalance_short = 0
         self.suppressed_short_alert_disabled = 0
         self.fired_spread_squeeze = 0
+        self.fired_book_pressure_reclaim_long = 0
+        self.suppressed_book_pressure_warmup = 0
+        self.suppressed_book_pressure_condition = 0
         self.suppressed_cooldown = 0
         self.suppressed_warmup = 0
+        self.suppressed_bar_close_alerts_disabled = 0
         # F8a pullback-fade experiment. Per-ticker heaps so each
         # ticker's deferred entries drain only on that ticker's own
         # next book emit -- avoids the cross-ticker price-capture bug
@@ -214,10 +300,22 @@ class MomentumScanner:
         self._pullback_seq: int = 0
         self.deferred_scheduled = 0
         self.deferred_dropped_overcap = 0
+        self.deferred_dropped_stale = 0
 
     # ── Bar-close handler ──────────────────────────────────────────────
 
-    def on_bar_close(self, bar: dict) -> list[dict]:
+    def _state_for(self, ticker: str) -> _PerTickerState:
+        st = self._state.get(ticker)
+        if st is None:
+            st = _PerTickerState(
+                recent_vols=deque(maxlen=self._vol_breakout_lookback),
+                recent_closes=deque(maxlen=self._vol_breakout_lookback),
+                recent_book_pressure=deque(maxlen=self._book_pressure_window),
+            )
+            self._state[ticker] = st
+        return st
+
+    def on_bar_close(self, bar: dict, *, emit_alerts: bool = True) -> list[dict]:
         """Update rolling state with the just-closed bar; return any
         alerts triggered. Each alert is a dict shaped like an
         ``AlertItem`` payload but un-typed so this module remains
@@ -229,6 +327,11 @@ class MomentumScanner:
         ``bar`` should be a dict with at least: ``ticker`` (str),
         ``volume`` (float), ``open`` (float), ``close`` (float),
         ``bar_close_at`` (datetime).
+
+        ``emit_alerts=False`` is used by the websocket client for
+        historical candle replay: the bar still warms indicator state,
+        but execution-relevant alerts and deferred pullbacks are not
+        created from already-stale candles.
         """
         self.bars_seen += 1
         ticker = bar.get("ticker")
@@ -239,16 +342,17 @@ class MomentumScanner:
         close_p = float(bar.get("close") or 0.0)
         ts: datetime = bar.get("bar_close_at") or datetime.now(timezone.utc).replace(tzinfo=None)
 
-        st = self._state.get(ticker)
-        if st is None:
-            st = _PerTickerState()
-            self._state[ticker] = st
+        st = self._state_for(str(ticker))
 
         alerts: list[dict] = []
         # Need full lookback before we can emit; until then just learn.
-        if len(st.recent_vols) >= VOL_BREAKOUT_LOOKBACK:
+        if len(st.recent_vols) >= self._vol_breakout_lookback:
             mean_vol = sum(st.recent_vols) / len(st.recent_vols)
-            if mean_vol > 0 and vol >= VOL_BREAKOUT_MULT * mean_vol and close_p > open_p:
+            if (
+                mean_vol > 0
+                and vol >= self._vol_breakout_mult * mean_vol
+                and close_p > open_p
+            ):
                 # Score saturates at 4x mean (uncommon mega-spike).
                 ratio = vol / mean_vol
                 score = max(0.0, min(1.0, (ratio - 1.0) / 4.0))
@@ -261,35 +365,42 @@ class MomentumScanner:
                     "close": float(close_p),
                     "ret_pct": float((close_p - open_p) / open_p if open_p else 0.0),
                 }
-                alerts.append({
-                    "ticker": ticker,
-                    "alert_type": "volume_breakout_long",
-                    "fired_at": ts,
-                    "signal_score": float(score),
-                    "features": vbl_features,
-                })
-                self.fired_volume_breakout_long += 1
-                # F8a: schedule a deferred volume_breakout_pullback_long
-                # emit for ts + DELAY_S. The natural event flow (next
-                # book emit on this ticker after the deadline) will
-                # drain it. Same (ticker, signal_score, features
-                # lineage) as the original; alert_type differs.
-                self._schedule_pullback_deferred(
-                    ticker=ticker,
-                    original_fired_at=ts,
-                    signal_score=float(score),
-                    original_features=vbl_features,
-                )
+                if emit_alerts:
+                    alerts.append({
+                        "ticker": ticker,
+                        "alert_type": "volume_breakout_long",
+                        "fired_at": ts,
+                        "signal_score": float(score),
+                        "features": vbl_features,
+                    })
+                    self.fired_volume_breakout_long += 1
+                    # F8a: schedule a deferred volume_breakout_pullback_long
+                    # emit for ts + DELAY_S. The natural event flow (next
+                    # book emit on this ticker after the deadline) will
+                    # drain it. Same (ticker, signal_score, features
+                    # lineage) as the original; alert_type differs.
+                    self._schedule_pullback_deferred(
+                        ticker=ticker,
+                        original_fired_at=ts,
+                        signal_score=float(score),
+                        original_features=vbl_features,
+                    )
+                else:
+                    self.suppressed_bar_close_alerts_disabled += 1
             # Layered signal: tight spread + above-average volume on a
             # green bar. Spread comes from the most recent book emit; if
             # we haven't seen one yet, last_spread_bps is 0 and the
             # check below short-circuits safely.
             if (st.last_spread_bps > 0
-                and st.last_spread_bps <= SPREAD_SQUEEZE_BPS
+                and st.last_spread_bps <= self._spread_squeeze_bps
                 and mean_vol > 0
-                and vol >= SPREAD_SQUEEZE_VOL_MULT * mean_vol
+                and vol >= self._spread_squeeze_vol_mult * mean_vol
                 and close_p > open_p):
-                if self._cooldown_ok(st, "spread_squeeze", SPREAD_SQUEEZE_COOLDOWN_S):
+                if not emit_alerts:
+                    self.suppressed_bar_close_alerts_disabled += 1
+                elif self._cooldown_ok(
+                    st, "spread_squeeze", self._spread_squeeze_cooldown_s
+                ):
                     score = max(0.0, min(1.0, vol / max(mean_vol, 1e-9) / 4.0))
                     alerts.append({
                         "ticker": ticker,
@@ -318,17 +429,17 @@ class MomentumScanner:
 
     # ── Book-emit handler ──────────────────────────────────────────────
 
-    def on_book_emit(self, ticker: str, book: dict,
+    def on_book_emit(self, ticker: str | dict, book: dict | None = None,
                      *, now_monotonic: float | None = None) -> list[dict]:
         """Inspect a freshly-emitted top-N book; emit imbalance alerts
         when thresholds are crossed. Cooldown gates the rate."""
+        if book is None and isinstance(ticker, dict):
+            book = ticker
+            ticker = str(book.get("ticker") or "")
         self.books_seen += 1
         if not ticker or not isinstance(book, dict):
             return []
-        st = self._state.get(ticker)
-        if st is None:
-            st = _PerTickerState()
-            self._state[ticker] = st
+        st = self._state_for(str(ticker))
         st.last_spread_bps = float(book.get("spread_bps") or 0.0)
         imb = float(book.get("imbalance") or 0.5)
         ts: datetime = book.get("snapshot_at") or datetime.now(timezone.utc).replace(tzinfo=None)
@@ -342,13 +453,20 @@ class MomentumScanner:
         alerts.extend(self._drain_pullback_due(
             now_wall=ts, triggering_ticker=ticker, triggering_book=book,
         ))
-        if imb >= IMBALANCE_LONG_THRESHOLD:
-            if self._cooldown_ok(st, "imbalance_long", IMBALANCE_COOLDOWN_S, now_monotonic):
+        pressure_alert = self._book_pressure_alert_if_any(
+            st, str(ticker), ts, book, now_monotonic,
+        )
+        if pressure_alert is not None:
+            alerts.append(pressure_alert)
+        if imb >= self._imbalance_long_threshold:
+            if self._cooldown_ok(
+                st, "imbalance_long", self._imbalance_cooldown_s, now_monotonic
+            ):
                 alerts.append(self._book_alert(ticker, "imbalance_long", ts, imb, book))
                 self.fired_imbalance_long += 1
             else:
                 self.suppressed_cooldown += 1
-        elif imb <= IMBALANCE_SHORT_THRESHOLD:
+        elif imb <= self._imbalance_short_threshold:
             # 2026-05-17 spot-venue gate: skip imbalance_short emission
             # when the scanner is configured for a long-only venue.
             # The executor would reject these with
@@ -358,7 +476,9 @@ class MomentumScanner:
             # imbalance_short and 100% rejected.
             if not self._emit_short_alerts:
                 self.suppressed_short_alert_disabled += 1
-            elif self._cooldown_ok(st, "imbalance_short", IMBALANCE_COOLDOWN_S, now_monotonic):
+            elif self._cooldown_ok(
+                st, "imbalance_short", self._imbalance_cooldown_s, now_monotonic
+            ):
                 alerts.append(self._book_alert(ticker, "imbalance_short", ts, imb, book))
                 self.fired_imbalance_short += 1
             else:
@@ -367,12 +487,171 @@ class MomentumScanner:
 
     # ── Helpers ────────────────────────────────────────────────────────
 
+    def _book_pressure_alert_if_any(
+        self,
+        state: _PerTickerState,
+        ticker: str,
+        ts: datetime,
+        book: dict,
+        now_monotonic: float | None,
+    ) -> dict | None:
+        if not self._book_pressure_enabled:
+            return None
+        obs = self._book_pressure_observation(book)
+        if obs is None:
+            return None
+        state.recent_book_pressure.append(obs)
+        window = list(state.recent_book_pressure)
+        if len(window) < self._book_pressure_window:
+            self.suppressed_book_pressure_warmup += 1
+            return None
+
+        avg_imbalance = sum(o["imbalance"] for o in window) / len(window)
+        avg_microprice_edge_bps = (
+            sum(o["microprice_edge_bps"] for o in window) / len(window)
+        )
+        max_spread_bps = max(o["spread_bps"] for o in window)
+        min_touch_notional_usd = min(
+            min(o["top_bid_notional_usd"], o["top_ask_notional_usd"])
+            for o in window
+        )
+        first_mid = window[0]["mid"]
+        last_mid = window[-1]["mid"]
+        first_best_bid = window[0]["best_bid"]
+        last_best_bid = window[-1]["best_bid"]
+        mid_move_bps = (
+            ((last_mid - first_mid) / first_mid) * BPS_PER_UNIT
+            if first_mid > 0
+            else 0.0
+        )
+        best_bid_move_bps = (
+            ((last_best_bid - first_best_bid) / first_best_bid) * BPS_PER_UNIT
+            if first_best_bid > 0
+            else 0.0
+        )
+        if (
+            avg_imbalance < self._book_pressure_min_avg_imbalance
+            or avg_microprice_edge_bps < self._book_pressure_min_microprice_bps
+            or obs["microprice_edge_bps"] < self._book_pressure_min_microprice_bps
+            or max_spread_bps > self._book_pressure_max_spread_bps
+            or min_touch_notional_usd < self._book_pressure_min_touch_notional_usd
+            or mid_move_bps < self._book_pressure_min_mid_move_bps
+            or best_bid_move_bps < self._book_pressure_min_mid_move_bps
+            or mid_move_bps > self._book_pressure_max_spread_bps
+            or best_bid_move_bps > self._book_pressure_max_spread_bps
+        ):
+            self.suppressed_book_pressure_condition += 1
+            return None
+        if not self._cooldown_ok(
+            state,
+            BOOK_PRESSURE_RECLAIM_LONG,
+            self._book_pressure_cooldown_s,
+            now_monotonic,
+        ):
+            self.suppressed_cooldown += 1
+            return None
+
+        score = max(0.0, min(1.0, (avg_imbalance - 0.5) * 2.0))
+        self.fired_book_pressure_reclaim_long += 1
+        return {
+            "ticker": ticker,
+            "alert_type": BOOK_PRESSURE_RECLAIM_LONG,
+            "fired_at": ts,
+            "signal_score": float(score),
+            "features": {
+                "imbalance": float(obs["imbalance"]),
+                "avg_imbalance": float(avg_imbalance),
+                "min_imbalance": float(min(o["imbalance"] for o in window)),
+                "spread_bps": float(obs["spread_bps"]),
+                "max_spread_bps": float(max_spread_bps),
+                "mid": float(last_mid),
+                "mid_move_bps": float(mid_move_bps),
+                "best_bid_move_bps": float(best_bid_move_bps),
+                "best_bid": float(obs["best_bid"]),
+                "best_ask": float(obs["best_ask"]),
+                "close": float(obs["best_ask"]),
+                "microprice": float(obs["microprice"]),
+                "microprice_edge_bps": float(obs["microprice_edge_bps"]),
+                "avg_microprice_edge_bps": float(avg_microprice_edge_bps),
+                "top_bid_size": float(obs["top_bid_size"]),
+                "top_ask_size": float(obs["top_ask_size"]),
+                "bid_total_size": float(obs["bid_total_size"]),
+                "ask_total_size": float(obs["ask_total_size"]),
+                "top_bid_notional_usd": float(obs["top_bid_notional_usd"]),
+                "top_ask_notional_usd": float(obs["top_ask_notional_usd"]),
+                "min_touch_notional_usd": float(min_touch_notional_usd),
+                "book_pressure_window": int(len(window)),
+            },
+        }
+
+    def _book_pressure_observation(self, book: dict) -> dict[str, float] | None:
+        bid_level = self._first_level(book.get("bid_levels"))
+        ask_level = self._first_level(book.get("ask_levels"))
+        if bid_level is None or ask_level is None:
+            return None
+        best_bid, top_bid_size = bid_level
+        best_ask, top_ask_size = ask_level
+        if (
+            best_bid <= 0.0
+            or best_ask <= best_bid
+            or top_bid_size <= 0.0
+            or top_ask_size <= 0.0
+        ):
+            return None
+        mid = (best_bid + best_ask) / 2.0
+        spread_bps = float(book.get("spread_bps") or 0.0)
+        if spread_bps <= 0.0:
+            spread_bps = ((best_ask - best_bid) / mid) * BPS_PER_UNIT
+        bid_total_size = float(book.get("bid_total_size") or top_bid_size)
+        ask_total_size = float(book.get("ask_total_size") or top_ask_size)
+        if bid_total_size <= 0.0 or ask_total_size <= 0.0:
+            return None
+        depth_denom = bid_total_size + ask_total_size
+        microprice = (
+            (best_ask * bid_total_size) + (best_bid * ask_total_size)
+        ) / depth_denom
+        microprice_edge_bps = ((microprice - mid) / mid) * BPS_PER_UNIT
+        imbalance = float(book.get("imbalance") or 0.5)
+        top_bid_notional_usd = top_bid_size * best_bid
+        top_ask_notional_usd = top_ask_size * best_ask
+        return {
+            "imbalance": max(0.0, min(1.0, imbalance)),
+            "spread_bps": max(0.0, spread_bps),
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "mid": mid,
+            "top_bid_size": top_bid_size,
+            "top_ask_size": top_ask_size,
+            "bid_total_size": bid_total_size,
+            "ask_total_size": ask_total_size,
+            "top_bid_notional_usd": top_bid_notional_usd,
+            "top_ask_notional_usd": top_ask_notional_usd,
+            "microprice": microprice,
+            "microprice_edge_bps": microprice_edge_bps,
+        }
+
+    @staticmethod
+    def _first_level(levels: Any) -> tuple[float, float] | None:
+        if not levels:
+            return None
+        first = levels[0]
+        try:
+            if isinstance(first, dict):
+                price = float(first.get("price") or first.get("price_level"))
+                size = float(first.get("size") or first.get("quantity"))
+            else:
+                price = float(first[0])
+                size = float(first[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        return price, size
+
     @staticmethod
     def _cooldown_ok(state: _PerTickerState, alert_type: str,
-                     cooldown_s: float, now_monotonic: float | None = None) -> bool:
+        cooldown_s: float, now_monotonic: float | None = None) -> bool:
         now = now_monotonic if now_monotonic is not None else time.monotonic()
-        last = state.last_fire.get(alert_type, 0.0)
-        if (now - last) < cooldown_s:
+        last = state.last_fire.get(alert_type)
+        if last is not None and (now - last) < cooldown_s:
             return False
         state.last_fire[alert_type] = now
         return True
@@ -496,6 +775,22 @@ class MomentumScanner:
                     f"_drain_pullback_due invariant violated: heap key "
                     f"{triggering_ticker} contained entry for {obs.ticker}"
                 )
+            if obs.original_fired_at.tzinfo is not None:
+                original_unix = obs.original_fired_at.timestamp()
+            else:
+                original_unix = obs.original_fired_at.replace(
+                    tzinfo=timezone.utc
+                ).timestamp()
+            original_age_s = now_unix - original_unix
+            max_original_age_s = float(obs.delay_s) + float(ALERT_RECENCY_MAX_AGE_S)
+            if original_age_s > max_original_age_s:
+                self.deferred_dropped_stale += 1
+                logger.info(
+                    "[fast_path] dropped stale pullback replay ticker=%s "
+                    "original_age_s=%.1f max_original_age_s=%.1f",
+                    obs.ticker, original_age_s, max_original_age_s,
+                )
+                continue
             features = dict(obs.features)
             if cur_best_bid > 0 and cur_best_ask > 0:
                 features["best_bid"] = cur_best_bid
@@ -546,8 +841,16 @@ class MomentumScanner:
             "fired_imbalance_short": self.fired_imbalance_short,
             "suppressed_short_alert_disabled": self.suppressed_short_alert_disabled,
             "fired_spread_squeeze": self.fired_spread_squeeze,
+            "fired_book_pressure_reclaim_long":
+                self.fired_book_pressure_reclaim_long,
+            "suppressed_book_pressure_warmup":
+                self.suppressed_book_pressure_warmup,
+            "suppressed_book_pressure_condition":
+                self.suppressed_book_pressure_condition,
             "suppressed_cooldown": self.suppressed_cooldown,
             "suppressed_warmup": self.suppressed_warmup,
+            "suppressed_bar_close_alerts_disabled":
+                self.suppressed_bar_close_alerts_disabled,
             "tickers_tracked": len(self._state),
             # Global pending-heap total -- existing supervisor metrics
             # line reads this; behavior unchanged from operator UX.
@@ -560,7 +863,32 @@ class MomentumScanner:
             "pullback_deferred_scheduled": self.deferred_scheduled,
             "pullback_deferred_dropped_overcap":
                 self.deferred_dropped_overcap,
+            "pullback_deferred_dropped_stale":
+                self.deferred_dropped_stale,
+            "config": {
+                "vol_breakout_lookback": self._vol_breakout_lookback,
+                "vol_breakout_mult": self._vol_breakout_mult,
+                "imbalance_long_threshold": self._imbalance_long_threshold,
+                "imbalance_short_threshold": self._imbalance_short_threshold,
+                "imbalance_cooldown_s": self._imbalance_cooldown_s,
+                "spread_squeeze_bps": self._spread_squeeze_bps,
+                "spread_squeeze_vol_mult": self._spread_squeeze_vol_mult,
+                "spread_squeeze_cooldown_s": self._spread_squeeze_cooldown_s,
+                "book_pressure_enabled": self._book_pressure_enabled,
+                "book_pressure_window": self._book_pressure_window,
+                "book_pressure_min_avg_imbalance":
+                    self._book_pressure_min_avg_imbalance,
+                "book_pressure_min_microprice_bps":
+                    self._book_pressure_min_microprice_bps,
+                "book_pressure_max_spread_bps":
+                    self._book_pressure_max_spread_bps,
+                "book_pressure_min_mid_move_bps":
+                    self._book_pressure_min_mid_move_bps,
+                "book_pressure_cooldown_s": self._book_pressure_cooldown_s,
+                "book_pressure_min_touch_notional_usd":
+                    self._book_pressure_min_touch_notional_usd,
+            },
         }
 
 
-__all__ = ["MomentumScanner"]
+__all__ = ["MomentumScanner", "BOOK_PRESSURE_RECLAIM_LONG"]

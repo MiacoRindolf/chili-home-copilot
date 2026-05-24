@@ -32,12 +32,14 @@ except ImportError:
     logger.info("[coinbase] coinbase-advanced-py not installed — Coinbase integration disabled")
 
 _client: Any | None = None
+_client_source = ""
 _connected = False
 _last_check: float = 0
 _CHECK_TTL = 600
 
 _cache: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 300
+_TRANSACTION_SUMMARY_CACHE_TTL = 60
 
 # f-coinbase-dust-auto-create-skip (2026-05-19): minimum dollar notional
 # below which ``sync_positions_to_db`` will refuse to auto-create a Trade
@@ -90,7 +92,7 @@ def get_coinbase_rest_client() -> Any | None:
 
 
 def _get_client():
-    global _client
+    global _client, _client_source
     if _client is not None:
         return _client
     if not _cb_available or not _credentials_configured():
@@ -99,9 +101,24 @@ def _get_client():
         from coinbase.rest import RESTClient as CB
         secret = settings.coinbase_api_secret.replace("\\n", "\n")
         _client = CB(api_key=settings.coinbase_api_key, api_secret=secret)
+        _client_source = "env"
         return _client
     except Exception as e:
         logger.error(f"[coinbase] Failed to create client: {e}")
+        return None
+
+
+def _get_env_client():
+    if not _cb_available or not _credentials_configured():
+        return None
+    if _client is not None and _client_source == "env":
+        return _client
+    try:
+        from coinbase.rest import RESTClient as CB
+        secret = settings.coinbase_api_secret.replace("\\n", "\n")
+        return CB(api_key=settings.coinbase_api_key, api_secret=secret)
+    except Exception as e:
+        logger.error(f"[coinbase] Failed to create env client: {e}")
         return None
 
 
@@ -134,7 +151,7 @@ def connect() -> dict[str, Any]:
 
 def connect_with_credentials(api_key: str, api_secret: str) -> dict[str, Any]:
     """Connect using explicitly provided credentials (from DB vault)."""
-    global _client, _connected, _last_check
+    global _client, _client_source, _connected, _last_check
     if not _cb_available:
         return {"status": "error", "message": "Coinbase SDK not installed. Run: pip install coinbase-advanced-py"}
     if not api_key or not api_secret:
@@ -147,6 +164,7 @@ def connect_with_credentials(api_key: str, api_secret: str) -> dict[str, Any]:
         accounts = resp.get("accounts", []) if isinstance(resp, dict) else getattr(resp, "accounts", [])
         if accounts is not None:
             _client = client
+            _client_source = "explicit"
             _connected = True
             _last_check = time.time()
             return {"status": "connected", "message": "Connected to Coinbase Advanced"}
@@ -190,6 +208,79 @@ def get_connection_status() -> dict[str, Any]:
         "connected": connected,
         "cb_available": _cb_available,
         "api_key_set": bool(settings.coinbase_api_key),
+    }
+
+
+def get_transaction_summary_raw(
+    *, prefer_env_credentials: bool = False,
+) -> dict[str, Any]:
+    """Fetch Coinbase account transaction summary, cached.
+
+    Callers should only expose the specific fields they need. The raw
+    response can include balances and fee totals.
+    """
+    cache_key = (
+        "transaction_summary_env"
+        if prefer_env_credentials
+        else "transaction_summary"
+    )
+    cached_entry = _cache.get(cache_key)
+    if (
+        cached_entry is not None
+        and (time.time() - cached_entry[0]) < _TRANSACTION_SUMMARY_CACHE_TTL
+    ):
+        return cached_entry[1]
+    client = _get_env_client() if prefer_env_credentials else _get_client()
+    if not client:
+        return {}
+    if not prefer_env_credentials and not is_connected():
+        return {}
+    try:
+        resp = client.get_transaction_summary()
+        summary = (
+            resp if isinstance(resp, dict)
+            else resp.__dict__ if hasattr(resp, "__dict__")
+            else {}
+        )
+        _cache[cache_key] = (time.time(), summary)
+        return summary
+    except Exception as e:
+        logger.warning("[coinbase] get_transaction_summary failed: %s", e)
+        return {}
+
+
+def _fee_rate_to_bps(value: Any) -> float:
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if rate <= 0.0:
+        return 0.0
+    return rate * 10_000.0 if rate < 1.0 else rate
+
+
+def get_fee_rates_bps(*, prefer_env_credentials: bool = False) -> dict[str, Any]:
+    """Return the current Coinbase maker/taker fee rates in bps."""
+    summary = get_transaction_summary_raw(
+        prefer_env_credentials=prefer_env_credentials,
+    )
+    tier = None
+    if isinstance(summary, dict):
+        tier_without_promo = summary.get("fee_tier_without_promotion")
+        if isinstance(tier_without_promo, dict):
+            tier = tier_without_promo.get("current_tier")
+        if not isinstance(tier, dict):
+            tier = summary.get("fee_tier")
+    if not isinstance(tier, dict):
+        return {}
+    maker_fee_bps = _fee_rate_to_bps(tier.get("maker_fee_rate"))
+    taker_fee_bps = _fee_rate_to_bps(tier.get("taker_fee_rate"))
+    if maker_fee_bps <= 0.0 and taker_fee_bps <= 0.0:
+        return {}
+    return {
+        "maker_fee_bps": maker_fee_bps,
+        "taker_fee_bps": taker_fee_bps,
+        "pricing_tier": tier.get("pricing_tier") or "",
     }
 
 
@@ -828,6 +919,7 @@ def _coinbase_stale_close_fill(trade: Any) -> dict[str, Any] | None:
 def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Reconcile local trades with broker_source='coinbase' against Coinbase."""
     from ..models.trading import Trade, StrategyProposal
+    from .trading.decision_ledger import mark_linked_trade_packets_executed, mark_linked_trade_packets_terminal
     from .trading.execution_audit import normalize_coinbase_order_event, record_execution_event
 
     if not is_connected():
@@ -884,6 +976,12 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             trade.last_broker_sync = now
 
             if cb_state == "filled":
+                mark_linked_trade_packets_executed(
+                    db,
+                    trade_id=int(trade.id),
+                    source="coinbase_order_sync",
+                    broker_order_id=trade.broker_order_id,
+                )
                 filled += 1
                 logger.info(
                     f"[coinbase] Order {trade.broker_order_id} for {trade.ticker} FILLED @ ${trade.avg_fill_price}"
@@ -891,6 +989,15 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 _update_proposal_on_fill(db, trade)
 
             elif cb_state in _CB_TERMINAL_STATES and cb_state != "filled":
+                mark_linked_trade_packets_terminal(
+                    db,
+                    trade_id=int(trade.id),
+                    outcome_status="cancelled" if cb_state in ("cancelled", "expired") else "rejected",
+                    source="coinbase_order_sync",
+                    reason_code=f"coinbase_order_{cb_state}",
+                    reason_text=f"Coinbase order ended {cb_state} with no fill",
+                    broker_order_id=trade.broker_order_id,
+                )
                 cancelled += 1
                 logger.info(f"[coinbase] Order {trade.broker_order_id} for {trade.ticker} {cb_state}")
                 _update_proposal_on_cancel(db, trade, cb_state)
@@ -1226,7 +1333,7 @@ def _coinbase_has_working_sell_orders(ticker: str | None) -> bool:
 
         adapter = get_adapter("coinbase")
         if adapter is None:
-            return False
+            return True
         orders, _fresh = adapter.list_open_orders(product_id=str(ticker), limit=50)
         for order in orders or []:
             side = str(getattr(order, "side", "") or "").lower()
@@ -1239,11 +1346,13 @@ def _coinbase_has_working_sell_orders(ticker: str | None) -> bool:
             ):
                 return True
     except Exception:
-        logger.debug(
-            "[coinbase] open-order stale-close guard failed for %s",
+        logger.warning(
+            "[coinbase] open-order stale-close guard failed for %s; "
+            "treating broker order state as unknown and refusing stale-close",
             ticker,
             exc_info=True,
         )
+        return True
     return False
 
 
@@ -1728,6 +1837,16 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             )
             continue
         close_fill = _coinbase_stale_close_fill(trade)
+        if close_fill is None:
+            logger.warning(
+                "[coinbase] Skipping stale-close for %s trade#%s: missing "
+                "from current Coinbase position snapshot but no confirming "
+                "sell fill was found. Keeping trade open/monitored because "
+                "position snapshots can be partial or stale.",
+                trade.ticker,
+                trade.id,
+            )
+            continue
         trade.status = "closed"
         trade.exit_date = (
             close_fill.get("exit_at") if close_fill is not None else datetime.utcnow()

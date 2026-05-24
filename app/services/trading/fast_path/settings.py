@@ -109,10 +109,24 @@ class FastPathSettings:
     universe_rotation_enabled: bool = False
     """Master flag for the data-driven universe rotation. When False
     (default), the executor + ws_client read from ``pairs`` (the
-    hardcoded 5-pair list). When True, ws_client reads
+    configured pair list). When True, ws_client reads
     ``fast_path_universe WHERE status='active'`` and the rotator runs
     hourly. Rollback path: flip this False and the system reverts to
-    the 5-pair fallback bit-identically."""
+    the configured pair list bit-identically."""
+
+    universe_empty_fallback_enabled: bool = False
+    """When universe rotation is enabled but ``fast_path_universe`` has
+    no active/shadow rows, keep the feed paused instead of silently
+    subscribing to ``pairs``. The legacy fallback can be re-enabled for
+    emergency continuity via
+    ``CHILI_FAST_PATH_UNIVERSE_EMPTY_FALLBACK_ENABLED=true``."""
+
+    universe_shadow_paper_fills_enabled: bool = False
+    """When False, shadow pairs may still place simulated maker probes
+    and feed maker-filled decay, but a filled shadow probe does not
+    become an open dashboard paper position. Active pairs keep normal
+    paper-fill behavior. Override with
+    ``CHILI_FAST_PATH_UNIVERSE_SHADOW_PAPER_FILLS_ENABLED=true``."""
 
     universe_top_n: int = 25
     """Top-N pairs by composite_score that the rotator promotes per
@@ -125,8 +139,9 @@ class FastPathSettings:
 
     universe_shadow_window_h: int = 24
     """Cold-start window length (hours) before a newly-promoted pair
-    transitions from ``status='shadow'`` to ``status='active'`` and
-    becomes admission-eligible. ``decay_miner`` accumulates
+    becomes eligible for ``status='active'`` review. Promotion still
+    requires learned decay evidence to clear execution costs; the
+    window alone is not enough. ``decay_miner`` accumulates
     ``fast_signal_decay`` rows during this window."""
 
     # Admission gate thresholds (settings-tunable per the brief's
@@ -136,15 +151,40 @@ class FastPathSettings:
     """Lower bound for 24h-volume filter (USD). $10M filters out
     illiquid pairs whose round-trip cost exceeds reasonable alpha."""
 
-    universe_max_spread_bps: float = 10.0
-    """Upper bound for top-of-book spread (bps). 10 bps is the
-    economic-line consensus from the alpha replay; pairs above are
-    cost-prohibitive for alpha extraction at fast horizons."""
+    universe_max_spread_bps: float = 8.0
+    """Upper bound for top-of-book spread (bps). Defaults to the same
+    cap used by the executor's spread-sanity gate so the rotator does
+    not subscribe symbols that execution will reject immediately."""
 
     universe_min_top_of_book_usd: float = 5_000.0
     """Minimum top-of-book size (USD) on each side. Below this, market
     impact dominates the predicted alpha at typical fast-path order
     sizes."""
+
+    universe_shadow_min_top_of_book_usd: float = 25.0
+    """Minimum top-of-book size (USD) for shadow-only exploration.
+    Defaults to the configured fast-path execution notional at load
+    time. Shadow candidates may be thinner than active candidates, but
+    they still need enough visible touch liquidity to make a probe fill
+    observation meaningful."""
+
+    universe_min_range_24h_bps: float = 150.0
+    """Minimum Coinbase 24h high-low range (bps). This keeps
+    stable/near-stable quote products out of the scalp universe while
+    leaving the threshold operator-configurable via
+    ``CHILI_FAST_PATH_UNIVERSE_MIN_RANGE_24H_BPS``."""
+
+    universe_adaptive_range_floor_enabled: bool = True
+    """When True, raise the configured 24h-range floor to the weakest
+    range in the current top-N plus hysteresis volatility cohort among
+    otherwise liquid candidates. This keeps the scalp universe relative
+    to today's market instead of relying only on a static floor."""
+
+    universe_missing_grace_passes: int = 2
+    """Number of consecutive rotator passes a previously subscribed
+    symbol may miss due to transient data/depth/spread issues before it
+    is demoted inactive. Hard volatility/volume failures still demote
+    immediately."""
 
     universe_min_trades_24h: int = 1_000
     """Minimum 24h trade count. Below this, the order book is too
@@ -172,6 +212,12 @@ class FastPathSettings:
     tier 6 = 8, tier 7 = 5, tier 8 = 4, tier 9 = 4. Coinbase One
     subscribers may have different rates -- check the live fee schedule
     on the operator's account."""
+
+    cost_aware_live_fee_enabled: bool = False
+    """When True, cost-aware fast-path components ask Coinbase for the
+    account's current maker/taker fee tier and fall back to the static
+    fee settings only if the broker lookup is unavailable. Override via
+    ``CHILI_FAST_PATH_COST_AWARE_LIVE_FEE_ENABLED``."""
 
     # ── Maker-only execution mode (f-fastpath-maker-only, 2026-05-08) ─
     execution_mode: str = "taker"
@@ -220,6 +266,13 @@ class FastPathSettings:
     Keep at 0 by default because ``gate_cost_aware_admission`` already owns
     the economic line; raise this for a larger live safety margin."""
 
+    negative_edge_filter_ttl_s: int = 30
+    """Seconds to cache learned negative-edge suppression decisions in the
+    websocket alert path. The executor remains the source of truth; this
+    cache only avoids inserting alerts that the same learned gate would
+    immediately reject. Override via
+    ``CHILI_FAST_PATH_NEGATIVE_EDGE_FILTER_TTL_S``."""
+
     maker_cancel_on_timeout_s: int = 10
     """Cancel a resting maker order after this many seconds if unfilled.
     The trade-off: longer = higher fill rate but more adverse-selection
@@ -236,6 +289,16 @@ class FastPathSettings:
     Override via ``CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S``."""
 
     # ── Short-alert gate (2026-05-17) ─────────────────────────────────
+    maker_attempt_adverse_filter_enabled: bool = True
+    """When True, maker modes reject lanes whose recent maker-attempt
+    lifecycle proves adverse selection: passive fills happen after
+    adverse mid movement, or unfilled terminal attempts miss favorable
+    movement. The gate uses confidence intervals instead of a fixed
+    attempt-count quota."""
+
+    maker_attempt_adverse_filter_window_h: int = 24
+    """Lookback window for maker-attempt adverse-selection evidence."""
+
     emit_short_alerts: bool = False
     """When False (default), the scanner skips ``imbalance_short`` alert
     emission entirely. Coinbase spot — the only fast-path venue today —
@@ -251,6 +314,58 @@ class FastPathSettings:
     ``MomentumScanner`` directly (default True for backwards-compat with
     pre-gate fixtures)."""
 
+    scanner_vol_breakout_lookback: int = 20
+    """Number of closed 1m bars used for scanner volume baselines."""
+
+    scanner_vol_breakout_mult: float = 2.0
+    """Volume multiple over baseline required for ``volume_breakout_long``."""
+
+    scanner_imbalance_long_threshold: float = 0.65
+    """Order-book imbalance threshold for ``imbalance_long`` candidates."""
+
+    scanner_imbalance_short_threshold: float = 0.35
+    """Order-book imbalance threshold for optional ``imbalance_short`` candidates."""
+
+    scanner_imbalance_cooldown_s: float = 30.0
+    """Per-ticker cooldown for imbalance signals."""
+
+    scanner_spread_squeeze_bps: float = 1.5
+    """Maximum latest top-of-book spread for ``spread_squeeze`` candidates."""
+
+    scanner_spread_squeeze_vol_mult: float = 1.2
+    """Volume multiple over baseline required for ``spread_squeeze``."""
+
+    scanner_spread_squeeze_cooldown_s: float = 60.0
+    """Per-ticker cooldown for ``spread_squeeze`` candidates."""
+
+    scanner_book_pressure_enabled: bool = True
+    """When True, emit ``book_pressure_reclaim_long`` candidates from
+    persistent book pressure that also has microprice + mid confirmation."""
+
+    scanner_book_pressure_window: int = 5
+    """Number of sampled book emits that must agree before
+    ``book_pressure_reclaim_long`` can fire."""
+
+    scanner_book_pressure_min_avg_imbalance: float = 0.65
+    """Minimum average top-N book imbalance across the pressure window."""
+
+    scanner_book_pressure_min_microprice_bps: float = 0.25
+    """Minimum average microprice lead over mid, in bps."""
+
+    scanner_book_pressure_max_spread_bps: float = 3.0
+    """Maximum top-of-book spread allowed anywhere in the pressure window."""
+
+    scanner_book_pressure_min_mid_move_bps: float = 0.25
+    """Minimum mid and best-bid move from the start to end of the pressure window."""
+
+    scanner_book_pressure_cooldown_s: float = 30.0
+    """Per-ticker cooldown for ``book_pressure_reclaim_long`` candidates."""
+
+    scanner_book_pressure_min_touch_notional_usd: float = 25.0
+    """Minimum visible best bid and best ask notional for book-pressure
+    confirmation. Defaults to the configured execution notional so a
+    dust best level cannot manufacture fake microprice pressure."""
+
 
 def _env_float(name: str, default: float) -> float:
     raw = (os.environ.get(name) or "").strip()
@@ -265,6 +380,7 @@ def _env_float(name: str, default: float) -> float:
 def load() -> FastPathSettings:
     """Read settings from the process environment. Called once at
     container boot by ``scripts/fast_data_worker.py``."""
+    exec_notional_usd = _env_float("CHILI_FAST_PATH_EXEC_NOTIONAL_USD", 25.0)
     return FastPathSettings(
         enabled=_env_bool("CHILI_FAST_PATH_ENABLED", False),
         mode=(os.environ.get("CHILI_FAST_PATH_MODE") or "paper").strip().lower(),
@@ -282,6 +398,10 @@ def load() -> FastPathSettings:
         # f-fastpath-universe-rotation (2026-05-07)
         universe_rotation_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_ROTATION_ENABLED", False),
+        universe_empty_fallback_enabled=_env_bool(
+            "CHILI_FAST_PATH_UNIVERSE_EMPTY_FALLBACK_ENABLED", False),
+        universe_shadow_paper_fills_enabled=_env_bool(
+            "CHILI_FAST_PATH_UNIVERSE_SHADOW_PAPER_FILLS_ENABLED", False),
         universe_top_n=_env_int("CHILI_FAST_PATH_UNIVERSE_TOP_N", 25),
         universe_hysteresis_ranks=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", 3),
@@ -290,15 +410,29 @@ def load() -> FastPathSettings:
         universe_min_volume_24h_usd=_env_float(
             "CHILI_FAST_PATH_UNIVERSE_MIN_VOLUME_24H_USD", 10_000_000.0),
         universe_max_spread_bps=_env_float(
-            "CHILI_FAST_PATH_UNIVERSE_MAX_SPREAD_BPS", 10.0),
+            "CHILI_FAST_PATH_UNIVERSE_MAX_SPREAD_BPS",
+            _env_float("CHILI_FAST_PATH_EXEC_MAX_SPREAD_BPS", 8.0),
+        ),
         universe_min_top_of_book_usd=_env_float(
             "CHILI_FAST_PATH_UNIVERSE_MIN_TOP_OF_BOOK_USD", 5_000.0),
+        universe_shadow_min_top_of_book_usd=_env_float(
+            "CHILI_FAST_PATH_UNIVERSE_SHADOW_MIN_TOP_OF_BOOK_USD",
+            exec_notional_usd,
+        ),
+        universe_min_range_24h_bps=_env_float(
+            "CHILI_FAST_PATH_UNIVERSE_MIN_RANGE_24H_BPS", 150.0),
+        universe_adaptive_range_floor_enabled=_env_bool(
+            "CHILI_FAST_PATH_UNIVERSE_ADAPTIVE_RANGE_FLOOR_ENABLED", True),
+        universe_missing_grace_passes=_env_int(
+            "CHILI_FAST_PATH_UNIVERSE_MISSING_GRACE_PASSES", 2),
         universe_min_trades_24h=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H", 1_000),
         cost_aware_admission_enabled=_env_bool(
             "CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED", False),
         cost_aware_taker_fee_bps=_env_float(
             "CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS", 60.0),
+        cost_aware_live_fee_enabled=_env_bool(
+            "CHILI_FAST_PATH_COST_AWARE_LIVE_FEE_ENABLED", False),
         # f-fastpath-maker-only (2026-05-08)
         execution_mode=(
             os.environ.get("CHILI_FAST_PATH_EXECUTION_MODE") or "taker"
@@ -311,13 +445,53 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_LIVE_ALPHA_MIN_SAMPLES", 50),
         live_alpha_min_net_bps=_env_float(
             "CHILI_FAST_PATH_LIVE_ALPHA_MIN_NET_BPS", 0.0),
+        negative_edge_filter_ttl_s=_env_int(
+            "CHILI_FAST_PATH_NEGATIVE_EDGE_FILTER_TTL_S", 30),
         maker_cancel_on_timeout_s=_env_int(
             "CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S", 10),
         maker_first_taker_fallback_s=_env_int(
             "CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S", 5),
+        maker_attempt_adverse_filter_enabled=_env_bool(
+            "CHILI_FAST_PATH_MAKER_ATTEMPT_ADVERSE_FILTER_ENABLED", True),
+        maker_attempt_adverse_filter_window_h=_env_int(
+            "CHILI_FAST_PATH_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H", 24),
         # Short-alert gate (2026-05-17)
         emit_short_alerts=_env_bool(
             "CHILI_FAST_PATH_EMIT_SHORT_ALERTS", False),
+        scanner_vol_breakout_lookback=_env_int(
+            "CHILI_FAST_PATH_SCANNER_VOL_BREAKOUT_LOOKBACK", 20),
+        scanner_vol_breakout_mult=_env_float(
+            "CHILI_FAST_PATH_SCANNER_VOL_BREAKOUT_MULT", 2.0),
+        scanner_imbalance_long_threshold=_env_float(
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_LONG_THRESHOLD", 0.65),
+        scanner_imbalance_short_threshold=_env_float(
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_SHORT_THRESHOLD", 0.35),
+        scanner_imbalance_cooldown_s=_env_float(
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_COOLDOWN_S", 30.0),
+        scanner_spread_squeeze_bps=_env_float(
+            "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_BPS", 1.5),
+        scanner_spread_squeeze_vol_mult=_env_float(
+            "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_VOL_MULT", 1.2),
+        scanner_spread_squeeze_cooldown_s=_env_float(
+            "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_COOLDOWN_S", 60.0),
+        scanner_book_pressure_enabled=_env_bool(
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_ENABLED", True),
+        scanner_book_pressure_window=_env_int(
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_WINDOW", 5),
+        scanner_book_pressure_min_avg_imbalance=_env_float(
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_AVG_IMBALANCE", 0.65),
+        scanner_book_pressure_min_microprice_bps=_env_float(
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MICROPRICE_BPS", 0.25),
+        scanner_book_pressure_max_spread_bps=_env_float(
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MAX_SPREAD_BPS", 3.0),
+        scanner_book_pressure_min_mid_move_bps=_env_float(
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MID_MOVE_BPS", 0.25),
+        scanner_book_pressure_cooldown_s=_env_float(
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_COOLDOWN_S", 30.0),
+        scanner_book_pressure_min_touch_notional_usd=_env_float(
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD",
+            exec_notional_usd,
+        ),
     )
 
 
