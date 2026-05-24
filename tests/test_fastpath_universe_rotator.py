@@ -315,6 +315,7 @@ class _FakeRotationDB:
         maker_attempt_rows: dict[str, list[dict]] | None = None,
         latest_rotation_at: datetime | None = None,
         observed_rows: list[dict] | None = None,
+        prior_market_velocity_ratio: float | None = None,
         grace_history: dict[str, list[dict]] | None = None,
     ) -> None:
         self.inserted_rows: list[dict] = []
@@ -327,6 +328,7 @@ class _FakeRotationDB:
         self.maker_attempt_rows = maker_attempt_rows or {}
         self.latest_rotation_at = latest_rotation_at
         self.observed_rows = observed_rows or []
+        self.prior_market_velocity_ratio = prior_market_velocity_ratio
         self.grace_history = grace_history or {}
 
     def execute(self, statement, params=None):
@@ -349,6 +351,12 @@ class _FakeRotationDB:
             return _FakeRows([_FakeRow(rotation_at=self.latest_rotation_at)])
         if "observed alert/fill opportunity" in sql:
             return _FakeScalarRows(self.observed_rows)
+        if "latest observed market velocity ratio" in sql:
+            if self.prior_market_velocity_ratio is None:
+                return _FakeRows([])
+            return _FakeRows([
+                _FakeRow(ratio=self.prior_market_velocity_ratio)
+            ])
         if "SELECT status, rank, composite_score" in sql:
             ticker = (params or {}).get("ticker")
             rows = [_FakeRow(**row) for row in self.grace_history.get(ticker, [])]
@@ -1040,6 +1048,44 @@ def test_rotation_penalizes_observed_move_below_round_trip_cost():
     )
     assert out["ranked_n"] == 1
     assert db.inserted_rows[0]["ticker"] == "COST-FIT-USD"
+
+
+def test_rotation_does_not_backfill_unknown_symbols_when_velocity_below_cost():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(prior_market_velocity_ratio=0.2)
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+    )
+    snapshots = {
+        "UNKNOWN-A-USD": _make_candidate(
+            ticker="UNKNOWN-A-USD",
+            high_24h=120.0,
+            low_24h=80.0,
+        ),
+        "UNKNOWN-B-USD": _make_candidate(
+            ticker="UNKNOWN-B-USD",
+            high_24h=118.0,
+            low_24h=82.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: list(snapshots),
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["prior_observed_opportunity_median_realized_move_to_cost"] == (
+        pytest.approx(0.2)
+    )
+    assert out["market_velocity_backfill_skips"] == 2
+    assert out["ranked_n"] == 0
+    assert {row["status"] for row in db.inserted_rows} == {"inactive"}
 
 
 def test_rotation_ranks_shadow_candidates_against_active_depth_candidates():

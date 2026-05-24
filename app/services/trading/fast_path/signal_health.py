@@ -81,6 +81,8 @@ EDGE_PAIN_MEAN_BELOW_REQUIRED_NET = "best_mean_still_below_cost"
 EDGE_PAIN_ONLY_SPARSE_EVIDENCE = "only_sparse_decay_evidence"
 EDGE_PAIN_NEGATIVE_EDGE_PRESENT = "negative_edge_present"
 EDGE_PAIN_MARKET_MOVE_BELOW_COST = "observed_market_move_below_round_trip_cost"
+EDGE_PAIN_VENUE_FEE_TOO_HIGH = "venue_fee_above_observed_break_even"
+EDGE_PAIN_SPREAD_TOO_HIGH = "spread_above_observed_break_even"
 
 MARKET_VELOCITY_BELOW_COST = "movement_below_round_trip_cost"
 MARKET_VELOCITY_CLEARS_COST = "movement_clears_round_trip_cost"
@@ -596,14 +598,35 @@ def _fetch_maker_attempt_rows(
     return [dict(r) for r in rows]
 
 
-def _fetch_latest_market_velocity_context(engine: Engine) -> dict[str, Any]:
+def _fetch_latest_market_velocity_context(
+    engine: Engine,
+    *,
+    fee_bps: float | None = None,
+    spread_bps: float | None = None,
+    min_net_bps: float = 0.0,
+) -> dict[str, Any]:
     """Return latest universe-level movement-vs-cost diagnostics."""
     exists_sql = text("SELECT to_regclass('public.fast_path_universe_runs')")
     sql = text("""
-        SELECT rotation_at, counters_json
-        FROM fast_path_universe_runs
-        ORDER BY rotation_at DESC
-        LIMIT 1
+        WITH latest AS (
+            SELECT MAX(rotation_at) AS latest_rotation_at
+            FROM fast_path_universe_runs
+        ),
+        latest_with_velocity AS (
+            SELECT rotation_at, counters_json
+            FROM fast_path_universe_runs
+            WHERE counters_json ? 'observed_opportunity_median_realized_move_to_cost'
+              AND counters_json->>'observed_opportunity_median_realized_move_to_cost'
+                  IS NOT NULL
+            ORDER BY rotation_at DESC
+            LIMIT 1
+        )
+        SELECT
+            latest.latest_rotation_at,
+            latest_with_velocity.rotation_at,
+            latest_with_velocity.counters_json
+        FROM latest
+        LEFT JOIN latest_with_velocity ON TRUE
     """)
     with engine.connect() as conn:
         if conn.execute(exists_sql).scalar() is None:
@@ -612,9 +635,14 @@ def _fetch_latest_market_velocity_context(engine: Engine) -> dict[str, Any]:
                 "pain_points": [],
             }
         row = conn.execute(sql).mappings().one_or_none()
-    if row is None:
+    if row is None or row.get("rotation_at") is None:
         return {
             "verdict": MARKET_VELOCITY_UNKNOWN,
+            "latest_rotation_at": (
+                row["latest_rotation_at"].isoformat()
+                if row is not None and row.get("latest_rotation_at") is not None
+                else None
+            ),
             "pain_points": [],
         }
 
@@ -640,15 +668,80 @@ def _fetch_latest_market_velocity_context(engine: Engine) -> dict[str, Any]:
             verdict = MARKET_VELOCITY_BELOW_COST
             pain_points.append(EDGE_PAIN_MARKET_MOVE_BELOW_COST)
 
+    break_even_round_trip_cost_bps: float | None = None
+    break_even_all_in_per_side_bps: float | None = None
+    break_even_fee_per_side_bps: float | None = None
+    fee_gap_bps: float | None = None
+    required_move_multiple: float | None = None
+    spread_for_break_even = spread_bps
+    spread_source = "current_universe" if spread_bps is not None else None
+    if (
+        spread_for_break_even is None
+        and cost_bps is not None
+        and fee_bps is not None
+    ):
+        spread_for_break_even = max(
+            0.0,
+            (float(cost_bps) / 2.0) - float(fee_bps or 0.0),
+        )
+        spread_source = "velocity_context_inferred"
+    if move_bps is not None:
+        required_cost = max(0.0, float(move_bps) - float(min_net_bps or 0.0))
+        break_even_round_trip_cost_bps = required_cost
+        break_even_all_in_per_side_bps = required_cost / 2.0
+        if cost_bps is not None and float(move_bps) > 0.0:
+            required_move_multiple = (
+                (float(cost_bps) + float(min_net_bps or 0.0))
+                / float(move_bps)
+            )
+        if spread_for_break_even is not None:
+            break_even_fee_per_side_bps = (
+                break_even_all_in_per_side_bps
+                - float(spread_for_break_even or 0.0)
+            )
+            if break_even_fee_per_side_bps < 0.0:
+                pain_points.append(EDGE_PAIN_SPREAD_TOO_HIGH)
+            elif fee_bps is not None:
+                fee_gap_bps = (
+                    float(fee_bps or 0.0) - break_even_fee_per_side_bps
+                )
+                if fee_gap_bps > 0.0:
+                    pain_points.append(EDGE_PAIN_VENUE_FEE_TOO_HIGH)
+
     return {
+        "latest_rotation_at": (
+            row["latest_rotation_at"].isoformat()
+            if row.get("latest_rotation_at") is not None else None
+        ),
         "rotation_at": (
             row["rotation_at"].isoformat()
             if row.get("rotation_at") is not None else None
+        ),
+        "context_stale": bool(
+            row.get("latest_rotation_at") is not None
+            and row.get("rotation_at") is not None
+            and row.get("latest_rotation_at") != row.get("rotation_at")
         ),
         "verdict": verdict,
         "median_realized_bar_move_bps": move_bps,
         "median_round_trip_cost_bps": cost_bps,
         "median_realized_move_to_cost": ratio,
+        "required_move_multiple": _round_or_none(
+            required_move_multiple, digits=6,
+        ),
+        "break_even_round_trip_cost_bps": _round_or_none(
+            break_even_round_trip_cost_bps,
+        ),
+        "break_even_all_in_per_side_bps": _round_or_none(
+            break_even_all_in_per_side_bps,
+        ),
+        "current_fee_bps": _round_or_none(fee_bps),
+        "spread_bps_for_break_even": _round_or_none(spread_for_break_even),
+        "spread_source": spread_source,
+        "break_even_fee_per_side_bps_at_current_spread": _round_or_none(
+            break_even_fee_per_side_bps,
+        ),
+        "current_fee_gap_bps": _round_or_none(fee_gap_bps),
         "ranked_n": counters.get("ranked_n"),
         "effective_universe_max_spread_bps": counters.get(
             "effective_universe_max_spread_bps"
@@ -926,7 +1019,12 @@ def build_signal_health_report(
         pooled + ticker_health_all,
         min_net_bps=min_net_bps,
     )
-    market_velocity = _fetch_latest_market_velocity_context(engine)
+    market_velocity = _fetch_latest_market_velocity_context(
+        engine,
+        fee_bps=fee_bps,
+        spread_bps=median_spread_bps,
+        min_net_bps=min_net_bps,
+    )
 
     maker_attempt_health: dict[str, Any] | None = None
     if include_maker_attempts:

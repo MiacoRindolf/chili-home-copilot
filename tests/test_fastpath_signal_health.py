@@ -11,8 +11,10 @@ from app.services.trading.fast_path.signal_health import (
     EDGE_DIAGNOSIS_FEE_SPREAD_BOTTLENECK,
     EDGE_DIAGNOSIS_POSITIVE_PRESENT,
     EDGE_PAIN_MARKET_MOVE_BELOW_COST,
+    EDGE_PAIN_VENUE_FEE_TOO_HIGH,
     EDGE_PAIN_UPPER_BELOW_REQUIRED_NET,
     MARKET_VELOCITY_BELOW_COST,
+    _fetch_latest_market_velocity_context,
     build_signal_health_report,
     summarize_maker_attempt_group,
     summarize_signal_group,
@@ -67,6 +69,46 @@ def _attempt(
         "spread_at_fill_bps": spread_at_fill_bps,
         "mid_drift_bps": mid_drift_bps,
     }
+
+
+class _FakeResult:
+    def __init__(self, *, scalar_value=None, row=None):
+        self._scalar_value = scalar_value
+        self._row = row
+
+    def scalar(self):
+        return self._scalar_value
+
+    def mappings(self):
+        return self
+
+    def one_or_none(self):
+        return self._row
+
+
+class _FakeMarketVelocityConn:
+    def __init__(self, row):
+        self._row = row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def execute(self, statement, _params=None):
+        sql = str(statement)
+        if "to_regclass" in sql:
+            return _FakeResult(scalar_value="fast_path_universe_runs")
+        return _FakeResult(row=self._row)
+
+
+class _FakeMarketVelocityEngine:
+    def __init__(self, row):
+        self._row = row
+
+    def connect(self):
+        return _FakeMarketVelocityConn(self._row)
 
 
 def test_signal_health_flags_negative_edge_without_sample_quota():
@@ -149,6 +191,39 @@ def test_signal_health_keeps_wide_interval_observe_only():
 
     assert out["verdict"] == "uncertain"
     assert out["action"] == "observe_only"
+
+
+def test_market_velocity_context_reports_break_even_fee_gap():
+    from datetime import datetime
+
+    row = {
+        "latest_rotation_at": datetime(2026, 5, 24, 18, 40, 0),
+        "rotation_at": datetime(2026, 5, 24, 18, 33, 7),
+        "counters_json": {
+            "observed_opportunity_median_realized_bar_move_bps": 8.0,
+            "observed_opportunity_median_round_trip_cost_bps": 80.0,
+            "observed_opportunity_median_realized_move_to_cost": 0.1,
+            "ranked_n": 1,
+        },
+    }
+
+    out = _fetch_latest_market_velocity_context(
+        _FakeMarketVelocityEngine(row),
+        fee_bps=40.0,
+        spread_bps=2.0,
+    )
+
+    assert out["verdict"] == MARKET_VELOCITY_BELOW_COST
+    assert out["context_stale"] is True
+    assert out["required_move_multiple"] == pytest.approx(10.0)
+    assert out["break_even_round_trip_cost_bps"] == pytest.approx(8.0)
+    assert out["break_even_all_in_per_side_bps"] == pytest.approx(4.0)
+    assert out["break_even_fee_per_side_bps_at_current_spread"] == (
+        pytest.approx(2.0)
+    )
+    assert out["current_fee_gap_bps"] == pytest.approx(38.0)
+    assert EDGE_PAIN_MARKET_MOVE_BELOW_COST in out["pain_points"]
+    assert EDGE_PAIN_VENUE_FEE_TOO_HIGH in out["pain_points"]
 
 
 def test_maker_attempt_health_flags_adverse_fills_and_missed_moves():

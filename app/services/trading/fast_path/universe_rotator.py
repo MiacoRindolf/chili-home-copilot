@@ -107,6 +107,7 @@ _MAKER_ATTEMPT_SPARSE_VERDICTS = frozenset({
     _MAKER_ATTEMPT_INSUFFICIENT_VERDICT,
 })
 _DEFAULT_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H = 24
+_MARKET_VELOCITY_COST_PARITY_RATIO = 1.0
 
 
 @dataclass
@@ -837,6 +838,33 @@ def _observed_opportunity_by_ticker(
     }
 
 
+def _latest_observed_move_to_cost_ratio(db) -> float | None:
+    """Most recent rotator-level observed move/cost ratio, if available."""
+    from sqlalchemy import text
+
+    rows = db.execute(text("""
+        /* latest observed market velocity ratio */
+        SELECT
+            (
+                counters_json
+                ->> 'observed_opportunity_median_realized_move_to_cost'
+            )::double precision AS ratio
+        FROM fast_path_universe_runs
+        WHERE counters_json ? 'observed_opportunity_median_realized_move_to_cost'
+          AND counters_json->>'observed_opportunity_median_realized_move_to_cost'
+              IS NOT NULL
+        ORDER BY rotation_at DESC
+        LIMIT 1
+    """)).fetchall()
+    if not rows:
+        return None
+    try:
+        ratio = float(getattr(rows[0], "ratio", None))
+    except (TypeError, ValueError):
+        return None
+    return ratio if math.isfinite(ratio) else None
+
+
 def _recent_missing_grace_count(db, ticker: str) -> int:
     """Count consecutive latest rows that were kept only for grace."""
     from sqlalchemy import text
@@ -1486,7 +1514,9 @@ def run_rotation_pass(
         "observed_opportunity_median_realized_bar_move_bps": None,
         "observed_opportunity_median_round_trip_cost_bps": None,
         "observed_opportunity_median_realized_move_to_cost": None,
+        "prior_observed_opportunity_median_realized_move_to_cost": None,
         "observed_opportunity_rank_skips": 0,
+        "market_velocity_backfill_skips": 0,
         "rotation_at": rotation_at.isoformat(),
     }
 
@@ -1638,6 +1668,10 @@ def run_rotation_pass(
         db,
         since=observed_since,
     )
+    prior_move_to_cost = _latest_observed_move_to_cost_ratio(db)
+    out["prior_observed_opportunity_median_realized_move_to_cost"] = (
+        prior_move_to_cost
+    )
     if observed_since is not None:
         out["observed_opportunity_since"] = observed_since.isoformat()
     out["observed_opportunity_tickers"] = len(observed_opportunity)
@@ -1764,6 +1798,7 @@ def run_rotation_pass(
     cut_ranked: list[_PairCandidate] = []
     exhausted_rank_skips: list[_PairCandidate] = []
     observed_rank_skips: list[_PairCandidate] = []
+    velocity_backfill_skips: list[_PairCandidate] = []
     for cand in candidates:
         if len(cut_ranked) >= target_ranked:
             break
@@ -1798,16 +1833,35 @@ def run_rotation_pass(
             rank_context=rank_context,
             fee_bps=promotion_fee_bps,
         )
+        move_to_cost = rank_context.get("median_realized_move_to_cost")
+        if move_to_cost is None:
+            move_to_cost = prior_move_to_cost
+        obs = observed_opportunity.get(cand.ticker)
+        has_observed_move = (
+            obs is not None and int(obs.realized_move_samples or 0) > 0
+        )
+        if (
+            move_to_cost is not None
+            and float(move_to_cost) < _MARKET_VELOCITY_COST_PARITY_RATIO
+            and not has_observed_move
+        ):
+            velocity_backfill_skips.append(cand)
+            continue
         if cand.ticker in observed_opportunity and rank_score <= 0.0:
             observed_rank_skips.append(cand)
             continue
         cut_ranked.append(cand)
     out["edge_exhaustion_backfill_skips"] = len(exhausted_rank_skips)
     out["observed_opportunity_rank_skips"] = len(observed_rank_skips)
+    out["market_velocity_backfill_skips"] = len(velocity_backfill_skips)
     out["ranked_n"] = len(cut_ranked)
 
     seen_in_this_pass: set[str] = set()
-    for cand in [*exhausted_rank_skips, *observed_rank_skips]:
+    for cand in [
+        *exhausted_rank_skips,
+        *observed_rank_skips,
+        *velocity_backfill_skips,
+    ]:
         seen_in_this_pass.add(cand.ticker)
         rows_to_write.append({
             "ticker": cand.ticker,
