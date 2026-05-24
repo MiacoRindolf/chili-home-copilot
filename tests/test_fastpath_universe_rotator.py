@@ -807,7 +807,7 @@ def test_rotation_uses_observed_signal_and_fill_rates_for_shadow_ranking():
         ],
     )
     s = _StubSettings(
-        universe_top_n=2,
+        universe_top_n=3,
         universe_hysteresis_ranks=0,
         universe_min_range_24h_bps=0.0,
         universe_adaptive_range_floor_enabled=False,
@@ -839,7 +839,12 @@ def test_rotation_uses_observed_signal_and_fill_rates_for_shadow_ranking():
 
     assert out["observed_opportunity_tickers"] == 2
     assert out["observed_opportunity_median_maker_fill_rate"] == pytest.approx(0.5)
-    assert [r["ticker"] for r in db.inserted_rows] == ["FILL-USD", "FRESH-USD"]
+    assert out["observed_opportunity_rank_skips"] == 1
+    rows_by_ticker = {r["ticker"]: r for r in db.inserted_rows}
+    assert rows_by_ticker["NOFILL-USD"]["status"] == "inactive"
+    assert rows_by_ticker["NOFILL-USD"]["rank"] is None
+    assert rows_by_ticker["FILL-USD"]["rank"] == 1
+    assert rows_by_ticker["FRESH-USD"]["rank"] == 2
 
 
 def test_rotation_ranks_shadow_candidates_against_active_depth_candidates():

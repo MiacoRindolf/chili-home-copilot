@@ -288,16 +288,16 @@ def _observed_opportunity_adjusted_rank_score(
         return base_score
 
     adjusted = float(base_score)
+    if obs.bars > 0 and obs.alerts <= 0:
+        return 0.0
     median_alert_rate = rank_context.get("median_alert_rate_per_bar")
     if obs.bars > 0 and median_alert_rate and median_alert_rate > 0.0:
         adjusted *= max(obs.alert_rate_per_bar, 0.0) / float(median_alert_rate)
 
     median_fill_rate = rank_context.get("median_maker_fill_rate")
-    if (
-        obs.maker_attempts > 0
-        and median_fill_rate
-        and median_fill_rate > 0.0
-    ):
+    if obs.maker_attempts > 0 and obs.maker_fills <= 0:
+        return 0.0
+    if obs.maker_attempts > 0 and median_fill_rate and median_fill_rate > 0.0:
         adjusted *= max(obs.maker_fill_rate, 0.0) / float(median_fill_rate)
     return adjusted
 
@@ -1337,6 +1337,7 @@ def run_rotation_pass(
         "observed_opportunity_tickers": 0,
         "observed_opportunity_median_alert_rate_per_bar": None,
         "observed_opportunity_median_maker_fill_rate": None,
+        "observed_opportunity_rank_skips": 0,
         "rotation_at": rotation_at.isoformat(),
     }
 
@@ -1583,18 +1584,41 @@ def run_rotation_pass(
 
     cut_ranked: list[_PairCandidate] = []
     exhausted_rank_skips: list[_PairCandidate] = []
+    observed_rank_skips: list[_PairCandidate] = []
     for cand in candidates:
         if len(cut_ranked) >= target_ranked:
             break
         if _edge_exhausted(cand, record=True):
             exhausted_rank_skips.append(cand)
             continue
+        rank_context = {
+            "median_alert_rate_per_bar": out[
+                "observed_opportunity_median_alert_rate_per_bar"
+            ],
+            "median_maker_fill_rate": out[
+                "observed_opportunity_median_maker_fill_rate"
+            ],
+        }
+        rank_score = _observed_opportunity_adjusted_rank_score(
+            cand,
+            base_score=_candidate_rank_score(
+                cand,
+                fee_bps=promotion_fee_bps,
+                top_of_book_cap_usd=rank_top_of_book_cap_usd,
+            ),
+            observed=observed_opportunity,
+            rank_context=rank_context,
+        )
+        if cand.ticker in observed_opportunity and rank_score <= 0.0:
+            observed_rank_skips.append(cand)
+            continue
         cut_ranked.append(cand)
     out["edge_exhaustion_backfill_skips"] = len(exhausted_rank_skips)
+    out["observed_opportunity_rank_skips"] = len(observed_rank_skips)
     out["ranked_n"] = len(cut_ranked)
 
     seen_in_this_pass: set[str] = set()
-    for cand in exhausted_rank_skips:
+    for cand in [*exhausted_rank_skips, *observed_rank_skips]:
         seen_in_this_pass.add(cand.ticker)
         rows_to_write.append({
             "ticker": cand.ticker,
@@ -1608,7 +1632,8 @@ def run_rotation_pass(
             "rotation_at": rotation_at,
             "promoted_at": None,
         })
-        out["edge_exhausted_demotions"] += 1
+        if cand in exhausted_rank_skips:
+            out["edge_exhausted_demotions"] += 1
         out["demoted_to_inactive"] += 1
 
     for rank_idx, cand in enumerate(cut_ranked, start=1):
