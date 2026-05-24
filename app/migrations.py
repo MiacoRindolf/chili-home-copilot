@@ -18993,6 +18993,57 @@ def _migration_270_pattern_directional_quality_packet_lineage_view(conn) -> None
     logger.info("[mig270] pattern_directional_quality_v packet lineage columns installed")
 
 
+def _migration_271_scan_patterns_default_contract(conn) -> None:
+    """Repair DB-side defaults for raw ``scan_patterns`` inserts.
+
+    Several tests and maintenance paths intentionally use raw SQL so the
+    Python ORM defaults never execute.  Keep the table contract in the
+    database too, otherwise partial inserts fail on older NOT NULL columns.
+    """
+    if "scan_patterns" not in _tables(conn):
+        return
+
+    cols = _columns(conn, "scan_patterns")
+    defaults = [
+        ("rules_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("origin", "'user'", "'user'"),
+        ("asset_class", "'all'", "'all'"),
+        ("timeframe", "'1d'", "'1d'"),
+        ("confidence", "0", "0"),
+        ("evidence_count", "0", "0"),
+        ("backtest_count", "0", "0"),
+        ("score_boost", "0", "0"),
+        ("min_base_score", "0", "0"),
+        ("active", "TRUE", "TRUE"),
+        ("generation", "0", "0"),
+        ("ticker_scope", "'universal'", "'universal'"),
+        ("trade_count", "0", "0"),
+        ("backtest_priority", "0", "0"),
+        ("created_at", "NOW()", "NOW()"),
+        ("updated_at", "NOW()", "NOW()"),
+        ("promotion_status", "'legacy'", "'legacy'"),
+        ("oos_validation_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("queue_tier", "'full'", "'full'"),
+        ("paper_book_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("regime_affinity_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("lifecycle_stage", "'candidate'", "'candidate'"),
+        ("pattern_evidence_kind", "'realized_pnl'", "'realized_pnl'"),
+        ("portfolio_gate_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("recert_required", "FALSE", "FALSE"),
+    ]
+    for col, default_sql, fill_sql in defaults:
+        if col not in cols:
+            continue
+        conn.execute(text(
+            f"ALTER TABLE scan_patterns ALTER COLUMN {col} SET DEFAULT {default_sql}"
+        ))
+        conn.execute(text(
+            f"UPDATE scan_patterns SET {col} = {fill_sql} WHERE {col} IS NULL"
+        ))
+    conn.commit()
+    logger.info("[mig271] scan_patterns DB-side defaults repaired")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19315,6 +19366,8 @@ MIGRATIONS = [
      _migration_269_pattern_directional_outcome_decision_packet_id),
     ("270_pattern_directional_quality_packet_lineage_view",
      _migration_270_pattern_directional_quality_packet_lineage_view),
+    ("271_scan_patterns_default_contract",
+     _migration_271_scan_patterns_default_contract),
 ]
 
 

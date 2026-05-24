@@ -214,8 +214,14 @@ def evolution_credit_diagnostics(
     durable audit samples; this diagnostic explains why they are not allowed to
     update the neural learner yet.
     """
-    window_days = max(1, min(int(days or 30), 365))
-    row_limit = max(1, min(int(limit or 1000), 10_000))
+    default_window_days = 30
+    max_window_days = 365
+    default_row_limit = 1000
+    max_row_limit = 10_000
+    window_source = default_window_days if days is None else days
+    limit_source = default_row_limit if limit is None else limit
+    window_days = max(1, min(int(window_source), max_window_days))
+    row_limit = max(1, min(int(limit_source), max_row_limit))
     out: dict[str, Any] = {
         "table_present": momentum_outcomes_table_present(db),
         "mode": "audit_only",

@@ -1277,7 +1277,7 @@ def place_missing_stop(
     if _t_upper.endswith("-USD") and _bs_lower == "robinhood":
         logger.warning(
             f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
-            "ticker=%s reason=venue_unsupported_crypto "
+            "ticker=%s reason=venue_unsupported_crypto_path "
             "(Robinhood crypto stop-loss is not supported via the equity "
             "rh.orders.order primitive; the equity instrument lookup "
             "returns [] for crypto bases and the SDK crashes on [0]). "
@@ -1287,7 +1287,7 @@ def place_missing_stop(
         )
         return WriterAction(
             action="place_missing_stop", ok=False,
-            reason="venue_unsupported_crypto",
+            reason="venue_unsupported_crypto_path",
             broker_source=broker_source, ticker=ticker,
         )
 

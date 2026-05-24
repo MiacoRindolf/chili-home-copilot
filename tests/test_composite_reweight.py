@@ -304,17 +304,31 @@ def _test_db_or_skip():
         pytest.skip("TEST_DATABASE_URL not set or doesn't end in _test")
 
 
+def _seed_trade_user(db, user_id: int = 1) -> None:
+    db.execute(
+        text(
+            """
+            INSERT INTO users (id, name)
+            VALUES (:user_id, :name)
+            ON CONFLICT (id) DO NOTHING
+            """
+        ),
+        {"user_id": user_id, "name": f"test-user-{user_id}"},
+    )
+
+
 def test_cohort_eligibility_floor_blocks_negative_realized(db):
     """A pattern with >= 5 closed trades and negative avg_pnl_pct must
     NOT appear in select_cohort_candidates."""
     _test_db_or_skip()
     from app.services.trading.pattern_cohort_promote import select_cohort_candidates
 
+    _seed_trade_user(db)
     # Seed a candidate pattern (gate-passed, CPCV-strong) with 6 losing trades.
     db.execute(text("""
         INSERT INTO scan_patterns (id, name, active, lifecycle_stage,
-            promotion_gate_passed, cpcv_median_sharpe, deflated_sharpe, pbo)
-        VALUES (9991, 'TEST_FLOOR_LOSER', TRUE, 'candidate', TRUE, 2.0, 1.0, 0.0)
+            promotion_gate_passed, cpcv_n_paths, cpcv_median_sharpe, deflated_sharpe, pbo)
+        VALUES (9991, 'TEST_FLOOR_LOSER', TRUE, 'candidate', TRUE, 8, 2.0, 1.0, 0.0)
         ON CONFLICT (id) DO NOTHING
     """))
     for i in range(6):
@@ -339,10 +353,11 @@ def test_cohort_eligibility_floor_allows_few_trades(db):
     _test_db_or_skip()
     from app.services.trading.pattern_cohort_promote import select_cohort_candidates
 
+    _seed_trade_user(db)
     db.execute(text("""
         INSERT INTO scan_patterns (id, name, active, lifecycle_stage,
-            promotion_gate_passed, cpcv_median_sharpe, deflated_sharpe, pbo)
-        VALUES (9992, 'TEST_FLOOR_THIN', TRUE, 'candidate', TRUE, 2.0, 1.0, 0.0)
+            promotion_gate_passed, cpcv_n_paths, cpcv_median_sharpe, deflated_sharpe, pbo)
+        VALUES (9992, 'TEST_FLOOR_THIN', TRUE, 'candidate', TRUE, 8, 2.0, 1.0, 0.0)
         ON CONFLICT (id) DO NOTHING
     """))
     for i in range(3):  # only 3 trades — below floor of 5
@@ -366,10 +381,11 @@ def test_cohort_eligibility_floor_allows_positive_avg(db):
     _test_db_or_skip()
     from app.services.trading.pattern_cohort_promote import select_cohort_candidates
 
+    _seed_trade_user(db)
     db.execute(text("""
         INSERT INTO scan_patterns (id, name, active, lifecycle_stage,
-            promotion_gate_passed, cpcv_median_sharpe, deflated_sharpe, pbo)
-        VALUES (9993, 'TEST_FLOOR_WINNER', TRUE, 'candidate', TRUE, 2.0, 1.0, 0.0)
+            promotion_gate_passed, cpcv_n_paths, cpcv_median_sharpe, deflated_sharpe, pbo)
+        VALUES (9993, 'TEST_FLOOR_WINNER', TRUE, 'candidate', TRUE, 8, 2.0, 1.0, 0.0)
         ON CONFLICT (id) DO NOTHING
     """))
     for i in range(6):
@@ -398,13 +414,12 @@ def test_mig244_idempotent_on_second_run(db):
     _test_db_or_skip()
     from app.migrations import _migration_244_composite_reweight_demote_losers
 
-    conn = db.connection()
-
+    _seed_trade_user(db)
     # Seed a candidate: pilot_promoted with 5 losing closed trades.
     db.execute(text("""
         INSERT INTO scan_patterns (id, name, active, lifecycle_stage,
-            promotion_gate_passed, cpcv_median_sharpe, deflated_sharpe, pbo)
-        VALUES (9994, 'TEST_MIG244', TRUE, 'pilot_promoted', TRUE, 2.0, 1.0, 0.0)
+            promotion_gate_passed, cpcv_n_paths, cpcv_median_sharpe, deflated_sharpe, pbo)
+        VALUES (9994, 'TEST_MIG244', TRUE, 'pilot_promoted', TRUE, 8, 2.0, 1.0, 0.0)
         ON CONFLICT (id) DO NOTHING
     """))
     for i in range(5):
@@ -418,6 +433,7 @@ def test_mig244_idempotent_on_second_run(db):
     db.flush()
     db.commit()
 
+    conn = db.connection()
     _migration_244_composite_reweight_demote_losers(conn)
 
     stage_after_first = db.execute(

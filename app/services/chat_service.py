@@ -459,7 +459,11 @@ def _gather_context_parallel(
         futures["rag"] = executor.submit(rag_module.search, message, 3, trace_id)
         if project_id:
             futures["proj_rag"] = executor.submit(
-                pfs_module.search_project, project_id, message, 3, trace_id
+                pfs_module.search_project,
+                project_id,
+                message,
+                n_results=3,
+                trace_id=trace_id,
             )
         if user_id and not is_guest:
             futures["personality"] = executor.submit(_thread_get_personality_memory, user_id)

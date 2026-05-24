@@ -945,35 +945,49 @@ class ScanPattern(Base):
     id: int = Column(Integer, primary_key=True, index=True)
     name: str = Column(String(120), nullable=False)
     description: Optional[str] = Column(Text, nullable=True)
-    rules_json: dict = Column(JSONB, nullable=False, default=lambda: {})
-    origin: str = Column(String(30), nullable=False, default="user")
-    asset_class: str = Column(String(20), nullable=False, default="all")
-    timeframe: str = Column(String(10), nullable=False, default="1d")
-    confidence: float = Column(Float, nullable=False, default=0.0)
-    evidence_count: int = Column(Integer, nullable=False, default=0)
+    rules_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
+    origin: str = Column(String(30), nullable=False, default="user", server_default="user")
+    asset_class: str = Column(String(20), nullable=False, default="all", server_default="all")
+    timeframe: str = Column(String(10), nullable=False, default="1d", server_default="1d")
+    confidence: float = Column(Float, nullable=False, default=0.0, server_default="0")
+    evidence_count: int = Column(Integer, nullable=False, default=0, server_default="0")
     win_rate: Optional[float] = Column(Float, nullable=True)
     avg_return_pct: Optional[float] = Column(Float, nullable=True)
-    backtest_count: int = Column(Integer, nullable=False, default=0)
-    score_boost: float = Column(Float, nullable=False, default=0.0)
-    min_base_score: float = Column(Float, nullable=False, default=0.0)
-    active: bool = Column(Boolean, nullable=False, default=True)
+    backtest_count: int = Column(Integer, nullable=False, default=0, server_default="0")
+    score_boost: float = Column(Float, nullable=False, default=0.0, server_default="0")
+    min_base_score: float = Column(Float, nullable=False, default=0.0, server_default="0")
+    active: bool = Column(Boolean, nullable=False, default=True, server_default=text("TRUE"))
     parent_id: Optional[int] = Column(
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
     )
     exit_config: Optional[dict] = Column(JSONB, nullable=True)
     variant_label: Optional[str] = Column(String(40), nullable=True)
-    generation: int = Column(Integer, nullable=False, default=0)
-    ticker_scope: str = Column(String(20), nullable=False, default="universal")
+    generation: int = Column(Integer, nullable=False, default=0, server_default="0")
+    ticker_scope: str = Column(
+        String(20), nullable=False, default="universal", server_default="universal"
+    )
     scope_tickers: Optional[str] = Column(Text, nullable=True)
-    trade_count: int = Column(Integer, nullable=False, default=0)
-    backtest_priority: int = Column(Integer, nullable=False, default=0)
+    trade_count: int = Column(Integer, nullable=False, default=0, server_default="0")
+    backtest_priority: int = Column(Integer, nullable=False, default=0, server_default="0")
     last_backtest_at: Optional[datetime] = Column(DateTime, nullable=True)
-    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False, server_default=text("NOW()")
+    )
+    updated_at: datetime = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+        server_default=text("NOW()"),
+    )
 
     # Out-of-sample / promotion (see brain_oos_* settings and learning.py gates).
     # Deprecated: prefer lifecycle_stage; kept for backwards compatibility and reads.
-    promotion_status: str = Column(String(32), nullable=False, default="legacy")
+    promotion_status: str = Column(
+        String(32), nullable=False, default="legacy", server_default="legacy"
+    )
     oos_win_rate: Optional[float] = Column(Float, nullable=True)
     oos_avg_return_pct: Optional[float] = Column(Float, nullable=True)
     oos_trade_count: Optional[int] = Column(Integer, nullable=True)
@@ -985,15 +999,23 @@ class ScanPattern(Base):
     hypothesis_family: Optional[str] = Column(String(32), nullable=True)
 
     # Quant research: multi-holdout / bootstrap stats, two-tier queue (prescreen -> full), paper shadow book.
-    oos_validation_json: dict = Column(JSONB, nullable=False, default=lambda: {})
-    queue_tier: str = Column(String(16), nullable=False, default="full")
-    paper_book_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    oos_validation_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
+    queue_tier: str = Column(String(16), nullable=False, default="full", server_default="full")
+    paper_book_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
     # Regime affinity: win-rate / avg-return breakdown by market regime
     # e.g. {"risk_on": {"win_rate": 0.65, "n": 30}, "risk_off": {"win_rate": 0.40, "n": 12}}
-    regime_affinity_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    regime_affinity_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
     # Lifecycle FSM: candidate -> backtested -> validated | challenged -> promoted -> live -> decayed -> retired
     # ``challenged`` = repeatable-edge research (edge_evidence); inspectable, not live-eligible (see governance).
-    lifecycle_stage: str = Column(String(20), nullable=False, default="candidate")
+    lifecycle_stage: str = Column(
+        String(20), nullable=False, default="candidate", server_default="candidate"
+    )
     lifecycle_changed_at: Optional[datetime] = Column(DateTime, nullable=True)
     user_id: Optional[int] = Column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -1010,7 +1032,7 @@ class ScanPattern(Base):
     promotion_gate_reasons: Optional[list] = Column(JSONB, nullable=True)
     # Q1.T1.6: CPCV evaluator — realized trade PnL sequence vs ML triple-barrier classifier.
     pattern_evidence_kind: str = Column(
-        String(20), nullable=False, default="realized_pnl",
+        String(20), nullable=False, default="realized_pnl", server_default="realized_pnl",
     )
 
     # f-promotion-pipeline-rebalance Phase 4 (mig 237): composite quality
@@ -1023,9 +1045,13 @@ class ScanPattern(Base):
     # stale recert debt, and broker-risk readiness.
     alpha_sleeve: Optional[str] = Column(String(40), nullable=True)
     portfolio_gate_score: Optional[float] = Column(Float, nullable=True)
-    portfolio_gate_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    portfolio_gate_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
     portfolio_gate_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
-    recert_required: bool = Column(Boolean, nullable=False, default=False)
+    recert_required: bool = Column(
+        Boolean, nullable=False, default=False, server_default=text("FALSE")
+    )
     recert_reason: Optional[str] = Column(Text, nullable=True)
 
     # f-canonical-outcome-layer Phase A (mig 241, 2026-05-14): split the

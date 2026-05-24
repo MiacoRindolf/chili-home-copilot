@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -45,6 +46,7 @@ STRIKE_SEARCH_OFFSETS: tuple[float, ...] = (
     -3.0,
     3.0,
 )
+STRIKE_QUANTUM = Decimal("0.01")
 
 
 def _register_synthesis_parameters(db: Session) -> None:
@@ -131,6 +133,10 @@ def _pick_expiration(_adapter: Any, underlying: str, target_dte: int = DEFAULT_T
         return None
 
 
+def _quantize_strike(value: float) -> float:
+    return float(Decimal(str(value)).quantize(STRIKE_QUANTUM, rounding=ROUND_HALF_UP))
+
+
 def _pick_strike(spot: float, increment: float = DEFAULT_STRIKE_INCREMENT) -> float:
     """Round spot up to the nearest configured strike interval."""
     if spot <= 0 or increment <= 0:
@@ -139,7 +145,7 @@ def _pick_strike(spot: float, increment: float = DEFAULT_STRIKE_INCREMENT) -> fl
     strike = steps * increment
     if strike < spot:
         strike += increment
-    return round(strike, 2)
+    return _quantize_strike(strike)
 
 
 def _candidate_strikes(base_strike: float, increment: float) -> list[float]:
@@ -147,7 +153,7 @@ def _candidate_strikes(base_strike: float, increment: float) -> list[float]:
     seen: set[float] = set()
     strikes: list[float] = []
     for offset in STRIKE_SEARCH_OFFSETS:
-        strike = round(base_strike + offset * increment, 2)
+        strike = _quantize_strike(base_strike + offset * increment)
         if strike <= 0 or strike in seen:
             continue
         seen.add(strike)
