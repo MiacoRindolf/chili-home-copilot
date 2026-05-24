@@ -10,7 +10,9 @@ from app.services.trading.fast_path.settings import FastPathSettings
 from app.services.trading.fast_path.signal_health import (
     EDGE_DIAGNOSIS_FEE_SPREAD_BOTTLENECK,
     EDGE_DIAGNOSIS_POSITIVE_PRESENT,
+    EDGE_PAIN_MARKET_MOVE_BELOW_COST,
     EDGE_PAIN_UPPER_BELOW_REQUIRED_NET,
+    MARKET_VELOCITY_BELOW_COST,
     build_signal_health_report,
     summarize_maker_attempt_group,
     summarize_signal_group,
@@ -242,7 +244,10 @@ def test_build_signal_health_report_uses_execution_mode_table_and_spread_cost():
                 mid_drift_bps=-1.0,
             ),
         ],
-    ) as maker_attempt_lookup:
+    ) as maker_attempt_lookup, patch(
+        "app.services.trading.fast_path.signal_health._fetch_latest_market_velocity_context",
+        return_value={"verdict": "unknown", "pain_points": []},
+    ):
         report = build_signal_health_report(
             object(),
             settings=settings,
@@ -296,6 +301,15 @@ def test_signal_health_report_summarizes_cost_gap_when_no_edge_clears():
     ), patch(
         "app.services.trading.fast_path.signal_health._fetch_ticker_decay_rows",
         return_value=rows,
+    ), patch(
+        "app.services.trading.fast_path.signal_health._fetch_latest_market_velocity_context",
+        return_value={
+            "verdict": MARKET_VELOCITY_BELOW_COST,
+            "median_realized_bar_move_bps": 8.0,
+            "median_round_trip_cost_bps": 80.0,
+            "median_realized_move_to_cost": 0.1,
+            "pain_points": [EDGE_PAIN_MARKET_MOVE_BELOW_COST],
+        },
     ):
         report = build_signal_health_report(
             object(),
@@ -310,6 +324,10 @@ def test_signal_health_report_summarizes_cost_gap_when_no_edge_clears():
     assert EDGE_PAIN_UPPER_BELOW_REQUIRED_NET in diagnosis["pain_points"]
     assert diagnosis["best_upper_gap_bps"] > 0.0
     assert diagnosis["best_upper_lane"]["ticker"] == "TEST-USD"
+    market_velocity = report["summary"]["market_velocity"]
+    assert market_velocity["verdict"] == MARKET_VELOCITY_BELOW_COST
+    assert EDGE_PAIN_MARKET_MOVE_BELOW_COST in market_velocity["pain_points"]
+    assert market_velocity["median_realized_move_to_cost"] == 0.1
 
 
 def test_signal_health_endpoint_delegates_to_report_builder():

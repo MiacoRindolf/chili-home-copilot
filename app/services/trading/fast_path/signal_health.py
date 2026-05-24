@@ -80,6 +80,11 @@ EDGE_PAIN_UPPER_BELOW_REQUIRED_NET = "optimistic_confidence_still_below_cost"
 EDGE_PAIN_MEAN_BELOW_REQUIRED_NET = "best_mean_still_below_cost"
 EDGE_PAIN_ONLY_SPARSE_EVIDENCE = "only_sparse_decay_evidence"
 EDGE_PAIN_NEGATIVE_EDGE_PRESENT = "negative_edge_present"
+EDGE_PAIN_MARKET_MOVE_BELOW_COST = "observed_market_move_below_round_trip_cost"
+
+MARKET_VELOCITY_BELOW_COST = "movement_below_round_trip_cost"
+MARKET_VELOCITY_CLEARS_COST = "movement_clears_round_trip_cost"
+MARKET_VELOCITY_UNKNOWN = "unknown"
 
 
 def _round_or_none(value: Any, digits: int = 4) -> float | None:
@@ -591,6 +596,72 @@ def _fetch_maker_attempt_rows(
     return [dict(r) for r in rows]
 
 
+def _fetch_latest_market_velocity_context(engine: Engine) -> dict[str, Any]:
+    """Return latest universe-level movement-vs-cost diagnostics."""
+    exists_sql = text("SELECT to_regclass('public.fast_path_universe_runs')")
+    sql = text("""
+        SELECT rotation_at, counters_json
+        FROM fast_path_universe_runs
+        ORDER BY rotation_at DESC
+        LIMIT 1
+    """)
+    with engine.connect() as conn:
+        if conn.execute(exists_sql).scalar() is None:
+            return {
+                "verdict": MARKET_VELOCITY_UNKNOWN,
+                "pain_points": [],
+            }
+        row = conn.execute(sql).mappings().one_or_none()
+    if row is None:
+        return {
+            "verdict": MARKET_VELOCITY_UNKNOWN,
+            "pain_points": [],
+        }
+
+    counters = row.get("counters_json") or {}
+    if not isinstance(counters, dict):
+        counters = {}
+    move_bps = _round_or_none(
+        counters.get("observed_opportunity_median_realized_bar_move_bps")
+    )
+    cost_bps = _round_or_none(
+        counters.get("observed_opportunity_median_round_trip_cost_bps")
+    )
+    ratio = _round_or_none(
+        counters.get("observed_opportunity_median_realized_move_to_cost"),
+        digits=6,
+    )
+    verdict = MARKET_VELOCITY_UNKNOWN
+    pain_points: list[str] = []
+    if ratio is not None:
+        if float(ratio) >= 1.0:
+            verdict = MARKET_VELOCITY_CLEARS_COST
+        else:
+            verdict = MARKET_VELOCITY_BELOW_COST
+            pain_points.append(EDGE_PAIN_MARKET_MOVE_BELOW_COST)
+
+    return {
+        "rotation_at": (
+            row["rotation_at"].isoformat()
+            if row.get("rotation_at") is not None else None
+        ),
+        "verdict": verdict,
+        "median_realized_bar_move_bps": move_bps,
+        "median_round_trip_cost_bps": cost_bps,
+        "median_realized_move_to_cost": ratio,
+        "ranked_n": counters.get("ranked_n"),
+        "effective_universe_max_spread_bps": counters.get(
+            "effective_universe_max_spread_bps"
+        ),
+        "range_floor_effective_bps": counters.get("range_floor_effective_bps"),
+        "edge_exhausted_demotions": counters.get("edge_exhausted_demotions"),
+        "observed_opportunity_rank_skips": counters.get(
+            "observed_opportunity_rank_skips"
+        ),
+        "pain_points": pain_points,
+    }
+
+
 def _sort_signal_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         rows,
@@ -855,6 +926,7 @@ def build_signal_health_report(
         pooled + ticker_health_all,
         min_net_bps=min_net_bps,
     )
+    market_velocity = _fetch_latest_market_velocity_context(engine)
 
     maker_attempt_health: dict[str, Any] | None = None
     if include_maker_attempts:
@@ -888,6 +960,7 @@ def build_signal_health_report(
             "ticker_lanes_returned": len(ticker_health),
             "verdict_counts": verdict_counts,
             "edge_diagnosis": edge_diagnosis,
+            "market_velocity": market_velocity,
         },
         "pooled": pooled[:max_rows],
         "tickers": ticker_health,
