@@ -13,10 +13,19 @@ they do not depend on any scan_pattern or trade rows existing.
 
 from __future__ import annotations
 
+import uuid
+from datetime import datetime
+
 import pytest
 
 from app.config import settings
-from app.models.trading import EconomicLedgerEvent, LedgerParityLog
+from app.models.trading import (
+    EconomicLedgerEvent,
+    LedgerParityLog,
+    MomentumAutomationOutcome,
+    MomentumStrategyVariant,
+    TradingAutomationSession,
+)
 from app.services.trading import economic_ledger as el
 from app.trading_brain.infrastructure.ledger_ops_log import (
     CHILI_LEDGER_OPS_PREFIX,
@@ -390,6 +399,154 @@ def test_automation_partial_and_terminal_exit_reconcile_cumulative_pnl(db, shado
     assert parity is not None
     assert parity.ledger_pnl == pytest.approx(13.0, abs=1e-6)
     assert parity.agree_bool is True
+
+
+def test_reconcile_missing_automation_outcome_parity_dry_run_then_apply(db, shadow_mode):
+    variant = MomentumStrategyVariant(
+        family="ledger_repair",
+        variant_key=f"parity_{uuid.uuid4().hex[:12]}",
+        label="Ledger repair parity variant",
+        params_json={},
+    )
+    db.add(variant)
+    db.flush()
+
+    now = datetime.utcnow()
+    matched_session = TradingAutomationSession(
+        mode="paper",
+        symbol="BTC-USD",
+        variant_id=variant.id,
+        state="finished",
+        ended_at=now,
+    )
+    entry_only_session = TradingAutomationSession(
+        mode="paper",
+        symbol="ETH-USD",
+        variant_id=variant.id,
+        state="finished",
+        ended_at=now,
+    )
+    db.add_all([matched_session, entry_only_session])
+    db.flush()
+
+    db.add_all(
+        [
+            MomentumAutomationOutcome(
+                session_id=matched_session.id,
+                variant_id=variant.id,
+                symbol=matched_session.symbol,
+                mode="paper",
+                execution_family="coinbase_spot",
+                terminal_state="finished",
+                terminal_at=now,
+                outcome_class="small_win",
+                realized_pnl_usd=19.0,
+                return_bps=9.5,
+                regime_snapshot_json={},
+                entry_regime_snapshot_json={},
+                exit_regime_snapshot_json={},
+                readiness_snapshot_json={},
+                admission_snapshot_json={},
+                governance_context_json={},
+                extracted_summary_json={},
+                evidence_weight=1.0,
+                contributes_to_evolution=False,
+            ),
+            MomentumAutomationOutcome(
+                session_id=entry_only_session.id,
+                variant_id=variant.id,
+                symbol=entry_only_session.symbol,
+                mode="paper",
+                execution_family="coinbase_spot",
+                terminal_state="finished",
+                terminal_at=now,
+                outcome_class="small_win",
+                realized_pnl_usd=5.0,
+                return_bps=4.0,
+                regime_snapshot_json={},
+                entry_regime_snapshot_json={},
+                exit_regime_snapshot_json={},
+                readiness_snapshot_json={},
+                admission_snapshot_json={},
+                governance_context_json={},
+                extracted_summary_json={},
+                evidence_weight=1.0,
+                contributes_to_evolution=False,
+            ),
+        ]
+    )
+    db.flush()
+
+    el.record_automation_session_entry_fill(
+        db,
+        session_id=matched_session.id,
+        ticker=matched_session.symbol,
+        quantity=0.1,
+        fill_price=100_000.0,
+        mode="paper",
+        decision_packet_id=123,
+    )
+    el.record_automation_session_exit_fill(
+        db,
+        session_id=matched_session.id,
+        ticker=matched_session.symbol,
+        quantity=0.1,
+        fill_price=100_200.0,
+        entry_price=100_000.0,
+        realized_pnl_usd=19.0,
+        mode="paper",
+        decision_packet_id=123,
+    )
+    el.record_automation_session_entry_fill(
+        db,
+        session_id=entry_only_session.id,
+        ticker=entry_only_session.symbol,
+        quantity=1.0,
+        fill_price=100.0,
+        mode="paper",
+    )
+    db.commit()
+
+    dry = el.reconcile_missing_automation_outcome_parity(db, days=30, dry_run=True)
+
+    assert dry["dry_run"] is True
+    assert dry["processed"] == 2
+    assert dry["candidate_count"] == 1
+    assert dry["applied_count"] == 0
+    assert dry["skipped_without_realized_ledger_events"] == 1
+    assert dry["candidates"][0]["session_id"] == matched_session.id
+    assert dry["candidates"][0]["ledger_pnl"] == pytest.approx(19.0, abs=1e-6)
+    assert (
+        db.query(LedgerParityLog)
+        .filter(
+            LedgerParityLog.source == "automation",
+            LedgerParityLog.trade_id == el.automation_trade_id(matched_session.id),
+        )
+        .count()
+        == 0
+    )
+
+    applied = el.reconcile_missing_automation_outcome_parity(db, days=30, dry_run=False)
+
+    assert applied["dry_run"] is False
+    assert applied["candidate_count"] == 1
+    assert applied["applied_count"] == 1
+    assert applied["applied"][0]["agree_bool"] is True
+    assert applied["applied"][0]["delta_abs"] == pytest.approx(0.0, abs=1e-6)
+    parity = (
+        db.query(LedgerParityLog)
+        .filter(
+            LedgerParityLog.source == "automation",
+            LedgerParityLog.trade_id == el.automation_trade_id(matched_session.id),
+        )
+        .one()
+    )
+    assert parity.agree_bool is True
+    assert parity.provenance_json["repair"] == "automation_outcome_parity_reconcile"
+
+    again = el.reconcile_missing_automation_outcome_parity(db, days=30, dry_run=True)
+    assert again["candidate_count"] == 0
+    assert again["skipped_existing_agree"] == 1
 
 
 def test_exit_fill_is_idempotent_per_trade(db, shadow_mode):

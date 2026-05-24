@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import inspect as sa_inspect
@@ -13,7 +14,7 @@ from ....config import settings
 from ....models.trading import LedgerParityLog, MomentumAutomationOutcome, TradingAutomationSession, TradingDecisionPacket
 from ..decision_ledger import finalize_packet_from_automation_outcome, verify_decision_packet_snapshot
 from ..economic_ledger import automation_trade_id, mode_is_active as economic_ledger_active
-from .evolution import compute_session_evidence_weight, ingest_session_outcome
+from .evolution import compute_session_evidence_weight, ingest_session_outcome, outcome_needs_evolution_ingest
 from .outcome_extract import (
     extract_momentum_session_outcome,
     feedback_row_exists,
@@ -106,23 +107,288 @@ def _apply_economic_ledger_credit_gate(
     return out
 
 
-def _recompute_existing_row_credit(db: Session, row: MomentumAutomationOutcome) -> dict[str, Any]:
+def _computed_existing_row_credit(
+    db: Session,
+    row: MomentumAutomationOutcome,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     summary = dict(row.extracted_summary_json or {})
+    existing_credit = summary.get("evolution_credit") if isinstance(summary.get("evolution_credit"), dict) else {}
+    packet_id = summary.get("entry_decision_packet_id")
+    if packet_id is None:
+        packet_id = existing_credit.get("entry_decision_packet_id")
     extracted = {
         "entry_occurred": summary.get("entry_occurred"),
-        "entry_decision_packet_id": summary.get("entry_decision_packet_id"),
+        "entry_decision_packet_id": packet_id,
         "outcome_class": row.outcome_class,
         "mode": row.mode,
-        "quote_source_at_entry": summary.get("quote_source_at_entry"),
+        "quote_source_at_entry": summary.get("quote_source_at_entry") or existing_credit.get("quote_source_at_entry"),
         "return_bps": row.return_bps,
         "realized_pnl_usd": row.realized_pnl_usd,
     }
     credit = _apply_decision_snapshot_credit_gate(db, outcome_evolution_credit_from_extracted(extracted))
     credit = _apply_economic_ledger_credit_gate(db, session_id=int(row.session_id), credit=credit)
     summary["evolution_credit"] = credit
+    return summary, credit
+
+
+def _recompute_existing_row_credit(db: Session, row: MomentumAutomationOutcome) -> dict[str, Any]:
+    summary, credit = _computed_existing_row_credit(db, row)
     row.extracted_summary_json = summary
     row.contributes_to_evolution = bool(credit.get("contributes_to_evolution"))
     return credit
+
+
+def _credit_reason_codes(credit: Any) -> list[str]:
+    if not isinstance(credit, dict):
+        return []
+    return sorted({str(code) for code in (credit.get("reason_codes") or []) if str(code).strip()})
+
+
+def _credit_payload(summary: Any) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    credit = summary.get("evolution_credit")
+    return dict(credit) if isinstance(credit, dict) else {}
+
+
+def _credit_regrade_item(
+    row: MomentumAutomationOutcome,
+    *,
+    old_credit: dict[str, Any],
+    new_credit: dict[str, Any],
+    old_contributes: bool,
+) -> dict[str, Any]:
+    terminal_at = row.terminal_at.isoformat() + "Z" if isinstance(row.terminal_at, datetime) else None
+    created_at = row.created_at.isoformat() + "Z" if isinstance(row.created_at, datetime) else None
+    return {
+        "outcome_id": int(row.id),
+        "session_id": int(row.session_id),
+        "user_id": int(row.user_id) if row.user_id is not None else None,
+        "variant_id": int(row.variant_id) if row.variant_id is not None else None,
+        "symbol": row.symbol,
+        "mode": row.mode,
+        "execution_family": row.execution_family,
+        "terminal_at": terminal_at,
+        "created_at": created_at,
+        "entry_decision_packet_id": new_credit.get("entry_decision_packet_id"),
+        "old_contributes_to_evolution": bool(old_contributes),
+        "new_contributes_to_evolution": bool(new_credit.get("contributes_to_evolution")),
+        "old_reason_codes": _credit_reason_codes(old_credit),
+        "new_reason_codes": _credit_reason_codes(new_credit),
+    }
+
+
+def _stamp_credit_regrade(
+    summary: dict[str, Any],
+    *,
+    item: dict[str, Any],
+    requires_reingest: bool,
+) -> dict[str, Any]:
+    out = dict(summary or {})
+    out["evolution_credit_regrade_v1"] = {
+        "regraded_at_utc": datetime.utcnow().isoformat() + "Z",
+        "old_contributes_to_evolution": bool(item.get("old_contributes_to_evolution")),
+        "new_contributes_to_evolution": bool(item.get("new_contributes_to_evolution")),
+        "old_reason_codes": list(item.get("old_reason_codes") or []),
+        "new_reason_codes": list(item.get("new_reason_codes") or []),
+        "requires_reingest": bool(requires_reingest),
+        "reingested_at_utc": None,
+    }
+    return out
+
+
+def regrade_momentum_outcome_evolution_credit(
+    db: Session,
+    *,
+    days: int = 30,
+    user_id: int | None = None,
+    limit: int = 500,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Recompute existing momentum outcome evolution credit after lineage repairs.
+
+    This intentionally does not ingest/re-ingest evolution weights. It only
+    repairs the audit row's eligibility flag and credit explanation, so old
+    rows can be promoted to training-grade after packet snapshots or ledger
+    parity are repaired without silently double-counting learning state.
+    """
+    if not settings.chili_momentum_neural_feedback_enabled:
+        return {"ok": True, "skipped": "feedback_disabled", "processed": 0}
+    if not _outcomes_table_present(db):
+        return {"ok": True, "skipped": "outcomes_table_missing", "processed": 0}
+
+    window_days = max(1, min(int(days or 30), 365))
+    limit_i = max(0, min(int(limit or 0), 10000))
+    since = datetime.utcnow() - timedelta(days=window_days)
+    query = db.query(MomentumAutomationOutcome).filter(MomentumAutomationOutcome.terminal_at >= since)
+    if user_id is not None:
+        query = query.filter(MomentumAutomationOutcome.user_id == int(user_id))
+    rows = query.order_by(MomentumAutomationOutcome.created_at.desc()).limit(limit_i).all()
+
+    candidates: list[dict[str, Any]] = []
+    applied: list[dict[str, Any]] = []
+    upgraded = 0
+    downgraded = 0
+    needs_reingest = 0
+    for row in rows:
+        old_summary = dict(row.extracted_summary_json or {})
+        old_credit = _credit_payload(old_summary)
+        old_contributes = bool(row.contributes_to_evolution)
+        new_summary, new_credit = _computed_existing_row_credit(db, row)
+        new_contributes = bool(new_credit.get("contributes_to_evolution"))
+        old_reasons = _credit_reason_codes(old_credit)
+        new_reasons = _credit_reason_codes(new_credit)
+        payload_missing = not isinstance(old_summary.get("evolution_credit"), dict)
+        changed = payload_missing or old_contributes != new_contributes or old_reasons != new_reasons
+        if not changed:
+            continue
+
+        item = _credit_regrade_item(
+            row,
+            old_credit=old_credit,
+            new_credit=new_credit,
+            old_contributes=old_contributes,
+        )
+        candidates.append(item)
+        if old_contributes is False and new_contributes is True:
+            upgraded += 1
+            needs_reingest += 1
+        elif old_contributes is True and new_contributes is False:
+            downgraded += 1
+
+        if not dry_run:
+            new_summary = _stamp_credit_regrade(
+                new_summary,
+                item=item,
+                requires_reingest=old_contributes is False and new_contributes is True,
+            )
+            row.extracted_summary_json = new_summary
+            row.contributes_to_evolution = new_contributes
+            applied.append(item)
+
+    if not dry_run:
+        try:
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
+
+    return {
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "mode": "dry_run" if dry_run else "apply",
+        "window_days": window_days,
+        "limit": limit_i,
+        "user_id": int(user_id) if user_id is not None else None,
+        "processed": len(rows),
+        "candidate_count": len(candidates),
+        "applied_count": len(applied),
+        "upgraded_to_training_grade": upgraded,
+        "downgraded_to_audit_only": downgraded,
+        "reingest_required_count": needs_reingest,
+        "reingest_note": "Credit was repaired only; run explicit reingest if you want neural weights updated.",
+        "candidates": candidates if dry_run else [],
+        "applied": applied if not dry_run else [],
+    }
+
+
+def _reingest_regrade_marker(row: MomentumAutomationOutcome) -> dict[str, Any]:
+    summary = row.extracted_summary_json if isinstance(row.extracted_summary_json, dict) else {}
+    marker = summary.get("evolution_credit_regrade_v1")
+    return dict(marker) if isinstance(marker, dict) else {}
+
+
+def _reingest_candidate_item(row: MomentumAutomationOutcome) -> dict[str, Any]:
+    marker = _reingest_regrade_marker(row)
+    terminal_at = row.terminal_at.isoformat() + "Z" if isinstance(row.terminal_at, datetime) else None
+    return {
+        "outcome_id": int(row.id),
+        "session_id": int(row.session_id),
+        "user_id": int(row.user_id) if row.user_id is not None else None,
+        "variant_id": int(row.variant_id) if row.variant_id is not None else None,
+        "symbol": row.symbol,
+        "mode": row.mode,
+        "execution_family": row.execution_family,
+        "terminal_at": terminal_at,
+        "regraded_at_utc": marker.get("regraded_at_utc"),
+    }
+
+
+def reingest_regraded_momentum_outcomes(
+    db: Session,
+    *,
+    days: int = 30,
+    user_id: int | None = None,
+    limit: int = 100,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Explicitly apply learning once for rows upgraded by credit regrade."""
+    if not settings.chili_momentum_neural_feedback_enabled:
+        return {"ok": True, "skipped": "feedback_disabled", "processed": 0}
+    if not _outcomes_table_present(db):
+        return {"ok": True, "skipped": "outcomes_table_missing", "processed": 0}
+
+    window_days = max(1, min(int(days or 30), 365))
+    limit_i = max(0, min(int(limit or 0), 1000))
+    since = datetime.utcnow() - timedelta(days=window_days)
+    query = db.query(MomentumAutomationOutcome).filter(
+        MomentumAutomationOutcome.terminal_at >= since,
+        MomentumAutomationOutcome.contributes_to_evolution.is_(True),
+    )
+    if user_id is not None:
+        query = query.filter(MomentumAutomationOutcome.user_id == int(user_id))
+    rows = query.order_by(MomentumAutomationOutcome.created_at.desc()).limit(limit_i * 5 if limit_i else 0).all()
+
+    candidates: list[dict[str, Any]] = []
+    applied: list[dict[str, Any]] = []
+    for row in rows:
+        marker = _reingest_regrade_marker(row)
+        if not bool(marker.get("requires_reingest")):
+            continue
+        if marker.get("reingested_at_utc"):
+            continue
+        if not outcome_needs_evolution_ingest(row):
+            continue
+        item = _reingest_candidate_item(row)
+        candidates.append(item)
+        if not dry_run:
+            result = ingest_session_outcome(db, row, source="evolution_credit_regrade")
+            summary = dict(row.extracted_summary_json or {})
+            updated_marker = dict(summary.get("evolution_credit_regrade_v1") or {})
+            updated_marker["reingested_at_utc"] = datetime.utcnow().isoformat() + "Z"
+            updated_marker["reingest_result"] = result
+            summary["evolution_credit_regrade_v1"] = updated_marker
+            row.extracted_summary_json = summary
+            applied.append({**item, "reingest_result": result})
+        if len(candidates) >= limit_i:
+            break
+
+    if not dry_run:
+        try:
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
+
+    return {
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "mode": "dry_run" if dry_run else "apply",
+        "window_days": window_days,
+        "limit": limit_i,
+        "user_id": int(user_id) if user_id is not None else None,
+        "processed": len(rows),
+        "candidate_count": len(candidates),
+        "applied_count": len(applied),
+        "candidates": candidates if dry_run else [],
+        "applied": applied if not dry_run else [],
+    }
 
 
 def try_emit_momentum_session_feedback(
@@ -156,7 +422,7 @@ def try_emit_momentum_session_feedback(
         if row:
             credit = _recompute_existing_row_credit(db, row)
             finalize_packet_from_automation_outcome(db, row)
-            ingest_session_outcome(db, row)
+            ingest_session_outcome(db, row, force=True, source="feedback_emit_force_reingest")
             return {"ok": True, "reingested": True, "session_id": int(sess.id), "evolution_credit": credit}
 
     extracted = extract_momentum_session_outcome(db, sess)
@@ -183,7 +449,7 @@ def try_emit_momentum_session_feedback(
         return {"ok": False, "error": "insert_failed", "detail": str(ex)}
 
     try:
-        ingest_session_outcome(db, row)
+        ingest_session_outcome(db, row, source="feedback_emit")
     except Exception as ex:
         _log.warning("[momentum_feedback] evolution ingest failed session_id=%s: %s", sess.id, ex)
 

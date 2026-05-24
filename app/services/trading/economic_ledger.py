@@ -26,14 +26,14 @@ Safety properties:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from ...config import settings
-from ...models.trading import EconomicLedgerEvent, LedgerParityLog
+from ...models.trading import EconomicLedgerEvent, LedgerParityLog, MomentumAutomationOutcome
 from ...trading_brain.infrastructure.ledger_ops_log import (
     EVENT_ENTRY_FILL,
     EVENT_EXIT_FILL,
@@ -684,6 +684,231 @@ def reconcile_automation_session(
     )
 
 
+def _latest_automation_parity(
+    db: Session,
+    *,
+    session_id: int,
+) -> LedgerParityLog | None:
+    return (
+        db.query(LedgerParityLog)
+        .filter(
+            LedgerParityLog.source == SOURCE_AUTOMATION,
+            LedgerParityLog.trade_id == _automation_trade_id(session_id),
+        )
+        .order_by(LedgerParityLog.created_at.desc(), LedgerParityLog.id.desc())
+        .first()
+    )
+
+
+def _automation_fill_event_counts(db: Session, *, session_id: int) -> tuple[int, int]:
+    rows = (
+        db.query(EconomicLedgerEvent.event_type, func.count(EconomicLedgerEvent.id))
+        .filter(
+            EconomicLedgerEvent.source == SOURCE_AUTOMATION,
+            EconomicLedgerEvent.trade_id == _automation_trade_id(session_id),
+            EconomicLedgerEvent.event_type.in_(
+                [EVENT_ENTRY_FILL, EVENT_EXIT_FILL, EVENT_PARTIAL_FILL]
+            ),
+        )
+        .group_by(EconomicLedgerEvent.event_type)
+        .all()
+    )
+    counts = {str(event_type): int(n or 0) for event_type, n in rows}
+    fill_count = sum(counts.values())
+    realized_count = counts.get(EVENT_EXIT_FILL, 0) + counts.get(EVENT_PARTIAL_FILL, 0)
+    return int(fill_count), int(realized_count)
+
+
+def _dt_to_iso(value: Any) -> str | None:
+    return value.isoformat() + "Z" if isinstance(value, datetime) else None
+
+
+def _automation_parity_candidate_item(
+    db: Session,
+    row: MomentumAutomationOutcome,
+    *,
+    reason: str,
+    ledger_event_count: int,
+    realized_event_count: int,
+    latest_parity: LedgerParityLog | None,
+) -> dict[str, Any]:
+    trade_id = _automation_trade_id(row.session_id)
+    ledger_pnl = _sum_realized_for_trade(
+        db,
+        source=SOURCE_AUTOMATION,
+        trade_id=trade_id,
+        paper_trade_id=None,
+    )
+    return {
+        "outcome_id": int(row.id),
+        "session_id": int(row.session_id),
+        "trade_id": int(trade_id),
+        "user_id": int(row.user_id) if row.user_id is not None else None,
+        "symbol": row.symbol,
+        "mode": row.mode,
+        "execution_family": row.execution_family,
+        "terminal_at": _dt_to_iso(row.terminal_at),
+        "legacy_pnl": float(row.realized_pnl_usd)
+        if row.realized_pnl_usd is not None
+        else None,
+        "ledger_pnl": round(float(ledger_pnl), 6),
+        "ledger_event_count": int(ledger_event_count),
+        "realized_ledger_event_count": int(realized_event_count),
+        "reason": reason,
+        "latest_parity_id": int(latest_parity.id) if latest_parity is not None else None,
+        "latest_parity_agree": bool(latest_parity.agree_bool)
+        if latest_parity is not None
+        else None,
+        "latest_parity_created_at": _dt_to_iso(latest_parity.created_at)
+        if latest_parity is not None
+        else None,
+    }
+
+
+def _automation_parity_applied_item(
+    candidate: dict[str, Any],
+    parity: LedgerParityLog | None,
+) -> dict[str, Any]:
+    out = dict(candidate)
+    out.update(
+        {
+            "parity_id": int(parity.id) if parity is not None else None,
+            "agree_bool": bool(parity.agree_bool) if parity is not None else None,
+            "delta_pnl": parity.delta_pnl if parity is not None else None,
+            "delta_abs": parity.delta_abs if parity is not None else None,
+            "tolerance_usd": parity.tolerance_usd if parity is not None else None,
+            "created_at": _dt_to_iso(parity.created_at) if parity is not None else None,
+        }
+    )
+    return out
+
+
+def reconcile_missing_automation_outcome_parity(
+    db: Session,
+    *,
+    days: int = 30,
+    user_id: int | None = None,
+    limit: int = 500,
+    dry_run: bool = True,
+    include_disagreed: bool = False,
+) -> dict[str, Any]:
+    """Backfill automation outcome parity rows when ledger fills already exist.
+
+    This is an additive repair pass for historical momentum outcomes. It does
+    not mutate trades, outcomes, positions, or neural weights. Apply mode only
+    writes ``LedgerParityLog`` rows, after which the separate evolution-credit
+    regrade can decide whether a row is now training-grade.
+    """
+    eff_mode = _current_mode()
+    if eff_mode == MODE_OFF:
+        return {
+            "ok": True,
+            "skipped": "ledger_inactive",
+            "dry_run": bool(dry_run),
+            "processed": 0,
+            "candidate_count": 0,
+            "applied_count": 0,
+        }
+
+    window_days = max(1, min(int(days or 30), 365))
+    limit_i = max(0, min(int(limit or 0), 5000))
+    since = datetime.utcnow() - timedelta(days=window_days)
+
+    query = db.query(MomentumAutomationOutcome).filter(
+        MomentumAutomationOutcome.terminal_at >= since,
+        MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+    )
+    if user_id is not None:
+        query = query.filter(MomentumAutomationOutcome.user_id == int(user_id))
+    rows = (
+        query.order_by(MomentumAutomationOutcome.terminal_at.desc(), MomentumAutomationOutcome.id.desc())
+        .limit(limit_i)
+        .all()
+    )
+
+    candidates: list[dict[str, Any]] = []
+    applied: list[dict[str, Any]] = []
+    skipped_without_realized_ledger_events = 0
+    skipped_existing_agree = 0
+    skipped_existing_disagree = 0
+    for row in rows:
+        latest = _latest_automation_parity(db, session_id=int(row.session_id))
+        if latest is not None and latest.agree_bool is True:
+            skipped_existing_agree += 1
+            continue
+        if latest is not None and latest.agree_bool is False and not include_disagreed:
+            skipped_existing_disagree += 1
+            continue
+
+        fill_count, realized_count = _automation_fill_event_counts(
+            db,
+            session_id=int(row.session_id),
+        )
+        if realized_count <= 0:
+            skipped_without_realized_ledger_events += 1
+            continue
+
+        reason = "parity_missing" if latest is None else "parity_disagreed"
+        candidate = _automation_parity_candidate_item(
+            db,
+            row,
+            reason=reason,
+            ledger_event_count=fill_count,
+            realized_event_count=realized_count,
+            latest_parity=latest,
+        )
+        candidates.append(candidate)
+        if dry_run:
+            continue
+
+        parity = reconcile_automation_session(
+            db,
+            session_id=int(row.session_id),
+            user_id=int(row.user_id) if row.user_id is not None else None,
+            scan_pattern_id=None,
+            ticker=str(row.symbol),
+            legacy_pnl=row.realized_pnl_usd,
+            mode=str(row.mode or eff_mode),
+            provenance={
+                "repair": "automation_outcome_parity_reconcile",
+                "outcome_id": int(row.id),
+                "reason": reason,
+                "previous_parity_id": int(latest.id) if latest is not None else None,
+            },
+        )
+        applied.append(_automation_parity_applied_item(candidate, parity))
+
+    if not dry_run:
+        try:
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
+
+    return {
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "mode": "dry_run" if dry_run else "apply",
+        "ledger_mode": eff_mode,
+        "window_days": window_days,
+        "limit": limit_i,
+        "user_id": int(user_id) if user_id is not None else None,
+        "include_disagreed": bool(include_disagreed),
+        "processed": len(rows),
+        "candidate_count": len(candidates),
+        "applied_count": len(applied),
+        "skipped_existing_agree": skipped_existing_agree,
+        "skipped_existing_disagree": skipped_existing_disagree,
+        "skipped_without_realized_ledger_events": skipped_without_realized_ledger_events,
+        "note": "Apply mode only writes ledger parity rows; run evolution-credit regrade separately for learning credit.",
+        "candidates": candidates if dry_run else [],
+        "applied": applied if not dry_run else [],
+    }
+
+
 def ledger_summary(
     db: Session, *, lookback_hours: int = 24, source_filter: str | None = None
 ) -> dict[str, Any]:
@@ -789,6 +1014,7 @@ __all__ = [
     "record_automation_session_exit_fill",
     "record_automation_session_partial_exit_fill",
     "reconcile_automation_session",
+    "reconcile_missing_automation_outcome_parity",
     "reconcile_trade",
     "ledger_summary",
 ]

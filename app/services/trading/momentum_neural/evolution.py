@@ -17,6 +17,7 @@ from ..brain_neural_mesh.repository import get_or_create_state
 EVOLUTION_NODE_ID = "nm_momentum_evolution_trace"
 _MAX_TRACE = 24
 _FEEDBACK_VERSION = 1
+_INGEST_MARKER_KEY = "evolution_ingest_v1"
 
 # Decay: weight multiplier ~= exp(-age_days / TAU_DAYS)
 _TAU_DAYS = 14.0
@@ -100,26 +101,86 @@ def compute_session_evidence_weight(db: Session, extracted: dict[str, Any]) -> f
     return float(min(2.0, max(0.05, base)))
 
 
-def ingest_session_outcome(db: Session, outcome_row: MomentumAutomationOutcome) -> None:
+def _utc_now_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def _ingest_marker(row: MomentumAutomationOutcome) -> dict[str, Any]:
+    summary = row.extracted_summary_json if isinstance(row.extracted_summary_json, dict) else {}
+    marker = summary.get(_INGEST_MARKER_KEY)
+    return dict(marker) if isinstance(marker, dict) else {}
+
+
+def outcome_needs_evolution_ingest(row: MomentumAutomationOutcome) -> bool:
+    if not bool(row.contributes_to_evolution):
+        return False
+    return not bool(_ingest_marker(row).get("contribution_applied_at_utc"))
+
+
+def ingest_session_outcome(
+    db: Session,
+    outcome_row: MomentumAutomationOutcome,
+    *,
+    force: bool = False,
+    source: str = "feedback_emit",
+) -> dict[str, Any]:
     """Apply one durable outcome into evolution trace + viability feedback channel."""
-    record_feedback_ingestion_trace(
-        db,
-        {
-            "session_id": outcome_row.session_id,
-            "variant_id": outcome_row.variant_id,
-            "symbol": outcome_row.symbol,
-            "mode": outcome_row.mode,
-            "outcome_class": outcome_row.outcome_class,
-            "return_bps": outcome_row.return_bps,
-            "realized_pnl_usd": outcome_row.realized_pnl_usd,
-            "weight": outcome_row.evidence_weight,
-        },
-    )
-    if outcome_row.contributes_to_evolution:
+    summary = dict(outcome_row.extracted_summary_json or {})
+    marker = dict(summary.get(_INGEST_MARKER_KEY) or {})
+    trace_recorded = bool(marker.get("trace_recorded_at_utc"))
+    contribution_applied = bool(marker.get("contribution_applied_at_utc"))
+    contributes = bool(outcome_row.contributes_to_evolution)
+    if not force and trace_recorded and (not contributes or contribution_applied):
+        return {
+            "ok": True,
+            "skipped": "already_ingested",
+            "session_id": int(outcome_row.session_id),
+            "outcome_id": int(outcome_row.id) if outcome_row.id is not None else None,
+            "contributes_to_evolution": contributes,
+        }
+
+    now_iso = _utc_now_iso()
+    if force or not trace_recorded:
+        record_feedback_ingestion_trace(
+            db,
+            {
+                "session_id": outcome_row.session_id,
+                "variant_id": outcome_row.variant_id,
+                "symbol": outcome_row.symbol,
+                "mode": outcome_row.mode,
+                "outcome_class": outcome_row.outcome_class,
+                "return_bps": outcome_row.return_bps,
+                "realized_pnl_usd": outcome_row.realized_pnl_usd,
+                "weight": outcome_row.evidence_weight,
+            },
+        )
+        marker["trace_recorded_at_utc"] = now_iso
+        marker["trace_record_count"] = int(marker.get("trace_record_count") or 0) + 1
+
+    applied = False
+    if contributes and (force or not contribution_applied):
         apply_outcome_feedback_to_viability(db, outcome_row)
         maybe_pause_symbol_variant_after_losses(db, outcome_row)
         maybe_kill_underperforming_variant(db, variant_id=int(outcome_row.variant_id))
         maybe_publish_refined_variant(db, variant_id=int(outcome_row.variant_id))
+        marker["contribution_applied_at_utc"] = now_iso
+        marker["contribution_apply_count"] = int(marker.get("contribution_apply_count") or 0) + 1
+        applied = True
+
+    marker["last_ingest_at_utc"] = now_iso
+    marker["last_source"] = str(source or "feedback_emit")[:64]
+    marker["last_force"] = bool(force)
+    marker["contributes_to_evolution"] = contributes
+    summary[_INGEST_MARKER_KEY] = marker
+    outcome_row.extracted_summary_json = summary
+    return {
+        "ok": True,
+        "session_id": int(outcome_row.session_id),
+        "outcome_id": int(outcome_row.id) if outcome_row.id is not None else None,
+        "contributes_to_evolution": contributes,
+        "trace_recorded": force or not trace_recorded,
+        "contribution_applied": applied,
+    }
 
 
 def record_feedback_ingestion_trace(db: Session, payload: dict[str, Any]) -> None:

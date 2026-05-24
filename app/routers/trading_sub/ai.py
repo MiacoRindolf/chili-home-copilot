@@ -163,6 +163,88 @@ def api_trading_brain_momentum_feedback_summary(request: Request, db: Session = 
     return JSONResponse(get_momentum_feedback_brain_summary(db))
 
 
+@router.get("/api/trading/brain/momentum/evolution-credit")
+def api_trading_brain_momentum_evolution_credit(
+    request: Request,
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(1000, ge=1, le=10000),
+    mode: str | None = Query(None, description="Optional mode filter: paper or live"),
+    execution_family: str | None = Query(None, description="Optional execution family filter"),
+    mine: bool = Query(False, description="When true, filter to the paired user id"),
+    db: Session = Depends(get_db),
+):
+    """Read-only diagnostics for training-grade momentum outcomes.
+
+    Audit rows remain durable even when they are not eligible for evolution.
+    This endpoint explains the credit split without changing trading policy.
+    """
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.feedback_query import evolution_credit_diagnostics
+
+    user_id = ctx.get("user_id") if mine else None
+    payload = evolution_credit_diagnostics(
+        db,
+        days=int(days),
+        user_id=int(user_id) if user_id is not None else None,
+        mode=mode,
+        execution_family=execution_family,
+        limit=int(limit),
+    )
+    return JSONResponse({"ok": True, "evolution_credit": to_jsonable(payload)})
+
+
+@router.post("/api/trading/brain/momentum/evolution-credit/regrade")
+def api_trading_brain_momentum_evolution_credit_regrade(
+    request: Request,
+    apply: bool = Query(False, description="Apply credit repairs; false returns dry-run candidates"),
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(500, ge=0, le=10000),
+    mine: bool = Query(False, description="When true, filter to the paired user id"),
+    db: Session = Depends(get_db),
+):
+    """Dry-run-first repair for outcome evolution-credit eligibility.
+
+    This recomputes existing rows after packet-snapshot or ledger repairs. It
+    does not change trading policy and does not re-ingest neural weights.
+    """
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.feedback_emit import regrade_momentum_outcome_evolution_credit
+
+    user_id = ctx.get("user_id") if mine else None
+    payload = regrade_momentum_outcome_evolution_credit(
+        db,
+        days=int(days),
+        user_id=int(user_id) if user_id is not None else None,
+        limit=int(limit),
+        dry_run=not bool(apply),
+    )
+    return JSONResponse({"ok": bool(payload.get("ok", False)), "regrade": to_jsonable(payload)})
+
+
+@router.post("/api/trading/brain/momentum/evolution-credit/reingest")
+def api_trading_brain_momentum_evolution_credit_reingest(
+    request: Request,
+    apply: bool = Query(False, description="Apply one-time neural reingest for regraded rows"),
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(100, ge=0, le=1000),
+    mine: bool = Query(False, description="When true, filter to the paired user id"),
+    db: Session = Depends(get_db),
+):
+    """Dry-run-first learning application for rows upgraded by regrade."""
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.feedback_emit import reingest_regraded_momentum_outcomes
+
+    user_id = ctx.get("user_id") if mine else None
+    payload = reingest_regraded_momentum_outcomes(
+        db,
+        days=int(days),
+        user_id=int(user_id) if user_id is not None else None,
+        limit=int(limit),
+        dry_run=not bool(apply),
+    )
+    return JSONResponse({"ok": bool(payload.get("ok", False)), "reingest": to_jsonable(payload)})
+
+
 @router.get("/api/trading/brain/momentum/evolution-trace")
 def api_trading_brain_momentum_evolution_trace(request: Request, db: Session = Depends(get_db)):
     get_identity_ctx(request, db)
@@ -410,6 +492,37 @@ def api_trading_brain_ledger_diagnostics(
     payload = _ledger.ledger_summary(db, lookback_hours=int(lookback_hours), source_filter=src)
     payload["ok"] = True
     return JSONResponse({"ok": True, "ledger": payload})
+
+
+@router.post("/api/trading/brain/ledger/automation-parity/reconcile")
+def api_trading_brain_ledger_automation_parity_reconcile(
+    request: Request,
+    apply: bool = Query(False, description="Write missing parity rows; false returns dry-run candidates"),
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(500, ge=0, le=5000),
+    include_disagreed: bool = Query(False, description="Also re-reconcile latest disagreed parity rows"),
+    mine: bool = Query(False, description="When true, filter to the paired user id"),
+    db: Session = Depends(get_db),
+):
+    """Dry-run-first automation ledger parity repair.
+
+    This only creates parity logs for terminal momentum outcomes whose
+    automation ledger fill events already exist. It does not mutate outcomes,
+    trades, positions, or neural weights.
+    """
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading import economic_ledger as _ledger
+
+    user_id = ctx.get("user_id") if mine else None
+    payload = _ledger.reconcile_missing_automation_outcome_parity(
+        db,
+        days=int(days),
+        user_id=int(user_id) if user_id is not None else None,
+        limit=int(limit),
+        dry_run=not bool(apply),
+        include_disagreed=bool(include_disagreed),
+    )
+    return JSONResponse({"ok": bool(payload.get("ok", False)), "repair": to_jsonable(payload)})
 
 
 @router.get("/api/trading/brain/decision-packet-coverage")
