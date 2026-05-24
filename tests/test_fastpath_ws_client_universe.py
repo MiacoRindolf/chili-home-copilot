@@ -9,6 +9,10 @@ from unittest.mock import patch
 
 from app.services.trading.fast_path.gates import ALERT_RECENCY_MAX_AGE_S
 from app.services.trading.fast_path.settings import FastPathSettings
+from app.services.trading.fast_path.universe_status import (
+    UNIVERSE_STATUS_ACTIVE,
+    UNIVERSE_STATUS_SHADOW,
+)
 from app.services.trading.fast_path.ws_client import CoinbaseWSClient
 
 
@@ -61,6 +65,33 @@ class _FakeWriter:
     def enqueue_alert(self, item) -> bool:
         self.alerts.append(item)
         return True
+
+
+class _FakeUniverseStatusEngine:
+    def __init__(self, status: str | None) -> None:
+        self.status = status
+        self.queries = 0
+
+    def connect(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, *_args, **_kwargs):
+        self.queries += 1
+        return self
+
+    def mappings(self):
+        return self
+
+    def one_or_none(self):
+        if self.status is None:
+            return None
+        return {"status": self.status}
 
 
 def _client(
@@ -357,6 +388,70 @@ def test_dispatch_alert_suppresses_learned_negative_edge_before_db_write():
     assert writer.alerts == []
     assert client.stats()["alerts_suppressed_negative_edge"] == 1
     assert lookup.call_args.kwargs["table"] == "fast_signal_decay_maker_filled"
+
+
+def test_dispatch_alert_allows_shadow_universe_alerts_to_learn():
+    settings = FastPathSettings(
+        universe_rotation_enabled=True,
+        cost_aware_admission_enabled=True,
+        execution_mode="maker_only",
+        maker_attempt_adverse_filter_enabled=True,
+    )
+    writer = _FakeWriter()
+    engine = _FakeUniverseStatusEngine(UNIVERSE_STATUS_SHADOW)
+    client = _client(settings, writer=writer, engine=engine)
+
+    with patch(
+        "app.services.trading.fast_path.calibration.is_negative_edge_excluded",
+        side_effect=AssertionError("shadow alert should feed learning"),
+    ), patch(
+        "app.services.trading.fast_path.calibration.is_cost_barrier_excluded",
+        side_effect=AssertionError("shadow alert should feed learning"),
+    ), patch(
+        "app.services.trading.fast_path.calibration."
+        "maker_attempt_adverse_selection_excluded",
+        side_effect=AssertionError("shadow alert should feed learning"),
+    ):
+        client._dispatch_alert({
+            "ticker": "TEST-USD",
+            "alert_type": "imbalance_long",
+            "fired_at": datetime(2026, 5, 23, 18, 0, 0),
+            "signal_score": 0.5,
+            "features": {},
+        })
+
+    assert len(writer.alerts) == 1
+    assert engine.queries == 1
+    assert client.stats()["alerts_suppressed_negative_edge"] == 0
+    assert client.stats()["alerts_suppressed_cost_barrier"] == 0
+    assert client.stats()["alerts_suppressed_maker_attempt_adverse"] == 0
+
+
+def test_dispatch_alert_still_suppresses_active_universe_negative_edge():
+    settings = FastPathSettings(
+        universe_rotation_enabled=True,
+        execution_mode="maker_only",
+        negative_edge_filter_ttl_s=30,
+    )
+    writer = _FakeWriter()
+    engine = _FakeUniverseStatusEngine(UNIVERSE_STATUS_ACTIVE)
+    client = _client(settings, writer=writer, engine=engine)
+
+    with patch(
+        "app.services.trading.fast_path.calibration.is_negative_edge_excluded",
+        return_value=(True, {"verdict": "negative_edge"}),
+    ):
+        client._dispatch_alert({
+            "ticker": "TEST-USD",
+            "alert_type": "imbalance_long",
+            "fired_at": datetime(2026, 5, 23, 18, 0, 0),
+            "signal_score": 0.5,
+            "features": {},
+        })
+
+    assert writer.alerts == []
+    assert engine.queries == 1
+    assert client.stats()["alerts_suppressed_negative_edge"] == 1
 
 
 def test_dispatch_alert_suppresses_maker_attempt_adverse_before_db_write():

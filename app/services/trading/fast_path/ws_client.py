@@ -43,6 +43,7 @@ from .order_book import OrderBookAggregator
 from .scanner import MomentumScanner
 from .settings import FastPathSettings
 from .status_tracker import StatusTracker
+from .universe_status import UNIVERSE_STATUS_SHADOW
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,7 @@ class CoinbaseWSClient:
         self._maker_attempt_adverse_cache: dict[
             tuple[str, str, str, int], tuple[bool, float]
         ] = {}
+        self._universe_status_cache: dict[str, tuple[str | None, float]] = {}
         # f-fastpath-universe-rotation (2026-05-07): cached active-pair
         # set. Resolved at start() and refreshed on each reconnect via
         # ``_resolve_active_pairs``. When ``universe_rotation_enabled``
@@ -576,12 +578,13 @@ class CoinbaseWSClient:
         """
         if self._min_score_suppressed(alert_dict):
             return
-        if self._negative_edge_suppressed(alert_dict):
-            return
-        if self._cost_barrier_suppressed(alert_dict):
-            return
-        if self._maker_attempt_adverse_suppressed(alert_dict):
-            return
+        if not self._shadow_learning_alert(alert_dict):
+            if self._negative_edge_suppressed(alert_dict):
+                return
+            if self._cost_barrier_suppressed(alert_dict):
+                return
+            if self._maker_attempt_adverse_suppressed(alert_dict):
+                return
         try:
             item = AlertItem(
                 ticker=str(alert_dict["ticker"]),
@@ -599,6 +602,60 @@ class CoinbaseWSClient:
             "[fast_path] ALERT ticker=%s type=%s score=%.3f features=%s",
             item.ticker, item.alert_type, item.signal_score, item.features,
         )
+
+    def _shadow_learning_alert(self, alert_dict: dict[str, Any]) -> bool:
+        """Return True when alert writes should feed shadow-only learning.
+
+        The websocket prefilters are write-savers for lanes the executor
+        would reject anyway. Shadow universe rows are different: they are
+        intentionally subscribed so decay_miner can collect fresh evidence
+        while live execution remains blocked by the universe-status gate.
+        """
+        if not getattr(self._settings, "universe_rotation_enabled", False):
+            return False
+        if self._engine is None:
+            return False
+        ticker = str(alert_dict.get("ticker") or "")
+        if not ticker:
+            return False
+        try:
+            return self._latest_universe_status(ticker) == UNIVERSE_STATUS_SHADOW
+        except Exception as exc:
+            logger.debug(
+                "[fast_path] shadow-learning status lookup skipped: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
+
+    def _latest_universe_status(self, ticker: str) -> str | None:
+        now = time.monotonic()
+        cached = self._universe_status_cache.get(ticker)
+        if cached is not None:
+            status, expires_at = cached
+            if now < expires_at:
+                return status
+
+        from sqlalchemy import text
+
+        with self._engine.connect() as conn:
+            row = conn.execute(text("""
+                WITH latest_rotation AS (
+                    SELECT MAX(rotation_at) AS ts FROM fast_path_universe
+                )
+                SELECT status
+                FROM fast_path_universe
+                WHERE rotation_at = (SELECT ts FROM latest_rotation)
+                  AND ticker = :ticker
+                LIMIT 1
+            """), {"ticker": ticker}).mappings().one_or_none()
+        status = str((row or {}).get("status") or "").strip().lower() or None
+        ttl_s = max(
+            0.0,
+            float(getattr(self._settings, "negative_edge_filter_ttl_s", 30) or 0),
+        )
+        self._universe_status_cache[ticker] = (status, now + ttl_s)
+        return status
 
     @staticmethod
     def _execution_min_score() -> float:
