@@ -682,6 +682,64 @@ def test_rotation_treats_depth_as_fillability_gate_for_ranking():
     assert db.inserted_rows[0]["ticker"] == "VOL-USD"
 
 
+def test_rotation_ranks_shadow_candidates_against_active_depth_candidates():
+    """Probe-fillable volatile names should compete for subscription rank."""
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+    from app.services.trading.fast_path.universe_status import UNIVERSE_STATUS_SHADOW
+
+    db = _FakeRotationDB()
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+        universe_shadow_min_top_of_book_usd=25.0,
+    )
+    snapshots = {
+        "ACTIVE-A-USD": _make_candidate(
+            ticker="ACTIVE-A-USD",
+            bid_size_base=100.0,
+            ask_size_base=100.0,
+            high_24h=102.0,
+            low_24h=98.0,
+        ),
+        "ACTIVE-B-USD": _make_candidate(
+            ticker="ACTIVE-B-USD",
+            bid_size_base=100.0,
+            ask_size_base=100.0,
+            high_24h=101.75,
+            low_24h=98.25,
+        ),
+        "VOLATILE-USD": _make_candidate(
+            ticker="VOLATILE-USD",
+            bid_size_base=1.0,
+            ask_size_base=1.0,
+            high_24h=125.0,
+            low_24h=75.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: [
+            "ACTIVE-A-USD",
+            "ACTIVE-B-USD",
+            "VOLATILE-USD",
+        ],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["hard_ranked_n"] == 2
+    assert out["shadow_exploration_shortfall"] == 0
+    assert out["shadow_exploration_candidates"] == 1
+    assert out["gate_rejections"]["top_of_book_below_threshold"] == 1
+    assert [r["ticker"] for r in db.inserted_rows] == ["VOLATILE-USD", "ACTIVE-A-USD"]
+    volatile = db.inserted_rows[0]
+    assert volatile["status"] == UNIVERSE_STATUS_SHADOW
+    assert volatile["rank"] == 1
+
+
 def test_run_rotation_pass_keeps_shadow_when_lane_is_still_uncertain():
     from app.services.trading.fast_path.universe_status import UNIVERSE_STATUS_SHADOW
     from app.services.trading.fast_path.universe_rotator import run_rotation_pass

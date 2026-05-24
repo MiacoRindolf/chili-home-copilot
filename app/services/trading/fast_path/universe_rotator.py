@@ -986,6 +986,7 @@ def run_rotation_pass(
         "kept_shadow_missing_grace": 0,
         "exploration_fallback": False,
         "shadow_exploration_shortfall": 0,
+        "shadow_exploration_candidates": 0,
         "edge_promotion_blocks": {},
         "edge_exhaustion_blocks": {},
         "edge_exhausted_demotions": 0,
@@ -1144,9 +1145,11 @@ def run_rotation_pass(
         active_eligible_tickers.add(snap.ticker)
 
     target_ranked = top_n + settings.universe_hysteresis_ranks
-    exploration_pool = [
+    active_candidate_tickers = {c.ticker for c in candidates}
+    shadow_pool = [
         snap for snap in valid_snapshots
-        if passes_shadow_exploration_gates(
+        if snap.ticker not in active_candidate_tickers
+        and passes_shadow_exploration_gates(
             snap,
             min_volume_24h_usd=settings.universe_min_volume_24h_usd,
             max_spread_bps=settings.universe_max_spread_bps,
@@ -1155,14 +1158,21 @@ def run_rotation_pass(
             min_range_24h_bps=range_floor_bps,
         )
     ]
-    if not candidates and exploration_pool:
+    out["shadow_exploration_candidates"] = len(shadow_pool)
+    if not candidates and shadow_pool:
         # Exploration fallback: if static admission thresholds reject the
         # whole exchange, subscribe the best data-valid opportunity set
         # as shadow-only. The volatility floor remains binding so quiet
         # products never re-enter through fallback.
-        candidates = list(exploration_pool)
+        candidates = list(shadow_pool)
         out["exploration_fallback"] = True
     else:
+        out["hard_ranked_n"] = min(len(candidates), target_ranked)
+        out["shadow_exploration_shortfall"] = min(
+            len(shadow_pool),
+            max(target_ranked - len(candidates), 0),
+        )
+        candidates = [*candidates, *shadow_pool]
         candidates.sort(
             key=lambda c: _candidate_rank_score(
                 c,
@@ -1171,33 +1181,6 @@ def run_rotation_pass(
             ),
             reverse=True,
         )
-        out["hard_ranked_n"] = min(len(candidates), target_ranked)
-        shortfall = max(target_ranked - len(candidates), 0)
-        if shortfall > 0:
-            active_candidate_tickers = {c.ticker for c in candidates}
-            shadow_pool = [
-                snap for snap in valid_snapshots
-                if snap.ticker not in active_candidate_tickers
-                and passes_shadow_exploration_gates(
-                    snap,
-                    min_volume_24h_usd=settings.universe_min_volume_24h_usd,
-                    max_spread_bps=settings.universe_max_spread_bps,
-                    min_top_of_book_usd=shadow_min_top_of_book_usd,
-                    min_trades_24h=settings.universe_min_trades_24h,
-                    min_range_24h_bps=range_floor_bps,
-                )
-            ]
-            shadow_pool.sort(
-                key=lambda c: _candidate_rank_score(
-                    c,
-                    fee_bps=promotion_fee_bps,
-                    top_of_book_cap_usd=rank_shadow_top_of_book_cap_usd,
-                ),
-                reverse=True,
-            )
-            fill = shadow_pool[:shortfall]
-            candidates.extend(fill)
-            out["shadow_exploration_shortfall"] = len(fill)
 
     if out["exploration_fallback"]:
         candidates.sort(
