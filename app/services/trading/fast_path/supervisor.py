@@ -384,7 +384,10 @@ class FastPathSupervisor:
                 "polls=%s alerts_seen=%s paper_fill=%s live_placed=%s "
                 "rejected=%s db_errors=%s last_alert_id=%s "
                 "open_positions=%s tickers_held=%s daily_used_usd=%.2f "
-                "maker_adverse_cancelled=%s maker_observe_only=%s",
+                "maker_placed=%s maker_filled=%s maker_cancelled=%s "
+                "maker_replaced=%s maker_rejected=%s maker_capped=%s "
+                "maker_outstanding=%s maker_adverse_cancelled=%s "
+                "maker_observe_only=%s",
                 executor_stats.get("mode"),
                 executor_stats.get("live_authorized"),
                 executor_stats.get("polls_total"),
@@ -397,6 +400,13 @@ class FastPathSupervisor:
                 executor_stats.get("open_positions_total"),
                 executor_stats.get("tickers_with_position"),
                 float(executor_stats.get("daily_notional_used_usd") or 0.0),
+                executor_stats.get("maker_attempts_placed"),
+                executor_stats.get("maker_attempts_filled"),
+                executor_stats.get("maker_attempts_cancelled"),
+                executor_stats.get("maker_attempts_replaced"),
+                executor_stats.get("maker_attempts_rejected"),
+                executor_stats.get("maker_attempts_capped"),
+                executor_stats.get("maker_outstanding_count"),
                 executor_stats.get("maker_attempts_adverse_cancelled"),
                 executor_stats.get("maker_observe_only_fills"),
             )
