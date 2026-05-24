@@ -273,6 +273,41 @@ def test_dispatch_alert_suppresses_maker_attempt_adverse_before_db_write():
     assert lookup.call_args.kwargs["window_hours"] == 12
 
 
+def test_dispatch_alert_suppresses_cost_exhausted_lane_before_db_write():
+    settings = FastPathSettings(
+        cost_aware_admission_enabled=True,
+        execution_mode="maker_only",
+        cost_aware_maker_fee_bps=2.0,
+        negative_edge_filter_ttl_s=30,
+    )
+    writer = _FakeWriter()
+    client = _client(settings, writer=writer, engine=object())
+
+    with patch(
+        "app.services.trading.fast_path.calibration.is_negative_edge_excluded",
+        return_value=(False, {"verdict": "uncertain"}),
+    ), patch(
+        "app.services.trading.fast_path.calibration.is_cost_barrier_excluded",
+        return_value=(True, {"verdict": "below_cost"}),
+    ) as lookup, patch(
+        "app.services.trading.fast_path.calibration.maker_attempt_adverse_selection_excluded",
+        side_effect=AssertionError("cost-exhausted alert should stop first"),
+    ):
+        client._dispatch_alert({
+            "ticker": "TEST-USD",
+            "alert_type": "book_pressure_reclaim_long",
+            "fired_at": datetime(2026, 5, 23, 18, 0, 0),
+            "signal_score": 0.5,
+            "features": {"spread_bps": 3.0},
+        })
+
+    assert writer.alerts == []
+    assert client.stats()["alerts_suppressed_cost_barrier"] == 1
+    assert client.stats()["cost_barrier_cache_size"] == 1
+    assert lookup.call_args.kwargs["cost_bps"] == 10.0
+    assert lookup.call_args.kwargs["allow_pooled"] is True
+
+
 def test_maker_attempt_adverse_prefilter_skips_taker_mode():
     settings = FastPathSettings(execution_mode="taker")
     writer = _FakeWriter()

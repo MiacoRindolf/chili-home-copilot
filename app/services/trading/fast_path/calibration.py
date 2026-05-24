@@ -427,6 +427,107 @@ def _most_negative_confidence_evidence(
     return best
 
 
+def _cost_barrier_summary(
+    rows: list[dict[str, Any]],
+    *,
+    bucket: str,
+    table: str,
+    scope: str,
+    cost_bps: float,
+    min_net_bps: float,
+) -> dict[str, Any] | None:
+    """Return confidence-bound cost evidence for one decay bucket."""
+    evidence_rows: list[dict[str, Any]] = []
+    for row in rows:
+        evidence = _negative_edge_row_evidence(
+            row,
+            bucket=bucket,
+            table=table,
+            scope=scope,
+        )
+        if evidence is None:
+            continue
+        mean_bps = float(evidence["mean_return"]) * 10000.0
+        lower_bps = float(evidence["lower_ci"]) * 10000.0
+        upper_bps = float(evidence["upper_ci"]) * 10000.0
+        evidence_rows.append({
+            **evidence,
+            "mean_bps": mean_bps,
+            "lower_bps": lower_bps,
+            "upper_bps": upper_bps,
+            "cost_bps": float(cost_bps),
+            "min_net_bps": float(min_net_bps),
+            "mean_net_bps": mean_bps - float(cost_bps),
+            "lower_net_bps": lower_bps - float(cost_bps),
+            "upper_net_bps": upper_bps - float(cost_bps),
+        })
+    if not evidence_rows:
+        return None
+
+    worst_negative = min(
+        evidence_rows,
+        key=lambda e: (float(e["upper_ci"]), -int(e["sample_count"])),
+    )
+    best_lower_net = max(
+        evidence_rows,
+        key=lambda e: (float(e["lower_net_bps"]), int(e["sample_count"])),
+    )
+    best_upper_net = max(
+        evidence_rows,
+        key=lambda e: (float(e["upper_net_bps"]), int(e["sample_count"])),
+    )
+    best_mean_net = max(
+        evidence_rows,
+        key=lambda e: (float(e["mean_net_bps"]), int(e["sample_count"])),
+    )
+
+    if float(worst_negative["upper_ci"]) < 0.0:
+        verdict = "negative_edge"
+        decision_basis = "pre_cost_upper_confidence_below_zero"
+        decision = worst_negative
+    elif float(best_lower_net["lower_net_bps"]) >= float(min_net_bps):
+        verdict = "positive_edge_candidate"
+        decision_basis = "net_lower_confidence_clears_cost"
+        decision = best_lower_net
+    elif float(best_upper_net["upper_net_bps"]) < float(min_net_bps):
+        verdict = "below_cost"
+        decision_basis = "net_upper_confidence_below_cost"
+        decision = best_upper_net
+    else:
+        verdict = "uncertain"
+        decision_basis = "confidence_interval_overlaps_decision_line"
+        decision = best_upper_net
+
+    return {
+        "score_bucket": bucket,
+        "scope": scope,
+        "decay_table": table,
+        "verdict": verdict,
+        "decision_basis": decision_basis,
+        "cost_bps": round(float(cost_bps), 4),
+        "min_net_bps": round(float(min_net_bps), 4),
+        "best_horizon_s": int(best_mean_net["horizon_s"]),
+        "sample_count": int(best_mean_net["sample_count"]),
+        "mean_return_bps": round(float(best_mean_net["mean_bps"]), 4),
+        "mean_net_bps": round(float(best_mean_net["mean_net_bps"]), 4),
+        "decision_horizon_s": int(decision["horizon_s"]),
+        "decision_sample_count": int(decision["sample_count"]),
+        "decision_mean_bps": round(float(decision["mean_bps"]), 4),
+        "decision_lower_bps": round(float(decision["lower_bps"]), 4),
+        "decision_upper_bps": round(float(decision["upper_bps"]), 4),
+        "decision_mean_net_bps": round(float(decision["mean_net_bps"]), 4),
+        "decision_lower_net_bps": round(float(decision["lower_net_bps"]), 4),
+        "decision_upper_net_bps": round(float(decision["upper_net_bps"]), 4),
+        "best_lower_net_bps": round(float(best_lower_net["lower_net_bps"]), 4),
+        "best_upper_net_bps": round(float(best_upper_net["upper_net_bps"]), 4),
+        "worst_pre_cost_upper_bps": round(
+            float(worst_negative["upper_bps"]), 4,
+        ),
+        "confidence": round(float(decision["confidence"]), 6),
+        "minimum_requirement": "sample_count>=2 and nonzero_variance",
+    }
+
+
 def _fetch_bucket_rows(
     engine: Engine, *, ticker: str, alert_type: str, bucket: str,
     table: str = DECAY_TABLE_NO_FRICTION,
@@ -764,10 +865,112 @@ def is_negative_edge_excluded(
     return False, evidence
 
 
+def is_cost_barrier_excluded(
+    engine: Engine,
+    *,
+    ticker: str,
+    alert_type: str,
+    signal_score: float,
+    cost_bps: float,
+    min_net_bps: float = 0.0,
+    table: str = DECAY_TABLE_NO_FRICTION,
+    allow_pooled: bool = True,
+) -> tuple[bool, dict[str, Any]]:
+    """Return whether empirical evidence cannot clear round-trip cost.
+
+    This is the cost-aware counterpart to ``is_negative_edge_excluded``.
+    It blocks when every statistically usable horizon's upper
+    confidence bound is below ``cost_bps + min_net_bps``. Sparse
+    ticker buckets can be governed by pooled lane evidence, but a
+    ticker whose own lower confidence bound clears cost is allowed to
+    override pooled weakness.
+    """
+    bucket = score_bucket(signal_score)
+    cost_bps_f = max(0.0, float(cost_bps or 0.0))
+    min_net_bps_f = float(min_net_bps or 0.0)
+    rows = _fetch_bucket_rows(
+        engine,
+        ticker=ticker,
+        alert_type=alert_type,
+        bucket=bucket,
+        table=table,
+    )
+    ticker_summary = _cost_barrier_summary(
+        rows,
+        bucket=bucket,
+        table=table,
+        scope="ticker",
+        cost_bps=cost_bps_f,
+        min_net_bps=min_net_bps_f,
+    )
+    exhausted_verdicts = {"negative_edge", "below_cost"}
+    if ticker_summary is not None:
+        if ticker_summary["verdict"] in exhausted_verdicts:
+            return True, ticker_summary
+        if ticker_summary["verdict"] == "positive_edge_candidate":
+            return False, ticker_summary
+
+    pooled_summary: dict[str, Any] | None = None
+    if allow_pooled:
+        pooled_rows = _fetch_pooled_bucket_rows(
+            engine,
+            alert_type=alert_type,
+            bucket=bucket,
+            table=table,
+        )
+        pooled_summary = _cost_barrier_summary(
+            pooled_rows,
+            bucket=bucket,
+            table=table,
+            scope="pooled",
+            cost_bps=cost_bps_f,
+            min_net_bps=min_net_bps_f,
+        )
+        if (
+            pooled_summary is not None
+            and pooled_summary["verdict"] in exhausted_verdicts
+        ):
+            if ticker_summary is not None:
+                pooled_summary["ticker_scope_verdict"] = ticker_summary[
+                    "verdict"
+                ]
+                pooled_summary["ticker_decision_upper_net_bps"] = (
+                    ticker_summary["decision_upper_net_bps"]
+                )
+                pooled_summary["ticker_decision_lower_net_bps"] = (
+                    ticker_summary["decision_lower_net_bps"]
+                )
+                pooled_summary["ticker_sample_count"] = ticker_summary[
+                    "sample_count"
+                ]
+            return True, pooled_summary
+
+    if ticker_summary is not None:
+        return False, ticker_summary
+    if pooled_summary is not None:
+        return False, pooled_summary
+
+    verdict = (
+        "insufficient_statistical_evidence"
+        if rows
+        else "no_data"
+    )
+    return False, {
+        "score_bucket": bucket,
+        "verdict": verdict,
+        "minimum_requirement": "sample_count>=2 and nonzero_variance",
+        "cost_bps": round(cost_bps_f, 4),
+        "min_net_bps": round(min_net_bps_f, 4),
+        "decay_table": table,
+        "confidence": _bounded_confidence(NEGATIVE_EDGE_CONFIDENCE),
+    }
+
+
 __all__ = [
     "get_calibrated_max_hold_s",
     "is_score_tradeable",
     "is_negative_edge_excluded",
+    "is_cost_barrier_excluded",
     "maker_attempt_adverse_selection_excluded",
     "compute_calibrated_bracket",
     "MIN_SAMPLES_FOR_CALIB",

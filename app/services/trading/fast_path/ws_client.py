@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 # 1m bars and a 3s threshold, a bar that ends at HH:MM:00 is persisted
 # at HH:MM:03 at the earliest.
 BAR_CLOSE_GRACE_S = 3.0
+BPS_PER_UNIT = 10000.0
 
 
 class CoinbaseWSClient:
@@ -145,12 +146,16 @@ class CoinbaseWSClient:
         self._candles_filtered_dedupe: int = 0
         self._candles_scanned_warmup_only: int = 0
         self._alerts_suppressed_negative_edge: int = 0
+        self._alerts_suppressed_cost_barrier: int = 0
         self._alerts_suppressed_maker_attempt_adverse: int = 0
         self._heartbeats_total: int = 0
         self._subscriptions_total: int = 0
         self._unknown_channel_total: int = 0
         self._last_unknown_channel: str | None = None
         self._negative_edge_cache: dict[tuple[str, str, str, str], tuple[bool, float]] = {}
+        self._cost_barrier_cache: dict[
+            tuple[str, str, str, str, float, float], tuple[bool, float]
+        ] = {}
         self._maker_attempt_adverse_cache: dict[
             tuple[str, str, str, int], tuple[bool, float]
         ] = {}
@@ -517,6 +522,8 @@ class CoinbaseWSClient:
         """
         if self._negative_edge_suppressed(alert_dict):
             return
+        if self._cost_barrier_suppressed(alert_dict):
+            return
         if self._maker_attempt_adverse_suppressed(alert_dict):
             return
         try:
@@ -592,6 +599,110 @@ class CoinbaseWSClient:
         except Exception as exc:
             logger.debug(
                 "[fast_path] negative-edge alert prefilter skipped: %s",
+                exc,
+                exc_info=True,
+            )
+        return False
+
+    @staticmethod
+    def _alert_spread_bps(alert_dict: dict[str, Any]) -> float:
+        features = alert_dict.get("features")
+        if not isinstance(features, dict):
+            return 0.0
+        try:
+            spread_bps = float(features.get("spread_bps") or 0.0)
+        except (TypeError, ValueError):
+            spread_bps = 0.0
+        if spread_bps > 0.0:
+            return spread_bps
+        try:
+            best_bid = float(features.get("best_bid") or 0.0)
+            best_ask = float(features.get("best_ask") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if best_bid <= 0.0 or best_ask <= best_bid:
+            return 0.0
+        mid = (best_bid + best_ask) / 2.0
+        return ((best_ask - best_bid) / mid) * BPS_PER_UNIT
+
+    def _cost_barrier_suppressed(self, alert_dict: dict[str, Any]) -> bool:
+        """Suppress alerts whose lane cannot clear live round-trip cost."""
+        if self._engine is None:
+            return False
+        if not getattr(self._settings, "cost_aware_admission_enabled", False):
+            return False
+        try:
+            from .calibration import (
+                decay_table_for_execution_mode,
+                is_cost_barrier_excluded,
+            )
+            from .decay_miner import score_bucket
+            from .fees import fee_bps_for_execution_mode
+
+            ticker = str(alert_dict.get("ticker") or "")
+            alert_type = str(alert_dict.get("alert_type") or "")
+            signal_score = float(alert_dict.get("signal_score") or 0.0)
+            bucket = score_bucket(signal_score)
+            exec_mode = str(
+                getattr(self._settings, "execution_mode", "taker") or "taker"
+            ).strip().lower()
+            decay_table = decay_table_for_execution_mode(exec_mode)
+            fee_bps, _fee_detail = fee_bps_for_execution_mode(
+                self._settings,
+                exec_mode,
+            )
+            spread_bps = self._alert_spread_bps(alert_dict)
+            cost_bps = 2.0 * (float(fee_bps) + float(spread_bps))
+            min_net_bps = float(
+                getattr(self._settings, "live_alpha_min_net_bps", 0.0) or 0.0
+            )
+            key = (
+                ticker,
+                alert_type,
+                bucket,
+                decay_table,
+                round(cost_bps, 4),
+                round(min_net_bps, 4),
+            )
+            now = time.monotonic()
+            cached = self._cost_barrier_cache.get(key)
+            if cached is not None:
+                suppressed, expires_at = cached
+                if now < expires_at:
+                    if suppressed:
+                        self._alerts_suppressed_cost_barrier += 1
+                    return suppressed
+            excluded, evidence = is_cost_barrier_excluded(
+                self._engine,
+                ticker=ticker,
+                alert_type=alert_type,
+                signal_score=signal_score,
+                cost_bps=cost_bps,
+                min_net_bps=min_net_bps,
+                table=decay_table,
+                allow_pooled=True,
+            )
+            ttl_s = max(0.0, float(
+                getattr(self._settings, "negative_edge_filter_ttl_s", 30) or 0,
+            ))
+            self._cost_barrier_cache[key] = (bool(excluded), now + ttl_s)
+            if excluded:
+                self._alerts_suppressed_cost_barrier += 1
+                logger.debug(
+                    "[fast_path] alert suppressed by cost-barrier evidence "
+                    "ticker=%s type=%s bucket=%s table=%s verdict=%s "
+                    "cost_bps=%.4f",
+                    ticker,
+                    alert_type,
+                    bucket,
+                    decay_table,
+                    (evidence or {}).get("verdict"),
+                    cost_bps,
+                )
+                return True
+        except Exception as exc:
+            logger.debug(
+                "[fast_path] cost-barrier alert prefilter skipped: %s",
                 exc,
                 exc_info=True,
             )
@@ -683,9 +794,11 @@ class CoinbaseWSClient:
             "candles_filtered_dedupe": self._candles_filtered_dedupe,
             "candles_scanned_warmup_only": self._candles_scanned_warmup_only,
             "alerts_suppressed_negative_edge": self._alerts_suppressed_negative_edge,
+            "alerts_suppressed_cost_barrier": self._alerts_suppressed_cost_barrier,
             "alerts_suppressed_maker_attempt_adverse":
                 self._alerts_suppressed_maker_attempt_adverse,
             "negative_edge_cache_size": len(self._negative_edge_cache),
+            "cost_barrier_cache_size": len(self._cost_barrier_cache),
             "maker_attempt_adverse_cache_size": len(
                 self._maker_attempt_adverse_cache
             ),

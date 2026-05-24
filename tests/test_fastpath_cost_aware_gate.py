@@ -283,6 +283,74 @@ def test_negative_edge_pooled_block_does_not_override_decisive_ticker_positive()
     pooled_lookup.assert_not_called()
 
 
+def test_cost_barrier_falls_back_to_pooled_bucket_when_ticker_is_sparse():
+    from app.services.trading.fast_path.calibration import is_cost_barrier_excluded
+
+    pooled_below_cost = {
+        "horizon_s": 5,
+        "sample_count": 30,
+        "mean_return": 0.0002,
+        "m2_return": 0.00000001,
+    }
+    with patch(
+        "app.services.trading.fast_path.calibration._fetch_bucket_rows",
+        return_value=[],
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_pooled_bucket_rows",
+        return_value=[pooled_below_cost],
+    ):
+        excluded, evidence = is_cost_barrier_excluded(
+            "fake_engine",
+            ticker="NEW-USD",
+            alert_type="book_pressure_reclaim_long",
+            signal_score=0.5,
+            cost_bps=20.0,
+            table="fast_signal_decay_maker_filled",
+        )
+
+    assert excluded is True
+    assert evidence["scope"] == "pooled"
+    assert evidence["verdict"] == "below_cost"
+    assert evidence["decision_upper_net_bps"] < 0.0
+
+
+def test_cost_barrier_pooled_block_does_not_override_ticker_cost_positive():
+    from app.services.trading.fast_path.calibration import is_cost_barrier_excluded
+
+    ticker_positive = {
+        "horizon_s": 5,
+        "sample_count": 30,
+        "mean_return": 0.003,
+        "m2_return": 0.00000001,
+    }
+    pooled_below_cost = {
+        "horizon_s": 5,
+        "sample_count": 80,
+        "mean_return": 0.0002,
+        "m2_return": 0.00000001,
+    }
+    with patch(
+        "app.services.trading.fast_path.calibration._fetch_bucket_rows",
+        return_value=[ticker_positive],
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_pooled_bucket_rows",
+        return_value=[pooled_below_cost],
+    ) as pooled_lookup:
+        excluded, evidence = is_cost_barrier_excluded(
+            "fake_engine",
+            ticker="BTC-USD",
+            alert_type="book_pressure_reclaim_long",
+            signal_score=0.5,
+            cost_bps=20.0,
+            table="fast_signal_decay_maker_filled",
+        )
+
+    assert excluded is False
+    assert evidence["scope"] == "ticker"
+    assert evidence["verdict"] == "positive_edge_candidate"
+    pooled_lookup.assert_not_called()
+
+
 def test_maker_attempt_filter_blocks_adverse_fills_and_missed_moves():
     from app.services.trading.fast_path.calibration import (
         maker_attempt_adverse_selection_excluded,
@@ -712,6 +780,9 @@ def test_gate_no_data_allows_through_with_no_data_verdict():
         return_value=_stub_fp_settings(enabled=True),
     ), patch(
         "app.services.trading.fast_path.calibration._fetch_bucket_rows",
+        return_value=[],
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_pooled_bucket_rows",
         return_value=[],
     ), patch(
         "app.services.trading.fast_path.decay_miner.score_bucket",

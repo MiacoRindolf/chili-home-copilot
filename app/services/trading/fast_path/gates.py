@@ -410,9 +410,9 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
     """f-fastpath-universe-rotation Step 5 (2026-05-07): cost-aware
     admission gate.
 
-    Rejects any signal whose calibrated best-Sharpe-horizon
-    ``mean_return`` does not clear ``2 * (taker_fee_bps +
-    spread_bps_at_decision_time)``. This is the **right** form of the
+    Rejects any signal whose confidence-bounded empirical edge cannot
+    clear ``2 * (taker_fee_bps + spread_bps_at_decision_time)``.
+    This is the **right** form of the
     economic-line check — the F6.5 ``gate_calibrated_tradeability``
     uses a static cost multiplier; this gate uses the live spread as
     measured at the decision moment, which is what the round-trip
@@ -471,16 +471,23 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
     # trade even if the calibrated mean cleared a static threshold.
     spread_bps = float(ctx.spread_bps or 0.0)
     cost_bps = 2.0 * (fee_bps + spread_bps)
-    cost_return = cost_bps / 10000.0  # bps -> return units (mean_return is fraction)
+
+    min_net_bps = float(getattr(fp_settings, "live_alpha_min_net_bps", 0.0) or 0.0)
 
     try:
-        from .calibration import _fetch_bucket_rows, _best_sharpe_row
+        from .calibration import is_cost_barrier_excluded
         from .decay_miner import score_bucket as _score_bucket
 
         bucket = _score_bucket(signal_score)
-        rows = _fetch_bucket_rows(
-            ctx.engine, ticker=ticker, alert_type=alert_type, bucket=bucket,
+        excluded, detail = is_cost_barrier_excluded(
+            ctx.engine,
+            ticker=ticker,
+            alert_type=alert_type,
+            signal_score=signal_score,
+            cost_bps=cost_bps,
+            min_net_bps=min_net_bps,
             table=decay_table,
+            allow_pooled=True,
         )
     except Exception as exc:
         # Lookup failures shouldn't block; mirrors gate_calibrated_tradeability.
@@ -491,42 +498,18 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
              **fee_detail},
         )
 
-    if not rows:
-        return GateResult(
-            "cost_aware_admission", True, "",
-            {"verdict": "no_data", "score_bucket": bucket,
-             "cost_bps": cost_bps, "execution_mode": exec_mode,
-             "decay_table": decay_table, **fee_detail},
-        )
-
-    best_row = _best_sharpe_row(rows)
-    if best_row is None:
-        return GateResult(
-            "cost_aware_admission", True, "",
-            {"verdict": "insufficient_data", "score_bucket": bucket,
-             "cost_bps": cost_bps, "execution_mode": exec_mode,
-             "decay_table": decay_table, **fee_detail},
-        )
-
-    mean_return = float(best_row.get("mean_return") or 0.0)
-    horizon_s = int(best_row.get("horizon_s") or 0)
-    sample_count = int(best_row.get("sample_count") or 0)
-    mean_bps = mean_return * 10000.0
-    cleared = mean_return >= cost_return
-
     detail = {
-        "verdict": "cleared" if cleared else "below_cost",
-        "score_bucket": bucket,
-        "best_horizon_s": horizon_s,
-        "sample_count": sample_count,
-        "mean_return_bps": round(mean_bps, 4),
-        "cost_bps": round(cost_bps, 4),
+        **detail,
         "spread_bps": round(spread_bps, 4),
         "execution_mode": exec_mode,
         "decay_table": decay_table,
         **fee_detail,
     }
-    if not cleared:
+    if detail.get("verdict") == "positive_edge_candidate":
+        detail["verdict"] = "cleared"
+    if detail.get("verdict") == "insufficient_statistical_evidence":
+        detail["verdict"] = "insufficient_data"
+    if excluded:
         return GateResult(
             "cost_aware_admission", False, "below_round_trip_cost", detail,
         )
