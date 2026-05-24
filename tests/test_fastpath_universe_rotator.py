@@ -215,6 +215,38 @@ def test_candidate_rank_score_penalizes_execution_cost():
     )
 
 
+def test_candidate_rank_score_caps_depth_at_fillability_gate():
+    from app.services.trading.fast_path.universe_rotator import _candidate_rank_score
+
+    quiet_deep = _make_candidate(
+        ticker="QUIET-USD",
+        bid_size_base=10_000.0,
+        ask_size_base=10_000.0,
+        high_24h=101.0,
+        low_24h=99.0,
+    )
+    volatile_fillable = _make_candidate(
+        ticker="VOL-USD",
+        bid_size_base=50.0,
+        ask_size_base=50.0,
+        high_24h=120.0,
+        low_24h=80.0,
+    )
+
+    assert quiet_deep.composite_score > volatile_fillable.composite_score
+    assert _candidate_rank_score(
+        volatile_fillable,
+        fee_bps=40.0,
+        top_of_book_cap_usd=5_000.0,
+        trade_count_cap=1_000.0,
+    ) > _candidate_rank_score(
+        quiet_deep,
+        fee_bps=40.0,
+        top_of_book_cap_usd=5_000.0,
+        trade_count_cap=1_000.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # run_rotation_pass — disabled flag short-circuit
 # ---------------------------------------------------------------------------
@@ -573,6 +605,50 @@ def test_rotation_prefers_lower_cost_when_raw_opportunity_ties():
 
     assert out["ranked_n"] == 1
     assert db.inserted_rows[0]["ticker"] == "TIGHT-USD"
+
+
+def test_rotation_treats_depth_as_fillability_gate_for_ranking():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB()
+    s = _StubSettings(
+        universe_top_n=1,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+    )
+    snapshots = {
+        "QUIET-USD": _make_candidate(
+            ticker="QUIET-USD",
+            bid_size_base=10_000.0,
+            ask_size_base=10_000.0,
+            high_24h=101.0,
+            low_24h=99.0,
+        ),
+        "VOL-USD": _make_candidate(
+            ticker="VOL-USD",
+            bid_size_base=50.0,
+            ask_size_base=50.0,
+            high_24h=120.0,
+            low_24h=80.0,
+        ),
+    }
+
+    assert (
+        snapshots["QUIET-USD"].composite_score
+        > snapshots["VOL-USD"].composite_score
+    )
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: ["QUIET-USD", "VOL-USD"],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["rank_top_of_book_cap_usd"] == pytest.approx(5_000.0)
+    assert out["rank_trade_count_cap"] == pytest.approx(1_000.0)
+    assert out["ranked_n"] == 1
+    assert db.inserted_rows[0]["ticker"] == "VOL-USD"
 
 
 def test_run_rotation_pass_keeps_shadow_when_lane_is_still_uncertain():

@@ -11,10 +11,11 @@ One pass per invocation:
    count when Coinbase provides it). Measured thresholds must pass;
    settings-tunable thresholds.
 4. Score the survivors by data-derived opportunity per estimated
-   round-trip cost: 24h range, top-of-book depth, measured trade count
-   when Coinbase provides it, and live/configured fee + spread cost.
-   Volume remains an admission gate so quiet mega-cap pairs cannot
-   dominate solely by size.
+   round-trip cost: 24h range divided by live/configured fee + spread
+   cost, with top-of-book depth and measured trade count capped at the
+   configured fillability gates. Volume/depth/trade activity remain
+   admission gates so quiet mega-cap pairs cannot dominate solely by
+   size.
 5. Diff against the previous pass's status. Apply hysteresis: a pair
    currently in ``status='active'`` only gets demoted if its new rank
    is at least ``universe_hysteresis_ranks`` worse than the cut.
@@ -170,14 +171,43 @@ class _PairCandidate:
         )
 
 
-def _candidate_rank_score(cand: _PairCandidate, *, fee_bps: float) -> float:
-    """Opportunity per estimated round-trip cost, used for final ranking."""
+def _positive_cap_or_none(value: Any) -> float | None:
+    try:
+        cap = float(value or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return cap if cap > 0.0 else None
+
+
+def _candidate_rank_score(
+    cand: _PairCandidate,
+    *,
+    fee_bps: float,
+    top_of_book_cap_usd: float | None = None,
+    trade_count_cap: float | None = None,
+) -> float:
+    """Opportunity per estimated round-trip cost, used for final ranking.
+
+    The raw ``composite_score`` remains an audit metric. For ranking, depth
+    and trade count are capped at the configured fillability gates so they
+    prove the product is tradable without becoming unbounded substitutes for
+    volatility.
+    """
     if not cand.has_valid_opportunity_data:
         return 0.0
+    top_of_book_usd = cand.top_of_book_usd
+    depth_cap = _positive_cap_or_none(top_of_book_cap_usd)
+    if depth_cap is not None:
+        top_of_book_usd = min(top_of_book_usd, depth_cap)
+    trade_activity = float(cand.trades_24h) if cand.trades_24h > 0 else 1.0
+    trade_cap = _positive_cap_or_none(trade_count_cap)
+    if trade_cap is not None:
+        trade_activity = min(trade_activity, trade_cap)
+    opportunity_score = cand.range_24h_bps * top_of_book_usd * trade_activity
     cost_bps = 2.0 * (max(float(fee_bps or 0.0), 0.0) + cand.spread_bps)
     if cost_bps <= 0.0:
-        return cand.composite_score
-    return cand.composite_score / cost_bps
+        return opportunity_score
+    return opportunity_score / cost_bps
 
 
 # f-fastpath-rotator-http-retry (2026-05-08): retry policy for the
@@ -975,6 +1005,9 @@ def run_rotation_pass(
         "range_floor_dynamic_bps": None,
         "range_floor_effective_bps": None,
         "shadow_min_top_of_book_usd": None,
+        "rank_top_of_book_cap_usd": None,
+        "rank_shadow_top_of_book_cap_usd": None,
+        "rank_trade_count_cap": None,
         "rotation_at": rotation_at.isoformat(),
     }
 
@@ -1038,7 +1071,19 @@ def run_rotation_pass(
         float(getattr(settings, "universe_shadow_min_top_of_book_usd", 0.0) or 0.0),
         0.0,
     )
+    rank_top_of_book_cap_usd = _positive_cap_or_none(
+        getattr(settings, "universe_min_top_of_book_usd", None)
+    )
+    rank_shadow_top_of_book_cap_usd = _positive_cap_or_none(
+        shadow_min_top_of_book_usd
+    )
+    rank_trade_count_cap = _positive_cap_or_none(
+        getattr(settings, "universe_min_trades_24h", None)
+    )
     out["shadow_min_top_of_book_usd"] = shadow_min_top_of_book_usd
+    out["rank_top_of_book_cap_usd"] = rank_top_of_book_cap_usd
+    out["rank_shadow_top_of_book_cap_usd"] = rank_shadow_top_of_book_cap_usd
+    out["rank_trade_count_cap"] = rank_trade_count_cap
 
     for snap in valid_snapshots:
         passed = passes_shadow_exploration_gates(
@@ -1115,7 +1160,12 @@ def run_rotation_pass(
         out["exploration_fallback"] = True
     else:
         candidates.sort(
-            key=lambda c: _candidate_rank_score(c, fee_bps=promotion_fee_bps),
+            key=lambda c: _candidate_rank_score(
+                c,
+                fee_bps=promotion_fee_bps,
+                top_of_book_cap_usd=rank_top_of_book_cap_usd,
+                trade_count_cap=rank_trade_count_cap,
+            ),
             reverse=True,
         )
         out["hard_ranked_n"] = min(len(candidates), target_ranked)
@@ -1138,6 +1188,8 @@ def run_rotation_pass(
                 key=lambda c: _candidate_rank_score(
                     c,
                     fee_bps=promotion_fee_bps,
+                    top_of_book_cap_usd=rank_shadow_top_of_book_cap_usd,
+                    trade_count_cap=rank_trade_count_cap,
                 ),
                 reverse=True,
             )
@@ -1147,7 +1199,12 @@ def run_rotation_pass(
 
     if out["exploration_fallback"]:
         candidates.sort(
-            key=lambda c: _candidate_rank_score(c, fee_bps=promotion_fee_bps),
+            key=lambda c: _candidate_rank_score(
+                c,
+                fee_bps=promotion_fee_bps,
+                top_of_book_cap_usd=rank_shadow_top_of_book_cap_usd,
+                trade_count_cap=rank_trade_count_cap,
+            ),
             reverse=True,
         )
 
