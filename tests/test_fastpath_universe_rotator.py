@@ -296,6 +296,8 @@ class _StubSettings:
     cost_aware_taker_fee_bps: float = 0.0
     live_alpha_min_samples: int = 50
     live_alpha_min_net_bps: float = 0.0
+    maker_attempt_adverse_filter_enabled: bool = True
+    maker_attempt_adverse_filter_window_h: int = 24
 
 
 class _FakeRotationDB:
@@ -306,6 +308,7 @@ class _FakeRotationDB:
         completed_shadows: set[str] | None = None,
         edge_rows: dict[str, dict] | None = None,
         decay_rows: dict[str, list[dict]] | None = None,
+        maker_attempt_rows: dict[str, list[dict]] | None = None,
         grace_history: dict[str, list[dict]] | None = None,
     ) -> None:
         self.inserted_rows: list[dict] = []
@@ -315,6 +318,7 @@ class _FakeRotationDB:
         self.completed_shadows = completed_shadows or set()
         self.edge_rows = edge_rows or {}
         self.decay_rows = decay_rows or {}
+        self.maker_attempt_rows = maker_attempt_rows or {}
         self.grace_history = grace_history or {}
 
     def execute(self, statement, params=None):
@@ -340,6 +344,9 @@ class _FakeRotationDB:
         if "SELECT ticker, alert_type, score_bucket" in sql and "FROM fast_signal_decay" in sql:
             ticker = (params or {}).get("ticker")
             return _FakeScalarRows(self.decay_rows.get(ticker, []))
+        if "FROM fast_path_maker_attempts" in sql:
+            ticker = (params or {}).get("ticker")
+            return _FakeScalarRows(self.maker_attempt_rows.get(ticker, []))
         if "FROM fast_signal_decay" in sql:
             ticker = (params or {}).get("ticker")
             row = self.edge_rows.get(ticker)
@@ -540,6 +547,90 @@ def test_sparse_only_shadow_lane_still_collects_data():
     )
 
     assert out["edge_exhausted_demotions"] == 0
+    assert db.inserted_rows[0]["status"] == UNIVERSE_STATUS_SHADOW
+
+
+def test_shadow_demotes_when_maker_attempts_prove_adverse_selection():
+    from app.services.trading.fast_path.universe_status import (
+        UNIVERSE_STATUS_INACTIVE,
+        UNIVERSE_STATUS_SHADOW,
+    )
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        previous={"AERO-USD": (UNIVERSE_STATUS_SHADOW, 1)},
+        maker_attempt_rows={
+            "AERO-USD": [
+                {
+                    "ticker": "AERO-USD",
+                    "alert_type": "imbalance_long",
+                    "signal_score": 0.75,
+                    "side": "buy",
+                    "fill_outcome": "cancelled",
+                    "mid_drift_bps": 3.0,
+                },
+                {
+                    "ticker": "AERO-USD",
+                    "alert_type": "imbalance_long",
+                    "signal_score": 0.75,
+                    "side": "buy",
+                    "fill_outcome": "cancelled",
+                    "mid_drift_bps": 4.0,
+                },
+                {
+                    "ticker": "AERO-USD",
+                    "alert_type": "imbalance_long",
+                    "signal_score": 0.75,
+                    "side": "buy",
+                    "fill_outcome": "replaced",
+                    "mid_drift_bps": 5.0,
+                },
+            ],
+        },
+    )
+    s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["AERO-USD"],
+        fetch_snapshot_fn=lambda t: _make_candidate(ticker=t),
+    )
+
+    assert out["edge_exhausted_demotions"] == 1
+    assert out["edge_exhaustion_blocks"] == {"maker_adverse_selection": 1}
+    assert db.inserted_rows[0]["ticker"] == "AERO-USD"
+    assert db.inserted_rows[0]["status"] == UNIVERSE_STATUS_INACTIVE
+    assert db.inserted_rows[0]["rank"] is None
+
+
+def test_sparse_maker_attempts_do_not_demote_new_shadow():
+    from app.services.trading.fast_path.universe_status import UNIVERSE_STATUS_SHADOW
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        maker_attempt_rows={
+            "NEW-USD": [
+                {
+                    "ticker": "NEW-USD",
+                    "alert_type": "imbalance_long",
+                    "signal_score": 0.75,
+                    "side": "buy",
+                    "fill_outcome": "cancelled",
+                    "mid_drift_bps": 4.0,
+                },
+            ],
+        },
+    )
+    s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["NEW-USD"],
+        fetch_snapshot_fn=lambda t: _make_candidate(ticker=t),
+    )
+
+    assert out["edge_exhausted_demotions"] == 0
+    assert out["edge_exhaustion_blocks"] == {}
     assert db.inserted_rows[0]["status"] == UNIVERSE_STATUS_SHADOW
 
 

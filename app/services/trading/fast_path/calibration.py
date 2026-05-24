@@ -267,6 +267,25 @@ def _mid_drift_evidence(values: list[float], *, bucket: str) -> dict[str, Any] |
     }
 
 
+def _execute_mapped_rows(
+    source: Any,
+    sql,
+    params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    connect = getattr(source, "connect", None)
+    if callable(connect):
+        with connect() as conn:
+            rows = conn.execute(sql, params).mappings().all()
+        return [dict(r) for r in rows]
+
+    execute = getattr(source, "execute", None)
+    if callable(execute):
+        rows = source.execute(sql, params).mappings().all()
+        return [dict(r) for r in rows]
+
+    raise TypeError(f"unsupported SQL source for maker attempt rows: {type(source)!r}")
+
+
 def _fetch_maker_attempt_drift_rows(
     engine: Engine,
     *,
@@ -294,13 +313,11 @@ def _fetch_maker_attempt_drift_rows(
           AND m.placed_at >= NOW() - (:hours || ' hours')::interval
         ORDER BY m.placed_at DESC
     """)
-    with engine.connect() as conn:
-        rows = conn.execute(sql, {
-            "ticker": ticker,
-            "alert_type": alert_type,
-            "hours": int(window_hours),
-        }).mappings().all()
-    return [dict(r) for r in rows]
+    return _execute_mapped_rows(engine, sql, {
+        "ticker": ticker,
+        "alert_type": alert_type,
+        "hours": int(window_hours),
+    })
 
 
 def _fetch_pooled_maker_attempt_drift_rows(
@@ -329,12 +346,10 @@ def _fetch_pooled_maker_attempt_drift_rows(
           AND m.placed_at >= NOW() - (:hours || ' hours')::interval
         ORDER BY m.placed_at DESC
     """)
-    with engine.connect() as conn:
-        rows = conn.execute(sql, {
-            "alert_type": alert_type,
-            "hours": int(window_hours),
-        }).mappings().all()
-    return [dict(r) for r in rows]
+    return _execute_mapped_rows(engine, sql, {
+        "alert_type": alert_type,
+        "hours": int(window_hours),
+    })
 
 
 def _maker_attempt_adverse_selection_from_rows(
@@ -415,32 +430,41 @@ def _maker_attempt_adverse_selection_from_rows(
     }
 
 
-def maker_attempt_adverse_selection_excluded(
+def maker_attempt_adverse_selection_excluded_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    score_bucket_name: str,
+    scope: str,
+    window_hours: int,
+    ticker: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Summarize maker-attempt toxicity for an already selected score bucket."""
+    return _maker_attempt_adverse_selection_from_rows(
+        rows,
+        bucket=str(score_bucket_name or "").strip().lower(),
+        scope=scope,
+        ticker=ticker,
+        window_hours=window_hours,
+    )
+
+
+def maker_attempt_adverse_selection_excluded_for_bucket(
     engine: Engine,
     *,
     ticker: str,
     alert_type: str,
-    signal_score: float,
+    score_bucket_name: str,
     window_hours: int = 24,
     allow_pooled: bool = True,
 ) -> tuple[bool, dict[str, Any]]:
-    """Return whether recent maker attempts prove this lane is toxic.
+    """Return maker-attempt toxicity using the canonical score bucket directly.
 
-    Uses finite-sample confidence bounds on side-adjusted mid drift:
-
-      * filled attempts block when the upper confidence bound is below
-        zero, meaning passive fills are selected into adverse movement.
-      * cancelled/replaced attempts block when the lower confidence
-        bound is above zero, meaning the passive order tends to miss
-        favorable movement.
-
-    There is no fixed attempt-count quota. Sparse or zero-variance rows
-    simply produce no statistical verdict, matching the negative-edge
-    decay gate's finite-sample behavior. When the exact ticker lane is
-    sparse, pooled evidence for the same alert type and score bucket can
-    still block a broadly toxic passive-execution pattern.
+    This is the bucket-native companion to
+    :func:`maker_attempt_adverse_selection_excluded`; callers that already
+    grouped rows by the decay miner's score bucket do not have to invent a
+    representative signal score just to reuse the adverse-selection logic.
     """
-    bucket = score_bucket(signal_score)
+    bucket = str(score_bucket_name or "").strip().lower()
     window_h = max(1, int(window_hours))
     rows = _fetch_maker_attempt_drift_rows(
         engine,
@@ -476,6 +500,41 @@ def maker_attempt_adverse_selection_excluded(
         pooled_evidence["ticker_scope_attempts"] = ticker_evidence.get("attempts", 0)
         return True, pooled_evidence
     return False, ticker_evidence
+
+
+def maker_attempt_adverse_selection_excluded(
+    engine: Engine,
+    *,
+    ticker: str,
+    alert_type: str,
+    signal_score: float,
+    window_hours: int = 24,
+    allow_pooled: bool = True,
+) -> tuple[bool, dict[str, Any]]:
+    """Return whether recent maker attempts prove this lane is toxic.
+
+    Uses finite-sample confidence bounds on side-adjusted mid drift:
+
+      * filled attempts block when the upper confidence bound is below
+        zero, meaning passive fills are selected into adverse movement.
+      * cancelled/replaced attempts block when the lower confidence
+        bound is above zero, meaning the passive order tends to miss
+        favorable movement.
+
+    There is no fixed attempt-count quota. Sparse or zero-variance rows
+    simply produce no statistical verdict, matching the negative-edge
+    decay gate's finite-sample behavior. When the exact ticker lane is
+    sparse, pooled evidence for the same alert type and score bucket can
+    still block a broadly toxic passive-execution pattern.
+    """
+    return maker_attempt_adverse_selection_excluded_for_bucket(
+        engine,
+        ticker=ticker,
+        alert_type=alert_type,
+        score_bucket_name=score_bucket(signal_score),
+        window_hours=window_hours,
+        allow_pooled=allow_pooled,
+    )
 
 
 def _most_negative_confidence_evidence(
@@ -1052,6 +1111,8 @@ __all__ = [
     "is_negative_edge_excluded",
     "is_cost_barrier_excluded",
     "maker_attempt_adverse_selection_excluded",
+    "maker_attempt_adverse_selection_excluded_for_bucket",
+    "maker_attempt_adverse_selection_excluded_from_rows",
     "compute_calibrated_bracket",
     "MIN_SAMPLES_FOR_CALIB",
     "TRADING_COST_FRAC",

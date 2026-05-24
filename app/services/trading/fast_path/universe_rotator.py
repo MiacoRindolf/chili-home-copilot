@@ -80,6 +80,28 @@ _COINBASE_REST = "https://api.exchange.coinbase.com"
 _HTTP_TIMEOUT_S = 8.0
 _PER_REQ_PACING_S = 0.12  # ~8 req/s
 RANK_TRADE_COUNT_MULTIPLIER_MODE = "admission_gate_only"
+_MAKER_ATTEMPT_ADVERSE_SELECTION_VERDICT = "adverse_selection"
+_MAKER_ATTEMPT_RAW_NOT_EXCLUDED_VERDICT = "not_excluded"
+_MAKER_ATTEMPT_RAW_NO_DATA_VERDICT = "no_data"
+_MAKER_ATTEMPT_EXHAUSTED_VERDICT = "maker_adverse_selection"
+_MAKER_ATTEMPT_NOT_EXCLUDED_VERDICT = "maker_attempt_not_excluded"
+_MAKER_ATTEMPT_NO_DATA_VERDICT = "maker_attempt_no_data"
+_MAKER_ATTEMPT_INSUFFICIENT_VERDICT = (
+    "maker_attempt_insufficient_statistical_evidence"
+)
+_MAKER_ATTEMPT_ACTIONABLE_LEARNABLE_VERDICTS = frozenset({
+    _MAKER_ATTEMPT_NOT_EXCLUDED_VERDICT,
+})
+_MAKER_ATTEMPT_LEARNABLE_VERDICTS = frozenset({
+    _MAKER_ATTEMPT_NOT_EXCLUDED_VERDICT,
+    _MAKER_ATTEMPT_NO_DATA_VERDICT,
+    _MAKER_ATTEMPT_INSUFFICIENT_VERDICT,
+})
+_MAKER_ATTEMPT_SPARSE_VERDICTS = frozenset({
+    _MAKER_ATTEMPT_NO_DATA_VERDICT,
+    _MAKER_ATTEMPT_INSUFFICIENT_VERDICT,
+})
+_DEFAULT_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H = 24
 
 
 @dataclass
@@ -576,12 +598,11 @@ def _shadow_completion_promotions(
 def _promotion_decay_source(settings) -> tuple[str, float]:
     """Return the decay table + per-side fee used for universe promotion."""
     exec_mode = str(getattr(settings, "execution_mode", "taker") or "taker").lower()
+    from .calibration import decay_table_for_execution_mode
     from .fees import fee_bps_for_execution_mode
 
     fee_bps, _fee_detail = fee_bps_for_execution_mode(settings, exec_mode)
-    if exec_mode in ("maker_only", "maker_first_then_taker"):
-        return ("fast_signal_decay_maker_filled", fee_bps)
-    return ("fast_signal_decay", fee_bps)
+    return (decay_table_for_execution_mode(exec_mode), fee_bps)
 
 
 _PROMOTION_EDGE_POSITIVE_VERDICT = "positive_edge_candidate"
@@ -591,6 +612,16 @@ _PROMOTION_BLOCK_VERDICT_PRIORITY = {
     "below_cost": 2,
     "negative_edge": 1,
 }
+
+
+def _maker_attempt_shadow_verdict(verdict: str) -> str:
+    if verdict == _MAKER_ATTEMPT_ADVERSE_SELECTION_VERDICT:
+        return _MAKER_ATTEMPT_EXHAUSTED_VERDICT
+    if verdict == _MAKER_ATTEMPT_RAW_NOT_EXCLUDED_VERDICT:
+        return _MAKER_ATTEMPT_NOT_EXCLUDED_VERDICT
+    if verdict == _MAKER_ATTEMPT_RAW_NO_DATA_VERDICT:
+        return _MAKER_ATTEMPT_NO_DATA_VERDICT
+    return _MAKER_ATTEMPT_INSUFFICIENT_VERDICT
 
 
 def _metric_from_summary(
@@ -711,7 +742,9 @@ def _promotion_edge_evidence(db, cand: _PairCandidate, settings) -> tuple[bool, 
     from sqlalchemy import text
 
     table, fee_bps = _promotion_decay_source(settings)
-    if table not in ("fast_signal_decay", "fast_signal_decay_maker_filled"):
+    from .calibration import SUPPORTED_DECAY_TABLES
+
+    if table not in SUPPORTED_DECAY_TABLES:
         raise ValueError(f"unsupported promotion decay table: {table!r}")
 
     min_net_bps = float(getattr(settings, "live_alpha_min_net_bps", 0.0) or 0.0)
@@ -734,6 +767,110 @@ def _promotion_edge_evidence(db, cand: _PairCandidate, settings) -> tuple[bool, 
         spread_bps=float(cand.spread_bps or 0.0),
         min_net_bps=min_net_bps,
     )
+
+
+def _maker_attempt_window_hours(settings) -> int:
+    return max(
+        1,
+        int(
+            getattr(
+                settings,
+                "maker_attempt_adverse_filter_window_h",
+                _DEFAULT_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H,
+            )
+            or _DEFAULT_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H
+        ),
+    )
+
+
+def _shadow_maker_attempt_exhaustion_summaries(
+    db,
+    *,
+    cand: _PairCandidate,
+    settings,
+    decay_table: str,
+) -> list[dict[str, Any]]:
+    """Return exact-ticker maker-attempt exhaustion summaries for a shadow pair."""
+    from collections import defaultdict
+
+    from sqlalchemy import text
+
+    from .calibration import (
+        DECAY_TABLE_MAKER_FILLED,
+        maker_attempt_adverse_selection_excluded_from_rows,
+    )
+    from .decay_miner import score_bucket
+
+    if decay_table != DECAY_TABLE_MAKER_FILLED:
+        return []
+    if not getattr(settings, "maker_attempt_adverse_filter_enabled", True):
+        return []
+
+    window_h = _maker_attempt_window_hours(settings)
+    rows = db.execute(text("""
+        SELECT
+            m.ticker,
+            m.side,
+            m.fill_outcome,
+            m.mid_drift_bps,
+            a.alert_type,
+            a.signal_score
+        FROM fast_path_maker_attempts m
+        JOIN LATERAL (
+            SELECT alert_type, signal_score
+            FROM fast_alerts a
+            WHERE a.id = m.alert_id
+            ORDER BY fired_at DESC
+            LIMIT 1
+        ) a ON TRUE
+        WHERE m.ticker = :ticker
+          AND m.mid_drift_bps IS NOT NULL
+          AND m.placed_at >= NOW() - (:hours || ' hours')::interval
+        ORDER BY a.alert_type, a.signal_score, m.placed_at DESC
+    """), {
+        "ticker": cand.ticker,
+        "hours": window_h,
+    }).mappings().all()
+    if not rows:
+        return []
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        d = dict(row)
+        alert_type = str(d.get("alert_type") or "").strip()
+        if not alert_type:
+            continue
+        try:
+            bucket = score_bucket(float(d.get("signal_score") or 0.0))
+        except (TypeError, ValueError):
+            bucket = score_bucket(0.0)
+        grouped[(alert_type, bucket)].append(d)
+
+    summaries: list[dict[str, Any]] = []
+    for (alert_type, bucket), lane_rows in sorted(grouped.items()):
+        _excluded, evidence = maker_attempt_adverse_selection_excluded_from_rows(
+            lane_rows,
+            score_bucket_name=bucket,
+            scope="ticker",
+            ticker=cand.ticker,
+            window_hours=window_h,
+        )
+        maker_verdict = str(evidence.get("verdict") or "")
+        summaries.append({
+            "alert_type": alert_type,
+            "score_bucket": bucket,
+            "verdict": _maker_attempt_shadow_verdict(maker_verdict),
+            "maker_attempt_verdict": maker_verdict,
+            "attempts": evidence.get("attempts", len(lane_rows)),
+            "filled_samples": evidence.get("filled_samples", 0),
+            "unfilled_terminal_samples": evidence.get(
+                "unfilled_terminal_samples", 0,
+            ),
+            "blocked_reasons": evidence.get("blocked_reasons") or [],
+            "window_hours": window_h,
+            "scope": "ticker",
+        })
+    return summaries
 
 
 def _shadow_edge_exhaustion_evidence(
@@ -761,7 +898,9 @@ def _shadow_edge_exhaustion_evidence(
     )
 
     table, fee_bps = _promotion_decay_source(settings)
-    if table not in ("fast_signal_decay", "fast_signal_decay_maker_filled"):
+    from .calibration import SUPPORTED_DECAY_TABLES
+
+    if table not in SUPPORTED_DECAY_TABLES:
         raise ValueError(f"unsupported promotion decay table: {table!r}")
 
     rows = db.execute(text(f"""
@@ -773,12 +912,19 @@ def _shadow_edge_exhaustion_evidence(
         ORDER BY alert_type, score_bucket, horizon_s
     """), {"ticker": cand.ticker}).mappings().all()
 
+    maker_attempt_summaries = _shadow_maker_attempt_exhaustion_summaries(
+        db,
+        cand=cand,
+        settings=settings,
+        decay_table=table,
+    )
+
     base = {
         "decay_table": table,
         "fee_bps": round(float(fee_bps or 0.0), 4),
         "spread_bps": round(float(cand.spread_bps or 0.0), 4),
     }
-    if not rows:
+    if not rows and not maker_attempt_summaries:
         return False, {**base, "verdict": "no_decay_row"}
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -801,38 +947,68 @@ def _shadow_edge_exhaustion_evidence(
             )
         )
 
-    verdict_counts = Counter(str(s.get("verdict") or "unknown") for s in lane_summaries)
+    signal_verdict_counts = Counter(
+        str(s.get("verdict") or "unknown") for s in lane_summaries
+    )
+    maker_attempt_verdict_counts = Counter(
+        str(s.get("verdict") or "unknown") for s in maker_attempt_summaries
+    )
+    verdict_counts = signal_verdict_counts + maker_attempt_verdict_counts
     has_actionable_learnable_lane = any(
         str(s.get("verdict") or "") in SIGNAL_HEALTH_ACTIONABLE_LEARNABLE_VERDICTS
         for s in lane_summaries
+    ) or any(
+        str(s.get("verdict") or "") in _MAKER_ATTEMPT_ACTIONABLE_LEARNABLE_VERDICTS
+        for s in maker_attempt_summaries
     )
     has_sparse_lane = any(
         str(s.get("verdict") or "") in SIGNAL_HEALTH_SPARSE_VERDICTS
         for s in lane_summaries
+    ) or any(
+        str(s.get("verdict") or "") in _MAKER_ATTEMPT_SPARSE_VERDICTS
+        for s in maker_attempt_summaries
     )
     has_exhausted_lane = any(
         str(s.get("verdict") or "") in SIGNAL_HEALTH_EXHAUSTED_VERDICTS
         for s in lane_summaries
+    ) or any(
+        str(s.get("verdict") or "") == _MAKER_ATTEMPT_EXHAUSTED_VERDICT
+        for s in maker_attempt_summaries
     )
     has_any_learnable_lane = any(
         str(s.get("verdict") or "") in SIGNAL_HEALTH_LEARNABLE_VERDICTS
         for s in lane_summaries
+    ) or any(
+        str(s.get("verdict") or "") in _MAKER_ATTEMPT_LEARNABLE_VERDICTS
+        for s in maker_attempt_summaries
     )
-    exhausted = bool(lane_summaries) and (
+    has_maker_adverse_lane = any(
+        str(s.get("verdict") or "") == _MAKER_ATTEMPT_EXHAUSTED_VERDICT
+        for s in maker_attempt_summaries
+    )
+    exhausted = bool(lane_summaries or maker_attempt_summaries) and (
         not has_any_learnable_lane
         or (has_exhausted_lane and not has_actionable_learnable_lane)
     )
+    if exhausted and has_maker_adverse_lane:
+        exhaustion_basis = "maker_attempt_adverse_selection"
+    elif exhausted and has_sparse_lane and has_exhausted_lane:
+        exhaustion_basis = "only_sparse_learnable_lanes_remain"
+    elif exhausted:
+        exhaustion_basis = "all_lanes_exhausted"
+    else:
+        exhaustion_basis = "actionable_lane_remaining"
     return exhausted, {
         **base,
         "verdict": "edge_exhausted" if exhausted else "still_learning",
-        "exhaustion_basis": (
-            "only_sparse_learnable_lanes_remain"
-            if exhausted and has_sparse_lane and has_exhausted_lane
-            else "all_lanes_exhausted" if exhausted else "actionable_lane_remaining"
-        ),
+        "exhaustion_basis": exhaustion_basis,
         "has_actionable_learnable_lane": has_actionable_learnable_lane,
         "has_sparse_lane": has_sparse_lane,
         "lane_verdict_counts": dict(verdict_counts),
+        "signal_lane_verdict_counts": dict(signal_verdict_counts),
+        "maker_attempt_lane_verdict_counts": dict(maker_attempt_verdict_counts),
+        "maker_attempt_exact_ticker_only": True,
+        "maker_attempt_window_hours": _maker_attempt_window_hours(settings),
         "lanes": [
             {
                 "alert_type": s.get("alert_type"),
@@ -843,6 +1019,7 @@ def _shadow_edge_exhaustion_evidence(
             }
             for s in lane_summaries
         ],
+        "maker_attempt_lanes": maker_attempt_summaries,
     }
 
 

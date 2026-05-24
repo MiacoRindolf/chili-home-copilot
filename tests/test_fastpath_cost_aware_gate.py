@@ -394,6 +394,38 @@ def test_maker_attempt_filter_blocks_adverse_fills_and_missed_moves():
     )
 
 
+def test_maker_attempt_filter_accepts_score_bucket_directly():
+    from app.services.trading.fast_path.calibration import (
+        maker_attempt_adverse_selection_excluded_for_bucket,
+    )
+
+    rows = [
+        {"side": "buy", "fill_outcome": "cancelled", "mid_drift_bps": 3.0,
+         "signal_score": 0.75},
+        {"side": "buy", "fill_outcome": "cancelled", "mid_drift_bps": 4.0,
+         "signal_score": 0.75},
+        {"side": "buy", "fill_outcome": "replaced", "mid_drift_bps": 5.0,
+         "signal_score": 0.75},
+    ]
+    with patch(
+        "app.services.trading.fast_path.calibration._fetch_maker_attempt_drift_rows",
+        return_value=rows,
+    ):
+        excluded, evidence = maker_attempt_adverse_selection_excluded_for_bucket(
+            "fake_engine",
+            ticker="AERO-USD",
+            alert_type="imbalance_long",
+            score_bucket_name="high",
+            window_hours=24,
+            allow_pooled=False,
+        )
+
+    assert excluded is True
+    assert evidence["score_bucket"] == "high"
+    assert evidence["verdict"] == "adverse_selection"
+    assert evidence["blocked_reasons"] == ["maker_misses_favorable_moves"]
+
+
 def test_maker_attempt_filter_ignores_zero_variance_drift():
     from app.services.trading.fast_path.calibration import (
         maker_attempt_adverse_selection_excluded,
