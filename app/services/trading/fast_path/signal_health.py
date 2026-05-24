@@ -41,6 +41,12 @@ SIGNAL_HEALTH_LEARNABLE_VERDICTS = frozenset({
     "uncertain",
     "insufficient_statistical_evidence",
 })
+SIGNAL_HEALTH_SPARSE_VERDICTS = frozenset({
+    "insufficient_statistical_evidence",
+})
+SIGNAL_HEALTH_ACTIONABLE_LEARNABLE_VERDICTS = (
+    SIGNAL_HEALTH_LEARNABLE_VERDICTS - SIGNAL_HEALTH_SPARSE_VERDICTS
+)
 SIGNAL_HEALTH_EXHAUSTED_VERDICTS = frozenset({
     "negative_edge",
     "below_cost",
@@ -748,9 +754,11 @@ def build_signal_health_report(
 
 __all__ = [
     "MAKER_ATTEMPT_HEALTH_WINDOW_HOURS",
+    "SIGNAL_HEALTH_ACTIONABLE_LEARNABLE_VERDICTS",
     "SIGNAL_HEALTH_DEFAULT_LIMIT",
     "SIGNAL_HEALTH_EXHAUSTED_VERDICTS",
     "SIGNAL_HEALTH_LEARNABLE_VERDICTS",
+    "SIGNAL_HEALTH_SPARSE_VERDICTS",
     "build_signal_health_report",
     "summarize_maker_attempt_group",
     "summarize_signal_group",

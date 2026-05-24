@@ -408,6 +408,83 @@ def test_run_rotation_pass_demotes_shadow_when_learned_lanes_exhausted():
     assert db.inserted_rows[0]["rank"] is None
 
 
+def test_sparse_lane_does_not_veto_exhausted_ticker_demotion():
+    from app.services.trading.fast_path.universe_status import (
+        UNIVERSE_STATUS_INACTIVE,
+        UNIVERSE_STATUS_SHADOW,
+    )
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        previous={"SOL-USD": (UNIVERSE_STATUS_SHADOW, 1)},
+        decay_rows={
+            "SOL-USD": [
+                {
+                    "ticker": "SOL-USD",
+                    "alert_type": "imbalance_long",
+                    "score_bucket": "low",
+                    "horizon_s": 5,
+                    "sample_count": 6,
+                    "mean_return": -0.0012,
+                    "m2_return": 0.0000001,
+                },
+                {
+                    "ticker": "SOL-USD",
+                    "alert_type": "volume_breakout_long",
+                    "score_bucket": "high",
+                    "horizon_s": 5,
+                    "sample_count": 1,
+                    "mean_return": 0.001,
+                    "m2_return": 0.0,
+                },
+            ],
+        },
+    )
+    s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["SOL-USD"],
+        fetch_snapshot_fn=lambda t: _make_candidate(ticker=t),
+    )
+
+    assert out["edge_exhausted_demotions"] == 1
+    assert out["edge_exhaustion_blocks"]["negative_edge"] == 1
+    assert out["edge_exhaustion_blocks"]["insufficient_statistical_evidence"] == 1
+    assert db.inserted_rows[0]["status"] == UNIVERSE_STATUS_INACTIVE
+
+
+def test_sparse_only_shadow_lane_still_collects_data():
+    from app.services.trading.fast_path.universe_status import UNIVERSE_STATUS_SHADOW
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        decay_rows={
+            "NEW-USD": [
+                {
+                    "ticker": "NEW-USD",
+                    "alert_type": "volume_breakout_long",
+                    "score_bucket": "high",
+                    "horizon_s": 5,
+                    "sample_count": 1,
+                    "mean_return": 0.001,
+                    "m2_return": 0.0,
+                },
+            ],
+        },
+    )
+    s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["NEW-USD"],
+        fetch_snapshot_fn=lambda t: _make_candidate(ticker=t),
+    )
+
+    assert out["edge_exhausted_demotions"] == 0
+    assert db.inserted_rows[0]["status"] == UNIVERSE_STATUS_SHADOW
+
+
 def test_edge_exhausted_candidates_do_not_set_adaptive_range_floor():
     from app.services.trading.fast_path.universe_status import (
         UNIVERSE_STATUS_INACTIVE,

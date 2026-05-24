@@ -725,7 +725,10 @@ def _shadow_edge_exhaustion_evidence(
     from sqlalchemy import text
 
     from .signal_health import (
+        SIGNAL_HEALTH_ACTIONABLE_LEARNABLE_VERDICTS,
+        SIGNAL_HEALTH_EXHAUSTED_VERDICTS,
         SIGNAL_HEALTH_LEARNABLE_VERDICTS,
+        SIGNAL_HEALTH_SPARSE_VERDICTS,
         summarize_signal_group,
     )
 
@@ -771,14 +774,36 @@ def _shadow_edge_exhaustion_evidence(
         )
 
     verdict_counts = Counter(str(s.get("verdict") or "unknown") for s in lane_summaries)
-    has_learnable_lane = any(
+    has_actionable_learnable_lane = any(
+        str(s.get("verdict") or "") in SIGNAL_HEALTH_ACTIONABLE_LEARNABLE_VERDICTS
+        for s in lane_summaries
+    )
+    has_sparse_lane = any(
+        str(s.get("verdict") or "") in SIGNAL_HEALTH_SPARSE_VERDICTS
+        for s in lane_summaries
+    )
+    has_exhausted_lane = any(
+        str(s.get("verdict") or "") in SIGNAL_HEALTH_EXHAUSTED_VERDICTS
+        for s in lane_summaries
+    )
+    has_any_learnable_lane = any(
         str(s.get("verdict") or "") in SIGNAL_HEALTH_LEARNABLE_VERDICTS
         for s in lane_summaries
     )
-    exhausted = bool(lane_summaries) and not has_learnable_lane
+    exhausted = bool(lane_summaries) and (
+        not has_any_learnable_lane
+        or (has_exhausted_lane and not has_actionable_learnable_lane)
+    )
     return exhausted, {
         **base,
         "verdict": "edge_exhausted" if exhausted else "still_learning",
+        "exhaustion_basis": (
+            "only_sparse_learnable_lanes_remain"
+            if exhausted and has_sparse_lane and has_exhausted_lane
+            else "all_lanes_exhausted" if exhausted else "actionable_lane_remaining"
+        ),
+        "has_actionable_learnable_lane": has_actionable_learnable_lane,
+        "has_sparse_lane": has_sparse_lane,
         "lane_verdict_counts": dict(verdict_counts),
         "lanes": [
             {
