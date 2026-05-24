@@ -10,11 +10,11 @@ One pass per invocation:
 3. Apply admission gates (volume / spread / top-of-book size / trade
    count when Coinbase provides it). Measured thresholds must pass;
    settings-tunable thresholds.
-4. Score the survivors by a data-derived opportunity score:
-   ``range_24h_bps * top_of_book_usd`` with trade count included only
-   when Coinbase provides it. Volume and spread stay admission/cost
-   gates rather than ranking weights so quiet mega-cap pairs cannot
-   dominate solely by size or near-zero spread.
+4. Score the survivors by data-derived opportunity per estimated
+   round-trip cost: 24h range, top-of-book depth, measured trade count
+   when Coinbase provides it, and live/configured fee + spread cost.
+   Volume remains an admission gate so quiet mega-cap pairs cannot
+   dominate solely by size.
 5. Diff against the previous pass's status. Apply hysteresis: a pair
    currently in ``status='active'`` only gets demoted if its new rank
    is at least ``universe_hysteresis_ranks`` worse than the cut.
@@ -154,10 +154,11 @@ class _PairCandidate:
     def composite_score(self) -> float:
         """Opportunity score for scalp universe ranking.
 
-        The score intentionally avoids coin names and fixed spread
-        floors. Hard liquidity thresholds decide whether a pair is
-        admissible; among admissible pairs, ranking rewards volatility,
-        depth, and measured trade count when available.
+        The score intentionally avoids coin names. Hard liquidity
+        thresholds decide whether a pair is admissible; among
+        admissible pairs, ranking rewards volatility, depth, and
+        measured trade count when available. The rotator's final sort
+        divides this raw opportunity by the estimated execution cost.
         """
         if not self.has_valid_opportunity_data:
             return 0.0
@@ -167,6 +168,16 @@ class _PairCandidate:
             * self.top_of_book_usd
             * trade_activity
         )
+
+
+def _candidate_rank_score(cand: _PairCandidate, *, fee_bps: float) -> float:
+    """Opportunity per estimated round-trip cost, used for final ranking."""
+    if not cand.has_valid_opportunity_data:
+        return 0.0
+    cost_bps = 2.0 * (max(float(fee_bps or 0.0), 0.0) + cand.spread_bps)
+    if cost_bps <= 0.0:
+        return cand.composite_score
+    return cand.composite_score / cost_bps
 
 
 # f-fastpath-rotator-http-retry (2026-05-08): retry policy for the
@@ -1078,7 +1089,10 @@ def run_rotation_pass(
         candidates = list(exploration_pool)
         out["exploration_fallback"] = True
     else:
-        candidates.sort(key=lambda c: c.composite_score, reverse=True)
+        candidates.sort(
+            key=lambda c: _candidate_rank_score(c, fee_bps=promotion_fee_bps),
+            reverse=True,
+        )
         out["hard_ranked_n"] = min(len(candidates), target_ranked)
         shortfall = max(target_ranked - len(candidates), 0)
         if shortfall > 0:
@@ -1095,13 +1109,22 @@ def run_rotation_pass(
                     min_range_24h_bps=range_floor_bps,
                 )
             ]
-            shadow_pool.sort(key=lambda c: c.composite_score, reverse=True)
+            shadow_pool.sort(
+                key=lambda c: _candidate_rank_score(
+                    c,
+                    fee_bps=promotion_fee_bps,
+                ),
+                reverse=True,
+            )
             fill = shadow_pool[:shortfall]
             candidates.extend(fill)
             out["shadow_exploration_shortfall"] = len(fill)
 
     if out["exploration_fallback"]:
-        candidates.sort(key=lambda c: c.composite_score, reverse=True)
+        candidates.sort(
+            key=lambda c: _candidate_rank_score(c, fee_bps=promotion_fee_bps),
+            reverse=True,
+        )
 
     prior = _previous_pass_status(db)
     completed_shadows = _shadow_completion_promotions(

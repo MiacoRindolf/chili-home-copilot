@@ -202,6 +202,19 @@ def test_more_volatile_pair_can_outrank_higher_volume_pair():
     assert volatile_lower_volume.composite_score > quiet_high_volume.composite_score
 
 
+def test_candidate_rank_score_penalizes_execution_cost():
+    from app.services.trading.fast_path.universe_rotator import _candidate_rank_score
+
+    tight = _make_candidate(ticker="TIGHT-USD", bid=99.995, ask=100.005)
+    wide = _make_candidate(ticker="WIDE-USD", bid=99.96, ask=100.04)
+
+    assert tight.composite_score == pytest.approx(wide.composite_score)
+    assert _candidate_rank_score(tight, fee_bps=40.0) > _candidate_rank_score(
+        wide,
+        fee_bps=40.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # run_rotation_pass — disabled flag short-circuit
 # ---------------------------------------------------------------------------
@@ -459,6 +472,30 @@ def test_edge_exhausted_candidates_do_not_set_adaptive_range_floor():
     assert rows_by_ticker["GOOD1-USD"]["rank"] == 1
     assert rows_by_ticker["GOOD2-USD"]["status"] == UNIVERSE_STATUS_SHADOW
     assert rows_by_ticker["GOOD2-USD"]["rank"] == 2
+
+
+def test_rotation_prefers_lower_cost_when_raw_opportunity_ties():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB()
+    s = _StubSettings(
+        universe_top_n=1,
+        universe_hysteresis_ranks=0,
+        cost_aware_maker_fee_bps=40.0,
+    )
+    snapshots = {
+        "WIDE-USD": _make_candidate(ticker="WIDE-USD", bid=99.96, ask=100.04),
+        "TIGHT-USD": _make_candidate(ticker="TIGHT-USD", bid=99.995, ask=100.005),
+    }
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["WIDE-USD", "TIGHT-USD"],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["ranked_n"] == 1
+    assert db.inserted_rows[0]["ticker"] == "TIGHT-USD"
 
 
 def test_run_rotation_pass_keeps_shadow_when_lane_is_still_uncertain():
