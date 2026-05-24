@@ -1,17 +1,17 @@
 ﻿      <!-- â•â•â• ZONE 3: DEEP DIVE (tabbed, lazy-loaded) â•â•â• -->
       <div class="brain-deep-dive" id="brain-deep-dive">
-        <div class="bdd-tabs" id="bdd-tabs">
-          <button class="bdd-tab" data-bdd="patterns" onclick="switchDeepDiveTab('patterns')">Patterns</button>
-          <button class="bdd-tab" data-bdd="cycles" onclick="switchDeepDiveTab('cycles')">Cycles</button>
-          <button class="bdd-tab" data-bdd="ops" onclick="switchDeepDiveTab('ops')">Ops</button>
-          <button class="bdd-tab" data-bdd="research" onclick="switchDeepDiveTab('research')">Research</button>
-          <button class="bdd-tab" data-bdd="analytics" onclick="switchDeepDiveTab('analytics')">Analytics</button>
-          <button class="bdd-tab" data-bdd="debug" onclick="switchDeepDiveTab('debug')">Debug</button>
-        </div>
-        <div class="bdd-content" id="bdd-content">
+        <nav class="bx-drilldown-tabs" id="bx-drilldown-tabs" role="tablist" aria-label="Brain drill-down sections">
+          <button id="bx-tab-patterns"  class="bx-drilldown-tab" data-bdd="patterns"  role="tab" aria-selected="false" onclick="switchDeepDiveTab('patterns')">Patterns</button>
+          <button id="bx-tab-cycles"    class="bx-drilldown-tab" data-bdd="cycles"    role="tab" aria-selected="false" onclick="switchDeepDiveTab('cycles')">Cycles</button>
+          <button id="bx-tab-ops"       class="bx-drilldown-tab" data-bdd="ops"       role="tab" aria-selected="false" onclick="switchDeepDiveTab('ops')">Operations</button>
+          <button id="bx-tab-research"  class="bx-drilldown-tab" data-bdd="research"  role="tab" aria-selected="false" onclick="switchDeepDiveTab('research')">Research</button>
+          <button id="bx-tab-analytics" class="bx-drilldown-tab" data-bdd="analytics" role="tab" aria-selected="false" onclick="switchDeepDiveTab('analytics')">Analytics</button>
+          <button id="bx-tab-debug"     class="bx-drilldown-tab" data-bdd="debug"     role="tab" aria-selected="false" onclick="switchDeepDiveTab('debug')">Debug</button>
+        </nav>
+        <div class="bx-drilldown-content" id="bx-drilldown-content">
 
           <!-- Patterns sub-tab -->
-          <div class="bdd-panel" id="bdd-patterns" style="display:none">
+          <div class="bx-drilldown-panel" id="bdd-patterns" style="display:none">
             <div id="backfill-banner" style="display:none;padding:8px 12px;margin-bottom:8px;background:linear-gradient(90deg,rgba(139,92,246,.12),rgba(59,130,246,.08));border:1px solid rgba(139,92,246,.25);border-radius:8px;font-size:11px;color:var(--text-secondary)">
               <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><div class="brain-pulse" style="width:6px;height:6px"></div><strong style="color:#8b5cf6">Backtesting patterns...</strong> <span id="bf-progress-text"></span></div>
               <div style="height:4px;background:rgba(139,92,246,.15);border-radius:2px;overflow:hidden"><div id="bf-progress-bar" style="height:100%;background:#8b5cf6;border-radius:2px;transition:width .5s ease;width:0%"></div></div>
@@ -46,7 +46,7 @@
           </div>
 
           <!-- Cycles sub-tab -->
-          <div class="bdd-panel" id="bdd-cycles" style="display:none">
+          <div class="bx-drilldown-panel" id="bdd-cycles" style="display:none">
             <div style="margin-bottom:10px;padding:4px 0">
               <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
             </div>
@@ -101,7 +101,7 @@
           </div>
 
           <!-- Ops sub-tab -->
-          <div class="bdd-panel" id="bdd-ops" style="display:none">
+          <div class="bx-drilldown-panel" id="bdd-ops" style="display:none">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
               <span style="font-size:10px;font-weight:600;color:var(--text-muted)">Config Profile:</span>
               <select id="ops-profile-select" style="padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:10px;cursor:pointer">
@@ -180,7 +180,68 @@
           </div>
 
           <!-- Research sub-tab -->
-          <div class="bdd-panel" id="bdd-research" style="display:none">
+          <div class="bx-drilldown-panel" id="bdd-research" style="display:none">
+            <!-- bx-research-extras: re-homed from former Opportunities panel (Phase C). -->
+            <div class="bx-research-extras" id="bx-research-extras">
+              <div class="brain-edge-grid" id="brain-edge-grid">
+                <div class="brain-edge-col">
+                  <div class="brain-section" id="brain-playbook-section">
+                    <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+                      <span class="bs-icon">&#x1F4CB;</span> Daily Playbook
+                      <button type="button" onclick="loadPlaybook()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+                    </div>
+                    <div id="brain-playbook-content" style="font-size:11px;color:var(--text-muted)">Loading today&rsquo;s playbook...</div>
+                  </div>
+                </div>
+                <div class="brain-edge-col">
+                  <div class="brain-section" id="brain-perf-section">
+                    <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+                      <span class="bs-icon">&#x1F4C8;</span> P&amp;L Performance
+                      <button type="button" onclick="loadPerfDashboard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+                    </div>
+                    <div id="brain-perf-content" style="font-size:11px;color:var(--text-muted)">Loading performance data...</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="brain-section" id="brain-shadow-promoted-section">
+                <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                  <span class="bs-icon">&#x1F52C;</span> New CHILI-vetted patterns
+                  <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:560px;line-height:1.35">Adaptive-CPCV cohort moves through <code style="font-size:9px">shadow_promoted</code> into <code style="font-size:9px">pilot_promoted</code>. Pilot rows are confidence-sized while EV matures.</span>
+                  <button type="button" onclick="loadShadowPromotedPatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+                </div>
+                <div id="brain-shadow-promoted-patterns" style="font-size:11px;color:var(--text-muted)">Loading staged CHILI-vetted cohort...</div>
+              </div>
+
+              <div class="brain-section">
+                <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+                  <span class="bs-icon">&#x1F52E;</span> Live Predictions
+                  <button onclick="loadBrainPredictions()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+                </div>
+                <div id="brain-predictions" style="font-size:11px;color:var(--text-muted)">Loading predictions...</div>
+              </div>
+
+              <div class="brain-section" id="brain-tradeable-section">
+                <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                  <span class="bs-icon">&#x1F9E0;</span> Tradeable Patterns
+                  <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:420px;line-height:1.35">Promoted patterns meeting OOS / sample-size gates.</span>
+                  <button type="button" onclick="loadTradeablePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+                </div>
+                <div id="brain-tradeable-patterns" style="font-size:11px;color:var(--text-muted)">Loading...</div>
+              </div>
+
+              <div class="brain-section" id="brain-research-edge-section">
+                <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                  <span class="bs-icon">&#x1F9EA;</span> Edge research lane
+                  <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:480px;line-height:1.35">Patterns in <code style="font-size:9px">validated</code> or <code style="font-size:9px">challenged</code> lifecycle with persisted <code style="font-size:9px">edge_evidence</code>. Display only.</span>
+                  <button type="button" onclick="loadResearchEdgePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+                </div>
+                <div id="brain-research-edge-patterns" style="font-size:11px;color:var(--text-muted)">Loading...</div>
+              </div>
+            </div>
+
+            <hr style="margin:18px 0;border:0;border-top:1px solid var(--border)">
+
             <div class="brain-pipeline" id="brain-pipeline"></div>
             <div id="brain-research-funnel" style="font-size:10px;color:var(--text-secondary);margin:6px 0 10px;line-height:1.5"></div>
             <div id="brain-proposal-skips" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
@@ -199,7 +260,7 @@
           </div>
 
           <!-- Analytics sub-tab -->
-          <div class="bdd-panel" id="bdd-analytics" style="display:none">
+          <div class="bx-drilldown-panel" id="bdd-analytics" style="display:none">
             <div class="brain-section">
               <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Market Thesis</div>
               <div class="brain-thesis-card neutral" id="brain-thesis-card">
@@ -217,7 +278,7 @@
           </div>
 
           <!-- Debug: opportunity-board raw + skip reasons (not default operator view) -->
-          <div class="bdd-panel" id="bdd-debug" style="display:none">
+          <div class="bx-drilldown-panel" id="bdd-debug" style="display:none">
             <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Opportunity board API with <code>debug=1</code> (suppressions, skip counts). Scheduler / imminent dry-run: Ops tab or <code>POST /api/trading/alerts/run-pattern-imminent?dry_run=1</code>. Inspect API: <code>/api/trading/inspect/health</code> (session or Bearer).</p>
             <div id="bdd-inspect-health-card" style="margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:10px;background:var(--bg-secondary, rgba(0,0,0,.03))">
               <div style="font-weight:700;margin-bottom:6px">Inspect health</div>
@@ -228,5 +289,5 @@
             <pre id="bdd-debug-opp-json" style="margin-top:10px;font-size:10px;max-height:480px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-word">Not loaded.</pre>
           </div>
 
-        </div><!-- .bdd-content -->
+        </div><!-- .bx-drilldown-content -->
       </div><!-- .brain-deep-dive -->

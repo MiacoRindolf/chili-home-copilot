@@ -129,6 +129,14 @@ def broker_stale_open_trade_snapshot(
     if getattr(trade, "status", None) != "open" or not _is_live_broker_trade(trade):
         return None
 
+    if _source(trade) == "coinbase":
+        # Coinbase position snapshots have proven partial during API/egress
+        # failures. The Coinbase sync layer owns the close decision and now
+        # requires a confirming sell fill before changing Trade.status.
+        # Until then, fail open so the monitoring desk and live exit monitor
+        # keep visible ownership instead of hiding possible real exposure.
+        return None
+
     now = now or datetime.utcnow()
     pos: TradingPosition | None = None
     pos_id = getattr(trade, "position_id", None)

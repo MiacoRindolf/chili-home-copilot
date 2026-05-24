@@ -44,6 +44,7 @@ def test_dispatch_alert_passes_classified_tier_to_send_sms(db, monkeypatch: pyte
 
     monkeypatch.setattr("app.services.sms_service.send_sms", fake_send)
     monkeypatch.setattr("app.services.sms_service.is_configured", lambda: True)
+    monkeypatch.setattr("app.services.sms_service.push_to_telegram_panel", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("app.routers.trading._broadcast_alert_sync", lambda _p: None)
 
     from app.services.trading.alerts import PATTERN_BREAKOUT_IMMINENT, dispatch_alert

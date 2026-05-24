@@ -73,6 +73,45 @@ def test_emit_short_alerts_false_does_not_affect_imbalance_long():
     assert s.suppressed_short_alert_disabled == 0
 
 
+def test_emit_raw_imbalance_false_suppresses_long_and_short_raw_alerts():
+    """Raw imbalance can be disabled while book-pressure still uses it as input."""
+    s = MomentumScanner(
+        emit_raw_imbalance_alerts=False,
+        emit_short_alerts=True,
+    )
+
+    long_alerts = s.on_book_emit(
+        _make_book(imbalance=IMBALANCE_LONG_THRESHOLD + 0.01),
+        now_monotonic=0.0,
+    )
+    short_alerts = s.on_book_emit(
+        _make_book(imbalance=IMBALANCE_SHORT_THRESHOLD - 0.01, ticker="ETH-USD"),
+        now_monotonic=1.0,
+    )
+
+    assert long_alerts == []
+    assert short_alerts == []
+    assert s.fired_imbalance_long == 0
+    assert s.fired_imbalance_short == 0
+    assert s.suppressed_raw_imbalance_disabled == 2
+    assert s.stats()["config"]["emit_raw_imbalance_alerts"] is False
+
+
+def test_custom_imbalance_threshold_controls_emission():
+    """Scanner thresholds should be runtime knobs, not hidden constants."""
+    s = MomentumScanner(
+        emit_short_alerts=False,
+        imbalance_long_threshold=0.90,
+    )
+    alerts = s.on_book_emit(
+        _make_book(imbalance=IMBALANCE_LONG_THRESHOLD + 0.01),
+        now_monotonic=0.0,
+    )
+    assert alerts == []
+    assert s.fired_imbalance_long == 0
+    assert s.stats()["config"]["imbalance_long_threshold"] == 0.90
+
+
 def test_suppressed_short_alert_disabled_surfaces_in_stats():
     """Counter must round-trip through .stats() so the supervisor
     metrics line can show the suppression rate."""
@@ -92,17 +131,22 @@ def test_settings_load_default_is_false():
     from app.services.trading.fast_path.settings import load as fp_load
     # Ensure env var isn't set leftover from another test
     os.environ.pop("CHILI_FAST_PATH_EMIT_SHORT_ALERTS", None)
+    os.environ.pop("CHILI_FAST_PATH_EMIT_RAW_IMBALANCE_ALERTS", None)
     cfg = fp_load()
     assert cfg.emit_short_alerts is False
+    assert cfg.emit_raw_imbalance_alerts is False
 
 
-def test_settings_load_env_override_true():
-    """Operators on a perp venue flip the env var; load() reads it."""
+def test_settings_load_env_overrides_true():
+    """Operators can explicitly re-enable suppressed scanner families."""
     import os
     from app.services.trading.fast_path.settings import load as fp_load
     os.environ["CHILI_FAST_PATH_EMIT_SHORT_ALERTS"] = "true"
+    os.environ["CHILI_FAST_PATH_EMIT_RAW_IMBALANCE_ALERTS"] = "true"
     try:
         cfg = fp_load()
         assert cfg.emit_short_alerts is True
+        assert cfg.emit_raw_imbalance_alerts is True
     finally:
         os.environ.pop("CHILI_FAST_PATH_EMIT_SHORT_ALERTS", None)
+        os.environ.pop("CHILI_FAST_PATH_EMIT_RAW_IMBALANCE_ALERTS", None)

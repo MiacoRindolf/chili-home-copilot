@@ -1428,7 +1428,7 @@ def check_drawdown_breaker(
             # variance estimate -- see ARCHITECT-FLAG in
             # 2026-05-16_phase3-monthly-dd-breaker-arming-watch.md.
             monthly_pnl = _monthly_attributed_pnl(db, user_id)
-            if float(monthly_pnl) <= float(threshold):
+            if float(monthly_pnl) < float(threshold):
                 _breaker_tripped = True
                 k_val = float(getattr(
                     _s_dd, "chili_pattern_dd_breaker_lower_bound_sigmas", 2.0
@@ -1436,7 +1436,7 @@ def check_drawdown_breaker(
                 _breaker_reason = (
                     f"monthly_dd_breaker: 30-day realized PnL "
                     f"${float(monthly_pnl):.2f} (CHILI-attributed only) "
-                    f"<= empirical Gaussian lower-bound "
+                    f"< empirical Gaussian lower-bound "
                     f"${float(threshold):.2f} "
                     f"(K={k_val}σ, computed from {n_obs}d CHILI history)"
                 )

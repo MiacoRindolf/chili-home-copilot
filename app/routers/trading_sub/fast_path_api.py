@@ -34,6 +34,15 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from ...db import engine
+from ...services.trading.fast_path.universe_rotator import (
+    RANK_TRADE_COUNT_MULTIPLIER_MODE,
+    _promotion_edge_from_decay_rows,
+)
+from ...services.trading.fast_path.universe_status import (
+    UNIVERSE_STATUS_ACTIVE,
+    UNIVERSE_STATUS_INACTIVE,
+    UNIVERSE_STATUS_SHADOW,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -511,10 +520,10 @@ def get_universe() -> JSONResponse:
 
     Returns:
       - ``flags``: the rotation toggles + thresholds in effect.
-      - ``active``: tickers currently in ``status='active'`` (executor-
-        eligible) from the most recent rotation pass, ordered by rank.
-      - ``shadow``: tickers in cold-start window
-        (``status='shadow'``), ordered by rank.
+      - ``active``: tickers currently in ``status='active'`` from the
+        most recent rotation pass, ordered by rank. These are the only
+        universe-rotated pairs eligible for live fast-path orders.
+      - ``shadow``: tickers subscribed for learning, ordered by rank.
       - ``recent_rotations``: last 24h of rotation passes summarised
         (one row per pass with the active+shadow+inactive count).
       - ``last_pass``: timestamp of the most recent rotation_at.
@@ -522,14 +531,25 @@ def get_universe() -> JSONResponse:
     Read-only. Cheap (3 small queries against fast_path_universe).
     """
     from ...services.trading.fast_path import settings as fp_settings_mod
+    from ...services.trading.fast_path.fees import fee_bps_for_execution_mode
 
     fp_settings = fp_settings_mod.load()
+    exec_mode = str(fp_settings.execution_mode or "taker").strip().lower()
+    effective_fee_bps, fee_detail = fee_bps_for_execution_mode(
+        fp_settings, exec_mode,
+    )
 
     out: dict[str, Any] = {
         "as_of": _utc_now_naive().isoformat(),
         "flags": {
             "universe_rotation_enabled": bool(
                 fp_settings.universe_rotation_enabled
+            ),
+            "universe_empty_fallback_enabled": bool(
+                fp_settings.universe_empty_fallback_enabled
+            ),
+            "universe_shadow_paper_fills_enabled": bool(
+                fp_settings.universe_shadow_paper_fills_enabled
             ),
             "universe_top_n": int(fp_settings.universe_top_n),
             "universe_hysteresis_ranks": int(
@@ -547,24 +567,140 @@ def get_universe() -> JSONResponse:
             "universe_min_top_of_book_usd": float(
                 fp_settings.universe_min_top_of_book_usd
             ),
+            "universe_shadow_min_top_of_book_usd": float(
+                fp_settings.universe_shadow_min_top_of_book_usd
+            ),
+            "universe_min_range_24h_bps": float(
+                fp_settings.universe_min_range_24h_bps
+            ),
+            "universe_adaptive_range_floor_enabled": bool(
+                fp_settings.universe_adaptive_range_floor_enabled
+            ),
+            "universe_missing_grace_passes": int(
+                fp_settings.universe_missing_grace_passes
+            ),
             "universe_min_trades_24h": int(
                 fp_settings.universe_min_trades_24h
             ),
             "cost_aware_admission_enabled": bool(
                 fp_settings.cost_aware_admission_enabled
             ),
+            "cost_aware_live_fee_enabled": bool(
+                fp_settings.cost_aware_live_fee_enabled
+            ),
             "cost_aware_taker_fee_bps": float(
                 fp_settings.cost_aware_taker_fee_bps
             ),
+            "cost_aware_maker_fee_bps": float(
+                fp_settings.cost_aware_maker_fee_bps
+            ),
+            "effective_fee_bps": float(effective_fee_bps),
+            **fee_detail,
+            "execution_mode": str(fp_settings.execution_mode),
+            "live_alpha_min_samples": int(fp_settings.live_alpha_min_samples),
+            "live_alpha_min_net_bps": float(fp_settings.live_alpha_min_net_bps),
         },
         "active": [],
         "shadow": [],
+        "latest_diagnostics": None,
         "recent_rotations": [],
         "last_pass": None,
     }
 
     try:
         with engine.connect() as conn:
+            if exec_mode in ("maker_only", "maker_first_then_taker"):
+                decay_table = "fast_signal_decay_maker_filled"
+            else:
+                decay_table = "fast_signal_decay"
+            fee_bps = effective_fee_bps
+            min_net_bps = float(fp_settings.live_alpha_min_net_bps or 0.0)
+
+            def _implied_range_24h_bps(
+                composite_score: float | None,
+                top_of_book_usd: float | None,
+                trades_24h: int | None,
+            ) -> float | None:
+                """Reverse the rotator score into its volatility term."""
+                if not composite_score or not top_of_book_usd:
+                    return None
+                trade_activity = float(trades_24h) if (trades_24h or 0) > 0 else 1.0
+                denom = float(top_of_book_usd) * trade_activity
+                if denom <= 0:
+                    return None
+                return round(float(composite_score) / denom, 4)
+
+            def _rank_top_of_book_cap_usd() -> float | None:
+                caps = [
+                    float(value)
+                    for value in (
+                        fp_settings.universe_shadow_min_top_of_book_usd,
+                        fp_settings.universe_min_top_of_book_usd,
+                    )
+                    if float(value or 0.0) > 0.0
+                ]
+                return min(caps) if caps else None
+
+            rank_top_of_book_cap_usd = _rank_top_of_book_cap_usd()
+
+            def _rank_opportunity_per_cost(
+                *,
+                implied_range_24h_bps: float | None,
+                top_of_book_usd: float | None,
+                spread_bps: float | None,
+            ) -> dict[str, Any]:
+                cost_bps = 2.0 * (
+                    float(fee_bps or 0.0) + float(spread_bps or 0.0)
+                )
+                if (
+                    implied_range_24h_bps is None
+                    or top_of_book_usd is None
+                    or cost_bps <= 0.0
+                ):
+                    return {
+                        "rank_opportunity_per_cost": None,
+                        "rank_cost_bps": round(cost_bps, 4),
+                        "rank_top_of_book_cap_usd": rank_top_of_book_cap_usd,
+                        "rank_trade_count_multiplier": (
+                            RANK_TRADE_COUNT_MULTIPLIER_MODE
+                        ),
+                    }
+                capped_book = float(top_of_book_usd)
+                if rank_top_of_book_cap_usd is not None:
+                    capped_book = min(capped_book, rank_top_of_book_cap_usd)
+                return {
+                    "rank_opportunity_per_cost": round(
+                        float(implied_range_24h_bps) * capped_book / cost_bps,
+                        4,
+                    ),
+                    "rank_cost_bps": round(cost_bps, 4),
+                    "rank_top_of_book_cap_usd": rank_top_of_book_cap_usd,
+                    "rank_trade_count_multiplier": (
+                        RANK_TRADE_COUNT_MULTIPLIER_MODE
+                    ),
+                }
+
+            def _best_edge(ticker: str, spread_bps: float | None) -> dict[str, Any]:
+                rows = conn.execute(text(f"""
+                    SELECT ticker, alert_type, score_bucket, horizon_s,
+                           sample_count, mean_return, m2_return
+                    FROM {decay_table}
+                    WHERE ticker = :ticker
+                      AND sample_count > 0
+                    ORDER BY alert_type, score_bucket, horizon_s
+                """), {
+                    "ticker": ticker,
+                }).mappings().all()
+                _ok, evidence = _promotion_edge_from_decay_rows(
+                    [dict(row) for row in rows],
+                    ticker=ticker,
+                    table=decay_table,
+                    fee_bps=float(fee_bps or 0.0),
+                    spread_bps=float(spread_bps or 0.0),
+                    min_net_bps=min_net_bps,
+                )
+                return evidence
+
             # Active + shadow from the most recent rotation
             rows = conn.execute(text("""
                 WITH latest AS (
@@ -575,39 +711,58 @@ def get_universe() -> JSONResponse:
                        top_of_book_usd, trades_24h, promoted_at
                 FROM fast_path_universe
                 WHERE rotation_at = (SELECT ts FROM latest)
-                  AND status IN ('active', 'shadow')
-                ORDER BY status, rank ASC NULLS LAST
-            """)).mappings().all()
+                  AND status IN (:active_status, :shadow_status)
+                ORDER BY CASE WHEN status = :active_status THEN 0 ELSE 1 END,
+                         rank ASC NULLS LAST
+            """), {
+                "active_status": UNIVERSE_STATUS_ACTIVE,
+                "shadow_status": UNIVERSE_STATUS_SHADOW,
+            }).mappings().all()
             for r in rows:
+                spread_bps = (
+                    float(r["spread_bps"])
+                    if r["spread_bps"] is not None else None
+                )
+                composite_score = (
+                    float(r["composite_score"])
+                    if r["composite_score"] is not None else None
+                )
+                top_of_book_usd = (
+                    float(r["top_of_book_usd"])
+                    if r["top_of_book_usd"] is not None else None
+                )
+                trades_24h = (
+                    int(r["trades_24h"])
+                    if r["trades_24h"] is not None else None
+                )
+                implied_range_24h_bps = _implied_range_24h_bps(
+                    composite_score, top_of_book_usd, trades_24h,
+                )
                 row = {
                     "ticker": r["ticker"],
+                    "live_eligible": r["status"] == UNIVERSE_STATUS_ACTIVE,
                     "rank": int(r["rank"]) if r["rank"] is not None else None,
-                    "composite_score": (
-                        float(r["composite_score"])
-                        if r["composite_score"] is not None else None
-                    ),
+                    "composite_score": composite_score,
                     "volume_24h_usd": (
                         float(r["volume_24h_usd"])
                         if r["volume_24h_usd"] is not None else None
                     ),
-                    "spread_bps": (
-                        float(r["spread_bps"])
-                        if r["spread_bps"] is not None else None
-                    ),
-                    "top_of_book_usd": (
-                        float(r["top_of_book_usd"])
-                        if r["top_of_book_usd"] is not None else None
-                    ),
-                    "trades_24h": (
-                        int(r["trades_24h"])
-                        if r["trades_24h"] is not None else None
+                    "spread_bps": spread_bps,
+                    "top_of_book_usd": top_of_book_usd,
+                    "trades_24h": trades_24h,
+                    "implied_range_24h_bps": implied_range_24h_bps,
+                    **_rank_opportunity_per_cost(
+                        implied_range_24h_bps=implied_range_24h_bps,
+                        top_of_book_usd=top_of_book_usd,
+                        spread_bps=spread_bps,
                     ),
                     "promoted_at": (
                         r["promoted_at"].isoformat()
                         if r["promoted_at"] is not None else None
                     ),
+                    "best_edge": _best_edge(str(r["ticker"]), spread_bps),
                 }
-                if r["status"] == "active":
+                if r["status"] == UNIVERSE_STATUS_ACTIVE:
                     out["active"].append(row)
                 else:
                     out["shadow"].append(row)
@@ -615,15 +770,25 @@ def get_universe() -> JSONResponse:
             # Recent rotation passes (last 24h)
             rotations = conn.execute(text("""
                 SELECT rotation_at,
-                       COUNT(*) FILTER (WHERE status = 'active')   AS active_n,
-                       COUNT(*) FILTER (WHERE status = 'shadow')   AS shadow_n,
-                       COUNT(*) FILTER (WHERE status = 'inactive') AS inactive_n
+                       COUNT(*) FILTER (
+                           WHERE status = :active_status
+                       ) AS active_n,
+                       COUNT(*) FILTER (
+                           WHERE status = :shadow_status
+                       ) AS shadow_n,
+                       COUNT(*) FILTER (
+                           WHERE status = :inactive_status
+                       ) AS inactive_n
                 FROM fast_path_universe
                 WHERE rotation_at >= NOW() - INTERVAL '24 hours'
                 GROUP BY rotation_at
                 ORDER BY rotation_at DESC
                 LIMIT 48
-            """)).mappings().all()
+            """), {
+                "active_status": UNIVERSE_STATUS_ACTIVE,
+                "shadow_status": UNIVERSE_STATUS_SHADOW,
+                "inactive_status": UNIVERSE_STATUS_INACTIVE,
+            }).mappings().all()
             out["recent_rotations"] = [
                 {
                     "rotation_at": r["rotation_at"].isoformat(),
@@ -635,6 +800,89 @@ def get_universe() -> JSONResponse:
             ]
             if out["recent_rotations"]:
                 out["last_pass"] = out["recent_rotations"][0]["rotation_at"]
+
+            diag_table = conn.execute(text(
+                "SELECT to_regclass('public.fast_path_universe_runs')"
+            )).scalar()
+            if diag_table is not None:
+                diag = conn.execute(text("""
+                    SELECT rotation_at, scanned, snapshot_failures, ranked_n,
+                           active_n, shadow_n, inactive_n,
+                           range_floor_static_bps, range_floor_dynamic_bps,
+                           range_floor_effective_bps,
+                           gate_rejections, edge_promotion_blocks,
+                           promotion_decay_table, promotion_fee_bps,
+                           promotion_min_samples, promotion_min_net_bps,
+                           exploration_fallback, counters_json, created_at
+                    FROM fast_path_universe_runs
+                    ORDER BY rotation_at DESC
+                    LIMIT 1
+                """)).mappings().one_or_none()
+                if diag is not None:
+                    counters = diag["counters_json"] or {}
+                    out["latest_diagnostics"] = {
+                        "rotation_at": diag["rotation_at"].isoformat(),
+                        "created_at": diag["created_at"].isoformat(),
+                        "scanned": int(diag["scanned"] or 0),
+                        "snapshot_failures": int(
+                            diag["snapshot_failures"] or 0
+                        ),
+                        "ranked_n": int(diag["ranked_n"] or 0),
+                        "active_n": int(diag["active_n"] or 0),
+                        "shadow_n": int(diag["shadow_n"] or 0),
+                        "inactive_n": int(diag["inactive_n"] or 0),
+                        "range_floor_static_bps": (
+                            float(diag["range_floor_static_bps"])
+                            if diag["range_floor_static_bps"] is not None
+                            else None
+                        ),
+                        "range_floor_dynamic_bps": (
+                            float(diag["range_floor_dynamic_bps"])
+                            if diag["range_floor_dynamic_bps"] is not None
+                            else None
+                        ),
+                        "range_floor_effective_bps": (
+                            float(diag["range_floor_effective_bps"])
+                            if diag["range_floor_effective_bps"] is not None
+                            else None
+                        ),
+                        "gate_rejections": diag["gate_rejections"] or {},
+                        "edge_promotion_blocks": (
+                            diag["edge_promotion_blocks"] or {}
+                        ),
+                        "promotion_decay_table": diag[
+                            "promotion_decay_table"
+                        ],
+                        "promotion_fee_bps": (
+                            float(diag["promotion_fee_bps"])
+                            if diag["promotion_fee_bps"] is not None
+                            else None
+                        ),
+                        "promotion_min_samples": (
+                            int(diag["promotion_min_samples"])
+                            if diag["promotion_min_samples"] is not None
+                            else None
+                        ),
+                        "promotion_min_net_bps": (
+                            float(diag["promotion_min_net_bps"])
+                            if diag["promotion_min_net_bps"] is not None
+                            else None
+                        ),
+                        "observed_opportunity_median_round_trip_cost_bps": (
+                            counters.get(
+                                "observed_opportunity_median_round_trip_cost_bps"
+                            )
+                        ),
+                        "observed_opportunity_median_realized_move_to_cost": (
+                            counters.get(
+                                "observed_opportunity_median_realized_move_to_cost"
+                            )
+                        ),
+                        "exploration_fallback": bool(
+                            diag["exploration_fallback"]
+                        ),
+                        "counters": counters,
+                    }
     except Exception as exc:
         out["error"] = f"universe_query_failed: {exc!s:.200}"
 
@@ -695,15 +943,25 @@ def get_maker_stats() -> JSONResponse:
     ``fast_path_maker_attempts`` aggregated per ticker.
     """
     from ...services.trading.fast_path import settings as fp_settings_mod
+    from ...services.trading.fast_path.fees import fee_bps_for_execution_mode
+
     fp_settings = fp_settings_mod.load()
+    maker_fee_bps, fee_detail = fee_bps_for_execution_mode(
+        fp_settings, "maker_only",
+    )
 
     out: dict[str, Any] = {
         "ok": True,
         "settings": {
             "execution_mode": fp_settings.execution_mode,
+            "cost_aware_live_fee_enabled": bool(
+                fp_settings.cost_aware_live_fee_enabled
+            ),
             "cost_aware_maker_fee_bps": float(
                 fp_settings.cost_aware_maker_fee_bps
             ),
+            "effective_maker_fee_bps": float(maker_fee_bps),
+            **fee_detail,
             "maker_cancel_on_timeout_s": int(
                 fp_settings.maker_cancel_on_timeout_s
             ),
@@ -788,6 +1046,43 @@ def get_maker_stats() -> JSONResponse:
         out["error"] = f"maker_stats_query_failed: {exc!s:.200}"
 
     return JSONResponse(out)
+
+
+@router.get("/signal-health")
+def get_signal_health(
+    limit: int = Query(100, ge=1, le=500),
+    include_tickers: bool = Query(True),
+    include_maker_attempts: bool = Query(True),
+) -> JSONResponse:
+    """Confidence-bound signal diagnosis for the fast-path scalp lane.
+
+    Reads the execution-mode-appropriate decay table and returns a
+    pooled lane view plus optional per-ticker lane view. The verdicts
+    mirror the learned gates: negative pre-cost edge is suppressed,
+    statistically cost-cleared lanes are promotion candidates, and
+    overlapping intervals stay observe-only. Maker-attempt diagnostics
+    add fillability and adverse-selection context from execution
+    outcomes, which catches signals that look valid but cannot be
+    captured passively.
+    """
+    try:
+        from ...services.trading.fast_path.signal_health import (
+            build_signal_health_report,
+        )
+
+        return JSONResponse(
+            build_signal_health_report(
+                engine,
+                limit=int(limit),
+                include_tickers=bool(include_tickers),
+                include_maker_attempts=bool(include_maker_attempts),
+            )
+        )
+    except Exception as exc:
+        return JSONResponse({
+            "ok": False,
+            "error": f"signal_health_query_failed: {exc!s:.200}",
+        })
 
 
 __all__ = ["router"]

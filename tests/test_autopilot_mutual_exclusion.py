@@ -338,7 +338,13 @@ def test_auto_trader_v1_blocks_entry_when_momentum_owns_symbol(db, monkeypatch):
     # Momentum owns MUTEX1 with an active live session.
     _make_live_session(db, user_id=u.id, symbol="MUTEX1", state=STATE_LIVE_ENTERED)
     # Minimal pattern row for the alert's FK integrity.
-    pat = ScanPattern(name="mutex pat", rules_json={}, origin="user", asset_class="stock")
+    pat = ScanPattern(
+        name="mutex pat",
+        rules_json={},
+        origin="user",
+        asset_class="stock",
+        lifecycle_stage="live",
+    )
     db.add(pat)
     db.flush()
     alert = BreakoutAlert(
@@ -404,7 +410,13 @@ def test_auto_trader_v1_allowed_when_symbol_is_free(db, monkeypatch):
     from app.services.trading import auto_trader
 
     u = _make_user(db, name="mutex_v1_allowed")
-    pat = ScanPattern(name="mutex free", rules_json={}, origin="user", asset_class="stock")
+    pat = ScanPattern(
+        name="mutex free",
+        rules_json={},
+        origin="user",
+        asset_class="stock",
+        lifecycle_stage="live",
+    )
     db.add(pat)
     db.flush()
     alert = BreakoutAlert(

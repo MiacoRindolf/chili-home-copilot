@@ -25,6 +25,7 @@ CHILI is a local-first household assistant whose most sophisticated subsystem is
 - Python **3.11**; conda env **`chili-env`**. Use `conda activate chili-env` or `conda run -n chili-env …` for Python invocations and pip installs. Do not install into base.
 - Platform is Windows (win32), bash shell. Helper scripts are PowerShell (`.ps1`).
 - No ruff/black/mypy configured — do not add lint gates unprompted.
+- If pytest fails to collect with `'Package' object has no attribute 'obj'`, the env's `pytest-asyncio` is older than the floor in `requirements.txt:92`. Recreate or upgrade: `conda run -n chili-env pip install -r requirements.txt --upgrade`.
 
 ## Common commands
 

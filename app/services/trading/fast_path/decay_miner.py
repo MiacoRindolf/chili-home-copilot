@@ -55,6 +55,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from .alert_direction import direction_for_alert_type
 from .settings import FastPathSettings
 
 logger = logging.getLogger(__name__)
@@ -113,12 +114,7 @@ def _alert_direction(alert_type: str) -> str:
     kept for an eventual F8 "exit early on opposite-direction
     signal" feature).
     """
-    a = (alert_type or "").lower()
-    if a.endswith("_short"):
-        return "short"
-    if a.endswith("_long"):
-        return "long"
-    return "neutral"
+    return direction_for_alert_type(alert_type)
 
 
 # ── In-memory state ──────────────────────────────────────────────────

@@ -1,73 +1,72 @@
-# NEXT_TASK: f-position-identity-phase-5b-soak-and-reader-parity
+# NEXT_TASK: f-chili-env-pin-pytest-asyncio
 
-STATUS: PENDING
+STATUS: DONE
 
-## Goal
+**Source:** CC_REPORT §54 + Open Question §5 in `2026-05-23_f-brain-runtime-tab-redesign.md`, ACK'd in the corresponding COWORK_REVIEW.
+**Scope:** Mostly a docs / diagnostic note. Minimal env spec change (verify the existing pin is sufficient, possibly tighten it). ~10 minutes.
+**Risk:** Low. Only touches developer environment + CLAUDE.md, not runtime code.
 
-Soak the Phase 5B read-only envelope layer and compare old Trade-row reports
-against the new decision/envelope/position views before migrating any live
-reader.
+## Pre-dispatch finding (read first)
 
-## What Exists Now
+When this brief was originally drafted, CC's CC_REPORT (§54) said `pytest-asyncio` "is not pinned anywhere". Pre-dispatch grep against `requirements.txt` line 92 shows:
 
-- `trading_management_envelopes`: compatibility view over `trading_trades`.
-- `trading_phase5b_decision_envelope_position`: joined read model for
-  `trading_decisions -> management envelope -> trading_positions`.
-- `trading_phase5b_pattern_decision_performance`: pattern-level performance
-  view using the decision/envelope split.
-- `app.services.trading.management_envelopes`: read-only helper API.
-- Linkage status separates hard live failures from
-  `historical_broker_envelope_missing_position` debt.
-
-## Daily Probe
-
-```sql
-SELECT * FROM trading_phase5a_envelope_parity;
-
-SELECT linkage_status, COUNT(*)
-FROM trading_phase5b_decision_envelope_position
-GROUP BY linkage_status
-ORDER BY COUNT(*) DESC;
-
-SELECT *
-FROM trading_phase5b_pattern_decision_performance
-ORDER BY total_pnl DESC NULLS LAST
-LIMIT 20;
+```
+pytest-asyncio>=0.23.8,<1   # 0.23.8+ for pytest 8.x Package.obj collection compat
 ```
 
-Green state:
+**The pin already exists and the comment already documents the exact failure mode** CC hit. So this brief is NOT "add a missing pin"; it's:
 
-- `valid_trades_missing_decision = 0`
-- `open_broker_trades_missing_position = 0`
-- `orphan_decisions = 0`
-- Phase 5B hard linkage issues are zero.
-- `historical_broker_envelope_missing_position` can remain nonzero until old
-  closed envelopes are backfilled or retired from reports.
+1. **Verify the existing pin is the minimum sufficient.** CC's local env had a 0.23.3 install (per CC_REPORT §54) — which would have been blocked by the `>=0.23.8` floor in requirements.txt IF CC had reinstalled from the file. The problem was env staleness, not missing pin.
+2. **Tighten if useful.** If the version CC's session ended up using is significantly newer than 0.23.8, consider raising the floor to that version (still keeping `<1` upper bound). Or leave the existing `>=0.23.8,<1` as-is — both are defensible.
+3. **Add the CLAUDE.md diagnostic line** so the next operator who hits the collection error knows the fix is `pip install -r requirements.txt --upgrade` inside `chili-env`, not a code change.
+4. **Verify** that a fresh `conda run -n chili-env pip install -r requirements.txt && conda run -n chili-env pytest --collect-only tests/test_brain_runtime_endpoints.py -q` collects cleanly.
 
-## Phase 5C Criteria
+## Tasks
 
-Move to Phase 5C when the read model stays boring through multiple fresh
-entries and at least one close:
+1. **Discover the installed version.** Run:
+   ```
+   conda run -n chili-env python -c "import pytest_asyncio; print(pytest_asyncio.__version__)"
+   ```
+   Capture the version. Decide whether to tighten the existing `>=0.23.8` pin to that version.
+2. **Update `requirements.txt` line 92** if tightening. If leaving as-is, that's a no-op — record the decision in the CC report's "What shipped" section as "no change needed; pin already correct".
+3. **Add to `CLAUDE.md`** under "Environment & runtime", as a new line at the end of that section: "If pytest fails to collect with `'Package' object has no attribute 'obj'`, the env's `pytest-asyncio` is older than the floor in `requirements.txt:92`. Recreate or upgrade: `conda run -n chili-env pip install -r requirements.txt --upgrade`."
+4. **Verify.** Run:
+   ```
+   conda run -n chili-env pip install -r requirements.txt --upgrade
+   conda run -n chili-env pytest --collect-only tests/test_brain_runtime_endpoints.py -q
+   ```
+   First command should be idempotent (or upgrade pytest-asyncio if your local was stale). Second should collect 6 tests cleanly.
 
-1. Add one reporting reader that uses `management_envelopes.py`.
-2. Compare old `trading_trades` report output to Phase 5B output.
-3. Keep the old query live until the comparison is stable.
-4. Do not physically rename `trading_trades` yet.
+## Acceptance
+
+- `grep -n 'pytest-asyncio' requirements.txt` shows the (possibly tightened, possibly unchanged) pin.
+- `grep -n "Package' object has no attribute 'obj'" CLAUDE.md` shows the new diagnostic note.
+- `pytest --collect-only` works.
+- ONE commit, docs+config only, no app code touched.
+
+## Commit message
+
+```
+chore(chili-env): document pytest-asyncio recovery diagnostic in CLAUDE.md
+
+[Optionally: + tighten requirements.txt pin from >=0.23.8 to >=<actual-version>.]
+
+Pre-dispatch grep showed requirements.txt:92 already pins pytest-asyncio
+>=0.23.8,<1 with a comment about the Package.obj collection bug. The
+2026-05-23 brain-runtime-tab-redesign session hit the bug because its
+chili-env had a stale 0.23.3 install — the pin was correct, the env was
+behind it. Adding a CLAUDE.md diagnostic line so the next operator who
+sees the error knows the fix is `pip install -r requirements.txt --upgrade`,
+not a code change.
+```
+
+## Out of scope
+
+- Migrating to a different test framework or pytest major-version upgrade.
+- Pinning anything besides pytest-asyncio. The existing pytest pin (`>=8.2,<9`) and pytest-cov pin (`>=7.0.0,<8`) are already coherent.
+- Reproducing the original failure (CC already saw it; closing the prevention loop is enough).
+- Creating an `environment.yml`. The repo uses `requirements.txt` as the env spec; that's the convention.
 
 ## Rollback
 
-Phase 5B is read-only. Rollback is just:
-
-```sql
-DROP VIEW IF EXISTS trading_phase5b_pattern_decision_performance;
-DROP VIEW IF EXISTS trading_phase5b_decision_envelope_position;
-DROP VIEW IF EXISTS trading_management_envelopes;
-```
-
-The helper module can remain unused if the views are dropped.
-
-## Reference
-
-- CC report: `docs/STRATEGY/CC_REPORTS/2026-05-21_f-position-identity-phase-5b-read-models.md`
-- Migrations: 264-265
-- Test suite: `tests/test_position_identity_phase5b.py`
+`git revert <commit>` — the change is a one-line CLAUDE.md addition (and optionally a tightened pin in requirements.txt). Reverting is trivial.

@@ -131,6 +131,7 @@ services:
       # Autopilot real-time streaming: price bus + Coinbase WS for crypto quotes.
       - CHILI_AUTOPILOT_PRICE_BUS_ENABLED=1
       - CHILI_COINBASE_WS_ENABLED=1
+      - CHILI_FAST_PATH_COST_AWARE_LIVE_FEE_ENABLED=${CHILI_FAST_PATH_COST_AWARE_LIVE_FEE_ENABLED:-1}
       # 2026-04-28: raised from default 0.75 → 0.85 per operator. Same
       # value also set in scheduler-worker (where the autotrader runs);
       # mirrored here for any chili-side consumer of portfolio_risk.
@@ -801,11 +802,14 @@ services:
       # in .env (or unset) to disable without editing this file.
       - CHILI_FAST_PATH_ENABLED=${CHILI_FAST_PATH_ENABLED:-1}
       - CHILI_FAST_PATH_MODE=paper
-      - CHILI_FAST_PATH_PAIRS=BTC-USD,ETH-USD,SOL-USD,AVAX-USD,DOGE-USD
+      # CHILI_FAST_PATH_PAIRS intentionally has no compose default.
+      # Set it explicitly only for configured-pair rollback/testing; the
+      # production scalp universe is selected from fast_path_universe.
       # Profitability guardrails: keep paper mode, but use maker-style
       # fills and the dynamic cost gate unless the operator overrides.
       - CHILI_FAST_PATH_EXECUTION_MODE=${CHILI_FAST_PATH_EXECUTION_MODE:-maker_only}
       - CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED=${CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED:-1}
+      - CHILI_FAST_PATH_COST_AWARE_LIVE_FEE_ENABLED=${CHILI_FAST_PATH_COST_AWARE_LIVE_FEE_ENABLED:-1}
       - CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS=${CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS:-60}
       - CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS=${CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS:-40}
       - CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S=${CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S:-10}

@@ -127,7 +127,9 @@ class Trade(Base):
     related_alert_id: Optional[int] = Column(
         Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    scale_in_count: int = Column(Integer, nullable=False, default=0)
+    scale_in_count: int = Column(
+        Integer, nullable=False, server_default="0", default=0
+    )
     auto_trader_version: Optional[str] = Column(String(32), nullable=True, index=True)
     pending_exit_order_id: Optional[str] = Column(String(100), nullable=True)
     pending_exit_status: Optional[str] = Column(String(30), nullable=True)
@@ -145,7 +147,9 @@ class Trade(Base):
     # are audit-only. Original ``quantity`` is reduced by the partial fraction
     # at fill time, so reconstructing pre-partial size is
     # ``quantity + partial_taken_qty``.
-    partial_taken: bool = Column(Boolean, nullable=False, default=False)
+    partial_taken: bool = Column(
+        Boolean, nullable=False, server_default=text("FALSE"), default=False
+    )
     partial_taken_at: Optional[datetime] = Column(DateTime, nullable=True)
     partial_taken_qty: Optional[float] = Column(Float, nullable=True)
     partial_taken_price: Optional[float] = Column(Float, nullable=True)
@@ -486,7 +490,7 @@ class TradingExecutionEvent(Base):
     order_id: Optional[str] = Column(String(128), nullable=True, index=True)
     client_order_id: Optional[str] = Column(String(128), nullable=True, index=True)
     product_id: Optional[str] = Column(String(64), nullable=True, index=True)
-    event_type: str = Column(String(32), nullable=False, index=True)
+    event_type: str = Column(String(64), nullable=False, index=True)
     status: Optional[str] = Column(String(32), nullable=True, index=True)
     requested_quantity: Optional[float] = Column(Float, nullable=True)
     cumulative_filled_quantity: Optional[float] = Column(Float, nullable=True)
@@ -738,6 +742,9 @@ class AlertHistory(Base):
     scan_pattern_id: Optional[int] = Column(
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    decision_packet_id: Optional[int] = Column(
+        BigInteger, ForeignKey("trading_decision_packets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     content_signature: Optional[str] = Column(String(512), nullable=True)
     sent_via: str = Column(String(20), nullable=False, default="email_gateway")
     success: bool = Column(Boolean, nullable=False, default=True)
@@ -938,35 +945,49 @@ class ScanPattern(Base):
     id: int = Column(Integer, primary_key=True, index=True)
     name: str = Column(String(120), nullable=False)
     description: Optional[str] = Column(Text, nullable=True)
-    rules_json: dict = Column(JSONB, nullable=False, default=lambda: {})
-    origin: str = Column(String(30), nullable=False, default="user")
-    asset_class: str = Column(String(20), nullable=False, default="all")
-    timeframe: str = Column(String(10), nullable=False, default="1d")
-    confidence: float = Column(Float, nullable=False, default=0.0)
-    evidence_count: int = Column(Integer, nullable=False, default=0)
+    rules_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
+    origin: str = Column(String(30), nullable=False, default="user", server_default="user")
+    asset_class: str = Column(String(20), nullable=False, default="all", server_default="all")
+    timeframe: str = Column(String(10), nullable=False, default="1d", server_default="1d")
+    confidence: float = Column(Float, nullable=False, default=0.0, server_default="0")
+    evidence_count: int = Column(Integer, nullable=False, default=0, server_default="0")
     win_rate: Optional[float] = Column(Float, nullable=True)
     avg_return_pct: Optional[float] = Column(Float, nullable=True)
-    backtest_count: int = Column(Integer, nullable=False, default=0)
-    score_boost: float = Column(Float, nullable=False, default=0.0)
-    min_base_score: float = Column(Float, nullable=False, default=0.0)
-    active: bool = Column(Boolean, nullable=False, default=True)
+    backtest_count: int = Column(Integer, nullable=False, default=0, server_default="0")
+    score_boost: float = Column(Float, nullable=False, default=0.0, server_default="0")
+    min_base_score: float = Column(Float, nullable=False, default=0.0, server_default="0")
+    active: bool = Column(Boolean, nullable=False, default=True, server_default=text("TRUE"))
     parent_id: Optional[int] = Column(
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
     )
     exit_config: Optional[dict] = Column(JSONB, nullable=True)
     variant_label: Optional[str] = Column(String(40), nullable=True)
-    generation: int = Column(Integer, nullable=False, default=0)
-    ticker_scope: str = Column(String(20), nullable=False, default="universal")
+    generation: int = Column(Integer, nullable=False, default=0, server_default="0")
+    ticker_scope: str = Column(
+        String(20), nullable=False, default="universal", server_default="universal"
+    )
     scope_tickers: Optional[str] = Column(Text, nullable=True)
-    trade_count: int = Column(Integer, nullable=False, default=0)
-    backtest_priority: int = Column(Integer, nullable=False, default=0)
+    trade_count: int = Column(Integer, nullable=False, default=0, server_default="0")
+    backtest_priority: int = Column(Integer, nullable=False, default=0, server_default="0")
     last_backtest_at: Optional[datetime] = Column(DateTime, nullable=True)
-    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False, server_default=text("NOW()")
+    )
+    updated_at: datetime = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+        server_default=text("NOW()"),
+    )
 
     # Out-of-sample / promotion (see brain_oos_* settings and learning.py gates).
     # Deprecated: prefer lifecycle_stage; kept for backwards compatibility and reads.
-    promotion_status: str = Column(String(32), nullable=False, default="legacy")
+    promotion_status: str = Column(
+        String(32), nullable=False, default="legacy", server_default="legacy"
+    )
     oos_win_rate: Optional[float] = Column(Float, nullable=True)
     oos_avg_return_pct: Optional[float] = Column(Float, nullable=True)
     oos_trade_count: Optional[int] = Column(Integer, nullable=True)
@@ -978,15 +999,23 @@ class ScanPattern(Base):
     hypothesis_family: Optional[str] = Column(String(32), nullable=True)
 
     # Quant research: multi-holdout / bootstrap stats, two-tier queue (prescreen -> full), paper shadow book.
-    oos_validation_json: dict = Column(JSONB, nullable=False, default=lambda: {})
-    queue_tier: str = Column(String(16), nullable=False, default="full")
-    paper_book_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    oos_validation_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
+    queue_tier: str = Column(String(16), nullable=False, default="full", server_default="full")
+    paper_book_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
     # Regime affinity: win-rate / avg-return breakdown by market regime
     # e.g. {"risk_on": {"win_rate": 0.65, "n": 30}, "risk_off": {"win_rate": 0.40, "n": 12}}
-    regime_affinity_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    regime_affinity_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
     # Lifecycle FSM: candidate -> backtested -> validated | challenged -> promoted -> live -> decayed -> retired
     # ``challenged`` = repeatable-edge research (edge_evidence); inspectable, not live-eligible (see governance).
-    lifecycle_stage: str = Column(String(20), nullable=False, default="candidate")
+    lifecycle_stage: str = Column(
+        String(20), nullable=False, default="candidate", server_default="candidate"
+    )
     lifecycle_changed_at: Optional[datetime] = Column(DateTime, nullable=True)
     user_id: Optional[int] = Column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -1003,7 +1032,7 @@ class ScanPattern(Base):
     promotion_gate_reasons: Optional[list] = Column(JSONB, nullable=True)
     # Q1.T1.6: CPCV evaluator — realized trade PnL sequence vs ML triple-barrier classifier.
     pattern_evidence_kind: str = Column(
-        String(20), nullable=False, default="realized_pnl",
+        String(20), nullable=False, default="realized_pnl", server_default="realized_pnl",
     )
 
     # f-promotion-pipeline-rebalance Phase 4 (mig 237): composite quality
@@ -1016,9 +1045,13 @@ class ScanPattern(Base):
     # stale recert debt, and broker-risk readiness.
     alpha_sleeve: Optional[str] = Column(String(40), nullable=True)
     portfolio_gate_score: Optional[float] = Column(Float, nullable=True)
-    portfolio_gate_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    portfolio_gate_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
+    )
     portfolio_gate_updated_at: Optional[datetime] = Column(DateTime, nullable=True)
-    recert_required: bool = Column(Boolean, nullable=False, default=False)
+    recert_required: bool = Column(
+        Boolean, nullable=False, default=False, server_default=text("FALSE")
+    )
     recert_reason: Optional[str] = Column(Text, nullable=True)
 
     # f-canonical-outcome-layer Phase A (mig 241, 2026-05-14): split the
@@ -1230,15 +1263,22 @@ class PaperTrade(Base):
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
     )
     ticker: str = Column(String(32), nullable=False)
-    direction: str = Column(String(8), nullable=False, default="long")
+    direction: str = Column(
+        String(8), nullable=False, server_default="long", default="long"
+    )
     entry_price: float = Column(Float, nullable=False)
     stop_price: Optional[float] = Column(Float, nullable=True)
     target_price: Optional[float] = Column(Float, nullable=True)
     # Migration 226: widened from Integer -> Float so a fractional partial
     # at 1R is representable on the typical ``quantity=1`` paper position.
-    quantity: float = Column(Float, nullable=False, default=1.0)
-    status: str = Column(String(16), nullable=False, default="open")  # open, closed, expired
-    entry_date: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    quantity: float = Column(Float, nullable=False, server_default="1.0", default=1.0)
+    status: str = Column(
+        String(16), nullable=False, server_default="open", default="open"
+    )  # open, closed, expired
+    entry_date: datetime = Column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
+    )
     exit_date: Optional[datetime] = Column(DateTime, nullable=True)
     exit_price: Optional[float] = Column(Float, nullable=True)
     exit_reason: Optional[str] = Column(String(32), nullable=True)  # stop, target, expired, manual
@@ -1257,11 +1297,16 @@ class PaperTrade(Base):
     # Migration 226: partial-profit-taking at 1R. Same shape as on Trade
     # above. Single partial per paper trade; reconstruct pre-partial size
     # as ``quantity + partial_taken_qty``.
-    partial_taken: bool = Column(Boolean, nullable=False, default=False)
+    partial_taken: bool = Column(
+        Boolean, nullable=False, server_default=text("FALSE"), default=False
+    )
     partial_taken_at: Optional[datetime] = Column(DateTime, nullable=True)
     partial_taken_qty: Optional[float] = Column(Float, nullable=True)
     partial_taken_price: Optional[float] = Column(Float, nullable=True)
-    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: datetime = Column(
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
+    )
 
 
 class BrainBatchJob(Base):
@@ -3522,6 +3567,46 @@ class FastPathUniverseEntry(Base):
     promoted_at: Optional[datetime] = Column(DateTime, nullable=True)
 
 
+class FastPathUniverseRun(Base):
+    """Pass-level diagnostics for fast-path universe rotations.
+
+    Complements ``FastPathUniverseEntry``. One run row explains the
+    pass-level choices that cannot live naturally on each ticker row:
+    gate rejection counts, effective volatility floor, and learned-edge
+    promotion blocks.
+    """
+
+    __tablename__ = "fast_path_universe_runs"
+    __table_args__ = (
+        Index("ix_fast_path_universe_runs_rotation_at", "rotation_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    rotation_at: datetime = Column(DateTime, nullable=False)
+    scanned: int = Column(Integer, nullable=False, default=0)
+    snapshot_failures: int = Column(Integer, nullable=False, default=0)
+    ranked_n: int = Column(Integer, nullable=False, default=0)
+    active_n: int = Column(Integer, nullable=False, default=0)
+    shadow_n: int = Column(Integer, nullable=False, default=0)
+    inactive_n: int = Column(Integer, nullable=False, default=0)
+    range_floor_static_bps: Optional[float] = Column(Float, nullable=True)
+    range_floor_dynamic_bps: Optional[float] = Column(Float, nullable=True)
+    range_floor_effective_bps: Optional[float] = Column(Float, nullable=True)
+    gate_rejections: dict = Column(JSONB, nullable=False, default=lambda: {})
+    edge_promotion_blocks: dict = Column(
+        JSONB, nullable=False, default=lambda: {}
+    )
+    promotion_decay_table: Optional[str] = Column(String(64), nullable=True)
+    promotion_fee_bps: Optional[float] = Column(Float, nullable=True)
+    promotion_min_samples: Optional[int] = Column(Integer, nullable=True)
+    promotion_min_net_bps: Optional[float] = Column(Float, nullable=True)
+    exploration_fallback: bool = Column(Boolean, nullable=False, default=False)
+    counters_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    created_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+
 class TradingDecision(Base):
     """Immutable entry-decision layer for position-identity Phase 5A.
 
@@ -3621,13 +3706,19 @@ class TradingPosition(Base):
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     broker_source: str = Column(String(20), nullable=False)
-    account_type: str = Column(String(20), nullable=False, default="cash")
+    account_type: str = Column(
+        String(20), nullable=False, server_default="cash", default="cash"
+    )
     ticker: str = Column(String(20), nullable=False)
-    direction: str = Column(String(10), nullable=False, default="long")
+    direction: str = Column(
+        String(10), nullable=False, server_default="long", default="long"
+    )
     asset_kind: Optional[str] = Column(String(20), nullable=True)
     current_quantity: Optional[float] = Column(Float, nullable=True)
     current_avg_price: Optional[float] = Column(Float, nullable=True)
-    state: str = Column(String(20), nullable=False, default="unknown")
+    state: str = Column(
+        String(20), nullable=False, server_default="unknown", default="unknown"
+    )
     current_envelope_id: Optional[int] = Column(
         BigInteger,
         ForeignKey("trading_trades.id", ondelete="SET NULL"),
@@ -3638,10 +3729,12 @@ class TradingPosition(Base):
         DateTime, nullable=True
     )
     created_at: datetime = Column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
     )
     updated_at: datetime = Column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
     )
 
 
@@ -3672,8 +3765,10 @@ class TradingPositionEvent(Base):
         nullable=True,
     )
     observed_at: datetime = Column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
     )
     recorded_at: datetime = Column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, server_default=text("CURRENT_TIMESTAMP"), default=datetime.utcnow,
+        nullable=False
     )

@@ -34,19 +34,38 @@ class ContextBrainRuntimeState:
 
 
 _VALID_MODES = frozenset({"reactive", "learning", "paused", "shadow"})
+DEFAULT_TOKEN_BUDGET_PER_REQUEST = 8000
+DEFAULT_DISTILLATION_THRESHOLD_TOKENS = 12000
+DEFAULT_DAILY_DISTILLATION_USD_CAP = 0
+DEFAULT_SPENT_TODAY_DISTILLATION_USD = 0
+DEFAULT_LEARNED_STRATEGY_VERSION = 1
+
+
+def _value_or_default(value: Any, default: Any) -> Any:
+    return default if value is None else value
 
 
 def _row_to_state(row: Any) -> ContextBrainRuntimeState:
     return ContextBrainRuntimeState(
         mode=str(row[0]),
-        token_budget_per_request=int(row[1] or 8000),
-        distillation_threshold_tokens=int(row[2] or 12000),
-        daily_distillation_usd_cap=Decimal(row[3] or 0),
-        spent_today_distillation_usd=Decimal(row[4] or 0),
+        token_budget_per_request=int(
+            _value_or_default(row[1], DEFAULT_TOKEN_BUDGET_PER_REQUEST)
+        ),
+        distillation_threshold_tokens=int(
+            _value_or_default(row[2], DEFAULT_DISTILLATION_THRESHOLD_TOKENS)
+        ),
+        daily_distillation_usd_cap=Decimal(
+            _value_or_default(row[3], DEFAULT_DAILY_DISTILLATION_USD_CAP)
+        ),
+        spent_today_distillation_usd=Decimal(
+            _value_or_default(row[4], DEFAULT_SPENT_TODAY_DISTILLATION_USD)
+        ),
         spend_reset_date=row[5] or date.today(),
         learning_enabled=bool(row[6]),
         distillation_enabled=bool(row[7]),
-        learned_strategy_version=int(row[8] or 1),
+        learned_strategy_version=int(
+            _value_or_default(row[8], DEFAULT_LEARNED_STRATEGY_VERSION)
+        ),
         last_learning_cycle_at=row[9],
         updated_at=row[10],
     )

@@ -138,6 +138,7 @@ def _collect_live_session_conflicts(
     symbol: str,
     sector: str,
     correlation_bucket: str,
+    hypothesis_family: str | None,
 ) -> list[dict[str, Any]]:
     from ...models.trading import MomentumStrategyVariant, TradingAutomationSession
 
@@ -156,6 +157,7 @@ def _collect_live_session_conflicts(
         for variant in db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id.in_(tuple(variant_ids))).all():
             variants[int(variant.id)] = variant
     out: list[dict[str, Any]] = []
+    candidate_family = str(hypothesis_family or "").strip().lower()
     for sess in rows:
         sess_sector = _symbol_asset_family(sess.symbol)
         sess_corr = _correlation_bucket(sess.symbol, asset_class=sess_sector)
@@ -167,7 +169,8 @@ def _collect_live_session_conflicts(
         if sess_corr == correlation_bucket:
             buckets.append("same_correlation_bucket")
         variant = variants.get(int(sess.variant_id)) if getattr(sess, "variant_id", None) else None
-        if variant and (variant.family or "").strip().lower():
+        incumbent_family = (variant.family or "").strip().lower() if variant else ""
+        if candidate_family and incumbent_family == candidate_family:
             buckets.append("same_hypothesis_family")
         if not buckets:
             continue
@@ -182,6 +185,162 @@ def _collect_live_session_conflicts(
             }
         )
     return out
+
+
+def _trade_notional_usd(trade: Any) -> float:
+    px = _safe_float(getattr(trade, "avg_fill_price", None), 0.0) or _safe_float(
+        getattr(trade, "entry_price", None), 0.0
+    )
+    qty = _safe_float(getattr(trade, "filled_quantity", None), 0.0) or _safe_float(
+        getattr(trade, "quantity", None), 0.0
+    )
+    return max(0.0, abs(px * qty))
+
+
+def _session_position_notional_usd(session: Any) -> float:
+    snap = getattr(session, "risk_snapshot_json", None)
+    if not isinstance(snap, dict):
+        return 0.0
+    for key in ("momentum_live_execution", "momentum_paper_execution"):
+        lane = snap.get(key)
+        if not isinstance(lane, dict):
+            continue
+        pos = lane.get("position")
+        if not isinstance(pos, dict):
+            continue
+        direct = _safe_float(pos.get("notional_usd"), 0.0)
+        if direct > 0:
+            return direct
+        qty = _safe_float(pos.get("quantity"), 0.0)
+        px = (
+            _safe_float(pos.get("entry_price"), 0.0)
+            or _safe_float(pos.get("avg_fill_price"), 0.0)
+            or _safe_float(lane.get("last_price"), 0.0)
+        )
+        if qty > 0 and px > 0:
+            return abs(qty * px)
+    return 0.0
+
+
+def _portfolio_exposure_snapshot(
+    db: Session,
+    *,
+    user_id: int,
+    symbol: str,
+    sector: str,
+    correlation_bucket: str,
+    hypothesis_family: str | None,
+    execution_mode: str | None,
+    intended_notional_usd: float | None,
+) -> dict[str, Any]:
+    from ...models.trading import MomentumStrategyVariant, Trade, TradingAutomationSession
+
+    open_trade_rows = (
+        db.query(Trade)
+        .filter(Trade.user_id == int(user_id), Trade.status == "open", Trade.direction == "long")
+        .all()
+    )
+    live_session_rows = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.user_id == int(user_id),
+            TradingAutomationSession.mode == "live",
+            ~TradingAutomationSession.state.in_(tuple(_LIVE_TERMINAL_SESSION_STATES)),
+        )
+        .all()
+    )
+    variant_ids = {int(row.variant_id) for row in live_session_rows if getattr(row, "variant_id", None)}
+    variants = {}
+    if variant_ids:
+        for variant in db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id.in_(tuple(variant_ids))).all():
+            variants[int(variant.id)] = variant
+
+    open_trade_notional = sum(_trade_notional_usd(row) for row in open_trade_rows)
+    live_session_notional = sum(_session_position_notional_usd(row) for row in live_session_rows)
+    candidate_family = str(hypothesis_family or "").strip().lower()
+    same_family_live = 0
+    same_symbol_live = 0
+    same_corr_live = 0
+    same_sector_live = 0
+    for sess in live_session_rows:
+        sess_symbol = (getattr(sess, "symbol", "") or "").strip().upper()
+        sess_sector = _symbol_asset_family(sess_symbol)
+        sess_corr = _correlation_bucket(sess_symbol, asset_class=sess_sector)
+        if sess_symbol == (symbol or "").strip().upper():
+            same_symbol_live += 1
+        if sess_sector == sector:
+            same_sector_live += 1
+        if sess_corr == correlation_bucket:
+            same_corr_live += 1
+        variant = variants.get(int(sess.variant_id)) if getattr(sess, "variant_id", None) else None
+        incumbent_family = (variant.family or "").strip().lower() if variant else ""
+        if candidate_family and incumbent_family == candidate_family:
+            same_family_live += 1
+
+    intended = max(0.0, _safe_float(intended_notional_usd, 0.0))
+    is_live_candidate = str(execution_mode or "").strip().lower() == "live"
+    projected_live_notional = live_session_notional + (intended if is_live_candidate else 0.0)
+    return {
+        "open_trade_count": len(open_trade_rows),
+        "active_live_session_count": len(live_session_rows),
+        "active_risk_item_count": len(open_trade_rows) + len(live_session_rows),
+        "open_trade_notional_usd": round(open_trade_notional, 6),
+        "active_live_session_notional_usd": round(live_session_notional, 6),
+        "intended_notional_usd": round(intended, 6),
+        "projected_live_notional_usd": round(projected_live_notional, 6),
+        "same_symbol_live_sessions": same_symbol_live,
+        "same_asset_family_live_sessions": same_sector_live,
+        "same_correlation_bucket_live_sessions": same_corr_live,
+        "same_hypothesis_family_live_sessions": same_family_live,
+        "execution_mode": execution_mode,
+    }
+
+
+def _pattern_capital_gate(db: Session, *, scan_pattern_id: int | None, execution_mode: str) -> dict[str, Any]:
+    if not scan_pattern_id:
+        return {
+            "status": "pass",
+            "hard_block_reason": None,
+            "reasons": [],
+            "scan_pattern_id": None,
+        }
+    from ...models.trading import ScanPattern
+
+    pattern = db.query(ScanPattern).filter(ScanPattern.id == int(scan_pattern_id)).one_or_none()
+    if pattern is None:
+        return {
+            "status": "warn",
+            "hard_block_reason": None,
+            "reasons": ["pattern_missing"],
+            "scan_pattern_id": int(scan_pattern_id),
+        }
+
+    lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
+    promotion_status = str(getattr(pattern, "promotion_status", "") or "").strip().lower()
+    recert_required = bool(getattr(pattern, "recert_required", False))
+    reasons: list[str] = []
+    if lifecycle in {"retired", "decayed", "challenged"}:
+        reasons.append(f"lifecycle_{lifecycle}")
+    if recert_required:
+        reasons.append("recert_required")
+
+    is_live = str(execution_mode or "").strip().lower() == "live"
+    hard_reason = None
+    if is_live and recert_required and bool(getattr(settings, "chili_autotrader_block_live_on_recert_required", True)):
+        hard_reason = "pattern_recert_required"
+    if is_live and hard_reason is None and lifecycle in {"retired", "decayed", "challenged"}:
+        hard_reason = "pattern_lifecycle_degraded"
+
+    return {
+        "status": "block" if hard_reason else ("warn" if reasons else "pass"),
+        "hard_block_reason": hard_reason,
+        "reasons": reasons,
+        "scan_pattern_id": int(scan_pattern_id),
+        "lifecycle_stage": lifecycle or None,
+        "promotion_status": promotion_status or None,
+        "recert_required": recert_required,
+        "learning_lane_enabled": True,
+    }
 
 
 def _candidate_score(
@@ -214,6 +373,8 @@ def evaluate_allocation_candidate(
     live_drift_contract: dict[str, Any] | None,
     execution_contract: dict[str, Any] | None,
     context: str,
+    execution_mode: str | None = None,
+    intended_notional_usd: float | None = None,
 ) -> dict[str, Any]:
     if user_id is None:
         return {
@@ -228,6 +389,7 @@ def evaluate_allocation_candidate(
             "score_inputs": {"reason": "user_required_for_portfolio_view"},
             "conflicts": [],
             "conflict_buckets": [],
+            "portfolio_exposure": {},
         }
 
     sector = (asset_class or "").strip().lower() or _symbol_asset_family(symbol)
@@ -269,7 +431,18 @@ def evaluate_allocation_candidate(
             symbol=symbol,
             sector=sector,
             correlation_bucket=corr_bucket,
+            hypothesis_family=hypothesis_family,
         )
+    )
+    exposure = _portfolio_exposure_snapshot(
+        db,
+        user_id=int(user_id),
+        symbol=symbol,
+        sector=sector,
+        correlation_bucket=corr_bucket,
+        hypothesis_family=hypothesis_family,
+        execution_mode=execution_mode,
+        intended_notional_usd=intended_notional_usd,
     )
     buckets = sorted({bucket for row in conflicts for bucket in row.get("buckets", [])})
     score = _candidate_score(
@@ -283,6 +456,10 @@ def evaluate_allocation_candidate(
     blocked_reason = None
     sector_cap = int(getattr(settings, "brain_max_open_per_sector", 0) or 0)
     max_correlated = int(getattr(settings, "brain_max_correlated_positions", 0) or 0)
+    max_heat = int(getattr(settings, "brain_allocator_max_active_risk_items", 0) or 0)
+    max_live_notional = _safe_float(getattr(settings, "brain_allocator_max_live_notional_usd", 0.0), 0.0)
+    max_same_family_live = int(getattr(settings, "brain_allocator_max_same_family_live_sessions", 0) or 0)
+    is_live_candidate = str(execution_mode or "").strip().lower() == "live"
     same_symbol_conflicts = [row for row in conflicts if "same_ticker" in row.get("buckets", [])]
     if same_symbol_conflicts:
         best_incumbent = max(_safe_float(row.get("incumbent_score"), 0.5) for row in same_symbol_conflicts)
@@ -297,6 +474,17 @@ def evaluate_allocation_candidate(
         corr_count = sum(1 for row in conflicts if "same_correlation_bucket" in row.get("buckets", []))
         if corr_count >= max_correlated:
             blocked_reason = "correlation_bucket_cap"
+    if blocked_reason is None and max_heat > 0:
+        if int(exposure.get("active_risk_item_count") or 0) >= max_heat:
+            blocked_reason = "portfolio_heat_cap"
+    if blocked_reason is None and is_live_candidate and max_live_notional > 0:
+        projected = _safe_float(exposure.get("projected_live_notional_usd"), 0.0)
+        if projected > max_live_notional:
+            blocked_reason = "portfolio_live_notional_cap"
+    if blocked_reason is None and is_live_candidate and max_same_family_live > 0:
+        same_family = int(exposure.get("same_hypothesis_family_live_sessions") or 0)
+        if same_family >= max_same_family_live:
+            blocked_reason = "strategy_family_live_cap"
     if blocked_reason is None and live_drift_contract and execution_contract:
         if _tier_score(live_drift_contract) <= 0.2 and _tier_score(execution_contract) <= 0.2:
             blocked_reason = "quality_stack_critical"
@@ -322,7 +510,9 @@ def evaluate_allocation_candidate(
             "venue_readiness_score": round(venue_score, 4),
             "portfolio_heat_score": round(portfolio_heat_score, 4),
             "portfolio_heat_count": portfolio_heat,
+            "intended_notional_usd": round(_safe_float(intended_notional_usd, 0.0), 6),
         },
+        "portfolio_exposure": exposure,
         "conflicts": conflicts,
         "conflict_buckets": buckets,
         "evaluated_at": _utc_iso(),
@@ -379,6 +569,9 @@ def build_proposal_allocation_decision(db: Session, proposal: Any, *, user_id: i
         4,
     )
     research_quality = max(0.0, min(1.0, research_quality))
+    proposal_notional = _safe_float(getattr(proposal, "entry_price", None), 0.0) * _safe_float(
+        getattr(proposal, "quantity", None), 0.0
+    )
     decision = evaluate_allocation_candidate(
         db,
         user_id=user_id,
@@ -390,6 +583,7 @@ def build_proposal_allocation_decision(db: Session, proposal: Any, *, user_id: i
         live_drift_contract=pattern_projection.live_drift_v2 or pattern_projection.live_drift,
         execution_contract=pattern_projection.execution_robustness_v2 or pattern_projection.execution_robustness,
         context="proposal_approval",
+        intended_notional_usd=proposal_notional,
     )
     proposal.allocation_decision_json = dict(decision)
     return decision
@@ -401,6 +595,7 @@ def build_session_allocation_decision(
     *,
     user_id: int | None,
     context: str,
+    intended_notional_usd: float | None = None,
 ) -> dict[str, Any]:
     from ...models.trading import MomentumStrategyVariant, ScanPattern
 
@@ -432,6 +627,8 @@ def build_session_allocation_decision(
         live_drift_contract=projection.live_drift_v2 or projection.live_drift,
         execution_contract=projection.execution_robustness_v2 or projection.execution_robustness,
         context=context,
+        execution_mode=getattr(session, "mode", None),
+        intended_notional_usd=intended_notional_usd,
     )
     session.allocation_decision_json = dict(decision)
     return decision
@@ -533,6 +730,7 @@ def allocate_momentum_session_entry(
 
     symbol = (getattr(session, "symbol", None) or "").strip().upper()
     scan_pattern_id = int(getattr(variant, "scan_pattern_id", None) or 0) or None
+    pattern_gate = _pattern_capital_gate(db, scan_pattern_id=scan_pattern_id, execution_mode=execution_mode)
     ex = viability.execution_readiness_json if isinstance(getattr(viability, "execution_readiness_json", None), dict) else {}
     vol_proxy = None
     try:
@@ -540,8 +738,6 @@ def allocate_momentum_session_entry(
         vol_proxy = _safe_float(ev.get("volume_usd_24h") or ev.get("quote_volume_usd"),0.0) or None
     except Exception:
         vol_proxy = None
-
-    alloc = build_session_allocation_decision(db, session, user_id=user_id, context="momentum_entry")
 
     base_cap = _safe_float(max_notional_policy, 250.0)
     if deployment_size_mult >= 0:
@@ -554,6 +750,13 @@ def allocate_momentum_session_entry(
         mult = 1.0
 
     intended_notional = max(10.0, base_cap * max(0.0, min(1.0, mult)))
+    alloc = build_session_allocation_decision(
+        db,
+        session,
+        user_id=user_id,
+        context="momentum_entry",
+        intended_notional_usd=intended_notional,
+    )
     try:
         perf_mult = _momentum_variant_performance_size_mult(db, int(getattr(variant, "id", 0) or 0))
         intended_notional = max(10.0, intended_notional * perf_mult)
@@ -625,9 +828,12 @@ def allocate_momentum_session_entry(
         correlation_penalty=corr_pen,
     )
 
-    # SHADOW HOOK: NetEdgeRanker (Phase E). Logs a parallel score next to the
-    # heuristic ``exp``. The authoritative abstain/floor logic below MUST
-    # continue to use ``exp`` until brain_net_edge_ranker_mode == authoritative.
+    net_edge_result: Any | None = None
+    net_edge_authoritative = False
+
+    # NetEdgeRanker (Phase E). Shadow/compare modes only log a parallel score.
+    # In explicit authoritative mode, its cost-adjusted expected net P&L becomes
+    # the capital-lane ranking value and the expectancy floor is enforced.
     try:
         from . import net_edge_ranker as _net_edge
 
@@ -641,7 +847,7 @@ def allocate_momentum_session_entry(
                 (ex or {}).get("target_price") or (ex or {}).get("target"), 0.0
             ) or None
             if _entry > 0 and _stop > 0:
-                _net_edge.score(
+                net_edge_result = _net_edge.score(
                     db,
                     _net_edge.NetEdgeSignalContext(
                         ticker=symbol or "unknown",
@@ -660,14 +866,26 @@ def allocate_momentum_session_entry(
                         heuristic_score=_safe_float(exp.get("expected_edge_net"), None),
                     ),
                 )
+                if _net_edge.mode_is_authoritative() and net_edge_result is not None:
+                    ne = _safe_float(getattr(net_edge_result, "expected_net_pnl", None), None)
+                    if ne is not None:
+                        exp = dict(exp)
+                        exp["expected_edge_net"] = ne
+                        exp["net_edge_authoritative"] = True
+                        exp["net_edge_decision_id"] = getattr(net_edge_result, "decision_id", None)
+                        net_edge_authoritative = True
     except Exception as _net_edge_exc:
         logger.debug("[allocator] net_edge shadow score failed: %s", _net_edge_exc)
 
     floor = _safe_float(getattr(settings, "brain_minimum_net_expectancy_to_trade", 0.0), 0.0)
     shadow = bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", False))
-    enforce_exp = bool(getattr(settings, "brain_enforce_net_expectancy_live", False)) if execution_mode == "live" else bool(
-        getattr(settings, "brain_enforce_net_expectancy_paper", True)
+    enforce_exp = (
+        bool(getattr(settings, "brain_enforce_net_expectancy_live", False))
+        if execution_mode == "live"
+        else bool(getattr(settings, "brain_enforce_net_expectancy_paper", True))
     )
+    if net_edge_authoritative:
+        enforce_exp = True
     regime_label = str(
         (regime_snapshot or {}).get("regime")
         or (regime_snapshot or {}).get("composite")
@@ -679,9 +897,17 @@ def allocate_momentum_session_entry(
     abstain_text = None
     shadow_override = False
 
-    if not alloc.get("allowed_if_enforced"):
+    allocator_shadow_blocked = not bool(alloc.get("allowed_if_enforced", True))
+    allocator_live_hard_block = execution_mode == "live" and allocation_block_reason(alloc) is not None
+    if allocator_shadow_blocked:
+        alloc["shadow_suppression"] = True
+        alloc["shadow_suppression_reason"] = alloc.get("blocked_reason")
+    if allocator_live_hard_block:
         abstain_code = "portfolio_allocator_blocked"
         abstain_text = str(alloc.get("blocked_reason") or "allocator")
+    if pattern_gate.get("hard_block_reason"):
+        abstain_code = abstain_code or str(pattern_gate.get("hard_block_reason"))
+        abstain_text = abstain_text or ",".join(pattern_gate.get("reasons") or [])
 
     cap_blocked = bool(cap_eval.get("capacity_blocked"))
     if cap_blocked:
@@ -727,6 +953,14 @@ def allocate_momentum_session_entry(
             "was_selected": primary_selected,
             "reject_reason_code": None if primary_selected else abstain_code,
             "reject_reason_text": None if primary_selected else abstain_text,
+            "reject_detail_json": {
+                "net_edge_authoritative": net_edge_authoritative,
+                "net_edge_decision_id": exp.get("net_edge_decision_id"),
+                "portfolio_allocator_shadow_blocked": allocator_shadow_blocked,
+                "portfolio_allocator_live_hard_block": allocator_live_hard_block,
+                "portfolio_allocator_blocked_reason": alloc.get("blocked_reason"),
+                "pattern_capital_gate": pattern_gate,
+            },
         }
     ]
 
@@ -756,6 +990,8 @@ def allocate_momentum_session_entry(
         "recommended_notional": intended_notional if proceed else 0.0,
         "expected_edge_gross": exp["expected_edge_gross"],
         "expected_edge_net": exp["expected_edge_net"],
+        "net_edge_authoritative": net_edge_authoritative,
+        "net_edge_decision_id": exp.get("net_edge_decision_id"),
         "realism": realism,
         "capacity": cap_eval,
         "allocation_decision": alloc,
@@ -768,5 +1004,8 @@ def allocate_momentum_session_entry(
         "shadow_override": shadow_override,
         "capacity_blocked_flag": bool(cap_eval.get("capacity_hard_signals")),
         "erc_allocation": erc_allocation,
+        "portfolio_allocator_shadow_blocked": allocator_shadow_blocked,
+        "portfolio_allocator_live_hard_block": allocator_live_hard_block,
+        "pattern_capital_gate": pattern_gate,
     }
 

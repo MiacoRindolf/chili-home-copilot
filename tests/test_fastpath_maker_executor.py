@@ -10,6 +10,8 @@ Pin the executor's maker-only / maker-first-then-taker path:
   * 1-outstanding-per-(ticker, side) cap — second signal rejected.
   * Cancel-on-timeout (paper) — book not crossed -> cancelled,
     book crossed -> filled.
+  * Adverse paper sweep — side-adjusted mid reaching our quote before
+    fill cancels early without waiting for timeout.
   * `decay_miner.record_maker_outcome` called on fill.
   * Hybrid taker fallback fires after `replaced`.
 
@@ -19,6 +21,8 @@ Helper-level. We monkey-patch the executor's DB helpers + the
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -27,6 +31,15 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from app.services.trading.fast_path import executor as ex_mod
+from app.services.trading.fast_path.alert_direction import (
+    DIRECTION_LONG,
+    DIRECTION_NEUTRAL,
+    DIRECTION_SHORT,
+    SIDE_BUY,
+    SIDE_SELL,
+    direction_for_alert_type,
+    spot_entry_side_for_alert_type,
+)
 from app.services.trading.fast_path.executor import (
     FastPathExecutor,
     _compute_maker_limit_price,
@@ -38,6 +51,10 @@ from app.services.trading.fast_path.gates import (
     GateRunResult,
 )
 from app.services.trading.fast_path.settings import FastPathSettings
+from app.services.trading.fast_path.universe_status import (
+    UNIVERSE_STATUS_ACTIVE,
+    UNIVERSE_STATUS_SHADOW,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +106,17 @@ def _make_gate_run():
     )
 
 
+def _make_denied_gate_run(*gate_names: str):
+    return GateRunResult(
+        allow=False,
+        deny_reason="negative_edge:negative_edge",
+        results=[
+            GateResult(name=name, allow=False, reason=name, detail={})
+            for name in gate_names
+        ],
+    )
+
+
 def _make_executor(settings, decay_miner=None):
     """Build an executor with a stubbed engine + book aggregator. The
     DB helpers are patched per-test so no real engine is needed.
@@ -120,10 +148,15 @@ def test_compute_maker_limit_short_is_inside_spread():
     assert 100.0 < px < 100.10
 
 
+def test_compute_maker_limit_joins_top_when_no_inside_price_exists():
+    """One-tick books should still get passive join prices."""
+    assert _compute_maker_limit_price("buy", 100.0, 100.05, 1.0) == pytest.approx(100.0)
+    assert _compute_maker_limit_price("sell", 100.0, 100.05, 1.0) == pytest.approx(100.05)
+
+
 def test_compute_maker_limit_returns_zero_on_inverted_book():
-    """If tick is too large the candidate would cross — refuse."""
-    assert _compute_maker_limit_price("buy", 100.0, 100.05, 1.0) == 0.0
-    assert _compute_maker_limit_price("sell", 100.0, 100.05, 1.0) == 0.0
+    assert _compute_maker_limit_price("buy", 100.05, 100.0, 0.01) == 0.0
+    assert _compute_maker_limit_price("sell", 100.05, 100.0, 0.01) == 0.0
 
 
 def test_compute_maker_limit_returns_zero_on_no_quotes():
@@ -139,6 +172,14 @@ def test_default_tick_size_scales_with_mid():
     """Tick is `mid * 1bp` by default — order-of-magnitude sanity."""
     assert _maker_default_tick_size(100.0) == pytest.approx(0.01)
     assert _maker_default_tick_size(0.0) == 0.0
+
+
+def test_alert_direction_helpers_treat_neutral_as_spot_long_entry():
+    assert direction_for_alert_type("imbalance_long") == DIRECTION_LONG
+    assert direction_for_alert_type("imbalance_short") == DIRECTION_SHORT
+    assert direction_for_alert_type("spread_squeeze") == DIRECTION_NEUTRAL
+    assert spot_entry_side_for_alert_type("spread_squeeze") == SIDE_BUY
+    assert spot_entry_side_for_alert_type("imbalance_short") == SIDE_SELL
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +210,136 @@ def test_taker_mode_does_not_invoke_maker_path():
 
     assert ex._outstanding_maker == {}
     assert ex._insert_maker_attempt_sync.call_count == 0
+
+
+def test_neutral_spread_squeeze_does_not_become_spot_short(monkeypatch):
+    """Neutral alert names must not become sell entries by default."""
+    settings = _make_settings(execution_mode="taker")
+    ex = _make_executor(settings)
+    ctx = _make_ctx(spread_bps=1.0)
+    ex._build_context = MagicMock(return_value=ctx)
+    writes = []
+
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: _make_gate_run())
+
+    async def run():
+        async def _record(*a, **kw):
+            writes.append(kw)
+            return None
+
+        ex._write_decision = _record
+        await ex._process_alert(_make_alert(alert_type="spread_squeeze"))
+
+    asyncio.run(run())
+
+    assert len(writes) == 1
+    assert writes[0]["decision"] == "paper_fill"
+    assert writes[0]["reject_reason"] is None
+    assert writes[0]["side"] == SIDE_BUY
+
+
+def test_shadow_maker_probe_bypasses_learned_denials(monkeypatch):
+    """Shadow maker probes refresh maker-filled evidence despite pooled blocks."""
+    settings = replace(
+        _make_settings(execution_mode="maker_only"),
+        universe_rotation_enabled=True,
+    )
+    ex = _make_executor(settings)
+    ex._build_context = MagicMock(return_value=_make_ctx(spread_bps=2.0))
+    ex._latest_universe_status_sync = MagicMock(return_value=UNIVERSE_STATUS_SHADOW)
+    gate_run = _make_denied_gate_run(
+        "negative_edge",
+        "maker_attempt_adverse",
+        "cost_aware_admission",
+    )
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: gate_run)
+    calls = []
+
+    async def _record_maker_probe(**kwargs):
+        calls.append(kwargs)
+
+    async def _fail_reject(*_a, **_kw):
+        raise AssertionError("shadow learned denial should route to maker probe")
+
+    ex._process_alert_maker = _record_maker_probe
+    ex._write_decision = _fail_reject
+
+    asyncio.run(ex._process_alert(_make_alert()))
+
+    assert len(calls) == 1
+    assert calls[0]["gate_run"] is gate_run
+    assert calls[0]["execution_mode"] == "maker_only"
+    ex._latest_universe_status_sync.assert_called_once_with("BTC-USD")
+
+
+def test_shadow_maker_probe_blocks_terminal_learned_denials(monkeypatch):
+    """Shadow probes should not keep sampling lanes already proven toxic."""
+    settings = replace(
+        _make_settings(execution_mode="maker_only"),
+        universe_rotation_enabled=True,
+    )
+    ex = _make_executor(settings)
+    ex._build_context = MagicMock(return_value=_make_ctx(spread_bps=2.0))
+    ex._latest_universe_status_sync = MagicMock(return_value=UNIVERSE_STATUS_SHADOW)
+    gate_run = GateRunResult(
+        allow=False,
+        deny_reason="negative_edge:negative_edge",
+        results=[
+            GateResult(
+                name="negative_edge",
+                allow=False,
+                reason="negative_edge",
+                detail={"verdict": "negative_edge"},
+            ),
+        ],
+    )
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: gate_run)
+    writes = []
+
+    async def _record_write(*_a, **kwargs):
+        writes.append(kwargs)
+
+    async def _fail_maker_probe(**_kwargs):
+        raise AssertionError("terminal learned denial must not be re-probed")
+
+    ex._write_decision = _record_write
+    ex._process_alert_maker = _fail_maker_probe
+
+    asyncio.run(ex._process_alert(_make_alert()))
+
+    assert len(writes) == 1
+    assert writes[0]["decision"] == "rejected"
+    assert writes[0]["reject_reason"] == "negative_edge:negative_edge"
+    ex._latest_universe_status_sync.assert_not_called()
+
+
+def test_shadow_maker_probe_keeps_operational_denials_blocking(monkeypatch):
+    settings = replace(
+        _make_settings(execution_mode="maker_only"),
+        universe_rotation_enabled=True,
+    )
+    ex = _make_executor(settings)
+    ex._build_context = MagicMock(return_value=_make_ctx(spread_bps=20.0))
+    ex._latest_universe_status_sync = MagicMock(return_value=UNIVERSE_STATUS_SHADOW)
+    gate_run = _make_denied_gate_run("negative_edge", "spread_sanity")
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: gate_run)
+    writes = []
+
+    async def _record_write(*_a, **kwargs):
+        writes.append(kwargs)
+
+    async def _fail_maker_probe(**_kwargs):
+        raise AssertionError("spread sanity denial must not be bypassed")
+
+    ex._write_decision = _record_write
+    ex._process_alert_maker = _fail_maker_probe
+
+    asyncio.run(ex._process_alert(_make_alert()))
+
+    assert len(writes) == 1
+    assert writes[0]["decision"] == "rejected"
+    assert writes[0]["reject_reason"] == "negative_edge:negative_edge"
+    assert ex._latest_universe_status_sync.call_count == 0
 
 
 def test_open_positions_refresh_uses_fast_exits_as_truth():
@@ -207,6 +378,43 @@ def test_open_positions_refresh_uses_fast_exits_as_truth():
     ex._refresh_open_positions_sync()
 
     assert ex._open_positions == {"BTC-USD": 1, "SOL-USD": 1}
+
+
+def test_paper_position_allowed_requires_latest_active_universe():
+    settings = replace(
+        _make_settings(),
+        universe_rotation_enabled=True,
+        universe_shadow_paper_fills_enabled=False,
+    )
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE fast_path_universe (
+                ticker TEXT,
+                status TEXT,
+                rotation_at TEXT
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO fast_path_universe (ticker, status, rotation_at) VALUES
+              ('BTC-USD', :active_status, '2026-05-23 15:00:00'),
+              ('BTC-USD', :shadow_status, '2026-05-23 15:05:00'),
+              ('ETH-USD', :active_status, '2026-05-23 15:05:00')
+        """), {
+            "active_status": UNIVERSE_STATUS_ACTIVE,
+            "shadow_status": UNIVERSE_STATUS_SHADOW,
+        })
+
+    ex = FastPathExecutor(settings, engine, SimpleNamespace(_books={}))
+
+    assert ex._paper_position_allowed_for_universe("BTC-USD") == (
+        False, UNIVERSE_STATUS_SHADOW,
+    )
+    assert ex._paper_position_allowed_for_universe("ETH-USD") == (
+        True, UNIVERSE_STATUS_ACTIVE,
+    )
+    assert ex._paper_position_allowed_for_universe("SOL-USD") == (False, None)
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +497,144 @@ def test_maker_only_paper_places_and_schedules_timeout():
     assert payload["limit_price"] > 100.0  # bid + tick
     assert payload["limit_price"] < 100.10  # below ask
     assert payload["execution_mode"] == "maker_only"
+
+
+def test_paper_maker_sweep_resolves_crossed_book_before_timeout():
+    """Paper fills should resolve on the polling sweep, not at cancel timeout."""
+    settings = _make_settings(
+        execution_mode="maker_only",
+        maker_cancel_on_timeout_s=120,
+    )
+    decay = MagicMock()
+    ex = _make_executor(settings, decay_miner=decay)
+
+    ctx_place = _make_ctx(best_bid=100.0, best_ask=100.10)
+    ctx_after = _make_ctx(best_bid=100.005, best_ask=100.005)
+    ex._build_context = MagicMock(return_value=ctx_after)
+    writes = []
+
+    async def _record_write(*a, **kw):
+        writes.append(kw)
+        return None
+    ex._write_decision = _record_write
+
+    timeout_task = MagicMock()
+    attempt = {
+        "attempt_id": 7,
+        "alert_id": 1,
+        "ticker": "BTC-USD",
+        "side": "buy",
+        "limit_price": 100.005,
+        "broker_order_id": None,
+        "execution_mode": "maker_only",
+        "alert_type": "imbalance_long",
+        "signal_score": 0.85,
+        "fired_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        "placed_at": time.monotonic() - 0.25,
+        "quantity": 0.001,
+        "notional_usd": 10.0,
+        "timeout_task": timeout_task,
+        "_placement_ctx": ctx_place,
+        "_alert": _make_alert(),
+        "_gate_run": _make_gate_run(),
+        "_unfilled_outcome": "cancelled",
+    }
+    ex._outstanding_maker[("BTC-USD", "buy")] = attempt
+
+    asyncio.run(ex._sweep_paper_maker_fills())
+
+    timeout_task.cancel.assert_called_once()
+    payload = ex._update_maker_attempt_sync.call_args.args[0]
+    assert payload["fill_outcome"] == "filled"
+    assert payload["final_price"] == pytest.approx(100.005)
+    assert 0 < payload["time_to_fill_ms"] < 2_000
+    assert attempt["resolved"] is True
+    assert ("BTC-USD", "buy") not in ex._outstanding_maker
+    assert ex._metrics.maker_attempts_filled == 1
+    assert ex._metrics.decisions_paper_fill == 1
+    assert len(writes) == 1
+    decay.record_maker_outcome.assert_called_once()
+
+
+def test_maker_adverse_cancel_threshold_is_quote_distance():
+    """The early-cancel threshold comes from the order's own quote distance."""
+    ctx_place = _make_ctx(best_bid=100.0, best_ask=100.10)
+    limit_price = 100.01
+    near_but_not_at_quote = _make_ctx(best_bid=99.99, best_ask=100.05)
+    at_quote_mid = _make_ctx(best_bid=99.98, best_ask=100.04)
+
+    assert FastPathExecutor._maker_quote_distance_bps(
+        "buy",
+        limit_price,
+        ctx_place,
+    ) == pytest.approx(((100.05 - 100.01) / 100.05) * 10_000.0)
+    assert not FastPathExecutor._maker_adverse_drift_reached_quote(
+        "buy",
+        limit_price,
+        ctx_place,
+        near_but_not_at_quote,
+    )
+    assert FastPathExecutor._maker_adverse_drift_reached_quote(
+        "buy",
+        limit_price,
+        ctx_place,
+        at_quote_mid,
+    )
+
+
+def test_paper_maker_sweep_cancels_adverse_drift_before_timeout():
+    """Cancel when mid reaches our passive quote before the book crosses."""
+    settings = _make_settings(
+        execution_mode="maker_only",
+        maker_cancel_on_timeout_s=120,
+    )
+    decay = MagicMock()
+    ex = _make_executor(settings, decay_miner=decay)
+
+    ctx_place = _make_ctx(best_bid=100.0, best_ask=100.10)
+    # Mid is exactly the passive buy quote, but ask has not traded
+    # through the quote yet, so this is an early cancel rather than a fill.
+    ctx_after = _make_ctx(best_bid=99.98, best_ask=100.04)
+    ex._build_context = MagicMock(return_value=ctx_after)
+
+    timeout_task = MagicMock()
+    attempt = {
+        "attempt_id": 7,
+        "alert_id": 1,
+        "ticker": "BTC-USD",
+        "side": "buy",
+        "limit_price": 100.01,
+        "broker_order_id": None,
+        "execution_mode": "maker_only",
+        "alert_type": "imbalance_long",
+        "signal_score": 0.85,
+        "fired_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        "placed_at": time.monotonic() - 0.25,
+        "quantity": 0.001,
+        "notional_usd": 10.0,
+        "timeout_task": timeout_task,
+        "_placement_ctx": ctx_place,
+        "_alert": _make_alert(),
+        "_gate_run": _make_gate_run(),
+        "_unfilled_outcome": "cancelled",
+    }
+    ex._outstanding_maker[("BTC-USD", "buy")] = attempt
+
+    asyncio.run(ex._sweep_paper_maker_fills())
+
+    timeout_task.cancel.assert_called_once()
+    payload = ex._update_maker_attempt_sync.call_args.args[0]
+    assert payload["fill_outcome"] == "cancelled"
+    assert payload["final_price"] is None
+    assert payload["time_to_fill_ms"] is None
+    assert payload["mid_drift_bps"] == pytest.approx(-3.998, abs=0.01)
+    assert attempt["resolved"] is True
+    assert attempt["_adverse_cancel"] is True
+    assert ("BTC-USD", "buy") not in ex._outstanding_maker
+    assert ex._metrics.maker_attempts_cancelled == 1
+    assert ex._metrics.maker_attempts_adverse_cancelled == 1
+    assert ex._metrics.maker_attempts_filled == 0
+    decay.record_maker_outcome.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +766,71 @@ def test_maker_timeout_paper_book_crossed_fills_and_notifies_decay():
     assert kwargs["alert_type"] == "imbalance_long"
 
 
+def test_maker_timeout_shadow_fill_records_decay_without_paper_position():
+    """Shadow maker fills are learning samples, not dashboard positions."""
+    settings = replace(
+        _make_settings(execution_mode="maker_only", maker_cancel_on_timeout_s=1),
+        universe_rotation_enabled=True,
+        universe_shadow_paper_fills_enabled=False,
+    )
+    decay = MagicMock()
+    ex = _make_executor(settings, decay_miner=decay)
+    ex._paper_position_allowed_for_universe = MagicMock(
+        return_value=(False, UNIVERSE_STATUS_SHADOW),
+    )
+
+    ctx_place = _make_ctx(best_bid=100.0, best_ask=100.10)
+    ctx_after = _make_ctx(best_bid=100.005, best_ask=100.005)
+    ex._build_context = MagicMock(return_value=ctx_after)
+    writes = []
+
+    async def _record_write(*a, **kw):
+        writes.append(kw)
+        return None
+    ex._write_decision = _record_write
+
+    attempt = {
+        "attempt_id": 7,
+        "alert_id": 1,
+        "ticker": "BTC-USD",
+        "side": "buy",
+        "limit_price": 100.005,
+        "broker_order_id": None,
+        "execution_mode": "maker_only",
+        "alert_type": "imbalance_long",
+        "signal_score": 0.85,
+        "fired_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        "placed_at": 0.0,
+        "quantity": 0.001,
+        "notional_usd": 10.0,
+    }
+
+    async def run():
+        orig_sleep = asyncio.sleep
+        async def _instant(_): return None
+        asyncio.sleep = _instant
+        try:
+            await ex._maker_timeout_handler(
+                cap_key=("BTC-USD", "buy"), attempt=attempt,
+                timeout_s=1, unfilled_outcome="cancelled",
+                ctx=ctx_place, alert=_make_alert(), gate_run=_make_gate_run(),
+            )
+        finally:
+            asyncio.sleep = orig_sleep
+
+    asyncio.run(run())
+
+    payload = ex._update_maker_attempt_sync.call_args.args[0]
+    assert payload["fill_outcome"] == "filled"
+    assert ex._metrics.maker_attempts_filled == 1
+    assert ex._metrics.maker_observe_only_fills == 1
+    assert ex._metrics.decisions_paper_fill == 0
+    assert writes == []
+    assert ex._open_positions == {}
+    assert ex._daily_notional_used_usd == pytest.approx(0.0)
+    decay.record_maker_outcome.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # Hybrid mode: replaced -> taker fallback fires
 # ---------------------------------------------------------------------------
@@ -509,7 +920,10 @@ def test_place_coinbase_maker_order_passes_post_only_true(monkeypatch):
     )
 
     import sys
+    import app.services as services_pkg
+
     monkeypatch.setitem(sys.modules, "app.services.coinbase_service", fake_cb)
+    monkeypatch.setattr(services_pkg, "coinbase_service", fake_cb, raising=False)
 
     order_id = ex_mod._place_coinbase_maker_order_live(
         "BTC-USD", "buy", 0.001, 100.01, 10.0,

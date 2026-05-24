@@ -154,14 +154,23 @@ def _is_fast_path_active(ticker: str) -> bool:
     try:
         from sqlalchemy import text
         from ...db import SessionLocal
+        from .fast_path.universe_status import (
+            UNIVERSE_STATUS_ACTIVE,
+            UNIVERSE_STATUS_SHADOW,
+        )
+
         sess = SessionLocal()
         try:
             row = sess.execute(text("""
                 SELECT 1 FROM fast_path_universe
                  WHERE UPPER(ticker) = :t
-                   AND status IN ('active', 'shadow')
+                   AND status IN (:active_status, :shadow_status)
                  LIMIT 1
-            """), {"t": t}).fetchone()
+            """), {
+                "t": t,
+                "active_status": UNIVERSE_STATUS_ACTIVE,
+                "shadow_status": UNIVERSE_STATUS_SHADOW,
+            }).fetchone()
             return row is not None
         finally:
             try:

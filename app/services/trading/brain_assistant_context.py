@@ -257,6 +257,17 @@ def build_snapshot(
         logger.debug("[brain_assistant_context] automation snapshot failed: %s", e)
     decision_ctx = _decision_context(db, user_id)
     opportunity_ctx = _opportunity_board_summary(db, user_id)
+    packet_coverage_ctx = {}
+    try:
+        from .decision_packet_coverage import decision_packet_coverage_summary
+
+        packet_coverage_ctx = decision_packet_coverage_summary(
+            db,
+            lookback_hours=72,
+            user_id=user_id,
+        )
+    except Exception as e:
+        logger.debug("[brain_assistant_context] decision packet coverage failed: %s", e)
 
     position_plans_ctx = {}
     try:
@@ -302,6 +313,7 @@ def build_snapshot(
         "automation_summary": automation_ctx,
         "automation_focus": automation_focus,
         "decision_context": decision_ctx,
+        "decision_packet_coverage": packet_coverage_ctx,
         "opportunity_board": opportunity_ctx,
         "position_plans": position_plans_ctx,
         "snapshot_at": datetime.utcnow().isoformat() + "Z",

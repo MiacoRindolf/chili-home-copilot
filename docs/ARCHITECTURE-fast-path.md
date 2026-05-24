@@ -171,8 +171,8 @@ A container at full subscription (5 pairs, 1m bars, top-25 L2) should sit at ~12
 
 ### Operational levers
 
-- `CHILI_FAST_PATH_ENABLED=0` (default) → container starts but immediately enters `paused` state for all pairs. Safe deploy without consuming Coinbase quota.
-- `CHILI_FAST_PATH_PAIRS="BTC-USD,ETH-USD,..."` → which pairs to subscribe.
+- `CHILI_FAST_PATH_ENABLED=0` (default) → container starts but immediately enters `paused` state for all configured pairs. Safe deploy without consuming Coinbase quota.
+- `CHILI_FAST_PATH_PAIRS="TICKER-USD,..."` → optional explicit configured-pair rollback/testing universe. Normal operation uses `fast_path_universe`; there is no baked-in static pair default.
 - `CHILI_FAST_PATH_MODE=paper|live` → only affects F4 (execution); F1 ingestion is read-only by definition.
 
 ---

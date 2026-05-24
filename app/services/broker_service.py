@@ -4291,6 +4291,7 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     local status, fill price, and timestamps accordingly.
     """
     from ..models.trading import Trade, StrategyProposal
+    from .trading.decision_ledger import mark_linked_trade_packets_executed, mark_linked_trade_packets_terminal
     from .trading.execution_audit import normalize_robinhood_order_event, record_execution_event
     from .trading.robinhood_exit_execution import sync_pending_exit_order
 
@@ -4365,6 +4366,12 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     apply_tca_on_trade_fill(trade)
                 except Exception:
                     pass
+                mark_linked_trade_packets_executed(
+                    db,
+                    trade_id=int(trade.id),
+                    source="robinhood_order_sync",
+                    broker_order_id=trade.broker_order_id,
+                )
                 filled += 1
                 logger.info(
                     f"[broker] Order {trade.broker_order_id} for {trade.ticker} FILLED "
@@ -4398,11 +4405,26 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     )
                     trade.status = "open"
                     trade.broker_status = "filled"
+                    mark_linked_trade_packets_executed(
+                        db,
+                        trade_id=int(trade.id),
+                        source="robinhood_order_sync_state_anomaly",
+                        broker_order_id=trade.broker_order_id,
+                    )
                     filled += 1
                 else:
                     trade.status = "cancelled"
                     if not trade.exit_reason:
                         trade.exit_reason = f"broker_order_cancelled:{rh_state}"[:50]
+                    mark_linked_trade_packets_terminal(
+                        db,
+                        trade_id=int(trade.id),
+                        outcome_status="cancelled" if rh_state in ("cancelled", "canceled") else "rejected",
+                        source="robinhood_order_sync",
+                        reason_code=f"robinhood_order_{rh_state}",
+                        reason_text=f"Robinhood order ended {rh_state} with no cumulative fill",
+                        broker_order_id=trade.broker_order_id,
+                    )
                     cancelled += 1
                     logger.info(
                         f"[broker] Order {trade.broker_order_id} for {trade.ticker} {rh_state}"
@@ -4480,6 +4502,15 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 else:
                     cancelled += 1
                     synced += 1
+                    mark_linked_trade_packets_terminal(
+                        db,
+                        trade_id=int(trade.id),
+                        outcome_status="cancelled" if rh_state in ("cancelled", "canceled") else "rejected",
+                        source="robinhood_open_order_reconcile",
+                        reason_code=f"robinhood_order_{rh_state}",
+                        reason_text=f"Robinhood order reconcile saw {rh_state} with no cumulative fill",
+                        broker_order_id=trade.broker_order_id,
+                    )
                     logger.info(
                         f"[broker] Reconcile: {trade.ticker} (open locally) was {rh_state} on RH -> set cancelled"
                     )

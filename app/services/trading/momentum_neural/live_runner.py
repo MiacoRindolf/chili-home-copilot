@@ -33,7 +33,12 @@ from ..autopilot_scope import (
 from ..governance import is_kill_switch_active
 from ..venue.protocol import NormalizedOrder, NormalizedProduct, is_fresh_enough
 from .persistence import append_trading_automation_event
-from ..decision_ledger import finalize_packet_after_simulated_exit, mark_packet_executed, run_momentum_entry_decision
+from ..decision_ledger import (
+    finalize_packet_after_simulated_exit,
+    mark_packet_executed,
+    record_packet_execution_intent,
+    run_momentum_entry_decision,
+)
 from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY
@@ -136,6 +141,474 @@ def _finalize_live_decision_after_exit(
         _log.debug("live decision packet finalize skipped session=%s", sess.id, exc_info=True)
 
 
+def _scan_pattern_id_for_session(db: Session, sess: TradingAutomationSession) -> int | None:
+    try:
+        variant = variant_for_id(db, int(sess.variant_id))
+        sid = getattr(variant, "scan_pattern_id", None) if variant is not None else None
+        return int(sid) if sid is not None else None
+    except Exception:
+        return None
+
+
+def _record_live_entry_ledger_safe(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    quantity: float,
+    fill_price: float,
+) -> None:
+    try:
+        from .. import economic_ledger as _ledger
+
+        if not _ledger.mode_is_active():
+            return
+        _ledger.record_automation_session_entry_fill(
+            db,
+            session_id=int(sess.id),
+            user_id=sess.user_id,
+            scan_pattern_id=_scan_pattern_id_for_session(db, sess),
+            ticker=sess.symbol,
+            quantity=quantity,
+            fill_price=fill_price,
+            fee=0.0,
+            venue=sess.venue,
+            mode="live",
+            decision_packet_id=int(le["entry_decision_packet_id"]) if le.get("entry_decision_packet_id") else None,
+            provenance={
+                "runner": "momentum_live_runner",
+                "entry_order_id": le.get("entry_order_id"),
+                "entry_client_order_id": le.get("entry_client_order_id"),
+            },
+        )
+    except Exception:
+        _log.debug("live economic ledger entry hook skipped session=%s", sess.id, exc_info=True)
+
+
+def _record_live_exit_ledger_safe(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    quantity: float,
+    entry_price: float,
+    fill_price: float,
+    realized_pnl_usd: float,
+    reason: str,
+) -> None:
+    try:
+        from .. import economic_ledger as _ledger
+
+        if not _ledger.mode_is_active():
+            return
+        scan_pattern_id = _scan_pattern_id_for_session(db, sess)
+        dpid = int(le["entry_decision_packet_id"]) if le.get("entry_decision_packet_id") else None
+        _ledger.record_automation_session_exit_fill(
+            db,
+            session_id=int(sess.id),
+            user_id=sess.user_id,
+            scan_pattern_id=scan_pattern_id,
+            ticker=sess.symbol,
+            quantity=quantity,
+            fill_price=fill_price,
+            entry_price=entry_price,
+            realized_pnl_usd=realized_pnl_usd,
+            fee=0.0,
+            venue=sess.venue,
+            mode="live",
+            decision_packet_id=dpid,
+            provenance={
+                "runner": "momentum_live_runner",
+                "reason": reason,
+                "exit_order_id": le.get("exit_order_id"),
+                "exit_client_order_id": le.get("exit_client_order_id"),
+            },
+        )
+        _ledger.reconcile_automation_session(
+            db,
+            session_id=int(sess.id),
+            user_id=sess.user_id,
+            scan_pattern_id=scan_pattern_id,
+            ticker=sess.symbol,
+            legacy_pnl=float(le.get("realized_pnl_usd") or realized_pnl_usd),
+            mode="live",
+            provenance={"runner": "momentum_live_runner", "reason": reason},
+        )
+    except Exception:
+        _log.debug("live economic ledger exit hook skipped session=%s", sess.id, exc_info=True)
+
+
+def _record_live_partial_exit_ledger_safe(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    quantity: float,
+    entry_price: float,
+    fill_price: float,
+    realized_pnl_usd: float,
+    reason: str,
+) -> None:
+    try:
+        from .. import economic_ledger as _ledger
+
+        if not _ledger.mode_is_active():
+            return
+        scan_pattern_id = _scan_pattern_id_for_session(db, sess)
+        dpid = int(le["entry_decision_packet_id"]) if le.get("entry_decision_packet_id") else None
+        _ledger.record_automation_session_partial_exit_fill(
+            db,
+            session_id=int(sess.id),
+            user_id=sess.user_id,
+            scan_pattern_id=scan_pattern_id,
+            ticker=sess.symbol,
+            quantity=quantity,
+            fill_price=fill_price,
+            entry_price=entry_price,
+            realized_pnl_usd=realized_pnl_usd,
+            fee=0.0,
+            venue=sess.venue,
+            mode="live",
+            decision_packet_id=dpid,
+            provenance={
+                "runner": "momentum_live_runner",
+                "reason": reason,
+                "exit_order_id": le.get("exit_order_id"),
+                "exit_client_order_id": le.get("exit_client_order_id"),
+            },
+        )
+    except Exception:
+        _log.debug("live economic ledger partial exit hook skipped session=%s", sess.id, exc_info=True)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _record_live_exit_intent_safe(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    reason: str,
+    product_id: str,
+    quantity: float,
+    client_order_id: str | None,
+    bid: float | None,
+    ask: float | None,
+    mid: float | None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    try:
+        qty = _float_or_none(quantity)
+        bid_f = _float_or_none(bid)
+        ask_f = _float_or_none(ask)
+        mid_f = _float_or_none(mid)
+        spread_bps = None
+        if bid_f is not None and ask_f is not None and mid_f and mid_f > 0:
+            spread_bps = max(0.0, (ask_f - bid_f) / mid_f * 10_000.0)
+        pos = le.get("position")
+        pos = pos if isinstance(pos, dict) else {}
+        ref_px = bid_f if bid_f is not None else mid_f
+        intent: dict[str, Any] = {
+            "surface": "momentum_live_runner_exit",
+            "session_id": int(sess.id),
+            "state": sess.state,
+            "side": "sell",
+            "order_type": "market",
+            "reason": reason,
+            "product_id": product_id,
+            "quantity": qty,
+            "base_size": _fmt_base_size(qty) if qty and qty > 0 else None,
+            "client_order_id": client_order_id,
+            "bid": bid_f,
+            "ask": ask_f,
+            "mid": mid_f,
+            "spread_bps": spread_bps,
+            "reference_notional_usd": (qty * ref_px) if qty is not None and ref_px is not None else None,
+            "avg_entry_price": _float_or_none(pos.get("avg_entry_price")),
+            "stop_price": _float_or_none(pos.get("stop_price")),
+            "target_price": _float_or_none(pos.get("target_price")),
+            "opened_at_utc": pos.get("opened_at_utc"),
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        if extra:
+            intent.update(dict(extra))
+        intents = list(le.get("exit_execution_intents") or [])
+        intents.append(intent)
+        le["exit_execution_intents"] = intents[-10:]
+        le["last_exit_intent"] = intent
+        packet_id = int(le["entry_decision_packet_id"]) if le.get("entry_decision_packet_id") else None
+        record_packet_execution_intent(db, packet_id, intent)
+    except Exception:
+        _log.debug("live exit intent hook skipped session=%s reason=%s", sess.id, reason, exc_info=True)
+
+
+def _submit_live_market_exit(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    quantity: float,
+    client_order_id: str,
+    reason: str,
+    bid: float | None,
+    ask: float | None,
+    mid: float | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    _record_live_exit_intent_safe(
+        db,
+        sess,
+        le=le,
+        reason=reason,
+        product_id=product_id,
+        quantity=quantity,
+        client_order_id=client_order_id,
+        bid=bid,
+        ask=ask,
+        mid=mid,
+        extra=extra,
+    )
+    result = adapter.place_market_order(
+        product_id=product_id,
+        side="sell",
+        base_size=_fmt_base_size(quantity),
+        client_order_id=client_order_id,
+    ) or {}
+    le["exit_order_id"] = result.get("order_id")
+    le["exit_client_order_id"] = result.get("client_order_id") or client_order_id
+    le["exit_place_result"] = {"ok": result.get("ok"), "error": result.get("error")}
+    if result.get("ok"):
+        le["pending_exit_reason"] = reason
+        le["pending_exit_quantity"] = float(quantity)
+        le["pending_exit_submitted_at_utc"] = _utcnow().isoformat()
+    return result
+
+
+def _live_exit_submit_succeeded(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    result: dict[str, Any],
+    reason: str,
+) -> bool:
+    if result.get("ok") and le.get("exit_order_id"):
+        return True
+    missing_order_id = bool(result.get("ok")) and not le.get("exit_order_id")
+    failed = {
+        "reason": reason,
+        "result": {
+            "ok": result.get("ok"),
+            "error": result.get("error") or ("missing_exit_order_id" if missing_order_id else None),
+        },
+        "exit_client_order_id": le.get("exit_client_order_id"),
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    le["last_exit_submit_failed"] = failed
+    le.pop("pending_exit_reason", None)
+    le.pop("pending_exit_quantity", None)
+    le.pop("pending_exit_submitted_at_utc", None)
+    _commit_le(sess, le)
+    _emit(db, sess, "live_exit_submit_failed", failed)
+    return False
+
+
+def _order_done_for_exit(no: NormalizedOrder) -> bool:
+    st = (no.status or "").lower()
+    if st in ("filled", "done", "closed"):
+        return float(no.filled_size or 0.0) > 1e-12 and no.average_filled_price is not None
+    if no.filled_size > 1e-12:
+        return st in ("cancelled", "canceled", "expired", "failed")
+    return False
+
+
+def _order_terminal_without_exit_fill(no: NormalizedOrder) -> bool:
+    st = (no.status or "").lower()
+    if st in ("cancelled", "canceled", "expired", "failed", "rejected"):
+        return float(no.filled_size or 0.0) <= 1e-12
+    if st in ("filled", "done", "closed"):
+        return float(no.filled_size or 0.0) <= 1e-12 or no.average_filled_price is None
+    return False
+
+
+def _poll_live_exit_fill(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    reason: str,
+    quantity: float,
+) -> dict[str, Any]:
+    oid = le.get("exit_order_id")
+    if not oid:
+        _emit(db, sess, "live_exit_pending_unconfirmed", {"reason": reason, "why": "missing_exit_order_id"})
+        return {"filled": False, "pending": True, "why": "missing_exit_order_id"}
+    try:
+        no, _ = adapter.get_order(str(oid))
+    except Exception:
+        _log.debug("live exit order poll failed session=%s order_id=%s", sess.id, oid, exc_info=True)
+        no = None
+    if no is None:
+        _emit(db, sess, "live_exit_pending_unconfirmed", {"reason": reason, "order_id": oid, "why": "order_missing"})
+        return {"filled": False, "pending": True, "why": "order_missing"}
+
+    filled_size = float(no.filled_size or 0.0)
+    avg_px = _float_or_none(no.average_filled_price)
+    full_fill = _order_done_for_exit(no) and avg_px is not None and filled_size + 1e-12 >= float(quantity) * 0.999
+    if full_fill:
+        return {"filled": True, "fill_price": avg_px, "filled_size": filled_size, "order_status": no.status}
+
+    terminal_status = (no.status or "").lower() in ("filled", "done", "closed", "cancelled", "canceled", "expired", "failed")
+    if terminal_status and filled_size > 1e-12 and avg_px is not None:
+        return {
+            "filled": False,
+            "partial": True,
+            "fill_price": avg_px,
+            "filled_size": filled_size,
+            "order_status": no.status,
+        }
+
+    if _order_terminal_without_exit_fill(no):
+        failed = {
+            "reason": reason,
+            "order_id": oid,
+            "order_status": no.status,
+            "filled_size": filled_size,
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        le["last_exit_terminal_no_fill"] = failed
+        le.pop("pending_exit_reason", None)
+        le.pop("pending_exit_quantity", None)
+        le.pop("pending_exit_submitted_at_utc", None)
+        _commit_le(sess, le)
+        _emit(db, sess, "live_exit_terminal_no_fill", failed)
+        return {"filled": False, "failed": True, "why": "terminal_no_fill", "order_status": no.status}
+
+    pending = {
+        "reason": reason,
+        "order_id": oid,
+        "order_status": no.status,
+        "filled_size": filled_size,
+        "expected_quantity": float(quantity),
+        "recorded_at_utc": _utcnow().isoformat(),
+    }
+    if filled_size > 1e-12:
+        pending["why"] = "partial_exit_fill_pending"
+        if avg_px is not None:
+            pending["average_filled_price"] = avg_px
+    else:
+        pending["why"] = "exit_fill_pending"
+    le["last_exit_pending_confirmation"] = pending
+    _commit_le(sess, le)
+    _emit(db, sess, "live_exit_pending_confirmation", pending)
+    return {"filled": False, "pending": True, **pending}
+
+
+def _complete_confirmed_live_exit(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    quantity: float,
+    entry_price: float,
+    fill_price: float,
+    reason: str,
+    slip_bps: float,
+    sell_result: dict[str, Any] | None = None,
+) -> float:
+    pnl = (float(fill_price) - float(entry_price)) * float(quantity)
+    notional_basis = abs(float(entry_price) * float(quantity))
+    le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+    le["last_exit_price"] = float(fill_price)
+    le["last_exit_entry_price"] = float(entry_price)
+    le["last_exit_quantity"] = float(quantity)
+    le["last_exit_notional_basis_usd"] = notional_basis
+    le["last_exit_return_bps"] = (pnl / notional_basis) * 10_000.0 if notional_basis > 1e-12 else None
+    _record_live_exit_ledger_safe(
+        db,
+        sess,
+        le=le,
+        quantity=float(quantity),
+        entry_price=float(entry_price),
+        fill_price=float(fill_price),
+        realized_pnl_usd=pnl,
+        reason=reason,
+    )
+    _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_bps)
+    le["last_exit_reason"] = reason
+    le["position"] = None
+    le.pop("pending_exit_reason", None)
+    le.pop("pending_exit_quantity", None)
+    le.pop("pending_exit_submitted_at_utc", None)
+    _commit_le(sess, le)
+    _safe_transition(db, sess, STATE_LIVE_EXITED)
+    payload = {"reason": reason, "pnl_usd": pnl, "fill_price": float(fill_price)}
+    if sell_result is not None:
+        payload["sell_result"] = sell_result
+    _emit(db, sess, "live_exit_filled", payload)
+    return pnl
+
+
+def _apply_confirmed_live_partial_exit(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    filled_quantity: float,
+    entry_price: float,
+    fill_price: float,
+    reason: str,
+) -> float:
+    pos = le.get("position")
+    pos = dict(pos) if isinstance(pos, dict) else {}
+    current_qty = _float_or_none(pos.get("quantity")) or 0.0
+    qty = min(max(float(filled_quantity), 0.0), current_qty)
+    pnl = (float(fill_price) - float(entry_price)) * qty
+    notional_basis = abs(float(entry_price) * qty)
+    remaining = max(0.0, current_qty - qty)
+    le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+    le["last_partial_exit_price"] = float(fill_price)
+    le["last_partial_exit_reason"] = reason
+    le["last_partial_exit_quantity"] = qty
+    le["last_partial_exit_notional_basis_usd"] = notional_basis
+    le["last_partial_exit_return_bps"] = (pnl / notional_basis) * 10_000.0 if notional_basis > 1e-12 else None
+    pos["quantity"] = remaining
+    pos["partial_taken"] = True
+    le["position"] = pos
+    le.pop("pending_exit_reason", None)
+    le.pop("pending_exit_quantity", None)
+    le.pop("pending_exit_submitted_at_utc", None)
+    _record_live_partial_exit_ledger_safe(
+        db,
+        sess,
+        le=le,
+        quantity=qty,
+        entry_price=float(entry_price),
+        fill_price=float(fill_price),
+        realized_pnl_usd=pnl,
+        reason=reason,
+    )
+    _commit_le(sess, le)
+    _emit(
+        db,
+        sess,
+        "live_partial_exit_filled",
+        {"reason": reason, "qty": qty, "remain": remaining, "pnl_usd": pnl, "fill_price": float(fill_price)},
+    )
+    return pnl
+
+
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
     old = sess.state
     if old == new_state:
@@ -185,6 +658,59 @@ def _fmt_base_size(q: float) -> str:
     return s if s else "0"
 
 
+def _notional_guard_multiplier() -> float:
+    try:
+        bps = float(getattr(settings, "chili_momentum_order_notional_guard_bps", 25.0) or 25.0)
+    except (TypeError, ValueError):
+        bps = 25.0
+    return 1.0 + max(0.0, bps) / 10_000.0
+
+
+def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str, Any]) -> bool:
+    state = sess.state
+    if state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE, STATE_WATCHING_LIVE, STATE_LIVE_ENTRY_CANDIDATE):
+        return True
+    return state == STATE_LIVE_PENDING_ENTRY and not le.get("entry_submitted")
+
+
+def _quote_quality_block(tick: Any, freshness: Any) -> dict[str, Any] | None:
+    meta = getattr(tick, "freshness", None) or freshness
+    if meta is not None and not is_fresh_enough(meta):
+        return {
+            "reason": "stale_bbo",
+            "age_seconds": round(float(meta.age_seconds()), 4),
+            "max_age_seconds": float(getattr(meta, "max_age_seconds", 0.0) or 0.0),
+        }
+    try:
+        mid = float(getattr(tick, "mid", 0.0) or 0.0)
+        bid = float(getattr(tick, "bid", 0.0) or 0.0)
+        ask = float(getattr(tick, "ask", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return {"reason": "invalid_bbo"}
+    if mid <= 0 or bid <= 0 or ask <= 0 or ask < bid:
+        return {"reason": "invalid_bbo", "bid": bid, "ask": ask, "mid": mid}
+    try:
+        spread_bps = float(getattr(tick, "spread_bps", None))
+    except (TypeError, ValueError):
+        spread_bps = ((ask - bid) / mid) * 10_000.0
+    if not math.isfinite(spread_bps):
+        spread_bps = ((ask - bid) / mid) * 10_000.0
+    try:
+        max_spread = float(getattr(settings, "chili_momentum_risk_max_spread_bps_live", 12.0) or 12.0)
+    except (TypeError, ValueError):
+        max_spread = 12.0
+    if spread_bps > max_spread:
+        return {
+            "reason": "wide_bbo_spread",
+            "spread_bps": round(spread_bps, 4),
+            "max_spread_bps": max_spread,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+        }
+    return None
+
+
 def _order_done_for_entry(no: NormalizedOrder) -> bool:
     st = (no.status or "").lower()
     if st in ("filled", "done", "closed"):
@@ -217,6 +743,25 @@ def summarize_live_execution(snap: Any) -> dict[str, Any]:
         "fees_usd": le.get("fees_usd"),
         "last_mid": le.get("last_mid"),
         "last_exit_reason": le.get("last_exit_reason"),
+        "last_exit_intent": le.get("last_exit_intent") if isinstance(le.get("last_exit_intent"), dict) else None,
+        "exit_execution_intent_count": len(le.get("exit_execution_intents") or []),
+        "pending_exit_reason": le.get("pending_exit_reason"),
+        "pending_exit_quantity": le.get("pending_exit_quantity"),
+        "pending_exit_submitted_at_utc": le.get("pending_exit_submitted_at_utc"),
+        "last_exit_pending_confirmation": (
+            le.get("last_exit_pending_confirmation")
+            if isinstance(le.get("last_exit_pending_confirmation"), dict)
+            else None
+        ),
+        "last_partial_exit_reason": le.get("last_partial_exit_reason"),
+        "last_partial_exit_price": le.get("last_partial_exit_price"),
+        "last_quote_quality_gate": (
+            le.get("last_quote_quality_gate") if isinstance(le.get("last_quote_quality_gate"), dict) else None
+        ),
+        "last_exit_notional_basis_usd": le.get("last_exit_notional_basis_usd"),
+        "last_exit_return_bps": le.get("last_exit_return_bps"),
+        "last_partial_exit_notional_basis_usd": le.get("last_partial_exit_notional_basis_usd"),
+        "last_partial_exit_return_bps": le.get("last_partial_exit_return_bps"),
         "cooldown_until_utc": le.get("cooldown_until_utc"),
     }
     if isinstance(pos, dict):
@@ -358,6 +903,9 @@ def tick_live_session(
         return {"ok": False, "error": "missing_risk_snapshot"}
 
     le = _live_exec(snap)
+    mid: float | None = None
+    bid: float | None = None
+    ask: float | None = None
 
     def _kill_switch_blocks_live() -> bool:
         pol = snap.get("momentum_risk_policy_summary") or {}
@@ -365,7 +913,7 @@ def tick_live_session(
             return False
         return is_kill_switch_active()
 
-    def _handle_kill_switch_mid_run() -> None:
+    def _handle_kill_switch_mid_run() -> bool:
         """Safest effort: cancel open entry order; flatten if position recorded."""
         nonlocal le, snap
         if le.get("entry_order_id") and not le.get("position"):
@@ -375,15 +923,58 @@ def tick_live_session(
         pos = le.get("position")
         if isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0:
             pid = pos.get("product_id") or sess.symbol
-            qty = _fmt_base_size(float(pos["quantity"]))
             cid = f"chili_ml_x_{sess.id}_{uuid.uuid4().hex[:12]}"
-            sr = adapter.place_market_order(product_id=str(pid), side="sell", base_size=qty, client_order_id=cid)
-            le["exit_order_id"] = sr.get("order_id")
-            le["exit_client_order_id"] = sr.get("client_order_id")
-            le["last_exit_reason"] = "kill_switch_flatten"
+            sr = _submit_live_market_exit(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=str(pid),
+                quantity=float(pos["quantity"]),
+                client_order_id=cid,
+                reason="kill_switch_flatten",
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                extra={"trigger": "kill_switch"},
+            )
+            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="kill_switch_flatten"):
+                return False
             _emit(db, sess, "live_exit_submitted", {"reason": "kill_switch", "result": sr})
-            le["position"] = None
+            poll = _poll_live_exit_fill(
+                db,
+                sess,
+                adapter,
+                le=le,
+                reason="kill_switch_flatten",
+                quantity=float(pos["quantity"]),
+            )
+            if not poll.get("filled"):
+                if poll.get("partial"):
+                    _apply_confirmed_live_partial_exit(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=float(poll["filled_size"]),
+                        entry_price=float(pos.get("avg_entry_price") or bid or mid or 0.0),
+                        fill_price=float(poll["fill_price"]),
+                        reason="kill_switch_flatten",
+                    )
+                return False
+            _complete_confirmed_live_exit(
+                db,
+                sess,
+                le=le,
+                quantity=float(pos["quantity"]),
+                entry_price=float(pos.get("avg_entry_price") or bid or mid or 0.0),
+                fill_price=float(poll["fill_price"]),
+                reason="kill_switch_flatten",
+                slip_bps=float(le.get("entry_slip_bps_ref") or 6.0),
+                sell_result=sr,
+            )
+            return True
         _commit_le(sess, le)
+        return True
 
     # ── Early kill switch (before venue reads) ───────────────────────────
     if _kill_switch_blocks_live() and sess.state in (
@@ -424,11 +1015,16 @@ def tick_live_session(
         db.flush()
         return {"ok": True, "blocked": True, "reason": "no_quote"}
 
-    if tick.freshness and not is_fresh_enough(tick.freshness):
-        _emit(db, sess, "live_blocked_by_risk", {"reason": "stale_bbo", "age": tick.freshness.age_seconds()})
-        if sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE, STATE_WATCHING_LIVE):
+    quote_block = _quote_quality_block(tick, _fr)
+    if quote_block is not None:
+        _emit(db, sess, "live_blocked_by_risk", quote_block)
+        le["last_quote_quality_gate"] = quote_block
+        _commit_le(sess, le)
+        if sess.state in (STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_PENDING_ENTRY) and not le.get("entry_submitted"):
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+        if _live_entry_quote_gate_applies(sess, le):
             db.flush()
-            return {"ok": True, "blocked": True, "reason": "stale_quote"}
+            return {"ok": True, "blocked": True, "reason": quote_block.get("reason")}
 
     mid = float(tick.mid)
     bid = float(tick.bid or mid)
@@ -448,8 +1044,8 @@ def tick_live_session(
             adapter.cancel_order(str(le["entry_order_id"]))
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
         elif sess.state == STATE_LIVE_ENTERED and le.get("position"):
-            _handle_kill_switch_mid_run()
-            _safe_transition(db, sess, STATE_LIVE_EXITED)
+            if _handle_kill_switch_mid_run():
+                _safe_transition(db, sess, STATE_LIVE_EXITED)
         db.flush()
         return {"ok": True, "blocked": True, "risk_evaluation": ev}
 
@@ -461,8 +1057,8 @@ def tick_live_session(
         STATE_LIVE_BAILOUT,
     ):
         _emit(db, sess, "live_blocked_by_risk", {"reason": "kill_switch_mid_run"})
-        _handle_kill_switch_mid_run()
-        _safe_transition(db, sess, STATE_LIVE_EXITED)
+        if _handle_kill_switch_mid_run():
+            _safe_transition(db, sess, STATE_LIVE_EXITED)
         le = _live_exec(dict(sess.risk_snapshot_json or {}))
         db.flush()
         return {"ok": True, "blocked": True, "reason": "kill_switch"}
@@ -576,6 +1172,7 @@ def tick_live_session(
                         mark_packet_executed(db, int(le["entry_decision_packet_id"]))
                     except Exception:
                         _log.debug("mark_packet_executed live skipped session=%s", sess.id, exc_info=True)
+                _record_live_entry_ledger_safe(db, sess, le=le, quantity=filled, fill_price=avg)
                 _safe_transition(db, sess, STATE_LIVE_ENTERED)
                 _emit(
                     db,
@@ -811,11 +1408,11 @@ def tick_live_session(
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "abstained": True}
             decision_packet_id = dec.get("packet_id")
             max_notional = min(float(max_notional), float(dec["allocation"]["recommended_notional"]))
-            if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
-                _emit(db, sess, "live_error", {"reason": "decision_packet_required_missing"})
-                _safe_transition(db, sess, STATE_LIVE_ERROR)
-                db.flush()
-                return {"ok": False, "error": "decision_packet_missing"}
+        if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
+            _emit(db, sess, "live_error", {"reason": "decision_packet_required_missing"})
+            _safe_transition(db, sess, STATE_LIVE_ERROR)
+            db.flush()
+            return {"ok": False, "error": "decision_packet_missing"}
         le["entry_decision_packet_id"] = decision_packet_id
         le["entry_slip_bps_ref"] = slip_ref
         _commit_le(sess, le)
@@ -824,13 +1421,73 @@ def tick_live_session(
 
         inc = prod.base_increment if prod else None
         mn = prod.base_min_size if prod else None
-        qty_raw = max_notional / ask
+        guarded_ask = ask * _notional_guard_multiplier()
+        qty_raw = max_notional / guarded_ask
         qty = _round_base_size(qty_raw, inc, mn)
         if qty <= 0:
             _emit(db, sess, "live_error", {"reason": "size_zero_after_rounding"})
             _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()
             return {"ok": False, "error": "size_zero"}
+        estimated_guarded_notional = qty * guarded_ask
+        if estimated_guarded_notional > max_notional + 1e-9:
+            _emit(
+                db,
+                sess,
+                "live_entry_blocked_by_notional_cap",
+                {
+                    "max_notional_usd": max_notional,
+                    "estimated_guarded_notional_usd": estimated_guarded_notional,
+                    "ask": ask,
+                    "guarded_ask": guarded_ask,
+                    "quantity": qty,
+                    "decision_packet_id": decision_packet_id,
+                },
+            )
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "blocked": True,
+                "reason": "notional_cap",
+            }
+        le["entry_notional_guard"] = {
+            "max_notional_usd": max_notional,
+            "ask": ask,
+            "bid": bid,
+            "mid": mid,
+            "guarded_ask": guarded_ask,
+            "estimated_guarded_notional_usd": estimated_guarded_notional,
+            "quantity": qty,
+            "order_type": "market",
+            "spread_bps": spread_bps_live,
+            "slippage_bps_ref": slip_ref,
+        }
+        record_packet_execution_intent(
+            db,
+            decision_packet_id,
+            {
+                "surface": "momentum_live_runner_entry",
+                "order_type": "market",
+                "side": "buy",
+                "product_id": product_id,
+                "bid": bid,
+                "ask": ask,
+                "mid": mid,
+                "spread_bps": spread_bps_live,
+                "slippage_bps_ref": slip_ref,
+                "max_notional_usd": max_notional,
+                "guarded_ask": guarded_ask,
+                "estimated_guarded_notional_usd": estimated_guarded_notional,
+                "quantity": qty,
+                "base_increment": inc,
+                "base_min_size": mn,
+                "notional_guard_multiplier": _notional_guard_multiplier(),
+            },
+        )
+        _commit_le(sess, le)
 
         cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{uuid.uuid4().hex[:10]}"[:120]
         res = adapter.place_market_order(
@@ -864,6 +1521,51 @@ def tick_live_session(
         avg = float(pos["avg_entry_price"])
         stop_px = float(pos["stop_price"])
         target_px = float(pos["target_price"])
+        pending_exit_reason = le.get("pending_exit_reason")
+        if pending_exit_reason:
+            try:
+                pending_qty = float(le.get("pending_exit_quantity") or qty)
+            except (TypeError, ValueError):
+                pending_qty = qty
+            poll = _poll_live_exit_fill(
+                db,
+                sess,
+                adapter,
+                le=le,
+                reason=str(pending_exit_reason),
+                quantity=min(max(pending_qty, 0.0), qty),
+            )
+            if poll.get("filled"):
+                slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
+                _complete_confirmed_live_exit(
+                    db,
+                    sess,
+                    le=le,
+                    quantity=min(max(pending_qty, 0.0), qty),
+                    entry_price=avg,
+                    fill_price=float(poll["fill_price"]),
+                    reason=str(pending_exit_reason),
+                    slip_bps=slip_live,
+                )
+            elif poll.get("partial"):
+                _apply_confirmed_live_partial_exit(
+                    db,
+                    sess,
+                    le=le,
+                    filled_quantity=float(poll["filled_size"]),
+                    entry_price=avg,
+                    fill_price=float(poll["fill_price"]),
+                    reason=str(pending_exit_reason),
+                )
+            db.flush()
+            return {
+                "ok": bool(poll.get("filled") or poll.get("partial") or poll.get("pending")),
+                "session_id": sess.id,
+                "state": sess.state,
+                "pending_exit": bool(poll.get("pending")),
+                "partial_exit": bool(poll.get("partial")),
+                "exit_failed": bool(poll.get("failed")),
+            }
         opened_raw = pos.get("opened_at_utc")
         try:
             t0 = datetime.fromisoformat(str(opened_raw).replace("Z", "+00:00")).replace(tzinfo=None)
@@ -885,25 +1587,56 @@ def tick_live_session(
 
         if st == STATE_LIVE_BAILOUT:
             cid = f"chili_ml_b_{sess.id}_{uuid.uuid4().hex[:12]}"
-            sr = adapter.place_market_order(
-                product_id=product_id, side="sell", base_size=_fmt_base_size(qty), client_order_id=cid
+            sr = _submit_live_market_exit(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                quantity=qty,
+                client_order_id=cid,
+                reason="bailout",
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                extra={"unrealized_pnl_usd": (bid - avg) * qty},
             )
-            le["exit_order_id"] = sr.get("order_id")
-            le["exit_client_order_id"] = sr.get("client_order_id")
-            xpx = bid
-            if sr.get("ok") and le.get("exit_order_id"):
-                nox, _ = adapter.get_order(str(le["exit_order_id"]))
-                if nox and nox.average_filled_price:
-                    xpx = float(nox.average_filled_price)
-            pnl = (xpx - avg) * qty
+            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="bailout"):
+                db.flush()
+                return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
+            poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="bailout", quantity=qty)
+            if not poll.get("filled"):
+                if poll.get("partial"):
+                    _apply_confirmed_live_partial_exit(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=float(poll["filled_size"]),
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason="bailout",
+                    )
+                db.flush()
+                return {
+                    "ok": bool(poll.get("pending") or poll.get("partial")),
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "pending_exit": bool(poll.get("pending")),
+                    "partial_exit": bool(poll.get("partial")),
+                    "exit_failed": bool(poll.get("failed")),
+                }
             slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
-            le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
-            _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
-            le["last_exit_reason"] = "bailout"
-            le["position"] = None
-            _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_LIVE_EXITED)
-            _emit(db, sess, "live_exit_filled", {"reason": "bailout", "pnl_usd": pnl, "sell_result": sr})
+            _complete_confirmed_live_exit(
+                db,
+                sess,
+                le=le,
+                quantity=qty,
+                entry_price=avg,
+                fill_price=float(poll["fill_price"]),
+                reason="bailout",
+                slip_bps=slip_live,
+                sell_result=sr,
+            )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -930,47 +1663,109 @@ def tick_live_session(
 
         if held >= max_hold:
             cid = f"chili_ml_t_{sess.id}_{uuid.uuid4().hex[:12]}"
-            sr = adapter.place_market_order(
-                product_id=product_id, side="sell", base_size=_fmt_base_size(qty), client_order_id=cid
+            sr = _submit_live_market_exit(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                quantity=qty,
+                client_order_id=cid,
+                reason="max_hold",
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                extra={"held_seconds": held, "max_hold_seconds": max_hold},
             )
-            le["exit_order_id"] = sr.get("order_id")
-            xpx = bid
-            if sr.get("ok") and le.get("exit_order_id"):
-                nox, _ = adapter.get_order(str(le["exit_order_id"]))
-                if nox and nox.average_filled_price:
-                    xpx = float(nox.average_filled_price)
-            pnl = (xpx - avg) * qty
+            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="max_hold"):
+                db.flush()
+                return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
+            poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="max_hold", quantity=qty)
+            if not poll.get("filled"):
+                if poll.get("partial"):
+                    _apply_confirmed_live_partial_exit(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=float(poll["filled_size"]),
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason="max_hold",
+                    )
+                db.flush()
+                return {
+                    "ok": bool(poll.get("pending") or poll.get("partial")),
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "pending_exit": bool(poll.get("pending")),
+                    "partial_exit": bool(poll.get("partial")),
+                    "exit_failed": bool(poll.get("failed")),
+                }
             slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
-            le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
-            _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
-            le["last_exit_reason"] = "max_hold"
-            le["position"] = None
-            _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_LIVE_EXITED)
-            _emit(db, sess, "live_exit_filled", {"reason": "max_hold", "pnl_usd": pnl})
+            _complete_confirmed_live_exit(
+                db,
+                sess,
+                le=le,
+                quantity=qty,
+                entry_price=avg,
+                fill_price=float(poll["fill_price"]),
+                reason="max_hold",
+                slip_bps=slip_live,
+            )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if bid <= stop_px:
             cid = f"chili_ml_s_{sess.id}_{uuid.uuid4().hex[:12]}"
-            sr = adapter.place_market_order(
-                product_id=product_id, side="sell", base_size=_fmt_base_size(qty), client_order_id=cid
+            sr = _submit_live_market_exit(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                quantity=qty,
+                client_order_id=cid,
+                reason="stop",
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                extra={"stop_price": stop_px},
             )
-            le["exit_order_id"] = sr.get("order_id")
-            xpx = bid
-            if sr.get("ok") and le.get("exit_order_id"):
-                nox, _ = adapter.get_order(str(le["exit_order_id"]))
-                if nox and nox.average_filled_price:
-                    xpx = float(nox.average_filled_price)
-            pnl = (xpx - avg) * qty
+            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="stop"):
+                db.flush()
+                return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
+            poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="stop", quantity=qty)
+            if not poll.get("filled"):
+                if poll.get("partial"):
+                    _apply_confirmed_live_partial_exit(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=float(poll["filled_size"]),
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason="stop",
+                    )
+                db.flush()
+                return {
+                    "ok": bool(poll.get("pending") or poll.get("partial")),
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "pending_exit": bool(poll.get("pending")),
+                    "partial_exit": bool(poll.get("partial")),
+                    "exit_failed": bool(poll.get("failed")),
+                }
             slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
-            le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
-            _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
-            le["last_exit_reason"] = "stop"
-            le["position"] = None
-            _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_LIVE_EXITED)
-            _emit(db, sess, "live_exit_filled", {"reason": "stop", "pnl_usd": pnl})
+            _complete_confirmed_live_exit(
+                db,
+                sess,
+                le=le,
+                quantity=qty,
+                entry_price=avg,
+                fill_price=float(poll["fill_price"]),
+                reason="stop",
+                slip_bps=slip_live,
+            )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -982,23 +1777,55 @@ def tick_live_session(
 
         if st == STATE_LIVE_SCALING_OUT:
             cid = f"chili_ml_p_{sess.id}_{uuid.uuid4().hex[:12]}"
-            sr = adapter.place_market_order(
-                product_id=product_id, side="sell", base_size=_fmt_base_size(qty), client_order_id=cid
+            sr = _submit_live_market_exit(
+                db,
+                sess,
+                adapter,
+                le=le,
+                product_id=product_id,
+                quantity=qty,
+                client_order_id=cid,
+                reason="target",
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                extra={"target_price": target_px},
             )
-            xpx = bid
-            if sr.get("ok") and sr.get("order_id"):
-                nox, _ = adapter.get_order(str(sr["order_id"]))
-                if nox and nox.average_filled_price:
-                    xpx = float(nox.average_filled_price)
-            pnl = (xpx - avg) * qty
+            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="target"):
+                db.flush()
+                return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
+            poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="target", quantity=qty)
+            if not poll.get("filled"):
+                if poll.get("partial"):
+                    _apply_confirmed_live_partial_exit(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=float(poll["filled_size"]),
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason="target",
+                    )
+                db.flush()
+                return {
+                    "ok": bool(poll.get("pending") or poll.get("partial")),
+                    "session_id": sess.id,
+                    "state": sess.state,
+                    "pending_exit": bool(poll.get("pending")),
+                    "partial_exit": bool(poll.get("partial")),
+                    "exit_failed": bool(poll.get("failed")),
+                }
             slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
-            le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
-            _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
-            le["last_exit_reason"] = "target"
-            le["position"] = None
-            _commit_le(sess, le)
-            _safe_transition(db, sess, STATE_LIVE_EXITED)
-            _emit(db, sess, "live_exit_filled", {"reason": "target", "pnl_usd": pnl})
+            _complete_confirmed_live_exit(
+                db,
+                sess,
+                le=le,
+                quantity=qty,
+                entry_price=avg,
+                fill_price=float(poll["fill_price"]),
+                reason="target",
+                slip_bps=slip_live,
+            )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -1012,23 +1839,55 @@ def tick_live_session(
             trail_stop = max(stop_px, avg * trail_floor_return)
             if bid <= trail_stop:
                 cid = f"chili_ml_tr_{sess.id}_{uuid.uuid4().hex[:12]}"
-                sr = adapter.place_market_order(
-                    product_id=product_id, side="sell", base_size=_fmt_base_size(qty), client_order_id=cid
+                sr = _submit_live_market_exit(
+                    db,
+                    sess,
+                    adapter,
+                    le=le,
+                    product_id=product_id,
+                    quantity=qty,
+                    client_order_id=cid,
+                    reason="trail_stop",
+                    bid=bid,
+                    ask=ask,
+                    mid=mid,
+                    extra={"trail_stop_price": trail_stop, "trail_floor_return": trail_floor_return},
                 )
-                xpx = bid
-                if sr.get("ok") and sr.get("order_id"):
-                    nox, _ = adapter.get_order(str(sr["order_id"]))
-                    if nox and nox.average_filled_price:
-                        xpx = float(nox.average_filled_price)
-                pnl = (xpx - avg) * qty
+                if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="trail_stop"):
+                    db.flush()
+                    return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
+                poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="trail_stop", quantity=qty)
+                if not poll.get("filled"):
+                    if poll.get("partial"):
+                        _apply_confirmed_live_partial_exit(
+                            db,
+                            sess,
+                            le=le,
+                            filled_quantity=float(poll["filled_size"]),
+                            entry_price=avg,
+                            fill_price=float(poll["fill_price"]),
+                            reason="trail_stop",
+                        )
+                    db.flush()
+                    return {
+                        "ok": bool(poll.get("pending") or poll.get("partial")),
+                        "session_id": sess.id,
+                        "state": sess.state,
+                        "pending_exit": bool(poll.get("pending")),
+                        "partial_exit": bool(poll.get("partial")),
+                        "exit_failed": bool(poll.get("failed")),
+                    }
                 slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
-                le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
-                _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
-                le["last_exit_reason"] = "trail_stop"
-                le["position"] = None
-                _commit_le(sess, le)
-                _safe_transition(db, sess, STATE_LIVE_EXITED)
-                _emit(db, sess, "live_exit_filled", {"reason": "trail_stop", "pnl_usd": pnl})
+                _complete_confirmed_live_exit(
+                    db,
+                    sess,
+                    le=le,
+                    quantity=qty,
+                    entry_price=avg,
+                    fill_price=float(poll["fill_price"]),
+                    reason="trail_stop",
+                    slip_bps=slip_live,
+                )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 

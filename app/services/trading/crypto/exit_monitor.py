@@ -203,17 +203,108 @@ def _position_qty_for_trade(trade: Trade) -> tuple[float | None, str]:
     return None, broker_source
 
 
-def _place_market_sell_for_trade(trade: Trade, qty: float) -> dict[str, Any]:
+def _coinbase_exit_limit_buffer_pct() -> float:
+    try:
+        value = float(
+            getattr(
+                settings,
+                "chili_coinbase_exit_limit_fallback_buffer_pct",
+                getattr(settings, "chili_coinbase_stop_limit_buffer_pct", 0.005),
+            )
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        value = 0.005
+    return min(max(value, 0.0001), 0.10)
+
+
+def _coinbase_limit_only_mode(error: str | None) -> bool:
+    msg = str(error or "").strip().lower()
+    return "limit only mode" in msg or "please use limit order type" in msg
+
+
+def _coinbase_spot_adapter():
+    from ..venue.coinbase_spot import CoinbaseSpotAdapter
+
+    return CoinbaseSpotAdapter()
+
+
+def _place_coinbase_sell_for_trade(
+    trade: Trade,
+    qty: float,
+    *,
+    px: float | None = None,
+) -> dict[str, Any]:
+    """Submit a Coinbase crypto exit using product-specific precision.
+
+    Coinbase enforces per-product ``base_increment``. The legacy
+    ``coinbase_service.place_sell_order`` only normalized crypto quantity
+    to eight decimals, which is still too fine for some products. The spot
+    venue adapter pulls product metadata first and quantizes size/price
+    before the broker sees the order.
+    """
+    product_id = _to_usd_product_id(trade.ticker)
+    adapter = _coinbase_spot_adapter()
+    market_res = adapter.place_market_order(
+        product_id=product_id,
+        side="sell",
+        base_size=str(qty),
+    )
+    if isinstance(market_res, dict) and market_res.get("ok"):
+        market_res.setdefault("order_type", "market")
+        return market_res
+
+    err = (market_res or {}).get("error") if isinstance(market_res, dict) else None
+    if not (_coinbase_limit_only_mode(err) and px is not None and px > 0):
+        return market_res
+
+    buffer_pct = _coinbase_exit_limit_buffer_pct()
+    limit_px = px * (1.0 - buffer_pct)
+    if limit_px <= 0:
+        return market_res
+    limit_res = adapter.place_limit_order_gtc(
+        product_id=product_id,
+        side="sell",
+        base_size=str(qty),
+        limit_price=str(limit_px),
+        post_only=False,
+    )
+    if isinstance(limit_res, dict):
+        limit_res.setdefault("fallback_from", "market")
+        limit_res.setdefault("fallback_reason", str(err or "limit_only_mode"))
+        limit_res.setdefault("order_type", "limit")
+        limit_res.setdefault("market_error", str(err or ""))
+    if isinstance(limit_res, dict) and limit_res.get("ok"):
+        logger.warning(
+            "[crypto_exit] Coinbase market sell refused limit-only mode; "
+            "submitted marketable limit exit trade#%s ticker=%s qty=%s px=%s "
+            "limit_px=%s buffer_pct=%s",
+            getattr(trade, "id", None),
+            product_id,
+            qty,
+            px,
+            limit_px,
+            buffer_pct,
+        )
+        return limit_res
+    if isinstance(market_res, dict) and isinstance(limit_res, dict):
+        merged = dict(market_res)
+        merged["fallback_error"] = limit_res.get("error")
+        merged["fallback_order_type"] = "limit"
+        return merged
+    return market_res
+
+
+def _place_market_sell_for_trade(
+    trade: Trade,
+    qty: float,
+    *,
+    px: float | None = None,
+) -> dict[str, Any]:
     """Submit the exit order to the venue that owns the open position."""
     broker_source = _broker_source_for_trade(trade)
     if broker_source == "coinbase":
-        from ... import coinbase_service
-
-        return coinbase_service.place_sell_order(
-            ticker=trade.ticker,
-            quantity=qty,
-            order_type="market",
-        )
+        return _place_coinbase_sell_for_trade(trade, qty, px=px)
 
     from ... import broker_service
 
@@ -226,6 +317,112 @@ def _place_market_sell_for_trade(trade: Trade, qty: float) -> dict[str, Any]:
 
 def _coinbase_insufficient_balance(error: str | None) -> bool:
     return "insufficient balance" in str(error or "").strip().lower()
+
+
+def _coinbase_dust_notional_threshold_usd() -> float:
+    try:
+        from ... import coinbase_service
+
+        return float(getattr(coinbase_service, "_MIN_AUTO_CREATE_NOTIONAL_USD", 1.0))
+    except Exception:
+        return 1.0
+
+
+def _is_coinbase_unmarketable_dust(qty: float, px: float | None) -> bool:
+    try:
+        q = float(qty or 0.0)
+        p = float(px or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if q <= 0 or p <= 0:
+        return False
+    threshold = _coinbase_dust_notional_threshold_usd()
+    return threshold > 0 and (q * p) < threshold
+
+
+def _close_coinbase_dust_trade(
+    db: Session,
+    trade: Trade,
+    *,
+    qty: float,
+    px: float,
+    trigger_reason: str,
+) -> None:
+    """Stop retrying unmarketable Coinbase dust as an actionable position."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    q = float(qty or 0.0)
+    p = float(px or 0.0)
+    entry = float(trade.entry_price or 0.0)
+    pnl = (p - entry) * q
+    if str(trade.direction or "long").lower() == "short":
+        pnl = -pnl
+    notional = q * p
+    threshold = _coinbase_dust_notional_threshold_usd()
+
+    trade.status = "closed"
+    if q > 0:
+        trade.quantity = q
+    trade.exit_price = p
+    trade.exit_date = now
+    trade.pnl = round(pnl, 4)
+    trade.exit_reason = "coinbase_dust_unmarketable"
+    trade.broker_status = "dust_unmarketable"
+    trade.last_broker_sync = now
+    trade.pending_exit_order_id = None
+    trade.pending_exit_status = None
+    trade.pending_exit_requested_at = None
+    trade.pending_exit_reason = None
+    trade.notes = (
+        (trade.notes or "")
+        + "\nAuto-closed dust residual: Coinbase position notional "
+        + f"${notional:.6f} below ${threshold:.2f} minimum; "
+        + "broker may retain untradeable dust."
+    )
+    db.add(trade)
+    db.commit()
+
+    try:
+        from ..execution_audit import record_execution_event
+
+        record_execution_event(
+            db,
+            user_id=trade.user_id,
+            ticker=trade.ticker,
+            trade=trade,
+            scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+            broker_source="coinbase",
+            order_id=None,
+            event_type="coinbase_dust_close",
+            status="closed",
+            requested_quantity=q,
+            cumulative_filled_quantity=0.0,
+            average_fill_price=p,
+            payload_json={
+                "side": "sell",
+                "synthetic": True,
+                "source": "crypto_exit_monitor",
+                "reason": "coinbase_dust_unmarketable",
+                "trigger_reason": trigger_reason[:120],
+                "notional_usd": notional,
+                "dust_threshold_usd": threshold,
+            },
+        )
+    except Exception:
+        logger.debug(
+            "[crypto_exit] dust close execution_event failed for trade#%s",
+            trade.id,
+            exc_info=True,
+        )
+    try:
+        from ..brain_work.execution_hooks import on_live_trade_closed
+
+        on_live_trade_closed(db, trade, source="coinbase_dust_residual_close")
+    except Exception:
+        logger.debug(
+            "[crypto_exit] dust close learning hook failed for trade#%s",
+            trade.id,
+            exc_info=True,
+        )
 
 
 def _cancel_coinbase_open_sell_orders(ticker: str) -> list[str]:
@@ -391,7 +588,28 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
                 )
                 qty = _broker_qty
 
-            res = _place_market_sell_for_trade(t, qty)
+            if _broker_source == "coinbase" and _is_coinbase_unmarketable_dust(qty, px):
+                _close_coinbase_dust_trade(
+                    db,
+                    t,
+                    qty=qty,
+                    px=px,
+                    trigger_reason=reason,
+                )
+                out["closed"] += 1
+                out["dust_closed"] = int(out.get("dust_closed") or 0) + 1
+                logger.warning(
+                    "[crypto_exit] closed Coinbase dust residual trade#%s "
+                    "ticker=%s qty=%s px=%s reason=%s",
+                    t.id,
+                    t.ticker,
+                    qty,
+                    px,
+                    reason,
+                )
+                continue
+
+            res = _place_market_sell_for_trade(t, qty, px=px)
             if not (isinstance(res, dict) and res.get("ok")):
                 err = (res or {}).get("error") if isinstance(res, dict) else "unknown"
                 if _broker_source == "coinbase" and _coinbase_insufficient_balance(err):
@@ -402,7 +620,7 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
                             "for trade#%s %s before retrying market exit",
                             len(cancelled_orders), t.id, t.ticker,
                         )
-                        res = _place_market_sell_for_trade(t, qty)
+                        res = _place_market_sell_for_trade(t, qty, px=px)
                         if isinstance(res, dict) and res.get("ok"):
                             err = None
                         else:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -13,6 +14,7 @@ from .evolution import (
     aggregate_recent_outcomes_for_symbol_variant,
     aggregate_recent_outcomes_for_variant,
     evolution_summary_for_operator,
+    outcome_needs_evolution_ingest,
     paper_vs_live_performance_slices,
 )
 
@@ -55,6 +57,14 @@ def list_recent_momentum_outcomes(
 
 
 def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
+    summary = r.extracted_summary_json if isinstance(r.extracted_summary_json, dict) else {}
+    credit = summary.get("evolution_credit") if isinstance(summary.get("evolution_credit"), dict) else {}
+    regrade = (
+        summary.get("evolution_credit_regrade_v1")
+        if isinstance(summary.get("evolution_credit_regrade_v1"), dict)
+        else {}
+    )
+    ingest = summary.get("evolution_ingest_v1") if isinstance(summary.get("evolution_ingest_v1"), dict) else {}
     return {
         "id": r.id,
         "session_id": r.session_id,
@@ -69,9 +79,283 @@ def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
         "hold_seconds": r.hold_seconds,
         "exit_reason": r.exit_reason,
         "evidence_weight": r.evidence_weight,
+        "contributes_to_evolution": bool(r.contributes_to_evolution),
+        "evolution_credit": credit,
+        "evolution_credit_reason_codes": list(credit.get("reason_codes") or []),
+        "evolution_credit_regrade": regrade,
+        "evolution_ingest": ingest,
+        "reingest_required": _reingest_required(r),
         "terminal_at": r.terminal_at.isoformat() if r.terminal_at else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
+
+
+def _credit_payload(row: MomentumAutomationOutcome) -> dict[str, Any]:
+    summary = row.extracted_summary_json if isinstance(row.extracted_summary_json, dict) else {}
+    credit = summary.get("evolution_credit") if isinstance(summary.get("evolution_credit"), dict) else {}
+    return dict(credit)
+
+
+def _credit_reason_codes(row: MomentumAutomationOutcome) -> list[str]:
+    credit = _credit_payload(row)
+    reasons = [str(r) for r in (credit.get("reason_codes") or []) if str(r)]
+    if bool(row.contributes_to_evolution):
+        return []
+    if not reasons:
+        return ["credit_reason_missing"]
+    return reasons
+
+
+def _credit_rate(credited: int, total: int) -> float | None:
+    if total <= 0:
+        return None
+    return round(float(credited) / float(total), 4)
+
+
+def _regrade_payload(row: MomentumAutomationOutcome) -> dict[str, Any]:
+    summary = row.extracted_summary_json if isinstance(row.extracted_summary_json, dict) else {}
+    marker = summary.get("evolution_credit_regrade_v1")
+    return dict(marker) if isinstance(marker, dict) else {}
+
+
+def _reingest_required(row: MomentumAutomationOutcome) -> bool:
+    marker = _regrade_payload(row)
+    return (
+        bool(row.contributes_to_evolution)
+        and bool(marker.get("requires_reingest"))
+        and not bool(marker.get("reingested_at_utc"))
+        and outcome_needs_evolution_ingest(row)
+    )
+
+
+def _repair_recommendation(reason_code: str, n: int) -> dict[str, Any]:
+    code = str(reason_code or "unknown")
+    base = {"reason_code": code, "n": int(n or 0)}
+    if code in {"missing_entry_decision_packet", "entry_decision_packet_missing"}:
+        return {
+            **base,
+            "repair_kind": "decision_packet_lineage",
+            "dry_run_endpoint": "POST /api/trading/brain/decision-packet-coverage/repair?target=automation_ledger&apply=false",
+            "apply_endpoint": "POST /api/trading/brain/decision-packet-coverage/repair?target=automation_ledger&apply=true",
+            "follow_up_endpoint": "POST /api/trading/brain/momentum/evolution-credit/regrade?apply=false",
+            "expected_effect": "Recover credit only where an existing entry packet can be proven.",
+        }
+    if code == "decision_snapshot_invalid":
+        return {
+            **base,
+            "repair_kind": "decision_snapshot_seal",
+            "dry_run_endpoint": "POST /api/trading/brain/decision-packet-coverage/repair?target=packet_snapshots&apply=false",
+            "apply_endpoint": "POST /api/trading/brain/decision-packet-coverage/repair?target=packet_snapshots&apply=true",
+            "follow_up_endpoint": "POST /api/trading/brain/momentum/evolution-credit/regrade?apply=false",
+            "expected_effect": "Recover credit only when the packet can be sealed into a replayable snapshot.",
+        }
+    if code == "economic_ledger_parity_missing":
+        return {
+            **base,
+            "repair_kind": "automation_ledger_parity",
+            "dry_run_endpoint": "POST /api/trading/brain/ledger/automation-parity/reconcile?apply=false",
+            "apply_endpoint": "POST /api/trading/brain/ledger/automation-parity/reconcile?apply=true",
+            "follow_up_endpoint": "POST /api/trading/brain/momentum/evolution-credit/regrade?apply=false",
+            "expected_effect": "Recover credit only where existing automation fill events reconcile with outcome P&L.",
+        }
+    if code == "economic_ledger_parity_mismatch":
+        return {
+            **base,
+            "repair_kind": "ledger_disagreement_review",
+            "dry_run_endpoint": "POST /api/trading/brain/ledger/automation-parity/reconcile?include_disagreed=true&apply=false",
+            "apply_endpoint": "POST /api/trading/brain/ledger/automation-parity/reconcile?include_disagreed=true&apply=true",
+            "follow_up_endpoint": "POST /api/trading/brain/momentum/evolution-credit/regrade?apply=false",
+            "expected_effect": "Refresh stale disagreements; persistent mismatches should stay audit-only.",
+        }
+    if code == "missing_economic_result":
+        return {
+            **base,
+            "repair_kind": "outcome_capture_gap",
+            "dry_run_endpoint": None,
+            "apply_endpoint": None,
+            "follow_up_endpoint": None,
+            "expected_effect": "No safe repair unless broker/runtime economics can be reconstructed.",
+        }
+    if code.startswith("non_strategy_outcome_") or code in {"no_entry", "paper_synthetic_quote_source"}:
+        return {
+            **base,
+            "repair_kind": "audit_only_expected",
+            "dry_run_endpoint": None,
+            "apply_endpoint": None,
+            "follow_up_endpoint": None,
+            "expected_effect": "Keep the row for diagnostics, but do not use it for strategy learning.",
+        }
+    return {
+        **base,
+        "repair_kind": "manual_review",
+        "dry_run_endpoint": None,
+        "apply_endpoint": None,
+        "follow_up_endpoint": None,
+        "expected_effect": "Unknown blocker; inspect examples before changing learning credit.",
+    }
+
+
+def _repair_recommendations(reason_counts: Counter[str]) -> list[dict[str, Any]]:
+    return [_repair_recommendation(reason, n) for reason, n in reason_counts.most_common()]
+
+
+def evolution_credit_diagnostics(
+    db: Session,
+    *,
+    days: int = 30,
+    user_id: Optional[int] = None,
+    mode: Optional[str] = None,
+    execution_family: Optional[str] = None,
+    limit: int = 1000,
+) -> dict[str, Any]:
+    """Summarize which outcome rows are eligible to train evolution.
+
+    This is intentionally read-only. Rows blocked from evolution still remain
+    durable audit samples; this diagnostic explains why they are not allowed to
+    update the neural learner yet.
+    """
+    default_window_days = 30
+    max_window_days = 365
+    default_row_limit = 1000
+    max_row_limit = 10_000
+    window_source = default_window_days if days is None else days
+    limit_source = default_row_limit if limit is None else limit
+    window_days = max(1, min(int(window_source), max_window_days))
+    row_limit = max(1, min(int(limit_source), max_row_limit))
+    out: dict[str, Any] = {
+        "table_present": momentum_outcomes_table_present(db),
+        "mode": "audit_only",
+        "window_days": window_days,
+        "row_limit": row_limit,
+        "row_limit_reached": False,
+        "filters": {
+            "user_id": int(user_id) if user_id is not None else None,
+            "mode": mode.lower().strip() if mode else None,
+            "execution_family": execution_family.strip().lower() if execution_family else None,
+        },
+        "total": 0,
+        "credited": 0,
+        "blocked": 0,
+        "credit_rate": None,
+        "reason_counts": [],
+        "by_mode": [],
+        "by_execution_family": [],
+        "reingest_required": 0,
+        "reingest_examples": [],
+        "blocked_examples": [],
+        "recommended_repairs": [],
+    }
+    if not out["table_present"]:
+        return out
+
+    since = datetime.utcnow() - timedelta(days=window_days)
+    q = (
+        db.query(MomentumAutomationOutcome)
+        .filter(MomentumAutomationOutcome.terminal_at >= since)
+        .order_by(MomentumAutomationOutcome.created_at.desc())
+    )
+    if user_id is not None:
+        q = q.filter(MomentumAutomationOutcome.user_id == int(user_id))
+    if mode:
+        q = q.filter(MomentumAutomationOutcome.mode == mode.lower().strip())
+    if execution_family:
+        q = q.filter(MomentumAutomationOutcome.execution_family == execution_family.strip().lower())
+
+    rows = q.limit(row_limit + 1).all()
+    if len(rows) > row_limit:
+        out["row_limit_reached"] = True
+        rows = rows[:row_limit]
+
+    total = len(rows)
+    credited = sum(1 for row in rows if bool(row.contributes_to_evolution))
+    reason_counts: Counter[str] = Counter()
+    by_mode: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "credited": 0, "blocked": 0})
+    by_family: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "credited": 0, "blocked": 0})
+    blocked_examples: list[dict[str, Any]] = []
+    reingest_examples: list[dict[str, Any]] = []
+    reingest_required = 0
+
+    for row in rows:
+        is_credited = bool(row.contributes_to_evolution)
+        needs_reingest = _reingest_required(row)
+        if needs_reingest:
+            reingest_required += 1
+            if len(reingest_examples) < 10:
+                marker = _regrade_payload(row)
+                reingest_examples.append(
+                    {
+                        "outcome_id": int(row.id) if row.id is not None else None,
+                        "session_id": int(row.session_id),
+                        "symbol": row.symbol,
+                        "mode": row.mode,
+                        "execution_family": row.execution_family,
+                        "outcome_class": row.outcome_class,
+                        "entry_decision_packet_id": _credit_payload(row).get("entry_decision_packet_id"),
+                        "regraded_at_utc": marker.get("regraded_at_utc"),
+                        "terminal_at": row.terminal_at.isoformat() if row.terminal_at else None,
+                    }
+                )
+        mode_key = str(row.mode or "unknown")
+        family_key = str(row.execution_family or "unknown")
+        by_mode[mode_key]["total"] += 1
+        by_family[family_key]["total"] += 1
+        if is_credited:
+            by_mode[mode_key]["credited"] += 1
+            by_family[family_key]["credited"] += 1
+            continue
+
+        by_mode[mode_key]["blocked"] += 1
+        by_family[family_key]["blocked"] += 1
+        reasons = _credit_reason_codes(row)
+        reason_counts.update(reasons)
+        if len(blocked_examples) < 10:
+            credit = _credit_payload(row)
+            blocked_examples.append(
+                {
+                    "outcome_id": int(row.id) if row.id is not None else None,
+                    "session_id": int(row.session_id),
+                    "symbol": row.symbol,
+                    "mode": row.mode,
+                    "execution_family": row.execution_family,
+                    "outcome_class": row.outcome_class,
+                    "reason_codes": reasons,
+                    "entry_decision_packet_id": credit.get("entry_decision_packet_id"),
+                    "terminal_at": row.terminal_at.isoformat() if row.terminal_at else None,
+                }
+            )
+
+    def _bucket_rows(src: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
+        rows_out: list[dict[str, Any]] = []
+        for key, counts in src.items():
+            rows_out.append(
+                {
+                    "key": key,
+                    **counts,
+                    "credit_rate": _credit_rate(counts["credited"], counts["total"]),
+                }
+            )
+        rows_out.sort(key=lambda r: (-int(r["total"]), str(r["key"])))
+        return rows_out
+
+    out.update(
+        {
+            "total": total,
+            "credited": credited,
+            "blocked": total - credited,
+            "credit_rate": _credit_rate(credited, total),
+            "reason_counts": [
+                {"reason_code": reason, "n": int(n)}
+                for reason, n in reason_counts.most_common()
+            ],
+            "by_mode": _bucket_rows(by_mode),
+            "by_execution_family": _bucket_rows(by_family),
+            "reingest_required": reingest_required,
+            "reingest_examples": reingest_examples,
+            "blocked_examples": blocked_examples,
+            "recommended_repairs": _repair_recommendations(reason_counts),
+        }
+    )
+    return out
 
 
 def get_variant_feedback_summary(db: Session, *, variant_id: int, days: int = 14) -> dict[str, Any]:

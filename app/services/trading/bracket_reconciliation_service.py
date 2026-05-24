@@ -372,6 +372,24 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
         p = by_key.get((tkr, src)) if tkr and src else None
         stop_oid, stop_state, stop_price = _stop_meta_for(tkr, src)
         if p is None:
+            if (src or "").lower() == "coinbase":
+                # Coinbase account/position snapshots can be partial or
+                # unavailable while open trades still exist. Position-sync is
+                # the only layer allowed to decide a Coinbase position is
+                # truly gone, and it now requires a confirming sell fill.
+                # Treat this sweep as broker-down/unknown so mirror writes do
+                # not clear cached stop ids and the writer does not place off
+                # a false broker_qty=0.
+                views.append(BrokerView(
+                    available=False,
+                    ticker=tkr,
+                    broker_source=src,
+                    position_quantity=None,
+                    stop_order_id=stop_oid,
+                    stop_order_state=stop_state,
+                    stop_order_price=stop_price,
+                ))
+                continue
             views.append(BrokerView(
                 available=True,
                 ticker=tkr,

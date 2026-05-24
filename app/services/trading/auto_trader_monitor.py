@@ -318,6 +318,26 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
     }
     if crypto_trade_ids:
         summary["delegated_to_crypto_exit_monitor"] = sorted(crypto_trade_ids)
+        for t in open_rows:
+            if int(t.id) not in crypto_trade_ids:
+                continue
+            broker_source = (t.broker_source or "").strip().lower()
+            if broker_source and broker_source != "robinhood":
+                summary.setdefault("skipped_broker_source", []).append(
+                    {
+                        "trade_id": int(t.id),
+                        "ticker": t.ticker,
+                        "broker_source": broker_source,
+                    }
+                )
+            elif broker_source == "robinhood" and (t.ticker or "").upper().endswith("-USD"):
+                summary.setdefault("skipped_unsupported_ticker", []).append(
+                    {
+                        "trade_id": int(t.id),
+                        "ticker": t.ticker,
+                        "broker_source": broker_source,
+                    }
+                )
     open_rows = [t for t in open_rows if int(t.id) not in crypto_trade_ids]
 
     for t in open_rows:

@@ -26,7 +26,7 @@ from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT, normalize_execution_family
 from ..governance import get_kill_switch_status
 from .evolution import EVOLUTION_NODE_ID, paper_vs_live_performance_slices
-from .feedback_query import momentum_outcomes_table_present
+from .feedback_query import evolution_credit_diagnostics, momentum_outcomes_table_present
 
 _log = logging.getLogger(__name__)
 
@@ -111,6 +111,7 @@ def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
         "window_days": days,
         "paper": {"n": 0, "mean_return_bps": None},
         "live": {"n": 0, "mean_return_bps": None},
+        "evolution_credit": None,
         "mix_top": [],
         "best_variant": None,
         "weakest_variant": None,
@@ -148,6 +149,7 @@ def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
             .all()
         )
         out["mix_top"] = [{"outcome_class": str(oc), "n": int(c)} for oc, c in mix_rows]
+        out["evolution_credit"] = evolution_credit_diagnostics(db, days=days, limit=1000)
 
         vstats = (
             db.query(

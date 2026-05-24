@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .universe_status import UNIVERSE_STATUS_ACTIVE
+
 
 # Default thresholds — tuned conservatively. Override via env where
 # noted; constants stay here so the gate semantics are visible.
@@ -55,6 +57,13 @@ of signal quality. Override via CHILI_FAST_PATH_EXEC_DAILY_USD."""
 
 MAX_OPEN_POSITIONS_PER_PAIR = 1
 """No pyramiding in the fast lane — one entry per ticker at a time."""
+
+
+def _decay_table_for_execution_mode(exec_mode: str) -> str:
+    """Return the empirical table matching the configured fill model."""
+    from .calibration import decay_table_for_execution_mode
+
+    return decay_table_for_execution_mode(exec_mode)
 
 
 # ── Result + Context types ───────────────────────────────────────────
@@ -112,6 +121,25 @@ class ExecContext:
 # ── Individual gates ─────────────────────────────────────────────────
 
 
+def _coerce_naive_utc(value: Any) -> datetime | None:
+    """Parse DB/JSON datetimes into the repo's naive-UTC convention."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.replace(tzinfo=None)
+
+
 def gate_recency(alert: dict, ctx: ExecContext,
                  *, max_age_s: float = ALERT_RECENCY_MAX_AGE_S) -> GateResult:
     """Reject alerts whose ``fired_at`` is older than max_age_s.
@@ -134,7 +162,42 @@ def gate_recency(alert: dict, ctx: ExecContext,
         # than silently allowing a future-dated alert.
         return GateResult("recency", False, "alert_in_future_skew",
                           {"age_s": float(age)})
-    return GateResult("recency", True, "", {"age_s": float(age)})
+
+    detail = {"age_s": float(age)}
+    features = alert.get("features")
+    if isinstance(features, dict) and "original_fired_at" in features:
+        original_fired_at = _coerce_naive_utc(features.get("original_fired_at"))
+        if original_fired_at is None:
+            return GateResult(
+                "recency", False, "original_fired_at_invalid",
+                {"raw": str(features.get("original_fired_at"))},
+            )
+        original_age_s = (ctx.now_wall - original_fired_at).total_seconds()
+        try:
+            delay_s = max(0.0, float(features.get("delay_s") or 0.0))
+        except (TypeError, ValueError):
+            delay_s = 0.0
+        max_original_age_s = max_age_s + delay_s
+        if original_age_s > max_original_age_s:
+            return GateResult(
+                "recency", False, "original_alert_too_old",
+                {
+                    "original_age_s": float(original_age_s),
+                    "max_original_age_s": float(max_original_age_s),
+                    "delay_s": float(delay_s),
+                    "max_age_s": float(max_age_s),
+                },
+            )
+        if original_age_s < -5.0:
+            return GateResult(
+                "recency", False, "original_alert_in_future_skew",
+                {"original_age_s": float(original_age_s)},
+            )
+        detail.update({
+            "original_age_s": float(original_age_s),
+            "max_original_age_s": float(max_original_age_s),
+        })
+    return GateResult("recency", True, "", detail)
 
 
 def gate_min_score(alert: dict, ctx: ExecContext,
@@ -228,7 +291,7 @@ def gate_negative_edge_excluded(alert: dict, ctx: ExecContext) -> GateResult:
     even if free to trade."
 
     Three outcomes:
-      - statistically negative (n>=30, mean+2*stderr<0) -> deny
+      - statistically negative (Student upper confidence bound < 0) -> deny
         with reason='negative_edge', evidence in detail
       - non-negative or insufficient data -> allow (other gates
         still apply)
@@ -247,11 +310,21 @@ def gate_negative_edge_excluded(alert: dict, ctx: ExecContext) -> GateResult:
                           {"verdict": "no_engine"})
     try:
         from .calibration import is_negative_edge_excluded
+
+        from .settings import load as _load_fp_settings
+
+        fp_settings = _load_fp_settings()
+        exec_mode = str(
+            getattr(fp_settings, "execution_mode", "taker") or "taker"
+        ).strip().lower()
+        decay_table = _decay_table_for_execution_mode(exec_mode)
         excluded, evidence = is_negative_edge_excluded(
             ctx.engine,
             ticker=str(alert.get("ticker") or ""),
             alert_type=str(alert.get("alert_type") or ""),
             signal_score=float(alert.get("signal_score") or 0.0),
+            table=decay_table,
+            allow_pooled=True,
         )
     except Exception as exc:
         return GateResult(
@@ -266,13 +339,80 @@ def gate_negative_edge_excluded(alert: dict, ctx: ExecContext) -> GateResult:
     return GateResult("negative_edge", True, "", evidence)
 
 
+def gate_maker_attempt_adverse_selection(alert: dict, ctx: ExecContext) -> GateResult:
+    """Block maker-only lanes that prove passive execution is toxic.
+
+    Maker-filled decay only learns after a passive order fills. This
+    gate also studies the maker-attempt lifecycle: if fills occur after
+    statistically adverse mid movement, or cancels/replaces tend to
+    miss statistically favorable movement, the lane is not tradeable as
+    a passive scalp even if the raw signal direction looks plausible.
+    """
+    try:
+        from .settings import load as _load_fp_settings
+
+        fp_settings = _load_fp_settings()
+    except Exception as exc:
+        return GateResult(
+            "maker_attempt_adverse", True, "",
+            {"verdict": "settings_lookup_failed", "error": str(exc)[:120]},
+        )
+
+    exec_mode = str(
+        getattr(fp_settings, "execution_mode", "taker") or "taker"
+    ).strip().lower()
+    if exec_mode not in ("maker_only", "maker_first_then_taker"):
+        return GateResult(
+            "maker_attempt_adverse", True, "",
+            {"verdict": "non_maker_mode", "execution_mode": exec_mode},
+        )
+    if not getattr(fp_settings, "maker_attempt_adverse_filter_enabled", True):
+        return GateResult(
+            "maker_attempt_adverse", True, "",
+            {"verdict": "disabled", "execution_mode": exec_mode},
+        )
+    if ctx.engine is None:
+        return GateResult(
+            "maker_attempt_adverse", True, "",
+            {"verdict": "no_engine", "execution_mode": exec_mode},
+        )
+
+    try:
+        from .calibration import maker_attempt_adverse_selection_excluded
+
+        excluded, evidence = maker_attempt_adverse_selection_excluded(
+            ctx.engine,
+            ticker=str(alert.get("ticker") or ""),
+            alert_type=str(alert.get("alert_type") or ""),
+            signal_score=float(alert.get("signal_score") or 0.0),
+            window_hours=int(
+                getattr(fp_settings, "maker_attempt_adverse_filter_window_h", 24)
+                or 24
+            ),
+        )
+    except Exception as exc:
+        return GateResult(
+            "maker_attempt_adverse", True, "",
+            {"verdict": "lookup_failed", "error": str(exc)[:120],
+             "execution_mode": exec_mode},
+        )
+
+    evidence["execution_mode"] = exec_mode
+    if excluded:
+        return GateResult(
+            "maker_attempt_adverse", False, "maker_adverse_selection",
+            evidence,
+        )
+    return GateResult("maker_attempt_adverse", True, "", evidence)
+
+
 def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
     """f-fastpath-universe-rotation Step 5 (2026-05-07): cost-aware
     admission gate.
 
-    Rejects any signal whose calibrated best-Sharpe-horizon
-    ``mean_return`` does not clear ``2 * (taker_fee_bps +
-    spread_bps_at_decision_time)``. This is the **right** form of the
+    Rejects any signal whose confidence-bounded empirical edge cannot
+    clear ``2 * (taker_fee_bps + spread_bps_at_decision_time)``.
+    This is the **right** form of the
     economic-line check — the F6.5 ``gate_calibrated_tradeability``
     uses a static cost multiplier; this gate uses the live spread as
     measured at the decision moment, which is what the round-trip
@@ -321,73 +461,55 @@ def gate_cost_aware_admission(alert: dict, ctx: ExecContext) -> GateResult:
     # the taker fee and reads the no-friction decay table. Default
     # (taker) is bit-identical to the prior behaviour.
     exec_mode = str(getattr(fp_settings, "execution_mode", "taker") or "taker").strip().lower()
-    if exec_mode in ("maker_only", "maker_first_then_taker"):
-        fee_bps = float(getattr(fp_settings, "cost_aware_maker_fee_bps", 0.0) or 0.0)
-        decay_table = "fast_signal_decay_maker_filled"
-    else:
-        fee_bps = float(fp_settings.cost_aware_taker_fee_bps or 0.0)
-        decay_table = "fast_signal_decay"
+    from .fees import fee_bps_for_execution_mode
+
+    fee_bps, fee_detail = fee_bps_for_execution_mode(fp_settings, exec_mode)
+    decay_table = _decay_table_for_execution_mode(exec_mode)
 
     # Cost = round-trip in bps: 2 * (fee + spread). Spread comes from
     # the LIVE book (ctx) so a momentarily-wide top-of-book gates the
     # trade even if the calibrated mean cleared a static threshold.
     spread_bps = float(ctx.spread_bps or 0.0)
     cost_bps = 2.0 * (fee_bps + spread_bps)
-    cost_return = cost_bps / 10000.0  # bps -> return units (mean_return is fraction)
+
+    min_net_bps = float(getattr(fp_settings, "live_alpha_min_net_bps", 0.0) or 0.0)
 
     try:
-        from .calibration import _fetch_bucket_rows, _best_sharpe_row
+        from .calibration import is_cost_barrier_excluded
         from .decay_miner import score_bucket as _score_bucket
 
         bucket = _score_bucket(signal_score)
-        rows = _fetch_bucket_rows(
-            ctx.engine, ticker=ticker, alert_type=alert_type, bucket=bucket,
+        excluded, detail = is_cost_barrier_excluded(
+            ctx.engine,
+            ticker=ticker,
+            alert_type=alert_type,
+            signal_score=signal_score,
+            cost_bps=cost_bps,
+            min_net_bps=min_net_bps,
             table=decay_table,
+            allow_pooled=True,
         )
     except Exception as exc:
         # Lookup failures shouldn't block; mirrors gate_calibrated_tradeability.
         return GateResult(
             "cost_aware_admission", True, "",
             {"verdict": "lookup_failed", "error": str(exc)[:120],
-             "execution_mode": exec_mode, "decay_table": decay_table},
+             "execution_mode": exec_mode, "decay_table": decay_table,
+             **fee_detail},
         )
-
-    if not rows:
-        return GateResult(
-            "cost_aware_admission", True, "",
-            {"verdict": "no_data", "score_bucket": bucket,
-             "cost_bps": cost_bps, "execution_mode": exec_mode,
-             "decay_table": decay_table},
-        )
-
-    best_row = _best_sharpe_row(rows)
-    if best_row is None:
-        return GateResult(
-            "cost_aware_admission", True, "",
-            {"verdict": "insufficient_data", "score_bucket": bucket,
-             "cost_bps": cost_bps, "execution_mode": exec_mode,
-             "decay_table": decay_table},
-        )
-
-    mean_return = float(best_row.get("mean_return") or 0.0)
-    horizon_s = int(best_row.get("horizon_s") or 0)
-    sample_count = int(best_row.get("sample_count") or 0)
-    mean_bps = mean_return * 10000.0
-    cleared = mean_return >= cost_return
 
     detail = {
-        "verdict": "cleared" if cleared else "below_cost",
-        "score_bucket": bucket,
-        "best_horizon_s": horizon_s,
-        "sample_count": sample_count,
-        "mean_return_bps": round(mean_bps, 4),
-        "cost_bps": round(cost_bps, 4),
-        "fee_bps": round(fee_bps, 4),
+        **detail,
         "spread_bps": round(spread_bps, 4),
         "execution_mode": exec_mode,
         "decay_table": decay_table,
+        **fee_detail,
     }
-    if not cleared:
+    if detail.get("verdict") == "positive_edge_candidate":
+        detail["verdict"] = "cleared"
+    if detail.get("verdict") == "insufficient_statistical_evidence":
+        detail["verdict"] = "insufficient_data"
+    if excluded:
         return GateResult(
             "cost_aware_admission", False, "below_round_trip_cost", detail,
         )
@@ -426,12 +548,10 @@ def gate_live_alpha_evidence(alert: dict, ctx: ExecContext) -> GateResult:
     alert_type = str(alert.get("alert_type") or "")
     signal_score = float(alert.get("signal_score") or 0.0)
     exec_mode = str(getattr(fp_settings, "execution_mode", "taker") or "taker").strip().lower()
-    if exec_mode in ("maker_only", "maker_first_then_taker"):
-        fee_bps = float(getattr(fp_settings, "cost_aware_maker_fee_bps", 0.0) or 0.0)
-        decay_table = "fast_signal_decay_maker_filled"
-    else:
-        fee_bps = float(getattr(fp_settings, "cost_aware_taker_fee_bps", 0.0) or 0.0)
-        decay_table = "fast_signal_decay"
+    from .fees import fee_bps_for_execution_mode
+
+    fee_bps, fee_detail = fee_bps_for_execution_mode(fp_settings, exec_mode)
+    decay_table = _decay_table_for_execution_mode(exec_mode)
     cost_bps = 2.0 * (fee_bps + float(ctx.spread_bps or 0.0))
     min_net_bps = float(getattr(fp_settings, "live_alpha_min_net_bps", 0.0) or 0.0)
     min_samples = int(getattr(fp_settings, "live_alpha_min_samples", 50) or 50)
@@ -449,14 +569,15 @@ def gate_live_alpha_evidence(alert: dict, ctx: ExecContext) -> GateResult:
         return GateResult(
             "live_alpha_evidence", False, "lookup_failed",
             {"verdict": "lookup_failed", "error": str(exc)[:120],
-             "execution_mode": exec_mode, "decay_table": decay_table},
+             "execution_mode": exec_mode, "decay_table": decay_table,
+             **fee_detail},
         )
     if best is None:
         return GateResult(
             "live_alpha_evidence", False, "insufficient_decay_evidence",
             {"verdict": "insufficient_decay_evidence",
              "min_samples": min_samples, "execution_mode": exec_mode,
-             "decay_table": decay_table},
+             "decay_table": decay_table, **fee_detail},
         )
     mean_bps = float(best.get("mean_return") or 0.0) * 10000.0
     net_bps = mean_bps - cost_bps
@@ -471,12 +592,76 @@ def gate_live_alpha_evidence(alert: dict, ctx: ExecContext) -> GateResult:
         "min_net_bps": round(min_net_bps, 4),
         "execution_mode": exec_mode,
         "decay_table": decay_table,
+        **fee_detail,
     }
     if net_bps < min_net_bps:
         return GateResult(
             "live_alpha_evidence", False, "below_live_edge", detail,
         )
     return GateResult("live_alpha_evidence", True, "", detail)
+
+
+def gate_universe_active_for_live(alert: dict, ctx: ExecContext) -> GateResult:
+    """Live-only guard: shadow/exploration pairs may learn, not trade.
+
+    Universe rotation subscribes both ``active`` and ``shadow`` pairs so
+    the decay miner can keep learning. A live order, however, must only
+    be reachable for the latest-rotation ``status='active'`` set. Paper
+    mode is allowed through so shadow candidates keep producing evidence.
+    """
+    if (ctx.mode or "paper").strip().lower() != "live":
+        return GateResult("universe_status", True, "", {"verdict": "paper_mode"})
+    try:
+        from .settings import load as _load_fp_settings
+
+        fp_settings = _load_fp_settings()
+    except Exception as exc:
+        return GateResult(
+            "universe_status", False, "settings_unavailable",
+            {"verdict": "settings_unavailable", "error": str(exc)[:120]},
+        )
+    if not getattr(fp_settings, "universe_rotation_enabled", False):
+        return GateResult(
+            "universe_status", True, "",
+            {"verdict": "rotation_disabled"},
+        )
+    if ctx.engine is None:
+        return GateResult(
+            "universe_status", False, "no_engine",
+            {"verdict": "no_engine"},
+        )
+    ticker = str(alert.get("ticker") or "")
+    try:
+        from sqlalchemy import text
+
+        with ctx.engine.connect() as conn:
+            row = conn.execute(text("""
+                WITH latest_rotation AS (
+                    SELECT MAX(rotation_at) AS ts FROM fast_path_universe
+                )
+                SELECT status
+                FROM fast_path_universe
+                WHERE rotation_at = (SELECT ts FROM latest_rotation)
+                  AND ticker = :ticker
+                LIMIT 1
+            """), {"ticker": ticker}).mappings().one_or_none()
+    except Exception as exc:
+        return GateResult(
+            "universe_status", False, "lookup_failed",
+            {"verdict": "lookup_failed", "error": str(exc)[:120],
+             "ticker": ticker},
+        )
+    status = str((row or {}).get("status") or "")
+    if status == UNIVERSE_STATUS_ACTIVE:
+        return GateResult(
+            "universe_status", True, "",
+            {"verdict": UNIVERSE_STATUS_ACTIVE, "ticker": ticker},
+        )
+    reason = f"universe_not_active:{status or 'missing'}"
+    return GateResult(
+        "universe_status", False, reason,
+        {"verdict": "not_active", "ticker": ticker, "status": status or None},
+    )
 
 
 def gate_spread_sanity(alert: dict, ctx: ExecContext,
@@ -496,36 +681,24 @@ def gate_spread_sanity(alert: dict, ctx: ExecContext,
     return GateResult("spread_sanity", True, "", {"spread_bps": float(sp)})
 
 
-# F8b: signal-class-specific ticker allowlist.
-#
-# 2026-05-14 refresh: realized fast_exits showed the pullback class
-# remained positive on SOL-USD but drifted negative on BTC-USD. Keep
-# only the cohort with positive realized exits until the rotator/maker
-# pipeline has a stronger learned replacement.
-PULLBACK_LONG_ALLOWLIST: frozenset[str] = frozenset({"SOL-USD"})
-
-
 def gate_pullback_ticker_allowed(alert: dict, ctx: ExecContext) -> GateResult:
-    """F8b: per-signal-class ticker allowlist.
+    """F8b compatibility gate for pullback signal eligibility.
 
-    Pass-through for any alert NOT of type ``volume_breakout_pullback_long``.
-    For pullback alerts, only tickers in ``PULLBACK_LONG_ALLOWLIST``
-    proceed; others rejected with a per-ticker reason so the postmortem
-    is self-documenting.
+    This used to enforce a static ticker allowlist for
+    ``volume_breakout_pullback_long``. That turned one historical slice
+    into a permanent coin-specific rule. Signal admission is now owned
+    by the learned negative-edge, calibration, cost, and live-alpha
+    gates above; this gate remains as a named pass-through so existing
+    postmortem JSON keeps a stable field.
     """
     alert_type = str(alert.get("alert_type") or "")
     if alert_type != "volume_breakout_pullback_long":
         return GateResult("pullback_ticker", True, "",
                           {"verdict": "not_pullback_long_signal"})
     ticker = str(alert.get("ticker") or "")
-    if ticker in PULLBACK_LONG_ALLOWLIST:
-        return GateResult("pullback_ticker", True, "",
-                          {"verdict": "ticker_allowed", "ticker": ticker})
     return GateResult(
-        "pullback_ticker", False,
-        f"pullback_ticker_not_allowed:{ticker}",
-        {"verdict": "blocked", "ticker": ticker,
-         "allowlist": sorted(PULLBACK_LONG_ALLOWLIST)},
+        "pullback_ticker", True, "",
+        {"verdict": "deferred_to_learned_edge_gates", "ticker": ticker},
     )
 
 
@@ -605,6 +778,7 @@ DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
     # (run_gates collects every result into gates_json) so the
     # postmortem detail is unchanged either way.
     gate_negative_edge_excluded,
+    gate_maker_attempt_adverse_selection,
     gate_calibrated_tradeability,
     # f-fastpath-universe-rotation Step 5 (2026-05-07): cost-aware
     # admission gate. Off-by-default
@@ -616,13 +790,10 @@ DEFAULT_GATES: tuple[Callable[[dict, ExecContext], GateResult], ...] = (
     # preserved in gates_json regardless.
     gate_cost_aware_admission,
     gate_live_alpha_evidence,
-    # F8b: signal-class-specific ticker allowlist runs AFTER the
-    # calibrated-edge gates so that a calibrated negative-edge or
-    # not-tradeable verdict still reports as the primary reject
-    # reason (more actionable than the allowlist filter), and BEFORE
-    # the price-sanity / capacity / budget gates because the
-    # allowlist is purely a signal-eligibility check that doesn't
-    # care about per-decision state.
+    gate_universe_active_for_live,
+    # F8b compatibility gate runs AFTER the learned-edge gates and
+    # stays pass-through so postmortems keep a stable pullback field
+    # without reintroducing coin-specific allowlists.
     gate_pullback_ticker_allowed,
     gate_spread_sanity,
     gate_capacity,
@@ -693,7 +864,9 @@ __all__ = [
     "GateResult", "ExecContext", "GateRunResult",
     "gate_recency", "gate_min_score", "gate_calibrated_tradeability",
     "gate_negative_edge_excluded", "gate_pullback_ticker_allowed",
+    "gate_maker_attempt_adverse_selection",
     "gate_cost_aware_admission", "gate_live_alpha_evidence",
+    "gate_universe_active_for_live",
     "gate_spread_sanity",
     "gate_capacity", "gate_daily_budget", "gate_mode_interlock",
     "DEFAULT_GATES", "run_gates",

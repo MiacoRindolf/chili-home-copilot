@@ -256,6 +256,7 @@ function brainBootstrapTradingDesk() {
   initTradingBrainAssistant();
   startBwPolling();
   loadBrainStopDecisions();
+  brainBootRuntime();
 }
 
 function loadBrainStopDecisions() {
@@ -930,36 +931,18 @@ function dismissAnticipation(id) {
 }
 
 /* â”€â”€ Repos â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
-/* -- Section panel switching -- */
-function switchBrainPanel(panelId) {
-  document.querySelectorAll('.brain-content-panel').forEach(function(p) {
-    p.classList.remove('active');
-  });
-  document.querySelectorAll('.brain-nav-btn').forEach(function(btn) {
-    var on = btn.getAttribute('data-panel') === panelId;
-    btn.classList.toggle('active', on);
-    btn.setAttribute('aria-selected', on ? 'true' : 'false');
-  });
-  var target = document.getElementById('brain-panel-' + panelId);
-  if (target) target.classList.add('active');
-}
-
-/* -- Summary bar sync (called from desk polling) -- */
+/* -- Runtime header sync (called from desk polling) -- */
 function updateBrainSummaryBar(data) {
-  var dot = document.getElementById('bsb-summary-dot');
-  var worker = document.getElementById('bsb-summary-worker');
-  var regime = document.getElementById('bsb-summary-regime');
-  var actionable = document.getElementById('bsb-summary-actionable');
-  var watch = document.getElementById('bsb-summary-watch');
-  var cycle = document.getElementById('bsb-summary-cycle');
   if (!data) return;
+  var dot = document.getElementById('bx-status-dot');
+  var label = document.getElementById('bx-status-label');
+  var regime = document.getElementById('bx-regime-chip');
+  var cycle = document.getElementById('bx-last-cycle');
   if (dot && data.workerStatus) {
-    dot.className = 'bsb-dot ' + (data.workerStatus === 'running' ? 'running' : data.workerStatus === 'idle' ? 'idle' : 'stopped');
+    dot.className = 'bx-status-dot ' + (data.workerStatus === 'running' ? 'running' : data.workerStatus === 'idle' ? 'idle' : 'stopped');
   }
-  if (worker && data.workerLabel) worker.textContent = data.workerLabel;
+  if (label && data.workerLabel) label.textContent = data.workerLabel;
   if (regime && data.regime) regime.textContent = data.regime;
-  if (actionable && data.actionable != null) actionable.textContent = data.actionable;
-  if (watch && data.watch != null) watch.textContent = data.watch;
   if (cycle && data.lastCycle) cycle.textContent = data.lastCycle;
 }
 
@@ -973,28 +956,19 @@ function brainTrackEvent(action, label, data) {
   }
 }
 
-/* -- Lazy loading for panels -- */
-var _brainPanelLoaded = {};
-function brainEnsurePanelLoaded(panelId) {
-  if (_brainPanelLoaded[panelId]) return;
-  _brainPanelLoaded[panelId] = true;
-  brainTrackEvent('panel_view', panelId);
-  switch (panelId) {
-    case 'overview':
-      if (typeof loadBrainDashboard === 'function') loadBrainDashboard();
-      if (typeof loadPlaybook === 'function') loadPlaybook();
-      if (typeof loadPerfDashboard === 'function') loadPerfDashboard();
-      break;
-    case 'opportunities':
-      if (typeof loadOpportunityBoard === 'function') loadOpportunityBoard();
-      if (typeof loadBrainPredictions === 'function') loadBrainPredictions();
-      if (typeof loadTradeablePatterns === 'function') loadTradeablePatterns();
-      if (typeof loadResearchEdgePatterns === 'function') loadResearchEdgePatterns();
-      break;
-    case 'deep-dive':
-      if (typeof switchDeepDiveTab === 'function') switchDeepDiveTab('patterns');
-      break;
+/* -- Runtime boot: fire above-the-fold loaders + default drill-down tab -- */
+var _brainRuntimeBooted = false;
+function brainBootRuntime() {
+  if (_brainRuntimeBooted) return;
+  _brainRuntimeBooted = true;
+  brainTrackEvent('runtime_boot', 'trading');
+  if (typeof loadOpportunityBoard === 'function') loadOpportunityBoard();
+  if (typeof loadBrainWorkerStatus === 'function') loadBrainWorkerStatus();
+  if (typeof window.brainRuntimeGates === 'object' && window.brainRuntimeGates) {
+    try { window.brainRuntimeGates.start(); } catch (e) {}
+    try { window.brainRuntimeGates.refreshPatterns(); } catch (e) {}
   }
+  if (typeof switchDeepDiveTab === 'function') switchDeepDiveTab('patterns');
 }
 
 /* -- Global keyboard shortcuts -- */
@@ -1002,23 +976,12 @@ document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   if (e.target.isContentEditable) return;
 
-  if (e.key === '1' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+  /* Drill-down tab shortcuts (1-6) */
+  var _drilldownByDigit = { '1': 'patterns', '2': 'cycles', '3': 'ops', '4': 'research', '5': 'analytics', '6': 'debug' };
+  if (_drilldownByDigit[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
-    switchBrainPanel('overview');
-    brainEnsurePanelLoaded('overview');
-    brainTrackEvent('shortcut', 'panel_overview');
-  }
-  if (e.key === '2' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    switchBrainPanel('opportunities');
-    brainEnsurePanelLoaded('opportunities');
-    brainTrackEvent('shortcut', 'panel_opportunities');
-  }
-  if (e.key === '3' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    switchBrainPanel('deep-dive');
-    brainEnsurePanelLoaded('deep-dive');
-    brainTrackEvent('shortcut', 'panel_deep_dive');
+    if (typeof switchDeepDiveTab === 'function') switchDeepDiveTab(_drilldownByDigit[e.key]);
+    brainTrackEvent('shortcut', 'drilldown_' + _drilldownByDigit[e.key]);
   }
   if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
@@ -1040,9 +1003,12 @@ function _showKeyboardShortcutsHelp() {
   var body =
     '<table class="data-table" style="width:100%">' +
     '<thead><tr><th>Key</th><th>Action</th></tr></thead><tbody>' +
-    '<tr><td><kbd>1</kbd></td><td>Switch to Overview panel</td></tr>' +
-    '<tr><td><kbd>2</kbd></td><td>Switch to Opportunities panel</td></tr>' +
-    '<tr><td><kbd>3</kbd></td><td>Switch to Deep Dive panel</td></tr>' +
+    '<tr><td><kbd>1</kbd></td><td>Patterns drill-down</td></tr>' +
+    '<tr><td><kbd>2</kbd></td><td>Cycles drill-down</td></tr>' +
+    '<tr><td><kbd>3</kbd></td><td>Operations drill-down</td></tr>' +
+    '<tr><td><kbd>4</kbd></td><td>Research drill-down</td></tr>' +
+    '<tr><td><kbd>5</kbd></td><td>Analytics drill-down</td></tr>' +
+    '<tr><td><kbd>6</kbd></td><td>Debug drill-down</td></tr>' +
     '<tr><td><kbd>n</kbd></td><td>Switch to Network graph</td></tr>' +
     '<tr><td><kbd>r</kbd></td><td>Switch to Runtime view</td></tr>' +
     '<tr><td><kbd>?</kbd></td><td>Show this help</td></tr>' +

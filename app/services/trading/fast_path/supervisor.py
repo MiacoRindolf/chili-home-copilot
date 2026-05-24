@@ -135,7 +135,7 @@ class FastPathSupervisor:
             batch_interval_ms=self._settings.batch_interval_ms,
         )
         self._ws = CoinbaseWSClient(
-            self._settings, self._db_writer, self._status,
+            self._settings, self._db_writer, self._status, self._engine,
         )
         self._healthz = HealthzServer(
             port=self._settings.healthz_port,
@@ -292,15 +292,30 @@ class FastPathSupervisor:
         # flowing at all (and where it's being filtered).
         logger.info(
             "[fast_path] ws raw_messages=%s candles_events=%s candles=%s "
-            "filtered_unclosed=%s filtered_dedupe=%s heartbeats=%s "
-            "subscriptions=%s unknown=%s last_unknown=%s",
+            "filtered_unclosed=%s filtered_dedupe=%s warmup_only=%s "
+            "min_score_suppressed=%s "
+            "neg_edge_suppressed=%s neg_edge_cache=%s "
+            "cost_suppressed=%s cost_cache=%s "
+            "maker_adverse_suppressed=%s maker_adverse_cache=%s "
+            "heartbeats=%s subscriptions=%s universe_refreshes=%s "
+            "universe_reconnects=%s unknown=%s last_unknown=%s",
             ws_stats.get("raw_messages_total"),
             ws_stats.get("raw_candles_events_total"),
             ws_stats.get("raw_candles_total"),
             ws_stats.get("candles_filtered_unclosed"),
             ws_stats.get("candles_filtered_dedupe"),
+            ws_stats.get("candles_scanned_warmup_only"),
+            ws_stats.get("alerts_suppressed_min_score"),
+            ws_stats.get("alerts_suppressed_negative_edge"),
+            ws_stats.get("negative_edge_cache_size"),
+            ws_stats.get("alerts_suppressed_cost_barrier"),
+            ws_stats.get("cost_barrier_cache_size"),
+            ws_stats.get("alerts_suppressed_maker_attempt_adverse"),
+            ws_stats.get("maker_attempt_adverse_cache_size"),
             ws_stats.get("heartbeats_total"),
             ws_stats.get("subscriptions_total"),
+            ws_stats.get("universe_refreshes_total"),
+            ws_stats.get("universe_reconnects_total"),
             ws_stats.get("unknown_channel_total"),
             ws_stats.get("last_unknown_channel"),
         )
@@ -368,7 +383,11 @@ class FastPathSupervisor:
                 "[fast_path] executor mode=%s live_authorized=%s "
                 "polls=%s alerts_seen=%s paper_fill=%s live_placed=%s "
                 "rejected=%s db_errors=%s last_alert_id=%s "
-                "open_positions=%s tickers_held=%s daily_used_usd=%.2f",
+                "open_positions=%s tickers_held=%s daily_used_usd=%.2f "
+                "maker_placed=%s maker_filled=%s maker_cancelled=%s "
+                "maker_replaced=%s maker_rejected=%s maker_capped=%s "
+                "maker_outstanding=%s maker_adverse_cancelled=%s "
+                "maker_observe_only=%s",
                 executor_stats.get("mode"),
                 executor_stats.get("live_authorized"),
                 executor_stats.get("polls_total"),
@@ -381,14 +400,30 @@ class FastPathSupervisor:
                 executor_stats.get("open_positions_total"),
                 executor_stats.get("tickers_with_position"),
                 float(executor_stats.get("daily_notional_used_usd") or 0.0),
+                executor_stats.get("maker_attempts_placed"),
+                executor_stats.get("maker_attempts_filled"),
+                executor_stats.get("maker_attempts_cancelled"),
+                executor_stats.get("maker_attempts_replaced"),
+                executor_stats.get("maker_attempts_rejected"),
+                executor_stats.get("maker_attempts_capped"),
+                executor_stats.get("maker_outstanding_count"),
+                executor_stats.get("maker_attempts_adverse_cancelled"),
+                executor_stats.get("maker_observe_only_fills"),
             )
         scanner_stats = ws_stats.get("scanner") or {}
         if scanner_stats:
             logger.info(
                 "[fast_path] scanner bars_seen=%s books_seen=%s "
-                "vol_breakout=%s vol_pullback=%s pullback_heap=%s pullback_dropped=%s "
+                "vol_breakout=%s vol_pullback=%s pullback_heap=%s "
+                "pullback_dropped=%s pullback_stale=%s "
                 "imb_long=%s imb_short=%s spread_squeeze=%s "
-                "suppressed_cooldown=%s suppressed_warmup=%s tickers=%s "
+                "book_pressure=%s book_pressure_warmup=%s "
+                "book_pressure_condition=%s "
+                "book_pressure_reasons=%s "
+                "suppressed_cooldown=%s suppressed_warmup=%s "
+                "suppressed_raw_imbalance_disabled=%s "
+                "suppressed_short_disabled=%s "
+                "suppressed_bar_disabled=%s tickers=%s "
                 "writer_alerts_received=%s writer_alerts_written=%s "
                 "writer_alerts_dropped=%s",
                 scanner_stats.get("bars_seen"),
@@ -397,11 +432,19 @@ class FastPathSupervisor:
                 scanner_stats.get("fired_volume_breakout_pullback_long"),
                 scanner_stats.get("pullback_pending_heap"),
                 scanner_stats.get("pullback_deferred_dropped_overcap"),
+                scanner_stats.get("pullback_deferred_dropped_stale"),
                 scanner_stats.get("fired_imbalance_long"),
                 scanner_stats.get("fired_imbalance_short"),
                 scanner_stats.get("fired_spread_squeeze"),
+                scanner_stats.get("fired_book_pressure_reclaim_long"),
+                scanner_stats.get("suppressed_book_pressure_warmup"),
+                scanner_stats.get("suppressed_book_pressure_condition"),
+                scanner_stats.get("suppressed_book_pressure_reasons"),
                 scanner_stats.get("suppressed_cooldown"),
                 scanner_stats.get("suppressed_warmup"),
+                scanner_stats.get("suppressed_raw_imbalance_disabled"),
+                scanner_stats.get("suppressed_short_alert_disabled"),
+                scanner_stats.get("suppressed_bar_close_alerts_disabled"),
                 scanner_stats.get("tickers_tracked"),
                 writer.get("alerts_received"),
                 writer.get("alerts_written"),

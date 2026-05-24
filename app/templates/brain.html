@@ -19,7 +19,7 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
 window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
 </script>
 
-<a href="#brain-panel-overview" class="skip-nav">Skip to main content</a>
+<a href="#bx-runtime-header" class="skip-nav">Skip to main content</a>
 {% include "brain/_header.html" %}
 
 <div class="b-body">
@@ -32,62 +32,54 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       {% include "brain/_trading_network.html" %}
       <div id="trading-brain-pane-output" class="trading-brain-pane" role="tabpanel" aria-labelledby="tb-tab-runtime" aria-hidden="false" style="overflow-y:auto">
 
-      <!-- Sticky summary bar -->
-      <div class="brain-summary-bar" id="brain-summary-bar">
-        <div class="bsb-item">
-          <span class="bsb-dot stopped" id="bsb-summary-dot"></span>
-          <span class="bsb-item-value" id="bsb-summary-worker">Stopped</span>
+      <!-- Runtime tab redesign 2026-05-23: unified sticky header -->
+      <header class="bx-runtime-header" id="bx-runtime-header" role="region" aria-label="Brain worker controls and runtime status">
+        <span class="bx-status-dot stopped" id="bx-status-dot" aria-hidden="true"></span>
+        <span class="bx-status-label" id="bx-status-label">Stopped</span>
+        <div class="bx-controls" id="bx-controls" role="group" aria-label="Worker controls">
+          <button class="bx-ctrl-btn primary" id="bw-start-btn" type="button" onclick="startBrainWorker()">&#x25B6; Start</button>
+          <button class="bx-ctrl-btn" id="bw-wake-btn" type="button" onclick="wakeBrainWorker()" style="display:none" title="Skip idle wait and start the next worker iteration now">&#x23ED; Wake</button>
+          <button class="bx-ctrl-btn" id="bw-pause-btn" type="button" onclick="pauseBrainWorker()" style="display:none">&#x23F8; Pause</button>
+          <button class="bx-ctrl-btn danger" id="bw-stop-btn" type="button" onclick="stopBrainWorker()" style="display:none">&#x23F9; Stop</button>
         </div>
-        <div class="bsb-divider"></div>
-        <div class="bsb-item">
-          <span class="bsb-item-label">Regime</span>
-          <span class="bsb-item-value" id="bsb-summary-regime">--</span>
+        <span class="bx-regime-chip" id="bx-regime-chip" title="Market regime">&#x1F7E1; --</span>
+        <span class="bx-breaker-chip" id="bx-breaker-chip" style="display:none" title="Circuit breaker status">&#x26A0; Breaker</span>
+        <span class="bx-last-cycle" id="bx-last-cycle" title="Last reconcile pass / scheduler heartbeat">--</span>
+        <span class="bx-scheduler-info" id="brain-scheduler-info"></span>
+        <button type="button" class="bx-queue-pill" id="bx-queue-pill" title="Dispatch queue health &mdash; click to open diagnostics drawer" aria-label="Dispatch queue health">
+          <span class="bx-queue-pill-dot" id="bx-queue-pill-dot"></span>
+          <span class="bx-queue-pill-text" id="bx-queue-pill-text">Queue --</span>
+        </button>
+        <button type="button" class="bx-help-btn" id="bx-help-btn" onclick="openRuntimeHelpModal()" title="How to read this desk" aria-label="How to read this desk">?</button>
+      </header>
+
+      <!-- Single thesis line (one element, no badge stack, no narrative wall) -->
+      <div class="bx-thesis-line" id="bx-thesis-line" aria-live="polite">Loading market thesis&hellip;</div>
+
+      <!-- AI Learning Report (floating, hidden until triggered) -->
+      <div class="brain-reflection-box" id="brain-reflection">
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
+          <span>&#x1F52C;</span><strong style="font-size:11px">AI Learning Report</strong>
+          <button type="button" onclick="document.getElementById('brain-reflection').style.display='none'" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px" aria-label="Close report">&times;</button>
         </div>
-        <div class="bsb-divider"></div>
-        <div class="bsb-item">
-          <span class="bsb-item-label">Actionable</span>
-          <span class="bsb-item-value" id="bsb-summary-actionable">--</span>
-        </div>
-        <div class="bsb-item">
-          <span class="bsb-item-label">Watch</span>
-          <span class="bsb-item-value" id="bsb-summary-watch">--</span>
-        </div>
-        <div class="bsb-divider"></div>
-        <div class="bsb-item">
-          <span class="bsb-item-label">Last cycle</span>
-          <span class="bsb-item-value" id="bsb-summary-cycle">--</span>
-        </div>
+        <div id="brain-reflection-content"></div>
       </div>
 
-      <!-- Section navigation -->
-      <nav class="brain-section-nav" id="brain-section-nav" role="tablist" aria-label="Trading brain sections">
-        <button class="brain-nav-btn active" data-panel="overview" role="tab" aria-selected="true" onclick="switchBrainPanel('overview')">Overview</button>
-        <button class="brain-nav-btn" data-panel="opportunities" role="tab" aria-selected="false" onclick="switchBrainPanel('opportunities')">Opportunities</button>
-        <button class="brain-nav-btn" data-panel="deep-dive" role="tab" aria-selected="false" onclick="switchBrainPanel('deep-dive')">Deep Dive</button>
-      </nav>
+      <!-- Above-the-fold: two-column grid (Today's Edge | Brain Activity) -->
+      <div class="bx-above-fold" id="bx-above-fold">
+        {% include "brain/_runtime_edge_card.html" %}
+        {% include "brain/_runtime_activity_card.html" %}
+      </div>
 
+      <!-- Diagnostics drawer (hidden by default; opened from header or activity card) -->
+      {% include "brain/_trading_diagnostics_drawer.html" %}
+
+      <!-- Runtime gates polling IIFE (markup moved to drawer; script targets ids by getElementById) -->
       {% include "brain/_trading_runtime_gates.html" %}
 
-      <!-- Panel: Overview (operator desk + edge grid) -->
-      <div class="brain-content-panel active" id="brain-panel-overview" role="tabpanel">
-      <div class="trading-main-content">
-        {% include "brain/_trading_operator_desk.html" %}
-      </div>
-      </div>
-
-      <!-- Panel: Opportunities (board + speculative movers + predictions + tradeable + research edge) -->
-      <div class="brain-content-panel" id="brain-panel-opportunities" role="tabpanel">
-      <div class="trading-main-content">
-        {% include "brain/_trading_opportunities.html" %}
-        {% include "brain/_trading_sections.html" %}
-      </div>
-      </div>
-
-      <!-- Panel: Deep Dive (patterns, cycles, ops, research, analytics, debug) -->
-      <div class="brain-content-panel" id="brain-panel-deep-dive" role="tabpanel">
+      <!-- Single drill-down tabstrip (Patterns / Cycles / Operations / Research / Analytics / Debug) -->
       <div class="trading-main-content">
         {% include "brain/_trading_deep_dive.html" %}
-      </div>
       </div>
 
       </div>
@@ -226,6 +218,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
 </div>
 
 {% include "brain/_modal.html" %}
+{% include "brain/_runtime_help_modal.html" %}
 
 <script src="/static/js/brain-components.js"></script>
 <script src="/static/js/brain-core.js"></script>
@@ -233,6 +226,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
 <script src="/static/js/brain-trading-assistant.js"></script>
 <script src="/static/js/brain-trading-deep-dive.js"></script>
 <script src="/static/js/brain-trading-desk.js?v=20260513-pilot-promoted"></script>
+<script src="/static/js/brain-diagnostics-drawer.js"></script>
 <script>
 window.__CHILI_BRAIN_PLANNER_TASK_HINT__ = {{ planner_task_id|default(none)|tojson }};
 window.__CHILI_BRAIN_PLANNER_PROJECT_HINT__ = {{ planner_project_id|default(none)|tojson }};

@@ -32,7 +32,7 @@ import pandas as pd
 import pytest
 from sqlalchemy import text
 
-from app.models.trading import AlertHistory, ScanPattern
+from app.models.trading import AlertHistory, ScanPattern, TradingDecisionPacket
 from app.services.trading.pattern_directional_outcome import (
     _compute_window_outcome,
     _entry_price_from_df,
@@ -344,6 +344,62 @@ def test_evaluator_inserts_correct_outcome_for_up_pattern(db):
     assert row[7] == 24
 
 
+def test_evaluator_updates_linked_shadow_decision_packet(db):
+    pat = _make_pattern(db, name="up_packet_breakout", rules={"direction": "up"})
+    now = datetime.utcnow().replace(microsecond=0)
+    alert_at = now - timedelta(hours=30)
+    pkt = TradingDecisionPacket(
+        scan_pattern_id=pat.id,
+        chosen_ticker="AAPL",
+        decision_type="manual_signal",
+        execution_mode="shadow",
+        deployment_stage="promoted",
+        source_surface="alert_pattern_breakout",
+        outcome_status="observed",
+        shadow_advisory_only=True,
+    )
+    db.add(pkt)
+    db.flush()
+    alert = _make_alert(db, pattern_id=pat.id, ticker="AAPL", created_at=alert_at)
+    alert.decision_packet_id = int(pkt.id)
+    db.commit()
+
+    summary = evaluate_directional_outcomes(
+        db,
+        now=now,
+        fetch_ohlcv=lambda *_args, **_kwargs: _build_ohlc_window(
+            start=alert_at - timedelta(hours=1),
+            n_bars=30,
+            entry_price=100.0,
+            high_pct=3.0,
+            low_pct=-0.5,
+        ),
+        settings_=_settings_stub(),
+    )
+
+    assert summary["evaluated"] == 1
+    db.refresh(pkt)
+    assert pkt.outcome_status == "won"
+    outcomes = pkt.research_vs_live_context_json["directional_outcomes"]
+    assert outcomes[0]["alert_id"] == int(alert.id)
+    assert outcomes[0]["directional_correct"] is True
+    assert outcomes[0]["ticker"] == "AAPL"
+    row = db.execute(
+        text(
+            "SELECT decision_packet_id "
+            "FROM pattern_alert_directional_outcome "
+            "WHERE alert_id = :alert_id"
+        ),
+        {"alert_id": int(alert.id)},
+    ).fetchone()
+    assert row is not None
+    assert int(row[0]) == int(pkt.id)
+    q = get_rolling_directional_quality(db, pat.id)
+    assert q is not None
+    assert q["packet_linked_sample_n"] == 1
+    assert q["packet_lineage_coverage"] == pytest.approx(1.0, rel=1e-6)
+
+
 def test_evaluator_uses_duration_estimate_for_intraday_alert(db):
     pat = _make_pattern(db, name="intraday_up", rules={"direction": "up"})
     now = datetime.utcnow().replace(microsecond=0)
@@ -542,6 +598,8 @@ def test_rolling_view_aggregates_per_pattern_directional_wr(db):
     assert q is not None
     assert q["rolling_sample_n"] == 5
     assert q["rolling_directional_wr"] == pytest.approx(0.6, rel=1e-6)
+    assert q["packet_linked_sample_n"] == 0
+    assert q["packet_lineage_coverage"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_rolling_view_caps_sample_at_30(db):
@@ -582,6 +640,8 @@ def test_rolling_view_caps_sample_at_30(db):
     assert q is not None
     assert q["rolling_sample_n"] == 30
     assert q["rolling_directional_wr"] == pytest.approx(1.0, rel=1e-6)
+    assert q["packet_linked_sample_n"] == 0
+    assert q["packet_lineage_coverage"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_evaluator_skips_alert_with_missing_pattern(db):

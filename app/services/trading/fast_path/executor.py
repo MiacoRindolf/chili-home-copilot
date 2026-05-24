@@ -53,6 +53,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from .alert_direction import SIDE_SELL, spot_entry_side_for_alert_type
 from .gates import (
     DEFAULT_GATES,
     DEFAULT_NOTIONAL_USD,
@@ -64,6 +65,7 @@ from .gates import (
 )
 from .order_book import OrderBookAggregator
 from .settings import FastPathSettings
+from .universe_status import UNIVERSE_STATUS_ACTIVE, UNIVERSE_STATUS_SHADOW
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,20 @@ POLL_INTERVAL_S = 1.0
 """How often the executor polls fast_alerts. 1s gives sub-2s typical
 end-to-end latency (ws -> scanner -> alert row -> poll -> decision)
 without hammering the DB."""
+
+_SHADOW_MAKER_PROBE_BYPASS_GATES = frozenset({
+    "negative_edge",
+    "maker_attempt_adverse",
+    "cost_aware_admission",
+})
+"""Learned denials that shadow maker probes are allowed to re-measure."""
+
+_SHADOW_MAKER_PROBE_TERMINAL_VERDICTS = frozenset({
+    "negative_edge",
+    "below_cost",
+    "adverse_selection",
+})
+"""Gate verdicts that are already conclusive enough to stop re-probing."""
 
 
 # ── Coinbase live placement ──────────────────────────────────────────
@@ -256,6 +272,7 @@ encodes the default; an operator override should NOT be needed since
 the gate already filters wide-spread pairs."""
 
 MAKER_TIMEOUT_TASK_NAME_PREFIX = "fast_path_maker_timeout"
+BPS_PER_UNIT = 10_000.0
 
 
 def _maker_default_tick_size(mid_price: float) -> float:
@@ -271,26 +288,21 @@ def _maker_default_tick_size(mid_price: float) -> float:
 
 def _compute_maker_limit_price(side: str, best_bid: float, best_ask: float,
                                tick_size: float) -> float:
-    """Place the limit one tick INSIDE the spread on our side of the
-    book.
+    """Place a passive limit on our side of the book.
 
-      * long  (side='buy'):  best_bid + tick   (just above the BBO bid;
-                                                fills only if the book
-                                                trades down to us)
-      * short (side='sell'): best_ask - tick   (just below the BBO ask)
-
-    Returns 0.0 if the inputs are degenerate (no quote, or the offset
-    would invert the book). Caller treats 0.0 as a reject reason.
+    Improve by one tick when that stays inside the spread. If the book
+    is already one tick wide, join the current best bid/ask instead of
+    rejecting; the order is still passive/post-only, and the market can
+    produce maker-fill evidence.
     """
-    if best_bid <= 0 or best_ask <= 0 or tick_size <= 0:
+    if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
         return 0.0
     if side == "buy":
-        candidate = best_bid + tick_size
-        # Don't cross the spread — that would make us a taker.
-        return candidate if candidate < best_ask else 0.0
+        candidate = best_bid + tick_size if tick_size > 0 else 0.0
+        return candidate if best_bid < candidate < best_ask else best_bid
     elif side == "sell":
-        candidate = best_ask - tick_size
-        return candidate if candidate > best_bid else 0.0
+        candidate = best_ask - tick_size if tick_size > 0 else 0.0
+        return candidate if best_bid < candidate < best_ask else best_ask
     return 0.0
 
 
@@ -402,6 +414,8 @@ class _ExecutorMetrics:
     maker_attempts_replaced: int = 0
     maker_attempts_rejected: int = 0
     maker_attempts_capped: int = 0  # blocked by 1-outstanding-per-(ticker,side) cap
+    maker_attempts_adverse_cancelled: int = 0
+    maker_observe_only_fills: int = 0
 
 
 class FastPathExecutor:
@@ -512,6 +526,7 @@ class FastPathExecutor:
                 "[fast_path] executor open-position refresh failed: %s",
                 exc, exc_info=True,
             )
+        await self._sweep_paper_maker_fills()
         rows = await loop.run_in_executor(None, self._fetch_new_alerts)
         if not rows:
             return
@@ -566,7 +581,12 @@ class FastPathExecutor:
         decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
         latency_ms = (time.monotonic() - t_start) * 1000.0
 
+        shadow_maker_probe = False
         if not gate_run.allow:
+            shadow_maker_probe = await self._shadow_maker_probe_allowed_async(
+                alert, ctx, gate_run,
+            )
+        if not gate_run.allow and not shadow_maker_probe:
             # Reject path
             await self._write_decision(
                 alert, ctx, decision="rejected",
@@ -581,12 +601,11 @@ class FastPathExecutor:
             return
 
         # All gates passed — proceed. Side mapping: long alerts -> buy,
-        # short alerts -> sell. We don't currently *open* short
-        # positions in spot crypto (you can't short BTC-USD on Coinbase
-        # spot without margin), so imbalance_short alerts are recorded
-        # as decisions but never fill. F5 will use them as exit signals.
-        side = "buy" if alert_type.endswith("_long") else "sell"
-        if side == "sell":
+        # short alerts -> sell. Neutral signals are long-entry
+        # candidates in today's scanner; do not turn them into shorts
+        # merely because their names lack a "_long" suffix.
+        side = spot_entry_side_for_alert_type(alert_type)
+        if side == SIDE_SELL:
             # No spot-short execution; record as rejected with a
             # specific reason so we can see the alerts that COULD
             # become exit signals later.
@@ -698,6 +717,21 @@ class FastPathExecutor:
             self._metrics.decisions_live_placed += 1
         else:
             # Paper fill — synthesize at best ask, no broker call.
+            paper_allowed, universe_status = (
+                await self._paper_position_allowed_for_universe_async(ticker)
+            )
+            if not paper_allowed:
+                await self._write_decision(
+                    alert, ctx, decision="rejected",
+                    reject_reason=self._universe_observe_only_reason(universe_status),
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=latency_ms,
+                )
+                self._metrics.decisions_rejected += 1
+                self._metrics.last_decision_at = decided_at
+                return
             await self._write_decision(
                 alert, ctx, decision="paper_fill",
                 reject_reason=None,
@@ -714,6 +748,70 @@ class FastPathExecutor:
         self._metrics.last_decision_at = decided_at
 
     # ── Maker-only path (f-fastpath-maker-only-executor, 2026-05-08) ──
+
+    async def _shadow_maker_probe_allowed_async(
+        self,
+        alert: dict,
+        ctx: ExecContext,
+        gate_run: GateRunResult,
+    ) -> bool:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._shadow_maker_probe_allowed, alert, ctx, gate_run,
+        )
+
+    def _shadow_maker_probe_allowed(
+        self,
+        alert: dict,
+        ctx: ExecContext,
+        gate_run: GateRunResult,
+    ) -> bool:
+        """Allow paper shadow symbols to refresh maker-fill evidence.
+
+        This is intentionally narrow: it only applies to latest-rotation
+        shadow symbols in paper maker modes, and only when every denial is
+        a learned maker/economic gate. Operational denials still reject.
+        """
+        if (ctx.mode or "paper").strip().lower() != "paper":
+            return False
+        execution_mode = (self._settings.execution_mode or "taker").strip().lower()
+        if execution_mode not in ("maker_only", "maker_first_then_taker"):
+            return False
+        if not getattr(self._settings, "universe_rotation_enabled", False):
+            return False
+        denied = {r.name for r in gate_run.results if not r.allow}
+        if not denied:
+            return False
+        if not denied.issubset(_SHADOW_MAKER_PROBE_BYPASS_GATES):
+            return False
+        if not self._shadow_maker_probe_denials_refreshable(gate_run):
+            return False
+        ticker = str(alert.get("ticker") or "")
+        if not ticker:
+            return False
+        try:
+            status = self._latest_universe_status_sync(ticker)
+        except Exception as exc:
+            self._metrics.db_errors += 1
+            logger.debug(
+                "[fast_path] shadow maker probe status lookup failed "
+                "ticker=%s: %s",
+                ticker, exc, exc_info=True,
+            )
+            return False
+        return status == UNIVERSE_STATUS_SHADOW
+
+    @staticmethod
+    def _shadow_maker_probe_denials_refreshable(gate_run: GateRunResult) -> bool:
+        """Return False when learned gates already reached terminal evidence."""
+        for result in gate_run.results:
+            if result.allow:
+                continue
+            detail = result.detail if isinstance(result.detail, dict) else {}
+            verdict = str(detail.get("verdict") or "").strip().lower()
+            if verdict in _SHADOW_MAKER_PROBE_TERMINAL_VERDICTS:
+                return False
+        return True
 
     async def _process_alert_maker(
         self,
@@ -892,6 +990,10 @@ class FastPathExecutor:
             "placed_at": time.monotonic(),
             "quantity": float(quantity),
             "notional_usd": float(notional_usd),
+            "_placement_ctx": ctx,
+            "_alert": alert,
+            "_gate_run": gate_run,
+            "_unfilled_outcome": unfilled_outcome,
         }
         self._outstanding_maker[cap_key] = attempt_record
 
@@ -921,6 +1023,7 @@ class FastPathExecutor:
         ctx: ExecContext,
         alert: dict,
         gate_run: GateRunResult,
+        force_outcome: str | None = None,
     ) -> None:
         """Run after ``timeout_s`` seconds; resolve the maker attempt.
 
@@ -930,8 +1033,10 @@ class FastPathExecutor:
             mark filled. Else cancel via SDK and mark
             ``unfilled_outcome``.
           * Paper mode: peek at the in-memory book. If the BBO has
-            crossed our limit (best_bid >= our buy_limit, etc.), call
-            it filled at the limit price. Else mark unfilled.
+            traded through the passive limit on our side of the book,
+            call it filled at the limit price. Else mark unfilled.
+            The sweep path may force a cancellation before timeout
+            when adverse mid drift reaches our passive quote first.
 
         On filled / partial: notify the decay_miner so the maker-filled
         forward-return obs accumulate.
@@ -944,6 +1049,11 @@ class FastPathExecutor:
             await asyncio.sleep(int(timeout_s))
         except asyncio.CancelledError:
             return
+        if attempt.get("resolved"):
+            return
+        if attempt.get("resolving") and force_outcome is None:
+            return
+        attempt["resolving"] = True
 
         ticker = attempt["ticker"]
         side = attempt["side"]
@@ -968,9 +1078,19 @@ class FastPathExecutor:
                 if (ctx.best_bid > 0 and ctx.best_ask > 0) else 0.0
             )
             if mid_at_place > 0:
-                mid_drift_bps = ((mid_now - mid_at_place) / mid_at_place) * 10_000.0
+                mid_drift_bps = (
+                    (mid_now - mid_at_place) / mid_at_place
+                ) * BPS_PER_UNIT
 
-        if ctx.mode == "live" and broker_order_id:
+        if force_outcome in ("filled", "partial"):
+            outcome = force_outcome
+            final_price = limit_price
+        elif force_outcome in ("cancelled", "replaced"):
+            outcome = force_outcome
+            final_price = None
+            if ctx.mode == "live" and broker_order_id:
+                _cancel_coinbase_order_live(broker_order_id)
+        elif ctx.mode == "live" and broker_order_id:
             # Poll broker for terminal state.
             try:
                 from app.services import coinbase_service as cb
@@ -1015,14 +1135,12 @@ class FastPathExecutor:
                 # limit price (someone matched us). Equivalent
                 # observable: an aggressive seller hit the bid-side at
                 # our limit.
-                book_crossed = (
-                    peek_ctx.best_bid > 0 and peek_ctx.best_bid <= limit_price
-                    and peek_ctx.best_ask > 0 and peek_ctx.best_ask <= limit_price
+                book_crossed = self._paper_maker_book_crossed(
+                    side, limit_price, peek_ctx,
                 )
             else:  # sell
-                book_crossed = (
-                    peek_ctx.best_ask > 0 and peek_ctx.best_ask >= limit_price
-                    and peek_ctx.best_bid > 0 and peek_ctx.best_bid >= limit_price
+                book_crossed = self._paper_maker_book_crossed(
+                    side, limit_price, peek_ctx,
                 )
             if book_crossed:
                 outcome = "filled"
@@ -1068,6 +1186,8 @@ class FastPathExecutor:
             self._metrics.maker_attempts_replaced += 1
         elif outcome == "cancelled":
             self._metrics.maker_attempts_cancelled += 1
+            if attempt.get("_adverse_cancel"):
+                self._metrics.maker_attempts_adverse_cancelled += 1
 
         # Notify decay_miner so the maker-filled forward-return obs
         # accumulate. For unfilled outcomes the call is a no-op.
@@ -1092,24 +1212,36 @@ class FastPathExecutor:
                 )
 
         if ctx.mode != "live" and outcome in ("filled", "partial"):
-            fill_ctx = self._build_context(ticker)
-            fill_ctx.mode = "paper"
-            fill_ctx.live_authorized = False
             decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
             fill_price = float(final_price or limit_price)
             filled_notional = float(attempt.get("notional_usd") or 0.0)
-            await self._write_decision(
-                alert, fill_ctx, decision="paper_fill",
-                reject_reason=None,
-                gate_run=gate_run, side=side,
-                quantity=float(attempt.get("quantity") or 0.0),
-                fill_price=fill_price, notional_usd=filled_notional,
-                broker_order_id=None, decided_at=decided_at,
-                latency_ms=0.0,
+            paper_allowed, universe_status = (
+                await self._paper_position_allowed_for_universe_async(ticker)
             )
-            self._metrics.decisions_paper_fill += 1
-            self._open_positions[ticker] = self._open_positions.get(ticker, 0) + 1
-            self._daily_notional_used_usd += filled_notional
+            if not paper_allowed:
+                self._metrics.maker_observe_only_fills += 1
+                logger.info(
+                    "[fast_path] maker fill kept observe-only "
+                    "ticker=%s side=%s status=%s fill_price=%.8f notional=%.2f",
+                    ticker, side, universe_status or "missing",
+                    fill_price, filled_notional,
+                )
+            else:
+                fill_ctx = self._build_context(ticker)
+                fill_ctx.mode = "paper"
+                fill_ctx.live_authorized = False
+                await self._write_decision(
+                    alert, fill_ctx, decision="paper_fill",
+                    reject_reason=None,
+                    gate_run=gate_run, side=side,
+                    quantity=float(attempt.get("quantity") or 0.0),
+                    fill_price=fill_price, notional_usd=filled_notional,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=0.0,
+                )
+                self._metrics.decisions_paper_fill += 1
+                self._open_positions[ticker] = self._open_positions.get(ticker, 0) + 1
+                self._daily_notional_used_usd += filled_notional
             self._metrics.last_decision_at = decided_at
 
         # f-fastpath-maker-only-executor (2026-05-08): hybrid taker
@@ -1134,7 +1266,149 @@ class FastPathExecutor:
                 )
 
         # Drop our entry from the outstanding cap.
+        attempt["resolved"] = True
         self._outstanding_maker.pop(cap_key, None)
+
+    async def _sweep_paper_maker_fills(self) -> None:
+        """Resolve paper maker orders when the current book invalidates them.
+
+        The timeout handler still owns cancel/replaced outcomes. This
+        sweep accelerates paper fills and early adverse cancels so
+        fill-time and mid-drift evidence are measured near the book
+        event, not artificially at the cancel deadline.
+        """
+        if not self._outstanding_maker:
+            return
+        for cap_key, attempt in list(self._outstanding_maker.items()):
+            if attempt.get("resolved") or attempt.get("resolving"):
+                continue
+            ctx = attempt.get("_placement_ctx")
+            if ctx is None or getattr(ctx, "mode", "paper") == "live":
+                continue
+            ticker = str(attempt.get("ticker") or "")
+            side = str(attempt.get("side") or "")
+            limit_price = float(attempt.get("limit_price") or 0.0)
+            peek_ctx = self._build_context(ticker)
+            force_outcome: str | None = None
+            if self._paper_maker_book_crossed(side, limit_price, peek_ctx):
+                force_outcome = "filled"
+            elif self._maker_adverse_drift_reached_quote(
+                side,
+                limit_price,
+                ctx,
+                peek_ctx,
+            ):
+                # If the mid has already moved all the way to our
+                # passive quote and we still are not filled, the maker
+                # premise has failed. Cancel rather than waiting to be
+                # selected into the next adverse print.
+                attempt["_adverse_cancel"] = True
+                force_outcome = "cancelled"
+            if force_outcome is not None:
+                attempt["resolving"] = True
+                task = attempt.get("timeout_task")
+                if task is not None:
+                    task.cancel()
+                await self._maker_timeout_handler(
+                    cap_key=cap_key,
+                    attempt=attempt,
+                    timeout_s=0,
+                    unfilled_outcome=str(
+                        attempt.get("_unfilled_outcome") or "cancelled"
+                    ),
+                    ctx=ctx,
+                    alert=attempt.get("_alert") or {},
+                    gate_run=attempt.get("_gate_run"),
+                    force_outcome=force_outcome,
+                )
+
+    @staticmethod
+    def _ctx_mid_price(ctx: ExecContext) -> float:
+        if ctx.best_bid <= 0.0 or ctx.best_ask <= 0.0:
+            return 0.0
+        return (ctx.best_bid + ctx.best_ask) / 2.0
+
+    @classmethod
+    def _maker_quote_distance_bps(
+        cls,
+        side: str,
+        limit_price: float,
+        placement_ctx: ExecContext,
+    ) -> float:
+        mid_at_place = cls._ctx_mid_price(placement_ctx)
+        if mid_at_place <= 0.0 or limit_price <= 0.0:
+            return 0.0
+        if side == "buy":
+            distance = mid_at_place - limit_price
+        elif side == "sell":
+            distance = limit_price - mid_at_place
+        else:
+            return 0.0
+        if distance <= 0.0:
+            return 0.0
+        return (distance / mid_at_place) * BPS_PER_UNIT
+
+    @classmethod
+    def _maker_side_adjusted_mid_drift_bps(
+        cls,
+        side: str,
+        placement_ctx: ExecContext,
+        peek_ctx: ExecContext,
+    ) -> float | None:
+        mid_at_place = cls._ctx_mid_price(placement_ctx)
+        mid_now = cls._ctx_mid_price(peek_ctx)
+        if mid_at_place <= 0.0 or mid_now <= 0.0:
+            return None
+        raw = ((mid_now - mid_at_place) / mid_at_place) * BPS_PER_UNIT
+        if side == "sell":
+            return -raw
+        if side == "buy":
+            return raw
+        return None
+
+    @classmethod
+    def _maker_adverse_drift_reached_quote(
+        cls,
+        side: str,
+        limit_price: float,
+        placement_ctx: ExecContext,
+        peek_ctx: ExecContext,
+    ) -> bool:
+        quote_distance_bps = cls._maker_quote_distance_bps(
+            side,
+            limit_price,
+            placement_ctx,
+        )
+        if quote_distance_bps <= 0.0:
+            return False
+        side_drift_bps = cls._maker_side_adjusted_mid_drift_bps(
+            side,
+            placement_ctx,
+            peek_ctx,
+        )
+        if side_drift_bps is None:
+            return False
+        return side_drift_bps <= -quote_distance_bps
+
+    @staticmethod
+    def _paper_maker_book_crossed(
+        side: str,
+        limit_price: float,
+        ctx: ExecContext,
+    ) -> bool:
+        if limit_price <= 0:
+            return False
+        if side == "buy":
+            return (
+                ctx.best_bid > 0 and ctx.best_bid <= limit_price
+                and ctx.best_ask > 0 and ctx.best_ask <= limit_price
+            )
+        if side == "sell":
+            return (
+                ctx.best_ask > 0 and ctx.best_ask >= limit_price
+                and ctx.best_bid > 0 and ctx.best_bid >= limit_price
+            )
+        return False
 
     async def _taker_fallback_after_maker_replaced(
         self,
@@ -1239,6 +1513,21 @@ class FastPathExecutor:
             )
             self._metrics.decisions_live_placed += 1
         else:
+            paper_allowed, universe_status = (
+                await self._paper_position_allowed_for_universe_async(ticker)
+            )
+            if not paper_allowed:
+                await self._write_decision(
+                    alert, peek_ctx, decision="rejected",
+                    reject_reason=self._universe_observe_only_reason(universe_status),
+                    gate_run=gate_run, side=side,
+                    quantity=quantity, fill_price=fill_price, notional_usd=notional_usd,
+                    broker_order_id=None, decided_at=decided_at,
+                    latency_ms=0.0,
+                )
+                self._metrics.decisions_rejected += 1
+                self._metrics.last_decision_at = decided_at
+                return
             await self._write_decision(
                 alert, peek_ctx, decision="paper_fill",
                 reject_reason=None,
@@ -1433,6 +1722,61 @@ class FastPathExecutor:
 
     # ── Helpers ───────────────────────────────────────────────────────
 
+    async def _paper_position_allowed_for_universe_async(
+        self,
+        ticker: str,
+    ) -> tuple[bool, str | None]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._paper_position_allowed_for_universe, ticker,
+        )
+
+    def _paper_position_allowed_for_universe(
+        self,
+        ticker: str,
+    ) -> tuple[bool, str | None]:
+        """Return whether a paper fill may become a dashboard position.
+
+        With universe rotation on, shadow symbols are observe-only by
+        default: they can still emit alerts and maker-fill decay, but
+        they should not inflate the paper-position book until promoted
+        to active.
+        """
+        if not getattr(self._settings, "universe_rotation_enabled", False):
+            return True, None
+        if getattr(self._settings, "universe_shadow_paper_fills_enabled", False):
+            return True, None
+        try:
+            status = self._latest_universe_status_sync(ticker)
+        except Exception as exc:
+            self._metrics.db_errors += 1
+            logger.warning(
+                "[fast_path] universe status lookup failed for paper fill "
+                "ticker=%s: %s",
+                ticker, exc, exc_info=True,
+            )
+            return False, None
+        return status == UNIVERSE_STATUS_ACTIVE, status
+
+    def _latest_universe_status_sync(self, ticker: str) -> str | None:
+        with self._engine.begin() as conn:
+            row = conn.execute(text("""
+                WITH latest_rotation AS (
+                    SELECT MAX(rotation_at) AS ts FROM fast_path_universe
+                )
+                SELECT status
+                FROM fast_path_universe
+                WHERE rotation_at = (SELECT ts FROM latest_rotation)
+                  AND ticker = :ticker
+                LIMIT 1
+            """), {"ticker": ticker}).mappings().one_or_none()
+        status = str((row or {}).get("status") or "")
+        return status or None
+
+    @staticmethod
+    def _universe_observe_only_reason(status: str | None) -> str:
+        return f"universe_observe_only:{status or 'missing'}"
+
     def _build_context(self, ticker: str) -> ExecContext:
         # Pull top-of-book from the in-memory aggregator. We don't
         # *force* an emission here — we read whatever is already there;
@@ -1446,7 +1790,7 @@ class FastPathExecutor:
             best_ask = min(book.asks.keys())
             mid = (best_bid + best_ask) / 2.0 if (best_bid > 0 and best_ask > 0) else 0.0
             if mid > 0:
-                spread_bps = ((best_ask - best_bid) / mid) * 10_000.0
+                spread_bps = ((best_ask - best_bid) / mid) * BPS_PER_UNIT
         return ExecContext(
             now_wall=datetime.now(timezone.utc).replace(tzinfo=None),
             best_bid=best_bid,
@@ -1503,6 +1847,9 @@ class FastPathExecutor:
             "maker_attempts_replaced": self._metrics.maker_attempts_replaced,
             "maker_attempts_rejected": self._metrics.maker_attempts_rejected,
             "maker_attempts_capped": self._metrics.maker_attempts_capped,
+            "maker_attempts_adverse_cancelled":
+                self._metrics.maker_attempts_adverse_cancelled,
+            "maker_observe_only_fills": self._metrics.maker_observe_only_fills,
             "maker_outstanding_count": len(self._outstanding_maker),
         }
 

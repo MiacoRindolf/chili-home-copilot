@@ -64,3 +64,16 @@ def test_coinbase_ticker_level_snapshot_gap_checks_open_orders() -> None:
     assert "_coinbase_has_working_sell_orders(trade.ticker)" in fn_src
     assert "positions snapshot" in fn_src
     assert "working sell order" in fn_src
+
+
+def test_coinbase_missing_snapshot_requires_confirming_sell_fill() -> None:
+    fn_src = _sync_source()
+    assert "no confirming" in fn_src
+    assert "Keeping trade open/monitored" in fn_src
+    assert "close_fill is None" in fn_src
+
+
+def test_coinbase_open_order_guard_fails_closed_for_monitoring() -> None:
+    src = SVC_PATH.read_text(encoding="utf-8")
+    assert "treating broker order state as unknown" in src
+    assert "return True" in src

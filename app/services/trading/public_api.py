@@ -45,6 +45,7 @@ from .portfolio_risk import (
 
 # ── Attribution / review ────────────────────────────────────────────────────
 from .attribution_service import live_vs_research_by_pattern, post_trade_review
+from .decision_packet_coverage import decision_packet_coverage_summary
 
 # ── Thesis / evidence ──────────────────────────────────────────────────────
 from .thesis import enrich_picks_with_evidence
@@ -91,6 +92,7 @@ __all__ = [
     # attribution / review
     "live_vs_research_by_pattern",
     "post_trade_review",
+    "decision_packet_coverage_summary",
     # thesis / evidence
     "enrich_picks_with_evidence",
     # pattern engine

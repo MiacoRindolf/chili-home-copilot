@@ -351,6 +351,73 @@ def get_all_weights() -> dict[str, float]:
         return dict(_adaptive_weights)
 
 
+def _finite_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out:
+        return None
+    return out
+
+
+def _max_atr_fraction_for_levels(*, crypto: bool) -> float:
+    env_key = (
+        "CHILI_SCANNER_MAX_ATR_PRICE_FRACTION_CRYPTO"
+        if crypto
+        else "CHILI_SCANNER_MAX_ATR_PRICE_FRACTION_STOCK"
+    )
+    default = 0.50 if crypto else 0.35
+    try:
+        value = float(_os.getenv(env_key, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if value != value:
+        return default
+    return max(0.01, min(2.0, value))
+
+
+def _long_atr_trade_levels(
+    reference_price: float,
+    atr: float,
+    *,
+    stop_mult: float,
+    target_mult: float,
+    crypto: bool,
+) -> tuple[float, float, float] | None:
+    """Build sane long entry/stop/target levels from ATR geometry.
+
+    Extreme ATR/price ratios usually mean split/corporate-action pollution,
+    stale OHLC, or a penny-stock halt gap. Letting that math through creates
+    negative stops and fantasy targets, which later show up as "viable"
+    alerts that the autotrader must reject. Returning None makes the scanner
+    skip the candidate before it enters the alert pool.
+    """
+    price = _finite_float(reference_price)
+    atr_f = _finite_float(atr)
+    stop_m = _finite_float(stop_mult)
+    target_m = _finite_float(target_mult)
+    if (
+        price is None
+        or atr_f is None
+        or stop_m is None
+        or target_m is None
+        or price <= 0.0
+        or atr_f <= 0.0
+        or stop_m <= 0.0
+        or target_m <= 0.0
+    ):
+        return None
+    if (atr_f / price) > _max_atr_fraction_for_levels(crypto=crypto):
+        return None
+    entry = smart_round(price, crypto=crypto)
+    stop = smart_round(price - stop_m * atr_f, crypto=crypto)
+    target = smart_round(price + target_m * atr_f, crypto=crypto)
+    if stop <= 0.0 or stop >= entry or target <= entry:
+        return None
+    return entry, stop, target
+
+
 def _apply_learned_weights(overrides: dict[str, float]) -> None:
     """Merge brain-computed weight adjustments into the live weights."""
     with _weights_lock:
@@ -1094,8 +1161,17 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
 
         volatility_pct = (atr_f / price * 100) if price > 0 else 5
         _stop_mult = get_adaptive_weight("swing_stop_atr_mult_vol") if volatility_pct > 3 else get_adaptive_weight("swing_stop_atr_mult_normal")
-        stop_loss = smart_round(price - _stop_mult * atr_f, crypto=_cr)
-        take_profit = smart_round(price + get_adaptive_weight("swing_target_atr_mult") * atr_f, crypto=_cr)
+        _target_mult = get_adaptive_weight("swing_target_atr_mult")
+        levels = _long_atr_trade_levels(
+            price,
+            atr_f,
+            stop_mult=_stop_mult,
+            target_mult=_target_mult,
+            crypto=_cr,
+        )
+        if levels is None:
+            return None
+        entry_price, stop_loss, take_profit = levels
         if volatility_pct > 3:
             risk = "high"
         elif volatility_pct > 1.5:
@@ -1107,8 +1183,8 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": signal,
-            "price": smart_round(price, crypto=_cr),
-            "entry_price": smart_round(price, crypto=_cr),
+            "price": entry_price,
+            "entry_price": entry_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "risk_level": risk,
@@ -1376,16 +1452,24 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.01
         _i_stop_m = get_adaptive_weight("intra_stop_atr_mult")
         _i_tgt_m = get_adaptive_weight("intra_target_atr_mult")
-        scalp_stop = smart_round(price - _i_stop_m * atr_f, crypto=_cr)
-        scalp_target = smart_round(price + _i_tgt_m * atr_f, crypto=_cr)
+        levels = _long_atr_trade_levels(
+            price,
+            atr_f,
+            stop_mult=_i_stop_m,
+            target_mult=_i_tgt_m,
+            crypto=_cr,
+        )
+        if levels is None:
+            return None
+        entry_price, scalp_stop, scalp_target = levels
         risk_reward = round(_i_tgt_m * atr_f / (_i_stop_m * atr_f), 2) if atr_f > 0 else 1.67
 
         return {
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": signal,
-            "price": smart_round(price, crypto=_cr),
-            "entry_price": smart_round(price, crypto=_cr),
+            "price": entry_price,
+            "entry_price": entry_price,
             "stop_loss": scalp_stop,
             "take_profit": scalp_target,
             "risk_reward": risk_reward,
@@ -2451,9 +2535,16 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         # Entry / stop / target
         _c_stop_m = get_adaptive_weight("crypto_bo_stop_atr_mult")
         _c_tgt_m = get_adaptive_weight("crypto_bo_target_atr_mult")
-        entry = smart_round(price, crypto=True)
-        stop = smart_round(price - _c_stop_m * atr_val, crypto=True)
-        target = smart_round(price + _c_tgt_m * atr_val, crypto=True)
+        levels = _long_atr_trade_levels(
+            price,
+            atr_val,
+            stop_mult=_c_stop_m,
+            target_mult=_c_tgt_m,
+            crypto=True,
+        )
+        if levels is None:
+            return None
+        entry, stop, target = levels
         rr = round(_c_tgt_m / _c_stop_m, 2)
 
         bb_width_pct_rank = ind.get("bb_width_pct_rank", 0.0 if bb_squeeze else 50.0)
@@ -3214,6 +3305,16 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         _cr = ticker.upper().endswith("-USD")
         _bo_stop_m = get_adaptive_weight("bo_stop_atr_mult")
         _bo_tgt_m = get_adaptive_weight("bo_target_atr_mult")
+        levels = _long_atr_trade_levels(
+            resistance,
+            atr_f,
+            stop_mult=_bo_stop_m,
+            target_mult=_bo_tgt_m,
+            crypto=_cr,
+        )
+        if levels is None:
+            return None
+        entry_price, stop_loss, take_profit = levels
 
         result = {
             "ticker": ticker.upper(),
@@ -3230,9 +3331,9 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             "tight_days": tight_days,
             "risk_level": "medium" if status == "watch" else "high",
             "signals": signals,
-            "entry_price": smart_round(resistance, crypto=_cr),
-            "stop_loss": smart_round(resistance - _bo_stop_m * atr_f, crypto=_cr),
-            "take_profit": smart_round(resistance + _bo_tgt_m * atr_f, crypto=_cr),
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
             "indicators": {
                 "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
                 "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
@@ -3246,7 +3347,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             "news_sentiment": _news_score,
             "sector": _get_sector_for_ticker(ticker),
             "hold_estimate": _estimate_hold_duration(
-                resistance, smart_round(resistance + _bo_tgt_m * atr_f, crypto=_cr),
+                resistance, take_profit,
                 atr_f, "1d",
                 float(adx_val) if pd.notna(adx_val) else None,
             ),

@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from app.services.trading.opportunity_board import get_trading_opportunity_board
+from app.services.trading.opportunity_board import (
+    _annotate_desk_fields,
+    _apply_board_data_quality_gate,
+    _board_data_quality_gate,
+    get_trading_opportunity_board,
+)
 
 
 def test_opportunity_board_empty_shape(monkeypatch) -> None:
@@ -74,6 +79,7 @@ def test_opportunity_board_empty_shape(monkeypatch) -> None:
     assert "generated_at" in out
     assert out.get("data_as_of") is not None
     assert out.get("board_truncated") is False
+    assert out["data_quality_gate"]["learning_lane_enabled"] is True
     assert "source_freshness" in out
     assert out["no_trade_now"] is True
     assert "tiers" in out
@@ -138,3 +144,71 @@ def test_opportunity_board_truncated_when_budget_hit(monkeypatch) -> None:
     out = get_trading_opportunity_board(db, 1, include_research=False, include_debug=False)
     assert out["ok"] is True
     assert out.get("board_truncated") is True
+
+
+def test_opportunity_board_risk_annotations_are_real() -> None:
+    rows = [
+        {
+            "ticker": "BTC-USD",
+            "asset_class": "crypto",
+            "tier": "A",
+            "sources": ["pattern_imminent", "scan_pattern"],
+            "source_strength": "strong",
+            "composite": 0.62,
+            "score_breakdown": {"overextension_penalty": 0.07},
+            "readiness": 0.76,
+            "feature_coverage": 0.66,
+            "entry": 100.0,
+            "stop": 96.0,
+            "target": 110.0,
+            "price": 100.0,
+            "prediction_support": {"direction": "up", "confidence": 0.7},
+        }
+    ]
+
+    _annotate_desk_fields(rows)
+    row = rows[0]
+    assert row["extension_risk"]["level"] in {"low", "medium", "high"}
+    assert row["execution_risk"]["expected_slippage_bps"] > 0
+    assert row["structural_confirmation"]["score"] > 0
+    assert row["liquidity_quality"]["score"] > 0
+    assert row["net_edge_estimate"]["available"] is True
+
+
+def test_opportunity_board_data_quality_blocks_capital_not_learning() -> None:
+    rows = [
+        {
+            "ticker": "BTC-USD",
+            "asset_class": "crypto",
+            "tier": "A",
+            "sources": ["pattern_imminent"],
+            "source_strength": "strong",
+            "composite": 0.7,
+            "readiness": 0.8,
+            "feature_coverage": 0.7,
+            "entry": 100.0,
+            "stop": 97.0,
+            "target": 108.0,
+        }
+    ]
+    gate = _board_data_quality_gate(
+        data_as_of="2026-01-01T12:00:00+00:00",
+        age_sec=900.0,
+        stale_threshold_seconds=180,
+        freshness_unknown=False,
+        is_stale=True,
+        board_truncated=False,
+        data_as_of_min_keys=["scan_results_latest_utc"],
+        source_freshness={"scan_results_latest_utc": "2026-01-01T12:00:00+00:00"},
+    )
+
+    _annotate_desk_fields(rows)
+    _apply_board_data_quality_gate(rows, gate)
+
+    row = rows[0]
+    assert gate["status"] == "block"
+    assert gate["capital_lane_eligible"] is False
+    assert row["learning_lane"]["enabled"] is True
+    assert row["capital_lane"]["approved_for_direct_execution"] is False
+    assert row["capital_lane"]["hard_block_reason_code"] == "board_data_stale"
+    assert row["net_edge_estimate"]["capital_lane"] == "blocked_data_quality"

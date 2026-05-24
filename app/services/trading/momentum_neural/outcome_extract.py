@@ -15,11 +15,11 @@ from ....models.trading import (
 )
 from .live_fsm import STATE_LIVE_CANCELLED, STATE_LIVE_ERROR, STATE_LIVE_FINISHED
 from .outcome_labels import (
-    OUTCOME_ARCHIVED,
-    OUTCOME_BAILOUT,
-    OUTCOME_CANCELLED_IN_TRADE,
-    OUTCOME_CANCELLED_PRE_ENTRY,
-    OUTCOME_ERROR_EXIT,
+OUTCOME_ARCHIVED,
+OUTCOME_BAILOUT,
+OUTCOME_CANCELLED_IN_TRADE,
+OUTCOME_CANCELLED_PRE_ENTRY,
+OUTCOME_ERROR_EXIT,
     OUTCOME_EXPIRED_PRE_RUN,
     OUTCOME_FLAT_UNKNOWN,
     OUTCOME_GOVERNANCE_EXIT,
@@ -43,6 +43,20 @@ from .risk_policy import RISK_SNAPSHOT_KEY
 KEY_PAPER = "momentum_paper_execution"
 KEY_LIVE = "momentum_live_execution"
 
+_NON_STRATEGY_CREDIT_OUTCOMES = frozenset(
+    {
+        OUTCOME_ARCHIVED,
+        OUTCOME_CANCELLED_IN_TRADE,
+        OUTCOME_CANCELLED_PRE_ENTRY,
+        OUTCOME_ERROR_EXIT,
+        OUTCOME_EXPIRED_PRE_RUN,
+        OUTCOME_GOVERNANCE_EXIT,
+        OUTCOME_NO_FILL,
+        OUTCOME_RISK_BLOCK,
+        OUTCOME_STALE_DATA_ABORT,
+    }
+)
+
 
 def _utc(d: Optional[datetime]) -> Optional[datetime]:
     if d is None:
@@ -50,6 +64,14 @@ def _utc(d: Optional[datetime]) -> Optional[datetime]:
     if d.tzinfo is not None:
         return d.replace(tzinfo=None)
     return d
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return out if out > 0 else 0.0
 
 
 def session_terminal_for_feedback(mode: str, state: str) -> bool:
@@ -77,7 +99,13 @@ def _entry_occurred_from_events(events: list[TradingAutomationEvent], mode: str)
     if mode == "paper":
         markers = {"paper_entry_filled", "paper_exit_filled", "paper_partial_exit"}
     else:
-        markers = {"live_entry_filled", "live_exit_filled", "live_exit_submitted", "live_partial_exit"}
+        markers = {
+            "live_entry_filled",
+            "live_exit_filled",
+            "live_exit_submitted",
+            "live_partial_exit",
+            "live_partial_exit_filled",
+        }
     for ev in events:
         if ev.event_type in markers:
             return True
@@ -184,8 +212,18 @@ def extract_momentum_session_outcome(
     exit_reason: Optional[str] = None
     partial_exit = False
     entry_occurred = False
+    entry_decision_packet_id: Optional[int] = None
+    quote_source_at_entry: Optional[str] = None
 
     if mode == "paper":
+        try:
+            entry_decision_packet_id = (
+                int(pe["last_entry_decision_packet_id"])
+                if pe.get("last_entry_decision_packet_id")
+                else None
+            )
+        except (TypeError, ValueError):
+            entry_decision_packet_id = None
         realized = pe.get("realized_pnl_usd")
         if realized is not None:
             try:
@@ -195,6 +233,9 @@ def extract_momentum_session_outcome(
         exit_reason = pe.get("last_exit_reason")
         if isinstance(exit_reason, str):
             exit_reason = exit_reason.strip() or None
+        quote_source_raw = pe.get("entry_quote_source") or pe.get("last_quote_source")
+        if quote_source_raw is not None:
+            quote_source_at_entry = str(quote_source_raw).strip() or None
         pos = pe.get("position")
         entry_occurred = _entry_occurred_from_events(events, "paper") or (
             isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0
@@ -203,6 +244,14 @@ def extract_momentum_session_outcome(
             if ev.event_type == "paper_partial_exit":
                 partial_exit = True
     else:
+        try:
+            entry_decision_packet_id = (
+                int(le["entry_decision_packet_id"])
+                if le.get("entry_decision_packet_id")
+                else None
+            )
+        except (TypeError, ValueError):
+            entry_decision_packet_id = None
         realized = le.get("realized_pnl_usd")
         if realized is not None:
             try:
@@ -217,7 +266,7 @@ def extract_momentum_session_outcome(
             isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0
         )
         for ev in events:
-            if ev.event_type == "live_partial_exit":
+            if ev.event_type in ("live_partial_exit", "live_partial_exit_filled"):
                 partial_exit = True
 
     hold_seconds: Optional[int] = None
@@ -235,6 +284,10 @@ def extract_momentum_session_outcome(
             notional_basis = float(le["position"].get("notional_usd") or 0)
         except (TypeError, ValueError):
             notional_basis = 0.0
+    if notional_basis <= 0 and mode == "paper":
+        notional_basis = _positive_float(pe.get("last_exit_notional_basis_usd"))
+    if notional_basis <= 0 and mode == "live":
+        notional_basis = _positive_float(le.get("last_exit_notional_basis_usd"))
     if notional_basis <= 0 and mode == "paper" and isinstance(pe.get("position"), dict):
         posp = pe["position"]
         try:
@@ -278,8 +331,11 @@ def extract_momentum_session_outcome(
         "outcome_class": outcome_class,
         "realized_pnl_usd": realized,
         "return_bps": return_bps,
+        "notional_basis_usd": notional_basis if notional_basis > 0 else None,
         "exit_reason": exit_reason,
         "entry_occurred": entry_occurred,
+        "entry_decision_packet_id": entry_decision_packet_id,
+        "quote_source_at_entry": quote_source_at_entry,
         "partial_exit_occurred": partial_exit,
         "regime_snapshot_json": regime_snapshot_json,
         "entry_regime_snapshot_json": entry_regime_snapshot_json,
@@ -373,7 +429,7 @@ def outcome_row_from_extracted(
     extracted: dict[str, Any],
     *,
     evidence_weight: float = 1.0,
-    contributes_to_evolution: bool = True,
+    contributes_to_evolution: bool | None = None,
 ) -> MomentumAutomationOutcome:
     terminal_at = datetime.utcnow()
     try:
@@ -383,7 +439,24 @@ def outcome_row_from_extracted(
     except Exception:
         pass
 
-    summary = {k: extracted.get(k) for k in ("entry_occurred", "partial_exit_occurred", "variant_family", "variant_key")}
+    credit = outcome_evolution_credit_from_extracted(extracted)
+    contributes = credit["contributes_to_evolution"] if contributes_to_evolution is None else bool(contributes_to_evolution)
+    if contributes_to_evolution is not None:
+        credit["overridden"] = True
+
+    summary = {
+        k: extracted.get(k)
+        for k in (
+            "entry_occurred",
+            "entry_decision_packet_id",
+            "partial_exit_occurred",
+            "quote_source_at_entry",
+            "notional_basis_usd",
+            "variant_family",
+            "variant_key",
+        )
+    }
+    summary["evolution_credit"] = credit
 
     return MomentumAutomationOutcome(
         session_id=int(extracted["session_id"]),
@@ -407,8 +480,45 @@ def outcome_row_from_extracted(
         governance_context_json=dict(extracted.get("governance_context_json") or {}),
         extracted_summary_json=summary,
         evidence_weight=float(evidence_weight),
-        contributes_to_evolution=bool(contributes_to_evolution),
+        contributes_to_evolution=bool(contributes),
     )
+
+
+def outcome_evolution_credit_from_extracted(extracted: dict[str, Any]) -> dict[str, Any]:
+    """Decide whether a terminal outcome may update neural evolution.
+
+    Audit rows are still persisted, but model credit requires the closed-loop
+    chain to include an actual entry, the decision packet that authorized it,
+    an economic result, and a strategy-caused terminal outcome.
+    """
+    entry_occurred = bool(extracted.get("entry_occurred"))
+    packet_id = extracted.get("entry_decision_packet_id")
+    try:
+        packet_id_int = int(packet_id) if packet_id is not None else None
+    except (TypeError, ValueError):
+        packet_id_int = None
+    has_economic_result = extracted.get("return_bps") is not None or extracted.get("realized_pnl_usd") is not None
+    outcome_class = str(extracted.get("outcome_class") or "").strip()
+    mode = str(extracted.get("mode") or "").strip().lower()
+    quote_source = str(extracted.get("quote_source_at_entry") or "").strip().lower()
+    reasons: list[str] = []
+    if not entry_occurred:
+        reasons.append("no_entry")
+    if packet_id_int is None:
+        reasons.append("missing_entry_decision_packet")
+    if not has_economic_result:
+        reasons.append("missing_economic_result")
+    if outcome_class in _NON_STRATEGY_CREDIT_OUTCOMES:
+        reasons.append(f"non_strategy_outcome_{outcome_class}")
+    if mode == "paper" and quote_source in {"synthetic", "synthetic_spread"}:
+        reasons.append("paper_synthetic_quote_source")
+    return {
+        "contributes_to_evolution": not reasons,
+        "reason_codes": reasons,
+        "entry_decision_packet_id": packet_id_int,
+        "outcome_class": outcome_class or None,
+        "quote_source_at_entry": quote_source or None,
+    }
 
 
 def feedback_row_exists(db: Session, session_id: int) -> bool:

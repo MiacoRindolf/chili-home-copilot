@@ -107,7 +107,9 @@ def retrieve_project_files(
         except Exception:
             return []
     try:
-        hits = pfs.search_project(project_id, message, n=3, trace_id=trace_id)  # type: ignore[attr-defined]
+        hits = pfs.search_project(  # type: ignore[attr-defined]
+            project_id, message, n_results=3, trace_id=trace_id
+        )
     except Exception as e:
         logger.debug("[context_brain.retrievers] project_files failed: %s", e)
         return []

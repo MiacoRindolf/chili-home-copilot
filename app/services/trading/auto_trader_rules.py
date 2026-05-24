@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -511,6 +512,7 @@ def resolve_pattern_signal_context(
         "profit_factor": None,
         "n_cells": 0,
         "n_trades_sum": 0,
+        "n_trades_effective": 0,
         "source": "fallback:no_pattern_id",
     }
     if pattern_id is None:
@@ -550,6 +552,11 @@ def resolve_pattern_signal_context(
         expectancy = _mean("expectancy")
         profit_factor = _mean("profit_factor")
         n_trades = sum(int(c.n_trades or 0) for c in cells)
+        # ``n_trades`` is summed across regime dimensions, so the same
+        # underlying trade can appear in multiple cells. For probability
+        # shrinkage use a conservative effective count near the per-cell
+        # average rather than overstating evidence by up to 8x.
+        n_effective = int(math.ceil(n_trades / max(1, len(cells)))) if n_trades > 0 else 0
 
         out.update(
             hit_rate=round(hit_rate, 4) if hit_rate is not None else None,
@@ -557,6 +564,7 @@ def resolve_pattern_signal_context(
             profit_factor=round(profit_factor, 4) if profit_factor is not None else None,
             n_cells=len(cells),
             n_trades_sum=n_trades,
+            n_trades_effective=n_effective,
             source="brain_ledger",
         )
     except Exception:
@@ -702,6 +710,314 @@ def _probability_sample_count(
     return n, None
 
 
+def _settings_int(settings: Any, name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        value = int(getattr(settings, name, default))
+    except Exception:
+        value = default
+    return max(minimum, value)
+
+
+def _settings_float(
+    settings: Any,
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    try:
+        value = float(getattr(settings, name, default))
+    except Exception:
+        value = default
+    if not math.isfinite(value):
+        value = default
+    if minimum is not None:
+        value = max(float(minimum), value)
+    if maximum is not None:
+        value = min(float(maximum), value)
+    return value
+
+
+def _bayes_lower_probability(
+    *,
+    successes: float,
+    observations: float,
+    prior_n: float,
+    z: float,
+    prior_mean: float = 0.5,
+) -> dict[str, Any] | None:
+    if observations <= 0.0:
+        return None
+    successes = max(0.0, min(float(observations), float(successes)))
+    prior_mean = max(0.0, min(1.0, float(prior_mean)))
+    prior_n = max(0.0, float(prior_n))
+    alpha = successes + prior_mean * prior_n
+    beta = (float(observations) - successes) + (1.0 - prior_mean) * prior_n
+    total = alpha + beta
+    if total <= 0.0:
+        return None
+    mean = alpha / total
+    variance = (alpha * beta) / ((total * total) * (total + 1.0))
+    lower = max(0.0, min(1.0, mean - max(0.0, float(z)) * math.sqrt(max(0.0, variance))))
+    return {
+        "mean_probability": mean,
+        "lower_probability": lower,
+        "alpha": alpha,
+        "beta": beta,
+        "observations": observations,
+        "successes": successes,
+        "prior_n": prior_n,
+        "prior_mean": prior_mean,
+        "z": z,
+    }
+
+
+def _directional_row_value(row: Any, key: str, idx: int) -> Any:
+    if hasattr(row, "get"):
+        return row.get(key)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None:
+        return mapping.get(key)
+    try:
+        return row[idx]
+    except Exception:
+        return None
+
+
+def _load_directional_outcome_rows(
+    db: Session,
+    *,
+    pattern_id: int,
+    ticker: str,
+    exact_ticker: bool,
+    limit: int,
+) -> list[Any]:
+    if pattern_id <= 0 or limit <= 0:
+        return []
+    try:
+        from sqlalchemy import text
+
+        ticker_clause = "AND UPPER(ticker) = UPPER(:ticker)" if exact_ticker else (
+            "AND (:ticker = '' OR UPPER(ticker) <> UPPER(:ticker))"
+        )
+        result = db.execute(
+            text(
+                f"""
+                SELECT ticker, alert_at,
+                       window_max_favorable_pct,
+                       window_max_adverse_pct,
+                       directional_correct
+                FROM pattern_alert_directional_outcome
+                WHERE scan_pattern_id = :pattern_id
+                  AND directional_correct IS NOT NULL
+                  AND window_max_favorable_pct IS NOT NULL
+                  AND window_max_adverse_pct IS NOT NULL
+                  {ticker_clause}
+                ORDER BY alert_at DESC
+                LIMIT :limit
+                """
+            ),
+            {
+                "pattern_id": int(pattern_id),
+                "ticker": str(ticker or "").upper(),
+                "limit": int(limit),
+            },
+        )
+        mapped = result.mappings()
+        if hasattr(mapped, "all"):
+            return list(mapped.all())
+        return list(mapped)
+    except Exception:
+        return []
+
+
+def _score_directional_rows_for_edge(
+    rows: list[Any],
+    *,
+    reward: float,
+    loss: float,
+    prior_n: int,
+    z: float,
+) -> dict[str, Any] | None:
+    if not rows or reward <= 0.0 or loss <= 0.0:
+        return None
+    reward_pct = float(reward) * 100.0
+    loss_pct = float(loss) * 100.0
+    successes = 0.0
+    observations = 0.0
+    reward_hits = 0
+    stop_breaches = 0
+    ambiguous = 0
+    directional_correct = 0
+    fav_vals: list[float] = []
+    adv_vals: list[float] = []
+
+    for row in rows:
+        fav = _finite_float(_directional_row_value(row, "window_max_favorable_pct", 2))
+        adv = _finite_float(_directional_row_value(row, "window_max_adverse_pct", 3))
+        if fav is None or adv is None:
+            continue
+        observations += 1.0
+        fav_vals.append(float(fav))
+        adv_vals.append(float(adv))
+        if bool(_directional_row_value(row, "directional_correct", 4)):
+            directional_correct += 1
+        hit_reward = float(fav) >= reward_pct
+        hit_stop = float(adv) <= -loss_pct
+        if hit_reward:
+            reward_hits += 1
+        if hit_stop:
+            stop_breaches += 1
+        if hit_reward and hit_stop:
+            # With MFE/MAE bars but no intrabar path, sequence is unknown.
+            # Count it as half a win instead of pretending target came first.
+            ambiguous += 1
+            successes += 0.5
+        elif hit_reward:
+            successes += 1.0
+
+    if observations <= 0.0:
+        return None
+    posterior = _bayes_lower_probability(
+        successes=successes,
+        observations=observations,
+        prior_n=float(prior_n),
+        z=float(z),
+    )
+    if posterior is None:
+        return None
+    return {
+        **posterior,
+        "sample_n": int(observations),
+        "reward_hits": reward_hits,
+        "stop_breaches": stop_breaches,
+        "ambiguous_path_count": ambiguous,
+        "directional_correct_count": directional_correct,
+        "directional_wr": directional_correct / observations,
+        "avg_max_favorable_pct": sum(fav_vals) / len(fav_vals) if fav_vals else None,
+        "avg_max_adverse_pct": sum(adv_vals) / len(adv_vals) if adv_vals else None,
+        "reward_threshold_pct": reward_pct,
+        "stop_threshold_pct": loss_pct,
+    }
+
+
+def _directional_edge_probability(
+    db: Session,
+    *,
+    alert: BreakoutAlert,
+    reward: float,
+    loss: float,
+    settings: Any,
+) -> dict[str, Any] | None:
+    try:
+        pattern_id = int(alert.scan_pattern_id or 0)
+    except (TypeError, ValueError):
+        pattern_id = 0
+    if pattern_id <= 0:
+        return None
+
+    prior_n = _settings_int(settings, "chili_realized_ev_min_trades", 5, minimum=0)
+    z = _settings_float(
+        settings,
+        "chili_autotrader_directional_probability_z",
+        1.0,
+        minimum=0.0,
+        maximum=3.0,
+    )
+    limit = _settings_int(
+        settings,
+        "chili_autotrader_directional_probability_max_rows",
+        30,
+        minimum=1,
+    )
+    ticker_rows = _load_directional_outcome_rows(
+        db,
+        pattern_id=pattern_id,
+        ticker=alert.ticker or "",
+        exact_ticker=True,
+        limit=limit,
+    )
+    pattern_rows = _load_directional_outcome_rows(
+        db,
+        pattern_id=pattern_id,
+        ticker=alert.ticker or "",
+        exact_ticker=False,
+        limit=limit,
+    )
+    ticker_ev = _score_directional_rows_for_edge(
+        ticker_rows, reward=reward, loss=loss, prior_n=prior_n, z=z,
+    )
+    pattern_ev = _score_directional_rows_for_edge(
+        pattern_rows, reward=reward, loss=loss, prior_n=prior_n, z=z,
+    )
+    if ticker_ev is None and pattern_ev is None:
+        return None
+    if ticker_ev is not None and pattern_ev is not None:
+        # Ticker-specific evidence should matter more as it accumulates, but
+        # until then the pattern-wide bucket is the safer base rate.
+        ticker_n = float(ticker_ev["observations"])
+        ticker_weight = ticker_n / max(1.0, ticker_n + float(prior_n))
+        prob = (
+            ticker_weight * float(ticker_ev["lower_probability"])
+            + (1.0 - ticker_weight) * float(pattern_ev["lower_probability"])
+        )
+        source = "directional_mfe_mae_pattern_ticker_blend"
+    elif ticker_ev is not None:
+        ticker_weight = 1.0
+        prob = float(ticker_ev["lower_probability"])
+        source = "directional_mfe_mae_ticker"
+    else:
+        ticker_weight = 0.0
+        prob = float(pattern_ev["lower_probability"])  # type: ignore[index]
+        source = "directional_mfe_mae_pattern"
+
+    sample_n = int(
+        (ticker_ev or {}).get("sample_n", 0) + (pattern_ev or {}).get("sample_n", 0)
+    )
+    return {
+        "probability": max(0.0, min(1.0, prob)),
+        "source": source,
+        "sample_n": sample_n,
+        "prior_n": prior_n,
+        "z": z,
+        "ticker_weight": round(float(ticker_weight), 6),
+        "ticker": _round_directional_evidence(ticker_ev),
+        "pattern": _round_directional_evidence(pattern_ev),
+    }
+
+
+def _round_directional_evidence(evidence: dict[str, Any] | None) -> dict[str, Any] | None:
+    if evidence is None:
+        return None
+    out: dict[str, Any] = {}
+    for key, value in evidence.items():
+        if isinstance(value, float):
+            out[key] = round(value, 6)
+        else:
+            out[key] = value
+    return out
+
+
+def _alert_confidence_probability(confidence: float, settings: Any) -> tuple[float, dict[str, Any]]:
+    raw = _fraction01(confidence, 0.5)
+    if raw is None:
+        raw = 0.5
+    weight = _settings_float(
+        settings,
+        "chili_autotrader_alert_confidence_probability_weight",
+        0.25,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    p = 0.5 + (float(raw) - 0.5) * weight
+    return max(0.0, min(1.0, p)), {
+        "raw_alert_confidence": round(float(raw), 6),
+        "weight": round(float(weight), 6),
+        "reason": "score_confidence_is_not_a_calibrated_win_probability",
+    }
+
+
 def _pattern_probability(
     db: Session,
     *,
@@ -710,18 +1026,34 @@ def _pattern_probability(
     confidence: float,
     settings: Any,
     pattern: ScanPattern | None = None,
-) -> tuple[float, str, int | None]:
+    reward: float,
+    loss: float,
+) -> tuple[float, str, int | None, dict[str, Any]]:
+    directional = _directional_edge_probability(
+        db,
+        alert=alert,
+        reward=reward,
+        loss=loss,
+        settings=settings,
+    )
+    details: dict[str, Any] = {
+        "directional_evidence": directional,
+        "alert_confidence": None,
+    }
     p = _fraction01(pat_ctx.get("hit_rate"))
     n: int | None = None
     if p is not None:
         try:
-            n = int(pat_ctx.get("n_trades_sum") or 0)
+            n = int(
+                pat_ctx.get("n_trades_effective")
+                if pat_ctx.get("n_trades_effective") is not None
+                else pat_ctx.get("n_trades_sum") or 0
+            )
         except (TypeError, ValueError):
             n = None
         source = "pattern_regime_hit_rate"
     else:
-        source = "alert_confidence"
-        p = _fraction01(confidence, 0.5)
+        source = "missing"
         if alert.scan_pattern_id:
             try:
                 from .pattern_stats_accessor import get_corrected_pattern_stats
@@ -740,21 +1072,64 @@ def _pattern_probability(
             except Exception:
                 pass
 
+    if source == "pattern_regime_hit_rate" and (n is None or n <= 0):
+        details["ignored_regime_hit_rate_reason"] = "missing_effective_sample_n"
+        p = None
+        n = None
+        source = "missing"
+
     if p is None:
-        p = 0.5
+        if directional is not None:
+            p = float(directional["probability"])
+            n = int(directional.get("sample_n") or 0)
+            source = str(directional.get("source") or "directional_mfe_mae")
+        else:
+            p, alert_details = _alert_confidence_probability(confidence, settings)
+            details["alert_confidence"] = alert_details
+            source = "alert_confidence_shrunk"
 
     # Shrink pattern-derived probabilities toward break-even until the
     # realized-EV evidence count matures. The prior size reuses CHILI's
     # existing promotion evidence knob instead of inventing a new threshold.
-    if n is not None and n > 0 and not source.startswith("alert_"):
-        try:
-            prior_n = max(0, int(getattr(settings, "chili_realized_ev_min_trades", 5)))
-        except Exception:
-            prior_n = 5
+    if (
+        n is not None
+        and n > 0
+        and not source.startswith("alert_")
+        and not source.startswith("directional_")
+    ):
+        prior_n = _settings_int(settings, "chili_realized_ev_min_trades", 5, minimum=0)
         if prior_n > 0:
             p = (p * n + 0.5 * prior_n) / max(1, n + prior_n)
             source = f"{source}_shrunk"
-    return max(0.0, min(1.0, p)), source, n
+            details["neutral_prior_n"] = prior_n
+
+    # Imminent-alert outcomes are gate-chain-free observations. Use them as a
+    # cold-start prior when closed-trade evidence is thin, but let actual
+    # closed trades dominate as their count grows.
+    if (
+        directional is not None
+        and not source.startswith("directional_")
+        and not source.startswith("alert_")
+    ):
+        prior_n = _settings_int(settings, "chili_realized_ev_min_trades", 5, minimum=0)
+        closed_n = max(0, int(n or 0))
+        trade_weight = (
+            closed_n / max(1.0, float(closed_n + prior_n))
+            if prior_n > 0
+            else 1.0
+        )
+        if trade_weight < 1.0:
+            p = trade_weight * float(p) + (1.0 - trade_weight) * float(
+                directional["probability"]
+            )
+            source = f"{source}_directional_cold_start_blend"
+            details["trade_evidence_weight"] = round(float(trade_weight), 6)
+
+    p = max(0.0, min(1.0, p))
+    details["final_probability"] = round(float(p), 6)
+    details["final_source"] = source
+    details["final_sample_n"] = n
+    return p, source, n, details
 
 
 def _realized_exit_geometry(
@@ -807,11 +1182,21 @@ def _realized_exit_geometry(
         try:
             n = int(
                 getattr(pattern, "corrected_trade_count", None)
-                or getattr(pattern, "payoff_ratio_n", None)
                 or 0
             )
         except (TypeError, ValueError):
             n = 0
+    try:
+        payoff_n = int(getattr(pattern, "payoff_ratio_n", None) or 0)
+    except (TypeError, ValueError):
+        payoff_n = 0
+    guarded_n, n_guard = _probability_sample_count(pattern, n)
+    n_candidates = [
+        int(x)
+        for x in (guarded_n, payoff_n)
+        if x is not None and int(x) > 0
+    ]
+    n = min(n_candidates) if n_candidates else int(guarded_n or payoff_n or 0)
     if avg_return is not None and avg_return <= 0.0:
         snap["reason"] = "non_positive_realized_avg_return"
         snap["corrected_avg_return_pct"] = round(avg_return, 6)
@@ -837,6 +1222,7 @@ def _realized_exit_geometry(
         realized_reward_fraction=round(realized_reward, 8),
         realized_loss_fraction=round(realized_loss, 8),
         realized_sample_n=n,
+        realized_sample_n_guard=n_guard,
         realized_prior_n=prior_n,
         realized_evidence_weight=round(evidence_weight, 6),
         corrected_avg_return_pct=round(avg_return, 6) if avg_return is not None else None,
@@ -965,13 +1351,15 @@ def evaluate_entry_edge(
         static_loss=static_loss,
         settings=settings,
     )
-    prob, prob_source, sample_n = _pattern_probability(
+    prob, prob_source, sample_n, probability_details = _pattern_probability(
         db,
         alert=alert,
         pat_ctx=pat_ctx,
         confidence=confidence,
         settings=settings,
         pattern=pattern,
+        reward=reward,
+        loss=loss,
     )
     cost_fraction, cost_snapshot = _empirical_entry_cost_fraction(
         db, ticker=alert.ticker, settings=settings,
@@ -990,6 +1378,7 @@ def evaluate_entry_edge(
         probability=round(prob, 6),
         probability_source=prob_source,
         probability_sample_n=sample_n,
+        probability_details=probability_details,
         edge_geometry_source=(
             "realized_dynamic_exit_blend"
             if realized_geometry.get("used")

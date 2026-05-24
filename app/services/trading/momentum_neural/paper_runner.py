@@ -205,7 +205,7 @@ def _record_sim_fill(
     decision_packet_id: int | None = None,
 ) -> None:
     try:
-        append_trading_automation_simulated_fill(
+        row = append_trading_automation_simulated_fill(
             db,
             session_id=int(sess.id),
             symbol=sess.symbol,
@@ -224,8 +224,138 @@ def _record_sim_fill(
             marker_json=marker_json,
             decision_packet_id=decision_packet_id,
         )
+        _record_sim_fill_ledger_safe(
+            db,
+            sess,
+            simulated_fill_id=int(row.id),
+            fill_type=fill_type,
+            quantity=quantity,
+            price=price,
+            pnl_usd=pnl_usd,
+            position_state_after=position_state_after,
+            reason=reason,
+            marker_json=marker_json,
+            decision_packet_id=decision_packet_id,
+        )
     except Exception:
         _log.debug("paper simulated fill audit skipped for session %s", sess.id, exc_info=True)
+
+
+def _scan_pattern_id_for_session(db: Session, sess: TradingAutomationSession) -> int | None:
+    try:
+        variant = variant_for_id(db, int(sess.variant_id))
+        sid = getattr(variant, "scan_pattern_id", None) if variant is not None else None
+        return int(sid) if sid is not None else None
+    except Exception:
+        return None
+
+
+def _record_sim_fill_ledger_safe(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    simulated_fill_id: int,
+    fill_type: str | None,
+    quantity: float | None,
+    price: float | None,
+    pnl_usd: float | None,
+    position_state_after: str | None,
+    reason: str | None,
+    marker_json: Optional[dict[str, Any]],
+    decision_packet_id: int | None,
+) -> None:
+    """Mirror momentum paper fills into the canonical economic ledger."""
+    try:
+        from .. import economic_ledger as _ledger
+
+        if not _ledger.mode_is_active():
+            return
+        marker = marker_json if isinstance(marker_json, dict) else {}
+        mode = (sess.mode or "paper").lower()
+        scan_pattern_id = _scan_pattern_id_for_session(db, sess)
+        common = {
+            "session_id": int(sess.id),
+            "user_id": sess.user_id,
+            "scan_pattern_id": scan_pattern_id,
+            "ticker": sess.symbol,
+            "quantity": float(quantity) if quantity is not None else 0.0,
+            "fill_price": float(price) if price is not None else 0.0,
+            "venue": sess.venue,
+            "mode": mode,
+            "decision_packet_id": decision_packet_id,
+            "provenance": {
+                "runner": "momentum_paper_runner",
+                "simulated_fill_id": simulated_fill_id,
+                "reason": reason,
+            },
+        }
+        if fill_type == "entry" and position_state_after == "long":
+            _ledger.record_automation_session_entry_fill(db, fee=0.0, **common)
+            return
+        if fill_type != "exit":
+            return
+        entry = marker.get("entry")
+        if entry is None:
+            return
+        if position_state_after == "long":
+            _ledger.record_automation_session_partial_exit_fill(
+                db,
+                entry_price=float(entry),
+                realized_pnl_usd=pnl_usd,
+                **common,
+            )
+            return
+        if position_state_after != "flat":
+            return
+        _ledger.record_automation_session_exit_fill(
+            db,
+            entry_price=float(entry),
+            realized_pnl_usd=pnl_usd,
+            **common,
+        )
+        pe = _paper_exec(dict(sess.risk_snapshot_json or {}))
+        cumulative = pe.get("realized_pnl_usd")
+        _ledger.reconcile_automation_session(
+            db,
+            session_id=int(sess.id),
+            user_id=sess.user_id,
+            scan_pattern_id=scan_pattern_id,
+            ticker=sess.symbol,
+            legacy_pnl=float(cumulative) if cumulative is not None else pnl_usd,
+            mode=mode,
+            provenance={
+                "runner": "momentum_paper_runner",
+                "simulated_fill_id": simulated_fill_id,
+                "reason": reason,
+            },
+        )
+    except Exception:
+        _log.debug("paper economic ledger automation hook skipped for session %s", sess.id, exc_info=True)
+
+
+def _record_paper_exit_basis(
+    pe: dict[str, Any],
+    *,
+    quantity: float,
+    entry_price: float,
+    exit_price: float,
+    pnl_usd: float,
+    reason: str,
+) -> None:
+    try:
+        qty = float(quantity)
+        entry = float(entry_price)
+        exit_px = float(exit_price)
+        pnl = float(pnl_usd)
+    except (TypeError, ValueError):
+        return
+    notional_basis = abs(entry * qty)
+    pe["last_exit_quantity"] = qty
+    pe["last_exit_entry_price"] = entry
+    pe["last_exit_price"] = exit_px
+    pe["last_exit_notional_basis_usd"] = notional_basis
+    pe["last_exit_return_bps"] = (pnl / notional_basis) * 10_000.0 if notional_basis > 1e-12 else None
+    pe["last_exit_reason"] = reason
 
 
 def _finalize_paper_decision_after_exit(
@@ -506,8 +636,14 @@ def tick_paper_session(
                 exit_px = long_exit_fill_price(bid, mid, slip_bps)
                 pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
                 pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-                pe["last_exit_price"] = exit_px
-                pe["last_exit_reason"] = "risk_block_forced_exit"
+                _record_paper_exit_basis(
+                    pe,
+                    quantity=qty,
+                    entry_price=entry,
+                    exit_price=exit_px,
+                    pnl_usd=pnl,
+                    reason="risk_block_forced_exit",
+                )
                 pe["position"] = None
                 dpid = pe.get("last_entry_decision_packet_id")
                 _record_sim_fill(
@@ -649,11 +785,11 @@ def tick_paper_session(
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "abstained": True}
             decision_packet_id = dec.get("packet_id")
             notional = min(float(dec["allocation"]["recommended_notional"]), max_notional, 250.0)
-            if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
-                _emit(db, sess, "paper_error", {"reason": "decision_packet_required_missing"})
-                _safe_transition(db, sess, STATE_ERROR)
-                db.flush()
-                return {"ok": False, "error": "decision_packet_missing"}
+        if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
+            _emit(db, sess, "paper_error", {"reason": "decision_packet_required_missing"})
+            _safe_transition(db, sess, STATE_ERROR)
+            db.flush()
+            return {"ok": False, "error": "decision_packet_missing"}
         qty = notional / entry_px
         atrp = regime_atr_pct(regime)
         stop_px, target_px = stop_target_prices(
@@ -681,6 +817,7 @@ def tick_paper_session(
         }
         pe["entry_regime_snapshot_json"] = dict(regime)
         pe["reference_mid_at_entry"] = ref_mid
+        pe["entry_quote_source"] = quote_src
         pe["last_entry_decision_packet_id"] = decision_packet_id
         _safe_transition(db, sess, STATE_ENTERED)
         _commit_pe(sess, pe)
@@ -752,8 +889,14 @@ def tick_paper_session(
         if st == STATE_BAILOUT:
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
             pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-            pe["last_exit_price"] = exit_px
-            pe["last_exit_reason"] = "bailout"
+            _record_paper_exit_basis(
+                pe,
+                quantity=qty,
+                entry_price=entry,
+                exit_price=exit_px,
+                pnl_usd=pnl,
+                reason="bailout",
+            )
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
@@ -802,8 +945,14 @@ def tick_paper_session(
                 if bos_exit_triggered_long(df_bos, current_close=last_close):
                     pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
                     pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-                    pe["last_exit_price"] = exit_px
-                    pe["last_exit_reason"] = "bos"
+                    _record_paper_exit_basis(
+                        pe,
+                        quantity=qty,
+                        entry_price=entry,
+                        exit_price=exit_px,
+                        pnl_usd=pnl,
+                        reason="bos",
+                    )
                     pe["position"] = None
                     _safe_transition(db, sess, STATE_EXITED)
                     _commit_pe(sess, pe)
@@ -848,8 +997,14 @@ def tick_paper_session(
         if held >= max_hold:
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
             pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-            pe["last_exit_price"] = exit_px
-            pe["last_exit_reason"] = "max_hold"
+            _record_paper_exit_basis(
+                pe,
+                quantity=qty,
+                entry_price=entry,
+                exit_price=exit_px,
+                pnl_usd=pnl,
+                reason="max_hold",
+            )
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
@@ -878,8 +1033,14 @@ def tick_paper_session(
         if exit_px <= stop_px:
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
             pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-            pe["last_exit_price"] = exit_px
-            pe["last_exit_reason"] = "stop"
+            _record_paper_exit_basis(
+                pe,
+                quantity=qty,
+                entry_price=entry,
+                exit_price=exit_px,
+                pnl_usd=pnl,
+                reason="stop",
+            )
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
@@ -963,8 +1124,14 @@ def tick_paper_session(
         if st == STATE_SCALING_OUT:
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
             pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-            pe["last_exit_price"] = exit_px
-            pe["last_exit_reason"] = "target"
+            _record_paper_exit_basis(
+                pe,
+                quantity=qty,
+                entry_price=entry,
+                exit_price=exit_px,
+                pnl_usd=pnl,
+                reason="target",
+            )
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
@@ -1002,8 +1169,14 @@ def tick_paper_session(
             if exit_px <= trail_stop:
                 pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
                 pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-                pe["last_exit_price"] = exit_px
-                pe["last_exit_reason"] = "trail_stop"
+                _record_paper_exit_basis(
+                    pe,
+                    quantity=qty,
+                    entry_price=entry,
+                    exit_price=exit_px,
+                    pnl_usd=pnl,
+                    reason="trail_stop",
+                )
                 pe["position"] = None
                 _safe_transition(db, sess, STATE_EXITED)
                 _commit_pe(sess, pe)

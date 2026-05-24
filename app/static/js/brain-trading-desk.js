@@ -9,8 +9,8 @@ function toggleBwDetails() {
 }
 
 function updateBrainWorkerUI(data) {
-  var dot = document.getElementById('bw-status-dot');
-  var statusEl = document.getElementById('bw-status');
+  var dot = document.getElementById('bx-status-dot');
+  var statusEl = document.getElementById('bx-status-label');
   var startBtn = document.getElementById('bw-start-btn');
   var wakeBtn = document.getElementById('bw-wake-btn');
   var pauseBtn = document.getElementById('bw-pause-btn');
@@ -20,10 +20,10 @@ function updateBrainWorkerUI(data) {
   var progressEl = document.getElementById('bw-current-progress');
   var uptimeEl = document.getElementById('bw-uptime');
   var cyclesEl = document.getElementById('bw-cycles');
-  
+
   var status = data.status || 'stopped';
-  dot.className = 'bw-status-dot ' + status;
-  statusEl.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+  if (dot) dot.className = 'bx-status-dot ' + status;
+  if (statusEl) statusEl.textContent = status.charAt(0).toUpperCase() + status.slice(1);
   
   if (status === 'running' || status === 'paused') {
     startBtn.style.display = 'none';
@@ -245,7 +245,6 @@ function loadBrainWorkerStatus() {
       updateBrainWorkerUI(d);
       try { window._deskWorkerSnapshot = d; } catch (eDw) {}
     }
-    if (typeof renderOperatorDeskTrustStrip === 'function') renderOperatorDeskTrustStrip();
     if (typeof renderOperatorDeskFromBoard === 'function' && window._oppBoardLastGoodPayload) {
       renderOperatorDeskFromBoard(window._oppBoardLastGoodPayload);
     }
@@ -604,20 +603,16 @@ var brainPollInterval = null;
 var _predShowAll = false, _PRED_INITIAL = 30;
 
 function loadBrainDashboard() {
-  /* Zone 1: status bar â€” worker status + regime chip */
+  /* Runtime tab redesign 2026-05-23 (Phase C):
+   * Above-the-fold loaders run here unconditionally (header + edge card +
+   * thesis). Research-tab-only loaders (playbook, perf, predictions, tradeable,
+   * research-edge, shadow-promoted) are now lazy and fire from switchDeepDiveTab('research').
+   */
   startBwPolling();
   _loadRegimeChip();
-
-  /* Zone 2: Playbook + P&L + Predictions + Tradeable */
-  loadPlaybook();
-  loadPerfDashboard();
   loadOpportunityBoard();
-  loadBrainPredictions();
-  loadShadowPromotedPatterns();
-  loadTradeablePatterns();
-  loadResearchEdgePatterns();
 
-  /* Polling: learning status (status bar only) */
+  /* Polling: learning status (header pipeline) */
   pollLearningStatus().catch(function(){});
   if (brainPollInterval) clearInterval(brainPollInterval);
   brainPollInterval = setInterval(function() {
@@ -627,11 +622,13 @@ function loadBrainDashboard() {
   /* Opportunity board: soft auto-refresh while tab visible (no overlap with in-flight; see loadOpportunityBoard) */
   _schedOppBoardSoftAutoRefresh();
 
-  /* Tradeable auto-refresh */
+  /* Tradeable auto-refresh remains scheduled but only fires updates when the Research tab is mounted (loaders check element presence). */
   if (window._tradeablePatternsInterval) clearInterval(window._tradeablePatternsInterval);
   window._tradeablePatternsInterval = setInterval(function() {
-    loadShadowPromotedPatterns();
-    loadTradeablePatterns();
+    if (_bddActiveTab === 'research') {
+      loadShadowPromotedPatterns();
+      loadTradeablePatterns();
+    }
   }, 120000);
 
   /* Reset deep-dive tab state so tabs lazy-load fresh */
@@ -642,10 +639,10 @@ function loadBrainDashboard() {
 function _loadRegimeChip() {
   fetch('/api/trading/brain/thesis').then(parseFetchJson).then(function(d) {
     if (!d.ok) {
-      var chip0 = document.getElementById('bsb-regime');
+      var chip0 = document.getElementById('bx-regime-chip');
       if (chip0) {
         chip0.innerHTML = '<span style="font-size:10px;color:var(--text-muted)">Thesis unavailable</span>';
-        chip0.className = 'bsb-chip';
+        chip0.className = 'bx-regime-chip';
       }
       return;
     }
@@ -653,12 +650,12 @@ function _loadRegimeChip() {
     if (typeof renderOperatorDeskFromBoard === 'function' && window._oppBoardLastGoodPayload) {
       renderOperatorDeskFromBoard(window._oppBoardLastGoodPayload);
     }
-    var chip = document.getElementById('bsb-regime');
+    var chip = document.getElementById('bx-regime-chip');
     if (!chip) return;
     var icons = {bullish:'&#x1F7E2;', bearish:'&#x1F534;', neutral:'&#x1F7E1;'};
-    var cls = {bullish:'bsb-chip-bull', bearish:'bsb-chip-bear'};
+    var cls = {bullish:'bx-regime-chip-bull', bearish:'bx-regime-chip-bear'};
     chip.innerHTML = (icons[d.stance]||'&#x1F7E1;') + ' ' + (d.stance||'neutral').charAt(0).toUpperCase() + (d.stance||'neutral').slice(1);
-    chip.className = 'bsb-chip ' + (cls[d.stance]||'');
+    chip.className = 'bx-regime-chip ' + (cls[d.stance]||'');
 
     /* Also fill the full thesis card in Analytics tab */
     var stanceEl = document.getElementById('thesis-stance');
@@ -695,18 +692,17 @@ function _loadRegimeChip() {
     }
   }).catch(function(err) {
     var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
-    var chipE = document.getElementById('bsb-regime');
+    var chipE = document.getElementById('bx-regime-chip');
     if (chipE) {
       chipE.innerHTML = '<span style="font-size:10px;color:var(--text-muted)">Thesis failed</span><br/><span style="font-size:8px;opacity:.85">' + hint + '</span>';
-      chipE.className = 'bsb-chip';
+      chipE.className = 'bx-regime-chip';
     }
   });
   fetch('/api/trading/brain/volatility').then(parseFetchJson).then(function(v) {
     if (!v.ok) return;
     window._brainVixData = v;
-    var chip = document.getElementById('bsb-regime');
+    var chip = document.getElementById('bx-regime-chip');
     if (chip) {
-      var regimeColors = {low:'#22c55e', normal:'#f59e0b', elevated:'#f97316', extreme:'#ef4444', unknown:'#6b7280'};
       chip.innerHTML += ' <span style="font-size:8px;opacity:.8">VIX ' + (v.vix||'?') + '</span>';
     }
     var stanceEl = document.getElementById('thesis-stance');
@@ -716,7 +712,7 @@ function _loadRegimeChip() {
     }
   }).catch(function(err) {
     var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
-    var chipV = document.getElementById('bsb-regime');
+    var chipV = document.getElementById('bx-regime-chip');
     if (chipV) {
       chipV.innerHTML += '<br/><span style="font-size:8px;opacity:.85;color:#b45309">Volatility failed: ' + hint + '</span>';
     }
@@ -1213,30 +1209,9 @@ function updateOppBoardTrustBanners(d) {
 }
 
 function setOppStatusChips(actionable, watchSoon, watchToday, refreshLine, chipState) {
-  var ca = document.getElementById('opp-chip-a');
-  var cb = document.getElementById('opp-chip-b');
-  var cc = document.getElementById('opp-chip-c');
-  var cr = document.getElementById('opp-chip-refresh');
-  if (ca) {
-    ca.textContent = 'Actionable: ' + actionable;
-    ca.classList.toggle('opp-chip-loading', chipState === 'loading');
-    ca.classList.toggle('opp-chip-error', chipState === 'error');
-  }
-  if (cb) {
-    cb.textContent = 'Watch soon: ' + watchSoon;
-    cb.classList.toggle('opp-chip-loading', chipState === 'loading');
-    cb.classList.toggle('opp-chip-error', chipState === 'error');
-  }
-  if (cc) {
-    cc.textContent = 'Watch today: ' + watchToday;
-    cc.classList.toggle('opp-chip-loading', chipState === 'loading');
-    cc.classList.toggle('opp-chip-error', chipState === 'error');
-  }
-  if (cr) {
-    cr.textContent = refreshLine || '';
-    cr.classList.toggle('opp-chip-loading', chipState === 'loading');
-    cr.classList.toggle('opp-chip-error', chipState === 'error');
-  }
+  /* 2026-05-23 (Phase D): the chip targets were inside a deprecated summary row.
+   * Function kept as a no-op so existing callers do not crash; tier counts now
+   * show inside the edge card's tier headers. */
 }
 
 function loadInspectHealthCard() {
@@ -1277,52 +1252,10 @@ function oppExpandTier(t) {
   loadOpportunityBoard();
 }
 
-function _odhPillClass(eng) {
-  if (eng === 'core_repeatable_edge') return 'opp-pill-core';
-  return 'opp-pill-ctx';
-}
-
-function renderOperatorDeskTrustStrip() {
-  var el = document.getElementById('odh-trust-panel');
-  if (!el) return;
-  var w = window._deskWorkerSnapshot || {};
-  var lc = w.last_cycle || {};
-  var parts = [];
-  parts.push('<div><strong>Worker:</strong> ' + escHtml(w.status || 'unknown') + '</div>');
-  if (lc.completed) parts.push('<div><strong>Last reconcile pass (worker):</strong> ' + escHtml(String(lc.completed)) + '</div>');
-  var bd = window._oppBoardLastGoodPayload;
-  if (bd) {
-    parts.push('<div><strong>Opportunity board generated:</strong> ' + escHtml(String(bd.generated_at || 'â€”')) + '</div>');
-    parts.push('<div><strong>Board data as-of:</strong> ' + escHtml(String(bd.data_as_of || 'unknown')) + '</div>');
-  } else {
-    parts.push('<div><strong>Opportunity board:</strong> not loaded yet</div>');
-  }
-  parts.push('<div><strong>Live predictions:</strong> refresh in section below (on-demand).</div>');
-  parts.push('<div><strong>Promoted patterns list:</strong> refresh in Tradeable Patterns (on-demand).</div>');
-  el.innerHTML = '<strong>Trust &amp; freshness</strong><br/>' + parts.join('');
-}
-
-function renderOperatorDeskHealthBadges(d, top3) {
-  var health = 'healthy';
-  if (d && (d.is_stale || d.freshness_degraded)) health = 'stale';
-  var w = window._deskWorkerSnapshot || {};
-  var ws = w.status || 'stopped';
-  if (ws !== 'running') health = (health === 'healthy') ? 'partial' : health;
-  var hasOpp = top3 && top3.length > 0;
-  if (d && !hasOpp && health === 'healthy') health = 'empty';
-
-  var healthEl = document.getElementById('odh-health-badge');
-  if (healthEl) {
-    healthEl.className = 'odh-badge health-' + health;
-    var labels = { healthy: 'Healthy', partial: 'Partial', stale: 'Stale', offline: 'Offline', empty: 'Empty' };
-    healthEl.textContent = labels[health] || health;
-  }
-  var wb = document.getElementById('odh-worker-badge');
-  if (wb) {
-    wb.textContent = 'Worker: ' + ws;
-    wb.className = 'odh-badge' + (ws === 'running' ? ' health-healthy' : '');
-  }
-}
+/* _odhPillClass / renderOperatorDeskTrustStrip / renderOperatorDeskHealthBadges
+ * removed 2026-05-23 (Phase D): the deprecated operator-desk element they wrote into
+ * was deleted in Phase A; bx-status-dot / bx-status-label / bx-thesis-line now
+ * surface the equivalent information from the sticky header. */
 
 function renderSpeculativeMoversPanel(spec) {
   var meth = document.getElementById('spec-movers-methodology');
@@ -1365,100 +1298,26 @@ function renderSpeculativeMoversPanel(spec) {
   }).join('');
 }
 
-function _fetchDeskGovernanceHint() {
-  var el = document.getElementById('odh-governance-hint');
-  if (!el || el._govLoaded) return;
-  el._govLoaded = true;
-  fetch('/api/trading/brain/governance').then(parseFetchJson).then(function(g) {
-    if (!g || !g.kill_switch) { el.textContent = ''; return; }
-    if (g.kill_switch.active) {
-      el.innerHTML = '<span style="color:#dc2626;font-weight:700">Kill switch ON</span><br/><span style="font-size:9px">' + escHtml(String(g.kill_switch.reason || '')) + '</span>';
-    } else {
-      el.textContent = 'Governance: kill switch off.';
-    }
-  }).catch(function() { el.textContent = ''; });
-}
-
 function renderOperatorDeskFromBoard(d) {
+  /* 2026-05-23 (Phase D): the deprecated operator-desk element is gone. The only piece
+   * that survives is the single thesis line + spec-movers panel. Trust strip,
+   * health badges, top-3 cards, evidence strip, fresh row, narrative, governance
+   * hint were dropped because the new bx-runtime-header + edge card already cover
+   * the same information without the duplication. */
   if (!d || d.ok === false) return;
-  var T = d.tiers || {};
-  var pool = [].concat(T.actionable_now || [], T.watch_soon || [], T.watch_today || []);
-  var top3 = pool.slice(0, 3);
 
   var th = window._brainThesisData || {};
-  var thesisLine = document.getElementById('odh-thesis-line');
+  var thesisLine = document.getElementById('bx-thesis-line');
   if (thesisLine) {
     if (th.thesis) {
       var plain = String(th.thesis).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      thesisLine.textContent = plain.length > 240 ? plain.slice(0, 237) + 'â€¦' : plain;
+      thesisLine.textContent = plain.length > 240 ? plain.slice(0, 237) + '…' : plain;
     } else {
-      thesisLine.textContent = 'Market thesis loads from the brain API â€” if this stays empty, check auth or server logs.';
+      thesisLine.textContent = 'Market thesis loads from the brain API — if this stays empty, check auth or server logs.';
     }
   }
 
-  var nar = document.getElementById('odh-operator-narrative');
-  if (nar) {
-    var parts = [];
-    var os = d.operator_summary || {};
-    if (os.session_line) parts.push(String(os.session_line));
-    if (th.stance) parts.push('Stance: ' + th.stance + '.');
-    if (d.is_stale) parts.push('Feeds look stale versus your threshold â€” verify before acting.');
-    else if (d.data_as_of) parts.push('Composite board freshness is bounded by data-as-of below.');
-    if (!parts.length) parts.push('Use Tier Aâ€“C for repeatable edges; explosive movers are isolated in the panel below.');
-    nar.textContent = parts.join(' ');
-  }
-
-  var fr = document.getElementById('odh-fresh-row');
-  if (fr) {
-    var bits = [];
-    bits.push('Board: ' + (d.generated_at || 'â€”'));
-    bits.push('Data as-of: ' + (d.data_as_of || 'unknown'));
-    if (d.age_seconds != null) bits.push('Age ~' + Math.round(d.age_seconds) + 's');
-    var sf = d.source_freshness || {};
-    var sk = Object.keys(sf);
-    for (var i = 0; i < Math.min(5, sk.length); i++) {
-      var k = sk[i];
-      var v = sf[k];
-      if (v && typeof v === 'object' && v.timestamp) bits.push(k + ': ' + String(v.timestamp));
-    }
-    fr.innerHTML = bits.map(function(b) { return '<span>' + escHtml(b) + '</span>'; }).join('');
-  }
-
-  var t3 = document.getElementById('odh-top3');
-  if (t3) {
-    if (!top3.length) {
-      t3.innerHTML = '<div class="odh-card"><div class="odh-eng">Core repeatable edge</div><div class="odh-tk">No tiered opportunities</div><div class="odh-act" style="color:var(--text-muted)">Run worker reconcile passes or relax tier caps â€” see board section.</div></div>';
-    } else {
-      t3.innerHTML = top3.map(function(it) {
-        var eng = it.opportunity_engine || 'context_unknown';
-        var engLabel = eng === 'core_repeatable_edge' ? 'Core repeatable edge engine' : (eng === 'prediction_context' ? 'Prediction context' : 'Auxiliary context');
-        var pill = '<span class="opp-engine-pill ' + _odhPillClass(eng) + '">' + escHtml(String(it.setup_type_badge || 'Setup')) + '</span> ';
-        var act = it.next_action_label || 'Watch';
-        var pat = it.pattern_name ? escHtml(String(it.pattern_name)) : 'â€”';
-        return '<div class="odh-card"><div class="odh-eng">' + pill + escHtml(engLabel) + '</div><div class="odh-tk">' + escHtml(String(it.ticker || '')) + '</div>' +
-          '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">' + pat + '</div>' +
-          '<div class="odh-act">' + escHtml(String(act)) + '</div></div>';
-      }).join('');
-    }
-  }
-
-  var ev = document.getElementById('odh-evidence-strip');
-  if (ev) {
-    var c1 = th.thesis ? 'Thesis present â€” bias trades accordingly.' : 'Thesis not loaded yet.';
-    var c2 = top3.length && top3[0].why_here ? String(top3[0].why_here).slice(0, 160) : 'No primary opportunity narrative.';
-    var c3 = top3.length && top3[0].main_risk ? String(top3[0].main_risk).slice(0, 140) : (d.is_stale ? 'Stale data â€” invalidation is time-based.' : 'Use normal risk limits.');
-    var engSrc = top3.length ? (top3[0].opportunity_engine || '') : '';
-    var plane = engSrc === 'core_repeatable_edge' ? 'Core repeatable edge engine' : 'Auxiliary / context signal';
-    ev.innerHTML = '<div><strong>Confirming context:</strong> ' + escHtml(c1) + '</div>' +
-      '<div style="margin-top:4px"><strong>Strongest desk note:</strong> ' + escHtml(c2) + '</div>' +
-      '<div style="margin-top:4px"><strong>Primary risk:</strong> ' + escHtml(c3) + '</div>' +
-      '<div style="margin-top:4px"><strong>Plane:</strong> ' + escHtml(plane) + (d.is_stale ? ' Â· <span style="color:#b45309">Stale</span>' : '') + '</div>';
-  }
-
-  renderOperatorDeskTrustStrip();
-  renderOperatorDeskHealthBadges(d, top3);
   renderSpeculativeMoversPanel(d.speculative_movers);
-  _fetchDeskGovernanceHint();
 }
 
 function loadOpportunityBoardDebug() {

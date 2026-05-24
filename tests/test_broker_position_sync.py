@@ -305,6 +305,55 @@ def test_coinbase_sync_fresh_observation_window_defers_close(
 @patch(
     "app.services.coinbase_service.get_positions",
     return_value=[
+        {"ticker": "XYZ-USD", "quantity": 1.0, "average_buy_price": 2.0},
+    ],
+)
+@patch("app.services.coinbase_service.is_connected", return_value=True)
+def test_coinbase_sync_missing_without_sell_fill_keeps_monitoring(
+    _connected,
+    _positions,
+    db,
+    monkeypatch,
+):
+    from app.services import coinbase_service
+
+    trade = Trade(
+        user_id=None,
+        ticker="ABC-USD",
+        direction="long",
+        entry_price=1.0,
+        quantity=10.0,
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+        last_broker_sync=datetime.utcnow() - timedelta(hours=2),
+        status="open",
+        broker_source="coinbase",
+        broker_sync_missing_streak=5,
+    )
+    db.add(trade)
+    db.commit()
+
+    class _FakeClient:
+        def get_fills(self, product_id=None, limit=100):
+            return {"fills": []}
+
+    monkeypatch.setattr(coinbase_service, "_get_client", lambda: _FakeClient())
+    monkeypatch.setattr(coinbase_service, "_COINBASE_RECONCILE_MISSING_STREAK_MIN", 2)
+    monkeypatch.setattr(coinbase_service, "_COINBASE_RECONCILE_CONFIRM_WINDOW", 300)
+    monkeypatch.setattr(coinbase_service, "_coinbase_has_working_sell_orders", lambda _ticker: False)
+
+    result = sync_coinbase_positions_to_db(db, user_id=None)
+    db.refresh(trade)
+
+    assert result["closed"] == 0
+    assert trade.status == "open"
+    assert trade.exit_reason is None
+    assert trade.exit_price is None
+    assert trade.pnl is None
+
+
+@patch(
+    "app.services.coinbase_service.get_positions",
+    return_value=[
         {"ticker": "ABC-USD", "quantity": 10.0, "average_buy_price": 1.05},
     ],
 )

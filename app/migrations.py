@@ -897,11 +897,13 @@ def _migration_028_seed_rsi_ema_breakout_pattern(conn) -> None:
                 " evidence_count, backtest_count, score_boost, min_base_score, "
                 " active, generation, ticker_scope, trade_count, backtest_priority, "
                 " promotion_status, oos_validation_json, queue_tier, paper_book_json, "
-                " regime_affinity_json, lifecycle_stage, pattern_evidence_kind, created_at, updated_at) "
+                " regime_affinity_json, portfolio_gate_json, recert_required, lifecycle_stage, "
+                " pattern_evidence_kind, created_at, updated_at) "
                 "VALUES (:name, :desc, :rules, :origin, :ac, '1d', 0.0, 0, 0, 1.5, 4.0, "
                 " TRUE, 0, 'universal', 0, 0, "
-                " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
-                " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, "
+                " '{}'::jsonb, false, 'candidate', 'realized_pnl', CURRENT_TIMESTAMP, "
+                " CURRENT_TIMESTAMP)"
             ), {
                 "name": pat_name,
                 "desc": (
@@ -1132,11 +1134,13 @@ def _migration_031_seed_ross_cameron_patterns(conn) -> None:
             " evidence_count, backtest_count, score_boost, min_base_score, "
             " active, generation, ticker_scope, trade_count, backtest_priority, "
             " promotion_status, oos_validation_json, queue_tier, paper_book_json, "
-            " regime_affinity_json, lifecycle_stage, pattern_evidence_kind, created_at, updated_at) "
+            " regime_affinity_json, portfolio_gate_json, recert_required, lifecycle_stage, "
+            " pattern_evidence_kind, created_at, updated_at) "
             "VALUES (:name, :desc, :rules, 'user_seeded', 'stocks', '1d', 0.5, "
             " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, "
-            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
-            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, "
+            " '{}'::jsonb, false, 'candidate', 'realized_pnl', CURRENT_TIMESTAMP, "
+            " CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
             "desc": pat["desc"],
@@ -1267,11 +1271,13 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
             " evidence_count, backtest_count, score_boost, min_base_score, "
             " active, generation, ticker_scope, trade_count, backtest_priority, "
             " promotion_status, oos_validation_json, queue_tier, paper_book_json, "
-            " regime_affinity_json, lifecycle_stage, pattern_evidence_kind, created_at, updated_at) "
+            " regime_affinity_json, portfolio_gate_json, recert_required, lifecycle_stage, "
+            " pattern_evidence_kind, created_at, updated_at) "
             "VALUES (:name, :desc, :rules, 'user_seeded', 'all', '1d', 0.5, "
             " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, "
-            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
-            " CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            " 'legacy', '{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, "
+            " '{}'::jsonb, false, 'candidate', 'realized_pnl', CURRENT_TIMESTAMP, "
+            " CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
             "desc": pat["desc"],
@@ -1668,12 +1674,12 @@ def _migration_043_insight_scan_pattern_required(conn) -> None:
                 "INSERT INTO scan_patterns (name, description, rules_json, origin, asset_class, "
                 "timeframe, confidence, evidence_count, backtest_count, score_boost, min_base_score, "
                 "active, generation, ticker_scope, trade_count, backtest_priority, promotion_status, "
-                "oos_validation_json, queue_tier, paper_book_json, regime_affinity_json, lifecycle_stage, "
-                "pattern_evidence_kind, created_at, updated_at) "
+                "oos_validation_json, queue_tier, paper_book_json, regime_affinity_json, "
+                "portfolio_gate_json, recert_required, lifecycle_stage, pattern_evidence_kind, created_at, updated_at) "
                 "VALUES (:name, :desc, '{}', 'legacy_unlinked', 'all', '1d', 0.0, 0, 0, 0.0, 0.0, "
                 "FALSE, 0, 'universal', 0, 0, 'legacy', "
-                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
-                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, false, "
+                "'candidate', 'realized_pnl', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ),
             {
                 "name": sent_name,
@@ -1819,12 +1825,12 @@ def _migration_044_trading_insight_scan_pattern_constraints(conn) -> None:
                 "INSERT INTO scan_patterns (name, description, rules_json, origin, asset_class, "
                 "timeframe, confidence, evidence_count, backtest_count, score_boost, min_base_score, "
                 "active, generation, ticker_scope, trade_count, backtest_priority, promotion_status, "
-                "oos_validation_json, queue_tier, paper_book_json, regime_affinity_json, lifecycle_stage, "
-                "pattern_evidence_kind, created_at, updated_at) "
+                "oos_validation_json, queue_tier, paper_book_json, regime_affinity_json, "
+                "portfolio_gate_json, recert_required, lifecycle_stage, pattern_evidence_kind, created_at, updated_at) "
                 "VALUES (:name, :desc, '{}', 'legacy_unlinked', 'all', '1d', 0.0, 0, 0, 0.0, 0.0, "
                 "FALSE, 0, 'universal', 0, 0, 'legacy', "
-                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, 'candidate', 'realized_pnl', "
-                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                "'{}'::jsonb, 'full', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, false, "
+                "'candidate', 'realized_pnl', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ),
             {
                 "name": sent_name,
@@ -4718,7 +4724,7 @@ def _migration_099_execution_audit_and_allocator(conn) -> None:
                     order_id VARCHAR(128),
                     client_order_id VARCHAR(128),
                     product_id VARCHAR(64),
-                    event_type VARCHAR(32) NOT NULL,
+                    event_type VARCHAR(64) NOT NULL,
                     status VARCHAR(32),
                     requested_quantity DOUBLE PRECISION,
                     cumulative_filled_quantity DOUBLE PRECISION,
@@ -12951,7 +12957,9 @@ def _migration_198_seed_short_swing_patterns(conn) -> None:
                 score_boost, min_base_score, generation,
                 lifecycle_stage, promotion_status,
                 ticker_scope, backtest_priority,
-                active, created_at, updated_at
+                active, oos_validation_json, queue_tier, paper_book_json,
+                regime_affinity_json, portfolio_gate_json, pattern_evidence_kind,
+                recert_required, created_at, updated_at
             ) VALUES (
                 :name, :description, CAST(:rules AS jsonb), CAST(:exit_cfg AS jsonb),
                 'short_swing_seed_198', :asset_class, '1d',
@@ -12960,7 +12968,9 @@ def _migration_198_seed_short_swing_patterns(conn) -> None:
                 0.0, 0.0, 0,
                 'backtested', 'pending_oos',
                 'universal', 200,
-                true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                true, '{}'::jsonb, 'full', '{}'::jsonb,
+                '{}'::jsonb, '{}'::jsonb, 'realized_pnl',
+                false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
         """), {
             "name": name,
@@ -13512,7 +13522,9 @@ def _migration_203_seed_crypto_native_patterns(conn) -> None:
                 score_boost, min_base_score, generation,
                 lifecycle_stage, promotion_status,
                 ticker_scope, backtest_priority,
-                active, created_at, updated_at
+                active, oos_validation_json, queue_tier, paper_book_json,
+                regime_affinity_json, portfolio_gate_json, pattern_evidence_kind,
+                recert_required, created_at, updated_at
             ) VALUES (
                 :name, :description, CAST(:rules AS jsonb), CAST(:exit_cfg AS jsonb),
                 'crypto_native_seed_203', 'crypto', :timeframe,
@@ -13521,7 +13533,9 @@ def _migration_203_seed_crypto_native_patterns(conn) -> None:
                 0.0, 0.0, 0,
                 'candidate', 'pending_oos',
                 'universal', 100,
-                true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                true, '{}'::jsonb, 'full', '{}'::jsonb,
+                '{}'::jsonb, '{}'::jsonb, 'realized_pnl',
+                false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
         """), {
             "name": name,
@@ -18782,6 +18796,254 @@ def _migration_265_position_identity_phase5b_linkage_statuses(conn) -> None:
     logger.info("[mig265] Phase 5B linkage statuses separated")
 
 
+def _migration_266_execution_event_type_width(conn) -> None:
+    """Allow descriptive execution-event labels used by reconciler writers."""
+    if "trading_execution_events" not in _tables(conn):
+        return
+    conn.execute(text("DROP VIEW IF EXISTS trading_execution_events_quarantine"))
+    conn.execute(text("""
+        ALTER TABLE trading_execution_events
+        ALTER COLUMN event_type TYPE VARCHAR(64)
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_execution_events_quarantine AS
+        SELECT
+            e.id, e.trade_id, e.user_id, e.ticker, e.broker_source,
+            e.event_type, e.event_at, e.recorded_at,
+            t.status AS trade_status,
+            CASE
+                WHEN e.trade_id IS NULL THEN 'null_trade_id'
+                WHEN t.id IS NULL THEN 'orphan_trade_id'
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM trading_positions p
+                    WHERE p.user_id = t.user_id
+                      AND p.broker_source = t.broker_source
+                      AND p.ticker = t.ticker
+                ) THEN 'no_matching_position'
+                ELSE 'resolution_failed_other'
+            END AS quarantine_reason
+        FROM trading_execution_events e
+        LEFT JOIN trading_trades t ON t.id = e.trade_id
+        WHERE e.position_id IS NULL
+    """))
+    conn.commit()
+    logger.info("[mig266] widened trading_execution_events.event_type to VARCHAR(64)")
+
+
+def _migration_267_fast_path_universe_run_diagnostics(conn) -> None:
+    """Persist pass-level diagnostics for the fast-path universe rotator."""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fast_path_universe_runs (
+            id BIGSERIAL PRIMARY KEY,
+            rotation_at TIMESTAMP NOT NULL,
+            scanned INTEGER NOT NULL DEFAULT 0,
+            snapshot_failures INTEGER NOT NULL DEFAULT 0,
+            ranked_n INTEGER NOT NULL DEFAULT 0,
+            active_n INTEGER NOT NULL DEFAULT 0,
+            shadow_n INTEGER NOT NULL DEFAULT 0,
+            inactive_n INTEGER NOT NULL DEFAULT 0,
+            range_floor_static_bps DOUBLE PRECISION NULL,
+            range_floor_dynamic_bps DOUBLE PRECISION NULL,
+            range_floor_effective_bps DOUBLE PRECISION NULL,
+            gate_rejections JSONB NOT NULL DEFAULT '{}'::jsonb,
+            edge_promotion_blocks JSONB NOT NULL DEFAULT '{}'::jsonb,
+            promotion_decay_table VARCHAR(64) NULL,
+            promotion_fee_bps DOUBLE PRECISION NULL,
+            promotion_min_samples INTEGER NULL,
+            promotion_min_net_bps DOUBLE PRECISION NULL,
+            exploration_fallback BOOLEAN NOT NULL DEFAULT FALSE,
+            counters_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_path_universe_runs_rotation_at
+            ON fast_path_universe_runs (rotation_at DESC)
+    """))
+    conn.commit()
+    logger.info("[mig267] fast_path_universe_runs diagnostics table installed")
+
+
+def _migration_268_alert_decision_packet_id(conn) -> None:
+    """Link alert history rows to the canonical decision packet ledger."""
+    tables = _tables(conn)
+    if "trading_alerts" not in tables:
+        return
+    cols = _columns(conn, "trading_alerts")
+    if "decision_packet_id" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE trading_alerts "
+                "ADD COLUMN decision_packet_id BIGINT REFERENCES trading_decision_packets(id) ON DELETE SET NULL"
+            )
+        )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_alerts_decision_packet "
+            "ON trading_alerts (decision_packet_id)"
+        )
+    )
+    conn.commit()
+    logger.info("[mig268] trading_alerts.decision_packet_id installed")
+
+
+def _migration_269_pattern_directional_outcome_decision_packet_id(conn) -> None:
+    """Link evaluated alert directional outcomes to their canonical packet."""
+    tables = _tables(conn)
+    if "pattern_alert_directional_outcome" not in tables:
+        return
+    cols = _columns(conn, "pattern_alert_directional_outcome")
+    if "decision_packet_id" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE pattern_alert_directional_outcome "
+                "ADD COLUMN decision_packet_id BIGINT REFERENCES trading_decision_packets(id) ON DELETE SET NULL"
+            )
+        )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_padc_decision_packet "
+            "ON pattern_alert_directional_outcome (decision_packet_id)"
+        )
+    )
+    if "trading_alerts" in tables and "decision_packet_id" in _columns(conn, "trading_alerts"):
+        conn.execute(
+            text(
+                """
+                UPDATE pattern_alert_directional_outcome p
+                SET decision_packet_id = a.decision_packet_id
+                FROM trading_alerts a
+                WHERE p.alert_id = a.id
+                  AND p.decision_packet_id IS NULL
+                  AND a.decision_packet_id IS NOT NULL
+                """
+            )
+        )
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW pattern_directional_quality_v AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*) AS rolling_sample_n,
+            SUM(CASE WHEN directional_correct IS TRUE THEN 1 ELSE 0 END)::numeric
+              / NULLIF(COUNT(*), 0) AS rolling_directional_wr,
+            MAX(alert_at) AS last_alert_at,
+            MAX(evaluated_at) AS last_evaluated_at,
+            COUNT(*) FILTER (WHERE decision_packet_id IS NOT NULL) AS packet_linked_sample_n,
+            COUNT(*) FILTER (WHERE decision_packet_id IS NOT NULL)::numeric
+              / NULLIF(COUNT(*), 0) AS packet_lineage_coverage
+        FROM (
+            SELECT
+                scan_pattern_id,
+                decision_packet_id,
+                directional_correct,
+                alert_at,
+                evaluated_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY scan_pattern_id
+                    ORDER BY alert_at DESC
+                ) AS rn
+            FROM pattern_alert_directional_outcome
+            WHERE directional_correct IS NOT NULL
+        ) ranked
+        WHERE rn <= 30
+        GROUP BY scan_pattern_id
+    """))
+    conn.commit()
+    logger.info("[mig269] pattern_alert_directional_outcome.decision_packet_id installed")
+
+
+def _migration_270_pattern_directional_quality_packet_lineage_view(conn) -> None:
+    """Expose packet-lineage coverage on the directional quality view."""
+    tables = _tables(conn)
+    if "pattern_alert_directional_outcome" not in tables:
+        return
+    cols = _columns(conn, "pattern_alert_directional_outcome")
+    if "decision_packet_id" not in cols:
+        return
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW pattern_directional_quality_v AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*) AS rolling_sample_n,
+            SUM(CASE WHEN directional_correct IS TRUE THEN 1 ELSE 0 END)::numeric
+              / NULLIF(COUNT(*), 0) AS rolling_directional_wr,
+            MAX(alert_at) AS last_alert_at,
+            MAX(evaluated_at) AS last_evaluated_at,
+            COUNT(*) FILTER (WHERE decision_packet_id IS NOT NULL) AS packet_linked_sample_n,
+            COUNT(*) FILTER (WHERE decision_packet_id IS NOT NULL)::numeric
+              / NULLIF(COUNT(*), 0) AS packet_lineage_coverage
+        FROM (
+            SELECT
+                scan_pattern_id,
+                decision_packet_id,
+                directional_correct,
+                alert_at,
+                evaluated_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY scan_pattern_id
+                    ORDER BY alert_at DESC
+                ) AS rn
+            FROM pattern_alert_directional_outcome
+            WHERE directional_correct IS NOT NULL
+        ) ranked
+        WHERE rn <= 30
+        GROUP BY scan_pattern_id
+    """))
+    conn.commit()
+    logger.info("[mig270] pattern_directional_quality_v packet lineage columns installed")
+
+
+def _migration_271_scan_patterns_default_contract(conn) -> None:
+    """Repair DB-side defaults for raw ``scan_patterns`` inserts.
+
+    Several tests and maintenance paths intentionally use raw SQL so the
+    Python ORM defaults never execute.  Keep the table contract in the
+    database too, otherwise partial inserts fail on older NOT NULL columns.
+    """
+    if "scan_patterns" not in _tables(conn):
+        return
+
+    cols = _columns(conn, "scan_patterns")
+    defaults = [
+        ("rules_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("origin", "'user'", "'user'"),
+        ("asset_class", "'all'", "'all'"),
+        ("timeframe", "'1d'", "'1d'"),
+        ("confidence", "0", "0"),
+        ("evidence_count", "0", "0"),
+        ("backtest_count", "0", "0"),
+        ("score_boost", "0", "0"),
+        ("min_base_score", "0", "0"),
+        ("active", "TRUE", "TRUE"),
+        ("generation", "0", "0"),
+        ("ticker_scope", "'universal'", "'universal'"),
+        ("trade_count", "0", "0"),
+        ("backtest_priority", "0", "0"),
+        ("created_at", "NOW()", "NOW()"),
+        ("updated_at", "NOW()", "NOW()"),
+        ("promotion_status", "'legacy'", "'legacy'"),
+        ("oos_validation_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("queue_tier", "'full'", "'full'"),
+        ("paper_book_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("regime_affinity_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("lifecycle_stage", "'candidate'", "'candidate'"),
+        ("pattern_evidence_kind", "'realized_pnl'", "'realized_pnl'"),
+        ("portfolio_gate_json", "'{}'::jsonb", "'{}'::jsonb"),
+        ("recert_required", "FALSE", "FALSE"),
+    ]
+    for col, default_sql, fill_sql in defaults:
+        if col not in cols:
+            continue
+        conn.execute(text(
+            f"ALTER TABLE scan_patterns ALTER COLUMN {col} SET DEFAULT {default_sql}"
+        ))
+        conn.execute(text(
+            f"UPDATE scan_patterns SET {col} = {fill_sql} WHERE {col} IS NULL"
+        ))
+    conn.commit()
+    logger.info("[mig271] scan_patterns DB-side defaults repaired")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19094,6 +19356,18 @@ MIGRATIONS = [
      _migration_264_position_identity_phase5b_read_models),
     ("265_position_identity_phase5b_linkage_statuses",
      _migration_265_position_identity_phase5b_linkage_statuses),
+    ("266_execution_event_type_width",
+     _migration_266_execution_event_type_width),
+    ("267_fast_path_universe_run_diagnostics",
+     _migration_267_fast_path_universe_run_diagnostics),
+    ("268_alert_decision_packet_id",
+     _migration_268_alert_decision_packet_id),
+    ("269_pattern_directional_outcome_decision_packet_id",
+     _migration_269_pattern_directional_outcome_decision_packet_id),
+    ("270_pattern_directional_quality_packet_lineage_view",
+     _migration_270_pattern_directional_quality_packet_lineage_view),
+    ("271_scan_patterns_default_contract",
+     _migration_271_scan_patterns_default_contract),
 ]
 
 

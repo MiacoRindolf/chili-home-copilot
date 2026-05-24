@@ -11,7 +11,7 @@ Nine scenarios:
     3. is_robinhood_supported_crypto("BTC") returns True.
     4. Autotrader prefilter blocks ZEC-USD before broker call.
     5. Autotrader allows BTC-USD through to broker.
-    6. place_missing_stop skips ZEC-USD with venue_unsupported_crypto.
+    6. place_missing_stop skips ZEC-USD with venue_unsupported_crypto_path.
     7. place_missing_stop proceeds for AAPL (equity ticker).
     8. Static-list maintenance hint — fast-path subset assertion.
     9. Per-symbol True/False sanity for the audit's flagged set
@@ -157,7 +157,7 @@ def _enable_writer_flag():
 
 def test_place_missing_stop_skips_unsupported_crypto(db):
     """Scenario 6: ZEC-USD reaches place_missing_stop. The new prefilter
-    short-circuits with reason='venue_unsupported_crypto'. Crucially,
+    short-circuits with reason='venue_unsupported_crypto_path'. Crucially,
     the broker_service.place_sell_stop_loss_order is NEVER called (the
     sentinel raise verifies)."""
     _seed_trade_and_intent(
@@ -193,14 +193,14 @@ def test_place_missing_stop_skips_unsupported_crypto(db):
 
     assert result.action == "place_missing_stop"
     assert result.ok is False
-    assert result.reason == "venue_unsupported_crypto"
+    assert result.reason == "venue_unsupported_crypto_path"
 
 
 def test_place_missing_stop_proceeds_for_equity(db):
     """Scenario 7: AAPL is an equity, not crypto. The prefilter must NOT
     short-circuit. The writer reaches its next check (which then fails
     on broker_qty_zero or covered-by-sell — exact next gate doesn't
-    matter for this test). Reason MUST NOT be venue_unsupported_crypto."""
+    matter for this test). Reason MUST NOT be venue_unsupported_crypto_path."""
     _seed_trade_and_intent(
         db, trade_id=5002, intent_id=55002, ticker="AAPL",
         qty=10.0, stop_price=180.0,
@@ -236,7 +236,7 @@ def test_place_missing_stop_proceeds_for_equity(db):
         for p in patches:
             p.stop()
 
-    assert result.reason != "venue_unsupported_crypto", (
+    assert result.reason != "venue_unsupported_crypto_path", (
         "equity ticker AAPL must not be filtered as unsupported crypto"
     )
 
