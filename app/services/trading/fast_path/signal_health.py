@@ -68,6 +68,19 @@ _ACTION_BY_VERDICT = {
     "positive_edge_candidate": "maker_shadow_candidate",
 }
 
+EDGE_DIAGNOSIS_POSITIVE_PRESENT = "positive_edge_candidate_present"
+EDGE_DIAGNOSIS_NO_EVIDENCE = "no_decay_evidence"
+EDGE_DIAGNOSIS_COLLECT_MORE_DATA = "collect_more_data"
+EDGE_DIAGNOSIS_FEE_SPREAD_BOTTLENECK = "fee_spread_bottleneck"
+EDGE_DIAGNOSIS_OBSERVE_UNCERTAIN = "observe_uncertain"
+EDGE_DIAGNOSIS_NEGATIVE_DOMINANT = "negative_edge_dominant"
+
+EDGE_PAIN_NO_POSITIVE = "no_positive_edge_candidate"
+EDGE_PAIN_UPPER_BELOW_REQUIRED_NET = "optimistic_confidence_still_below_cost"
+EDGE_PAIN_MEAN_BELOW_REQUIRED_NET = "best_mean_still_below_cost"
+EDGE_PAIN_ONLY_SPARSE_EVIDENCE = "only_sparse_decay_evidence"
+EDGE_PAIN_NEGATIVE_EDGE_PRESENT = "negative_edge_present"
+
 
 def _round_or_none(value: Any, digits: int = 4) -> float | None:
     if value is None:
@@ -609,6 +622,131 @@ def _sort_attempt_health_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     )
 
 
+def _net_metric(row: dict[str, Any], section: str, field: str) -> float | None:
+    value = (row.get(section) or {}).get(field)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _edge_lane_summary(row: dict[str, Any]) -> dict[str, Any]:
+    best_mean = row.get("best_mean_net") or {}
+    best_upper = row.get("best_upper_net") or {}
+    best_lower = row.get("best_lower_net") or {}
+    return {
+        "scope": row.get("scope"),
+        "ticker": row.get("ticker"),
+        "rank": row.get("rank"),
+        "alert_type": row.get("alert_type"),
+        "score_bucket": row.get("score_bucket"),
+        "verdict": row.get("verdict"),
+        "action": row.get("action"),
+        "total_samples": int(row.get("total_samples") or 0),
+        "best_mean_net_bps": _round_or_none(best_mean.get("mean_net_bps")),
+        "best_upper_net_bps": _round_or_none(best_upper.get("upper_net_bps")),
+        "best_lower_net_bps": _round_or_none(best_lower.get("lower_net_bps")),
+        "best_mean_horizon_s": best_mean.get("horizon_s"),
+        "best_upper_horizon_s": best_upper.get("horizon_s"),
+        "best_lower_horizon_s": best_lower.get("horizon_s"),
+        "cost_bps": row.get("cost_bps"),
+    }
+
+
+def _best_edge_lane(
+    rows: list[dict[str, Any]], *, section: str, field: str,
+) -> dict[str, Any] | None:
+    scored: list[tuple[float, int, dict[str, Any]]] = []
+    for row in rows:
+        value = _net_metric(row, section, field)
+        if value is None:
+            continue
+        scored.append((value, int(row.get("total_samples") or 0), row))
+    if not scored:
+        return None
+    _value, _samples, row = max(scored, key=lambda item: (item[0], item[1]))
+    return _edge_lane_summary(row)
+
+
+def _build_edge_diagnosis(
+    rows: list[dict[str, Any]], *, min_net_bps: float,
+) -> dict[str, Any]:
+    """Summarize the exact cost-adjusted edge gap across health rows."""
+    verdict_counts: dict[str, int] = {}
+    for row in rows:
+        verdict = str(row.get("verdict") or "unknown")
+        verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+
+    best_mean = _best_edge_lane(
+        rows, section="best_mean_net", field="mean_net_bps",
+    )
+    best_upper = _best_edge_lane(
+        rows, section="best_upper_net", field="upper_net_bps",
+    )
+    best_lower = _best_edge_lane(
+        rows, section="best_lower_net", field="lower_net_bps",
+    )
+
+    positive_count = verdict_counts.get("positive_edge_candidate", 0)
+    uncertain_count = verdict_counts.get("uncertain", 0)
+    sparse_count = verdict_counts.get("insufficient_statistical_evidence", 0)
+    negative_count = verdict_counts.get("negative_edge", 0)
+
+    best_upper_net = (
+        None if best_upper is None else best_upper.get("best_upper_net_bps")
+    )
+    best_mean_net = (
+        None if best_mean is None else best_mean.get("best_mean_net_bps")
+    )
+    required_net = float(min_net_bps or 0.0)
+    upper_gap = (
+        None if best_upper_net is None
+        else required_net - float(best_upper_net)
+    )
+    mean_gap = (
+        None if best_mean_net is None
+        else required_net - float(best_mean_net)
+    )
+
+    if positive_count > 0:
+        diagnosis = EDGE_DIAGNOSIS_POSITIVE_PRESENT
+    elif not rows:
+        diagnosis = EDGE_DIAGNOSIS_NO_EVIDENCE
+    elif sparse_count == len(rows):
+        diagnosis = EDGE_DIAGNOSIS_COLLECT_MORE_DATA
+    elif upper_gap is not None and upper_gap > 0.0:
+        diagnosis = EDGE_DIAGNOSIS_FEE_SPREAD_BOTTLENECK
+    elif uncertain_count > 0:
+        diagnosis = EDGE_DIAGNOSIS_OBSERVE_UNCERTAIN
+    else:
+        diagnosis = EDGE_DIAGNOSIS_NEGATIVE_DOMINANT
+
+    pain_points: list[str] = []
+    if positive_count <= 0:
+        pain_points.append(EDGE_PAIN_NO_POSITIVE)
+    if upper_gap is not None and upper_gap > 0.0:
+        pain_points.append(EDGE_PAIN_UPPER_BELOW_REQUIRED_NET)
+    if mean_gap is not None and mean_gap > 0.0:
+        pain_points.append(EDGE_PAIN_MEAN_BELOW_REQUIRED_NET)
+    if rows and sparse_count == len(rows):
+        pain_points.append(EDGE_PAIN_ONLY_SPARSE_EVIDENCE)
+    if negative_count > 0:
+        pain_points.append(EDGE_PAIN_NEGATIVE_EDGE_PRESENT)
+
+    return {
+        "diagnosis": diagnosis,
+        "required_net_bps": _round_or_none(required_net),
+        "best_mean_gap_bps": _round_or_none(mean_gap),
+        "best_upper_gap_bps": _round_or_none(upper_gap),
+        "best_mean_lane": best_mean,
+        "best_upper_lane": best_upper,
+        "best_lower_lane": best_lower,
+        "pain_points": pain_points,
+    }
+
+
 def _build_maker_attempt_health(
     rows: list[dict[str, Any]],
     *,
@@ -713,6 +851,10 @@ def build_signal_health_report(
     for row in pooled + ticker_health_all:
         verdict = str(row.get("verdict") or "unknown")
         verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+    edge_diagnosis = _build_edge_diagnosis(
+        pooled + ticker_health_all,
+        min_net_bps=min_net_bps,
+    )
 
     maker_attempt_health: dict[str, Any] | None = None
     if include_maker_attempts:
@@ -745,6 +887,7 @@ def build_signal_health_report(
             "ticker_lanes": len(ticker_health_all),
             "ticker_lanes_returned": len(ticker_health),
             "verdict_counts": verdict_counts,
+            "edge_diagnosis": edge_diagnosis,
         },
         "pooled": pooled[:max_rows],
         "tickers": ticker_health,

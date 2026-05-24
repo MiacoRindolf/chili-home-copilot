@@ -8,6 +8,9 @@ import pytest
 
 from app.services.trading.fast_path.settings import FastPathSettings
 from app.services.trading.fast_path.signal_health import (
+    EDGE_DIAGNOSIS_FEE_SPREAD_BOTTLENECK,
+    EDGE_DIAGNOSIS_POSITIVE_PRESENT,
+    EDGE_PAIN_UPPER_BELOW_REQUIRED_NET,
     build_signal_health_report,
     summarize_maker_attempt_group,
     summarize_signal_group,
@@ -252,10 +255,61 @@ def test_build_signal_health_report_uses_execution_mode_table_and_spread_cost():
     assert report["settings"]["pooled_cost_bps"] == 3.0
     assert report["pooled"][0]["verdict"] == "negative_edge"
     assert report["tickers"][0]["verdict"] == "positive_edge_candidate"
+    assert (
+        report["summary"]["edge_diagnosis"]["diagnosis"]
+        == EDGE_DIAGNOSIS_POSITIVE_PRESENT
+    )
+    assert (
+        report["summary"]["edge_diagnosis"]["best_lower_lane"]["ticker"]
+        == "ETH-USD"
+    )
     assert report["maker_attempts"]["summary"]["attempts"] == 1
     assert report["maker_attempts"]["summary"]["filled_adverse_rate"] == 1.0
     assert pooled_lookup.call_args.kwargs["table"] == "fast_signal_decay_maker_filled"
     assert maker_attempt_lookup.call_args.kwargs["window_hours"] == 24
+
+
+def test_signal_health_report_summarizes_cost_gap_when_no_edge_clears():
+    settings = FastPathSettings(
+        execution_mode="maker_only",
+        cost_aware_maker_fee_bps=8.0,
+        live_alpha_min_net_bps=0.0,
+    )
+    rows = [
+        _row(
+            ticker="TEST-USD",
+            alert_type="volume_breakout_pullback_long",
+            score_bucket="low",
+            sample_count=30,
+            mean_return=0.0002,
+            m2_return=0.00000001,
+            spread_bps=2.0,
+        ),
+    ]
+
+    with patch(
+        "app.services.trading.fast_path.signal_health._fetch_median_universe_spread_bps",
+        return_value=2.0,
+    ), patch(
+        "app.services.trading.fast_path.signal_health._fetch_pooled_decay_rows",
+        return_value=[],
+    ), patch(
+        "app.services.trading.fast_path.signal_health._fetch_ticker_decay_rows",
+        return_value=rows,
+    ):
+        report = build_signal_health_report(
+            object(),
+            settings=settings,
+            include_tickers=True,
+            include_maker_attempts=False,
+            limit=10,
+        )
+
+    diagnosis = report["summary"]["edge_diagnosis"]
+    assert diagnosis["diagnosis"] == EDGE_DIAGNOSIS_FEE_SPREAD_BOTTLENECK
+    assert EDGE_PAIN_UPPER_BELOW_REQUIRED_NET in diagnosis["pain_points"]
+    assert diagnosis["best_upper_gap_bps"] > 0.0
+    assert diagnosis["best_upper_lane"]["ticker"] == "TEST-USD"
 
 
 def test_signal_health_endpoint_delegates_to_report_builder():
