@@ -302,9 +302,10 @@ class Settings(BaseSettings):
     # off -> shadow -> compare -> authoritative. Legacy Trade.pnl and
     # PaperTrade.pnl remain authoritative until the cutover phase.
     # See docs/TRADING_BRAIN_ECONOMIC_LEDGER_ROLLOUT.md.
-    brain_economic_ledger_mode: str = "live"
+    brain_economic_ledger_mode: str = "shadow"
     brain_economic_ledger_ops_log_enabled: bool = True
     brain_economic_ledger_parity_tolerance_usd: float = 0.01
+    brain_economic_ledger_require_parity_for_evolution: bool = True
 
     # PIT hygiene audit (Phase C) — classifies `ScanPattern.rules_json`
     # condition indicators against an explicit allow/deny list and writes
@@ -2540,6 +2541,14 @@ class Settings(BaseSettings):
         default=0.005,
         validation_alias=AliasChoices("CHILI_COINBASE_STOP_LIMIT_BUFFER_PCT"),
     )
+    # When Coinbase rejects an exit-market sell because a product is in
+    # limit-only mode, the crypto exit monitor submits a marketable SELL
+    # limit below the current price. This is an emergency flattening path,
+    # so it defaults wider than bracket stops.
+    chili_coinbase_exit_limit_fallback_buffer_pct: float = Field(
+        default=0.01,
+        validation_alias=AliasChoices("CHILI_COINBASE_EXIT_LIMIT_FALLBACK_BUFFER_PCT"),
+    )
     # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
     # (2026-05-09): Coinbase Advanced Trade Tier 1 fees per
     # docs.cdp.coinbase.com/exchange/docs/fees:
@@ -3590,18 +3599,42 @@ class Settings(BaseSettings):
     brain_max_open_per_sector: int = 0
     brain_max_correlated_positions: int = 0
     brain_allocator_enabled: bool = True
-    brain_allocator_shadow_mode: bool = False
+    brain_allocator_shadow_mode: bool = True
     brain_allocator_live_soft_block_enabled: bool = False
-    brain_allocator_live_hard_block_enabled: bool = True
+    brain_allocator_live_hard_block_enabled: bool = False
     brain_allocator_incumbent_score_margin: float = 0.08
+    brain_allocator_max_active_risk_items: int = Field(
+        default=0,
+        validation_alias=AliasChoices("CHILI_BRAIN_ALLOCATOR_MAX_ACTIVE_RISK_ITEMS"),
+        description="Max open trades + active live automation sessions before allocator blocks; 0 disables.",
+    )
+    brain_allocator_max_live_notional_usd: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("CHILI_BRAIN_ALLOCATOR_MAX_LIVE_NOTIONAL_USD"),
+        description="Max estimated live notional after a new allocation; 0 disables.",
+    )
+    brain_allocator_max_same_family_live_sessions: int = Field(
+        default=0,
+        validation_alias=AliasChoices("CHILI_BRAIN_ALLOCATOR_MAX_SAME_FAMILY_LIVE_SESSIONS"),
+        description="Max active live automation sessions per strategy/hypothesis family; 0 disables.",
+    )
 
     # Decision ledger + net-expectancy allocator (momentum autopilot / brain). Live enforcement OFF by default.
     brain_enable_decision_ledger: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_DECISION_LEDGER"))
     brain_decision_packet_required_for_runners: bool = Field(
         default=True, validation_alias=AliasChoices("CHILI_BRAIN_DECISION_PACKET_REQUIRED_FOR_RUNNERS")
     )
+    brain_decision_packet_required_for_proposals: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_DECISION_PACKET_REQUIRED_FOR_PROPOSALS")
+    )
     brain_expectancy_allocator_shadow_mode: bool = Field(
         default=False, validation_alias=AliasChoices("CHILI_BRAIN_EXPECTANCY_ALLOCATOR_SHADOW_MODE")
+    )
+    brain_opportunity_board_decision_packets_enabled: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_OPPORTUNITY_BOARD_DECISION_PACKETS_ENABLED")
+    )
+    brain_alert_decision_packets_enabled: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_ALERT_DECISION_PACKETS_ENABLED")
     )
     brain_enable_execution_realism: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_EXECUTION_REALISM"))
     brain_enable_capacity_governor: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_CAPACITY_GOVERNOR"))
@@ -3613,19 +3646,19 @@ class Settings(BaseSettings):
         default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENFORCE_NET_EXPECTANCY_PAPER")
     )
     brain_enforce_net_expectancy_live: bool = Field(
-        default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENFORCE_NET_EXPECTANCY_LIVE")
+        default=False, validation_alias=AliasChoices("CHILI_BRAIN_ENFORCE_NET_EXPECTANCY_LIVE")
     )
     brain_capacity_hard_block_paper: bool = Field(
         default=True, validation_alias=AliasChoices("CHILI_BRAIN_CAPACITY_HARD_BLOCK_PAPER")
     )
     brain_capacity_hard_block_live: bool = Field(
-        default=True, validation_alias=AliasChoices("CHILI_BRAIN_CAPACITY_HARD_BLOCK_LIVE")
+        default=False, validation_alias=AliasChoices("CHILI_BRAIN_CAPACITY_HARD_BLOCK_LIVE")
     )
     brain_paper_deployment_enforcement: bool = Field(
         default=True, validation_alias=AliasChoices("CHILI_BRAIN_PAPER_DEPLOYMENT_ENFORCEMENT")
     )
     brain_live_deployment_enforcement: bool = Field(
-        default=True, validation_alias=AliasChoices("CHILI_BRAIN_LIVE_DEPLOYMENT_ENFORCEMENT")
+        default=False, validation_alias=AliasChoices("CHILI_BRAIN_LIVE_DEPLOYMENT_ENFORCEMENT")
     )
     brain_max_adv_notional_pct: float = Field(
         default=0.25,

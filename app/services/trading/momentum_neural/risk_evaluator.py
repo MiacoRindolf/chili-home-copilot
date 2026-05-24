@@ -528,9 +528,12 @@ def evaluate_proposed_momentum_automation(
         _check(
             "notional_cap",
             True,
-            severity="warn",
-            message="Max notional per trade not enforced until orders (Phase 7+).",
-            detail={"max_notional_per_trade_usd": policy.max_notional_per_trade_usd},
+            severity="ok",
+            message="Max notional per trade is enforced at the runner order boundary before adapter submission.",
+            detail={
+                "max_notional_per_trade_usd": policy.max_notional_per_trade_usd,
+                "enforcement_boundary": "momentum_live_runner_pre_adapter",
+            },
         )
     )
 

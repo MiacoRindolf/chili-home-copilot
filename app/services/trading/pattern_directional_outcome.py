@@ -298,7 +298,7 @@ def evaluate_directional_outcomes(
     rows = db.execute(
         text(
             """
-            SELECT a.id, a.scan_pattern_id, a.ticker, a.created_at, a.duration_estimate
+            SELECT a.id, a.scan_pattern_id, a.ticker, a.created_at, a.duration_estimate, a.decision_packet_id
             FROM trading_alerts a
             LEFT JOIN pattern_alert_directional_outcome p
               ON p.alert_id = a.id
@@ -349,7 +349,7 @@ def evaluate_directional_outcomes(
         ):
             pat_by_id[int(p.id)] = p
 
-    for alert_id, scan_pattern_id, ticker, created_at, _duration in rows:
+    for alert_id, scan_pattern_id, ticker, created_at, _duration, decision_packet_id in rows:
         try:
             pat = pat_by_id.get(int(scan_pattern_id))
             if pat is None:
@@ -388,11 +388,12 @@ def evaluate_directional_outcomes(
             if outcome is None:
                 skipped_window_empty += 1
                 continue
-            db.execute(
+            result = db.execute(
                 text(
                     """
                     INSERT INTO pattern_alert_directional_outcome (
                         alert_id, scan_pattern_id, ticker, alert_at,
+                        decision_packet_id,
                         predicted_direction, entry_price,
                         hold_window_hours, window_close_at,
                         window_max_favorable_pct, window_max_adverse_pct,
@@ -400,6 +401,7 @@ def evaluate_directional_outcomes(
                         evaluated_at
                     ) VALUES (
                         :alert_id, :scan_pattern_id, :ticker, :alert_at,
+                        :decision_packet_id,
                         :predicted_direction, :entry_price,
                         :hold_window_hours, :window_close_at,
                         :max_fav, :max_adv,
@@ -414,6 +416,7 @@ def evaluate_directional_outcomes(
                     "scan_pattern_id": int(scan_pattern_id),
                     "ticker": str(ticker)[:32],
                     "alert_at": created_at,
+                    "decision_packet_id": int(decision_packet_id) if decision_packet_id is not None else None,
                     "predicted_direction": direction,
                     "entry_price": Decimal(str(round(entry_price, 8))),
                     "hold_window_hours": int(math.ceil(hold_hours)),
@@ -425,7 +428,31 @@ def evaluate_directional_outcomes(
                     "evaluated_at": now,
                 },
             )
-            evaluated += 1
+            if int(getattr(result, "rowcount", 0) or 0) > 0:
+                try:
+                    from .decision_ledger import finalize_signal_packet_directional_outcome
+
+                    finalize_signal_packet_directional_outcome(
+                        db,
+                        packet_id=int(decision_packet_id) if decision_packet_id is not None else None,
+                        alert_id=int(alert_id),
+                        ticker=str(ticker),
+                        scan_pattern_id=int(scan_pattern_id) if scan_pattern_id is not None else None,
+                        directional_correct=bool(outcome["directional_correct"]),
+                        max_favorable_pct=float(outcome["max_favorable_pct"]),
+                        max_adverse_pct=float(outcome["max_adverse_pct"]),
+                        entry_price=float(entry_price),
+                        hold_window_hours=int(math.ceil(hold_hours)),
+                        evaluated_at=now,
+                    )
+                except Exception:
+                    logger.debug(
+                        "[pattern_directional] packet outcome update failed alert_id=%s packet_id=%s",
+                        alert_id,
+                        decision_packet_id,
+                        exc_info=True,
+                    )
+                evaluated += 1
         except Exception as e:
             errors += 1
             logger.warning(
@@ -469,7 +496,8 @@ def get_rolling_directional_quality(
         text(
             """
             SELECT scan_pattern_id, rolling_sample_n, rolling_directional_wr,
-                   last_alert_at, last_evaluated_at
+                   last_alert_at, last_evaluated_at,
+                   packet_linked_sample_n, packet_lineage_coverage
             FROM pattern_directional_quality_v
             WHERE scan_pattern_id = :pid
             """
@@ -484,4 +512,6 @@ def get_rolling_directional_quality(
         "rolling_directional_wr": float(row[2]) if row[2] is not None else None,
         "last_alert_at": row[3],
         "last_evaluated_at": row[4],
+        "packet_linked_sample_n": int(row[5] or 0),
+        "packet_lineage_coverage": float(row[6]) if row[6] is not None else None,
     }

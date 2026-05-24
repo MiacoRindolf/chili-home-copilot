@@ -22,6 +22,7 @@ from app.trading_brain.infrastructure.ledger_ops_log import (
     CHILI_LEDGER_OPS_PREFIX,
     EVENT_ENTRY_FILL,
     EVENT_EXIT_FILL,
+    EVENT_PARTIAL_FILL,
     EVENT_RECONCILE,
     MODE_OFF,
     MODE_SHADOW,
@@ -145,6 +146,11 @@ def test_mode_is_active_tracks_setting(monkeypatch):
     assert el.mode_is_active() is True
     monkeypatch.setattr(settings, "brain_economic_ledger_mode", "bogus")
     assert el.mode_is_active() is False  # invalid mode treated as off
+
+
+def test_default_economic_ledger_mode_is_shadow_active():
+    assert settings.brain_economic_ledger_mode == MODE_SHADOW
+    assert settings.brain_economic_ledger_require_parity_for_evolution is True
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +297,101 @@ def test_entry_fill_is_idempotent_per_paper_trade(db, shadow_mode):
     assert db.query(EconomicLedgerEvent).filter_by(paper_trade_id=300).count() == 1
 
 
+def test_automation_trade_id_is_negative_and_stable():
+    assert el.automation_trade_id(77) == -77
+    assert el.automation_trade_id(-77) == -77
+
+
+def test_automation_session_ledger_uses_negative_session_trade_id(db, shadow_mode):
+    entry = el.record_automation_session_entry_fill(
+        db,
+        session_id=77,
+        user_id=1,
+        ticker="BTC-USD",
+        quantity=0.1,
+        fill_price=100_000.0,
+        mode="paper",
+        decision_packet_id=123,
+    )
+    assert entry is not None
+    assert entry.source == "automation"
+    assert entry.trade_id == -77
+    assert entry.provenance_json["decision_packet_id"] == 123
+
+    exit_row = el.record_automation_session_exit_fill(
+        db,
+        session_id=77,
+        user_id=1,
+        ticker="BTC-USD",
+        quantity=0.1,
+        fill_price=100_200.0,
+        entry_price=100_000.0,
+        realized_pnl_usd=19.0,
+        mode="paper",
+        decision_packet_id=123,
+    )
+    assert exit_row is not None
+    assert exit_row.event_type == EVENT_EXIT_FILL
+    assert exit_row.realized_pnl_delta == pytest.approx(19.0, abs=1e-6)
+
+    parity = el.reconcile_automation_session(
+        db,
+        session_id=77,
+        user_id=1,
+        ticker="BTC-USD",
+        legacy_pnl=19.0,
+        mode="paper",
+    )
+    assert parity is not None
+    assert parity.source == "automation"
+    assert parity.trade_id == -77
+    assert parity.agree_bool is True
+
+
+def test_automation_partial_and_terminal_exit_reconcile_cumulative_pnl(db, shadow_mode):
+    el.record_automation_session_entry_fill(
+        db,
+        session_id=78,
+        ticker="ETH-USD",
+        quantity=3.0,
+        fill_price=100.0,
+        mode="paper",
+    )
+    part = el.record_automation_session_partial_exit_fill(
+        db,
+        session_id=78,
+        ticker="ETH-USD",
+        quantity=1.0,
+        fill_price=106.0,
+        entry_price=100.0,
+        realized_pnl_usd=5.5,
+        mode="paper",
+    )
+    assert part is not None
+    assert part.event_type == EVENT_PARTIAL_FILL
+    final = el.record_automation_session_exit_fill(
+        db,
+        session_id=78,
+        ticker="ETH-USD",
+        quantity=2.0,
+        fill_price=104.0,
+        entry_price=100.0,
+        realized_pnl_usd=7.5,
+        mode="paper",
+    )
+    assert final is not None
+    parity = el.reconcile_automation_session(
+        db,
+        session_id=78,
+        ticker="ETH-USD",
+        legacy_pnl=13.0,
+        mode="paper",
+    )
+    assert parity is not None
+    assert parity.ledger_pnl == pytest.approx(13.0, abs=1e-6)
+    assert parity.agree_bool is True
+
+
 def test_exit_fill_is_idempotent_per_trade(db, shadow_mode):
     first = el.record_exit_fill(
         db,
@@ -421,6 +522,16 @@ def test_ledger_summary_aggregates_events_and_parity(db, shadow_mode):
         quantity=100.0,
         fill_price=150.0,
     )
+    el.record_entry_fill(
+        db,
+        source="paper",
+        paper_trade_id=902,
+        ticker="MSFT",
+        direction="long",
+        quantity=10.0,
+        fill_price=200.0,
+        provenance={"decision_packet_id": 123},
+    )
     el.record_exit_fill(
         db,
         source="paper",
@@ -444,6 +555,9 @@ def test_ledger_summary_aggregates_events_and_parity(db, shadow_mode):
     assert summary["events_total"] >= 2
     assert summary["events_by_type"].get(EVENT_ENTRY_FILL, 0) >= 1
     assert summary["events_by_type"].get(EVENT_EXIT_FILL, 0) >= 1
+    assert summary["fill_events_total"] >= 3
+    assert summary["fill_events_with_decision_packet"] >= 1
+    assert summary["fill_event_packet_lineage_rate"] is not None
     assert summary["parity_total"] >= 1
     assert summary["parity_agree"] >= 1
     assert summary["parity_rate"] is not None
@@ -452,6 +566,9 @@ def test_ledger_summary_aggregates_events_and_parity(db, shadow_mode):
 def test_ledger_summary_empty_db(db, shadow_mode):
     summary = el.ledger_summary(db, lookback_hours=1)
     assert summary["events_total"] == 0
+    assert summary["fill_events_total"] == 0
+    assert summary["fill_events_with_decision_packet"] == 0
+    assert summary["fill_event_packet_lineage_rate"] is None
     assert summary["parity_total"] == 0
     assert summary["parity_rate"] is None
 

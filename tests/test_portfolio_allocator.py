@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import uuid
 
-from app.models import StrategyProposal, Trade, User
+from app.config import Settings
+from app.models import MomentumStrategyVariant, StrategyProposal, Trade, TradingAutomationSession, User
 from app.services.trading.portfolio_allocator import (
+    allocation_block_reason,
     build_proposal_allocation_decision,
     evaluate_allocation_candidate,
 )
@@ -78,3 +80,133 @@ def test_allocator_uses_sector_cap(db, monkeypatch):
     )
     assert decision["allowed_if_enforced"] is False
     assert decision["blocked_reason"] == "sector_cap"
+
+
+def test_allocator_defaults_keep_live_hard_blocks_shadowed():
+    assert Settings.model_fields["brain_allocator_shadow_mode"].default is True
+    assert Settings.model_fields["brain_allocator_live_hard_block_enabled"].default is False
+
+
+def test_allocator_block_reason_requires_authoritative_flag(monkeypatch):
+    decision = {"allowed_if_enforced": False, "blocked_reason": "same_ticker_conflict"}
+    monkeypatch.setattr("app.services.trading.portfolio_allocator.settings.brain_allocator_live_hard_block_enabled", False)
+    assert allocation_block_reason(decision) is None
+    monkeypatch.setattr("app.services.trading.portfolio_allocator.settings.brain_allocator_live_hard_block_enabled", True)
+    assert allocation_block_reason(decision) == "same_ticker_conflict"
+
+
+def test_allocator_family_cap_only_matches_same_family(db, monkeypatch):
+    user = User(name=f"Allocator Family User {uuid.uuid4().hex[:8]}")
+    db.add(user)
+    db.flush()
+    incumbent = MomentumStrategyVariant(
+        family="mean_reversion",
+        variant_key=f"alloc_inc_{uuid.uuid4().hex[:10]}",
+        label="incumbent",
+        params_json={},
+    )
+    db.add(incumbent)
+    db.flush()
+    db.add(
+        TradingAutomationSession(
+            user_id=user.id,
+            venue="coinbase",
+            execution_family="coinbase_spot",
+            mode="live",
+            symbol="ETH-USD",
+            variant_id=int(incumbent.id),
+            state="live_entered",
+            risk_snapshot_json={"momentum_live_execution": {"position": {"notional_usd": 25.0}}},
+        )
+    )
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_allocator.settings.brain_allocator_max_same_family_live_sessions",
+        1,
+    )
+    different = evaluate_allocation_candidate(
+        db,
+        user_id=user.id,
+        symbol="BTC-USD",
+        timeframe="scalp",
+        asset_class="crypto",
+        hypothesis_family="momentum_scalp",
+        research_quality=0.75,
+        live_drift_contract={"composite_tier": "healthy"},
+        execution_contract={"robustness_tier": "healthy"},
+        context="momentum_entry",
+        execution_mode="live",
+        intended_notional_usd=10.0,
+    )
+    assert different["allowed_if_enforced"] is True
+    assert "same_hypothesis_family" not in different["conflict_buckets"]
+
+    same = evaluate_allocation_candidate(
+        db,
+        user_id=user.id,
+        symbol="BTC-USD",
+        timeframe="scalp",
+        asset_class="crypto",
+        hypothesis_family="mean_reversion",
+        research_quality=0.75,
+        live_drift_contract={"composite_tier": "healthy"},
+        execution_contract={"robustness_tier": "healthy"},
+        context="momentum_entry",
+        execution_mode="live",
+        intended_notional_usd=10.0,
+    )
+    assert same["allowed_if_enforced"] is False
+    assert same["blocked_reason"] == "strategy_family_live_cap"
+    assert same["portfolio_exposure"]["same_hypothesis_family_live_sessions"] == 1
+
+
+def test_allocator_live_notional_cap_uses_projected_exposure(db, monkeypatch):
+    user = User(name=f"Allocator Notional User {uuid.uuid4().hex[:8]}")
+    db.add(user)
+    db.flush()
+    variant = MomentumStrategyVariant(
+        family="momentum_scalp",
+        variant_key=f"alloc_notional_{uuid.uuid4().hex[:10]}",
+        label="notional incumbent",
+        params_json={},
+    )
+    db.add(variant)
+    db.flush()
+    db.add(
+        TradingAutomationSession(
+            user_id=user.id,
+            venue="coinbase",
+            execution_family="coinbase_spot",
+            mode="live",
+            symbol="ETH-USD",
+            variant_id=int(variant.id),
+            state="live_entered",
+            risk_snapshot_json={
+                "momentum_live_execution": {"position": {"quantity": 1.0, "entry_price": 90.0}}
+            },
+        )
+    )
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_allocator.settings.brain_allocator_max_live_notional_usd",
+        100.0,
+    )
+    decision = evaluate_allocation_candidate(
+        db,
+        user_id=user.id,
+        symbol="BTC-USD",
+        timeframe="scalp",
+        asset_class="crypto",
+        hypothesis_family="breakout",
+        research_quality=0.75,
+        live_drift_contract={"composite_tier": "healthy"},
+        execution_contract={"robustness_tier": "healthy"},
+        context="momentum_entry",
+        execution_mode="live",
+        intended_notional_usd=20.0,
+    )
+    assert decision["allowed_if_enforced"] is False
+    assert decision["blocked_reason"] == "portfolio_live_notional_cap"
+    assert decision["portfolio_exposure"]["projected_live_notional_usd"] == 110.0

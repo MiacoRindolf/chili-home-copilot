@@ -228,9 +228,12 @@ def test_coinbase_stop_hit_uses_coinbase_position_and_sell(db):
     cb_positions = MagicMock(
         return_value=[{"ticker": "ADA-USD", "quantity": 3.0}]
     )
-    cb_sell = MagicMock(
-        return_value={"ok": True, "order_id": "cb-exit-1", "raw": {}}
-    )
+    cb_adapter = MagicMock()
+    cb_adapter.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "cb-exit-1",
+        "raw": {},
+    }
     rh_positions = MagicMock(
         return_value=[{"ticker": "ADA-USD", "quantity": 5.0}]
     )
@@ -243,8 +246,8 @@ def test_coinbase_stop_hit_uses_coinbase_position_and_sell(db):
         "app.services.coinbase_service.get_positions",
         cb_positions,
     ), patch(
-        "app.services.coinbase_service.place_sell_order",
-        cb_sell,
+        "app.services.trading.crypto.exit_monitor._coinbase_spot_adapter",
+        return_value=cb_adapter,
     ), patch(
         "app.services.broker_service.get_crypto_positions",
         rh_positions,
@@ -264,11 +267,12 @@ def test_coinbase_stop_hit_uses_coinbase_position_and_sell(db):
     assert t.pending_exit_reason is not None
     assert t.pending_exit_reason.startswith("stop_loss_hit")
     cb_positions.assert_called_once()
-    cb_sell.assert_called_once_with(
-        ticker=t.ticker,
-        quantity=3.0,
-        order_type="market",
+    cb_adapter.place_market_order.assert_called_once_with(
+        product_id=t.ticker,
+        side="sell",
+        base_size="3.0",
     )
+    cb_adapter.place_limit_order_gtc.assert_not_called()
     rh_positions.assert_not_called()
     rh_sell.assert_not_called()
 
@@ -284,12 +288,11 @@ def test_coinbase_stop_hit_cancels_stale_sell_hold_and_retries(db):
         broker_source="coinbase",
     )
 
-    cb_sell = MagicMock(
-        side_effect=[
-            {"ok": False, "error": "Insufficient balance in source account"},
-            {"ok": True, "order_id": "cb-exit-retry", "raw": {}},
-        ]
-    )
+    cb_adapter = MagicMock()
+    cb_adapter.place_market_order.side_effect = [
+        {"ok": False, "error": "Insufficient balance in source account"},
+        {"ok": True, "order_id": "cb-exit-retry", "raw": {}},
+    ]
     get_open_orders = MagicMock(
         return_value=[
             {
@@ -309,8 +312,8 @@ def test_coinbase_stop_hit_cancels_stale_sell_hold_and_retries(db):
         "app.services.coinbase_service.get_positions",
         return_value=[{"ticker": "ADA-USD", "quantity": 3.0}],
     ), patch(
-        "app.services.coinbase_service.place_sell_order",
-        cb_sell,
+        "app.services.trading.crypto.exit_monitor._coinbase_spot_adapter",
+        return_value=cb_adapter,
     ), patch(
         "app.services.coinbase_service.get_open_orders",
         get_open_orders,
@@ -327,9 +330,82 @@ def test_coinbase_stop_hit_cancels_stale_sell_hold_and_retries(db):
     assert out.get("closed") == 1
     db.refresh(t)
     assert t.pending_exit_order_id == "cb-exit-retry"
-    assert cb_sell.call_count == 2
+    assert cb_adapter.place_market_order.call_count == 2
     get_open_orders.assert_called_once_with(product_ids=["ADA-USD"])
     cancel_order.assert_called_once_with("cb-old-stop")
+
+
+def test_coinbase_limit_only_market_rejection_falls_back_to_marketable_limit(
+    db,
+    monkeypatch,
+):
+    """Some Coinbase products reject market orders in limit-only mode. A
+    stop-hit exit should still flatten risk by submitting a takerable SELL
+    limit, while keeping the same product-specific quantity normalization
+    path through the Coinbase spot adapter."""
+    t = _seed_open_crypto_trade(
+        db,
+        ticker="DIEM-USD",
+        name_suffix="coinbase_limit_only",
+        broker_source="coinbase",
+    )
+    monkeypatch.setattr(
+        "app.config.settings.chili_coinbase_exit_limit_fallback_buffer_pct",
+        0.02,
+        raising=False,
+    )
+
+    cb_adapter = MagicMock()
+    cb_adapter.place_market_order.return_value = {
+        "ok": False,
+        "error": "Orderbook is in limit only mode - please use limit order type",
+    }
+    cb_adapter.place_limit_order_gtc.return_value = {
+        "ok": True,
+        "order_id": "cb-limit-exit",
+        "raw": {},
+    }
+
+    with patch(
+        "app.services.trading.crypto.exit_monitor._current_crypto_price",
+        return_value=8.50,
+    ), patch(
+        "app.services.coinbase_service.get_positions",
+        return_value=[{"ticker": "DIEM-USD", "quantity": 3.0}],
+    ), patch(
+        "app.services.trading.crypto.exit_monitor._coinbase_spot_adapter",
+        return_value=cb_adapter,
+    ), patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ):
+        from app.services.trading.crypto.exit_monitor import run_crypto_exit_pass
+
+        out = run_crypto_exit_pass(db)
+
+    assert out.get("closed") == 1
+    db.refresh(t)
+    assert t.pending_exit_order_id == "cb-limit-exit"
+    cb_adapter.place_market_order.assert_called_once_with(
+        product_id="DIEM-USD",
+        side="sell",
+        base_size="3.0",
+    )
+    cb_adapter.place_limit_order_gtc.assert_called_once()
+    limit_kwargs = cb_adapter.place_limit_order_gtc.call_args.kwargs
+    assert limit_kwargs["product_id"] == "DIEM-USD"
+    assert limit_kwargs["side"] == "sell"
+    assert limit_kwargs["base_size"] == "3.0"
+    assert float(limit_kwargs["limit_price"]) == pytest.approx(8.33)
+    assert limit_kwargs["post_only"] is False
+
+
+def test_coinbase_dust_detection_uses_notional_threshold():
+    from app.services.trading.crypto.exit_monitor import _is_coinbase_unmarketable_dust
+
+    assert _is_coinbase_unmarketable_dust(0.01965443, 0.2005) is True
+    assert _is_coinbase_unmarketable_dust(100.0, 0.2005) is False
+    assert _is_coinbase_unmarketable_dust(0.01965443, None) is False
 
 
 # ---------------------------------------------------------------------------

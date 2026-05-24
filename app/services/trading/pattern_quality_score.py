@@ -244,7 +244,9 @@ def _load_directional_quality_map(db: Session) -> dict[int, dict[str, Any]]:
     rows = db.execute(text(
         "SELECT scan_pattern_id, "
         "       rolling_directional_wr, "
-        "       rolling_sample_n "
+        "       rolling_sample_n, "
+        "       packet_linked_sample_n, "
+        "       packet_lineage_coverage "
         "FROM pattern_directional_quality_v"
     )).fetchall()
     out: dict[int, dict[str, Any]] = {}
@@ -254,7 +256,14 @@ def _load_directional_quality_map(db: Session) -> dict[int, dict[str, Any]]:
             continue
         wr = float(r[1]) if r[1] is not None else None
         n = int(r[2]) if r[2] is not None else 0
-        out[pid] = {"directional_wr": wr, "rolling_sample_n": n}
+        packet_n = int(r[3]) if r[3] is not None else 0
+        coverage = float(r[4]) if r[4] is not None else None
+        out[pid] = {
+            "directional_wr": wr,
+            "rolling_sample_n": n,
+            "packet_linked_sample_n": packet_n,
+            "packet_lineage_coverage": coverage,
+        }
     return out
 
 

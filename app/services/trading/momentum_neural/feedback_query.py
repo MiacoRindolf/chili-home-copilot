@@ -55,6 +55,8 @@ def list_recent_momentum_outcomes(
 
 
 def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
+    summary = r.extracted_summary_json if isinstance(r.extracted_summary_json, dict) else {}
+    credit = summary.get("evolution_credit") if isinstance(summary.get("evolution_credit"), dict) else {}
     return {
         "id": r.id,
         "session_id": r.session_id,
@@ -69,6 +71,9 @@ def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
         "hold_seconds": r.hold_seconds,
         "exit_reason": r.exit_reason,
         "evidence_weight": r.evidence_weight,
+        "contributes_to_evolution": bool(r.contributes_to_evolution),
+        "evolution_credit": credit,
+        "evolution_credit_reason_codes": list(credit.get("reason_codes") or []),
         "terminal_at": r.terminal_at.isoformat() if r.terminal_at else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }

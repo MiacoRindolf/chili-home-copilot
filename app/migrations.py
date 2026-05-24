@@ -4718,7 +4718,7 @@ def _migration_099_execution_audit_and_allocator(conn) -> None:
                     order_id VARCHAR(128),
                     client_order_id VARCHAR(128),
                     product_id VARCHAR(64),
-                    event_type VARCHAR(32) NOT NULL,
+                    event_type VARCHAR(64) NOT NULL,
                     status VARCHAR(32),
                     requested_quantity DOUBLE PRECISION,
                     cumulative_filled_quantity DOUBLE PRECISION,
@@ -18782,6 +18782,203 @@ def _migration_265_position_identity_phase5b_linkage_statuses(conn) -> None:
     logger.info("[mig265] Phase 5B linkage statuses separated")
 
 
+def _migration_266_execution_event_type_width(conn) -> None:
+    """Allow descriptive execution-event labels used by reconciler writers."""
+    if "trading_execution_events" not in _tables(conn):
+        return
+    conn.execute(text("DROP VIEW IF EXISTS trading_execution_events_quarantine"))
+    conn.execute(text("""
+        ALTER TABLE trading_execution_events
+        ALTER COLUMN event_type TYPE VARCHAR(64)
+    """))
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_execution_events_quarantine AS
+        SELECT
+            e.id, e.trade_id, e.user_id, e.ticker, e.broker_source,
+            e.event_type, e.event_at, e.recorded_at,
+            t.status AS trade_status,
+            CASE
+                WHEN e.trade_id IS NULL THEN 'null_trade_id'
+                WHEN t.id IS NULL THEN 'orphan_trade_id'
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM trading_positions p
+                    WHERE p.user_id = t.user_id
+                      AND p.broker_source = t.broker_source
+                      AND p.ticker = t.ticker
+                ) THEN 'no_matching_position'
+                ELSE 'resolution_failed_other'
+            END AS quarantine_reason
+        FROM trading_execution_events e
+        LEFT JOIN trading_trades t ON t.id = e.trade_id
+        WHERE e.position_id IS NULL
+    """))
+    conn.commit()
+    logger.info("[mig266] widened trading_execution_events.event_type to VARCHAR(64)")
+
+
+def _migration_267_fast_path_universe_run_diagnostics(conn) -> None:
+    """Persist pass-level diagnostics for the fast-path universe rotator."""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS fast_path_universe_runs (
+            id BIGSERIAL PRIMARY KEY,
+            rotation_at TIMESTAMP NOT NULL,
+            scanned INTEGER NOT NULL DEFAULT 0,
+            snapshot_failures INTEGER NOT NULL DEFAULT 0,
+            ranked_n INTEGER NOT NULL DEFAULT 0,
+            active_n INTEGER NOT NULL DEFAULT 0,
+            shadow_n INTEGER NOT NULL DEFAULT 0,
+            inactive_n INTEGER NOT NULL DEFAULT 0,
+            range_floor_static_bps DOUBLE PRECISION NULL,
+            range_floor_dynamic_bps DOUBLE PRECISION NULL,
+            range_floor_effective_bps DOUBLE PRECISION NULL,
+            gate_rejections JSONB NOT NULL DEFAULT '{}'::jsonb,
+            edge_promotion_blocks JSONB NOT NULL DEFAULT '{}'::jsonb,
+            promotion_decay_table VARCHAR(64) NULL,
+            promotion_fee_bps DOUBLE PRECISION NULL,
+            promotion_min_samples INTEGER NULL,
+            promotion_min_net_bps DOUBLE PRECISION NULL,
+            exploration_fallback BOOLEAN NOT NULL DEFAULT FALSE,
+            counters_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_fast_path_universe_runs_rotation_at
+            ON fast_path_universe_runs (rotation_at DESC)
+    """))
+    conn.commit()
+    logger.info("[mig267] fast_path_universe_runs diagnostics table installed")
+
+
+def _migration_268_alert_decision_packet_id(conn) -> None:
+    """Link alert history rows to the canonical decision packet ledger."""
+    tables = _tables(conn)
+    if "trading_alerts" not in tables:
+        return
+    cols = _columns(conn, "trading_alerts")
+    if "decision_packet_id" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE trading_alerts "
+                "ADD COLUMN decision_packet_id BIGINT REFERENCES trading_decision_packets(id) ON DELETE SET NULL"
+            )
+        )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_alerts_decision_packet "
+            "ON trading_alerts (decision_packet_id)"
+        )
+    )
+    conn.commit()
+    logger.info("[mig268] trading_alerts.decision_packet_id installed")
+
+
+def _migration_269_pattern_directional_outcome_decision_packet_id(conn) -> None:
+    """Link evaluated alert directional outcomes to their canonical packet."""
+    tables = _tables(conn)
+    if "pattern_alert_directional_outcome" not in tables:
+        return
+    cols = _columns(conn, "pattern_alert_directional_outcome")
+    if "decision_packet_id" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE pattern_alert_directional_outcome "
+                "ADD COLUMN decision_packet_id BIGINT REFERENCES trading_decision_packets(id) ON DELETE SET NULL"
+            )
+        )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_padc_decision_packet "
+            "ON pattern_alert_directional_outcome (decision_packet_id)"
+        )
+    )
+    if "trading_alerts" in tables and "decision_packet_id" in _columns(conn, "trading_alerts"):
+        conn.execute(
+            text(
+                """
+                UPDATE pattern_alert_directional_outcome p
+                SET decision_packet_id = a.decision_packet_id
+                FROM trading_alerts a
+                WHERE p.alert_id = a.id
+                  AND p.decision_packet_id IS NULL
+                  AND a.decision_packet_id IS NOT NULL
+                """
+            )
+        )
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW pattern_directional_quality_v AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*) AS rolling_sample_n,
+            SUM(CASE WHEN directional_correct IS TRUE THEN 1 ELSE 0 END)::numeric
+              / NULLIF(COUNT(*), 0) AS rolling_directional_wr,
+            MAX(alert_at) AS last_alert_at,
+            MAX(evaluated_at) AS last_evaluated_at,
+            COUNT(*) FILTER (WHERE decision_packet_id IS NOT NULL) AS packet_linked_sample_n,
+            COUNT(*) FILTER (WHERE decision_packet_id IS NOT NULL)::numeric
+              / NULLIF(COUNT(*), 0) AS packet_lineage_coverage
+        FROM (
+            SELECT
+                scan_pattern_id,
+                decision_packet_id,
+                directional_correct,
+                alert_at,
+                evaluated_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY scan_pattern_id
+                    ORDER BY alert_at DESC
+                ) AS rn
+            FROM pattern_alert_directional_outcome
+            WHERE directional_correct IS NOT NULL
+        ) ranked
+        WHERE rn <= 30
+        GROUP BY scan_pattern_id
+    """))
+    conn.commit()
+    logger.info("[mig269] pattern_alert_directional_outcome.decision_packet_id installed")
+
+
+def _migration_270_pattern_directional_quality_packet_lineage_view(conn) -> None:
+    """Expose packet-lineage coverage on the directional quality view."""
+    tables = _tables(conn)
+    if "pattern_alert_directional_outcome" not in tables:
+        return
+    cols = _columns(conn, "pattern_alert_directional_outcome")
+    if "decision_packet_id" not in cols:
+        return
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW pattern_directional_quality_v AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*) AS rolling_sample_n,
+            SUM(CASE WHEN directional_correct IS TRUE THEN 1 ELSE 0 END)::numeric
+              / NULLIF(COUNT(*), 0) AS rolling_directional_wr,
+            MAX(alert_at) AS last_alert_at,
+            MAX(evaluated_at) AS last_evaluated_at,
+            COUNT(*) FILTER (WHERE decision_packet_id IS NOT NULL) AS packet_linked_sample_n,
+            COUNT(*) FILTER (WHERE decision_packet_id IS NOT NULL)::numeric
+              / NULLIF(COUNT(*), 0) AS packet_lineage_coverage
+        FROM (
+            SELECT
+                scan_pattern_id,
+                decision_packet_id,
+                directional_correct,
+                alert_at,
+                evaluated_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY scan_pattern_id
+                    ORDER BY alert_at DESC
+                ) AS rn
+            FROM pattern_alert_directional_outcome
+            WHERE directional_correct IS NOT NULL
+        ) ranked
+        WHERE rn <= 30
+        GROUP BY scan_pattern_id
+    """))
+    conn.commit()
+    logger.info("[mig270] pattern_directional_quality_v packet lineage columns installed")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19094,6 +19291,16 @@ MIGRATIONS = [
      _migration_264_position_identity_phase5b_read_models),
     ("265_position_identity_phase5b_linkage_statuses",
      _migration_265_position_identity_phase5b_linkage_statuses),
+    ("266_execution_event_type_width",
+     _migration_266_execution_event_type_width),
+    ("267_fast_path_universe_run_diagnostics",
+     _migration_267_fast_path_universe_run_diagnostics),
+    ("268_alert_decision_packet_id",
+     _migration_268_alert_decision_packet_id),
+    ("269_pattern_directional_outcome_decision_packet_id",
+     _migration_269_pattern_directional_outcome_decision_packet_id),
+    ("270_pattern_directional_quality_packet_lineage_view",
+     _migration_270_pattern_directional_quality_packet_lineage_view),
 ]
 
 

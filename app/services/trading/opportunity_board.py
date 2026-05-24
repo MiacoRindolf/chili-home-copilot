@@ -11,6 +11,7 @@ from sqlalchemy import desc
 
 from ...config import settings
 from ...models.trading import PrescreenCandidate, ScanResult
+from .decision_ledger import attach_shadow_signal_packets
 from .learning import get_current_predictions
 from .market_data import is_crypto
 from .opportunity_scoring import scan_pattern_eligible_main_imminent
@@ -32,6 +33,284 @@ OPPORTUNITY_ENGINE_PREDICTION = "prediction_context"
 OPPORTUNITY_ENGINE_SCANNER = "scanner_context"
 OPPORTUNITY_ENGINE_UNIVERSE = "universe_context"
 OPPORTUNITY_ENGINE_PATTERN_RESEARCH = "pattern_research"
+
+
+def _safe_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _risk_level(score: float, *, good: bool = False) -> str:
+    score = max(0.0, min(1.0, float(score)))
+    if good:
+        if score >= 0.72:
+            return "strong"
+        if score >= 0.48:
+            return "partial"
+        return "weak"
+    if score >= 0.72:
+        return "high"
+    if score >= 0.38:
+        return "medium"
+    return "low"
+
+
+def _price_level_geometry(candidate: dict[str, Any]) -> dict[str, float | None]:
+    entry = _safe_float(candidate.get("entry") or candidate.get("price"))
+    stop = _safe_float(candidate.get("stop"))
+    target = _safe_float(candidate.get("target"))
+    if not entry or entry <= 0:
+        return {"entry": entry, "stop": stop, "target": target, "risk_bps": None, "reward_bps": None, "rr": None}
+    risk_bps = abs(entry - stop) / entry * 10_000.0 if stop and stop > 0 else None
+    reward_bps = abs(target - entry) / entry * 10_000.0 if target and target > 0 else None
+    rr = (reward_bps / risk_bps) if risk_bps and reward_bps else None
+    return {
+        "entry": entry,
+        "stop": stop,
+        "target": target,
+        "risk_bps": risk_bps,
+        "reward_bps": reward_bps,
+        "rr": rr,
+    }
+
+
+def _extension_risk(candidate: dict[str, Any]) -> dict[str, Any]:
+    breakdown = candidate.get("score_breakdown") if isinstance(candidate.get("score_breakdown"), dict) else {}
+    penalty = _safe_float(breakdown.get("overextension_penalty"), 0.0) or 0.0
+    score = max(0.0, min(1.0, penalty / 0.12 if penalty else 0.0))
+    return {
+        "level": _risk_level(score),
+        "score": round(score, 4),
+        "overextension_penalty": round(penalty, 4),
+        "reason": (
+            "RSI/extension penalty is priced into the setup score."
+            if penalty
+            else "No overextension penalty detected."
+        ),
+    }
+
+
+def _execution_risk(candidate: dict[str, Any], extension: dict[str, Any]) -> dict[str, Any]:
+    geom = _price_level_geometry(candidate)
+    rr = geom["rr"]
+    missing_levels = geom["entry"] is None or geom["stop"] is None or geom["target"] is None
+    score = 0.18
+    reasons: list[str] = []
+    if missing_levels:
+        score += 0.32
+        reasons.append("entry/stop/target incomplete")
+    if rr is not None and rr < 1.25:
+        score += 0.22
+        reasons.append("thin reward-to-risk")
+    risk_bps = geom["risk_bps"]
+    if risk_bps is not None:
+        if risk_bps < 35:
+            score += 0.2
+            reasons.append("tight stop vulnerable to spread/slippage")
+        elif risk_bps > 900:
+            score += 0.1
+            reasons.append("wide stop increases capital at risk")
+    score += 0.18 * float(extension.get("score") or 0.0)
+    if candidate.get("asset_class") == "crypto":
+        score += 0.04
+    score = max(0.0, min(1.0, score))
+    expected_slippage = 4.0 + score * (12.0 if candidate.get("asset_class") == "crypto" else 8.0)
+    return {
+        "level": _risk_level(score),
+        "score": round(score, 4),
+        "expected_slippage_bps": round(expected_slippage, 4),
+        "expected_fill_probability": round(max(0.35, min(0.98, 0.94 - score * 0.45)), 4),
+        "risk_bps": round(risk_bps, 4) if risk_bps is not None else None,
+        "reward_bps": round(geom["reward_bps"], 4) if geom["reward_bps"] is not None else None,
+        "reward_risk": round(rr, 4) if rr is not None else None,
+        "reasons": reasons or ["levels and extension look executable"],
+    }
+
+
+def _structural_confirmation(candidate: dict[str, Any]) -> dict[str, Any]:
+    coverage = _safe_float(candidate.get("feature_coverage"), 0.0) or 0.0
+    readiness = _safe_float(candidate.get("readiness"), 0.0) or 0.0
+    comp = _safe_float(candidate.get("composite"), 0.0) or 0.0
+    source_strength = str(candidate.get("source_strength") or "").lower()
+    score = 0.35 * coverage + 0.35 * readiness + 0.2 * comp
+    if "pattern_imminent" in (candidate.get("sources") or []):
+        score += 0.08
+    if source_strength == "strong":
+        score += 0.05
+    if candidate.get("prediction_support"):
+        score += 0.03
+    score = max(0.0, min(1.0, score))
+    return {
+        "level": _risk_level(score, good=True),
+        "score": round(score, 4),
+        "feature_coverage": round(coverage, 4) if candidate.get("feature_coverage") is not None else None,
+        "readiness": round(readiness, 4) if candidate.get("readiness") is not None else None,
+        "confirmation_sources": candidate.get("sources") or [],
+    }
+
+
+def _liquidity_quality(candidate: dict[str, Any]) -> dict[str, Any]:
+    sources = candidate.get("sources") or []
+    strength = str(candidate.get("source_strength") or "").lower()
+    score = 0.55
+    if candidate.get("asset_class") == "crypto":
+        score += 0.08
+    if "prescreener" in sources:
+        score += 0.1
+    if "scanner" in sources:
+        score += 0.04
+    if strength == "strong":
+        score += 0.08
+    elif strength == "weak":
+        score -= 0.12
+    if candidate.get("price") is None and candidate.get("entry") is None:
+        score -= 0.14
+    score = max(0.0, min(1.0, score))
+    return {
+        "level": _risk_level(score, good=True),
+        "score": round(score, 4),
+        "proxy": "source/freshness/level completeness",
+        "note": "Proxy until venue-order-book liquidity is attached to board rows.",
+    }
+
+
+def _net_edge_estimate(
+    candidate: dict[str, Any],
+    execution: dict[str, Any],
+    extension: dict[str, Any],
+) -> dict[str, Any]:
+    geom = _price_level_geometry(candidate)
+    entry = geom["entry"]
+    stop = geom["stop"]
+    target = geom["target"]
+    if not entry or not stop or not target or entry <= 0:
+        return {
+            "available": False,
+            "expected_net_edge": None,
+            "reason": "entry/stop/target required",
+            "capital_lane": "shadow_only",
+        }
+    if target <= entry or stop >= entry:
+        return {
+            "available": False,
+            "expected_net_edge": None,
+            "reason": "long-side payoff geometry invalid",
+            "capital_lane": "shadow_only",
+        }
+    prob = max(0.05, min(0.95, _safe_float(candidate.get("repeatability_confidence"), 0.35) or 0.35))
+    payoff = (target - entry) / entry
+    loss = (entry - stop) / entry
+    costs = (
+        (_safe_float(execution.get("expected_slippage_bps"), 0.0) or 0.0) / 10_000.0
+        + (0.003 if candidate.get("asset_class") == "crypto" else 0.0005)
+        + 0.0005 * float(extension.get("score") or 0.0)
+    )
+    edge = prob * payoff - (1.0 - prob) * loss - costs
+    return {
+        "available": True,
+        "expected_net_edge": round(edge, 6),
+        "probability_proxy": round(prob, 4),
+        "payoff_fraction": round(payoff, 6),
+        "loss_fraction": round(loss, 6),
+        "cost_fraction": round(costs, 6),
+        "capital_lane": "shadow_only",
+    }
+
+
+def _board_data_quality_gate(
+    *,
+    data_as_of: str | None,
+    age_sec: float | None,
+    stale_threshold_seconds: int,
+    freshness_unknown: bool,
+    is_stale: bool,
+    board_truncated: bool,
+    data_as_of_min_keys: list[str],
+    source_freshness: dict[str, Any],
+) -> dict[str, Any]:
+    reasons: list[dict[str, Any]] = []
+    hard_block_reason_code: str | None = None
+    if freshness_unknown:
+        hard_block_reason_code = "board_freshness_unknown"
+        reasons.append(
+            {
+                "code": hard_block_reason_code,
+                "severity": "block",
+                "message": "Board data_as_of could not be established from source timestamps.",
+            }
+        )
+    elif is_stale:
+        hard_block_reason_code = "board_data_stale"
+        reasons.append(
+            {
+                "code": hard_block_reason_code,
+                "severity": "block",
+                "message": "Board data_as_of is older than the configured freshness threshold.",
+            }
+        )
+    if board_truncated:
+        reasons.append(
+            {
+                "code": "board_candidate_pool_truncated",
+                "severity": "warn",
+                "message": "Candidate scoring hit the per-request evaluation budget.",
+            }
+        )
+
+    capital_lane_eligible = hard_block_reason_code is None
+    status = "pass" if capital_lane_eligible and not board_truncated else "warn"
+    if hard_block_reason_code:
+        status = "block"
+
+    missing_keys = sorted(k for k, v in (source_freshness or {}).items() if not v)
+    return {
+        "gate": "opportunity_board_data_quality",
+        "status": status,
+        "capital_lane_eligible": capital_lane_eligible,
+        "learning_lane_enabled": True,
+        "hard_block_reason_code": hard_block_reason_code,
+        "data_as_of": data_as_of,
+        "data_as_of_min_keys": data_as_of_min_keys,
+        "age_seconds": round(age_sec, 3) if age_sec is not None else None,
+        "stale_threshold_seconds": int(stale_threshold_seconds),
+        "freshness_unknown": bool(freshness_unknown),
+        "is_stale": bool(is_stale),
+        "board_truncated": bool(board_truncated),
+        "missing_source_keys": missing_keys,
+        "reasons": reasons,
+    }
+
+
+def _apply_board_data_quality_gate(candidates: list[dict[str, Any]], gate: dict[str, Any]) -> None:
+    candidate_gate = dict(gate or {})
+    capital_ok = bool(candidate_gate.get("capital_lane_eligible"))
+    hard_reason = candidate_gate.get("hard_block_reason_code")
+    for it in candidates:
+        it["data_quality_gate"] = dict(candidate_gate)
+        it["learning_lane"] = {
+            "enabled": True,
+            "records_decision_packet": True,
+            "reason": "Record the observation even when it is not capital-approved.",
+        }
+        it["capital_lane"] = {
+            "board_data_quality_passed": capital_ok,
+            "requires_runner_decision_packet": True,
+            "approved_for_direct_execution": False,
+            "hard_block_reason_code": hard_reason,
+        }
+        ne = it.get("net_edge_estimate")
+        if isinstance(ne, dict):
+            ne["data_quality_status"] = candidate_gate.get("status")
+            if capital_ok:
+                if ne.get("capital_lane") == "shadow_only":
+                    ne["capital_lane"] = "requires_runner_decision_packet"
+            else:
+                ne["capital_lane"] = "blocked_data_quality"
+                ne["data_quality_reason_code"] = hard_reason
 
 
 def _annotate_desk_fields(candidates: list[dict[str, Any]]) -> None:
@@ -79,10 +358,45 @@ def _annotate_desk_fields(candidates: list[dict[str, Any]]) -> None:
         else:
             it["repeatability_confidence"] = 0.35
             it["primary_scoring_plane"] = "auxiliary_context"
-        it["extension_risk"] = None
-        it["execution_risk"] = None
-        it["structural_confirmation"] = None
-        it["liquidity_quality"] = None
+        extension = _extension_risk(it)
+        execution = _execution_risk(it, extension)
+        it["extension_risk"] = extension
+        it["execution_risk"] = execution
+        it["structural_confirmation"] = _structural_confirmation(it)
+        it["liquidity_quality"] = _liquidity_quality(it)
+        it["net_edge_estimate"] = _net_edge_estimate(it, execution, extension)
+
+
+def _attach_board_decision_packets(
+    db: Session,
+    *,
+    user_id: int | None,
+    generated_at: datetime,
+    data_as_of: str | None,
+    tiers: list[list[dict[str, Any]]],
+) -> dict[str, int]:
+    if not isinstance(db, Session):
+        return {"created": 0, "reused": 0}
+    candidates = [item for tier in tiers for item in tier]
+    if not candidates:
+        return {"created": 0, "reused": 0}
+    try:
+        return attach_shadow_signal_packets(
+            db,
+            user_id=user_id,
+            candidates=candidates,
+            source_surface="opportunity_board",
+            generated_at=generated_at,
+            data_as_of=data_as_of,
+            ttl_seconds=int(getattr(settings, "opportunity_board_stale_seconds", 180)),
+        )
+    except Exception as exc:
+        logger.warning("[opportunity_board] decision packet attach failed: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"created": 0, "reused": 0}
 
 
 def _prediction_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -654,6 +968,17 @@ def get_trading_opportunity_board(
         age_sec = None
         is_stale = True
 
+    data_quality_gate = _board_data_quality_gate(
+        data_as_of=data_as_of,
+        age_sec=age_sec,
+        stale_threshold_seconds=stale_sec,
+        freshness_unknown=freshness_unknown,
+        is_stale=is_stale,
+        board_truncated=bool(meta.get("board_eval_budget_hit")),
+        data_as_of_min_keys=data_as_of_min_keys,
+        source_freshness=source_freshness,
+    )
+
     op_sum = {
         "actionable_count": len(tier_a),
         "watch_soon_count": len(tier_b),
@@ -662,12 +987,25 @@ def get_trading_opportunity_board(
         "last_refresh_utc": iso,
         "session_line": sess.get("label", "") + " · " + crypto_ctx.get("label", ""),
         "data_freshness_unknown": freshness_unknown,
+        "data_quality_status": data_quality_gate.get("status"),
+        "capital_lane_eligible": data_quality_gate.get("capital_lane_eligible"),
     }
 
     _annotate_desk_fields(tier_a)
     _annotate_desk_fields(tier_b)
     _annotate_desk_fields(tier_c)
     _annotate_desk_fields(tier_d)
+    _apply_board_data_quality_gate(tier_a, data_quality_gate)
+    _apply_board_data_quality_gate(tier_b, data_quality_gate)
+    _apply_board_data_quality_gate(tier_c, data_quality_gate)
+    _apply_board_data_quality_gate(tier_d, data_quality_gate)
+    decision_packet_stats = _attach_board_decision_packets(
+        db,
+        user_id=user_id,
+        generated_at=generated_at,
+        data_as_of=data_as_of,
+        tiers=[tier_a, tier_b, tier_c, tier_d],
+    )
 
     speculative_envelope: dict[str, Any]
     try:
@@ -699,6 +1037,7 @@ def get_trading_opportunity_board(
         "is_stale": is_stale,
         "stale_threshold_seconds": stale_sec,
         "freshness_degraded": freshness_unknown,
+        "data_quality_gate": data_quality_gate,
         # True when board gather hit per-request score/universe caps (not an error; UI should say "sampled").
         "board_truncated": bool(meta.get("board_eval_budget_hit")),
         "session_context": {**sess, "crypto_context": crypto_ctx},
@@ -720,6 +1059,7 @@ def get_trading_opportunity_board(
         },
         "has_more": {"A": more_a, "B": more_b, "C": more_c},
         "applied_tier_caps": {"A": max_a, "B": max_b, "C": max_c, "D": max_d},
+        "decision_packet_stats": decision_packet_stats,
         "source_stats": meta.get("universe_by_source", {}),
         # Isolated plane for explosive / speculative movers (not merged into tier scoring).
         "speculative_movers": speculative_envelope,

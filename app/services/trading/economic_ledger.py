@@ -37,16 +37,18 @@ from ...models.trading import EconomicLedgerEvent, LedgerParityLog
 from ...trading_brain.infrastructure.ledger_ops_log import (
     EVENT_ENTRY_FILL,
     EVENT_EXIT_FILL,
+    EVENT_PARTIAL_FILL,
     EVENT_RECONCILE,
     MODE_AUTHORITATIVE,
     MODE_OFF,
+    SOURCE_AUTOMATION,
     format_ledger_ops_line,
 )
 
 logger = logging.getLogger(__name__)
 
 _VALID_MODES = {"off", "shadow", "compare", "authoritative"}
-_VALID_SOURCES = {"paper", "live", "broker_sync"}
+_VALID_SOURCES = {"paper", "live", "broker_sync", SOURCE_AUTOMATION}
 _VALID_DIRECTIONS = {"long", "short"}
 
 
@@ -82,6 +84,25 @@ def _trade_ref(source: str, trade_id: int | None, paper_trade_id: int | None) ->
     if trade_id is not None:
         return f"{source}:{int(trade_id)}"
     return f"{source}:none"
+
+
+def _automation_trade_id(session_id: int) -> int:
+    """Use negative ids so automation-session ledger rows never collide with Trade ids."""
+    return -abs(int(session_id))
+
+
+def automation_trade_id(session_id: int) -> int:
+    """Public stable trade id for automation-session ledger/parity rows."""
+    return _automation_trade_id(session_id)
+
+
+def _safe_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _existing_event(
@@ -461,6 +482,208 @@ def reconcile_trade(
     return row
 
 
+def record_automation_session_entry_fill(
+    db: Session,
+    *,
+    session_id: int,
+    user_id: int | None = None,
+    scan_pattern_id: int | None = None,
+    ticker: str,
+    quantity: float,
+    fill_price: float,
+    fee: float = 0.0,
+    venue: str | None = None,
+    event_ts: datetime | None = None,
+    mode: str = "paper",
+    decision_packet_id: int | None = None,
+    provenance: dict[str, Any] | None = None,
+) -> EconomicLedgerEvent | None:
+    """Record a momentum automation entry fill keyed by automation session."""
+    prov = dict(provenance or {})
+    prov["automation_session_id"] = int(session_id)
+    if decision_packet_id is not None:
+        prov["decision_packet_id"] = int(decision_packet_id)
+    return record_entry_fill(
+        db,
+        source=SOURCE_AUTOMATION,
+        trade_id=_automation_trade_id(session_id),
+        user_id=user_id,
+        scan_pattern_id=scan_pattern_id,
+        ticker=ticker,
+        direction="long",
+        quantity=quantity,
+        fill_price=fill_price,
+        fee=fee,
+        venue=venue,
+        broker_source="momentum_automation",
+        event_ts=event_ts,
+        mode=mode,
+        provenance=prov,
+    )
+
+
+def record_automation_session_exit_fill(
+    db: Session,
+    *,
+    session_id: int,
+    user_id: int | None = None,
+    scan_pattern_id: int | None = None,
+    ticker: str,
+    quantity: float,
+    fill_price: float,
+    entry_price: float,
+    fee: float = 0.0,
+    venue: str | None = None,
+    event_ts: datetime | None = None,
+    mode: str = "paper",
+    decision_packet_id: int | None = None,
+    realized_pnl_usd: float | None = None,
+    provenance: dict[str, Any] | None = None,
+) -> EconomicLedgerEvent | None:
+    """Record a terminal momentum automation exit fill keyed by automation session."""
+    qty = _safe_float(quantity)
+    fill = _safe_float(fill_price)
+    entry = _safe_float(entry_price)
+    fee_v = _safe_float(fee, 0.0) or 0.0
+    pnl_v = _safe_float(realized_pnl_usd)
+    if pnl_v is not None and qty and fill is not None and entry is not None:
+        # The runner's realized PnL is the learning target. Back-solve the
+        # fee field so ledger realized_pnl_delta matches that target exactly.
+        fee_v = max(0.0, qty * (fill - entry) - pnl_v)
+    prov = dict(provenance or {})
+    prov["automation_session_id"] = int(session_id)
+    if decision_packet_id is not None:
+        prov["decision_packet_id"] = int(decision_packet_id)
+    if realized_pnl_usd is not None:
+        prov["runner_realized_pnl_usd"] = float(realized_pnl_usd)
+    return record_exit_fill(
+        db,
+        source=SOURCE_AUTOMATION,
+        trade_id=_automation_trade_id(session_id),
+        user_id=user_id,
+        scan_pattern_id=scan_pattern_id,
+        ticker=ticker,
+        direction="long",
+        quantity=quantity,
+        fill_price=fill_price,
+        entry_price=entry_price,
+        fee=fee_v,
+        venue=venue,
+        broker_source="momentum_automation",
+        event_ts=event_ts,
+        mode=mode,
+        provenance=prov,
+    )
+
+
+def record_automation_session_partial_exit_fill(
+    db: Session,
+    *,
+    session_id: int,
+    user_id: int | None = None,
+    scan_pattern_id: int | None = None,
+    ticker: str,
+    quantity: float,
+    fill_price: float,
+    entry_price: float,
+    fee: float = 0.0,
+    venue: str | None = None,
+    event_ts: datetime | None = None,
+    mode: str = "paper",
+    decision_packet_id: int | None = None,
+    realized_pnl_usd: float | None = None,
+    provenance: dict[str, Any] | None = None,
+) -> EconomicLedgerEvent | None:
+    """Record a non-terminal momentum partial exit.
+
+    This intentionally uses ``partial_fill`` rather than ``exit_fill`` so the
+    terminal full-exit row remains idempotent per automation session.
+    """
+    eff_mode = (mode or _current_mode()).strip().lower()
+    if eff_mode == MODE_OFF:
+        return None
+    qty = _safe_float(quantity)
+    fill = _safe_float(fill_price)
+    entry = _safe_float(entry_price)
+    if qty is None or fill is None or entry is None or qty <= 0 or fill <= 0 or entry <= 0:
+        return None
+    fee_v = _safe_float(fee, 0.0) or 0.0
+    pnl_v = _safe_float(realized_pnl_usd)
+    if pnl_v is not None:
+        fee_v = max(0.0, qty * (fill - entry) - pnl_v)
+    cash_delta = qty * fill - fee_v
+    realized = pnl_v if pnl_v is not None else qty * (fill - entry) - fee_v
+    prov = dict(provenance or {})
+    prov["automation_session_id"] = int(session_id)
+    if decision_packet_id is not None:
+        prov["decision_packet_id"] = int(decision_packet_id)
+    if realized_pnl_usd is not None:
+        prov["runner_realized_pnl_usd"] = float(realized_pnl_usd)
+
+    row = EconomicLedgerEvent(
+        source=SOURCE_AUTOMATION,
+        trade_id=_automation_trade_id(session_id),
+        paper_trade_id=None,
+        user_id=int(user_id) if user_id is not None else None,
+        scan_pattern_id=int(scan_pattern_id) if scan_pattern_id is not None else None,
+        ticker=str(ticker).upper()[:32],
+        event_type=EVENT_PARTIAL_FILL,
+        direction="long",
+        quantity=qty,
+        price=fill,
+        fee=fee_v,
+        cash_delta=round(cash_delta, 6),
+        realized_pnl_delta=round(realized, 6),
+        position_qty_after=None,
+        position_cost_basis_after=entry,
+        venue=(venue or None),
+        broker_source="momentum_automation",
+        event_ts=event_ts,
+        mode=eff_mode,
+        provenance_json=prov,
+    )
+    db.add(row)
+    db.flush()
+    _emit_ops(
+        mode=eff_mode,
+        source=SOURCE_AUTOMATION,
+        event_type=EVENT_PARTIAL_FILL,
+        trade_ref=_trade_ref(SOURCE_AUTOMATION, _automation_trade_id(session_id), None),
+        ticker=str(ticker),
+        quantity=qty,
+        price=fill,
+        cash_delta=cash_delta,
+        realized_pnl_delta=realized,
+    )
+    return row
+
+
+def reconcile_automation_session(
+    db: Session,
+    *,
+    session_id: int,
+    user_id: int | None = None,
+    scan_pattern_id: int | None = None,
+    ticker: str,
+    legacy_pnl: float | None,
+    mode: str = "paper",
+    provenance: dict[str, Any] | None = None,
+) -> LedgerParityLog | None:
+    prov = dict(provenance or {})
+    prov["automation_session_id"] = int(session_id)
+    return reconcile_trade(
+        db,
+        source=SOURCE_AUTOMATION,
+        trade_id=_automation_trade_id(session_id),
+        user_id=user_id,
+        scan_pattern_id=scan_pattern_id,
+        ticker=ticker,
+        legacy_pnl=legacy_pnl,
+        mode=mode,
+        provenance=prov,
+    )
+
+
 def ledger_summary(
     db: Session, *, lookback_hours: int = 24, source_filter: str | None = None
 ) -> dict[str, Any]:
@@ -489,6 +712,21 @@ def ledger_summary(
         .all()
     )
     events_by_source = {str(s): int(n) for s, n in source_rows}
+
+    fill_events_q = eq.filter(
+        EconomicLedgerEvent.event_type.in_(
+            [EVENT_ENTRY_FILL, EVENT_EXIT_FILL, EVENT_PARTIAL_FILL]
+        )
+    )
+    fill_events_total = fill_events_q.count()
+    fill_events_with_packet = fill_events_q.filter(
+        EconomicLedgerEvent.provenance_json.op("?")("decision_packet_id")
+    ).count()
+    packet_lineage_rate = (
+        fill_events_with_packet / fill_events_total
+        if fill_events_total
+        else None
+    )
 
     parity_total = pq.count()
     parity_agree = pq.filter(LedgerParityLog.agree_bool.is_(True)).count()
@@ -529,6 +767,9 @@ def ledger_summary(
         "events_total": int(events_total),
         "events_by_type": events_by_type,
         "events_by_source": events_by_source,
+        "fill_events_total": int(fill_events_total),
+        "fill_events_with_decision_packet": int(fill_events_with_packet),
+        "fill_event_packet_lineage_rate": packet_lineage_rate,
         "parity_total": int(parity_total),
         "parity_agree": int(parity_agree),
         "parity_disagree": int(parity_total - parity_agree),
@@ -540,9 +781,14 @@ def ledger_summary(
 
 
 __all__ = [
+    "automation_trade_id",
     "mode_is_active",
     "record_entry_fill",
     "record_exit_fill",
+    "record_automation_session_entry_fill",
+    "record_automation_session_exit_fill",
+    "record_automation_session_partial_exit_fill",
+    "reconcile_automation_session",
     "reconcile_trade",
     "ledger_summary",
 ]

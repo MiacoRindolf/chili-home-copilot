@@ -24,6 +24,7 @@ MODE_AUTHORITATIVE = "authoritative"
 SOURCE_PAPER = "paper"
 SOURCE_LIVE = "live"
 SOURCE_BROKER_SYNC = "broker_sync"
+SOURCE_AUTOMATION = "automation"
 
 EVENT_ENTRY_FILL = "entry_fill"
 EVENT_EXIT_FILL = "exit_fill"

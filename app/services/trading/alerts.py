@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from .alert_formatter import (
     format_breakout,
     format_legacy_stop_hit,
@@ -378,6 +379,16 @@ def _expire_proposals_on_stop(
         for p in proposals:
             p.status = "expired"
             p.thesis = (p.thesis or "") + " [Auto-expired: stop-loss hit]"
+            _record_proposal_terminal_decision(
+                db,
+                p,
+                user_id,
+                outcome_status="expired",
+                reason_code="proposal_stop_hit",
+                reason_text=f"Stop-loss hit for {ticker}",
+                surface="proposal_stop_expiry",
+                payload={"ticker": ticker},
+            )
         if proposals:
             db.commit()
             logger.info(
@@ -385,6 +396,134 @@ def _expire_proposals_on_stop(
             )
     except Exception as e:
         logger.warning(f"[alerts] Failed to expire proposals for {ticker}: {e}")
+
+
+def _alert_decision_packet_surface(alert_type: str) -> str:
+    clean = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(alert_type or "alert").lower())
+    return f"alert_{clean}"[:32]
+
+
+def _record_alert_shadow_decision_packet(
+    db: Session,
+    *,
+    user_id: int | None,
+    alert_type: str,
+    ticker: str | None,
+    message: str,
+    scan_pattern_id: int | None,
+    confidence: float,
+    price: float | None,
+    trade_type: str | None,
+    duration_estimate: str | None,
+) -> int | None:
+    """Attach a shadow decision packet to alert-only surfaces without approving capital."""
+    if not ticker or not bool(getattr(settings, "brain_enable_decision_ledger", True)):
+        return None
+    if not bool(getattr(settings, "brain_alert_decision_packets_enabled", True)):
+        return None
+    try:
+        packet_user_id = None
+        if user_id is not None:
+            try:
+                from ...models import User
+
+                with db.no_autoflush:
+                    packet_user_id = int(user_id) if db.get(User, int(user_id)) is not None else None
+            except Exception:
+                packet_user_id = None
+        packet_scan_pattern_id = None
+        if scan_pattern_id is not None:
+            try:
+                from ...models.trading import ScanPattern
+
+                with db.no_autoflush:
+                    packet_scan_pattern_id = (
+                        int(scan_pattern_id) if db.get(ScanPattern, int(scan_pattern_id)) is not None else None
+                    )
+            except Exception:
+                packet_scan_pattern_id = None
+        from .decision_ledger import attach_shadow_signal_packets
+
+        candidate: dict[str, Any] = {
+            "ticker": str(ticker).upper(),
+            "scan_pattern_id": packet_scan_pattern_id,
+            "core_edge_score": float(confidence or 0.0),
+            "tier": classify_alert_tier(alert_type, scan_pattern_id, confidence),
+            "sources": ["alert_dispatch"],
+            "source_strength": {"alert_type": alert_type},
+            "price": price,
+            "entry": price,
+            "data_quality_gate": {"capital_lane_eligible": True, "source": "alert_dispatch"},
+            "capital_lane": {"requested": False, "surface": "alert_dispatch"},
+            "alert_context": {
+                "alert_type": alert_type,
+                "trade_type": trade_type,
+                "duration_estimate": duration_estimate,
+                "message_preview": (message or "")[:240],
+            },
+        }
+        with db.begin_nested():
+            attach_shadow_signal_packets(
+                db,
+                user_id=packet_user_id,
+                candidates=[candidate],
+                source_surface=_alert_decision_packet_surface(alert_type),
+                generated_at=datetime.utcnow(),
+                data_as_of=datetime.utcnow().isoformat() + "Z",
+                ttl_seconds=300,
+                commit=False,
+                require_board_setting=False,
+            )
+        packet_id = candidate.get("decision_packet_id")
+        return int(packet_id) if packet_id is not None else None
+    except Exception:
+        logger.debug(
+            "[alerts] alert shadow decision packet failed type=%s ticker=%s",
+            alert_type,
+            ticker,
+            exc_info=True,
+        )
+        return None
+
+
+def _existing_scan_pattern_id_for_alert(db: Session, scan_pattern_id: int | None) -> int | None:
+    if scan_pattern_id is None:
+        return None
+    try:
+        from ...models.trading import ScanPattern
+
+        with db.no_autoflush:
+            return int(scan_pattern_id) if db.get(ScanPattern, int(scan_pattern_id)) is not None else None
+    except Exception:
+        return None
+
+
+def _existing_user_id_for_alert(db: Session, user_id: int | None) -> int | None:
+    if user_id is None:
+        return None
+    try:
+        from ...models import User
+
+        with db.no_autoflush:
+            return int(user_id) if db.get(User, int(user_id)) is not None else None
+    except Exception:
+        return None
+
+
+def _existing_decision_packet_id_for_alert(db: Session, decision_packet_id: int | None) -> int | None:
+    if decision_packet_id is None:
+        return None
+    try:
+        from ...models.trading import TradingDecisionPacket
+
+        with db.no_autoflush:
+            return (
+                int(decision_packet_id)
+                if db.get(TradingDecisionPacket, int(decision_packet_id)) is not None
+                else None
+            )
+    except Exception:
+        return None
 
 
 def dispatch_alert(
@@ -401,6 +540,7 @@ def dispatch_alert(
     confidence: float = 0.0,
     skip_throttle: bool = False,
     content_signature: str | None = None,
+    decision_packet_id: int | None = None,
 ) -> bool:
     """Log an alert to the DB and optionally send via SMS.
 
@@ -472,15 +612,34 @@ def dispatch_alert(
 
         _record_alert_sent(alert_type, ticker)
 
+        linked_packet_id = decision_packet_id
+        if linked_packet_id is None:
+            linked_packet_id = _record_alert_shadow_decision_packet(
+                db,
+                user_id=user_id,
+                alert_type=alert_type,
+                ticker=ticker,
+                message=message,
+                scan_pattern_id=scan_pattern_id,
+                confidence=confidence,
+                price=price,
+                trade_type=trade_type,
+                duration_estimate=duration_estimate,
+            )
+        linked_packet_id = _existing_decision_packet_id_for_alert(db, linked_packet_id)
+
         from ...models.trading import AlertHistory, AlertDeliveryAttempt
+        history_user_id = _existing_user_id_for_alert(db, user_id)
+        history_scan_pattern_id = _existing_scan_pattern_id_for_alert(db, scan_pattern_id)
         record = AlertHistory(
-            user_id=user_id,
+            user_id=history_user_id,
             alert_type=alert_type,
             ticker=ticker,
             message=message,
             trade_type=trade_type,
             duration_estimate=duration_estimate,
-            scan_pattern_id=scan_pattern_id,
+            scan_pattern_id=history_scan_pattern_id,
+            decision_packet_id=linked_packet_id,
             content_signature=content_signature,
             sent_via=sent_via,
             success=sent,
@@ -508,6 +667,7 @@ def dispatch_alert(
                 "message": message[:200] if message else "",
                 "trade_type": trade_type,
                 "duration_estimate": duration_estimate,
+                "decision_packet_id": linked_packet_id,
             })
         except Exception as _bc_err:
             logger.debug(
@@ -550,6 +710,7 @@ def get_alert_history(
             "trade_type": r.trade_type,
             "duration_estimate": r.duration_estimate,
             "scan_pattern_id": getattr(r, "scan_pattern_id", None),
+            "decision_packet_id": getattr(r, "decision_packet_id", None),
             "sent_via": r.sent_via,
             "success": r.success,
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -559,6 +720,72 @@ def get_alert_history(
 
 
 # ── Strategy Proposals ────────────────────────────────────────────────
+
+
+def _record_proposal_terminal_decision(
+    db: Session,
+    proposal,
+    user_id: int | None,
+    *,
+    outcome_status: str,
+    reason_code: str,
+    reason_text: str,
+    surface: str,
+    payload: dict[str, Any] | None = None,
+) -> int | None:
+    """Best-effort ledger packet for proposal no-trade terminal states."""
+    if not bool(getattr(settings, "brain_enable_decision_ledger", True)):
+        return None
+    try:
+        from .decision_ledger import mark_packet_terminal, record_strategy_proposal_decision
+
+        alloc = dict(getattr(proposal, "allocation_decision_json", None) or {})
+        alloc.update(
+            {
+                "terminal_outcome_status": outcome_status,
+                "terminal_reason_code": reason_code,
+                "terminal_surface": surface,
+            }
+        )
+        pkt = record_strategy_proposal_decision(
+            db,
+            proposal=proposal,
+            user_id=user_id if user_id is not None else getattr(proposal, "user_id", None),
+            allocation=alloc,
+            broker=None,
+            quantity=getattr(proposal, "quantity", None),
+            scan_pattern_id=getattr(proposal, "scan_pattern_id", None) or _scan_pattern_id_from_proposal(proposal),
+            decision_type="abstain",
+            deployment_stage=f"proposal_{outcome_status}",
+            outcome_status="pending",
+            candidate_was_selected=False,
+            selected_candidate_rank=None,
+            abstain_reason_code=reason_code,
+            abstain_reason_text=reason_text,
+        )
+        packet_id = int(pkt.id) if pkt is not None else None
+        mark_packet_terminal(
+            db,
+            packet_id,
+            outcome_status=outcome_status,
+            reason_code=reason_code,
+            reason_text=reason_text,
+            payload={
+                "surface": surface,
+                "strategy_proposal_id": int(getattr(proposal, "id")),
+                "proposal_status": getattr(proposal, "status", None),
+                **dict(payload or {}),
+            },
+        )
+        return packet_id
+    except Exception:
+        logger.debug(
+            "[alerts] proposal terminal decision packet failed proposal_id=%s reason=%s",
+            getattr(proposal, "id", None),
+            reason_code,
+            exc_info=True,
+        )
+        return None
 
 
 def _supersede_proposals(db: Session, user_id: int | None, ticker: str) -> int:
@@ -585,6 +812,16 @@ def _supersede_proposals(db: Session, user_id: int | None, ticker: str) -> int:
     for p in stale:
         p.status = "rejected"
         p.reviewed_at = now
+        _record_proposal_terminal_decision(
+            db,
+            p,
+            user_id,
+            outcome_status="rejected",
+            reason_code="proposal_superseded",
+            reason_text=f"Superseded by a newer proposal for {ticker}",
+            surface="proposal_supersede",
+            payload={"ticker": ticker},
+        )
     return len(stale)
 
 
@@ -1090,8 +1327,17 @@ def approve_proposal(
         return {"ok": False, "error": f"Proposal is already {proposal.status}"}
     if proposal.expires_at and proposal.expires_at < datetime.utcnow():
         proposal.status = "expired"
+        packet_id = _record_proposal_terminal_decision(
+            db,
+            proposal,
+            user_id,
+            outcome_status="expired",
+            reason_code="proposal_time_expired",
+            reason_text="Proposal expired before approval",
+            surface="proposal_approval",
+        )
         db.commit()
-        return {"ok": False, "error": "Proposal has expired"}
+        return {"ok": False, "error": "Proposal has expired", "decision_packet_id": packet_id}
 
     allocation = build_proposal_allocation_decision(db, proposal, user_id=user_id)
     if (
@@ -1138,9 +1384,18 @@ def reject_proposal(
 
     proposal.status = "rejected"
     proposal.reviewed_at = datetime.utcnow()
+    packet_id = _record_proposal_terminal_decision(
+        db,
+        proposal,
+        user_id,
+        outcome_status="rejected",
+        reason_code="operator_rejected_proposal",
+        reason_text="Operator rejected proposal",
+        surface="proposal_reject",
+    )
     db.commit()
 
-    return {"ok": True, "proposal": _proposal_to_dict(proposal)}
+    return {"ok": True, "proposal": _proposal_to_dict(proposal), "decision_packet_id": packet_id}
 
 
 def recheck_proposal(
@@ -1181,6 +1436,16 @@ def recheck_proposal(
     if drift_pct > drift_expire_pct and proposal.status in ("pending", "approved"):
         proposal.status = "expired"
         proposal.thesis = (proposal.thesis or "") + f" [Auto-expired: price drifted {drift_pct:.0f}% from entry]"
+        packet_id = _record_proposal_terminal_decision(
+            db,
+            proposal,
+            user_id,
+            outcome_status="expired",
+            reason_code="proposal_price_drift",
+            reason_text=f"Price drifted {drift_pct:.2f}% from proposal entry",
+            surface="proposal_recheck",
+            payload={"live_price": live_price, "drift_pct": round(drift_pct, 2)},
+        )
         db.commit()
         return {
             "ok": True,
@@ -1189,6 +1454,7 @@ def recheck_proposal(
             "drift_pct": round(drift_pct, 2),
             "status": "invalidated",
             "expired": True,
+            "decision_packet_id": packet_id,
         }
 
     status = "valid" if drift_pct <= 5 else ("moved_but_ok" if drift_pct <= 15 else "invalidated")
@@ -1552,6 +1818,13 @@ def _execute_proposal(
     is still sitting unfilled.
     """
     from ..broker_manager import place_buy_order, map_status, get_best_broker_for, is_any_connected
+    from .decision_ledger import (
+        mark_packet_executed,
+        mark_packet_linked_trade,
+        mark_packet_terminal,
+        record_packet_execution_intent,
+        record_strategy_proposal_decision,
+    )
     from ...models.trading import Trade
     from .execution_audit import (
         normalize_coinbase_order_event,
@@ -1619,6 +1892,24 @@ def _execute_proposal(
         )
 
     target_broker = broker or get_best_broker_for(ticker)
+    decision_packet_id: int | None = None
+    try:
+        pkt = record_strategy_proposal_decision(
+            db,
+            proposal=proposal,
+            user_id=user_id,
+            allocation=getattr(proposal, "allocation_decision_json", None),
+            broker=target_broker,
+            quantity=quantity,
+            scan_pattern_id=_prop_spid,
+        )
+        decision_packet_id = int(pkt.id) if pkt is not None else None
+    except Exception:
+        logger.exception("[alerts] failed to create proposal decision packet")
+        if bool(getattr(settings, "brain_decision_packet_required_for_proposals", True)):
+            return {"status": "blocked", "error": "decision_packet_create_failed"}
+    if bool(getattr(settings, "brain_decision_packet_required_for_proposals", True)) and decision_packet_id is None:
+        return {"status": "blocked", "error": "decision_packet_required_missing"}
     now = datetime.utcnow()
     try:
         from .backtest_engine import TICKER_TO_SECTOR
@@ -1653,12 +1944,31 @@ def _execute_proposal(
                 "take_profit": proposal.take_profit,
                 "proposal_id": proposal.id,
                 "scan_pattern_id": _prop_spid,
+                "decision_packet_id": decision_packet_id,
             }),
             tags="proposal-approved",
             notes=f"Approved from proposal #{proposal.id} (manual — broker not connected)",
         )
         db.add(trade)
         db.flush()
+        if decision_packet_id:
+            record_packet_execution_intent(
+                db,
+                decision_packet_id,
+                {
+                    "surface": "strategy_proposal_manual_record",
+                    "strategy_proposal_id": int(proposal.id),
+                    "broker": "manual",
+                    "order_type": "manual_record",
+                    "side": "buy",
+                    "ticker": ticker,
+                    "quantity": float(quantity or 0),
+                    "limit_price": float(proposal.entry_price),
+                    "trade_id": int(trade.id),
+                },
+            )
+            mark_packet_linked_trade(db, decision_packet_id, int(trade.id))
+            mark_packet_executed(db, decision_packet_id)
         proposal.status = "executed"
         proposal.executed_at = datetime.utcnow()
         proposal.trade_id = trade.id
@@ -1685,12 +1995,32 @@ def _execute_proposal(
             last_fill_at=now,
             event_at=now,
             reference_price=float(proposal.entry_price),
-            payload_json={"source": "manual_proposal_record"},
+            payload_json={"source": "manual_proposal_record", "decision_packet_id": decision_packet_id},
         )
         db.commit()
-        return {"status": "recorded", "trade_id": trade.id, "reason": "Broker not connected — trade recorded locally"}
+        return {
+            "status": "recorded",
+            "trade_id": trade.id,
+            "decision_packet_id": decision_packet_id,
+            "reason": "Broker not connected - trade recorded locally",
+        }
 
     try:
+        if decision_packet_id:
+            record_packet_execution_intent(
+                db,
+                decision_packet_id,
+                {
+                    "surface": "strategy_proposal_broker_order",
+                    "strategy_proposal_id": int(proposal.id),
+                    "broker": target_broker,
+                    "order_type": "limit",
+                    "side": "buy",
+                    "ticker": ticker,
+                    "quantity": float(quantity or 0),
+                    "limit_price": float(proposal.entry_price),
+                },
+            )
         result = place_buy_order(
             ticker=ticker,
             quantity=quantity,
@@ -1700,6 +2030,19 @@ def _execute_proposal(
         )
 
         used_broker = result.get("broker", target_broker)
+        if decision_packet_id:
+            record_packet_execution_intent(
+                db,
+                decision_packet_id,
+                {
+                    "surface": "strategy_proposal_broker_result",
+                    "strategy_proposal_id": int(proposal.id),
+                    "broker": used_broker,
+                    "ok": bool(result.get("ok")),
+                    "order_id": result.get("order_id"),
+                    "error": result.get("error"),
+                },
+            )
 
         if result.get("ok"):
             raw_state = (result.get("raw") or {}).get("state") or (result.get("raw") or {}).get("status") or "queued"
@@ -1755,6 +2098,7 @@ def _execute_proposal(
                     "take_profit": proposal.take_profit,
                     "proposal_id": proposal.id,
                     "scan_pattern_id": _prop_spid,
+                    "decision_packet_id": decision_packet_id,
                 }),
                 tags="auto-trade,proposal",
                 pattern_tags=_ptags or None,
@@ -1794,6 +2138,10 @@ def _execute_proposal(
                 scan_pattern_id=_prop_spid,
                 **normalized,
             )
+            if decision_packet_id:
+                mark_packet_linked_trade(db, decision_packet_id, int(trade.id))
+                if is_already_filled:
+                    mark_packet_executed(db, decision_packet_id)
             if is_already_filled:
                 try:
                     from .tca_service import apply_tca_on_trade_fill
@@ -1810,20 +2158,46 @@ def _execute_proposal(
                     ticker, quantity, trade.entry_price,
                     broker_label, proposal_id=proposal.id,
                 )
-                dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
-                return {"status": "executed", "order_id": result.get("order_id"), "trade_id": trade.id, "broker": used_broker}
+                dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg, decision_packet_id=decision_packet_id)
+                return {
+                    "status": "executed",
+                    "order_id": result.get("order_id"),
+                    "trade_id": trade.id,
+                    "broker": used_broker,
+                    "decision_packet_id": decision_packet_id,
+                }
             else:
                 msg = format_order_placed(
                     ticker, quantity, proposal.entry_price,
                     broker_label, proposal_id=proposal.id,
                 )
-                dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
-                return {"status": "working", "order_id": result.get("order_id"), "trade_id": trade.id, "broker": used_broker}
+                dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg, decision_packet_id=decision_packet_id)
+                return {
+                    "status": "working",
+                    "order_id": result.get("order_id"),
+                    "trade_id": trade.id,
+                    "broker": used_broker,
+                    "decision_packet_id": decision_packet_id,
+                }
         else:
             error = result.get("error", "Unknown error")
+            if decision_packet_id:
+                mark_packet_terminal(
+                    db,
+                    decision_packet_id,
+                    outcome_status="failed",
+                    reason_code="broker_order_failed",
+                    reason_text=str(error),
+                    payload={
+                        "surface": "strategy_proposal_broker_result",
+                        "broker": used_broker,
+                        "order_id": result.get("order_id"),
+                    },
+                )
+                db.commit()
             msg = format_order_failed(ticker, error)
-            dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
-            return {"status": "failed", "error": error}
+            dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg, decision_packet_id=decision_packet_id)
+            return {"status": "failed", "error": error, "decision_packet_id": decision_packet_id}
 
     except Exception as e:
         logger.error(f"[alerts] Execution failed for {ticker}: {e}")
@@ -1903,6 +2277,15 @@ def _expire_proposals(db: Session) -> int:
     )
     for p in time_expired:
         p.status = "expired"
+        _record_proposal_terminal_decision(
+            db,
+            p,
+            getattr(p, "user_id", None),
+            outcome_status="expired",
+            reason_code="proposal_time_expired",
+            reason_text="Proposal TTL expired",
+            surface="proposal_expiry_job",
+        )
         count += 1
 
     # 2. Price-drift expiry: if price moved far from entry, the setup is invalid
@@ -1920,6 +2303,16 @@ def _expire_proposals(db: Session) -> int:
                 if drift_pct > _PRICE_DRIFT_EXPIRE_PCT:
                     p.status = "expired"
                     p.thesis = (p.thesis or "") + f" [Auto-expired: price drifted {drift_pct:.0f}% from entry]"
+                    _record_proposal_terminal_decision(
+                        db,
+                        p,
+                        getattr(p, "user_id", None),
+                        outcome_status="expired",
+                        reason_code="proposal_price_drift",
+                        reason_text=f"Price drifted {drift_pct:.2f}% from proposal entry",
+                        surface="proposal_expiry_job",
+                        payload={"live_price": price, "drift_pct": round(drift_pct, 2)},
+                    )
                     count += 1
                     logger.info(
                         f"[alerts] Price-drift expired {p.ticker}: "
@@ -1940,6 +2333,7 @@ def _proposal_to_dict(p) -> dict[str, Any]:
     now = datetime.utcnow()
     proposed_at = p.proposed_at
     expires_at = p.expires_at
+    allocation_json = p.allocation_decision_json if isinstance(p.allocation_decision_json, dict) else {}
 
     age_seconds = (
         round((now - proposed_at).total_seconds()) if proposed_at else None
@@ -2014,4 +2408,6 @@ def _proposal_to_dict(p) -> dict[str, Any]:
         "broker_order_id": p.broker_order_id,
         "trade_id": p.trade_id,
         "scan_pattern_id": getattr(p, "scan_pattern_id", None),
+        "decision_packet_id": allocation_json.get("decision_packet_id"),
+        "decision_snapshot_id": allocation_json.get("decision_snapshot_id"),
     }

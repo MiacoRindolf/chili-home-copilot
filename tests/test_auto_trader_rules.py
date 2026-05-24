@@ -538,3 +538,314 @@ def test_passes_rule_gate_global_outer_ceiling_still_enforced(_mock_port, _mock_
     # which is NOT the case here (5 < 100). The global ceiling fires
     # next.
     assert reason == "max_concurrent_global"
+
+
+def test_evaluate_entry_edge_uses_directional_alert_outcomes_as_cold_start():
+    class _Result:
+        def __init__(self, rows=None, first=None):
+            self._rows = rows or []
+            self._first = first
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def first(self):
+            return self._first
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Db:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def execute(self, sql, params=None):
+            text = str(sql)
+            if "pattern_alert_directional_outcome" in text:
+                if "UPPER(ticker) = UPPER" in text:
+                    return _Result(rows=[
+                        {
+                            "ticker": "EDGE",
+                            "window_max_favorable_pct": 14.0,
+                            "window_max_adverse_pct": -3.0,
+                            "directional_correct": True,
+                        }
+                        for _ in range(8)
+                    ])
+                return _Result(rows=[])
+            return _Result(first=None)
+
+    alert = BreakoutAlert(
+        ticker="EDGE",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=777,
+        score_at_alert=0.4,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=112.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(
+        chili_realized_ev_min_trades=5,
+        chili_autotrader_directional_probability_z=1.0,
+        chili_autotrader_directional_probability_max_rows=30,
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=settings,
+        pat_ctx={},
+        confidence=0.55,
+    )
+
+    assert decision.allowed
+    assert decision.snapshot["probability_source"] == "directional_mfe_mae_ticker"
+    assert decision.snapshot["probability"] > 0.65
+    assert decision.snapshot["probability_details"]["directional_evidence"]["ticker"]["reward_hits"] == 8
+    assert decision.snapshot["expected_net_pct"] > 0
+
+
+def test_evaluate_entry_edge_directional_outcomes_must_match_payoff_geometry():
+    class _Result:
+        def __init__(self, rows=None, first=None):
+            self._rows = rows or []
+            self._first = first
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def first(self):
+            return self._first
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Db:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def execute(self, sql, params=None):
+            text = str(sql)
+            if "pattern_alert_directional_outcome" in text:
+                if "UPPER(ticker) = UPPER" in text:
+                    return _Result(rows=[
+                        {
+                            "ticker": "EDGE",
+                            "window_max_favorable_pct": 2.0,
+                            "window_max_adverse_pct": -3.0,
+                            "directional_correct": True,
+                        }
+                        for _ in range(12)
+                    ])
+                return _Result(rows=[])
+            return _Result(first=None)
+
+    alert = BreakoutAlert(
+        ticker="EDGE",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=777,
+        score_at_alert=0.9,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=112.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(
+        chili_realized_ev_min_trades=5,
+        chili_autotrader_directional_probability_z=1.0,
+        chili_autotrader_directional_probability_max_rows=30,
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=settings,
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert not decision.allowed
+    assert decision.reason == "non_positive_expected_edge"
+    assert decision.snapshot["probability_source"] == "directional_mfe_mae_ticker"
+    assert decision.snapshot["probability_details"]["directional_evidence"]["ticker"]["reward_hits"] == 0
+    assert decision.snapshot["expected_net_pct"] < 0
+
+
+def test_evaluate_entry_edge_shrinks_uncalibrated_alert_confidence():
+    class _Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+        def first(self):
+            return None
+
+    class _Db:
+        def execute(self, *_args, **_kwargs):
+            return _Result()
+
+    alert = BreakoutAlert(
+        ticker="NOEVID",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=110.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(chili_autotrader_alert_confidence_probability_weight=0.25)
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=settings,
+        pat_ctx={},
+        confidence=0.9,
+    )
+
+    assert decision.snapshot["probability_source"] == "alert_confidence_shrunk"
+    assert decision.snapshot["probability"] == pytest.approx(0.6, rel=1e-6)
+    assert (
+        decision.snapshot["probability_details"]["alert_confidence"]["reason"]
+        == "score_confidence_is_not_a_calibrated_win_probability"
+    )
+
+
+def test_evaluate_entry_edge_uses_regime_effective_sample_n_not_dimension_sum():
+    class _Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+        def first(self):
+            return None
+
+    class _Db:
+        def execute(self, *_args, **_kwargs):
+            return _Result()
+
+    alert = BreakoutAlert(
+        ticker="REGIME",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.5,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=115.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(chili_realized_ev_min_trades=5)
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=settings,
+        pat_ctx={
+            "hit_rate": 0.8,
+            "n_cells": 8,
+            "n_trades_sum": 80,
+            "n_trades_effective": 10,
+        },
+        confidence=0.5,
+    )
+
+    assert decision.snapshot["probability_source"] == "pattern_regime_hit_rate_shrunk"
+    assert decision.snapshot["probability_sample_n"] == 10
+    assert decision.snapshot["probability"] == pytest.approx(0.7, rel=1e-6)
+
+
+def test_evaluate_entry_edge_guards_dynamic_exit_geometry_sample_count():
+    class _Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+        def first(self):
+            return None
+
+    class _Query:
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return self._pattern
+
+    class _Db:
+        def __init__(self, pattern):
+            self._pattern = pattern
+
+        def query(self, *_args, **_kwargs):
+            return _Query(self._pattern)
+
+        def execute(self, *_args, **_kwargs):
+            return _Result()
+
+    pattern = SimpleNamespace(
+        corrected_trade_count=6,
+        corrected_win_rate=0.7,
+        corrected_avg_return_pct=1.0,
+        trade_count=6,
+        win_rate=0.7,
+        avg_return_pct=1.0,
+        raw_realized_trade_count=1,
+        avg_winner_pct=0.06,
+        avg_loser_pct=-0.02,
+        payoff_ratio=3.0,
+        payoff_ratio_n=6,
+    )
+    alert = BreakoutAlert(
+        ticker="GEOM",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=888,
+        score_at_alert=0.5,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=115.0,
+        user_id=1,
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(pattern),
+        alert,
+        settings=SimpleNamespace(chili_realized_ev_min_trades=5),
+        pat_ctx={},
+        confidence=0.5,
+    )
+
+    geom = decision.snapshot["dynamic_exit_geometry"]
+    assert geom["used"] is True
+    assert geom["realized_sample_n"] == 1
+    assert geom["realized_sample_n_guard"] == "closed_sample_count_guard"

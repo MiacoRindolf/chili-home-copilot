@@ -56,6 +56,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from statistics import median
 from typing import Any, Optional
 
 import requests
@@ -194,6 +195,28 @@ class _PairCandidate:
         )
 
 
+@dataclass(frozen=True)
+class _ObservedOpportunity:
+    """Observed signal/fill activity over the prior rotator interval."""
+
+    bars: int = 0
+    alerts: int = 0
+    maker_attempts: int = 0
+    maker_fills: int = 0
+
+    @property
+    def alert_rate_per_bar(self) -> float:
+        if self.bars <= 0:
+            return 0.0
+        return float(self.alerts) / float(self.bars)
+
+    @property
+    def maker_fill_rate(self) -> float:
+        if self.maker_attempts <= 0:
+            return 0.0
+        return float(self.maker_fills) / float(self.maker_attempts)
+
+
 def _positive_cap_or_none(value: Any) -> float | None:
     try:
         cap = float(value or 0.0)
@@ -228,6 +251,55 @@ def _candidate_rank_score(
     if cost_bps <= 0.0:
         return opportunity_score
     return opportunity_score / cost_bps
+
+
+def _positive_median(values: list[float]) -> float | None:
+    positives = [float(v) for v in values if float(v) > 0.0 and math.isfinite(float(v))]
+    if not positives:
+        return None
+    return float(median(positives))
+
+
+def _observed_opportunity_rank_context(
+    candidates: list[_PairCandidate],
+    observed: dict[str, _ObservedOpportunity],
+) -> dict[str, float | None]:
+    cohort = [observed.get(c.ticker) for c in candidates]
+    cohort = [o for o in cohort if o is not None]
+    return {
+        "median_alert_rate_per_bar": _positive_median([
+            o.alert_rate_per_bar for o in cohort if o.bars > 0
+        ]),
+        "median_maker_fill_rate": _positive_median([
+            o.maker_fill_rate for o in cohort if o.maker_attempts > 0
+        ]),
+    }
+
+
+def _observed_opportunity_adjusted_rank_score(
+    cand: _PairCandidate,
+    *,
+    base_score: float,
+    observed: dict[str, _ObservedOpportunity],
+    rank_context: dict[str, float | None],
+) -> float:
+    obs = observed.get(cand.ticker)
+    if obs is None:
+        return base_score
+
+    adjusted = float(base_score)
+    median_alert_rate = rank_context.get("median_alert_rate_per_bar")
+    if obs.bars > 0 and median_alert_rate and median_alert_rate > 0.0:
+        adjusted *= max(obs.alert_rate_per_bar, 0.0) / float(median_alert_rate)
+
+    median_fill_rate = rank_context.get("median_maker_fill_rate")
+    if (
+        obs.maker_attempts > 0
+        and median_fill_rate
+        and median_fill_rate > 0.0
+    ):
+        adjusted *= max(obs.maker_fill_rate, 0.0) / float(median_fill_rate)
+    return adjusted
 
 
 # f-fastpath-rotator-http-retry (2026-05-08): retry policy for the
@@ -544,6 +616,82 @@ def _previous_pass_status(db) -> dict[str, tuple[str, Optional[int]]]:
         WHERE rotation_at = (SELECT ts FROM latest_rotation)
     """)).fetchall()
     return {r.ticker: (r.status, r.rank) for r in rows}
+
+
+def _latest_universe_rotation_at(db) -> datetime | None:
+    from sqlalchemy import text
+
+    rows = db.execute(text("""
+        SELECT MAX(rotation_at) AS rotation_at FROM fast_path_universe
+    """)).fetchall()
+    if not rows:
+        return None
+    return getattr(rows[0], "rotation_at", None)
+
+
+def _observed_opportunity_by_ticker(
+    db,
+    *,
+    since: datetime | None,
+) -> dict[str, _ObservedOpportunity]:
+    """Observed alert/fill opportunity since the prior universe rotation."""
+    if since is None:
+        return {}
+
+    from sqlalchemy import text
+
+    rows = db.execute(text("""
+        /* observed alert/fill opportunity */
+        WITH bars AS (
+            SELECT ticker, COUNT(*) AS bars
+            FROM fast_snapshots
+            WHERE bar_close_at > :since
+            GROUP BY ticker
+        ),
+        alerts AS (
+            SELECT ticker, COUNT(*) AS alerts
+            FROM fast_alerts
+            WHERE fired_at > :since
+            GROUP BY ticker
+        ),
+        attempts AS (
+            SELECT
+                ticker,
+                COUNT(*) AS maker_attempts,
+                COUNT(*) FILTER (
+                    WHERE fill_outcome IN ('filled', 'partial')
+                ) AS maker_fills
+            FROM fast_path_maker_attempts
+            WHERE placed_at > :since
+            GROUP BY ticker
+        ),
+        tickers AS (
+            SELECT ticker FROM bars
+            UNION
+            SELECT ticker FROM alerts
+            UNION
+            SELECT ticker FROM attempts
+        )
+        SELECT
+            t.ticker,
+            COALESCE(b.bars, 0) AS bars,
+            COALESCE(a.alerts, 0) AS alerts,
+            COALESCE(m.maker_attempts, 0) AS maker_attempts,
+            COALESCE(m.maker_fills, 0) AS maker_fills
+        FROM tickers t
+        LEFT JOIN bars b ON b.ticker = t.ticker
+        LEFT JOIN alerts a ON a.ticker = t.ticker
+        LEFT JOIN attempts m ON m.ticker = t.ticker
+    """), {"since": since}).mappings().all()
+    return {
+        str(row["ticker"]): _ObservedOpportunity(
+            bars=int(row.get("bars") or 0),
+            alerts=int(row.get("alerts") or 0),
+            maker_attempts=int(row.get("maker_attempts") or 0),
+            maker_fills=int(row.get("maker_fills") or 0),
+        )
+        for row in rows
+    }
 
 
 def _recent_missing_grace_count(db, ticker: str) -> int:
@@ -1184,6 +1332,11 @@ def run_rotation_pass(
         "rank_top_of_book_cap_usd": None,
         "rank_shadow_top_of_book_cap_usd": None,
         "rank_trade_count_multiplier": None,
+        "rank_observed_opportunity_mode": "prior_rotation_interval",
+        "observed_opportunity_since": None,
+        "observed_opportunity_tickers": 0,
+        "observed_opportunity_median_alert_rate_per_bar": None,
+        "observed_opportunity_median_maker_fill_rate": None,
         "rotation_at": rotation_at.isoformat(),
     }
 
@@ -1322,6 +1475,15 @@ def run_rotation_pass(
         active_eligible_tickers.add(snap.ticker)
 
     target_ranked = top_n + settings.universe_hysteresis_ranks
+    observed_since = _latest_universe_rotation_at(db)
+    observed_opportunity = _observed_opportunity_by_ticker(
+        db,
+        since=observed_since,
+    )
+    if observed_since is not None:
+        out["observed_opportunity_since"] = observed_since.isoformat()
+    out["observed_opportunity_tickers"] = len(observed_opportunity)
+
     active_candidate_tickers = {c.ticker for c in candidates}
     shadow_pool = [
         snap for snap in valid_snapshots
@@ -1350,21 +1512,51 @@ def run_rotation_pass(
             max(target_ranked - len(candidates), 0),
         )
         candidates = [*candidates, *shadow_pool]
+        rank_context = _observed_opportunity_rank_context(
+            candidates,
+            observed_opportunity,
+        )
+        out["observed_opportunity_median_alert_rate_per_bar"] = (
+            rank_context["median_alert_rate_per_bar"]
+        )
+        out["observed_opportunity_median_maker_fill_rate"] = (
+            rank_context["median_maker_fill_rate"]
+        )
         candidates.sort(
-            key=lambda c: _candidate_rank_score(
+            key=lambda c: _observed_opportunity_adjusted_rank_score(
                 c,
-                fee_bps=promotion_fee_bps,
-                top_of_book_cap_usd=rank_top_of_book_cap_usd,
+                base_score=_candidate_rank_score(
+                    c,
+                    fee_bps=promotion_fee_bps,
+                    top_of_book_cap_usd=rank_top_of_book_cap_usd,
+                ),
+                observed=observed_opportunity,
+                rank_context=rank_context,
             ),
             reverse=True,
         )
 
     if out["exploration_fallback"]:
+        rank_context = _observed_opportunity_rank_context(
+            candidates,
+            observed_opportunity,
+        )
+        out["observed_opportunity_median_alert_rate_per_bar"] = (
+            rank_context["median_alert_rate_per_bar"]
+        )
+        out["observed_opportunity_median_maker_fill_rate"] = (
+            rank_context["median_maker_fill_rate"]
+        )
         candidates.sort(
-            key=lambda c: _candidate_rank_score(
+            key=lambda c: _observed_opportunity_adjusted_rank_score(
                 c,
-                fee_bps=promotion_fee_bps,
-                top_of_book_cap_usd=rank_shadow_top_of_book_cap_usd,
+                base_score=_candidate_rank_score(
+                    c,
+                    fee_bps=promotion_fee_bps,
+                    top_of_book_cap_usd=rank_shadow_top_of_book_cap_usd,
+                ),
+                observed=observed_opportunity,
+                rank_context=rank_context,
             ),
             reverse=True,
         )

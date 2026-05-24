@@ -486,7 +486,7 @@ class TradingExecutionEvent(Base):
     order_id: Optional[str] = Column(String(128), nullable=True, index=True)
     client_order_id: Optional[str] = Column(String(128), nullable=True, index=True)
     product_id: Optional[str] = Column(String(64), nullable=True, index=True)
-    event_type: str = Column(String(32), nullable=False, index=True)
+    event_type: str = Column(String(64), nullable=False, index=True)
     status: Optional[str] = Column(String(32), nullable=True, index=True)
     requested_quantity: Optional[float] = Column(Float, nullable=True)
     cumulative_filled_quantity: Optional[float] = Column(Float, nullable=True)
@@ -737,6 +737,9 @@ class AlertHistory(Base):
     duration_estimate: Optional[str] = Column(String(60), nullable=True)
     scan_pattern_id: Optional[int] = Column(
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    decision_packet_id: Optional[int] = Column(
+        BigInteger, ForeignKey("trading_decision_packets.id", ondelete="SET NULL"), nullable=True, index=True
     )
     content_signature: Optional[str] = Column(String(512), nullable=True)
     sent_via: str = Column(String(20), nullable=False, default="email_gateway")
@@ -3520,6 +3523,46 @@ class FastPathUniverseEntry(Base):
         DateTime, default=datetime.utcnow, nullable=False
     )
     promoted_at: Optional[datetime] = Column(DateTime, nullable=True)
+
+
+class FastPathUniverseRun(Base):
+    """Pass-level diagnostics for fast-path universe rotations.
+
+    Complements ``FastPathUniverseEntry``. One run row explains the
+    pass-level choices that cannot live naturally on each ticker row:
+    gate rejection counts, effective volatility floor, and learned-edge
+    promotion blocks.
+    """
+
+    __tablename__ = "fast_path_universe_runs"
+    __table_args__ = (
+        Index("ix_fast_path_universe_runs_rotation_at", "rotation_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    rotation_at: datetime = Column(DateTime, nullable=False)
+    scanned: int = Column(Integer, nullable=False, default=0)
+    snapshot_failures: int = Column(Integer, nullable=False, default=0)
+    ranked_n: int = Column(Integer, nullable=False, default=0)
+    active_n: int = Column(Integer, nullable=False, default=0)
+    shadow_n: int = Column(Integer, nullable=False, default=0)
+    inactive_n: int = Column(Integer, nullable=False, default=0)
+    range_floor_static_bps: Optional[float] = Column(Float, nullable=True)
+    range_floor_dynamic_bps: Optional[float] = Column(Float, nullable=True)
+    range_floor_effective_bps: Optional[float] = Column(Float, nullable=True)
+    gate_rejections: dict = Column(JSONB, nullable=False, default=lambda: {})
+    edge_promotion_blocks: dict = Column(
+        JSONB, nullable=False, default=lambda: {}
+    )
+    promotion_decay_table: Optional[str] = Column(String(64), nullable=True)
+    promotion_fee_bps: Optional[float] = Column(Float, nullable=True)
+    promotion_min_samples: Optional[int] = Column(Integer, nullable=True)
+    promotion_min_net_bps: Optional[float] = Column(Float, nullable=True)
+    exploration_fallback: bool = Column(Boolean, nullable=False, default=False)
+    counters_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    created_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
 
 
 class TradingDecision(Base):

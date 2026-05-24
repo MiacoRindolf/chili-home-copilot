@@ -3176,11 +3176,11 @@ def _run_momentum_scanner_job():
 def _run_fast_path_universe_rotator_job():
     """f-fastpath-universe-rotation (2026-05-07): hourly mid-tier rotator.
 
-    Scans Coinbase USD products, applies the four admission gates,
-    scores by ``volume_24h_usd / max(spread_bps, 0.5)``, applies
-    hysteresis, writes top-N to ``fast_path_universe``. New entrants
-    land in ``status='shadow'`` for ``universe_shadow_window_h`` hours
-    before promotion to ``status='active'``.
+    Scans Coinbase USD products, applies admission gates, scores by
+    opportunity/volatility/depth, applies hysteresis, and writes top-N
+    to ``fast_path_universe``. New entrants land in ``status='shadow'``;
+    promotion to ``status='active'`` requires both the shadow window
+    and learned decay evidence clearing configured execution cost.
 
     No-op when ``settings.universe_rotation_enabled`` is False (the
     flag's default). Failures log + return; never raises into the

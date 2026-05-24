@@ -10,6 +10,7 @@ the chili_test ``db`` fixture.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import pytest
@@ -309,6 +310,8 @@ class _FakeRotationDB:
         edge_rows: dict[str, dict] | None = None,
         decay_rows: dict[str, list[dict]] | None = None,
         maker_attempt_rows: dict[str, list[dict]] | None = None,
+        latest_rotation_at: datetime | None = None,
+        observed_rows: list[dict] | None = None,
         grace_history: dict[str, list[dict]] | None = None,
     ) -> None:
         self.inserted_rows: list[dict] = []
@@ -319,6 +322,8 @@ class _FakeRotationDB:
         self.edge_rows = edge_rows or {}
         self.decay_rows = decay_rows or {}
         self.maker_attempt_rows = maker_attempt_rows or {}
+        self.latest_rotation_at = latest_rotation_at
+        self.observed_rows = observed_rows or []
         self.grace_history = grace_history or {}
 
     def execute(self, statement, params=None):
@@ -335,6 +340,12 @@ class _FakeRotationDB:
                 for t, (status, rank) in self.previous.items()
             ]
             return _FakeRows(rows)
+        if "MAX(rotation_at) AS rotation_at" in sql:
+            if self.latest_rotation_at is None:
+                return _FakeRows([])
+            return _FakeRows([_FakeRow(rotation_at=self.latest_rotation_at)])
+        if "observed alert/fill opportunity" in sql:
+            return _FakeScalarRows(self.observed_rows)
         if "SELECT status, rank, composite_score" in sql:
             ticker = (params or {}).get("ticker")
             rows = [_FakeRow(**row) for row in self.grace_history.get(ticker, [])]
@@ -771,6 +782,64 @@ def test_rotation_treats_depth_as_fillability_gate_for_ranking():
     assert out["rank_trade_count_multiplier"] == RANK_TRADE_COUNT_MULTIPLIER_MODE
     assert out["ranked_n"] == 1
     assert db.inserted_rows[0]["ticker"] == "VOL-USD"
+
+
+def test_rotation_uses_observed_signal_and_fill_rates_for_shadow_ranking():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        latest_rotation_at=datetime(2026, 5, 24, 15, 0, 0),
+        observed_rows=[
+            {
+                "ticker": "NOFILL-USD",
+                "bars": 20,
+                "alerts": 20,
+                "maker_attempts": 20,
+                "maker_fills": 0,
+            },
+            {
+                "ticker": "FILL-USD",
+                "bars": 20,
+                "alerts": 10,
+                "maker_attempts": 10,
+                "maker_fills": 5,
+            },
+        ],
+    )
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+    )
+    snapshots = {
+        "NOFILL-USD": _make_candidate(
+            ticker="NOFILL-USD",
+            high_24h=130.0,
+            low_24h=70.0,
+        ),
+        "FILL-USD": _make_candidate(
+            ticker="FILL-USD",
+            high_24h=112.0,
+            low_24h=88.0,
+        ),
+        "FRESH-USD": _make_candidate(
+            ticker="FRESH-USD",
+            high_24h=108.0,
+            low_24h=92.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: ["NOFILL-USD", "FILL-USD", "FRESH-USD"],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["observed_opportunity_tickers"] == 2
+    assert out["observed_opportunity_median_maker_fill_rate"] == pytest.approx(0.5)
+    assert [r["ticker"] for r in db.inserted_rows] == ["FILL-USD", "FRESH-USD"]
 
 
 def test_rotation_ranks_shadow_candidates_against_active_depth_candidates():

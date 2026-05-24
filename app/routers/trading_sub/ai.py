@@ -386,7 +386,7 @@ def api_trading_brain_exit_engine_diagnostics(
 def api_trading_brain_ledger_diagnostics(
     request: Request,
     lookback_hours: int = Query(24, ge=1, le=168),
-    source: str | None = Query(None, description="Filter to 'paper' | 'live' | 'broker_sync'"),
+    source: str | None = Query(None, description="Filter to 'paper' | 'live' | 'broker_sync' | 'automation'"),
     db: Session = Depends(get_db),
 ):
     """Phase A: read-only diagnostics for the economic-truth ledger shadow rollout.
@@ -405,11 +405,95 @@ def api_trading_brain_ledger_diagnostics(
     from ...services.trading import economic_ledger as _ledger
 
     src = (source or "").strip().lower() or None
-    if src not in (None, "paper", "live", "broker_sync"):
+    if src not in (None, "paper", "live", "broker_sync", "automation"):
         src = None
     payload = _ledger.ledger_summary(db, lookback_hours=int(lookback_hours), source_filter=src)
     payload["ok"] = True
     return JSONResponse({"ok": True, "ledger": payload})
+
+
+@router.get("/api/trading/brain/decision-packet-coverage")
+def api_trading_brain_decision_packet_coverage(
+    request: Request,
+    lookback_hours: int = Query(72, ge=1, le=720),
+    example_limit: int = Query(5, ge=0, le=25),
+    db: Session = Depends(get_db),
+):
+    """Read-only diagnostics for packet lineage coverage.
+
+    Shows which alerts, outcomes, trades, automation fills, and ledger fills
+    are missing canonical decision-packet links. Audit-only: this endpoint
+    never changes trading policy or blocks execution.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.decision_packet_coverage import decision_packet_coverage_summary
+
+    payload = decision_packet_coverage_summary(
+        db,
+        lookback_hours=int(lookback_hours),
+        example_limit=int(example_limit),
+    )
+    return JSONResponse({"ok": True, "decision_packet_coverage": to_jsonable(payload)})
+
+
+@router.post("/api/trading/brain/decision-packet-coverage/repair")
+def api_trading_brain_decision_packet_coverage_repair(
+    request: Request,
+    apply: bool = Query(False, description="Apply safe lineage repairs; false returns dry-run candidates"),
+    target: str = Query(
+        "directional_outcomes",
+        description="'directional_outcomes', 'automation_ledger', 'trade_packets', or 'packet_snapshots'",
+    ),
+    lookback_hours: int = Query(720, ge=1, le=8760),
+    limit: int = Query(500, ge=0, le=5000),
+    db: Session = Depends(get_db),
+):
+    """Safe packet-lineage repair for already-known packet links.
+
+    Dry-run by default. Supported targets are ``directional_outcomes``,
+    ``automation_ledger``, ``trade_packets``, and ``packet_snapshots``; all
+    only repair existing records and never change trading policy.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.decision_packet_coverage import (
+        repair_automation_ledger_packet_links,
+        repair_directional_outcome_packet_links,
+        repair_packet_snapshot_seals,
+        repair_trade_packet_links_from_proposals,
+    )
+
+    clean_target = (target or "directional_outcomes").strip().lower()
+    if clean_target == "directional_outcomes":
+        payload = repair_directional_outcome_packet_links(
+            db,
+            lookback_hours=int(lookback_hours),
+            limit=int(limit),
+            dry_run=not bool(apply),
+        )
+    elif clean_target == "automation_ledger":
+        payload = repair_automation_ledger_packet_links(
+            db,
+            lookback_hours=int(lookback_hours),
+            limit=int(limit),
+            dry_run=not bool(apply),
+        )
+    elif clean_target == "trade_packets":
+        payload = repair_trade_packet_links_from_proposals(
+            db,
+            lookback_hours=int(lookback_hours),
+            limit=int(limit),
+            dry_run=not bool(apply),
+        )
+    elif clean_target == "packet_snapshots":
+        payload = repair_packet_snapshot_seals(
+            db,
+            lookback_hours=int(lookback_hours),
+            limit=int(limit),
+            dry_run=not bool(apply),
+        )
+    else:
+        raise HTTPException(status_code=400, detail="invalid_repair_target")
+    return JSONResponse({"ok": bool(payload.get("ok", False)), "repair": to_jsonable(payload)})
 
 
 @router.get("/api/trading/brain/pit/diagnostics")
