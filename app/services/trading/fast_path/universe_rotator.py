@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 _COINBASE_REST = "https://api.exchange.coinbase.com"
 _HTTP_TIMEOUT_S = 8.0
 _PER_REQ_PACING_S = 0.12  # ~8 req/s
+RANK_TRADE_COUNT_MULTIPLIER_MODE = "admission_gate_only"
 
 
 @dataclass
@@ -1086,7 +1087,7 @@ def run_rotation_pass(
     out["shadow_min_top_of_book_usd"] = shadow_min_top_of_book_usd
     out["rank_top_of_book_cap_usd"] = rank_top_of_book_cap_usd
     out["rank_shadow_top_of_book_cap_usd"] = rank_shadow_top_of_book_cap_usd
-    out["rank_trade_count_multiplier"] = "admission_gate_only"
+    out["rank_trade_count_multiplier"] = RANK_TRADE_COUNT_MULTIPLIER_MODE
 
     for snap in valid_snapshots:
         passed = passes_shadow_exploration_gates(

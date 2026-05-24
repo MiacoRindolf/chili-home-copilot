@@ -673,7 +673,11 @@ def test_rotation_treats_depth_as_fillability_gate_for_ranking():
 
     assert out["rank_top_of_book_cap_usd"] == pytest.approx(25.0)
     assert out["rank_shadow_top_of_book_cap_usd"] == pytest.approx(25.0)
-    assert out["rank_trade_count_multiplier"] == "admission_gate_only"
+    from app.services.trading.fast_path.universe_rotator import (
+        RANK_TRADE_COUNT_MULTIPLIER_MODE,
+    )
+
+    assert out["rank_trade_count_multiplier"] == RANK_TRADE_COUNT_MULTIPLIER_MODE
     assert out["ranked_n"] == 1
     assert db.inserted_rows[0]["ticker"] == "VOL-USD"
 

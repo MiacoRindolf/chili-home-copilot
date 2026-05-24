@@ -35,6 +35,7 @@ from sqlalchemy import text
 
 from ...db import engine
 from ...services.trading.fast_path.universe_rotator import (
+    RANK_TRADE_COUNT_MULTIPLIER_MODE,
     _promotion_edge_from_decay_rows,
 )
 from ...services.trading.fast_path.universe_status import (
@@ -566,6 +567,9 @@ def get_universe() -> JSONResponse:
             "universe_min_top_of_book_usd": float(
                 fp_settings.universe_min_top_of_book_usd
             ),
+            "universe_shadow_min_top_of_book_usd": float(
+                fp_settings.universe_shadow_min_top_of_book_usd
+            ),
             "universe_min_range_24h_bps": float(
                 fp_settings.universe_min_range_24h_bps
             ),
@@ -626,6 +630,56 @@ def get_universe() -> JSONResponse:
                     return None
                 return round(float(composite_score) / denom, 4)
 
+            def _rank_top_of_book_cap_usd() -> float | None:
+                caps = [
+                    float(value)
+                    for value in (
+                        fp_settings.universe_shadow_min_top_of_book_usd,
+                        fp_settings.universe_min_top_of_book_usd,
+                    )
+                    if float(value or 0.0) > 0.0
+                ]
+                return min(caps) if caps else None
+
+            rank_top_of_book_cap_usd = _rank_top_of_book_cap_usd()
+
+            def _rank_opportunity_per_cost(
+                *,
+                implied_range_24h_bps: float | None,
+                top_of_book_usd: float | None,
+                spread_bps: float | None,
+            ) -> dict[str, Any]:
+                cost_bps = 2.0 * (
+                    float(fee_bps or 0.0) + float(spread_bps or 0.0)
+                )
+                if (
+                    implied_range_24h_bps is None
+                    or top_of_book_usd is None
+                    or cost_bps <= 0.0
+                ):
+                    return {
+                        "rank_opportunity_per_cost": None,
+                        "rank_cost_bps": round(cost_bps, 4),
+                        "rank_top_of_book_cap_usd": rank_top_of_book_cap_usd,
+                        "rank_trade_count_multiplier": (
+                            RANK_TRADE_COUNT_MULTIPLIER_MODE
+                        ),
+                    }
+                capped_book = float(top_of_book_usd)
+                if rank_top_of_book_cap_usd is not None:
+                    capped_book = min(capped_book, rank_top_of_book_cap_usd)
+                return {
+                    "rank_opportunity_per_cost": round(
+                        float(implied_range_24h_bps) * capped_book / cost_bps,
+                        4,
+                    ),
+                    "rank_cost_bps": round(cost_bps, 4),
+                    "rank_top_of_book_cap_usd": rank_top_of_book_cap_usd,
+                    "rank_trade_count_multiplier": (
+                        RANK_TRADE_COUNT_MULTIPLIER_MODE
+                    ),
+                }
+
             def _best_edge(ticker: str, spread_bps: float | None) -> dict[str, Any]:
                 rows = conn.execute(text(f"""
                     SELECT ticker, alert_type, score_bucket, horizon_s,
@@ -681,6 +735,9 @@ def get_universe() -> JSONResponse:
                     int(r["trades_24h"])
                     if r["trades_24h"] is not None else None
                 )
+                implied_range_24h_bps = _implied_range_24h_bps(
+                    composite_score, top_of_book_usd, trades_24h,
+                )
                 row = {
                     "ticker": r["ticker"],
                     "live_eligible": r["status"] == UNIVERSE_STATUS_ACTIVE,
@@ -693,8 +750,11 @@ def get_universe() -> JSONResponse:
                     "spread_bps": spread_bps,
                     "top_of_book_usd": top_of_book_usd,
                     "trades_24h": trades_24h,
-                    "implied_range_24h_bps": _implied_range_24h_bps(
-                        composite_score, top_of_book_usd, trades_24h,
+                    "implied_range_24h_bps": implied_range_24h_bps,
+                    **_rank_opportunity_per_cost(
+                        implied_range_24h_bps=implied_range_24h_bps,
+                        top_of_book_usd=top_of_book_usd,
+                        spread_bps=spread_bps,
                     ),
                     "promoted_at": (
                         r["promoted_at"].isoformat()
