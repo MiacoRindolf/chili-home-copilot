@@ -299,6 +299,9 @@ class _StubSettings:
     live_alpha_min_net_bps: float = 0.0
     maker_attempt_adverse_filter_enabled: bool = True
     maker_attempt_adverse_filter_window_h: int = 24
+    emit_raw_imbalance_alerts: bool = True
+    scanner_book_pressure_enabled: bool = True
+    scanner_book_pressure_max_spread_bps: float = 10.0
 
 
 class _FakeRotationDB:
@@ -733,6 +736,74 @@ def test_rotation_prefers_lower_cost_when_raw_opportunity_ties():
 
     assert out["ranked_n"] == 1
     assert db.inserted_rows[0]["ticker"] == "TIGHT-USD"
+
+
+def test_rotation_honors_scanner_spread_cap_when_raw_imbalance_disabled():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB()
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_max_spread_bps=10.0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+        emit_raw_imbalance_alerts=False,
+        scanner_book_pressure_enabled=True,
+        scanner_book_pressure_max_spread_bps=3.0,
+    )
+    snapshots = {
+        "WIDE-USD": _make_candidate(ticker="WIDE-USD", bid=99.98, ask=100.02),
+        "TIGHT-USD": _make_candidate(ticker="TIGHT-USD", bid=99.995, ask=100.005),
+    }
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["WIDE-USD", "TIGHT-USD"],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["universe_max_spread_bps"] == pytest.approx(10.0)
+    assert out["signal_compatible_spread_cap_bps"] == pytest.approx(3.0)
+    assert out["effective_universe_max_spread_bps"] == pytest.approx(3.0)
+    assert out["gate_rejections"]["spread_above_threshold"] == 1
+    assert out["ranked_n"] == 1
+    assert [row["ticker"] for row in db.inserted_rows] == ["TIGHT-USD"]
+
+
+def test_rotation_keeps_universe_spread_cap_when_raw_imbalance_enabled():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB()
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_max_spread_bps=10.0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+        emit_raw_imbalance_alerts=True,
+        scanner_book_pressure_enabled=True,
+        scanner_book_pressure_max_spread_bps=3.0,
+    )
+    snapshots = {
+        "WIDE-USD": _make_candidate(ticker="WIDE-USD", bid=99.98, ask=100.02),
+        "TIGHT-USD": _make_candidate(ticker="TIGHT-USD", bid=99.995, ask=100.005),
+    }
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["WIDE-USD", "TIGHT-USD"],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["signal_compatible_spread_cap_bps"] is None
+    assert out["effective_universe_max_spread_bps"] == pytest.approx(10.0)
+    assert "spread_above_threshold" not in out["gate_rejections"]
+    assert out["ranked_n"] == 2
+    assert {row["ticker"] for row in db.inserted_rows} == {
+        "TIGHT-USD",
+        "WIDE-USD",
+    }
 
 
 def test_rotation_treats_depth_as_fillability_gate_for_ranking():

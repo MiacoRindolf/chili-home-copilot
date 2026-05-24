@@ -9,7 +9,9 @@ One pass per invocation:
    and ``book?level=1`` (top-of-book sizes).
 3. Apply admission gates (volume / spread / top-of-book size / trade
    count when Coinbase provides it). Measured thresholds must pass;
-   settings-tunable thresholds.
+   settings-tunable thresholds. When standalone raw imbalance alerts
+   are disabled, the rotator also honors the enabled scanner lane's
+   spread cap so ranked shadow slots remain learnable.
 4. Score the survivors by data-derived opportunity per estimated
    round-trip cost: 24h range divided by live/configured fee + spread
    cost, with top-of-book depth capped at the configured probe-depth
@@ -262,6 +264,36 @@ def _positive_median(values: list[float]) -> float | None:
     if not positives:
         return None
     return float(median(positives))
+
+
+def _signal_compatible_spread_cap_bps(settings) -> float | None:
+    """Return a scanner-derived spread cap when the active alert surface needs one.
+
+    Raw imbalance alerts can fire on any configured universe spread. Once that
+    raw lane is disabled, the live book-derived learning surface is the stricter
+    book-pressure signal, whose own max-spread knob should bound which symbols
+    receive ranked shadow subscription slots.
+    """
+    if bool(getattr(settings, "emit_raw_imbalance_alerts", True)):
+        return None
+    if not bool(getattr(settings, "scanner_book_pressure_enabled", False)):
+        return None
+    return _positive_cap_or_none(
+        getattr(settings, "scanner_book_pressure_max_spread_bps", None)
+    )
+
+
+def _effective_universe_max_spread_bps(settings) -> tuple[float, float | None]:
+    configured = max(
+        0.0,
+        float(getattr(settings, "universe_max_spread_bps", 0.0) or 0.0),
+    )
+    signal_cap = _signal_compatible_spread_cap_bps(settings)
+    if signal_cap is None:
+        return configured, None
+    if configured <= 0.0:
+        return float(signal_cap), float(signal_cap)
+    return min(configured, float(signal_cap)), float(signal_cap)
 
 
 def _observed_opportunity_rank_context(
@@ -1406,6 +1438,9 @@ def run_rotation_pass(
         "range_floor_dynamic_bps": None,
         "range_floor_effective_bps": None,
         "shadow_min_top_of_book_usd": None,
+        "universe_max_spread_bps": None,
+        "signal_compatible_spread_cap_bps": None,
+        "effective_universe_max_spread_bps": None,
         "rank_top_of_book_cap_usd": None,
         "rank_shadow_top_of_book_cap_usd": None,
         "rank_trade_count_multiplier": None,
@@ -1498,12 +1533,20 @@ def run_rotation_pass(
     out["rank_top_of_book_cap_usd"] = rank_top_of_book_cap_usd
     out["rank_shadow_top_of_book_cap_usd"] = rank_shadow_top_of_book_cap_usd
     out["rank_trade_count_multiplier"] = RANK_TRADE_COUNT_MULTIPLIER_MODE
+    effective_max_spread_bps, signal_spread_cap_bps = (
+        _effective_universe_max_spread_bps(settings)
+    )
+    out["universe_max_spread_bps"] = float(
+        getattr(settings, "universe_max_spread_bps", 0.0) or 0.0
+    )
+    out["signal_compatible_spread_cap_bps"] = signal_spread_cap_bps
+    out["effective_universe_max_spread_bps"] = effective_max_spread_bps
 
     for snap in valid_snapshots:
         passed = passes_shadow_exploration_gates(
             snap,
             min_volume_24h_usd=settings.universe_min_volume_24h_usd,
-            max_spread_bps=settings.universe_max_spread_bps,
+            max_spread_bps=effective_max_spread_bps,
             min_top_of_book_usd=shadow_min_top_of_book_usd,
             min_range_24h_bps=0.0,
             min_trades_24h=settings.universe_min_trades_24h,
@@ -1533,7 +1576,7 @@ def run_rotation_pass(
         passed, reject = passes_admission_gates(
             snap,
             min_volume_24h_usd=settings.universe_min_volume_24h_usd,
-            max_spread_bps=settings.universe_max_spread_bps,
+            max_spread_bps=effective_max_spread_bps,
             min_top_of_book_usd=settings.universe_min_top_of_book_usd,
             min_range_24h_bps=range_floor_bps,
             min_trades_24h=settings.universe_min_trades_24h,
@@ -1570,7 +1613,7 @@ def run_rotation_pass(
         and passes_shadow_exploration_gates(
             snap,
             min_volume_24h_usd=settings.universe_min_volume_24h_usd,
-            max_spread_bps=settings.universe_max_spread_bps,
+            max_spread_bps=effective_max_spread_bps,
             min_top_of_book_usd=shadow_min_top_of_book_usd,
             min_trades_24h=settings.universe_min_trades_24h,
             min_range_24h_bps=range_floor_bps,
