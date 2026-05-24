@@ -395,6 +395,72 @@ def test_run_rotation_pass_demotes_shadow_when_learned_lanes_exhausted():
     assert db.inserted_rows[0]["rank"] is None
 
 
+def test_edge_exhausted_candidates_do_not_set_adaptive_range_floor():
+    from app.services.trading.fast_path.universe_status import (
+        UNIVERSE_STATUS_INACTIVE,
+        UNIVERSE_STATUS_SHADOW,
+    )
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        decay_rows={
+            "BAD-USD": [
+                {
+                    "ticker": "BAD-USD",
+                    "alert_type": "imbalance_long",
+                    "score_bucket": "low",
+                    "horizon_s": 5,
+                    "sample_count": 6,
+                    "mean_return": -0.0012,
+                    "m2_return": 0.0000001,
+                },
+            ],
+        },
+    )
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=True,
+    )
+    snapshots = {
+        "BAD-USD": _make_candidate(
+            ticker="BAD-USD",
+            high_24h=120.0,
+            low_24h=80.0,
+        ),
+        "GOOD1-USD": _make_candidate(
+            ticker="GOOD1-USD",
+            high_24h=105.0,
+            low_24h=95.0,
+        ),
+        "GOOD2-USD": _make_candidate(
+            ticker="GOOD2-USD",
+            high_24h=104.0,
+            low_24h=96.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db, settings=s,
+        list_usd_products_fn=lambda: ["BAD-USD", "GOOD1-USD", "GOOD2-USD"],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["range_floor_dynamic_bps"] == pytest.approx(800.0)
+    assert out["edge_exhaustion_floor_excluded"] == 1
+    assert out["edge_exhaustion_backfill_skips"] == 1
+    assert out["edge_exhausted_demotions"] == 1
+    assert out["ranked_n"] == 2
+    rows_by_ticker = {r["ticker"]: r for r in db.inserted_rows}
+    assert rows_by_ticker["BAD-USD"]["status"] == UNIVERSE_STATUS_INACTIVE
+    assert rows_by_ticker["BAD-USD"]["rank"] is None
+    assert rows_by_ticker["GOOD1-USD"]["status"] == UNIVERSE_STATUS_SHADOW
+    assert rows_by_ticker["GOOD1-USD"]["rank"] == 1
+    assert rows_by_ticker["GOOD2-USD"]["status"] == UNIVERSE_STATUS_SHADOW
+    assert rows_by_ticker["GOOD2-USD"]["rank"] == 2
+
+
 def test_run_rotation_pass_keeps_shadow_when_lane_is_still_uncertain():
     from app.services.trading.fast_path.universe_status import UNIVERSE_STATUS_SHADOW
     from app.services.trading.fast_path.universe_rotator import run_rotation_pass

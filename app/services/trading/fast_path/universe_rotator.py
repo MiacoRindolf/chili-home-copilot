@@ -925,6 +925,8 @@ def run_rotation_pass(
         "edge_promotion_blocks": {},
         "edge_exhaustion_blocks": {},
         "edge_exhausted_demotions": 0,
+        "edge_exhaustion_floor_excluded": 0,
+        "edge_exhaustion_backfill_skips": 0,
         "promotion_decay_table": None,
         "promotion_fee_bps": None,
         "promotion_min_samples": None,
@@ -957,6 +959,23 @@ def run_rotation_pass(
         )
         db.commit()
         return out
+
+    edge_exhaustion_cache: dict[str, tuple[bool, dict[str, Any]]] = {}
+    edge_exhaustion_recorded: set[str] = set()
+
+    def _edge_exhausted(cand: _PairCandidate, *, record: bool = True) -> bool:
+        if cand.ticker not in edge_exhaustion_cache:
+            edge_exhaustion_cache[cand.ticker] = _shadow_edge_exhaustion_evidence(
+                db, cand, settings,
+            )
+        exhausted, evidence = edge_exhaustion_cache[cand.ticker]
+        if exhausted and record and cand.ticker not in edge_exhaustion_recorded:
+            edge_exhaustion_recorded.add(cand.ticker)
+            counts = evidence.get("lane_verdict_counts") or {}
+            blocks = out["edge_exhaustion_blocks"]
+            for verdict, count in dict(counts).items():
+                blocks[str(verdict)] = blocks.get(str(verdict), 0) + int(count or 0)
+        return exhausted
 
     # ``fetch_book_fn`` is held on the closure for tests that override
     # it independently of ``fetch_snapshot_fn``. Production
@@ -998,8 +1017,15 @@ def run_rotation_pass(
             base_range_candidates.append(snap)
 
     top_n = settings.universe_top_n
+    range_floor_candidates = [
+        snap for snap in base_range_candidates
+        if not _edge_exhausted(snap, record=False)
+    ]
+    out["edge_exhaustion_floor_excluded"] = (
+        len(base_range_candidates) - len(range_floor_candidates)
+    )
     range_floor_bps, dynamic_range_floor_bps = _adaptive_range_floor_bps(
-        base_range_candidates,
+        range_floor_candidates,
         static_floor_bps=settings.universe_min_range_24h_bps,
         target_count=top_n + settings.universe_hysteresis_ranks,
         enabled=bool(getattr(settings, "universe_adaptive_range_floor_enabled", True)),
@@ -1076,8 +1102,6 @@ def run_rotation_pass(
 
     if out["exploration_fallback"]:
         candidates.sort(key=lambda c: c.composite_score, reverse=True)
-    cut_ranked = candidates[:target_ranked]
-    out["ranked_n"] = len(cut_ranked)
 
     prior = _previous_pass_status(db)
     completed_shadows = _shadow_completion_promotions(
@@ -1086,7 +1110,6 @@ def run_rotation_pass(
 
     rows_to_write: list[dict[str, Any]] = []
     edge_evidence_cache: dict[str, tuple[bool, dict[str, Any]]] = {}
-    edge_exhaustion_cache: dict[str, tuple[bool, dict[str, Any]]] = {}
 
     def _has_edge(cand: _PairCandidate) -> bool:
         if cand.ticker not in edge_evidence_cache:
@@ -1100,41 +1123,40 @@ def run_rotation_pass(
             blocks[verdict] = blocks.get(verdict, 0) + 1
         return ok
 
-    def _edge_exhausted(cand: _PairCandidate) -> bool:
-        if cand.ticker not in edge_exhaustion_cache:
-            edge_exhaustion_cache[cand.ticker] = _shadow_edge_exhaustion_evidence(
-                db, cand, settings,
-            )
-        exhausted, evidence = edge_exhaustion_cache[cand.ticker]
-        if exhausted:
-            counts = evidence.get("lane_verdict_counts") or {}
-            blocks = out["edge_exhaustion_blocks"]
-            for verdict, count in dict(counts).items():
-                blocks[str(verdict)] = blocks.get(str(verdict), 0) + int(count or 0)
-        return exhausted
+    cut_ranked: list[_PairCandidate] = []
+    exhausted_rank_skips: list[_PairCandidate] = []
+    for cand in candidates:
+        if len(cut_ranked) >= target_ranked:
+            break
+        if _edge_exhausted(cand, record=True):
+            exhausted_rank_skips.append(cand)
+            continue
+        cut_ranked.append(cand)
+    out["edge_exhaustion_backfill_skips"] = len(exhausted_rank_skips)
+    out["ranked_n"] = len(cut_ranked)
 
     seen_in_this_pass: set[str] = set()
+    for cand in exhausted_rank_skips:
+        seen_in_this_pass.add(cand.ticker)
+        rows_to_write.append({
+            "ticker": cand.ticker,
+            "status": UNIVERSE_STATUS_INACTIVE,
+            "rank": None,
+            "composite_score": cand.composite_score,
+            "volume_24h_usd": cand.volume_24h_usd,
+            "spread_bps": cand.spread_bps,
+            "top_of_book_usd": cand.top_of_book_usd,
+            "trades_24h": cand.trades_24h,
+            "rotation_at": rotation_at,
+            "promoted_at": None,
+        })
+        out["edge_exhausted_demotions"] += 1
+        out["demoted_to_inactive"] += 1
+
     for rank_idx, cand in enumerate(cut_ranked, start=1):
         seen_in_this_pass.add(cand.ticker)
         prior_status, prior_rank = prior.get(cand.ticker, (None, None))
         active_eligible = cand.ticker in active_eligible_tickers
-
-        if _edge_exhausted(cand):
-            rows_to_write.append({
-                "ticker": cand.ticker,
-                "status": UNIVERSE_STATUS_INACTIVE,
-                "rank": None,
-                "composite_score": cand.composite_score,
-                "volume_24h_usd": cand.volume_24h_usd,
-                "spread_bps": cand.spread_bps,
-                "top_of_book_usd": cand.top_of_book_usd,
-                "trades_24h": cand.trades_24h,
-                "rotation_at": rotation_at,
-                "promoted_at": None,
-            })
-            out["edge_exhausted_demotions"] += 1
-            out["demoted_to_inactive"] += 1
-            continue
 
         if rank_idx > top_n:
             # Outside top_n; only present in cut_ranked because of the
