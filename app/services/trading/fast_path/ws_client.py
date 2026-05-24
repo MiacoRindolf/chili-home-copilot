@@ -150,6 +150,8 @@ class CoinbaseWSClient:
         self._alerts_suppressed_maker_attempt_adverse: int = 0
         self._heartbeats_total: int = 0
         self._subscriptions_total: int = 0
+        self._universe_refreshes_total: int = 0
+        self._universe_reconnects_total: int = 0
         self._unknown_channel_total: int = 0
         self._last_unknown_channel: str | None = None
         self._negative_edge_cache: dict[tuple[str, str, str, str], tuple[bool, float]] = {}
@@ -167,6 +169,39 @@ class CoinbaseWSClient:
         # universe pauses subscription unless the operator explicitly
         # enables the legacy fallback flag.
         self._active_pairs: list[str] = list(settings.pairs)
+
+    def _universe_refresh_interval_s(self) -> float:
+        if not getattr(self._settings, "universe_rotation_enabled", False):
+            return 0.0
+        metrics_s = float(getattr(self._settings, "metrics_log_interval_s", 0) or 0.0)
+        reconnect_floor_s = float(getattr(self._settings, "reconnect_min_s", 0) or 0.0)
+        return max(metrics_s, reconnect_floor_s)
+
+    def _refresh_active_pairs_if_changed(self) -> bool:
+        """Reload the rotator universe and return True when WS must reconnect."""
+        if not getattr(self._settings, "universe_rotation_enabled", False):
+            return False
+        latest = self._resolve_active_pairs()
+        self._universe_refreshes_total += 1
+        if latest == self._active_pairs:
+            return False
+
+        previous = list(self._active_pairs)
+        previous_set = set(previous)
+        latest_set = set(latest)
+        for ticker in latest:
+            self._status.register(ticker)
+            self._status.record_reconnect(ticker)
+        for ticker in sorted(previous_set - latest_set):
+            self._status.mark_paused(ticker, "universe_rotated")
+        self._active_pairs = latest
+        self._universe_reconnects_total += 1
+        logger.info(
+            "[fast_path] universe subscription changed; reconnecting ws "
+            "old=%s new=%s",
+            previous, latest,
+        )
+        return True
 
     def _resolve_active_pairs(self) -> list[str]:
         """Return the current subscription set.
@@ -314,7 +349,25 @@ class CoinbaseWSClient:
             await self._subscribe(ws, "heartbeats")
             for ticker in self._active_pairs:
                 self._status.mark_streaming(ticker)
-            async for raw in ws:
+            refresh_interval_s = self._universe_refresh_interval_s()
+            next_refresh_at = (
+                time.monotonic() + refresh_interval_s
+                if refresh_interval_s > 0.0
+                else None
+            )
+            while not self._stop.is_set():
+                timeout = None
+                if next_refresh_at is not None:
+                    timeout = max(0.0, next_refresh_at - time.monotonic())
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    if self._refresh_active_pairs_if_changed():
+                        await ws.close(code=1000, reason="universe_rotated")
+                        return
+                    if refresh_interval_s > 0.0:
+                        next_refresh_at = time.monotonic() + refresh_interval_s
+                    continue
                 if self._stop.is_set():
                     break
                 self._handle_message(raw)
@@ -804,6 +857,8 @@ class CoinbaseWSClient:
             ),
             "heartbeats_total": self._heartbeats_total,
             "subscriptions_total": self._subscriptions_total,
+            "universe_refreshes_total": self._universe_refreshes_total,
+            "universe_reconnects_total": self._universe_reconnects_total,
             "unknown_channel_total": self._unknown_channel_total,
             "last_unknown_channel": self._last_unknown_channel,
             # F2: nested order-book aggregator stats.

@@ -296,7 +296,8 @@ class FastPathSupervisor:
             "neg_edge_suppressed=%s neg_edge_cache=%s "
             "cost_suppressed=%s cost_cache=%s "
             "maker_adverse_suppressed=%s maker_adverse_cache=%s "
-            "heartbeats=%s subscriptions=%s unknown=%s last_unknown=%s",
+            "heartbeats=%s subscriptions=%s universe_refreshes=%s "
+            "universe_reconnects=%s unknown=%s last_unknown=%s",
             ws_stats.get("raw_messages_total"),
             ws_stats.get("raw_candles_events_total"),
             ws_stats.get("raw_candles_total"),
@@ -311,6 +312,8 @@ class FastPathSupervisor:
             ws_stats.get("maker_attempt_adverse_cache_size"),
             ws_stats.get("heartbeats_total"),
             ws_stats.get("subscriptions_total"),
+            ws_stats.get("universe_refreshes_total"),
+            ws_stats.get("universe_reconnects_total"),
             ws_stats.get("unknown_channel_total"),
             ws_stats.get("last_unknown_channel"),
         )

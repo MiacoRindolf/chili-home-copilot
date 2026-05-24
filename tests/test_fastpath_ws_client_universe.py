@@ -24,6 +24,7 @@ class _FakeStatus:
     def __init__(self) -> None:
         self.paused: list[tuple[str, str]] = []
         self.registered: list[str] = []
+        self.reconnected: list[str] = []
         self.bars: list[tuple[str, datetime]] = []
         self.errors: list[tuple[str, str]] = []
 
@@ -38,6 +39,9 @@ class _FakeStatus:
 
     def record_error(self, ticker: str, reason: str) -> None:
         self.errors.append((ticker, reason))
+
+    def record_reconnect(self, ticker: str) -> None:
+        self.reconnected.append(ticker)
 
 
 class _FakeWriter:
@@ -144,6 +148,54 @@ def test_rotation_disabled_uses_configured_pairs():
     client = _client(settings)
 
     assert client._resolve_active_pairs() == ["BTC-USD", "ETH-USD"]
+
+
+def test_universe_refresh_reconnects_when_rotator_pairs_change():
+    settings = FastPathSettings(
+        universe_rotation_enabled=True,
+        universe_empty_fallback_enabled=False,
+        pairs=[],
+    )
+    fake_db = _FakeSession()
+    status = _FakeStatus()
+    client = _client(settings, status=status)
+    client._active_pairs = ["OLD-USD", "KEEP-USD"]
+
+    with patch("app.db.SessionLocal", return_value=fake_db), patch(
+        "app.services.trading.fast_path.universe_rotator.get_subscribed_pairs",
+        return_value=["KEEP-USD", "NEW-USD"],
+    ):
+        changed = client._refresh_active_pairs_if_changed()
+
+    assert changed is True
+    assert client._active_pairs == ["KEEP-USD", "NEW-USD"]
+    assert ("OLD-USD", "universe_rotated") in status.paused
+    assert status.registered == ["KEEP-USD", "NEW-USD"]
+    assert status.reconnected == ["KEEP-USD", "NEW-USD"]
+    assert fake_db.closed is True
+    assert client.stats()["universe_refreshes_total"] == 1
+    assert client.stats()["universe_reconnects_total"] == 1
+
+
+def test_universe_refresh_ignores_unchanged_pairs():
+    settings = FastPathSettings(
+        universe_rotation_enabled=True,
+        universe_empty_fallback_enabled=False,
+        pairs=[],
+    )
+    client = _client(settings)
+    client._active_pairs = ["KEEP-USD", "NEW-USD"]
+
+    with patch("app.db.SessionLocal", return_value=_FakeSession()), patch(
+        "app.services.trading.fast_path.universe_rotator.get_subscribed_pairs",
+        return_value=["KEEP-USD", "NEW-USD"],
+    ):
+        changed = client._refresh_active_pairs_if_changed()
+
+    assert changed is False
+    assert client._active_pairs == ["KEEP-USD", "NEW-USD"]
+    assert client.stats()["universe_refreshes_total"] == 1
+    assert client.stats()["universe_reconnects_total"] == 0
 
 
 def test_ws_client_passes_scanner_threshold_settings():
