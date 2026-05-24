@@ -819,6 +819,7 @@ def get_universe() -> JSONResponse:
                     LIMIT 1
                 """)).mappings().one_or_none()
                 if diag is not None:
+                    counters = diag["counters_json"] or {}
                     out["latest_diagnostics"] = {
                         "rotation_at": diag["rotation_at"].isoformat(),
                         "created_at": diag["created_at"].isoformat(),
@@ -867,10 +868,20 @@ def get_universe() -> JSONResponse:
                             if diag["promotion_min_net_bps"] is not None
                             else None
                         ),
+                        "observed_opportunity_median_round_trip_cost_bps": (
+                            counters.get(
+                                "observed_opportunity_median_round_trip_cost_bps"
+                            )
+                        ),
+                        "observed_opportunity_median_realized_move_to_cost": (
+                            counters.get(
+                                "observed_opportunity_median_realized_move_to_cost"
+                            )
+                        ),
                         "exploration_fallback": bool(
                             diag["exploration_fallback"]
                         ),
-                        "counters": diag["counters_json"] or {},
+                        "counters": counters,
                     }
     except Exception as exc:
         out["error"] = f"universe_query_failed: {exc!s:.200}"

@@ -259,6 +259,13 @@ def _candidate_rank_score(
     return opportunity_score / cost_bps
 
 
+def _candidate_round_trip_cost_bps(
+    cand: _PairCandidate, *, fee_bps: float,
+) -> float:
+    """Round-trip fee + spread hurdle for this candidate."""
+    return 2.0 * (max(float(fee_bps or 0.0), 0.0) + cand.spread_bps)
+
+
 def _positive_median(values: list[float]) -> float | None:
     positives = [float(v) for v in values if float(v) > 0.0 and math.isfinite(float(v))]
     if not positives:
@@ -299,9 +306,25 @@ def _effective_universe_max_spread_bps(settings) -> tuple[float, float | None]:
 def _observed_opportunity_rank_context(
     candidates: list[_PairCandidate],
     observed: dict[str, _ObservedOpportunity],
+    *,
+    fee_bps: float,
 ) -> dict[str, float | None]:
     cohort = [observed.get(c.ticker) for c in candidates]
     cohort = [o for o in cohort if o is not None]
+    realized_cost_ratios: list[float] = []
+    round_trip_costs: list[float] = []
+    for cand in candidates:
+        obs = observed.get(cand.ticker)
+        if obs is None or obs.realized_move_samples <= 0:
+            continue
+        cost_bps = _candidate_round_trip_cost_bps(cand, fee_bps=fee_bps)
+        if cost_bps <= 0.0 or not math.isfinite(cost_bps):
+            continue
+        round_trip_costs.append(cost_bps)
+        if obs.mean_realized_bar_move_bps > 0.0:
+            realized_cost_ratios.append(
+                obs.mean_realized_bar_move_bps / cost_bps
+            )
     return {
         "median_alert_rate_per_bar": _positive_median([
             o.alert_rate_per_bar for o in cohort if o.bars > 0
@@ -314,6 +337,10 @@ def _observed_opportunity_rank_context(
             for o in cohort
             if o.realized_move_samples > 0
         ]),
+        "median_realized_move_to_cost": _positive_median(
+            realized_cost_ratios
+        ),
+        "median_round_trip_cost_bps": _positive_median(round_trip_costs),
     }
 
 
@@ -323,6 +350,7 @@ def _observed_opportunity_adjusted_rank_score(
     base_score: float,
     observed: dict[str, _ObservedOpportunity],
     rank_context: dict[str, float | None],
+    fee_bps: float,
 ) -> float:
     obs = observed.get(cand.ticker)
     if obs is None:
@@ -347,6 +375,12 @@ def _observed_opportunity_adjusted_rank_score(
             max(obs.mean_realized_bar_move_bps, 0.0)
             / float(median_realized_move)
         )
+        cost_bps = _candidate_round_trip_cost_bps(cand, fee_bps=fee_bps)
+        if cost_bps > 0.0 and math.isfinite(cost_bps):
+            adjusted *= min(
+                1.0,
+                max(obs.mean_realized_bar_move_bps, 0.0) / cost_bps,
+            )
 
     median_fill_rate = rank_context.get("median_maker_fill_rate")
     if obs.maker_attempts > 0 and obs.maker_fills <= 0:
@@ -1450,6 +1484,8 @@ def run_rotation_pass(
         "observed_opportunity_median_alert_rate_per_bar": None,
         "observed_opportunity_median_maker_fill_rate": None,
         "observed_opportunity_median_realized_bar_move_bps": None,
+        "observed_opportunity_median_round_trip_cost_bps": None,
+        "observed_opportunity_median_realized_move_to_cost": None,
         "observed_opportunity_rank_skips": 0,
         "rotation_at": rotation_at.isoformat(),
     }
@@ -1637,6 +1673,7 @@ def run_rotation_pass(
         rank_context = _observed_opportunity_rank_context(
             candidates,
             observed_opportunity,
+            fee_bps=promotion_fee_bps,
         )
         out["observed_opportunity_median_alert_rate_per_bar"] = (
             rank_context["median_alert_rate_per_bar"]
@@ -1646,6 +1683,12 @@ def run_rotation_pass(
         )
         out["observed_opportunity_median_realized_bar_move_bps"] = (
             rank_context["median_realized_bar_move_bps"]
+        )
+        out["observed_opportunity_median_round_trip_cost_bps"] = (
+            rank_context["median_round_trip_cost_bps"]
+        )
+        out["observed_opportunity_median_realized_move_to_cost"] = (
+            rank_context["median_realized_move_to_cost"]
         )
         candidates.sort(
             key=lambda c: _observed_opportunity_adjusted_rank_score(
@@ -1657,6 +1700,7 @@ def run_rotation_pass(
                 ),
                 observed=observed_opportunity,
                 rank_context=rank_context,
+                fee_bps=promotion_fee_bps,
             ),
             reverse=True,
         )
@@ -1665,6 +1709,7 @@ def run_rotation_pass(
         rank_context = _observed_opportunity_rank_context(
             candidates,
             observed_opportunity,
+            fee_bps=promotion_fee_bps,
         )
         out["observed_opportunity_median_alert_rate_per_bar"] = (
             rank_context["median_alert_rate_per_bar"]
@@ -1674,6 +1719,12 @@ def run_rotation_pass(
         )
         out["observed_opportunity_median_realized_bar_move_bps"] = (
             rank_context["median_realized_bar_move_bps"]
+        )
+        out["observed_opportunity_median_round_trip_cost_bps"] = (
+            rank_context["median_round_trip_cost_bps"]
+        )
+        out["observed_opportunity_median_realized_move_to_cost"] = (
+            rank_context["median_realized_move_to_cost"]
         )
         candidates.sort(
             key=lambda c: _observed_opportunity_adjusted_rank_score(
@@ -1685,6 +1736,7 @@ def run_rotation_pass(
                 ),
                 observed=observed_opportunity,
                 rank_context=rank_context,
+                fee_bps=promotion_fee_bps,
             ),
             reverse=True,
         )
@@ -1728,6 +1780,12 @@ def run_rotation_pass(
             "median_realized_bar_move_bps": out[
                 "observed_opportunity_median_realized_bar_move_bps"
             ],
+            "median_realized_move_to_cost": out[
+                "observed_opportunity_median_realized_move_to_cost"
+            ],
+            "median_round_trip_cost_bps": out[
+                "observed_opportunity_median_round_trip_cost_bps"
+            ],
         }
         rank_score = _observed_opportunity_adjusted_rank_score(
             cand,
@@ -1738,6 +1796,7 @@ def run_rotation_pass(
             ),
             observed=observed_opportunity,
             rank_context=rank_context,
+            fee_bps=promotion_fee_bps,
         )
         if cand.ticker in observed_opportunity and rank_score <= 0.0:
             observed_rank_skips.append(cand)

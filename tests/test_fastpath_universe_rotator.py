@@ -973,8 +973,73 @@ def test_rotation_uses_recent_realized_move_for_observed_ranking():
     assert out["observed_opportunity_median_realized_bar_move_bps"] == (
         pytest.approx(10.5)
     )
+    assert out["observed_opportunity_median_round_trip_cost_bps"] == (
+        pytest.approx(20.0)
+    )
+    assert out["observed_opportunity_median_realized_move_to_cost"] == (
+        pytest.approx(0.525)
+    )
     assert out["ranked_n"] == 1
     assert db.inserted_rows[0]["ticker"] == "MOVING-USD"
+
+
+def test_rotation_penalizes_observed_move_below_round_trip_cost():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        latest_rotation_at=datetime(2026, 5, 24, 15, 0, 0),
+        observed_rows=[
+            {
+                "ticker": "RANGEY-BUT-DEAD-USD",
+                "bars": 20,
+                "alerts": 10,
+                "maker_attempts": 0,
+                "maker_fills": 0,
+                "realized_move_samples": 20,
+                "mean_realized_bar_move_bps": 1.0,
+            },
+            {
+                "ticker": "COST-FIT-USD",
+                "bars": 20,
+                "alerts": 10,
+                "maker_attempts": 0,
+                "maker_fills": 0,
+                "realized_move_samples": 20,
+                "mean_realized_bar_move_bps": 20.0,
+            },
+        ],
+    )
+    s = _StubSettings(
+        universe_top_n=1,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+    )
+    snapshots = {
+        "RANGEY-BUT-DEAD-USD": _make_candidate(
+            ticker="RANGEY-BUT-DEAD-USD",
+            high_24h=150.0,
+            low_24h=50.0,
+        ),
+        "COST-FIT-USD": _make_candidate(
+            ticker="COST-FIT-USD",
+            high_24h=105.0,
+            low_24h=95.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: ["RANGEY-BUT-DEAD-USD", "COST-FIT-USD"],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["observed_opportunity_median_realized_move_to_cost"] == (
+        pytest.approx(0.525)
+    )
+    assert out["ranked_n"] == 1
+    assert db.inserted_rows[0]["ticker"] == "COST-FIT-USD"
 
 
 def test_rotation_ranks_shadow_candidates_against_active_depth_candidates():
