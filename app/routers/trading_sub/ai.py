@@ -193,6 +193,35 @@ def api_trading_brain_momentum_evolution_credit(
     return JSONResponse({"ok": True, "evolution_credit": to_jsonable(payload)})
 
 
+@router.get("/api/trading/brain/momentum/truth-repair-plan")
+def api_trading_brain_momentum_truth_repair_plan(
+    request: Request,
+    days: int = Query(30, ge=1, le=365),
+    lookback_hours: int | None = Query(None, ge=1, le=8760),
+    limit: int = Query(500, ge=1, le=5000),
+    mine: bool = Query(False, description="When true, filter to the paired user id"),
+    db: Session = Depends(get_db),
+):
+    """Read-only sequenced repair plan for momentum learning credit.
+
+    This endpoint dry-runs the packet, ledger, regrade, and reingest stages
+    needed to recover training-grade historical outcomes. It never applies
+    repairs and never changes trading policy.
+    """
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.repair_plan import momentum_truth_repair_plan
+
+    user_id = ctx.get("user_id") if mine else None
+    payload = momentum_truth_repair_plan(
+        db,
+        days=int(days),
+        lookback_hours=int(lookback_hours) if lookback_hours is not None else None,
+        user_id=int(user_id) if user_id is not None else None,
+        limit=int(limit),
+    )
+    return JSONResponse({"ok": bool(payload.get("ok", False)), "truth_repair_plan": to_jsonable(payload)})
+
+
 @router.post("/api/trading/brain/momentum/evolution-credit/regrade")
 def api_trading_brain_momentum_evolution_credit_regrade(
     request: Request,
