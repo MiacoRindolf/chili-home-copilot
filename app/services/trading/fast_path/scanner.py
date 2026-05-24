@@ -23,6 +23,8 @@ Signals (initial set — more can layer in):
   ``imbalance_long`` / ``imbalance_short``
     Order-book imbalance crosses a threshold (default 0.65 / 0.35).
     Score = abs(imbalance - 0.5) * 2 (clamped). Per-ticker 30s cooldown.
+    This raw signal can be disabled while still letting the stricter
+    book-pressure path use imbalance as one input.
 
   ``spread_squeeze``
     spread_bps < ``squeeze_bps`` AND volume on last bar > 1.2x mean.
@@ -220,6 +222,7 @@ class MomentumScanner:
         self,
         *,
         emit_short_alerts: bool = True,
+        emit_raw_imbalance_alerts: bool = True,
         vol_breakout_lookback: int = VOL_BREAKOUT_LOOKBACK,
         vol_breakout_mult: float = VOL_BREAKOUT_MULT,
         imbalance_long_threshold: float = IMBALANCE_LONG_THRESHOLD,
@@ -241,6 +244,7 @@ class MomentumScanner:
     ) -> None:
         self._state: dict[str, _PerTickerState] = {}
         self._emit_short_alerts = bool(emit_short_alerts)
+        self._emit_raw_imbalance_alerts = bool(emit_raw_imbalance_alerts)
         self._vol_breakout_lookback = max(1, int(vol_breakout_lookback or 1))
         self._vol_breakout_mult = max(0.0, float(vol_breakout_mult or 0.0))
         self._imbalance_long_threshold = max(
@@ -284,6 +288,7 @@ class MomentumScanner:
         self.fired_volume_breakout_pullback_long = 0
         self.fired_imbalance_long = 0
         self.fired_imbalance_short = 0
+        self.suppressed_raw_imbalance_disabled = 0
         self.suppressed_short_alert_disabled = 0
         self.fired_spread_squeeze = 0
         self.fired_book_pressure_reclaim_long = 0
@@ -459,7 +464,9 @@ class MomentumScanner:
         if pressure_alert is not None:
             alerts.append(pressure_alert)
         if imb >= self._imbalance_long_threshold:
-            if self._cooldown_ok(
+            if not self._emit_raw_imbalance_alerts:
+                self.suppressed_raw_imbalance_disabled += 1
+            elif self._cooldown_ok(
                 st, "imbalance_long", self._imbalance_cooldown_s, now_monotonic
             ):
                 alerts.append(self._book_alert(ticker, "imbalance_long", ts, imb, book))
@@ -467,6 +474,9 @@ class MomentumScanner:
             else:
                 self.suppressed_cooldown += 1
         elif imb <= self._imbalance_short_threshold:
+            if not self._emit_raw_imbalance_alerts:
+                self.suppressed_raw_imbalance_disabled += 1
+                return alerts
             # 2026-05-17 spot-venue gate: skip imbalance_short emission
             # when the scanner is configured for a long-only venue.
             # The executor would reject these with
@@ -839,6 +849,8 @@ class MomentumScanner:
                 self.fired_volume_breakout_pullback_long,
             "fired_imbalance_long": self.fired_imbalance_long,
             "fired_imbalance_short": self.fired_imbalance_short,
+            "suppressed_raw_imbalance_disabled":
+                self.suppressed_raw_imbalance_disabled,
             "suppressed_short_alert_disabled": self.suppressed_short_alert_disabled,
             "fired_spread_squeeze": self.fired_spread_squeeze,
             "fired_book_pressure_reclaim_long":
@@ -871,6 +883,7 @@ class MomentumScanner:
                 "imbalance_long_threshold": self._imbalance_long_threshold,
                 "imbalance_short_threshold": self._imbalance_short_threshold,
                 "imbalance_cooldown_s": self._imbalance_cooldown_s,
+                "emit_raw_imbalance_alerts": self._emit_raw_imbalance_alerts,
                 "spread_squeeze_bps": self._spread_squeeze_bps,
                 "spread_squeeze_vol_mult": self._spread_squeeze_vol_mult,
                 "spread_squeeze_cooldown_s": self._spread_squeeze_cooldown_s,

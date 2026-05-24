@@ -319,6 +319,18 @@ class FastPathSettings:
     ``MomentumScanner`` directly (default True for backwards-compat with
     pre-gate fixtures)."""
 
+    emit_raw_imbalance_alerts: bool = False
+    """When False (default), the scanner does not emit standalone
+    ``imbalance_long`` / ``imbalance_short`` alerts. Raw top-book
+    imbalance remains available as an input to stricter confirmed
+    signals such as ``book_pressure_reclaim_long``. The maker-filled
+    evidence observed on 2026-05-24 showed raw ``imbalance_long`` was
+    negative at scalp horizons across score buckets, so production
+    should not keep generating probes from that lane unless the
+    operator explicitly re-enables it via
+    ``CHILI_FAST_PATH_EMIT_RAW_IMBALANCE_ALERTS=true`` for a controlled
+    experiment."""
+
     scanner_vol_breakout_lookback: int = 20
     """Number of closed 1m bars used for scanner volume baselines."""
 
@@ -461,6 +473,8 @@ def load() -> FastPathSettings:
         # Short-alert gate (2026-05-17)
         emit_short_alerts=_env_bool(
             "CHILI_FAST_PATH_EMIT_SHORT_ALERTS", False),
+        emit_raw_imbalance_alerts=_env_bool(
+            "CHILI_FAST_PATH_EMIT_RAW_IMBALANCE_ALERTS", False),
         scanner_vol_breakout_lookback=_env_int(
             "CHILI_FAST_PATH_SCANNER_VOL_BREAKOUT_LOOKBACK", 20),
         scanner_vol_breakout_mult=_env_float(

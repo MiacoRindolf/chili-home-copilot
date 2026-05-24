@@ -420,6 +420,8 @@ class FastPathSupervisor:
                 "book_pressure=%s book_pressure_warmup=%s "
                 "book_pressure_condition=%s "
                 "suppressed_cooldown=%s suppressed_warmup=%s "
+                "suppressed_raw_imbalance_disabled=%s "
+                "suppressed_short_disabled=%s "
                 "suppressed_bar_disabled=%s tickers=%s "
                 "writer_alerts_received=%s writer_alerts_written=%s "
                 "writer_alerts_dropped=%s",
@@ -438,6 +440,8 @@ class FastPathSupervisor:
                 scanner_stats.get("suppressed_book_pressure_condition"),
                 scanner_stats.get("suppressed_cooldown"),
                 scanner_stats.get("suppressed_warmup"),
+                scanner_stats.get("suppressed_raw_imbalance_disabled"),
+                scanner_stats.get("suppressed_short_alert_disabled"),
                 scanner_stats.get("suppressed_bar_close_alerts_disabled"),
                 scanner_stats.get("tickers_tracked"),
                 writer.get("alerts_received"),

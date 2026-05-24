@@ -86,6 +86,9 @@ class CoinbaseWSClient:
         # flip CHILI_FAST_PATH_EMIT_SHORT_ALERTS=true.
         self._scanner = MomentumScanner(
             emit_short_alerts=getattr(settings, "emit_short_alerts", False),
+            emit_raw_imbalance_alerts=getattr(
+                settings, "emit_raw_imbalance_alerts", False,
+            ),
             vol_breakout_lookback=getattr(
                 settings, "scanner_vol_breakout_lookback", 20,
             ),
