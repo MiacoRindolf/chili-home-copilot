@@ -269,6 +269,71 @@ def test_stale_replay_bars_warm_scanner_without_emitting_alerts():
     assert scanner_stats["pullback_deferred_scheduled"] == 0
 
 
+def test_dispatch_alert_suppresses_min_score_before_db_write():
+    settings = FastPathSettings(
+        cost_aware_admission_enabled=True,
+        execution_mode="maker_only",
+    )
+    writer = _FakeWriter()
+    client = _client(settings, writer=writer, engine=object())
+
+    with patch.dict(
+        "os.environ",
+        {"CHILI_FAST_PATH_EXEC_MIN_SCORE": "0.55"},
+    ), patch(
+        "app.services.trading.fast_path.calibration.is_negative_edge_excluded",
+        side_effect=AssertionError("min-score alert should stop first"),
+    ), patch(
+        "app.services.trading.fast_path.calibration.is_cost_barrier_excluded",
+        side_effect=AssertionError("min-score alert should stop first"),
+    ), patch(
+        "app.services.trading.fast_path.calibration."
+        "maker_attempt_adverse_selection_excluded",
+        side_effect=AssertionError("min-score alert should stop first"),
+    ):
+        client._dispatch_alert({
+            "ticker": "TEST-USD",
+            "alert_type": "volume_breakout_long",
+            "fired_at": datetime(2026, 5, 23, 18, 0, 0),
+            "signal_score": 0.54,
+            "features": {},
+        })
+
+    assert writer.alerts == []
+    assert client.stats()["alerts_suppressed_min_score"] == 1
+    assert client.stats()["alerts_suppressed_negative_edge"] == 0
+    assert client.stats()["alerts_suppressed_cost_barrier"] == 0
+    assert client.stats()["alerts_suppressed_maker_attempt_adverse"] == 0
+
+
+def test_dispatch_alert_allows_score_at_executor_min_score():
+    settings = FastPathSettings(execution_mode="maker_only")
+    writer = _FakeWriter()
+    client = _client(settings, writer=writer, engine=object())
+
+    with patch.dict(
+        "os.environ",
+        {"CHILI_FAST_PATH_EXEC_MIN_SCORE": "0.55"},
+    ), patch(
+        "app.services.trading.fast_path.calibration.is_negative_edge_excluded",
+        return_value=(False, {"verdict": "not_excluded"}),
+    ), patch(
+        "app.services.trading.fast_path.calibration."
+        "maker_attempt_adverse_selection_excluded",
+        return_value=(False, {"verdict": "not_excluded"}),
+    ):
+        client._dispatch_alert({
+            "ticker": "TEST-USD",
+            "alert_type": "volume_breakout_long",
+            "fired_at": datetime(2026, 5, 23, 18, 0, 0),
+            "signal_score": 0.55,
+            "features": {},
+        })
+
+    assert len(writer.alerts) == 1
+    assert client.stats()["alerts_suppressed_min_score"] == 0
+
+
 def test_dispatch_alert_suppresses_learned_negative_edge_before_db_write():
     settings = FastPathSettings(
         execution_mode="maker_only",

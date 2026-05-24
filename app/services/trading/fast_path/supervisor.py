@@ -293,6 +293,7 @@ class FastPathSupervisor:
         logger.info(
             "[fast_path] ws raw_messages=%s candles_events=%s candles=%s "
             "filtered_unclosed=%s filtered_dedupe=%s warmup_only=%s "
+            "min_score_suppressed=%s "
             "neg_edge_suppressed=%s neg_edge_cache=%s "
             "cost_suppressed=%s cost_cache=%s "
             "maker_adverse_suppressed=%s maker_adverse_cache=%s "
@@ -304,6 +305,7 @@ class FastPathSupervisor:
             ws_stats.get("candles_filtered_unclosed"),
             ws_stats.get("candles_filtered_dedupe"),
             ws_stats.get("candles_scanned_warmup_only"),
+            ws_stats.get("alerts_suppressed_min_score"),
             ws_stats.get("alerts_suppressed_negative_edge"),
             ws_stats.get("negative_edge_cache_size"),
             ws_stats.get("alerts_suppressed_cost_barrier"),

@@ -145,6 +145,7 @@ class CoinbaseWSClient:
         self._candles_filtered_unclosed: int = 0
         self._candles_filtered_dedupe: int = 0
         self._candles_scanned_warmup_only: int = 0
+        self._alerts_suppressed_min_score: int = 0
         self._alerts_suppressed_negative_edge: int = 0
         self._alerts_suppressed_cost_barrier: int = 0
         self._alerts_suppressed_maker_attempt_adverse: int = 0
@@ -573,6 +574,8 @@ class CoinbaseWSClient:
         stays infra-free for unit tests; this method is the seam where
         we cross into the typed db_writer interface.
         """
+        if self._min_score_suppressed(alert_dict):
+            return
         if self._negative_edge_suppressed(alert_dict):
             return
         if self._cost_barrier_suppressed(alert_dict):
@@ -596,6 +599,39 @@ class CoinbaseWSClient:
             "[fast_path] ALERT ticker=%s type=%s score=%.3f features=%s",
             item.ticker, item.alert_type, item.signal_score, item.features,
         )
+
+    @staticmethod
+    def _execution_min_score() -> float:
+        from .gates import env_overrides
+
+        return max(0.0, float(env_overrides().get("min_score") or 0.0))
+
+    def _min_score_suppressed(self, alert_dict: dict[str, Any]) -> bool:
+        """Suppress alerts the executor's min-score gate cannot accept."""
+        try:
+            ticker = str(alert_dict.get("ticker") or "")
+            alert_type = str(alert_dict.get("alert_type") or "")
+            signal_score = float(alert_dict.get("signal_score") or 0.0)
+            min_score = self._execution_min_score()
+        except (TypeError, ValueError) as exc:
+            logger.debug(
+                "[fast_path] min-score alert prefilter skipped: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
+        if signal_score < min_score:
+            self._alerts_suppressed_min_score += 1
+            logger.debug(
+                "[fast_path] alert suppressed by min score ticker=%s type=%s "
+                "score=%.4f min=%.4f",
+                ticker,
+                alert_type,
+                signal_score,
+                min_score,
+            )
+            return True
+        return False
 
     def _negative_edge_suppressed(self, alert_dict: dict[str, Any]) -> bool:
         """Suppress alerts the learned negative-edge gate would reject.
@@ -846,6 +882,7 @@ class CoinbaseWSClient:
             "candles_filtered_unclosed": self._candles_filtered_unclosed,
             "candles_filtered_dedupe": self._candles_filtered_dedupe,
             "candles_scanned_warmup_only": self._candles_scanned_warmup_only,
+            "alerts_suppressed_min_score": self._alerts_suppressed_min_score,
             "alerts_suppressed_negative_edge": self._alerts_suppressed_negative_edge,
             "alerts_suppressed_cost_barrier": self._alerts_suppressed_cost_barrier,
             "alerts_suppressed_maker_attempt_adverse":
