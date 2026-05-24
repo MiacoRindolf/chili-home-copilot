@@ -80,6 +80,8 @@ logger = logging.getLogger(__name__)
 _COINBASE_REST = "https://api.exchange.coinbase.com"
 _HTTP_TIMEOUT_S = 8.0
 _PER_REQ_PACING_S = 0.12  # ~8 req/s
+_BPS_PER_UNIT = 10_000.0
+_FAST_PATH_BAR_INTERVAL = "1m"
 RANK_TRADE_COUNT_MULTIPLIER_MODE = "admission_gate_only"
 _MAKER_ATTEMPT_ADVERSE_SELECTION_VERDICT = "adverse_selection"
 _MAKER_ATTEMPT_RAW_NOT_EXCLUDED_VERDICT = "not_excluded"
@@ -129,7 +131,7 @@ class _PairCandidate:
         mid = (self.bid + self.ask) / 2.0
         if mid <= 0:
             return float("inf")
-        return (self.ask - self.bid) / mid * 10000.0
+        return (self.ask - self.bid) / mid * _BPS_PER_UNIT
 
     @property
     def top_of_book_usd(self) -> float:
@@ -157,7 +159,7 @@ class _PairCandidate:
         )
         if ref_price <= 0:
             return 0.0
-        return (self.high_24h - self.low_24h) / ref_price * 10000.0
+        return (self.high_24h - self.low_24h) / ref_price * _BPS_PER_UNIT
 
     @property
     def has_valid_opportunity_data(self) -> bool:
@@ -203,6 +205,8 @@ class _ObservedOpportunity:
     alerts: int = 0
     maker_attempts: int = 0
     maker_fills: int = 0
+    realized_move_samples: int = 0
+    mean_realized_bar_move_bps: float = 0.0
 
     @property
     def alert_rate_per_bar(self) -> float:
@@ -273,6 +277,11 @@ def _observed_opportunity_rank_context(
         "median_maker_fill_rate": _positive_median([
             o.maker_fill_rate for o in cohort if o.maker_attempts > 0
         ]),
+        "median_realized_bar_move_bps": _positive_median([
+            o.mean_realized_bar_move_bps
+            for o in cohort
+            if o.realized_move_samples > 0
+        ]),
     }
 
 
@@ -293,6 +302,19 @@ def _observed_opportunity_adjusted_rank_score(
     median_alert_rate = rank_context.get("median_alert_rate_per_bar")
     if obs.bars > 0 and median_alert_rate and median_alert_rate > 0.0:
         adjusted *= max(obs.alert_rate_per_bar, 0.0) / float(median_alert_rate)
+
+    median_realized_move = rank_context.get("median_realized_bar_move_bps")
+    if (
+        obs.realized_move_samples > 0
+        and median_realized_move
+        and median_realized_move > 0.0
+    ):
+        if obs.mean_realized_bar_move_bps <= 0.0:
+            return 0.0
+        adjusted *= (
+            max(obs.mean_realized_bar_move_bps, 0.0)
+            / float(median_realized_move)
+        )
 
     median_fill_rate = rank_context.get("median_maker_fill_rate")
     if obs.maker_attempts > 0 and obs.maker_fills <= 0:
@@ -642,10 +664,54 @@ def _observed_opportunity_by_ticker(
 
     rows = db.execute(text("""
         /* observed alert/fill opportunity */
-        WITH bars AS (
-            SELECT ticker, COUNT(*) AS bars
+        WITH raw_bars AS (
+            SELECT
+                ticker,
+                close_price,
+                high_price,
+                low_price,
+                LAG(close_price) OVER (
+                    PARTITION BY ticker ORDER BY bar_close_at
+                ) AS prev_close
             FROM fast_snapshots
             WHERE bar_close_at > :since
+              AND interval = :bar_interval
+        ),
+        bar_moves AS (
+            SELECT
+                ticker,
+                CASE
+                    WHEN close_price > 0.0 THEN GREATEST(
+                        COALESCE(
+                            CASE
+                                WHEN prev_close > 0.0
+                                THEN ABS(close_price - prev_close)
+                                    / prev_close * :bps_per_unit
+                                ELSE NULL
+                            END,
+                            0.0
+                        ),
+                        COALESCE(
+                            CASE
+                                WHEN high_price >= low_price
+                                THEN (high_price - low_price)
+                                    / close_price * :bps_per_unit
+                                ELSE NULL
+                            END,
+                            0.0
+                        )
+                    )
+                    ELSE NULL
+                END AS realized_move_bps
+            FROM raw_bars
+        ),
+        bars AS (
+            SELECT
+                ticker,
+                COUNT(*) AS bars,
+                COUNT(realized_move_bps) AS realized_move_samples,
+                AVG(realized_move_bps) AS mean_realized_bar_move_bps
+            FROM bar_moves
             GROUP BY ticker
         ),
         alerts AS (
@@ -675,6 +741,9 @@ def _observed_opportunity_by_ticker(
         SELECT
             t.ticker,
             COALESCE(b.bars, 0) AS bars,
+            COALESCE(b.realized_move_samples, 0) AS realized_move_samples,
+            COALESCE(b.mean_realized_bar_move_bps, 0.0)
+                AS mean_realized_bar_move_bps,
             COALESCE(a.alerts, 0) AS alerts,
             COALESCE(m.maker_attempts, 0) AS maker_attempts,
             COALESCE(m.maker_fills, 0) AS maker_fills
@@ -682,13 +751,21 @@ def _observed_opportunity_by_ticker(
         LEFT JOIN bars b ON b.ticker = t.ticker
         LEFT JOIN alerts a ON a.ticker = t.ticker
         LEFT JOIN attempts m ON m.ticker = t.ticker
-    """), {"since": since}).mappings().all()
+    """), {
+        "since": since,
+        "bar_interval": _FAST_PATH_BAR_INTERVAL,
+        "bps_per_unit": _BPS_PER_UNIT,
+    }).mappings().all()
     return {
         str(row["ticker"]): _ObservedOpportunity(
             bars=int(row.get("bars") or 0),
             alerts=int(row.get("alerts") or 0),
             maker_attempts=int(row.get("maker_attempts") or 0),
             maker_fills=int(row.get("maker_fills") or 0),
+            realized_move_samples=int(row.get("realized_move_samples") or 0),
+            mean_realized_bar_move_bps=float(
+                row.get("mean_realized_bar_move_bps") or 0.0
+            ),
         )
         for row in rows
     }
@@ -1337,6 +1414,7 @@ def run_rotation_pass(
         "observed_opportunity_tickers": 0,
         "observed_opportunity_median_alert_rate_per_bar": None,
         "observed_opportunity_median_maker_fill_rate": None,
+        "observed_opportunity_median_realized_bar_move_bps": None,
         "observed_opportunity_rank_skips": 0,
         "rotation_at": rotation_at.isoformat(),
     }
@@ -1523,6 +1601,9 @@ def run_rotation_pass(
         out["observed_opportunity_median_maker_fill_rate"] = (
             rank_context["median_maker_fill_rate"]
         )
+        out["observed_opportunity_median_realized_bar_move_bps"] = (
+            rank_context["median_realized_bar_move_bps"]
+        )
         candidates.sort(
             key=lambda c: _observed_opportunity_adjusted_rank_score(
                 c,
@@ -1547,6 +1628,9 @@ def run_rotation_pass(
         )
         out["observed_opportunity_median_maker_fill_rate"] = (
             rank_context["median_maker_fill_rate"]
+        )
+        out["observed_opportunity_median_realized_bar_move_bps"] = (
+            rank_context["median_realized_bar_move_bps"]
         )
         candidates.sort(
             key=lambda c: _observed_opportunity_adjusted_rank_score(
@@ -1597,6 +1681,9 @@ def run_rotation_pass(
             ],
             "median_maker_fill_rate": out[
                 "observed_opportunity_median_maker_fill_rate"
+            ],
+            "median_realized_bar_move_bps": out[
+                "observed_opportunity_median_realized_bar_move_bps"
             ],
         }
         rank_score = _observed_opportunity_adjusted_rank_score(

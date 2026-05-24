@@ -847,6 +847,65 @@ def test_rotation_uses_observed_signal_and_fill_rates_for_shadow_ranking():
     assert rows_by_ticker["FRESH-USD"]["rank"] == 2
 
 
+def test_rotation_uses_recent_realized_move_for_observed_ranking():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        latest_rotation_at=datetime(2026, 5, 24, 15, 0, 0),
+        observed_rows=[
+            {
+                "ticker": "QUIET-USD",
+                "bars": 20,
+                "alerts": 10,
+                "maker_attempts": 0,
+                "maker_fills": 0,
+                "realized_move_samples": 20,
+                "mean_realized_bar_move_bps": 1.0,
+            },
+            {
+                "ticker": "MOVING-USD",
+                "bars": 20,
+                "alerts": 10,
+                "maker_attempts": 0,
+                "maker_fills": 0,
+                "realized_move_samples": 20,
+                "mean_realized_bar_move_bps": 20.0,
+            },
+        ],
+    )
+    s = _StubSettings(
+        universe_top_n=1,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+    )
+    snapshots = {
+        "QUIET-USD": _make_candidate(
+            ticker="QUIET-USD",
+            high_24h=120.0,
+            low_24h=80.0,
+        ),
+        "MOVING-USD": _make_candidate(
+            ticker="MOVING-USD",
+            high_24h=112.0,
+            low_24h=88.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: ["QUIET-USD", "MOVING-USD"],
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    assert out["observed_opportunity_median_realized_bar_move_bps"] == (
+        pytest.approx(10.5)
+    )
+    assert out["ranked_n"] == 1
+    assert db.inserted_rows[0]["ticker"] == "MOVING-USD"
+
+
 def test_rotation_ranks_shadow_candidates_against_active_depth_candidates():
     """Probe-fillable volatile names should compete for subscription rank."""
     from app.services.trading.fast_path.universe_rotator import run_rotation_pass
