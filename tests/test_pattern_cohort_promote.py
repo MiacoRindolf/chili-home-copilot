@@ -315,9 +315,38 @@ def _seed_directional_outcomes(
     db.commit()
 
 
+def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02):
+    now = datetime.utcnow().replace(microsecond=0)
+    for i in range(n):
+        entry_price = 100.0
+        quantity = 1.0
+        pnl = entry_price * quantity * pnl_pct
+        db.execute(text(
+            """
+            INSERT INTO trading_trades (
+                scan_pattern_id, ticker, direction, entry_price, exit_price,
+                quantity, entry_date, exit_date, status, pnl
+            ) VALUES (
+                :pid, 'TEST', 'long', :entry_price, :exit_price,
+                :quantity, :entry_date, :exit_date, 'closed', :pnl
+            )
+            """
+        ), {
+            "pid": pattern_id,
+            "entry_price": entry_price,
+            "exit_price": entry_price + pnl,
+            "quantity": quantity,
+            "entry_date": now - timedelta(days=i + 2),
+            "exit_date": now - timedelta(days=i + 1),
+            "pnl": pnl,
+        })
+    db.commit()
+
+
 def _truncate_phase4_state(db):
     """Per-test: clear directional outcomes + alerts + scan patterns."""
     db.execute(text("DELETE FROM pattern_alert_directional_outcome"))
+    db.execute(text("DELETE FROM trading_trades"))
     db.execute(text(
         "DELETE FROM trading_alerts "
         "WHERE alert_type='pattern_breakout_imminent'"
@@ -664,6 +693,7 @@ def test_compute_and_persist_scores_populates_column(db):
     _seed_directional_outcomes(
         db, pattern_id=p_full.id, n_correct=20, n_incorrect=10,
     )
+    _seed_closed_trades(db, pattern_id=p_full.id, n=5, pnl_pct=0.02)
     p_thin = _make_pattern(
         db, name="thin_evidence",
         cpcv=1.5, dsr=1.0, pbo=0.0, quality_score=None,

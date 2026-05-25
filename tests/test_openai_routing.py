@@ -76,7 +76,7 @@ class TestOpenAIFallbackRouting:
     @patch("app.routers.chat.openai_client")
     @patch("app.services.chat_service.plan_action")
     def test_tool_actions_stay_local(self, mock_plan, mock_oc, paired_client, db):
-        """Tool actions should use llama3 even when OpenAI is configured."""
+        """Tool actions should stay local even when OpenAI is configured."""
         client, user = paired_client
         mock_plan.return_value = {
             "type": "list_chores",
@@ -89,7 +89,7 @@ class TestOpenAIFallbackRouting:
         data = resp.json()
 
         assert data["action_type"] == "list_chores"
-        assert data["model_used"] == "llama3"
+        assert data["model_used"] == "nlu-fallback"
         mock_oc.chat.assert_not_called()
 
 
@@ -97,7 +97,7 @@ class TestModelUsedTracking:
     """model_used should be recorded on every assistant ChatMessage."""
 
     @patch("app.services.chat_service.plan_action")
-    def test_llama3_model_recorded(self, mock_plan, paired_client, db):
+    def test_local_tool_model_recorded(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
             "type": "list_chores",
@@ -110,7 +110,7 @@ class TestModelUsedTracking:
         assistant_msg = db.query(ChatMessage).filter(
             ChatMessage.role == "assistant"
         ).first()
-        assert assistant_msg.model_used == "llama3"
+        assert assistant_msg.model_used == "nlu-fallback"
 
     @patch("app.routers.chat.openai_client")
     @patch("app.services.chat_service.plan_action", side_effect=Exception("offline"))

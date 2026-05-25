@@ -50,7 +50,7 @@ def test_architecture_node_count_consistent() -> None:
     clusters = TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
     n_steps = sum(len(c.steps) for c in clusters)
     assert len(clusters) == 13
-    assert n_steps == 32
+    assert n_steps == 31
 
 
 def test_snapshot_learning_for_brain_worker_status_file_has_stable_keys() -> None:

@@ -50,8 +50,9 @@ def _fake_adapter(fill_price: float = 9.0) -> MagicMock:
     a.is_enabled.return_value = True
     a.place_market_order.return_value = {
         "ok": True,
+        "state": "filled",
         "order_id": "rh-1",
-        "raw": {"average_price": str(fill_price)},
+        "raw": {"average_price": str(fill_price), "state": "filled"},
     }
     a.get_quote_price.return_value = None
     return a
@@ -66,6 +67,8 @@ def test_monitor_stamps_would_be_day_trade_on_same_day_exit(
     monkeypatch.setattr(_s, "chili_autotrader_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_rth_only", False)
+    monkeypatch.setattr(_s, "chili_autotrader_user_id", user.id)
+    monkeypatch.setattr(_s, "brain_default_user_id", user.id)
 
     t = _mk_live_trade(db, user.id, ticker="SAME1", entry_date=datetime.utcnow())
     adapter = _fake_adapter(fill_price=9.0)
@@ -75,6 +78,25 @@ def test_monitor_stamps_would_be_day_trade_on_same_day_exit(
         return_value=adapter,
     ), patch(
         "app.services.trading.auto_trader_monitor._quote_price", return_value=8.0
+    ), patch(
+        "app.services.trading.robinhood_exit_execution."
+        "describe_robinhood_equity_execution_window",
+        return_value={
+            "ticker": "SAME1",
+            "session": "regular_hours",
+            "session_label": "Regular session",
+            "market_hours": "regular_hours",
+            "next_eligible_session_at": None,
+            "overnight_eligible": False,
+            "can_submit_now": True,
+            "execution_reason": "Regular session",
+        },
+    ), patch(
+        "app.services.broker_service.is_connected",
+        return_value=True,
+    ), patch(
+        "app.services.broker_service.get_positions",
+        return_value=[{"ticker": "SAME1", "quantity": "10"}],
     ):
         summary = tick_auto_trader_monitor(db)
 
@@ -84,7 +106,10 @@ def test_monitor_stamps_would_be_day_trade_on_same_day_exit(
 
     audit = (
         db.query(AutoTraderRun)
-        .filter(AutoTraderRun.trade_id == t.id, AutoTraderRun.decision == "monitor_exit")
+        .filter(
+            AutoTraderRun.trade_id == t.id,
+            AutoTraderRun.decision.in_(("monitor_exit", "monitor_exit_filled")),
+        )
         .first()
     )
     assert audit is not None
@@ -104,6 +129,8 @@ def test_monitor_does_not_stamp_when_entered_yesterday(
     monkeypatch.setattr(_s, "chili_autotrader_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_rth_only", False)
+    monkeypatch.setattr(_s, "chili_autotrader_user_id", user.id)
+    monkeypatch.setattr(_s, "brain_default_user_id", user.id)
 
     yesterday = datetime.utcnow() - timedelta(days=2)
     t = _mk_live_trade(db, user.id, ticker="PRIOR1", entry_date=yesterday)
@@ -114,13 +141,35 @@ def test_monitor_does_not_stamp_when_entered_yesterday(
         return_value=adapter,
     ), patch(
         "app.services.trading.auto_trader_monitor._quote_price", return_value=8.0
+    ), patch(
+        "app.services.trading.robinhood_exit_execution."
+        "describe_robinhood_equity_execution_window",
+        return_value={
+            "ticker": "PRIOR1",
+            "session": "regular_hours",
+            "session_label": "Regular session",
+            "market_hours": "regular_hours",
+            "next_eligible_session_at": None,
+            "overnight_eligible": False,
+            "can_submit_now": True,
+            "execution_reason": "Regular session",
+        },
+    ), patch(
+        "app.services.broker_service.is_connected",
+        return_value=True,
+    ), patch(
+        "app.services.broker_service.get_positions",
+        return_value=[{"ticker": "PRIOR1", "quantity": "10"}],
     ):
         summary = tick_auto_trader_monitor(db)
 
     assert summary.get("closed", 0) == 1
     audit = (
         db.query(AutoTraderRun)
-        .filter(AutoTraderRun.trade_id == t.id, AutoTraderRun.decision == "monitor_exit")
+        .filter(
+            AutoTraderRun.trade_id == t.id,
+            AutoTraderRun.decision.in_(("monitor_exit", "monitor_exit_filled")),
+        )
         .first()
     )
     assert audit is not None

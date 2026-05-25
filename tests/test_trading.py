@@ -1087,7 +1087,7 @@ class TestBrainAPI:
             BacktestResult(
                 user_id=user.id,
                 ticker="SPY",
-                strategy_name="dynamic_pattern",
+                strategy_name=sp.name,
                 return_pct=2.0,
                 win_rate=0.6,
                 max_drawdown=-4.0,
@@ -1101,7 +1101,7 @@ class TestBrainAPI:
             BacktestResult(
                 user_id=user.id,
                 ticker="QQQ",
-                strategy_name="dynamic_pattern",
+                strategy_name=sp.name,
                 return_pct=1.0,
                 win_rate=0.55,
                 max_drawdown=-8.5,
@@ -1470,12 +1470,13 @@ class TestBrainAPI:
         bt = BacktestResult(
             user_id=user.id,
             ticker="NKT",
-            strategy_name="dynamic_pattern",
+            strategy_name=sp.name,
             return_pct=5.0,
-            win_rate=62.5,
+            win_rate=0.625,
             max_drawdown=-3.0,
             trade_count=2,
             related_insight_id=insight.id,
+            scan_pattern_id=sp.id,
         )
         db.add(bt)
         db.commit()
@@ -1578,10 +1579,12 @@ class TestTopPicksFreshness:
 class TestProposalFreshness:
     """Tests for proposal freshness metadata and recheck."""
 
-    def test_proposals_contain_freshness_fields(self, db, client):
+    @patch("app.services.trading.market_data.fetch_quote")
+    def test_proposals_contain_freshness_fields(self, mock_fetch, db, client):
         from app.models.trading import StrategyProposal
         from datetime import datetime, timedelta
 
+        mock_fetch.return_value = {"price": 150.0}
         user, token = _make_paired(db)
         client.cookies.set(DEVICE_COOKIE_NAME, token)
         prop = StrategyProposal(

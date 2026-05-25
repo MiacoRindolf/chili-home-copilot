@@ -13,6 +13,8 @@ All three endpoints handle empty tables gracefully.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from sqlalchemy import text
 
 from app.models import ScanPattern
@@ -46,12 +48,17 @@ def _insert_ptr_rows(db, scan_pattern_id: int, n: int) -> None:
           (scan_pattern_id, ticker, as_of_ts, timeframe, asset_class,
            features_json, source, feature_schema_version, created_at)
         VALUES
-          (:pid, 'TEST', CURRENT_TIMESTAMP, '1d', 'stock',
-           '{}'::jsonb, 'unit_test', '1', CURRENT_TIMESTAMP)
+          (:pid, 'TEST', :as_of_ts, '1d', 'stock',
+           '{}'::jsonb, 'unit_test', '1', :created_at)
         """
     )
-    for _ in range(n):
-        db.execute(insert_sql, {"pid": scan_pattern_id})
+    base_ts = datetime.utcnow()
+    for idx in range(n):
+        row_ts = base_ts + timedelta(seconds=idx)
+        db.execute(
+            insert_sql,
+            {"pid": scan_pattern_id, "as_of_ts": row_ts, "created_at": row_ts},
+        )
 
 
 # ── /api/brain/patterns/ptr-ready-but-ungated ────────────────────────

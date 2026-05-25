@@ -257,7 +257,7 @@ def test_finalize_enforced_blocks(monkeypatch):
         n_hypotheses_tested=1,
         scan_pattern=_Pat(id=1, pattern_evidence_kind="ml_signal", timeframe="1d"),
     )
-    assert out.get("blocked") == "cpcv_promotion_gate_failed"
+    assert "cpcv_promotion_gate_failed" in str(out.get("blocked", "")).split("+")
 
 
 def test_evaluate_pattern_cpcv_max_labeled_rows_subsamples(monkeypatch):

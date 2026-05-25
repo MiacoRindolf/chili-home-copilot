@@ -309,7 +309,7 @@ class _RepoRegisterBody(BaseModel):
     allow_clone: bool = Field(default=True, description="Set false to refuse cloning")
 
 
-@router.post("/repos")
+@router.post("/repo-resolver/repos")
 def code_brain_register_repo(
     body: _RepoRegisterBody,
     request: Request,
@@ -342,7 +342,7 @@ def code_brain_register_repo(
     }
 
 
-@router.get("/repos")
+@router.get("/repo-resolver/repos")
 def code_brain_list_repos(
     request: Request,
     db: Session = Depends(get_db),

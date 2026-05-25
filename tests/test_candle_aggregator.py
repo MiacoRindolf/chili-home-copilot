@@ -29,10 +29,10 @@ def test_single_trade_creates_bar():
 
 def test_multiple_trades_update_ohlc():
     agg = CandleAggregator(interval_seconds=60)
-    agg.on_trade("AAPL", _trade(150.0, 100, ts=1000.0))
-    agg.on_trade("AAPL", _trade(152.0, 200, ts=1010.0))
-    agg.on_trade("AAPL", _trade(149.0, 50, ts=1020.0))
-    agg.on_trade("AAPL", _trade(151.0, 75, ts=1030.0))
+    agg.on_trade("AAPL", _trade(150.0, 100, ts=960.0))
+    agg.on_trade("AAPL", _trade(152.0, 200, ts=980.0))
+    agg.on_trade("AAPL", _trade(149.0, 50, ts=1000.0))
+    agg.on_trade("AAPL", _trade(151.0, 75, ts=1010.0))
 
     bar = agg._bars["AAPL"]
     assert bar.open == 150.0

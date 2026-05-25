@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from app.models.trading import AlertHistory
+from app.models.trading import AlertHistory, ScanPattern
 from app.services.trading import pattern_imminent_alerts as imminent_mod
 from app.services.trading.alerts import PATTERN_BREAKOUT_IMMINENT
 from app.services.trading.pattern_imminent_alerts import (
@@ -101,24 +101,33 @@ def test_us_stock_session_open_saturday_utc() -> None:
 
 
 def test_cooldown_ignores_failed_imminent_delivery(db) -> None:
+    pattern = ScanPattern(
+        name="Cooldown test pattern",
+        rules_json={},
+        origin="test",
+        asset_class="stock",
+    )
+    db.add(pattern)
+    db.flush()
+
     row = AlertHistory(
         user_id=1,
         alert_type=PATTERN_BREAKOUT_IMMINENT,
         ticker="SPY",
         message="failed delivery",
-        scan_pattern_id=52,
+        scan_pattern_id=pattern.id,
         sent_via="sms_failed",
         success=False,
     )
     db.add(row)
     db.commit()
 
-    assert _cooldown_active(db, 1, "SPY", 52, 3.0) is False
+    assert _cooldown_active(db, 1, "SPY", pattern.id, 3.0) is False
 
     row.success = True
     db.commit()
 
-    assert _cooldown_active(db, 1, "SPY", 52, 3.0) is True
+    assert _cooldown_active(db, 1, "SPY", pattern.id, 3.0) is True
 
 
 def test_run_pattern_imminent_scan_counts_persisted_alert_when_delivery_fails(

@@ -234,9 +234,12 @@ class TestFetchOHLCVProviderOrder:
     @patch("app.services.trading.market_data._poly")
     @patch("app.services.trading.market_data._massive")
     def test_crypto_skips_yfinance_when_massive_and_polygon_empty(
-        self, mock_massive_mod, mock_poly_mod, _use_m, _use_p, mock_yf_hist,
+        self, mock_massive_mod, mock_poly_mod, _use_m, _use_p, mock_yf_hist, monkeypatch,
     ):
+        from app.services.trading import market_data
         from app.services.trading.market_data import fetch_ohlcv
+
+        monkeypatch.setattr(market_data.settings, "brain_market_data_coinbase_fallback", False)
 
         mock_massive_mod._is_dead_ticker.return_value = False
         mock_massive_mod.massive_aggregate_variants_all_dead.return_value = False

@@ -73,21 +73,23 @@ class TestSwingPivots:
         assert lows.any(), "Should find at least one swing low"
 
     def test_swing_high_is_local_maximum(self):
+        lookback = 2
         high = pd.Series([1, 2, 5, 3, 1, 2, 8, 3, 1, 2, 4], dtype=float)
-        pivots = find_swing_highs(high, lookback=2)
-        pivot_idxs = [i for i, v in enumerate(pivots) if v]
+        confirmed = find_swing_highs(high, lookback=lookback)
+        pivot_idxs = [i - lookback for i, v in enumerate(confirmed) if v]
         for idx in pivot_idxs:
-            lo = max(0, idx - 2)
-            hi = min(len(high), idx + 3)
+            lo = max(0, idx - lookback)
+            hi = min(len(high), idx + lookback + 1)
             assert high.iloc[idx] == high.iloc[lo:hi].max()
 
     def test_swing_low_is_local_minimum(self):
+        lookback = 2
         low = pd.Series([5, 3, 1, 4, 6, 3, 0.5, 2, 5, 4, 3], dtype=float)
-        pivots = find_swing_lows(low, lookback=2)
-        pivot_idxs = [i for i, v in enumerate(pivots) if v]
+        confirmed = find_swing_lows(low, lookback=lookback)
+        pivot_idxs = [i - lookback for i, v in enumerate(confirmed) if v]
         for idx in pivot_idxs:
-            lo = max(0, idx - 2)
-            hi = min(len(low), idx + 3)
+            lo = max(0, idx - lookback)
+            hi = min(len(low), idx + lookback + 1)
             assert low.iloc[idx] == low.iloc[lo:hi].min()
 
 

@@ -1,7 +1,8 @@
-"""Resolve ambiguous pattern_id to ScanPattern.
+"""Resolve ambiguous pattern ids to ``ScanPattern`` rows.
 
-``TradingInsight`` links to ``ScanPattern`` only via ``scan_pattern_id`` (NOT NULL + FK
-after migration 043). Do not derive links from ``pattern_description`` at runtime.
+``TradingInsight`` links to ``ScanPattern`` only via ``scan_pattern_id`` (NOT NULL
+and FK after migration 043). Do not derive links from ``pattern_description`` at
+runtime.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ _LEGACY_UNLINKED_NAME = "[Unlinked legacy insight]"
 
 
 def is_legacy_unlinked_scan_pattern(pattern: ScanPattern | None) -> bool:
-    """True for the shared sentinel row — never overwrite ``rules_json`` (many insights share it)."""
+    """True for the shared sentinel row; never overwrite shared ``rules_json``."""
     if pattern is None:
         return False
     return (
@@ -23,7 +24,7 @@ def is_legacy_unlinked_scan_pattern(pattern: ScanPattern | None) -> bool:
 
 
 def get_legacy_unlinked_scan_pattern_id(db: Session) -> int:
-    """PK of the sentinel row (migration 043); creates it if missing (e.g. tests after TRUNCATE)."""
+    """PK of the sentinel row; creates it if missing after test truncation."""
     sp = (
         db.query(ScanPattern)
         .filter(
@@ -63,25 +64,25 @@ def resolve_to_scan_pattern_from_insight(
 
 
 def resolve_to_scan_pattern(db: Session, pattern_id: int) -> ScanPattern | None:
-    """Resolve ``pattern_id`` (ScanPattern PK or TradingInsight PK) to ``ScanPattern``.
+    """Resolve ``pattern_id`` (TradingInsight PK or ScanPattern PK) to ``ScanPattern``.
 
-    Rules:
-    1. Direct ``ScanPattern`` PK lookup.
-    2. Else treat ``pattern_id`` as ``TradingInsight.id`` → follow ``scan_pattern_id`` FK.
+    ``TradingInsight`` ids can collide with unrelated ``ScanPattern`` ids in test
+    and restored databases, so insight foreign-key truth wins when both rows exist.
+    If no insight resolves to a real pattern, fall back to a direct ScanPattern PK.
     """
-    p = db.get(ScanPattern, pattern_id)
-    if p:
-        return p
-
     insight = db.get(TradingInsight, pattern_id)
-    if not insight:
-        return None
+    if insight:
+        p = resolve_to_scan_pattern_from_insight(db, insight)
+        if p:
+            return p
 
-    return resolve_to_scan_pattern_from_insight(db, insight)
+    return db.get(ScanPattern, pattern_id)
 
 
-def resolve_scan_pattern_id_for_insight(db: Session, insight: TradingInsight | None) -> int | None:
-    """Return ``ScanPattern.id`` for a ``TradingInsight``, or ``None`` if FK missing/invalid."""
+def resolve_scan_pattern_id_for_insight(
+    db: Session, insight: TradingInsight | None
+) -> int | None:
+    """Return ``ScanPattern.id`` for a ``TradingInsight``, or ``None`` if invalid."""
     if not insight:
         return None
     sp = resolve_to_scan_pattern_from_insight(db, insight)

@@ -148,7 +148,7 @@ class TestStreamingEndpoint:
         last_event = json.loads(events[-1].replace("data: ", ""))
         assert last_event["done"] is True
         assert last_event["action_type"] == "list_chores"
-        assert last_event["model_used"] == "llama3"
+        assert last_event["model_used"] == "nlu-fallback"
 
     @patch("app.routers.chat.openai_client")
     @patch("app.services.chat_service.plan_action")

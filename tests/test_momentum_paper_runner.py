@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -34,6 +35,8 @@ from app.services.trading.momentum_neural.paper_runner import list_runnable_pape
 from app.services.trading.momentum_neural.risk_policy import RISK_SNAPSHOT_KEY
 from app.services.trading.momentum_neural.automation_query import cancel_automation_session
 from app.services.trading.momentum_neural.persistence import ensure_momentum_strategy_variants
+
+PAPER_FILL_SYMBOL = "SIM-USD"
 
 
 def _seed_live_eligible_row(db: Session, *, symbol: str = "SOL-USD") -> tuple[int, MomentumStrategyVariant]:
@@ -72,6 +75,19 @@ def _uid(db: Session, name_suffix: str) -> int:
     db.commit()
     db.refresh(u)
     return int(u.id)
+
+
+def _entry_gate_pass_df() -> pd.DataFrame:
+    closes = [100.0 + i * 0.1 for i in range(40)]
+    return pd.DataFrame(
+        {
+            "Open": [c - 0.05 for c in closes],
+            "High": [c + 0.15 for c in closes],
+            "Low": [c - 0.15 for c in closes],
+            "Close": closes,
+            "Volume": [1000.0 for _ in closes[:-1]] + [2500.0],
+        }
+    )
 
 
 def test_fsm_valid_and_invalid_transition() -> None:
@@ -239,17 +255,32 @@ def test_paper_events_emitted(monkeypatch, db: Session) -> None:
 
 def test_paper_runner_writes_runtime_snapshot_and_sim_fill(monkeypatch, db: Session) -> None:
     monkeypatch.setattr(settings, "chili_momentum_paper_runner_enabled", True)
-    vid, _ = _seed_live_eligible_row(db, symbol="SIM-USD")
+    ohlcv = _entry_gate_pass_df()
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.entry_gates.fetch_ohlcv_df",
+        lambda *_args, **_kwargs: ohlcv,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.paper_runner.fetch_ohlcv_df",
+        lambda *_args, **_kwargs: ohlcv,
+    )
+    vid, _ = _seed_live_eligible_row(db, symbol=PAPER_FILL_SYMBOL)
     via = (
         db.query(MomentumSymbolViability)
-        .filter(MomentumSymbolViability.symbol == "SIM-USD", MomentumSymbolViability.variant_id == vid)
+        .filter(MomentumSymbolViability.symbol == PAPER_FILL_SYMBOL, MomentumSymbolViability.variant_id == vid)
         .one()
     )
     via.viability_score = 0.95
     via.paper_eligible = True
+    via.regime_snapshot_json = {
+        "atr_pct": 0.02,
+        "chop_expansion": "trend",
+        "volatility_regime": "normal",
+        "meta": {"atr_pct": 0.02, "chop_expansion": "trend"},
+    }
     db.commit()
     uid = _uid(db, "sim")
-    r = create_paper_draft_session(db, user_id=uid, symbol="SIM-USD", variant_id=vid)
+    r = create_paper_draft_session(db, user_id=uid, symbol=PAPER_FILL_SYMBOL, variant_id=vid)
     sid = r["session_id"]
     db.commit()
 
@@ -264,4 +295,15 @@ def test_paper_runner_writes_runtime_snapshot_and_sim_fill(monkeypatch, db: Sess
     assert snap is not None
     assert snap.lane == "simulation"
     fills = db.query(TradingAutomationSimulatedFill).filter_by(session_id=sid).all()
-    assert fills, "expected at least one simulated fill after forced high-viability entry path"
+    sess = db.query(TradingAutomationSession).filter_by(id=sid).one()
+    events = db.query(TradingAutomationEvent).filter_by(session_id=sid).all()
+    event_types = [event.event_type for event in events]
+    blocked_payloads = [
+        event.payload_json
+        for event in events
+        if event.event_type == "paper_entry_gates_blocked"
+    ]
+    assert fills, (
+        "expected at least one simulated fill after forced high-viability entry path; "
+        f"state={sess.state} events={event_types} blocked={blocked_payloads}"
+    )

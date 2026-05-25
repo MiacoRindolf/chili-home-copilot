@@ -137,6 +137,8 @@ def _run_live_autotrader(db, user_id: int, ticker: str, monkeypatch, broker_resu
     """
     monkeypatch.setattr(at_mod, "settings", _autotrader_cfg(user_id))
     monkeypatch.setattr(at_mod, "effective_autotrader_runtime", lambda _db: _live_runtime())
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "chili_robinhood_spot_adapter_enabled", True)
 
     # Short-circuit gates that need production infra (market data, LLM,
     # portfolio-risk DB views) — they're covered by their own unit tests.
@@ -147,6 +149,13 @@ def _run_live_autotrader(db, user_id: int, ticker: str, monkeypatch, broker_resu
     monkeypatch.setattr(at_mod, "find_open_autotrader_trade", lambda *a, **k: None)
     monkeypatch.setattr(at_mod, "find_open_autotrader_paper", lambda *a, **k: None)
     monkeypatch.setattr(at_mod, "maybe_scale_in", lambda *a, **k: None)
+    monkeypatch.setattr(at_mod, "_try_claim_alert", lambda *a, **k: True)
+    monkeypatch.setattr(at_mod, "_release_alert_claim", lambda *a, **k: None)
+    monkeypatch.setattr(
+        at_mod,
+        "check_autopilot_entry_gate",
+        lambda *a, **k: {"allowed": True, "reason": "test"},
+    )
     from app.services.trading import auto_trader_rules as rules_mod
     monkeypatch.setattr(
         rules_mod,

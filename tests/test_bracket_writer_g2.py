@@ -9,7 +9,7 @@ Coverage:
   * Default (both feature flags off) → every action returns ok=False,
     reason='disabled', and NEVER calls the adapter.
   * Each enable flag gates only its own action.
-  * Unsupported venue (e.g. coinbase) → unsupported_venue.
+  * Unsupported venue (e.g. paper) → unsupported_venue.
   * Invalid decision (wrong kind / missing payload fields) → invalid_decision.
   * resize_stop_for_partial_fill with a partial_fill decision → cancel
     happens BEFORE place; if cancel fails, place is NOT attempted.
@@ -178,8 +178,8 @@ def test_resize_rejects_unsupported_venue(db, monkeypatch):
     factory = MagicMock()
 
     result = g2.resize_stop_for_partial_fill(
-        db, trade_id=1, bracket_intent_id=1, ticker="BTC-USD",
-        broker_source="coinbase",
+        db, trade_id=1, bracket_intent_id=1, ticker="PAPER",
+        broker_source="paper",
         decision=_partial_fill_decision(0.1),
         prior_stop_order_id="stop-1", stop_price=50_000.0,
         adapter_factory=factory,
@@ -244,7 +244,14 @@ def test_resize_cancels_then_places_when_enabled(db, monkeypatch):
 
 
 def test_place_missing_stop_happy_path(db, monkeypatch):
+    from app.services import broker_service
+
     monkeypatch.setattr(g2, "settings", _on_cfg())
+    monkeypatch.setattr(
+        broker_service,
+        "verify_order_landed",
+        lambda order_id: ("resting", "confirmed"),
+    )
 
     adapter = MagicMock()
     adapter.place_stop_loss_sell_order.return_value = {

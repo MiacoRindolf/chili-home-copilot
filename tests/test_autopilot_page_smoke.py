@@ -99,6 +99,7 @@ def test_orchestrator_paper_tags_scan_pattern_and_alert(
         origin="user",
         asset_class="stock",
         timeframe="1d",
+        lifecycle_stage="promoted",
     )
     db.add(sp)
     db.flush()
@@ -125,9 +126,18 @@ def test_orchestrator_paper_tags_scan_pattern_and_alert(
     monkeypatch.setattr(_s, "chili_autotrader_llm_revalidation_enabled", False)
     monkeypatch.setattr(_s, "chili_autotrader_rth_only", False)
     monkeypatch.setattr(_s, "chili_autotrader_user_id", user.id)
+    monkeypatch.setattr(_s, "brain_default_user_id", user.id)
+    monkeypatch.setattr(_s, "chili_autotrader_eligible_lifecycle_stages", "promoted,live")
 
     with patch(
         "app.services.trading.auto_trader._current_price", return_value=10.05
+    ), patch(
+        "app.services.trading.auto_trader._try_claim_alert", return_value=True
+    ), patch(
+        "app.services.trading.auto_trader._release_alert_claim", return_value=None
+    ), patch(
+        "app.services.trading.auto_trader.passes_rule_gate",
+        return_value=(True, "ok", {"projected_profit_pct": 20.0}),
     ), patch(
         "app.services.trading.portfolio_risk.check_new_trade_allowed",
         return_value=(True, "ok"),

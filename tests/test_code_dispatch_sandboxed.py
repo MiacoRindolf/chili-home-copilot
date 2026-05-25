@@ -81,7 +81,7 @@ def test_sandboxed_calls_draft_apply_validate_in_order(
         calls.append("create")
         return h
 
-    def fake_apply(db, task_id, user_id, sid, hand):
+    def fake_apply(db, task_id, user_id, sid, hand, **kwargs):
         calls.append("apply")
         return {"ok": True, "files": ["a.py"], "loc": 3}
 

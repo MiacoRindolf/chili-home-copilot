@@ -130,7 +130,7 @@ _CLUSTER_LAST_STEP: dict[str, str] = {
     "c_state": "decay",
     "c_discovery": "seek",
     "c_validation": "bt_queue",
-    "c_evolution": "breakout",
+    "c_evolution": "trade_feedback",
     "c_secondary_structure": "refine",
     "c_secondary_outcomes": "monitor_review",
     "c_monitor_learning": "graduation_check",

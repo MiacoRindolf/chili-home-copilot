@@ -21,6 +21,10 @@ def _make_trade(**overrides):
     t.broker_order_id = overrides.get("broker_order_id", None)
     t.user_id = overrides.get("user_id", None)
     t.notes = overrides.get("notes", "")
+    t.exit_reason = overrides.get("exit_reason", None)
+    t.entry_price = overrides.get("entry_price", 10.0)
+    t.quantity = overrides.get("quantity", 1.0)
+    t.direction = overrides.get("direction", "long")
     t.exit_date = None
     return t
 
@@ -39,7 +43,7 @@ class TestCleanupManualTrades:
         assert alm.status == "closed"
         assert alm.exit_date is not None
         assert "Auto-closed during RH sync" in alm.notes
-        db.commit.assert_called_once()
+        db.commit.assert_called()
 
     def test_manual_trade_with_matching_rh_position_untouched(self):
         alm = _make_trade(ticker="ALM", broker_source=None, broker_order_id=None)

@@ -75,6 +75,7 @@ class TestFetchOhlcvDeadCacheEquity:
         monkeypatch.setattr(market_data, "_use_massive", lambda: True)
         monkeypatch.setattr(market_data, "_use_polygon", lambda: True)
         monkeypatch.setattr(market_data, "_effective_allow_fallback", lambda x: True)
+        monkeypatch.setattr(market_data.settings, "brain_market_data_coinbase_fallback", False)
 
         m = market_data._massive
         monkeypatch.setattr(m, "get_aggregates", lambda *a, **k: [])
@@ -131,6 +132,7 @@ class TestFetchOhlcvDfDeadCacheEquity:
         monkeypatch.setattr(market_data, "_use_massive", lambda: True)
         monkeypatch.setattr(market_data, "_use_polygon", lambda: True)
         monkeypatch.setattr(market_data, "_effective_allow_fallback", lambda x: True)
+        monkeypatch.setattr(market_data.settings, "brain_market_data_coinbase_fallback", False)
 
         m = market_data._massive
         monkeypatch.setattr(m, "get_aggregates_df", lambda *a, **k: pd.DataFrame())
