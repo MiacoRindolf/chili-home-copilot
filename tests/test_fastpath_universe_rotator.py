@@ -291,6 +291,7 @@ class _StubSettings:
     universe_min_range_24h_bps: float = 150.0
     universe_adaptive_range_floor_enabled: bool = True
     universe_missing_grace_passes: int = 2
+    universe_min_shadow_exploration_n: int = 0
     universe_min_trades_24h: int = 1_000
     execution_mode: str = "maker_only"
     cost_aware_maker_fee_bps: float = 0.0
@@ -569,6 +570,47 @@ def test_sparse_only_shadow_lane_still_collects_data():
     )
 
     assert out["edge_exhausted_demotions"] == 0
+    assert db.inserted_rows[0]["status"] == UNIVERSE_STATUS_SHADOW
+
+
+def test_shadow_exploration_floor_keeps_exhausted_candidate_learning():
+    from app.services.trading.fast_path.universe_status import UNIVERSE_STATUS_SHADOW
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB(
+        previous={"HYPE-USD": (UNIVERSE_STATUS_SHADOW, 1)},
+        decay_rows={
+            "HYPE-USD": [
+                {
+                    "ticker": "HYPE-USD",
+                    "alert_type": "imbalance_long",
+                    "score_bucket": "low",
+                    "horizon_s": 5,
+                    "sample_count": 6,
+                    "mean_return": -0.0012,
+                    "m2_return": 0.0000001,
+                },
+            ],
+        },
+    )
+    s = _StubSettings(
+        universe_top_n=1,
+        universe_hysteresis_ranks=0,
+        universe_min_shadow_exploration_n=1,
+    )
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: ["HYPE-USD"],
+        fetch_snapshot_fn=lambda t: _make_candidate(ticker=t),
+    )
+
+    assert out["shadow_exploration_forced"] == 1
+    assert out["shadow_exploration_forced_reasons"] == {"edge_exhausted": 1}
+    assert out["edge_exhausted_demotions"] == 0
+    assert out["kept_shadow"] == 1
+    assert db.inserted_rows[0]["ticker"] == "HYPE-USD"
     assert db.inserted_rows[0]["status"] == UNIVERSE_STATUS_SHADOW
 
 

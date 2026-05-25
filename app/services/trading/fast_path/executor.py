@@ -777,7 +777,14 @@ class FastPathExecutor:
             return False
         if not denied.issubset(_SHADOW_MAKER_PROBE_BYPASS_GATES):
             return False
-        if not self._shadow_maker_probe_denials_refreshable(gate_run):
+        if (
+            not getattr(
+                self._settings,
+                "universe_shadow_terminal_reprobe_enabled",
+                False,
+            )
+            and not self._shadow_maker_probe_denials_refreshable(gate_run)
+        ):
             return False
         ticker = str(alert.get("ticker") or "")
         if not ticker:

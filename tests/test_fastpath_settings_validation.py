@@ -140,6 +140,19 @@ def test_universe_shadow_paper_fills_env_override_works():
     assert loaded.universe_shadow_paper_fills_enabled is True
 
 
+def test_universe_shadow_terminal_reprobe_default_off():
+    assert FastPathSettings().universe_shadow_terminal_reprobe_enabled is False
+
+
+def test_universe_shadow_terminal_reprobe_env_override_works():
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_UNIVERSE_SHADOW_TERMINAL_REPROBE_ENABLED": "true"},
+    ):
+        loaded = load()
+    assert loaded.universe_shadow_terminal_reprobe_enabled is True
+
+
 def test_negative_edge_filter_ttl_env_override_works():
     with mock.patch.dict(
         os.environ,
@@ -216,6 +229,27 @@ def test_universe_missing_grace_passes_env_override_works():
     ):
         loaded = load()
     assert loaded.universe_missing_grace_passes == 3
+
+
+def test_universe_shadow_exploration_floor_defaults_to_hysteresis():
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS": "7",
+        },
+    ):
+        os.environ.pop("CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N", None)
+        loaded = load()
+    assert loaded.universe_min_shadow_exploration_n == 7
+
+
+def test_universe_shadow_exploration_floor_env_override_works():
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N": "0"},
+    ):
+        loaded = load()
+    assert loaded.universe_min_shadow_exploration_n == 0
 
 
 def test_scanner_threshold_env_overrides_work():

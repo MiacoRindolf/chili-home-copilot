@@ -133,6 +133,13 @@ class FastPathSettings:
     paper-fill behavior. Override with
     ``CHILI_FAST_PATH_UNIVERSE_SHADOW_PAPER_FILLS_ENABLED=true``."""
 
+    universe_shadow_terminal_reprobe_enabled: bool = False
+    """When True, paper-mode shadow pairs may place maker probes even
+    when learned gates report terminal negative-edge, below-cost, or
+    adverse-selection verdicts. Live trading remains active-only; this
+    only refreshes paper evidence for the learner. Override with
+    ``CHILI_FAST_PATH_UNIVERSE_SHADOW_TERMINAL_REPROBE_ENABLED=true``."""
+
     universe_top_n: int = 25
     """Top-N pairs by composite_score that the rotator promotes per
     pass. Mid-tier sweet spot per the 2026-05-07 alpha replay; tighten
@@ -190,6 +197,14 @@ class FastPathSettings:
     symbol may miss due to transient data/depth/spread issues before it
     is demoted inactive. Hard volatility/volume failures still demote
     immediately."""
+
+    universe_min_shadow_exploration_n: int = 3
+    """Minimum number of probe-eligible shadow subscriptions to keep
+    alive for learning when learned-edge or market-velocity filters
+    would otherwise empty the universe. These rows are shadow-only and
+    cannot promote to active without the normal edge evidence. Override
+    with ``CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N``; set to
+    0 to disable the exploration floor."""
 
     universe_min_trades_24h: int = 1_000
     """Minimum 24h trade count. Below this, the order book is too
@@ -417,6 +432,8 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_EMPTY_FALLBACK_ENABLED", False),
         universe_shadow_paper_fills_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_PAPER_FILLS_ENABLED", False),
+        universe_shadow_terminal_reprobe_enabled=_env_bool(
+            "CHILI_FAST_PATH_UNIVERSE_SHADOW_TERMINAL_REPROBE_ENABLED", False),
         universe_top_n=_env_int("CHILI_FAST_PATH_UNIVERSE_TOP_N", 25),
         universe_hysteresis_ranks=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", 3),
@@ -440,6 +457,10 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_ADAPTIVE_RANGE_FLOOR_ENABLED", True),
         universe_missing_grace_passes=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_MISSING_GRACE_PASSES", 2),
+        universe_min_shadow_exploration_n=_env_int(
+            "CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N",
+            _env_int("CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", 3),
+        ),
         universe_min_trades_24h=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H", 1_000),
         cost_aware_admission_enabled=_env_bool(

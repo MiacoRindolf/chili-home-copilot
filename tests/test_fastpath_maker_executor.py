@@ -313,6 +313,46 @@ def test_shadow_maker_probe_blocks_terminal_learned_denials(monkeypatch):
     ex._latest_universe_status_sync.assert_not_called()
 
 
+def test_shadow_maker_probe_rechecks_terminal_denials_when_enabled(monkeypatch):
+    settings = replace(
+        _make_settings(execution_mode="maker_only"),
+        universe_rotation_enabled=True,
+        universe_shadow_terminal_reprobe_enabled=True,
+    )
+    ex = _make_executor(settings)
+    ex._build_context = MagicMock(return_value=_make_ctx(spread_bps=2.0))
+    ex._latest_universe_status_sync = MagicMock(return_value=UNIVERSE_STATUS_SHADOW)
+    gate_run = GateRunResult(
+        allow=False,
+        deny_reason="negative_edge:negative_edge",
+        results=[
+            GateResult(
+                name="negative_edge",
+                allow=False,
+                reason="negative_edge",
+                detail={"verdict": "negative_edge"},
+            ),
+        ],
+    )
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: gate_run)
+    calls = []
+
+    async def _record_maker_probe(**kwargs):
+        calls.append(kwargs)
+
+    async def _fail_reject(*_a, **_kw):
+        raise AssertionError("terminal shadow reprobe should route to maker")
+
+    ex._process_alert_maker = _record_maker_probe
+    ex._write_decision = _fail_reject
+
+    asyncio.run(ex._process_alert(_make_alert()))
+
+    assert len(calls) == 1
+    assert calls[0]["gate_run"] is gate_run
+    ex._latest_universe_status_sync.assert_called_once_with("BTC-USD")
+
+
 def test_shadow_maker_probe_keeps_operational_denials_blocking(monkeypatch):
     settings = replace(
         _make_settings(execution_mode="maker_only"),

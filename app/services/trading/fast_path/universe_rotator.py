@@ -94,6 +94,9 @@ _MAKER_ATTEMPT_NO_DATA_VERDICT = "maker_attempt_no_data"
 _MAKER_ATTEMPT_INSUFFICIENT_VERDICT = (
     "maker_attempt_insufficient_statistical_evidence"
 )
+_SHADOW_EXPLORATION_FORCE_EDGE_EXHAUSTED = "edge_exhausted"
+_SHADOW_EXPLORATION_FORCE_OBSERVED_RANK = "observed_rank"
+_SHADOW_EXPLORATION_FORCE_MARKET_VELOCITY = "market_velocity"
 _MAKER_ATTEMPT_ACTIONABLE_LEARNABLE_VERDICTS = frozenset({
     _MAKER_ATTEMPT_NOT_EXCLUDED_VERDICT,
 })
@@ -687,6 +690,18 @@ def _adaptive_range_floor_bps(
     else:
         dynamic = ranges[slot - 1]
     return max(floor, dynamic), dynamic
+
+
+def _effective_min_shadow_exploration_n(settings, target_ranked: int) -> int:
+    """Return the configured shadow learner floor, bounded by rank capacity."""
+    raw = getattr(settings, "universe_min_shadow_exploration_n", None)
+    if raw is None:
+        raw = getattr(settings, "universe_hysteresis_ranks", 0)
+    try:
+        floor = int(raw or 0)
+    except (TypeError, ValueError):
+        floor = 0
+    return min(max(floor, 0), max(int(target_ranked or 0), 0))
 
 
 def _previous_pass_status(db) -> dict[str, tuple[str, Optional[int]]]:
@@ -1481,8 +1496,11 @@ def run_rotation_pass(
         "demoted_to_shadow": 0,
         "kept_shadow_missing_grace": 0,
         "exploration_fallback": False,
+        "shadow_exploration_floor_n": 0,
         "shadow_exploration_shortfall": 0,
         "shadow_exploration_candidates": 0,
+        "shadow_exploration_forced": 0,
+        "shadow_exploration_forced_reasons": {},
         "edge_promotion_blocks": {},
         "edge_exhaustion_blocks": {},
         "edge_exhausted_demotions": 0,
@@ -1663,6 +1681,10 @@ def run_rotation_pass(
         active_eligible_tickers.add(snap.ticker)
 
     target_ranked = top_n + settings.universe_hysteresis_ranks
+    min_shadow_exploration_n = _effective_min_shadow_exploration_n(
+        settings, target_ranked,
+    )
+    out["shadow_exploration_floor_n"] = min_shadow_exploration_n
     observed_since = _latest_universe_rotation_at(db)
     observed_opportunity = _observed_opportunity_by_ticker(
         db,
@@ -1851,6 +1873,56 @@ def run_rotation_pass(
             observed_rank_skips.append(cand)
             continue
         cut_ranked.append(cand)
+
+    forced_shadow_tickers: set[str] = set()
+    forced_shadow_reason_by_ticker: dict[str, str] = {}
+    selected_forced: list[_PairCandidate] = []
+    selected_tickers = {cand.ticker for cand in cut_ranked}
+
+    def _force_shadow_exploration(
+        pool: list[_PairCandidate],
+        *,
+        reason: str,
+        slots: int,
+    ) -> tuple[list[_PairCandidate], int]:
+        remaining: list[_PairCandidate] = []
+        for cand in pool:
+            if slots > 0 and cand.ticker not in selected_tickers:
+                selected_tickers.add(cand.ticker)
+                forced_shadow_tickers.add(cand.ticker)
+                forced_shadow_reason_by_ticker[cand.ticker] = reason
+                selected_forced.append(cand)
+                slots -= 1
+            else:
+                remaining.append(cand)
+        return remaining, slots
+
+    force_slots = min_shadow_exploration_n - len(cut_ranked)
+    if force_slots > 0:
+        force_slots = min(force_slots, max(target_ranked - len(cut_ranked), 0))
+        exhausted_rank_skips, force_slots = _force_shadow_exploration(
+            exhausted_rank_skips,
+            reason=_SHADOW_EXPLORATION_FORCE_EDGE_EXHAUSTED,
+            slots=force_slots,
+        )
+        observed_rank_skips, force_slots = _force_shadow_exploration(
+            observed_rank_skips,
+            reason=_SHADOW_EXPLORATION_FORCE_OBSERVED_RANK,
+            slots=force_slots,
+        )
+        velocity_backfill_skips, force_slots = _force_shadow_exploration(
+            velocity_backfill_skips,
+            reason=_SHADOW_EXPLORATION_FORCE_MARKET_VELOCITY,
+            slots=force_slots,
+        )
+        cut_ranked.extend(selected_forced)
+
+    if selected_forced:
+        out["shadow_exploration_forced"] = len(selected_forced)
+        forced_reasons = out["shadow_exploration_forced_reasons"]
+        for reason in forced_shadow_reason_by_ticker.values():
+            forced_reasons[reason] = forced_reasons.get(reason, 0) + 1
+
     out["edge_exhaustion_backfill_skips"] = len(exhausted_rank_skips)
     out["observed_opportunity_rank_skips"] = len(observed_rank_skips)
     out["market_velocity_backfill_skips"] = len(velocity_backfill_skips)
@@ -1883,8 +1955,17 @@ def run_rotation_pass(
         seen_in_this_pass.add(cand.ticker)
         prior_status, prior_rank = prior.get(cand.ticker, (None, None))
         active_eligible = cand.ticker in active_eligible_tickers
+        forced_shadow = cand.ticker in forced_shadow_tickers
 
-        if rank_idx > top_n:
+        if forced_shadow:
+            status = UNIVERSE_STATUS_SHADOW
+            if prior_status == UNIVERSE_STATUS_SHADOW:
+                out["kept_shadow"] += 1
+            elif prior_status == UNIVERSE_STATUS_ACTIVE:
+                out["demoted_to_shadow"] += 1
+            else:
+                out["promoted_to_shadow"] += 1
+        elif rank_idx > top_n:
             # Outside top_n; only present in cut_ranked because of the
             # hysteresis buffer. If this pair WAS active and is now
             # outside top_n + hysteresis... that's caught below in the

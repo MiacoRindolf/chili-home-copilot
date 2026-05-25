@@ -62,6 +62,7 @@ CANDLE_FRESHNESS_WINDOW_S = 300.0
 # A pair with this many errors in 60s is treated as ws-degraded for
 # /healthz purposes; the tracker itself flips it to PAUSED.
 WS_ERROR_CIRCUIT_BREAKER = 5
+HEALTH_REASON_NO_SUBSCRIBED_PAIRS = "no_subscribed_pairs"
 
 
 class HealthzServer:
@@ -154,6 +155,18 @@ class HealthzServer:
             }
 
         pairs = (snap.get("status") or {}).get("pairs") or {}
+        if not pairs:
+            return False, {
+                "ws_connected": False,
+                "candle_freshness": False,
+                "reason": HEALTH_REASON_NO_SUBSCRIBED_PAIRS,
+                "details": {
+                    "ws_window_s": WS_FRESHNESS_WINDOW_S,
+                    "candle_window_s": CANDLE_FRESHNESS_WINDOW_S,
+                    "subscribed_pairs": 0,
+                },
+            }
+
         ws_ok, ws_detail = self._probe_ws_connected(snap, pairs)
         candle_ok, candle_detail = self._probe_candle_freshness(pairs)
 
@@ -288,4 +301,4 @@ class HealthzServer:
         return (now - t).total_seconds()
 
 
-__all__ = ["HealthzServer"]
+__all__ = ["HEALTH_REASON_NO_SUBSCRIBED_PAIRS", "HealthzServer"]
