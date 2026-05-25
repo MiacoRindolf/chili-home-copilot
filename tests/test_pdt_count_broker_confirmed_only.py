@@ -244,7 +244,9 @@ def test_three_real_round_trips_counted_as_three(db):
     """Three real broker-confirmed same-day round-trips on different
     days within the window should aggregate to 3 — the SEC threshold
     is 4-in-5-business-days, so 3 still allows entries."""
-    base = datetime.utcnow() - timedelta(days=2, hours=5)
+    base = datetime.utcnow().replace(
+        hour=12, minute=0, second=0, microsecond=0,
+    ) - timedelta(days=2)
     for i, sym in enumerate(("AAPL", "MSFT", "NVDA"), start=40):
         entry = base + timedelta(days=(i - 40))
         _seed_trade(

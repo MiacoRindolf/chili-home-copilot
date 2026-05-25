@@ -137,6 +137,8 @@ def _run_live_autotrader(db, user_id: int, ticker: str, monkeypatch, broker_resu
     """
     monkeypatch.setattr(at_mod, "settings", _autotrader_cfg(user_id))
     monkeypatch.setattr(at_mod, "effective_autotrader_runtime", lambda _db: _live_runtime())
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "chili_robinhood_spot_adapter_enabled", True)
 
     # Short-circuit gates that need production infra (market data, LLM,
     # portfolio-risk DB views) — they're covered by their own unit tests.
