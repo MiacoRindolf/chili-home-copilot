@@ -70,6 +70,31 @@ def _stage(
     }
 
 
+def _skipped_stage(
+    *,
+    stage: str,
+    title: str,
+    reason: str,
+    dry_run_endpoint: str,
+    apply_endpoint: str | None,
+    impact: str,
+    action_count_key: str,
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "title": title,
+        "ok": True,
+        "skipped": reason,
+        "actionable_count": 0,
+        "action_count_key": action_count_key,
+        "dry_run_endpoint": dry_run_endpoint,
+        "apply_endpoint": apply_endpoint,
+        "impact": impact,
+        "error": None,
+        "payload": {"ok": True, "skipped": reason},
+    }
+
+
 def momentum_truth_repair_plan(
     db: Session,
     *,
@@ -219,4 +244,190 @@ def momentum_truth_repair_plan(
     }
 
 
-__all__ = ["momentum_truth_repair_plan"]
+def momentum_truth_repair_run(
+    db: Session,
+    *,
+    days: int = 30,
+    lookback_hours: int | None = None,
+    user_id: int | None = None,
+    limit: int = 500,
+    apply: bool = False,
+    include_reingest: bool = False,
+) -> dict[str, Any]:
+    """Run the sequenced truth repair flow.
+
+    ``apply=False`` is a dry-run equivalent to the plan, but with the same
+    response shape as apply mode. In apply mode, stages commit through their
+    existing narrowly-scoped repair helpers. Neural reingest is skipped unless
+    explicitly requested with ``include_reingest=True``.
+    """
+    if not apply:
+        plan = momentum_truth_repair_plan(
+            db,
+            days=days,
+            lookback_hours=lookback_hours,
+            user_id=user_id,
+            limit=limit,
+        )
+        return {
+            **plan,
+            "mode": "dry_run",
+            "apply": False,
+            "include_reingest": bool(include_reingest),
+        }
+
+    window_days = _clamp_int(days, default=30, lo=1, hi=365)
+    hours = _clamp_int(
+        lookback_hours,
+        default=window_days * 24,
+        lo=1,
+        hi=8760,
+    )
+    limit_i = _clamp_int(limit, default=500, lo=1, hi=5000)
+    user = int(user_id) if user_id is not None else None
+    credit_before = evolution_credit_diagnostics(
+        db,
+        days=window_days,
+        user_id=user,
+        limit=min(limit_i, 10_000),
+    )
+
+    stages = [
+        _stage(
+            stage="packet_snapshot_seals",
+            title="Seal replayable decision snapshots",
+            dry_run_endpoint="POST /api/trading/brain/decision-packet-coverage/repair?target=packet_snapshots&apply=false",
+            apply_endpoint="POST /api/trading/brain/decision-packet-coverage/repair?target=packet_snapshots&apply=true",
+            impact="No trade-count impact; repairs decision packet replay metadata only.",
+            action_count_key="applied_count",
+            fn=lambda: repair_packet_snapshot_seals(
+                db,
+                lookback_hours=hours,
+                user_id=user,
+                limit=limit_i,
+                dry_run=False,
+            ),
+        ),
+        _stage(
+            stage="automation_ledger_packet_links",
+            title="Backfill packet ids onto automation ledger fills",
+            dry_run_endpoint="POST /api/trading/brain/decision-packet-coverage/repair?target=automation_ledger&apply=false",
+            apply_endpoint="POST /api/trading/brain/decision-packet-coverage/repair?target=automation_ledger&apply=true",
+            impact="No trade-count impact; repairs ledger fill provenance where a single packet is already known.",
+            action_count_key="applied_count",
+            fn=lambda: repair_automation_ledger_packet_links(
+                db,
+                lookback_hours=hours,
+                user_id=user,
+                limit=limit_i,
+                dry_run=False,
+            ),
+        ),
+        _stage(
+            stage="automation_ledger_parity",
+            title="Reconcile automation outcome P&L to ledger fills",
+            dry_run_endpoint="POST /api/trading/brain/ledger/automation-parity/reconcile?apply=false",
+            apply_endpoint="POST /api/trading/brain/ledger/automation-parity/reconcile?apply=true",
+            impact="No trade-count impact; apply mode writes parity logs only.",
+            action_count_key="applied_count",
+            fn=lambda: reconcile_missing_automation_outcome_parity(
+                db,
+                days=window_days,
+                user_id=user,
+                limit=limit_i,
+                dry_run=False,
+            ),
+        ),
+        _stage(
+            stage="evolution_credit_regrade",
+            title="Recompute outcome evolution-credit eligibility",
+            dry_run_endpoint="POST /api/trading/brain/momentum/evolution-credit/regrade?apply=false",
+            apply_endpoint="POST /api/trading/brain/momentum/evolution-credit/regrade?apply=true",
+            impact="No trade-count impact; apply mode changes outcome credit flags, not neural weights.",
+            action_count_key="applied_count",
+            fn=lambda: regrade_momentum_outcome_evolution_credit(
+                db,
+                days=window_days,
+                user_id=user,
+                limit=min(limit_i, 10_000),
+                dry_run=False,
+            ),
+        ),
+    ]
+
+    reingest_stage = {
+        "stage": "evolution_reingest",
+        "title": "Apply one-time neural reingest for upgraded outcomes",
+        "dry_run_endpoint": "POST /api/trading/brain/momentum/evolution-credit/reingest?apply=false",
+        "apply_endpoint": "POST /api/trading/brain/momentum/evolution-credit/reingest?apply=true",
+        "impact": "No trade-count impact; apply mode updates neural learning state once per repaired outcome.",
+        "action_count_key": "applied_count",
+    }
+    if include_reingest:
+        stages.append(
+            _stage(
+                **reingest_stage,
+                fn=lambda: reingest_regraded_momentum_outcomes(
+                    db,
+                    days=window_days,
+                    user_id=user,
+                    limit=min(limit_i, 1000),
+                    dry_run=False,
+                ),
+            )
+        )
+    else:
+        stages.append(
+            _skipped_stage(
+                **reingest_stage,
+                reason="include_reingest_false",
+            )
+        )
+
+    credit_after = evolution_credit_diagnostics(
+        db,
+        days=window_days,
+        user_id=user,
+        limit=min(limit_i, 10_000),
+    )
+    applied_stage_count = sum(1 for s in stages if int(s.get("actionable_count") or 0) > 0)
+    total_applied = sum(int(s.get("actionable_count") or 0) for s in stages)
+    return {
+        "ok": all(bool(s.get("ok")) for s in stages),
+        "mode": "apply",
+        "apply": True,
+        "include_reingest": bool(include_reingest),
+        "window_days": window_days,
+        "lookback_hours": hours,
+        "limit": limit_i,
+        "user_id": user,
+        "policy_effect": "truth_repairs_only_no_execution_change",
+        "trade_count_impact": "none",
+        "credit_before": {
+            "total": credit_before.get("total", 0),
+            "credited": credit_before.get("credited", 0),
+            "blocked": credit_before.get("blocked", 0),
+            "credit_rate": credit_before.get("credit_rate"),
+            "reingest_required": credit_before.get("reingest_required", 0),
+        },
+        "credit_after": {
+            "total": credit_after.get("total", 0),
+            "credited": credit_after.get("credited", 0),
+            "blocked": credit_after.get("blocked", 0),
+            "credit_rate": credit_after.get("credit_rate"),
+            "reingest_required": credit_after.get("reingest_required", 0),
+        },
+        "summary": {
+            "applied_stage_count": applied_stage_count,
+            "total_applied_rows": total_applied,
+            "neural_reingest_applied": bool(include_reingest),
+        },
+        "sequence": stages,
+        "operator_note": (
+            "Applied stages only repair recorded truth-loop artifacts. "
+            "They do not change entry policy, sizing policy, or live order behavior."
+        ),
+    }
+
+
+__all__ = ["momentum_truth_repair_plan", "momentum_truth_repair_run"]

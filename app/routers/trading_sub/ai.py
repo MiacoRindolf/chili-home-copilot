@@ -222,6 +222,39 @@ def api_trading_brain_momentum_truth_repair_plan(
     return JSONResponse({"ok": bool(payload.get("ok", False)), "truth_repair_plan": to_jsonable(payload)})
 
 
+@router.post("/api/trading/brain/momentum/truth-repair-run")
+def api_trading_brain_momentum_truth_repair_run(
+    request: Request,
+    apply: bool = Query(False, description="Apply truth repairs; false returns the dry-run plan"),
+    include_reingest: bool = Query(False, description="Also apply neural reingest for regraded outcomes"),
+    days: int = Query(30, ge=1, le=365),
+    lookback_hours: int | None = Query(None, ge=1, le=8760),
+    limit: int = Query(500, ge=1, le=5000),
+    mine: bool = Query(False, description="When true, filter to the paired user id"),
+    db: Session = Depends(get_db),
+):
+    """Run the momentum truth repair sequence.
+
+    Dry-run by default. Apply mode repairs recorded truth-loop artifacts only:
+    packet snapshots, ledger packet provenance, ledger parity, and outcome
+    credit flags. Neural reingest remains separately opt-in.
+    """
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.repair_plan import momentum_truth_repair_run
+
+    user_id = ctx.get("user_id") if mine else None
+    payload = momentum_truth_repair_run(
+        db,
+        days=int(days),
+        lookback_hours=int(lookback_hours) if lookback_hours is not None else None,
+        user_id=int(user_id) if user_id is not None else None,
+        limit=int(limit),
+        apply=bool(apply),
+        include_reingest=bool(include_reingest),
+    )
+    return JSONResponse({"ok": bool(payload.get("ok", False)), "truth_repair_run": to_jsonable(payload)})
+
+
 @router.post("/api/trading/brain/momentum/evolution-credit/regrade")
 def api_trading_brain_momentum_evolution_credit_regrade(
     request: Request,

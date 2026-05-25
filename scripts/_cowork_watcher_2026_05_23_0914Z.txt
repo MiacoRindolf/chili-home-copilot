@@ -1,0 +1,88 @@
+2026-05-23T09:14:00+00:00 ERROR -- dev daemon hung. Host 2026-05-23T09:14:00Z.
+
+NOTE: This entry could not be appended to docs/STRATEGY/COWORK_DECISIONS_LOG.md
+(2.5MB) because bash-mount writes appeared to race with another writer and
+silently dropped (verified by post-write grep returning 0 for unique timestamp
+"2026-05-23T09:14:00"). File size grew but content not present in readback —
+classic bash-mount staleness pattern (see reference_bash_mount_stat_cache.md).
+Operator: please copy this entry's body into COWORK_DECISIONS_LOG.md by hand
+or via PowerShell `Add-Content` (NOT bash >>).
+
+---
+
+STEP A: state=idle, last.id=portfolio-vs-pattern-breaker-continuation-2026-05-16
+passed=true, ended 2026-05-16T20:01:58Z (duration 2732.8s). COWORK_REVIEW
+companion present (3030B 2026-05-16_f-portfolio-vs-pattern-breaker-separation.cowork-review.md)
+-- no STEP D action needed. NEXT_TASK header = f-position-identity-phase-5b-soak-and-reader-parity
+STATUS=PENDING (operator hasn't queued execution). HEAD 115079d (Phase 5B soak
+probe; last commit fc073f2 = operator DD-breaker docs 2026-05-22).
+No _claude_session_pause.flag, no plan.request.md.
+
+STEPS B / B2 / C / D: N/A (no in-flight session; no plan; last completion already reviewed).
+
+STEPS E + F: FAILED -- dev daemon hung.
+- Queued combo `dispatch-crypto-pulse.ps1` + `dispatch-autotrader-health-probe.ps1`
+  to scripts/_claude_pending.txt at 09:09:52Z.
+- Daemon DRAINED the pending file within ~30s (file removed) BUT:
+  - No `request #N` line written to _claude_daemon.log
+  - No new banner in dispatch-crypto-pulse-out.txt
+  - No new banner in dispatch-autotrader-health-out.txt
+- Last _claude_daemon.log entry: `2026-05-22 21:57:29 daemon v2 started, pid=8400`
+  = 2026-05-23T04:57:29Z, NOW +4h16m ago. Lifetime limit 14400s exceeded ~16m ago
+  with NO self-restart logged.
+- Two daemons started 3s apart at supervisor wake (pid 40236 then pid 8400) --
+  likely race-consuming pending file then no-op'ing.
+- Last crypto-pulse banner: `2026-05-19T12:54:34 PDT` = 2026-05-19T19:54:34Z
+  -- ~85 hours stale.
+- Last autotrader-health banner: `2026-05-19T12:54:37 PDT` -- same ~85h gap.
+- No _claude_daemon_supervisor.log file exists in scripts/.
+
+Rule#5 hard-stop engaged: NOT re-pending.
+
+STEP F SURVEILLANCE BLIND for open-position health across ~85 hours.
+Autotrader/exit_monitor regressions UNDETECTABLE in this state.
+This is the highest-priority operator concern -- open positions may be unmanaged.
+
+---
+
+OPERATOR WAKE PRIORITY:
+
+(1) RESTART DEV DAEMON via Win32_Process.Create per
+    reference_session_daemon_restart_pattern.md (Start-Process inherits the
+    dying supervisor job and dies). Then verify a fresh daemon log entry + a
+    dispatch-crypto-pulse banner advance.
+
+(2) VERIFY OPEN CRYPTO POSITIONS DIRECTLY via
+    `docker exec chili-postgres psql -d chili -c "SELECT id, ticker, broker, opened_at, status FROM trades WHERE status='open' ORDER BY opened_at;"`
+    Carryover standing-naked trades from 2026-05-19 (NOW +85h):
+      - 1827 RAY-USD (robinhood, was 14d naked)
+      - 1861 BNB-USD (coinbase, was 6.6d naked, dust)
+      - 2038 AAVE-USD (robinhood, was 76h naked)
+      - 2044 XLM-USD (robinhood, was 17.6h naked)
+      - 2058 ACS-USD (coinbase, was 41.8min naked at last sight)
+
+(3) VERIFY KILL SWITCH STATE: `price_monitor_freeze:disconnected` was ACTIVE
+    2026-05-19T13:52Z then operator-reset by 15:04Z. Status across the 85h
+    surveillance gap is UNKNOWN.
+
+(4) VERIFY trading_positions FK STATUS: bracket_writer_g2 was emitting
+    NoReferencedTableError storm against `trading_execution_events.position_id`
+    at last sight (2026-05-19). Migration to create trading_positions table
+    may still not have run. Check `SELECT id, name FROM trading_migrations
+    ORDER BY id DESC LIMIT 5;` vs latest `_migration_NNN_` in app/migrations.py.
+
+(5) QUEUE NEXT_TASK EXECUTION if Phase 5B soak still planned -- pending 7 days.
+
+---
+
+ANTI-HALLUCINATION COMPLIANCE:
+- Rule#1: host clock via `date -Iseconds` -> 2026-05-23T09:09:31Z then
+  2026-05-23T09:12:27Z then 2026-05-23T09:14:00Z (all real-time host).
+- Rule#2: banner timestamps obtained via Windows-content grep on
+  dispatch-*-out.txt content (banner regex match), NOT bash stat
+  (which lies per reference_bash_mount_stat_cache.md).
+- Rule#3: daemon-hung claim grounded in tail of _claude_daemon.log + absence
+  of `request #N` log entry post-consume, NOT prior-pulse memory.
+- Rule#5: engaged after one re-pend + ~65s wait + content-verified no banner advance.
+
+-- Cowork scheduled-task watcher (autonomous)
