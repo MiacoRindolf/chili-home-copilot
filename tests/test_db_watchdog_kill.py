@@ -93,13 +93,13 @@ def test_kill_failure_logs_error(caplog):
 # 3. Brain-worker exemption (1800s threshold) — under threshold, just warns
 # ---------------------------------------------------------------------------
 
-def test_brain_worker_exemption_under_threshold_just_warns(caplog):
-    """A chili-brain-worker pid held 800s should warn (still under 1800s
-    exempt threshold), NOT kill. Pre-fix this was the source of the
-    "claimed kill at 600s but didn't fire" confusion."""
+def test_brain_worker_exemption_under_threshold_just_warns(caplog, monkeypatch):
+    """A chili-brain-worker pid held 800s should warn when the operator
+    explicitly restores the legacy 1800s exemption."""
     import logging
     from app.services import db_watchdog
 
+    monkeypatch.setenv("CHILI_DB_WATCHDOG_BRAIN_WORKER_KILL_SEC", "1800")
     fake_row = MagicMock(pid=99999, dur_s=800, app="chili-brain-worker", q="SELECT ...")
 
     def _execute_side(*args, **kwargs):
@@ -119,7 +119,7 @@ def test_brain_worker_exemption_under_threshold_just_warns(caplog):
          caplog.at_level(logging.WARNING, logger="app.services.db_watchdog"):
         warned, killed = db_watchdog._poll_once()
 
-    # 800s > 600s base, but < 1800s brain-worker exemption -> warn-only.
+    # 800s > 600s base, but < explicit 1800s brain-worker exemption -> warn-only.
     assert killed == 0
     assert warned == 1
     assert not any(

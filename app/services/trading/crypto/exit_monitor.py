@@ -39,6 +39,8 @@ from ....models.trading import PatternMonitorDecision, Trade
 
 logger = logging.getLogger(__name__)
 
+COINBASE_EXIT_SIDE = "sell"
+
 # f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
 # the freshness window + the monitor-decision helpers moved to the
 # shared ``_exit_monitor_common`` module. Local re-exports preserved
@@ -247,7 +249,7 @@ def _place_coinbase_sell_for_trade(
     adapter = _coinbase_spot_adapter()
     market_res = adapter.place_market_order(
         product_id=product_id,
-        side="sell",
+        side=COINBASE_EXIT_SIDE,
         base_size=str(qty),
     )
     if isinstance(market_res, dict) and market_res.get("ok"):
@@ -264,7 +266,7 @@ def _place_coinbase_sell_for_trade(
         return market_res
     limit_res = adapter.place_limit_order_gtc(
         product_id=product_id,
-        side="sell",
+        side=COINBASE_EXIT_SIDE,
         base_size=str(qty),
         limit_price=str(limit_px),
         post_only=False,

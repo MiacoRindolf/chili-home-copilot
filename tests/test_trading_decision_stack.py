@@ -1262,7 +1262,7 @@ def test_paper_tick_abstain_persists_packet_without_entry_fill(db, momentum_user
     monkeypatch.setattr(paper_runner, "runner_boundary_risk_ok", lambda _db, _sess: (True, {}))
 
     user, sess, via, var = momentum_user_and_session
-    via.viability_score = 0.01
+    via.viability_score = 0.85
     db.commit()
     quote = {"mid": 100.0, "bid": 99.5, "ask": 100.5}
     out = tick_paper_session(db, int(sess.id), quote_fn=lambda _s: quote)

@@ -331,6 +331,12 @@ def test_close_position_now_live(paired_client, db: Session) -> None:
         "app.services.trading.robinhood_exit_execution."
         "describe_robinhood_equity_execution_window",
         return_value=dict(_REGULAR_HOURS_WINDOW, ticker="CLT1"),
+    ), patch(
+        "app.services.broker_service.is_connected",
+        return_value=True,
+    ), patch(
+        "app.services.broker_service.get_positions",
+        return_value=[{"ticker": "CLT1", "quantity": "10"}],
     ):
         res = close_position_now(db, kind="trade", trade_id=int(t.id))
 
@@ -389,6 +395,12 @@ def test_close_position_now_live_plan_levels(paired_client, db: Session) -> None
         "app.services.trading.robinhood_exit_execution."
         "describe_robinhood_equity_execution_window",
         return_value=dict(_REGULAR_HOURS_WINDOW, ticker="CLP2"),
+    ), patch(
+        "app.services.broker_service.is_connected",
+        return_value=True,
+    ), patch(
+        "app.services.broker_service.get_positions",
+        return_value=[{"ticker": "CLP2", "quantity": "4"}],
     ):
         res = close_position_now(db, kind="trade", trade_id=int(t.id))
 

@@ -46,6 +46,10 @@ floors to 0.0; zero PnL is 0.5.
 ~94%. The two multiply: the effective realized contribution is
 ``realized_pnl_score * realized_evidence_score``.
 
+When realized evidence is present, the directional-WR term is also
+scaled by ``realized_pnl_score``. That keeps a high directional hit-rate
+from masking fee/slippage-negative realized PnL.
+
 NULL propagation
 ----------------
 
@@ -140,11 +144,14 @@ def realized_evidence_score(
     """Sample-size confidence multiplier in ``[0, 1)``.
 
     ``1 - exp(-n / tau)``. At ``n = tau`` contributes ~63%, saturates
-    near 1 as ``n → ∞``. Always defined for ``n >= 0`` and ``tau > 0``;
-    returns ``0.0`` when either is missing.
+    near 1 as ``n → ∞``. Always defined for ``n >= 0`` and ``tau > 0``.
     """
-    if n is None or tau is None or float(tau) <= 0:
-        return 0.0
+    if n is None:
+        raise TypeError("realized_evidence_score requires n, got None")
+    if tau is None:
+        raise TypeError("realized_evidence_score requires tau, got None")
+    if float(tau) <= 0:
+        raise ValueError("realized_evidence_score requires tau > 0")
     return 1.0 - _math.exp(-float(n) / float(tau))
 
 
@@ -213,16 +220,17 @@ def compute_quality_composite_score(
     w_realized = float(weights.get("realized", 0.35))
     tau = float(weights.get("realized_evidence_tau", 30.0))
 
+    n = int(realized_n_trades or 0)
+    has_realized = realized_pnl_score is not None and n >= 5
+    realized_quality = _clip(float(realized_pnl_score)) if has_realized else None
+    wr_component = wr * (realized_quality if realized_quality is not None else 1.0)
     non_realized_terms = (
         w_cpcv * cpcv_n
         + w_dsr * dsr_n
         + w_pbo * pbo_inv
-        + w_wr * wr
+        + w_wr * wr_component
         + w_decay * dec_inv
     )
-
-    n = int(realized_n_trades or 0)
-    has_realized = realized_pnl_score is not None and n >= 5
 
     if not has_realized:
         # Realized component is dormant: rescale the five non-realized
@@ -234,7 +242,7 @@ def compute_quality_composite_score(
         return non_realized_terms / non_realized_sum
 
     evidence = realized_evidence_score(n, tau)
-    realized_component = _clip(float(realized_pnl_score)) * evidence
+    realized_component = float(realized_quality) * evidence
     return non_realized_terms + w_realized * realized_component
 
 

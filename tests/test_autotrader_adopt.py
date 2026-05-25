@@ -272,12 +272,36 @@ def test_close_now_allowed_on_non_v1_linked_live(
     fake_adapter.is_enabled.return_value = True
     fake_adapter.place_market_order.return_value = {
         "ok": True,
+        "state": "filled",
         "order_id": "rh-close-nonv1",
-        "raw": {"average_price": "10.75"},
+        "raw": {"average_price": "10.75", "state": "filled"},
     }
+    fake_adapter.get_product.return_value = (
+        {"market_hours_mic": "XNAS", "tradable": True, "tick_size": 0.01},
+        False,
+    )
     with patch(
         "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
         return_value=fake_adapter,
+    ), patch(
+        "app.services.trading.robinhood_exit_execution."
+        "describe_robinhood_equity_execution_window",
+        return_value={
+            "ticker": "CNLN",
+            "session": "regular_hours",
+            "session_label": "Regular session",
+            "market_hours": "regular_hours",
+            "next_eligible_session_at": None,
+            "overnight_eligible": False,
+            "can_submit_now": True,
+            "execution_reason": "Regular session",
+        },
+    ), patch(
+        "app.services.broker_service.is_connected",
+        return_value=True,
+    ), patch(
+        "app.services.broker_service.get_positions",
+        return_value=[{"ticker": "CNLN", "quantity": "5"}],
     ):
         res = close_position_now(db, kind="trade", trade_id=int(t.id))
 

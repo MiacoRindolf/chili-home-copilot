@@ -172,6 +172,12 @@ _PROJECT_DOMAIN_TARGETED_TESTS = (
     "test_projects.py",
     "test_code_agent.py",
 )
+_TRADING_DEFAULT_USER_TESTS = (
+    "test_pattern_imminent_alerts.py",
+    "test_signal_to_reconcile_e2e.py",
+    "test_trade_assign_pattern.py",
+    "test_trades_sync.py",
+)
 
 
 def _bootstrap_test_schema() -> None:
@@ -358,6 +364,38 @@ def _test_prefers_targeted_cleanup(request) -> bool:
     return any(token in name for token in _PROJECT_DOMAIN_TARGETED_TESTS)
 
 
+def _test_needs_default_trading_users(request) -> bool:
+    try:
+        name = Path(str(request.node.fspath)).name.lower()
+    except Exception:
+        return False
+    return name in _TRADING_DEFAULT_USER_TESTS
+
+
+def _seed_default_trading_users() -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO users (id, name)
+                VALUES (1, 'Trading Test User'), (99, 'Trading Wrong User')
+                ON CONFLICT (id) DO NOTHING
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                SELECT setval(
+                    pg_get_serial_sequence('users', 'id'),
+                    GREATEST((SELECT COALESCE(MAX(id), 0) FROM users), 1),
+                    true
+                )
+                """
+            )
+        )
+
+
 def _reset_trading_test_process_state() -> None:
     """Reset in-memory trading safety latches between DB-isolated tests."""
     try:
@@ -382,6 +420,8 @@ def db(request):
     _truncate_app_tables(
         _PROJECT_DOMAIN_TARGETED_TABLES if _test_prefers_targeted_cleanup(request) else None
     )
+    if _test_needs_default_trading_users(request):
+        _seed_default_trading_users()
     SessionTesting = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = SessionTesting()
     try:

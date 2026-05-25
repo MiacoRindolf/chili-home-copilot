@@ -4,23 +4,32 @@ from __future__ import annotations
 
 from app.config import settings
 
+ROLE_ALL = "all"
+HEARTBEAT_JOB_ID = "scheduler_worker_heartbeat"
 
-def test_scheduler_excludes_web_pattern_research_job():
+
+def test_scheduler_excludes_web_pattern_research_job(monkeypatch):
     """Web pattern research runs inside run_learning_cycle; it must not be a separate cron job."""
-    from app.services.trading_scheduler import get_scheduler_info, start_scheduler
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
 
-    start_scheduler()
-    info = get_scheduler_info()
-    assert info.get("running") is True, "scheduler should be running after app/client startup"
-    job_ids = {j["id"] for j in info.get("jobs", [])}
-    assert "web_pattern_research" not in job_ids
-    # Regression anchors: operational jobs we still expect
-    assert "broker_sync" in job_ids
-    assert "price_monitor" in job_ids
-    assert "pattern_imminent_scanner" in job_ids
-    assert "daily_prescreen" in job_ids
-    assert "daily_market_scan" in job_ids
-    assert "brain_market_snapshots" in job_ids
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+    try:
+        start_scheduler()
+        info = get_scheduler_info()
+        assert info.get("running") is True, "scheduler should be running after app/client startup"
+        job_ids = {j["id"] for j in info.get("jobs", [])}
+        assert "web_pattern_research" not in job_ids
+        # Regression anchors: operational jobs we still expect
+        assert "broker_sync" in job_ids
+        assert "price_monitor" in job_ids
+        assert "pattern_imminent_scanner" in job_ids
+        assert "daily_prescreen" in job_ids
+        assert "daily_market_scan" in job_ids
+        assert "brain_market_snapshots" in job_ids
+    finally:
+        stop_scheduler()
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
 
 
 def test_brain_learning_cycle_config_defaults():
@@ -46,7 +55,7 @@ def test_scheduler_web_role_omits_crypto_breakout(monkeypatch):
         assert "crypto_breakout_scanner" not in job_ids
     finally:
         stop_scheduler()
-        monkeypatch.setattr(settings, "chili_scheduler_role", "all")
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
 
 
 def test_scheduler_none_role_disables_apscheduler(monkeypatch):
@@ -62,20 +71,29 @@ def test_scheduler_none_role_disables_apscheduler(monkeypatch):
         assert info.get("jobs") == []
     finally:
         stop_scheduler()
-        monkeypatch.setattr(settings, "chili_scheduler_role", "all")
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
 
 
-def test_scheduler_all_emits_heartbeat_only_when_env(monkeypatch):
-    """CHILI_SCHEDULER_ROLE=all registers heartbeat only if CHILI_SCHEDULER_EMIT_HEARTBEAT is set."""
+def test_scheduler_all_emits_heartbeat_by_default_unless_env_disables(monkeypatch):
+    """CHILI_SCHEDULER_ROLE=all registers heartbeat unless env explicitly disables it."""
     from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
 
     stop_scheduler()
-    monkeypatch.setattr(settings, "chili_scheduler_role", "all")
+    monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
     monkeypatch.delenv("CHILI_SCHEDULER_EMIT_HEARTBEAT", raising=False)
     try:
         start_scheduler()
         job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
-        assert "scheduler_worker_heartbeat" not in job_ids
+        assert HEARTBEAT_JOB_ID in job_ids
+    finally:
+        stop_scheduler()
+
+    stop_scheduler()
+    monkeypatch.setenv("CHILI_SCHEDULER_EMIT_HEARTBEAT", "0")
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert HEARTBEAT_JOB_ID not in job_ids
     finally:
         stop_scheduler()
 
@@ -84,12 +102,12 @@ def test_scheduler_all_emits_heartbeat_only_when_env(monkeypatch):
     try:
         start_scheduler()
         job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
-        assert "scheduler_worker_heartbeat" in job_ids
+        assert HEARTBEAT_JOB_ID in job_ids
         assert "broker_sync" in job_ids
     finally:
         stop_scheduler()
         monkeypatch.delenv("CHILI_SCHEDULER_EMIT_HEARTBEAT", raising=False)
-        monkeypatch.setattr(settings, "chili_scheduler_role", "all")
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
 
 
 def test_scheduler_worker_role_registers_heavy_without_legacy_breakout(monkeypatch):
@@ -105,10 +123,10 @@ def test_scheduler_worker_role_registers_heavy_without_legacy_breakout(monkeypat
         assert "crypto_breakout_scanner" not in job_ids
         assert "stock_breakout_scanner" not in job_ids
         assert "brain_market_snapshots" in job_ids
-        assert "scheduler_worker_heartbeat" in job_ids
+        assert HEARTBEAT_JOB_ID in job_ids
     finally:
         stop_scheduler()
-        monkeypatch.setattr(settings, "chili_scheduler_role", "all")
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
 
 
 def test_brain_worker_default_interval_five_minutes():

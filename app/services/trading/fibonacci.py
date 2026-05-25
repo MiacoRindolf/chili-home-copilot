@@ -110,8 +110,8 @@ def find_impulse_leg(
         swing_lows = find_swing_lows(seg_low, pivot_lookback)
         swing_highs = find_swing_highs(seg_high, pivot_lookback)
 
-        low_idxs = [i for i, v in enumerate(swing_lows) if v]
-        high_idxs = [i for i, v in enumerate(swing_highs) if v]
+        low_idxs = [i - pivot_lookback for i, v in enumerate(swing_lows) if v]
+        high_idxs = [i - pivot_lookback for i, v in enumerate(swing_highs) if v]
 
         if not low_idxs or not high_idxs:
             return None
@@ -138,8 +138,8 @@ def find_impulse_leg(
         swing_highs = find_swing_highs(seg_high, pivot_lookback)
         swing_lows = find_swing_lows(seg_low, pivot_lookback)
 
-        high_idxs = [i for i, v in enumerate(swing_highs) if v]
-        low_idxs = [i for i, v in enumerate(swing_lows) if v]
+        high_idxs = [i - pivot_lookback for i, v in enumerate(swing_highs) if v]
+        low_idxs = [i - pivot_lookback for i, v in enumerate(swing_lows) if v]
 
         if not high_idxs or not low_idxs:
             return None

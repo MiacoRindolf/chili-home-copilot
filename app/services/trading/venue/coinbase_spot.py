@@ -444,7 +444,8 @@ class CoinbaseSpotAdapter(VenueAdapter):
         c = self._client()
         if not c:
             raise VenueAdapterError("Coinbase REST client unavailable")
-        if not cb.is_connected():
+        injected_client = "_client" in self.__dict__ or self._client_factory is not cb.get_coinbase_rest_client
+        if not injected_client and not cb.is_connected():
             raise VenueAdapterError("Coinbase not connected")
         return c
 

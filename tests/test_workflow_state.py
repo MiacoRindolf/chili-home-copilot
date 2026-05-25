@@ -74,7 +74,7 @@ def test_compute_state_not_bound_when_no_profile(db):
     user = _user(db)
     task = _task(db, user, with_profile=False)
     snap = compute_state(db, task, user_id=user.id)
-    assert snap.state == "not_bound"
+    assert snap.state == "unbound"
     assert snap.workspace_bound is False
 
 
@@ -86,7 +86,7 @@ def test_compute_state_bound_but_not_indexed(db):
     db.refresh(repo)
     task = _task(db, user, with_profile=True, repo=repo)
     snap = compute_state(db, task, user_id=user.id)
-    assert snap.state == "bound"
+    assert snap.state == "bound_unindexed"
     assert snap.workspace_indexed is False
 
 
@@ -95,7 +95,7 @@ def test_compute_state_indexed_when_repo_has_files(db):
     repo = _indexed_repo(db, user)
     task = _task(db, user, with_profile=True, repo=repo)
     snap = compute_state(db, task, user_id=user.id)
-    assert snap.state == "indexed"
+    assert snap.state == "ready_to_suggest"
 
 
 def test_compute_state_snapshot_saved_after_suggestion_row(db):
@@ -197,4 +197,4 @@ def test_assert_transition_allows_dry_run_at_snapshot_saved(db):
 
 def test_states_tuple_is_ordered_and_unique():
     assert len(STATES) == len(set(STATES))
-    assert STATES.index("bound") < STATES.index("indexed") < STATES.index("applied")
+    assert STATES.index("bound_unindexed") < STATES.index("ready_to_suggest") < STATES.index("applied")

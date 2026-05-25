@@ -269,6 +269,7 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
 
     from .auto_trader_position_overrides import list_position_overrides
     from .robinhood_exit_execution import (
+        _opened_today_et,
         cancel_pending_exit_order,
         clear_pending_exit_fields,
         describe_robinhood_equity_execution_window,
@@ -518,6 +519,8 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         if state == "filled":
             db.refresh(t)
             summary["closed"] += 1
+            if _opened_today_et(t.entry_date) and (t.direction or "long").lower() == "long":
+                summary.setdefault("would_be_day_trade_exits", []).append(int(t.id))
             logger.info(
                 "[autotrader_monitor] Closed trade id=%s ticker=%s reason=%s pnl=%s",
                 t.id,

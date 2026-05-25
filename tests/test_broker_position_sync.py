@@ -33,7 +33,7 @@ def test_collapse_open_broker_position_duplicates_merges_into_canonical(db):
         user_id=None,
         ticker="ABM",
         direction="long",
-        entry_price=0.0,
+        entry_price=41.25,
         quantity=8,
         entry_date=later,
         status="open",

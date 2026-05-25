@@ -21,12 +21,12 @@ from app.services.trading.pdt_guard import _earliest_business_day_in_window
         ("2026-05-19T15:00:00", "2026-05-13T00:00:00"),
         # Monday: window = prev-Tue .. today (Mon)
         ("2026-05-18T15:00:00", "2026-05-12T00:00:00"),
-        # Friday: window = Mon (this wk) .. today (Fri)
-        ("2026-05-16T15:00:00", "2026-05-12T00:00:00"),
+        # Saturday: root at prior Friday; window = Mon 5/11 .. Fri 5/15
+        ("2026-05-16T15:00:00", "2026-05-11T00:00:00"),
         # Wednesday: window = prev-Thu .. today (Wed)
         ("2026-05-14T15:00:00", "2026-05-08T00:00:00"),
-        # Thursday: window = prev-Fri .. today (Thu)
-        ("2026-05-15T15:00:00", "2026-05-09T00:00:00"),
+        # Friday: window = Mon 5/11 .. today (Fri)
+        ("2026-05-15T15:00:00", "2026-05-11T00:00:00"),
     ],
 )
 def test_earliest_business_day_for_weekday(today_iso: str, expected_iso: str) -> None:

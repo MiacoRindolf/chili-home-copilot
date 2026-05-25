@@ -7,8 +7,8 @@ and persists one ``BracketReconciliationLog`` row per comparison.
 
 This service is **strictly read-only against the broker** in Phase G.
 It never submits, cancels, or modifies any broker order. Running with
-``brain_live_brackets_mode=authoritative`` raises immediately so that
-Phase G.2 must explicitly wire a writer path before enabling it.
+``brain_live_brackets_mode=authoritative`` falls back to shadow unless
+the Phase G.2 sweep-writer flag is explicitly enabled.
 """
 from __future__ import annotations
 
@@ -2338,8 +2338,8 @@ def run_reconciliation_sweep(
 
     * Off mode → returns an empty summary without touching the DB or the
       broker.
-    * Authoritative mode → raises ``RuntimeError``; Phase G.2 will wire
-      a dedicated writer path and flip this gate.
+    * Authoritative mode → falls back to shadow unless the sweep-writer
+      flag is enabled.
     * Shadow / compare → dispatches to either ``_run_sweep_staged`` (when
       ``brain_live_brackets_staged_sweep_enabled`` is True) or
       ``_run_sweep_legacy`` (default). Both paths return a byte-identical

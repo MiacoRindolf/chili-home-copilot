@@ -87,14 +87,19 @@ class TestModeGates:
         assert summary.trades_scanned == 0
         assert summary.rows_written == 0
 
-    def test_authoritative_raises(self, db, monkeypatch):
+    def test_authoritative_without_writer_falls_back_to_shadow(self, db, monkeypatch):
         monkeypatch.setattr(
             "app.services.trading.bracket_reconciliation_service.settings.brain_live_brackets_mode",
             "authoritative",
             raising=False,
         )
-        with pytest.raises(RuntimeError):
-            run_reconciliation_sweep(db)
+        monkeypatch.setattr(
+            "app.services.trading.bracket_reconciliation_service.settings.chili_bracket_sweep_writer_enabled",
+            False,
+            raising=False,
+        )
+        summary = run_reconciliation_sweep(db)
+        assert summary.mode == "shadow"
 
 
 class TestShadowSweep:

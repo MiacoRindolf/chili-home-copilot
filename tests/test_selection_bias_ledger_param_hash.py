@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.models.trading import BacktestParamSet
+from app.models.trading import BacktestParamSet, ScanPattern
 from app.services.trading.backtest_param_sets import get_or_create_backtest_param_set
 from app.services.trading.selection_bias import (
     build_outcome_fingerprint,
@@ -11,6 +11,8 @@ from app.services.trading.selection_bias import (
     record_validation_slice_use,
     summarize_slice_usage,
 )
+
+RULES_FINGERPRINT = "rf_ledgertest"
 
 
 def _eval_row(*, is_win_rate: float, oos_win_rate: float) -> dict:
@@ -33,6 +35,15 @@ def _eval_row(*, is_win_rate: float, oos_win_rate: float) -> dict:
 
 
 def test_summarize_distinct_param_hash_counts_real_backtest_param_sets(db):
+    scan_pattern = ScanPattern(
+        name="Ledger param hash regression",
+        rules_json={},
+        origin="test",
+    )
+    db.add(scan_pattern)
+    db.flush()
+    scan_pattern_id = int(scan_pattern.id)
+
     pid_a = get_or_create_backtest_param_set(
         db, {"period": "1y", "ledger_param_hash_test": "alpha"}
     )
@@ -71,14 +82,14 @@ def test_summarize_distinct_param_hash_counts_real_backtest_param_sets(db):
 
     rrk_a = build_research_run_key(
         slice_key=sk,
-        scan_pattern_id=91001,
-        rules_fingerprint="rf_ledgertest",
+        scan_pattern_id=scan_pattern_id,
+        rules_fingerprint=RULES_FINGERPRINT,
         outcome_fingerprint=ofp_a,
     )
     rrk_b = build_research_run_key(
         slice_key=sk,
-        scan_pattern_id=91001,
-        rules_fingerprint="rf_ledgertest",
+        scan_pattern_id=scan_pattern_id,
+        rules_fingerprint=RULES_FINGERPRINT,
         outcome_fingerprint=ofp_b,
     )
 
@@ -86,16 +97,16 @@ def test_summarize_distinct_param_hash_counts_real_backtest_param_sets(db):
         db,
         research_run_key=rrk_a,
         slice_key=sk,
-        scan_pattern_id=91001,
-        rules_fingerprint="rf_ledgertest",
+        scan_pattern_id=scan_pattern_id,
+        rules_fingerprint=RULES_FINGERPRINT,
         param_hash=ph_a,
     )
     record_validation_slice_use(
         db,
         research_run_key=rrk_b,
         slice_key=sk,
-        scan_pattern_id=91001,
-        rules_fingerprint="rf_ledgertest",
+        scan_pattern_id=scan_pattern_id,
+        rules_fingerprint=RULES_FINGERPRINT,
         param_hash=ph_b,
     )
     db.commit()
@@ -108,16 +119,16 @@ def test_summarize_distinct_param_hash_counts_real_backtest_param_sets(db):
     ofp_c = build_outcome_fingerprint(eval_c)
     rrk_c = build_research_run_key(
         slice_key=sk,
-        scan_pattern_id=91001,
-        rules_fingerprint="rf_ledgertest",
+        scan_pattern_id=scan_pattern_id,
+        rules_fingerprint=RULES_FINGERPRINT,
         outcome_fingerprint=ofp_c,
     )
     record_validation_slice_use(
         db,
         research_run_key=rrk_c,
         slice_key=sk,
-        scan_pattern_id=91001,
-        rules_fingerprint="rf_ledgertest",
+        scan_pattern_id=scan_pattern_id,
+        rules_fingerprint=RULES_FINGERPRINT,
         param_hash=ph_a,
     )
     db.commit()

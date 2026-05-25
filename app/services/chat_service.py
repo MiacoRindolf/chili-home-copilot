@@ -39,7 +39,33 @@ from .reasoning_brain import learning as reasoning_learning
 from ..modules import is_module_enabled
 from . import project_file_service as pfs_module
 from . import planner_service
-from .tool_handlers import execute_tool
+from .tool_handlers import execute_tool as execute_tool_with_client_action
+
+
+def execute_tool(
+    db: Session,
+    action_type: str,
+    action_data: dict,
+    llm_reply: str,
+    is_guest: bool,
+    user_id: int | None = None,
+) -> tuple[str, bool, str]:
+    """Backward-compatible public wrapper for non-desktop tool calls."""
+    reply, executed, resolved_type, _client_action = execute_tool_with_client_action(
+        db, action_type, action_data, llm_reply, is_guest, user_id=user_id
+    )
+    return reply, executed, resolved_type
+
+
+def nlu_fallback_for_local_tool(message: str) -> dict | None:
+    """NLU fast path for deterministic local tools, excluding instant chat."""
+    result = nlu_fallback(message)
+    if not result:
+        return None
+    action_type = str(result.get("type") or "")
+    if action_type.startswith("instant_"):
+        return None
+    return result
 
 
 def nlu_fallback(message: str) -> dict | None:
@@ -83,7 +109,7 @@ def resolve_response(
         if planner_hooks and not is_guest and user_id and is_module_enabled("planner"):
             ok, project_name = planner_hooks.detect_create_project_with_tasks_intent(message)
             if ok and project_name:
-                llm_reply, executed, action_type, client_action = execute_tool(
+                llm_reply, executed, action_type, client_action = execute_tool_with_client_action(
                     db, "add_plan_project_with_tasks",
                     {"name": project_name, "description": "", "tasks": []},
                     "", is_guest, user_id=user_id,
@@ -97,9 +123,9 @@ def resolve_response(
                             llm_reply = f'Created project **"{project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
                 return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": "fallback", "rag_sources": [], "personality_used": False, "client_action": client_action}
 
-        nlu_result = nlu_fallback(message)
+        nlu_result = nlu_fallback_for_local_tool(message)
         if nlu_result:
-            llm_reply, executed, action_type, client_action = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
+            llm_reply, executed, action_type, client_action = execute_tool_with_client_action(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
             return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": "nlu-fallback", "rag_sources": [], "personality_used": False, "client_action": client_action}
 
         if openai_client.is_configured():
@@ -204,7 +230,7 @@ def resolve_response(
             llm_reply = ""
             log_info(trace_id, f"create_project_with_tasks_fallback name={project_name!r}")
 
-    llm_reply, executed, action_type, client_action = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
+    llm_reply, executed, action_type, client_action = execute_tool_with_client_action(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
 
     if (
         planner_hooks

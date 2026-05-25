@@ -420,27 +420,28 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
     CycleClusterDef(
         id="c_evolution",
         label="Evolution & hypotheses",
-        phase_summary="variants → validate_and_evolve → breakouts",
+        phase_summary="variants → validate_and_evolve → trade feedback",
         description=(
             "Evolves pattern families, tests statistical hypotheses, and learns from "
-            "resolved breakout-style outcomes."
+            "closed-trade and pattern-monitor outcomes."
         ),
         remarks=(
             "What: Structural evolution of pattern variants, statistical hypothesis testing "
-            "with weight updates, then breakout outcome learning.\n\n"
+            "with weight updates, then closed-trade and monitor-decision feedback.\n\n"
             "Where: ``evolve_pattern_strategies``, ``validate_and_evolve``, "
-            "``learn_from_breakout_outcomes`` in ``learning.py``.\n\n"
+            "``update_pattern_stats_from_closed_trades`` and "
+            "``learn_from_monitor_decisions`` in ``learning.py``.\n\n"
             "Why: Static patterns decay in live markets; this block adapts families and "
             "strategy weights from fresh evidence."
         ),
         inputs=(
             "Parent ``ScanPattern`` rows and variant trees",
             "Hypothesis / weight state",
-            "Resolved alerts for breakouts",
+            "Closed trades and resolved pattern-monitor decisions",
         ),
         outputs=(
             "``report['evolution']``, hypothesis and weight counters",
-            "``report['breakout_patterns_learned']``",
+            "``report['trade_feedback_patterns']`` and ``report['monitor_decisions_reviewed']``",
         ),
         steps=(
             CycleStepDef(
@@ -483,24 +484,31 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 ),
             ),
             CycleStepDef(
-                sid="breakout",
-                label="Learning from breakout outcomes",
-                code_ref="learning.learn_from_breakout_outcomes",
-                runner_phase="breakout_learning",
+                sid="trade_feedback",
+                label="Learning from closed-trade feedback",
+                code_ref=(
+                    "learning.update_pattern_stats_from_closed_trades + "
+                    "learning.learn_from_monitor_decisions"
+                ),
+                runner_phase="trade_feedback",
                 description=(
-                    "Consumes resolved breakout alerts to update pattern parameters or "
-                    "confidence based on real outcomes."
+                    "Consumes closed trades and resolved monitor decisions to update "
+                    "pattern stats, decision rules, and plan-accuracy telemetry."
                 ),
                 remarks=(
-                    "What: Closes the loop between fired breakout alerts and pattern params.\n\n"
-                    "Where: ``learn_from_breakout_outcomes(db, user_id)`` in ``learning.py``.\n\n"
-                    "Why: Realized path outcomes are higher signal than synthetic backtests "
-                    "for certain regime tags."
+                    "What: Retires legacy BreakoutAlert telemetry as validation evidence "
+                    "and learns from realized closed-trade outcomes plus pattern-monitor "
+                    "decision results.\n\n"
+                    "Where: ``update_pattern_stats_from_closed_trades`` and "
+                    "``learn_from_monitor_decisions`` in ``learning.py``.\n\n"
+                    "Why: Realized trade PnL and monitor outcomes are higher-integrity "
+                    "feedback than alert-fire telemetry."
                 ),
-                inputs=("Resolved breakout alerts in DB", "Linked ``ScanPattern`` ids"),
+                inputs=("Closed trades linked to ``ScanPattern`` ids", "PatternMonitorDecision rows"),
                 outputs=(
-                    "``bo_result['patterns_learned']``, ``total_resolved``",
-                    "Pattern patch dicts applied inside the helper",
+                    "Updated corrected pattern stats",
+                    "``report['trade_feedback_patterns']``",
+                    "``report['monitor_decisions_reviewed']``",
                 ),
             ),
         ),

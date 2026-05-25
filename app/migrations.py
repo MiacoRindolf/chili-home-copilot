@@ -17154,7 +17154,7 @@ def _migration_254_synthetic_exit_fill_events(conn) -> None:
 
     THIS MIGRATION inserts a synthetic 'backfill_exit_fill' event for
     every closed trade with exit_price + exit_date populated. The
-    payload tags side='sell' so position_has_recorded_sell will find
+    payload records the sell side so position_has_recorded_sell will find
     it. position_id is resolved via the natural-key join through
     trade_id -> trading_trades -> trading_positions (same pattern as
     mig 248's events backfill).

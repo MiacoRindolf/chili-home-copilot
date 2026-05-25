@@ -152,8 +152,9 @@ def test_monitor_falls_back_to_market_data_when_rh_empty(db) -> None:
     ad.get_quote_price.return_value = None  # RH halted / no data
     ad.place_market_order.return_value = {
         "ok": True,
+        "state": "filled",
         "order_id": "y",
-        "raw": {"average_price": 9.0},
+        "raw": {"average_price": 9.0, "state": "filled"},
     }
 
     with patch("app.services.trading.auto_trader_monitor.settings") as s:
@@ -169,6 +170,25 @@ def test_monitor_falls_back_to_market_data_when_rh_empty(db) -> None:
             return_value={"price": 8.5},
         ), patch(
             "app.services.trading.auto_trader_monitor._maybe_trip_daily_loss_kill_switch"
+        ), patch(
+            "app.services.trading.robinhood_exit_execution."
+            "describe_robinhood_equity_execution_window",
+            return_value={
+                "ticker": "HLT",
+                "session": "regular_hours",
+                "session_label": "Regular session",
+                "market_hours": "regular_hours",
+                "next_eligible_session_at": None,
+                "overnight_eligible": False,
+                "can_submit_now": True,
+                "execution_reason": "Regular session",
+            },
+        ), patch(
+            "app.services.broker_service.is_connected",
+            return_value=True,
+        ), patch(
+            "app.services.broker_service.get_positions",
+            return_value=[{"ticker": "HLT", "quantity": "2"}],
         ):
             out = tick_auto_trader_monitor(db)
 

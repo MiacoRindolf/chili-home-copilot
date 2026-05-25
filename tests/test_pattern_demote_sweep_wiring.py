@@ -42,17 +42,20 @@ def _seed_scan_pattern(
     *,
     pid: int,
     lifecycle_stage: str = "promoted",
-    trade_count: int = 4,
+    trade_count: int | None = None,
     win_rate: float = 0.25,
     oos_win_rate=None,
     promotion_gate_reasons=("provisional_small_paths",),
     promotion_status: str = "promoted",
     name: str = "Test Pattern",
 ) -> None:
+    from app.config import settings
     from app.models.trading import ScanPattern
 
     if db.query(ScanPattern).filter(ScanPattern.id == pid).first() is not None:
         return
+    if trade_count is None:
+        trade_count = int(getattr(settings, "chili_pattern_demote_min_realized_trades", 30))
 
     sp = ScanPattern(
         id=pid,
@@ -76,6 +79,20 @@ def _read_pattern(db, pid: int):
     """), {"id": pid}).fetchone()
 
 
+def _run_sweep_only_dispatch_round(db, *, user_id=None):
+    return run_brain_work_dispatch_round(
+        db,
+        user_id=user_id,
+        max_backtest=0,
+        max_exec_feedback=0,
+        max_mine=0,
+        max_cpcv_gate=0,
+        max_promote=0,
+        max_trade_close=0,
+        run_market_snapshots_watchdog=False,
+    )
+
+
 # ── INTEGRATION TEST (LIVE PATH) ─────────────────────────────────────
 
 
@@ -89,7 +106,7 @@ def test_integration_dispatch_round_demotes_thin_evidence_pattern(db):
     """
     _seed_scan_pattern(db, pid=585, name="Intraday Squeeze + Decl Vol")
 
-    res = run_brain_work_dispatch_round(db, user_id=None)
+    res = _run_sweep_only_dispatch_round(db, user_id=None)
 
     # Dispatcher round completed.
     assert res.get("ok") is True
@@ -111,11 +128,11 @@ def test_integration_dispatch_round_idempotent_on_already_challenged(db):
     `run_thin_evidence_demote` short-circuits."""
     _seed_scan_pattern(db, pid=586, name="Test pattern 2")
 
-    run_brain_work_dispatch_round(db, user_id=None)
+    _run_sweep_only_dispatch_round(db, user_id=None)
     first_row = _read_pattern(db, 586)
     first_demoted_at = first_row.demoted_at
 
-    res = run_brain_work_dispatch_round(db, user_id=None)
+    res = _run_sweep_only_dispatch_round(db, user_id=None)
     assert res["thin_evidence_sweep"].get("ok") is True
     assert 586 not in res["thin_evidence_sweep"].get("demoted_ids", [])
 
@@ -133,7 +150,7 @@ def test_integration_dispatch_round_keeps_healthy_pattern(db):
         trade_count=409, win_rate=0.632,
     )
 
-    res = run_brain_work_dispatch_round(db, user_id=None)
+    res = _run_sweep_only_dispatch_round(db, user_id=None)
     assert 1011 not in res["thin_evidence_sweep"].get("demoted_ids", [])
 
     row = _read_pattern(db, 1011)
@@ -156,7 +173,7 @@ def test_dispatch_round_completes_when_sweep_raises(db, monkeypatch):
         "app.services.trading.learning.run_thin_evidence_demote", _boom,
     )
 
-    res = run_brain_work_dispatch_round(db, user_id=None)
+    res = _run_sweep_only_dispatch_round(db, user_id=None)
 
     # Round still ok.
     assert res.get("ok") is True
@@ -234,7 +251,7 @@ def test_round_result_dict_has_thin_evidence_sweep_key(db):
     """Pin the new contract: every dispatch round result MUST carry
     `thin_evidence_sweep` so observability + the operator's grep
     pattern (`[learning] thin_evidence sweep`) keep working."""
-    res = run_brain_work_dispatch_round(db, user_id=None)
+    res = _run_sweep_only_dispatch_round(db, user_id=None)
     assert "thin_evidence_sweep" in res
     assert isinstance(res["thin_evidence_sweep"], dict)
     assert "ok" in res["thin_evidence_sweep"]

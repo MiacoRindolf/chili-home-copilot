@@ -45,7 +45,7 @@ def _add_closed_trade(db, *, user_id: int | None, pnl: float, version: str | Non
         ticker="AAPL",
         direction="long",
         entry_price=100.0,
-        exit_price=100.0 + pnl,  # placeholder; pnl column is what the helper reads
+        exit_price=100.0,  # placeholder; pnl column is what the helper reads
         quantity=1.0,
         entry_date=_today_et_utc_noon() - timedelta(hours=2),
         exit_date=_today_et_utc_noon(),

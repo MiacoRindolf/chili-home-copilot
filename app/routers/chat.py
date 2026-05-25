@@ -15,12 +15,14 @@ from .. import wellness
 from ..metrics import record_latency
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..schemas.chat import MobileChatRequest, MobileChatResponse
+from ..services import chat_service as chat_service_module
 from ..services.chat_service import (
     execute_tool,
     gather_context_only,
     get_cached_reply,
     init_chat,
     nlu_fallback,
+    nlu_fallback_for_local_tool,
     plan_and_enrich,
     build_openai_prompt,
     resolve_response,
@@ -38,6 +40,10 @@ from ..services.desktop_refinement import (
 )
 
 router = APIRouter()
+
+
+def _sync_chat_service_openai_client() -> None:
+    chat_service_module.openai_client = openai_client
 
 
 @router.get("/chat")
@@ -256,6 +262,7 @@ async def chat_api(
     from_planner_page: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
+    _sync_chat_service_openai_client()
     trace_id = new_trace_id()
     t0 = time.time()
 
@@ -360,7 +367,16 @@ async def chat_api(
     except Exception:
         pass
 
-    if openai_client.is_configured():
+    nlu_result = nlu_fallback_for_local_tool(message)
+    if nlu_result is not None:
+        log_info(trace_id, f"nlu_fast_path type={nlu_result['type']}")
+        ctx = {
+            "planned": nlu_result,
+            "rag_context": None,
+            "rag_hits": [],
+            "personality_context": None,
+        }
+    elif openai_client.is_configured():
         log_info(trace_id, "direct_llm_path skipping Ollama planner")
         ctx = gather_context_only(db, message, identity, trace_id, project_id=_project_id)
     else:
@@ -431,6 +447,7 @@ async def mobile_chat_api(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
+    _sync_chat_service_openai_client()
     """JSON-based chat endpoint for native/mobile clients.
 
     This mirrors the behavior of /api/chat but:
@@ -751,6 +768,7 @@ async def mobile_chat_stream_api(
     db: Session = Depends(get_db),
 ):
     """SSE streaming chat for mobile/desktop clients. JSON body, SSE response."""
+    _sync_chat_service_openai_client()
     trace_id = new_trace_id()
     t0 = time.time()
 
@@ -1002,6 +1020,7 @@ async def chat_stream_api(
     from_planner_page: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
+    _sync_chat_service_openai_client()
     trace_id = new_trace_id()
     t0 = time.time()
 
@@ -1157,7 +1176,16 @@ async def chat_stream_api(
         planner_current_stream = {"id": planner_project_id, "name": planner_project_name.strip()}
     on_planner_page_stream = from_planner_page in ("1", "true", "yes") or planner_current_stream is not None
 
-    if openai_client.is_configured():
+    nlu_result_stream = nlu_fallback_for_local_tool(message)
+    if nlu_result_stream is not None:
+        log_info(trace_id, f"stream_nlu_fast_path type={nlu_result_stream['type']}")
+        ctx = {
+            "planned": nlu_result_stream,
+            "rag_context": None,
+            "rag_hits": [],
+            "personality_context": None,
+        }
+    elif openai_client.is_configured():
         log_info(trace_id, "stream_direct_llm_path skipping Ollama planner")
         ctx = gather_context_only(db, message, identity, trace_id, project_id=_project_id_stream)
     else:

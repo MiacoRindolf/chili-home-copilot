@@ -99,6 +99,7 @@ def test_orchestrator_paper_tags_scan_pattern_and_alert(
         origin="user",
         asset_class="stock",
         timeframe="1d",
+        lifecycle_stage="promoted",
     )
     db.add(sp)
     db.flush()

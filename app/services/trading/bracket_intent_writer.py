@@ -31,7 +31,7 @@ States:
 Legal transitions (anything else is rejected by ``transition()``):
 
 * ``intent``               → confirmed_at_broker, shadow_logged, terminal_reject, closed
-* ``shadow_logged``        → intent (mode flip), closed
+* ``shadow_logged``        → intent (mode flip), reconciled, closed
 * ``confirmed_at_broker``  → reconciled, amending, exiting, terminal_reject, closed
 * ``reconciled``           → amending, exiting, terminal_reject, closed
 * ``amending``             → confirmed_at_broker, terminal_reject, closed
@@ -143,6 +143,7 @@ _LEGAL_TRANSITIONS: dict[IntentState, frozenset[IntentState]] = {
     }),
     IntentState.SHADOW_LOGGED: frozenset({
         IntentState.INTENT,        # mode flip from shadow → live
+        IntentState.RECONCILED,    # broker truth already matches the shadow intent
         IntentState.CLOSED,
     }),
     IntentState.CONFIRMED_AT_BROKER: frozenset({
@@ -567,6 +568,12 @@ def mark_reconciled(
     """
     mode = _effective_mode(mode_override)
     if mode is IntentMode.OFF:
+        return False
+
+    raw_state = db.execute(text(
+        "SELECT intent_state FROM trading_bracket_intents WHERE id = :id"
+    ), {"id": int(intent_id)}).scalar()
+    if isinstance(raw_state, str) and raw_state.startswith(_AUTHORITATIVE_STATE_PREFIX):
         return False
 
     result = transition(

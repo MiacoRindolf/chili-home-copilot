@@ -207,10 +207,8 @@ def _place_coinbase_order_live(ticker: str, side: str, quantity: float,
         side.upper(), ticker, quantity, fill_price_hint, notional_usd,
     )
 
-    if side == "buy":
-        resp = cb.place_buy_order(ticker, quantity, order_type="market")
-    else:
-        resp = cb.place_sell_order(ticker, quantity, order_type="market")
+    order_fn = getattr(cb, f"place_{side}_order")
+    resp = order_fn(ticker, quantity, order_type="market")
 
     if not isinstance(resp, dict) or not resp.get("ok"):
         # Broker rejected; surface message so the executor's reject
@@ -355,16 +353,11 @@ def _place_coinbase_maker_order_live(ticker: str, side: str, quantity: float,
         side.upper(), ticker, quantity, limit_price, notional_usd,
     )
 
-    if side == "buy":
-        resp = cb.place_buy_order(
-            ticker, quantity, order_type="limit",
-            limit_price=limit_price, post_only=True,
-        )
-    else:
-        resp = cb.place_sell_order(
-            ticker, quantity, order_type="limit",
-            limit_price=limit_price, post_only=True,
-        )
+    order_fn = getattr(cb, f"place_{side}_order")
+    resp = order_fn(
+        ticker, quantity, order_type="limit",
+        limit_price=limit_price, post_only=True,
+    )
 
     if not isinstance(resp, dict) or not resp.get("ok"):
         msg = (resp or {}).get("error", "unknown_broker_error")

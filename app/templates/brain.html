@@ -33,7 +33,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       <div id="trading-brain-pane-output" class="trading-brain-pane" role="tabpanel" aria-labelledby="tb-tab-runtime" aria-hidden="false" style="overflow-y:auto">
 
       <!-- Runtime tab redesign 2026-05-23: unified sticky header -->
-      <header class="bx-runtime-header" id="bx-runtime-header" role="region" aria-label="Brain worker controls and runtime status">
+      <header class="bx-runtime-header" id="bx-runtime-header" role="region" aria-label="Learning-cycle controls and runtime status">
         <span class="bx-status-dot stopped" id="bx-status-dot" aria-hidden="true"></span>
         <span class="bx-status-label" id="bx-status-label">Stopped</span>
         <div class="bx-controls" id="bx-controls" role="group" aria-label="Worker controls">
@@ -46,6 +46,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
         <span class="bx-breaker-chip" id="bx-breaker-chip" style="display:none" title="Circuit breaker status">&#x26A0; Breaker</span>
         <span class="bx-last-cycle" id="bx-last-cycle" title="Last reconcile pass / scheduler heartbeat">--</span>
         <span class="bx-scheduler-info" id="brain-scheduler-info"></span>
+        <a class="bx-ctrl-btn" href="/trading/autopilot" title="Open autopilot desk">Autopilot</a>
         <button type="button" class="bx-queue-pill" id="bx-queue-pill" title="Dispatch queue health &mdash; click to open diagnostics drawer" aria-label="Dispatch queue health">
           <span class="bx-queue-pill-dot" id="bx-queue-pill-dot"></span>
           <span class="bx-queue-pill-text" id="bx-queue-pill-text">Queue --</span>

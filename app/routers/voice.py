@@ -20,7 +20,6 @@ from ..services.voice_stream import (
     SAMPLE_RATE,
     CHUNK_BYTES,
 )
-from ..services.chat_service import process_message_get_reply
 
 router = APIRouter()
 
@@ -184,6 +183,8 @@ async def voice_stream_ws(websocket: WebSocket, db: Session = Depends(get_db)):
                 log_info(trace_id, f"[voice_stream] command={command!r}")
                 await send_status(f"Processing: {command[:50]}...")
                 try:
+                    from ..services.chat_service import process_message_get_reply
+
                     reply, _ = await asyncio.to_thread(
                         process_message_get_reply,
                         db, convo_key, identity, client_ip, command, trace_id,
