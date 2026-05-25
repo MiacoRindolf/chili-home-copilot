@@ -67,6 +67,8 @@ def test_monitor_stamps_would_be_day_trade_on_same_day_exit(
     monkeypatch.setattr(_s, "chili_autotrader_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_rth_only", False)
+    monkeypatch.setattr(_s, "chili_autotrader_user_id", user.id)
+    monkeypatch.setattr(_s, "brain_default_user_id", user.id)
 
     t = _mk_live_trade(db, user.id, ticker="SAME1", entry_date=datetime.utcnow())
     adapter = _fake_adapter(fill_price=9.0)
@@ -127,6 +129,8 @@ def test_monitor_does_not_stamp_when_entered_yesterday(
     monkeypatch.setattr(_s, "chili_autotrader_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_rth_only", False)
+    monkeypatch.setattr(_s, "chili_autotrader_user_id", user.id)
+    monkeypatch.setattr(_s, "brain_default_user_id", user.id)
 
     yesterday = datetime.utcnow() - timedelta(days=2)
     t = _mk_live_trade(db, user.id, ticker="PRIOR1", entry_date=yesterday)

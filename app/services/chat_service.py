@@ -247,7 +247,7 @@ def resolve_response(
             if added:
                 llm_reply = f'Created project **"{fallback_project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
 
-    model_used = "llama3"
+    model_used = ctx.get("model_used") or "llama3"
     if action_type == "web_search" and executed and openai_client.is_configured():
         search_context = llm_reply
         openai_messages = [{"role": m.role, "content": m.content} for m in recent]

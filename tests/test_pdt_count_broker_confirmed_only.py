@@ -66,7 +66,9 @@ def _seed_trade(
     fill recorded) without the helper auto-filling it.
     """
     if entry_at is None:
-        entry_at = datetime.utcnow() - timedelta(hours=4)
+        entry_at = datetime.utcnow().replace(
+            hour=12, minute=0, second=0, microsecond=0,
+        )
     if exit_at is None:
         # Same calendar day as entry_at.
         exit_at = entry_at + timedelta(hours=2)

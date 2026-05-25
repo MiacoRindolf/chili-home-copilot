@@ -23,6 +23,18 @@ from app.services.trading.venue.coinbase_spot import CoinbaseSpotAdapter
 from app.services.trading.venue.protocol import NormalizedProduct
 
 
+@pytest.fixture(autouse=True)
+def _bypass_buy_entry_guards(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot._coinbase_preflight_cash_check",
+        lambda **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot._assert_portfolio_breaker_ok",
+        lambda: (True, "ok"),
+    )
+
+
 _PERMISSIVE_PRODUCT = NormalizedProduct(
     product_id="ADA-USD",
     base_currency="ADA",

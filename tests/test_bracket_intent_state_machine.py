@@ -103,6 +103,7 @@ def _seed_intent(s, state: str = "intent") -> int:
     ("intent", IntentState.TERMINAL_REJECT, True),
     ("intent", IntentState.RECONCILED, True),
     ("confirmed_at_broker", IntentState.RECONCILED, True),
+    ("shadow_logged", IntentState.RECONCILED, True),
     ("reconciled", IntentState.AMENDING, True),
     ("reconciled", IntentState.EXITING, True),
     ("amending", IntentState.CONFIRMED_AT_BROKER, True),
@@ -114,7 +115,6 @@ def _seed_intent(s, state: str = "intent") -> int:
     ("closed", IntentState.RECONCILED, False),
     ("intent", IntentState.EXITING, False),
     ("intent", IntentState.AMENDING, False),
-    ("shadow_logged", IntentState.RECONCILED, False),
     ("exiting", IntentState.AMENDING, False),
 ])
 def test_transition_respects_state_machine(db, from_state, to_state, expected_ok):

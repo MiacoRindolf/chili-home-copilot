@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import text
 
 from app.models.trading import (
@@ -182,6 +183,13 @@ def _venue_truth_rows(db, trade_id: int) -> list[dict]:
 
 
 # ── tests ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _shadow_venue_truth_mode(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_venue_truth_mode", "shadow")
 
 
 def test_live_close_writes_venue_truth_row(db):

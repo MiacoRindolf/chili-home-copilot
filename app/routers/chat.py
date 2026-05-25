@@ -375,6 +375,7 @@ async def chat_api(
             "rag_context": None,
             "rag_hits": [],
             "personality_context": None,
+            "model_used": "nlu-fallback",
         }
     elif openai_client.is_configured():
         log_info(trace_id, "direct_llm_path skipping Ollama planner")
@@ -1184,6 +1185,7 @@ async def chat_stream_api(
             "rag_context": None,
             "rag_hits": [],
             "personality_context": None,
+            "model_used": "nlu-fallback",
         }
     elif openai_client.is_configured():
         log_info(trace_id, "stream_direct_llm_path skipping Ollama planner")

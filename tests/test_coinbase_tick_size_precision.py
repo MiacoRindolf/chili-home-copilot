@@ -65,6 +65,14 @@ def _product(
 
 def _bypass_gates(monkeypatch):
     monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot._coinbase_preflight_cash_check",
+        lambda **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.venue.coinbase_spot._assert_portfolio_breaker_ok",
+        lambda: (True, "ok"),
+    )
+    monkeypatch.setattr(
         "app.services.trading.venue.coinbase_spot.idempotency_store"
         ".is_duplicate", lambda *a, **k: False,
     )

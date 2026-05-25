@@ -271,11 +271,6 @@ def _bt_workers() -> int:
         os.environ.get("CHILI_BACKTEST_REFRESH_WORKERS", "").strip()
         or os.environ.get("BRAIN_SMART_BT_MAX_WORKERS", "").strip()
     )
-    if env_cap:
-        try:
-            return max(1, int(float(env_cap)))
-        except (TypeError, ValueError):
-            pass
     if os.environ.get("CHILI_MP_BACKTEST_CHILD", "").strip().lower() in ("1", "true", "yes"):
         try:
             from ...config import settings
@@ -283,6 +278,11 @@ def _bt_workers() -> int:
             return max(2, cap)
         except Exception:
             return 8
+    if env_cap:
+        try:
+            return max(1, int(float(env_cap)))
+        except (TypeError, ValueError):
+            pass
     base = max(8, (os.cpu_count() or 4) * 2)
     try:
         from ...config import settings
