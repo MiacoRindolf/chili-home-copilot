@@ -27,6 +27,16 @@ AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_BUFFER = 100
 AUTOTRADER_PAPER_DYNAMIC_DEFAULT_MONITOR_COOLDOWN_MINUTES = 5
 AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES = 240
 AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN = True
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE = "authoritative"
+AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES = "crypto"
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES = 8
+AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION = 0.60
+AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER = 1.50
+AUTOTRADER_MANAGED_EDGE_DEFAULT_STATIC_TO_MANAGED_REWARD_RATIO = 1.50
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_FRACTION = 0.005
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MAX_REWARD_FRACTION = 0.08
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK = 1.25
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT = 0.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS = 2.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS = 6
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT = 0.0
@@ -39,6 +49,9 @@ PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT = 40
 PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT = 8
 PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT = 12
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP = 0.10
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
+    "shadow_promoted,pilot_promoted"
+)
 PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES = 5
 PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES = 1
 PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS = 3
@@ -2201,6 +2214,63 @@ class Settings(BaseSettings):
         le=AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_DYNAMIC_MONITOR_COOLDOWN_MINUTES"),
     )
+    # Managed-exit edge overlay. Some scanner brackets are intentionally wide
+    # hard plans, especially on crypto, while the live/paper monitors often
+    # harvest earlier MFE and tighten risk. This gate can evaluate that
+    # managed geometry from directional MFE/MAE evidence, but still requires a
+    # positive expected net edge and records the original full-bracket verdict.
+    chili_autotrader_managed_edge_mode: str = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MODE"),
+    )
+    chili_autotrader_managed_edge_asset_types: str = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_ASSET_TYPES"),
+    )
+    chili_autotrader_managed_edge_min_directional_samples: int = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_MANAGED_EDGE_MIN_DIRECTIONAL_SAMPLES"
+        ),
+    )
+    chili_autotrader_managed_edge_capture_fraction: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_CAPTURE_FRACTION"),
+    )
+    chili_autotrader_managed_edge_adverse_buffer: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_ADVERSE_BUFFER"),
+    )
+    chili_autotrader_managed_edge_static_to_managed_reward_ratio: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_STATIC_TO_MANAGED_REWARD_RATIO,
+        ge=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_MANAGED_EDGE_STATIC_TO_MANAGED_REWARD_RATIO"
+        ),
+    )
+    chili_autotrader_managed_edge_min_reward_fraction: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_FRACTION,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MIN_REWARD_FRACTION"),
+    )
+    chili_autotrader_managed_edge_max_reward_fraction: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MAX_REWARD_FRACTION,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MAX_REWARD_FRACTION"),
+    )
+    chili_autotrader_managed_edge_min_reward_risk: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MIN_REWARD_RISK"),
+    )
+    chili_autotrader_managed_edge_min_expected_net_pct: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MIN_EXPECTED_NET_PCT"),
+    )
     # f-handler-live-drift + f-handler-execution-robustness (Phase 2
     # #8/#9, 2026-05-06): trade-close-driven observability. Both share
     # the trade-close batch size with demote/regime_ledger via
@@ -3278,6 +3348,10 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_SHADOW_PROMOTED_PAPER_OBSERVATION_ENABLED"),
     )
+    chili_autotrader_shadow_signal_lane_observation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SHADOW_SIGNAL_LANE_OBSERVATION_ENABLED"),
+    )
     chili_autotrader_live_require_venue_health_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_REQUIRE_VENUE_HEALTH_ENABLED"),
@@ -3987,12 +4061,15 @@ class Settings(BaseSettings):
     pattern_imminent_readiness_near_miss_limit: int = (
         PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT
     )
-    # Shadow-promoted only: admit close readiness misses into paper/shadow
-    # observation, never live broker flow. This increases measured learning
-    # samples without weakening promoted/live entry gates.
+    # Close readiness misses can enter paper/shadow observation, never live
+    # broker flow. This increases measured learning samples without weakening
+    # promoted/live entry gates.
     pattern_imminent_shadow_near_miss_enabled: bool = True
     pattern_imminent_shadow_near_miss_max_gap: float = (
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP
+    )
+    pattern_imminent_shadow_near_miss_lifecycle_stages: str = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES
     )
     pattern_imminent_ticker_rotation_enabled: bool = True
     pattern_imminent_ticker_rotation_window_minutes: int = (

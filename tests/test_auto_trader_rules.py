@@ -690,6 +690,102 @@ def test_evaluate_entry_edge_directional_outcomes_must_match_payoff_geometry():
     assert decision.snapshot["expected_net_pct"] < 0
 
 
+def test_evaluate_entry_edge_selects_managed_exit_for_overextended_crypto_bracket():
+    class _Result:
+        def __init__(self, rows=None, first=None):
+            self._rows = rows or []
+            self._first = first
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def first(self):
+            return self._first
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Db:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def execute(self, sql, params=None):
+            text = str(sql)
+            if "pattern_alert_directional_outcome" in text:
+                if "UPPER(ticker) = UPPER" in text:
+                    return _Result(rows=[
+                        {
+                            "ticker": "EDGE",
+                            "window_max_favorable_pct": 2.0,
+                            "window_max_adverse_pct": -0.2,
+                            "directional_correct": True,
+                        }
+                        for _ in range(12)
+                    ])
+                return _Result(rows=[])
+            return _Result(first=None)
+
+    alert = BreakoutAlert(
+        ticker="EDGE",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=777,
+        score_at_alert=0.9,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=112.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(
+        chili_realized_ev_min_trades=5,
+        chili_autotrader_directional_probability_z=1.0,
+        chili_autotrader_directional_probability_max_rows=30,
+        chili_autotrader_managed_edge_mode="authoritative",
+        chili_autotrader_managed_edge_asset_types="crypto",
+        chili_autotrader_managed_edge_min_directional_samples=8,
+        chili_autotrader_managed_edge_capture_fraction=0.60,
+        chili_autotrader_managed_edge_adverse_buffer=1.50,
+        chili_autotrader_managed_edge_static_to_managed_reward_ratio=1.50,
+        chili_autotrader_managed_edge_min_reward_fraction=0.005,
+        chili_autotrader_managed_edge_max_reward_fraction=0.08,
+        chili_autotrader_managed_edge_min_reward_risk=1.25,
+        chili_autotrader_managed_edge_min_expected_net_pct=0.0,
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=settings,
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert decision.allowed
+    assert decision.reason == "positive_expected_edge"
+    assert decision.snapshot["edge_geometry_source"] == "managed_directional_exit"
+    assert decision.snapshot["managed_exit_edge"]["selected"] is True
+    assert decision.snapshot["full_bracket_edge"]["expected_net_pct"] < 0
+    assert (
+        decision.snapshot["full_bracket_edge"]["probability_details"]
+        ["directional_evidence"]["ticker"]["reward_hits"]
+    ) == 0
+    assert (
+        decision.snapshot["probability_details"]["directional_evidence"]
+        ["ticker"]["reward_hits"]
+    ) == 12
+    assert decision.snapshot["managed_exit_edge"]["geometry"]["managed_target_price"] < 112.0
+    assert decision.snapshot["managed_exit_edge"]["geometry"]["managed_stop_price"] > 90.0
+    assert decision.snapshot["expected_net_pct"] > 0
+
+
 def test_evaluate_entry_edge_shrinks_uncalibrated_alert_confidence():
     class _Result:
         def mappings(self):

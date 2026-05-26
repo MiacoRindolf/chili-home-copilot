@@ -20,6 +20,7 @@ from ...config import (
 from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_rules import (
+    MANAGED_EDGE_GEOMETRY_SOURCE,
     RuleGateContext,
     alert_confidence_from_score,
     autotrader_paper_realized_pnl_today_et,
@@ -81,6 +82,26 @@ PROBATION_NOTIONAL_BELOW_TRADE_UNIT_REASON = "probation_notional_below_trade_uni
 PAPER_SHADOW_DUPLICATE_POLICY_STRICT = "strict_open_dedupe"
 PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS = "reject_observation_bypass"
 PAPER_SHADOW_AUDIT_PREFIX = "paper_shadow_"
+MANAGED_EDGE_PRICE_ROUND_DIGITS = 8
+SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
+SHADOW_OBSERVATION_SIGNAL_LANES = frozenset({SHADOW_NEAR_MISS_SIGNAL_LANE})
+SHADOW_OBSERVATION_REASON_STAGE = "selector:shadow_promoted_pattern_eval"
+SHADOW_OBSERVATION_REASON_SIGNAL_LANE = "selector:shadow_observation_signal_lane"
+SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED = (
+    "selector:shadow_observation_signal_lane_disabled"
+)
+
+
+def _alert_signal_lane(alert: BreakoutAlert) -> str:
+    snap = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+    scorecard = snap.get("imminent_scorecard") if isinstance(snap, dict) else {}
+    if not isinstance(scorecard, dict):
+        return ""
+    return str(scorecard.get("signal_lane") or "").strip().lower()
+
+
+def _alert_requests_shadow_observation(alert: BreakoutAlert) -> bool:
+    return _alert_signal_lane(alert) in SHADOW_OBSERVATION_SIGNAL_LANES
 
 
 def _autotrader_tick_note(
@@ -414,6 +435,72 @@ def _resolve_entry_risk_notional(
     return 0.0, {**snap, "notional_source": "capital_unavailable"}
 
 
+def _managed_edge_execution_levels(
+    alert: BreakoutAlert,
+    *,
+    px: float,
+    snap: dict[str, Any] | None,
+) -> tuple[float | None, float | None, dict[str, Any] | None]:
+    stop_price = float(alert.stop_loss) if alert.stop_loss is not None else None
+    target_price = float(alert.target_price) if alert.target_price is not None else None
+    if not isinstance(snap, dict):
+        return stop_price, target_price, None
+    edge = snap.get("entry_edge")
+    if not isinstance(edge, dict):
+        return stop_price, target_price, None
+    managed = edge.get("managed_exit_edge")
+    if not isinstance(managed, dict) or not bool(managed.get("selected")):
+        return stop_price, target_price, None
+    if edge.get("edge_geometry_source") != MANAGED_EDGE_GEOMETRY_SOURCE:
+        return stop_price, target_price, None
+    geometry = managed.get("geometry")
+    if not isinstance(geometry, dict):
+        geometry = {}
+
+    try:
+        px_f = float(px)
+    except (TypeError, ValueError):
+        px_f = 0.0
+    managed_target = geometry.get("managed_target_price")
+    managed_stop = geometry.get("managed_stop_price")
+    if managed_target is None:
+        try:
+            managed_target = px_f * (1.0 + float(edge.get("reward_fraction")))
+        except (TypeError, ValueError):
+            managed_target = None
+    if managed_stop is None:
+        try:
+            managed_stop = px_f * (1.0 - float(edge.get("stop_loss_fraction")))
+        except (TypeError, ValueError):
+            managed_stop = None
+
+    applied: dict[str, Any] = {
+        "source": MANAGED_EDGE_GEOMETRY_SOURCE,
+        "full_bracket_target_price": target_price,
+        "full_bracket_stop_price": stop_price,
+    }
+    try:
+        target_f = float(managed_target)
+    except (TypeError, ValueError):
+        target_f = 0.0
+    if target_f > 0.0 and (px_f <= 0.0 or target_f > px_f):
+        target_price = round(target_f, MANAGED_EDGE_PRICE_ROUND_DIGITS)
+        applied["managed_target_price"] = target_price
+    try:
+        stop_f = float(managed_stop)
+    except (TypeError, ValueError):
+        stop_f = 0.0
+    if stop_f > 0.0 and (px_f <= 0.0 or stop_f < px_f):
+        stop_price = round(stop_f, MANAGED_EDGE_PRICE_ROUND_DIGITS)
+        applied["managed_stop_price"] = stop_price
+    if (
+        applied.get("managed_target_price") is None
+        and applied.get("managed_stop_price") is None
+    ):
+        return stop_price, target_price, None
+    return stop_price, target_price, applied
+
+
 def _maybe_open_paper_shadow(
     db: Session,
     *,
@@ -480,6 +567,10 @@ def _maybe_open_paper_shadow(
                 else PAPER_SHADOW_DUPLICATE_POLICY_STRICT
             ),
         }
+        if snap.get("paper_observation_signal_lane"):
+            sig["paper_observation_signal_lane"] = snap.get(
+                "paper_observation_signal_lane"
+            )
         sig.update({
             k: v
             for k, v in (snap or {}).items()
@@ -515,11 +606,16 @@ def _maybe_open_paper_shadow(
                     or 0
                 ),
             )
+        shadow_stop, shadow_target, managed_exit_execution = (
+            _managed_edge_execution_levels(alert, px=px, snap=snap)
+        )
+        if managed_exit_execution is not None:
+            sig["managed_exit_execution"] = managed_exit_execution
         pt = open_paper_trade(
             db, uid, alert.ticker, px,
             scan_pattern_id=alert.scan_pattern_id,
-            stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
-            target_price=float(alert.target_price) if alert.target_price is not None else None,
+            stop_price=shadow_stop,
+            target_price=shadow_target,
             direction="long",
             quantity=float(qty),
             signal_json=sig,
@@ -1548,6 +1644,38 @@ def _process_one_alert(
     runtime: dict[str, Any],
 ) -> None:
     live = bool(runtime.get("live_orders_effective"))
+    shadow_signal_lane = _alert_signal_lane(alert)
+    if _alert_requests_shadow_observation(alert):
+        if bool(
+            getattr(
+                settings,
+                "chili_autotrader_shadow_signal_lane_observation_enabled",
+                True,
+            )
+        ):
+            setattr(alert, "_chili_shadow_observation_only", True)
+            setattr(
+                alert,
+                "_chili_shadow_observation_reason",
+                SHADOW_OBSERVATION_REASON_SIGNAL_LANE,
+            )
+            setattr(alert, "_chili_shadow_observation_signal_lane", shadow_signal_lane)
+        else:
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="blocked",
+                reason=SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED,
+                alert=alert,
+            )
+            return
     # 2026-04-28 lifecycle gate. Evidence audit demotes patterns to 'challenged'
     # but the entry funnel had been ignoring lifecycle_stage, so 32 of 34 entries
     # last week landed on demoted patterns (driving most of the bleed). Enforce
@@ -1580,8 +1708,14 @@ def _process_one_alert(
                     )
                 ):
                     setattr(alert, "_chili_shadow_observation_only", True)
+                    if not getattr(alert, "_chili_shadow_observation_reason", None):
+                        setattr(
+                            alert,
+                            "_chili_shadow_observation_reason",
+                            SHADOW_OBSERVATION_REASON_STAGE,
+                        )
                 else:
-                    _shadow_reason = "selector:shadow_promoted_pattern_eval"
+                    _shadow_reason = SHADOW_OBSERVATION_REASON_STAGE
                     _audit(db, user_id=uid, alert=alert,
                            decision="blocked", reason=_shadow_reason)
                     out["skipped"] += 1
@@ -3141,9 +3275,22 @@ def _execute_new_entry(
         snap["qty_raw"] = round(qty_raw, 8)
 
     if bool(getattr(alert, "_chili_shadow_observation_only", False)):
-        _reason = "selector:shadow_promoted_pattern_eval"
+        _reason = str(
+            getattr(
+                alert,
+                "_chili_shadow_observation_reason",
+                SHADOW_OBSERVATION_REASON_STAGE,
+            )
+            or SHADOW_OBSERVATION_REASON_STAGE
+        )
         snap["paper_observation_reason"] = _reason
         snap["paper_observation_live_orders_effective"] = bool(live)
+        if getattr(alert, "_chili_shadow_observation_signal_lane", None):
+            snap["paper_observation_signal_lane"] = getattr(
+                alert,
+                "_chili_shadow_observation_signal_lane",
+                None,
+            )
         _audit(
             db,
             user_id=uid,
@@ -3317,6 +3464,9 @@ def _execute_new_entry(
         _entry_broker_status = "accepted" if _is_coinbase_entry else None
         _entry_filled_qty = 0.0 if _is_coinbase_entry else None
         _entry_remaining_qty = _broker_qty if _is_coinbase_entry else None
+        _trade_stop, _trade_target, _managed_exit_execution = (
+            _managed_edge_execution_levels(alert, px=px, snap=snap)
+        )
         _entry_execution_snapshot = {
             "broker_source": _broker_source_for_trade,
             "client_order_id": res.get("client_order_id"),
@@ -3347,6 +3497,7 @@ def _execute_new_entry(
             "cost_gate_fee_bps": snap.get("cost_gate_fee_bps"),
             "cost_gate_threshold_bps": snap.get("cost_gate_threshold_bps"),
             "cost_gate_tca_cost_bps": snap.get("cost_gate_tca_cost_bps"),
+            "managed_exit_execution": _managed_exit_execution,
         }
         # f-tca-writer-wiring (2026-05-18): capture the AUTOTRADER's decision
         # price ``px`` as the entry-side TCA reference. ``fill`` (above) is
@@ -3371,8 +3522,8 @@ def _execute_new_entry(
             remaining_quantity=_entry_remaining_qty,
             submitted_at=_entry_now if _is_coinbase_entry else None,
             acknowledged_at=_entry_now if _is_coinbase_entry else None,
-            stop_loss=float(alert.stop_loss) if alert.stop_loss is not None else None,
-            take_profit=float(alert.target_price) if alert.target_price is not None else None,
+            stop_loss=_trade_stop,
+            take_profit=_trade_target,
             scan_pattern_id=alert.scan_pattern_id,
             related_alert_id=alert.id,
             broker_source=_broker_source_for_trade,
@@ -3471,14 +3622,19 @@ def _execute_new_entry(
         "breakout_alert_id": alert.id,
         "projected": snap.get("projected_profit_pct"),
     }
+    paper_stop, paper_target, managed_exit_execution = (
+        _managed_edge_execution_levels(alert, px=px, snap=snap)
+    )
+    if managed_exit_execution is not None:
+        sig["managed_exit_execution"] = managed_exit_execution
     pt = open_paper_trade(
         db,
         uid,
         alert.ticker,
         px,
         scan_pattern_id=alert.scan_pattern_id,
-        stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
-        target_price=float(alert.target_price) if alert.target_price is not None else None,
+        stop_price=paper_stop,
+        target_price=paper_target,
         direction="long",
         quantity=float(qty),
         signal_json=sig,

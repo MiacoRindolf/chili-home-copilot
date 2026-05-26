@@ -12,6 +12,7 @@ from app.services.trading.pattern_imminent_alerts import (
     _shadow_poor_edge_pattern_ids,
     estimate_breakout_eta_hours,
     evaluate_imminent_readiness,
+    flat_indicators_from_score,
     format_eta_range,
     gather_imminent_candidate_rows,
     run_pattern_imminent_scan,
@@ -42,6 +43,40 @@ TEST_SCORE_FAILURE_MIN_FAILURES = 1
 TEST_SCORE_TIME_BUDGET_SECONDS = 1.0
 TEST_SCORE_BUDGET_EXPIRED_SECONDS = 2.0
 TEST_PER_PATTERN_TICKER_CAP = 1
+TEST_LOW_READINESS_TICKER = "LOWRD-USD"
+TEST_CAP_READINESS_TICKER = "CAPRD-USD"
+TEST_EXCLUDED_LIFECYCLE_TICKER = "CHALLENGED-USD"
+TEST_DIAGNOSTIC_MIN_READINESS = 0.3
+TEST_DIAGNOSTIC_READINESS_CAP = 0.49
+TEST_DIAGNOSTIC_RSI_TRIGGER = 50
+TEST_DIAGNOSTIC_ADX_TRIGGER = 10
+TEST_LOW_READINESS_RSI = 55.0
+TEST_CAP_READINESS_RSI = 100.0
+TEST_FAILED_ADX = 0.0
+TEST_SHADOW_NEAR_MISS_TICKER = "NEARMISS-USD"
+TEST_PILOT_NEAR_MISS_TICKER = "PILOTNEAR-USD"
+TEST_SHADOW_NEAR_MISS_RSI = 70.0
+TEST_SHADOW_NEAR_MISS_MIN_READINESS = 0.45
+TEST_SHADOW_NEAR_MISS_MAX_GAP = 0.10
+TEST_MIN_COMPOSITE_DISABLED = 0.0
+TEST_ROTATION_CAP = 2
+TEST_ROTATION_WINDOW_MINUTES = 1
+TEST_ROTATION_EPOCH_SECONDS = 0
+TEST_ROTATION_NEXT_WINDOW_SECONDS = 60
+TEST_ROTATION_SECOND_WINDOW_SECONDS = 120
+TEST_ROTATION_FIRST_START = 0
+TEST_ROTATION_SECOND_START = TEST_ROTATION_CAP
+TEST_ROTATION_THIRD_START = TEST_ROTATION_CAP * 2
+TEST_ROTATION_TICKERS = ["A-USD", "B-USD", "C-USD", "D-USD", "E-USD", "F-USD"]
+TEST_ROTATION_STABLE_CAP = 4
+TEST_ROTATION_EXPLORE_TICKERS = 1
+TEST_ROTATION_STABLE_PREFIX = ["A-USD", "B-USD", "C-USD"]
+TEST_ALIAS_MACD_HIST = 0.0123
+TEST_ALIAS_STOCH_K = 21.0
+TEST_ALIAS_STOCH_D = 19.5
+TEST_ALIAS_BB_PCT_PERCENT = 12.5
+TEST_ALIAS_BB_PCT_FRACTION = 0.125
+TEST_ALIAS_VOLUME_RATIO = 1.7
 
 
 def test_timeframe_to_hours_per_step_defaults() -> None:
@@ -119,6 +154,126 @@ def test_evaluate_imminent_two_evaluable_low_ratio_ok() -> None:
     assert readiness is not None
     assert ratio == 0.5
     assert all_pass is False
+
+
+def test_flat_indicators_exposes_pattern_condition_aliases() -> None:
+    flat = flat_indicators_from_score(
+        {
+            "price": TEST_SCORE_PRICE,
+            "indicators": {
+                "rsi": TEST_SCORE_RSI,
+                "macd_hist": TEST_ALIAS_MACD_HIST,
+                "stoch_k": TEST_ALIAS_STOCH_K,
+                "stoch_d": TEST_ALIAS_STOCH_D,
+                "bb_pct": TEST_ALIAS_BB_PCT_PERCENT,
+                "vol_ratio": TEST_ALIAS_VOLUME_RATIO,
+            },
+        },
+        resistance=None,
+    )
+    conditions = [
+        {"indicator": "macd_histogram", "op": ">", "value": 0},
+        {"indicator": "stochastic_k", "op": "<", "value": 25},
+        {"indicator": "bb_pct", "op": "<", "value": 0.15},
+        {"indicator": "volume_ratio", "op": ">", "value": 1.5},
+    ]
+
+    readiness, all_pass, ratio = evaluate_imminent_readiness(
+        conditions,
+        flat,
+        evaluable_ratio_floor=1.0,
+    )
+
+    assert flat["macd_histogram"] == TEST_ALIAS_MACD_HIST
+    assert flat["stochastic_k"] == TEST_ALIAS_STOCH_K
+    assert flat["stochastic_d"] == TEST_ALIAS_STOCH_D
+    assert flat["bb_pct"] == TEST_ALIAS_BB_PCT_FRACTION
+    assert flat["bb_pct_percent"] == TEST_ALIAS_BB_PCT_PERCENT
+    assert readiness is not None
+    assert all_pass is True
+    assert ratio == 1.0
+
+
+def test_rotated_ticker_cap_slice_advances_by_window() -> None:
+    pattern = SimpleNamespace(id=0)
+
+    first, first_meta = imminent_mod._rotated_ticker_cap_slice(
+        TEST_ROTATION_TICKERS,
+        cap=TEST_ROTATION_CAP,
+        pat=pattern,
+        enabled=True,
+        window_minutes=TEST_ROTATION_WINDOW_MINUTES,
+        explore_count=TEST_ROTATION_CAP,
+        now_utc=datetime.fromtimestamp(TEST_ROTATION_EPOCH_SECONDS, tz=timezone.utc),
+    )
+    second, second_meta = imminent_mod._rotated_ticker_cap_slice(
+        TEST_ROTATION_TICKERS,
+        cap=TEST_ROTATION_CAP,
+        pat=pattern,
+        enabled=True,
+        window_minutes=TEST_ROTATION_WINDOW_MINUTES,
+        explore_count=TEST_ROTATION_CAP,
+        now_utc=datetime.fromtimestamp(TEST_ROTATION_NEXT_WINDOW_SECONDS, tz=timezone.utc),
+    )
+    third, third_meta = imminent_mod._rotated_ticker_cap_slice(
+        TEST_ROTATION_TICKERS,
+        cap=TEST_ROTATION_CAP,
+        pat=pattern,
+        enabled=True,
+        window_minutes=TEST_ROTATION_WINDOW_MINUTES,
+        explore_count=TEST_ROTATION_CAP,
+        now_utc=datetime.fromtimestamp(TEST_ROTATION_SECOND_WINDOW_SECONDS, tz=timezone.utc),
+    )
+    disabled, disabled_meta = imminent_mod._rotated_ticker_cap_slice(
+        TEST_ROTATION_TICKERS,
+        cap=TEST_ROTATION_CAP,
+        pat=pattern,
+        enabled=False,
+        window_minutes=TEST_ROTATION_WINDOW_MINUTES,
+        explore_count=TEST_ROTATION_CAP,
+        now_utc=datetime.fromtimestamp(TEST_ROTATION_SECOND_WINDOW_SECONDS, tz=timezone.utc),
+    )
+
+    assert first == ["A-USD", "B-USD"]
+    assert second == ["C-USD", "D-USD"]
+    assert third == ["E-USD", "F-USD"]
+    assert first_meta["start"] == TEST_ROTATION_FIRST_START
+    assert second_meta["start"] == TEST_ROTATION_SECOND_START
+    assert third_meta["start"] == TEST_ROTATION_THIRD_START
+    assert disabled == ["A-USD", "B-USD"]
+    assert disabled_meta is None
+
+
+def test_rotated_ticker_cap_slice_preserves_stable_prefix() -> None:
+    pattern = SimpleNamespace(id=0)
+
+    first, first_meta = imminent_mod._rotated_ticker_cap_slice(
+        TEST_ROTATION_TICKERS,
+        cap=TEST_ROTATION_STABLE_CAP,
+        pat=pattern,
+        enabled=True,
+        window_minutes=TEST_ROTATION_WINDOW_MINUTES,
+        explore_count=TEST_ROTATION_EXPLORE_TICKERS,
+        now_utc=datetime.fromtimestamp(TEST_ROTATION_EPOCH_SECONDS, tz=timezone.utc),
+    )
+    second, second_meta = imminent_mod._rotated_ticker_cap_slice(
+        TEST_ROTATION_TICKERS,
+        cap=TEST_ROTATION_STABLE_CAP,
+        pat=pattern,
+        enabled=True,
+        window_minutes=TEST_ROTATION_WINDOW_MINUTES,
+        explore_count=TEST_ROTATION_EXPLORE_TICKERS,
+        now_utc=datetime.fromtimestamp(TEST_ROTATION_NEXT_WINDOW_SECONDS, tz=timezone.utc),
+    )
+
+    assert first[:len(TEST_ROTATION_STABLE_PREFIX)] == TEST_ROTATION_STABLE_PREFIX
+    assert second[:len(TEST_ROTATION_STABLE_PREFIX)] == TEST_ROTATION_STABLE_PREFIX
+    assert first[-TEST_ROTATION_EXPLORE_TICKERS:] == ["D-USD"]
+    assert second[-TEST_ROTATION_EXPLORE_TICKERS:] == ["E-USD"]
+    assert first_meta["stable_count"] == len(TEST_ROTATION_STABLE_PREFIX)
+    assert first_meta["explore_count"] == TEST_ROTATION_EXPLORE_TICKERS
+    assert second_meta["stable_count"] == len(TEST_ROTATION_STABLE_PREFIX)
+    assert second_meta["explore_count"] == TEST_ROTATION_EXPLORE_TICKERS
 
 
 def test_us_stock_session_open_saturday_utc() -> None:
@@ -267,7 +422,11 @@ def test_gather_imminent_skips_poor_shadow_pattern_but_keeps_healthy(
 
     monkeypatch.setattr(imminent_mod.settings, "chili_shadow_promoted_lifecycle_enabled", True)
     monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_readiness", 0.0)
-    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_composite_main", 0.0)
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_composite_main",
+        TEST_MIN_COMPOSITE_DISABLED,
+    )
     monkeypatch.setattr(
         imminent_mod.settings,
         "pattern_imminent_shadow_poor_edge_min_rejects",
@@ -312,6 +471,345 @@ def test_gather_imminent_skips_poor_shadow_pattern_but_keeps_healthy(
     assert [c["ticker"] for c in candidates] == ["GOOD-USD"]
     assert meta["skip_reasons"]["shadow_poor_edge_cooldown"] == 1
     assert meta["top_suppressed"][0]["reason"] == "shadow_poor_edge_cooldown"
+
+
+def test_gather_imminent_reports_readiness_band_and_lifecycle_diagnostics(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {
+                "indicator": "rsi_14",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_RSI_TRIGGER,
+            },
+            {
+                "indicator": "adx",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_ADX_TRIGGER,
+            },
+        ],
+    }
+    below = ScanPattern(
+        name="Below readiness diagnostic",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_LOW_READINESS_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    above = ScanPattern(
+        name="Above readiness cap diagnostic",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_CAP_READINESS_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    challenged = ScanPattern(
+        name="Excluded lifecycle diagnostic",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="challenged",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_EXCLUDED_LIFECYCLE_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add_all([below, above, challenged])
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_DIAGNOSTIC_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_DIAGNOSTIC_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_near_miss_limit",
+        TEST_UNIVERSE_CAP,
+    )
+    tickers = [
+        TEST_LOW_READINESS_TICKER,
+        TEST_CAP_READINESS_TICKER,
+        TEST_EXCLUDED_LIFECYCLE_TICKER,
+    ]
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: (tickers, {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset(tickers),
+    )
+    score_calls: list[str] = []
+    rsi_by_ticker = {
+        TEST_LOW_READINESS_TICKER: TEST_LOW_READINESS_RSI,
+        TEST_CAP_READINESS_TICKER: TEST_CAP_READINESS_RSI,
+    }
+
+    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+        score_calls.append(ticker)
+        return {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": rsi_by_ticker[ticker],
+                "adx": TEST_FAILED_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        }
+
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _fake_score_ticker)
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+    )
+
+    assert candidates == []
+    assert score_calls == [TEST_LOW_READINESS_TICKER, TEST_CAP_READINESS_TICKER]
+    skip = meta["skip_reasons"]
+    assert skip["readiness_outside_band"] >= 2
+    assert skip["readiness_below_min"] >= 1
+    assert skip["readiness_at_or_above_cap"] >= 1
+    assert meta["excluded_lifecycle_by_stage"]["challenged"] >= 1
+    near_misses = {
+        row["ticker"]: row["reason"]
+        for row in meta["readiness_band_near_misses"]
+    }
+    assert near_misses[TEST_LOW_READINESS_TICKER] == "readiness_below_min"
+    assert near_misses[TEST_CAP_READINESS_TICKER] == "readiness_at_or_above_cap"
+
+
+def test_gather_imminent_admits_shadow_near_miss_observation_lane(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {
+                "indicator": "rsi_14",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_RSI_TRIGGER,
+            },
+            {
+                "indicator": "adx",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_ADX_TRIGGER,
+            },
+        ],
+    }
+    pattern = ScanPattern(
+        name="Shadow near-miss observation",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="shadow_promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_SHADOW_NEAR_MISS_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(imminent_mod.settings, "chili_shadow_promoted_lifecycle_enabled", True)
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_max_gap",
+        TEST_SHADOW_NEAR_MISS_MAX_GAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_SHADOW_NEAR_MISS_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_composite_main", 0.0)
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_SHADOW_NEAR_MISS_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_SHADOW_NEAR_MISS_TICKER}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_score_ticker",
+        lambda ticker, skip_fundamentals=True: {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SHADOW_NEAR_MISS_RSI,
+                "adx": TEST_FAILED_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        },
+    )
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+    )
+
+    matches = [
+        c for c in candidates
+        if c["ticker"] == TEST_SHADOW_NEAR_MISS_TICKER
+    ]
+    assert len(matches) == 1
+    candidate = matches[0]
+    assert candidate["signal_lane"] == "shadow_near_miss"
+    assert candidate["readiness"] < TEST_SHADOW_NEAR_MISS_MIN_READINESS
+    assert candidate["readiness_gap_to_min"] <= TEST_SHADOW_NEAR_MISS_MAX_GAP
+    assert meta["shadow_near_miss_eligible"] >= 1
+    assert meta["shadow_near_miss_admitted"] >= 1
+
+
+def test_gather_imminent_admits_pilot_near_miss_as_shadow_observation_lane(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {
+                "indicator": "rsi_14",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_RSI_TRIGGER,
+            },
+            {
+                "indicator": "adx",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_ADX_TRIGGER,
+            },
+        ],
+    }
+    pattern = ScanPattern(
+        name="Pilot near-miss observation",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="pilot_promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_PILOT_NEAR_MISS_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_lifecycle_stages",
+        "shadow_promoted,pilot_promoted",
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_max_gap",
+        TEST_SHADOW_NEAR_MISS_MAX_GAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_SHADOW_NEAR_MISS_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_composite_main", 0.0)
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_PILOT_NEAR_MISS_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_PILOT_NEAR_MISS_TICKER}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_score_ticker",
+        lambda ticker, skip_fundamentals=True: {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SHADOW_NEAR_MISS_RSI,
+                "adx": TEST_FAILED_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        },
+    )
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["ticker"] == TEST_PILOT_NEAR_MISS_TICKER
+    assert candidates[0]["signal_lane"] == "shadow_near_miss"
+    assert candidates[0]["readiness"] < TEST_SHADOW_NEAR_MISS_MIN_READINESS
+    assert "pilot_promoted" in meta["shadow_near_miss_lifecycle_stages"]
+    assert meta["shadow_near_miss_eligible"] >= 1
+    assert meta["shadow_near_miss_admitted"] >= 1
 
 
 def test_gather_imminent_memoizes_ticker_scores_across_patterns(
@@ -928,3 +1426,98 @@ def test_run_pattern_imminent_scan_reserves_shadow_observation_slots(
     assert result["shadow_alerts_sent"] == 1
     assert inserted[0] == ("SHADOW", 99, "shadow_promoted")
     assert ("MAIN1", 11, "promoted") in inserted
+
+
+def test_run_pattern_imminent_scan_reserves_signal_lane_observation_slots(
+    db,
+    monkeypatch,
+) -> None:
+    inserted: list[tuple[str, int, str, str]] = []
+
+    def _candidate(
+        pattern_id: int,
+        ticker: str,
+        composite: float,
+        stage: str,
+        signal_lane: str = imminent_mod.STANDARD_SIGNAL_LANE,
+    ):
+        pattern = SimpleNamespace(
+            id=pattern_id,
+            name=f"Pattern {pattern_id}",
+            description="Test imminent pattern",
+            lifecycle_stage=stage,
+        )
+        return {
+            "pattern": pattern,
+            "ticker": ticker,
+            "eta_lo": 0.5,
+            "eta_hi": 1.0,
+            "score": {
+                "price": 100.0,
+                "entry_price": 101.0,
+                "stop_loss": 97.5,
+                "take_profit": 110.0,
+                "signals": ["Tight range", "Volume building"],
+            },
+            "trade_type": "swing",
+            "duration_estimate": "2-5 days",
+            "hold_label": "2-5 days",
+            "composite": composite,
+            "readiness": 0.44,
+            "flat": {"price": 100.0},
+            "score_breakdown": {"quality": composite},
+            "coverage_ratio": 0.75,
+            "signal_lane": signal_lane,
+        }
+
+    candidates = [
+        _candidate(21, "MAIN", 0.91, "promoted"),
+        _candidate(
+            22,
+            "PILOTNEAR",
+            0.62,
+            "pilot_promoted",
+            imminent_mod.SHADOW_NEAR_MISS_SIGNAL_LANE,
+        ),
+    ]
+
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_max_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_observation_enabled", True)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_reserve_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_extra_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_max_per_ticker_per_run", 2)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_max_per_pattern_per_run", 2)
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts.gather_imminent_candidate_rows",
+        lambda *args, **kwargs: (
+            candidates,
+            {"patterns_active": 2, "tickers_scored": 2},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts._cooldown_active",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts.dispatch_alert",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts._insert_imminent_breakout_alert",
+        lambda db, user_id, pat, ticker, *args, **kwargs: inserted.append(
+            (ticker, pat.id, pat.lifecycle_stage, kwargs["signal_lane"])
+        ),
+    )
+
+    result = run_pattern_imminent_scan(db, user_id=1)
+
+    assert result["alerts_sent"] == 2
+    assert result["main_alerts_sent"] == 1
+    assert result["shadow_alerts_sent"] == 1
+    assert inserted[0] == (
+        "PILOTNEAR",
+        22,
+        "pilot_promoted",
+        imminent_mod.SHADOW_NEAR_MISS_SIGNAL_LANE,
+    )
+    assert ("MAIN", 21, "promoted", imminent_mod.STANDARD_SIGNAL_LANE) in inserted

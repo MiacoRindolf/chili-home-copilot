@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import time as _time
+from collections import Counter
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,14 @@ from zoneinfo import ZoneInfo
 from ...config import (
     PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS,
     PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN,
+    PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT,
+    PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT,
+    PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP,
+    PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES,
+    PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT,
+    PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS,
+    PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES,
+    PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES,
     PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES,
     PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES,
     PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS,
@@ -67,14 +76,106 @@ _HOURS_PER_BAR = {
     "1wk": 32.5,
 }
 SHADOW_PROMOTED_STAGE = "shadow_promoted"
+PILOT_PROMOTED_STAGE = "pilot_promoted"
 POOR_EDGE_REJECT_REASON = "non_positive_expected_edge"
 SECONDS_PER_MINUTE = 60.0
 UNBOUNDED_SCORE_BUDGET = 10**9
+UNKNOWN_LIFECYCLE_STAGE = "none"
+READINESS_SKIP_BELOW_MIN = "readiness_below_min"
+READINESS_SKIP_AT_OR_ABOVE_CAP = "readiness_at_or_above_cap"
+STANDARD_SIGNAL_LANE = "standard"
+SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
+PATTERN_ID_ROTATION_FALLBACK = 0
+MIN_POSITIVE_CONFIG_INT = 1
+FRACTION_UPPER_BOUND = 1.0
+PERCENT_TO_FRACTION_DIVISOR = 100.0
 _COINBASE_SPOT_TICKER_CACHE: dict[str, Any] = {
     "expires_at": 0.0,
     "tickers": frozenset(),
 }
 _SCORE_FAILURE_CACHE: dict[str, dict[str, float | int]] = {}
+
+
+def _non_negative_int_setting(name: str, default: int) -> int:
+    try:
+        return max(0, int(getattr(settings, name, default) or 0))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
+def _non_negative_float_setting(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(getattr(settings, name, default) or 0.0))
+    except (TypeError, ValueError):
+        return max(0.0, float(default))
+
+
+def _positive_int_setting(name: str, default: int) -> int:
+    try:
+        return max(MIN_POSITIVE_CONFIG_INT, int(getattr(settings, name, default) or default))
+    except (TypeError, ValueError):
+        return max(MIN_POSITIVE_CONFIG_INT, int(default))
+
+
+def _csv_stage_setting(name: str, default: str) -> frozenset[str]:
+    raw = getattr(settings, name, default) or default
+    if isinstance(raw, (set, frozenset, list, tuple)):
+        values = raw
+    else:
+        values = str(raw).split(",")
+    stages = {
+        str(value).strip().lower()
+        for value in values
+        if str(value).strip()
+    }
+    return frozenset(stages)
+
+
+def _pattern_id_for_rotation(pat: ScanPattern) -> int:
+    try:
+        return int(getattr(pat, "id", None) or PATTERN_ID_ROTATION_FALLBACK)
+    except (TypeError, ValueError):
+        return PATTERN_ID_ROTATION_FALLBACK
+
+
+def _rotated_ticker_cap_slice(
+    tickers: list[str],
+    *,
+    cap: int,
+    pat: ScanPattern,
+    enabled: bool,
+    window_minutes: int,
+    explore_count: int,
+    now_utc: datetime | None = None,
+) -> tuple[list[str], dict[str, Any] | None]:
+    if len(tickers) <= cap:
+        return list(tickers), None
+    if not enabled:
+        return tickers[:cap], None
+
+    window = max(PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES, int(window_minutes))
+    explore = max(MIN_POSITIVE_CONFIG_INT, min(int(explore_count), cap))
+    stable_count = max(0, cap - explore)
+    stable = tickers[:stable_count]
+    rotation_pool = tickers[stable_count:] or tickers
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    bucket_seconds = window * SECONDS_PER_MINUTE
+    bucket = int(now.timestamp() // bucket_seconds)
+    pattern_offset = _pattern_id_for_rotation(pat)
+    start = ((bucket + pattern_offset) * explore) % len(rotation_pool)
+    rotated = rotation_pool[start:] + rotation_pool[:start]
+    return (stable + rotated[:explore])[:cap], {
+        "pattern_id": getattr(pat, "id", None),
+        "available_tickers": len(tickers),
+        "cap": cap,
+        "start": start,
+        "stable_count": stable_count,
+        "explore_count": explore,
+        "rotation_pool": len(rotation_pool),
+        "window_minutes": window,
+    }
 
 
 def us_stock_session_open(now_utc: datetime | None = None) -> bool:
@@ -216,10 +317,30 @@ def flat_indicators_from_score(
     if rsi is not None:
         flat["rsi_14"] = float(rsi)
 
-    for key in ("macd_hist", "adx", "atr", "ema_20", "ema_50", "ema_100", "stoch_k"):
+    for key in (
+        "macd_hist",
+        "adx",
+        "atr",
+        "ema_20",
+        "ema_50",
+        "ema_100",
+        "stoch_k",
+        "stoch_d",
+    ):
         v = ind.get(key)
         if v is not None:
             flat[key] = float(v)
+
+    macd_hist = flat.get("macd_hist")
+    if macd_hist is not None:
+        flat["macd_histogram"] = float(macd_hist)
+
+    stoch_k = flat.get("stoch_k")
+    if stoch_k is not None:
+        flat["stochastic_k"] = float(stoch_k)
+    stoch_d = flat.get("stoch_d")
+    if stoch_d is not None:
+        flat["stochastic_d"] = float(stoch_d)
 
     # R34 (2026-04-30): scanner output has 'vol_ratio' inside score['indicators']
     # AND sometimes at the top-level of score (intraday _score_ticker_intraday).
@@ -246,7 +367,17 @@ def flat_indicators_from_score(
 
     bb_pct = ind.get("bb_pct")
     if bb_pct is not None:
-        flat["bb_pct"] = float(bb_pct)
+        bb_pct_f = float(bb_pct)
+        flat["bb_pct_percent"] = (
+            bb_pct_f
+            if abs(bb_pct_f) > FRACTION_UPPER_BOUND
+            else bb_pct_f * PERCENT_TO_FRACTION_DIVISOR
+        )
+        flat["bb_pct"] = (
+            bb_pct_f / PERCENT_TO_FRACTION_DIVISOR
+            if abs(bb_pct_f) > FRACTION_UPPER_BOUND
+            else bb_pct_f
+        )
 
     if resistance and price > 0:
         flat["resistance"] = float(resistance)
@@ -707,6 +838,7 @@ def _insert_imminent_breakout_alert(
     coverage_ratio: float,
     eta_lo: float,
     eta_hi: float,
+    signal_lane: str | None = None,
 ) -> None:
     price = float(score.get("price") or 0)
     snap = {
@@ -719,6 +851,7 @@ def _insert_imminent_breakout_alert(
             "eta_hours": [eta_lo, eta_hi],
             "lifecycle_stage": getattr(pat, "lifecycle_stage", None),
             "promotion_status": getattr(pat, "promotion_status", None),
+            "signal_lane": signal_lane or STANDARD_SIGNAL_LANE,
         },
     }
     asset = "crypto" if is_crypto(ticker) else "stock"
@@ -791,6 +924,42 @@ def gather_imminent_candidate_rows(
     k_eta = float(settings.pattern_imminent_eta_scale_k)
     score_time_budget_s = _score_time_budget_seconds()
     score_started_at = _time.monotonic()
+    suppressed_limit = _non_negative_int_setting(
+        "pattern_imminent_suppressed_diagnostic_limit",
+        PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT,
+    )
+    missing_indicator_limit = _non_negative_int_setting(
+        "pattern_imminent_missing_indicator_sample_limit",
+        PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT,
+    )
+    readiness_near_miss_limit = _non_negative_int_setting(
+        "pattern_imminent_readiness_near_miss_limit",
+        PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT,
+    )
+    shadow_near_miss_enabled = bool(
+        getattr(settings, "pattern_imminent_shadow_near_miss_enabled", True)
+    )
+    shadow_near_miss_max_gap = _non_negative_float_setting(
+        "pattern_imminent_shadow_near_miss_max_gap",
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP,
+    )
+    shadow_near_miss_lifecycle_stages = _csv_stage_setting(
+        "pattern_imminent_shadow_near_miss_lifecycle_stages",
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES,
+    )
+    ticker_rotation_enabled = (
+        bool(getattr(settings, "pattern_imminent_ticker_rotation_enabled", True))
+        and bool(apply_main_dispatch_filters)
+        and not bool(for_opportunity_board)
+    )
+    ticker_rotation_window_minutes = _positive_int_setting(
+        "pattern_imminent_ticker_rotation_window_minutes",
+        PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES,
+    )
+    ticker_rotation_explore_tickers = _positive_int_setting(
+        "pattern_imminent_ticker_rotation_explore_tickers",
+        PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS,
+    )
 
     patterns = db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all()
     poor_shadow_ids, poor_shadow_counts = _shadow_poor_edge_pattern_ids(
@@ -815,6 +984,8 @@ def gather_imminent_candidate_rows(
         "readiness_unusable": 0,
         "all_conditions_met": 0,
         "readiness_outside_band": 0,
+        READINESS_SKIP_BELOW_MIN: 0,
+        READINESS_SKIP_AT_OR_ABOVE_CAP: 0,
         "eta_too_long": 0,
         "excluded_promotion_lifecycle": 0,
         "insufficient_coverage_main": 0,
@@ -823,7 +994,51 @@ def gather_imminent_candidate_rows(
         "crypto_execution_universe_filtered": 0,
         "score_failure_cooldown": 0,
     }
+    excluded_lifecycle_by_stage: Counter[str] = Counter()
     suppressed: list[dict[str, Any]] = []
+    readiness_band_near_misses: list[dict[str, Any]] = []
+    shadow_near_miss_eligible = 0
+    shadow_near_miss_admitted = 0
+    ticker_rotation_applied = 0
+    ticker_rotation_total_available = 0
+    ticker_rotation_samples: list[dict[str, Any]] = []
+
+    def _append_suppressed(row: dict[str, Any]) -> None:
+        if suppressed_limit <= 0 or len(suppressed) >= suppressed_limit:
+            return
+        suppressed.append(row)
+
+    def _sample_missing_indicators(missing: list[str]) -> list[str]:
+        if missing_indicator_limit <= 0:
+            return []
+        return missing[:missing_indicator_limit]
+
+    def _append_readiness_band_miss(
+        *,
+        reason: str,
+        ticker: str,
+        pat: ScanPattern,
+        readiness: float,
+        coverage: float,
+        missing: list[str],
+        gap: float,
+    ) -> None:
+        if readiness_near_miss_limit <= 0:
+            return
+        readiness_band_near_misses.append({
+            "ticker": ticker,
+            "pattern_id": pat.id,
+            "lifecycle_stage": (
+                (getattr(pat, "lifecycle_stage", None) or UNKNOWN_LIFECYCLE_STAGE)
+                .strip()
+                .lower()
+            ),
+            "reason": reason,
+            "readiness": round(float(readiness), 4),
+            "coverage": round(float(coverage), 4),
+            "gap": round(max(0.0, float(gap)), 4),
+            "missing_indicators": _sample_missing_indicators(missing),
+        })
 
     per_pat_cap = max(
         1,
@@ -874,6 +1089,12 @@ def gather_imminent_candidate_rows(
     for pat in patterns:
         if not all_active_patterns and not scan_pattern_eligible_main_imminent(pat):
             skip["excluded_promotion_lifecycle"] += 1
+            stage = (
+                (getattr(pat, "lifecycle_stage", None) or UNKNOWN_LIFECYCLE_STAGE)
+                .strip()
+                .lower()
+            )
+            excluded_lifecycle_by_stage[stage or UNKNOWN_LIFECYCLE_STAGE] += 1
             continue
         if (
             not all_active_patterns
@@ -882,17 +1103,16 @@ def gather_imminent_candidate_rows(
             and int(getattr(pat, "id", 0) or 0) in poor_shadow_ids
         ):
             skip["shadow_poor_edge_cooldown"] += 1
-            if len(suppressed) < 40:
-                suppressed.append({
-                    "pattern_id": pat.id,
-                    "reason": "shadow_poor_edge_cooldown",
-                    "recent_non_positive_rejects": poor_shadow_counts.get(
-                        int(pat.id), 0,
-                    ),
-                    "avg_return_pct": _float_or_none(
-                        getattr(pat, "avg_return_pct", None)
-                    ),
-                })
+            _append_suppressed({
+                "pattern_id": pat.id,
+                "reason": "shadow_poor_edge_cooldown",
+                "recent_non_positive_rejects": poor_shadow_counts.get(
+                    int(pat.id), 0,
+                ),
+                "avg_return_pct": _float_or_none(
+                    getattr(pat, "avg_return_pct", None)
+                ),
+            })
             continue
 
         tickers = _tickers_for_pattern(pat, global_uni, equity_open=eq_open)
@@ -912,7 +1132,21 @@ def gather_imminent_candidate_rows(
 
         patterns_tried += 1
         if len(tickers) > per_pat_cap:
-            tickers = tickers[:per_pat_cap]
+            tickers, rotation_sample = _rotated_ticker_cap_slice(
+                tickers,
+                cap=per_pat_cap,
+                pat=pat,
+                enabled=ticker_rotation_enabled,
+                window_minutes=ticker_rotation_window_minutes,
+                explore_count=ticker_rotation_explore_tickers,
+            )
+            if rotation_sample is not None:
+                ticker_rotation_applied += 1
+                ticker_rotation_total_available += int(
+                    rotation_sample.get("available_tickers") or 0
+                )
+                if len(ticker_rotation_samples) < suppressed_limit:
+                    ticker_rotation_samples.append(rotation_sample)
         for ticker in tickers:
             if _score_time_budget_hit():
                 score_time_budget_hit = True
@@ -946,33 +1180,68 @@ def gather_imminent_candidate_rows(
             )
             if readiness is None:
                 skip["readiness_unusable"] += 1
-                if len(suppressed) < 40:
-                    suppressed.append({
-                        "ticker": ticker,
-                        "pattern_id": pat.id,
-                        "reason": "readiness_unusable",
-                        "coverage": ratio,
-                        "missing_indicators": missing[:8],
-                    })
+                _append_suppressed({
+                    "ticker": ticker,
+                    "pattern_id": pat.id,
+                    "reason": "readiness_unusable",
+                    "coverage": ratio,
+                    "missing_indicators": _sample_missing_indicators(missing),
+                })
                 continue
 
             if apply_main_dispatch_filters and ratio < min_cov_main:
                 skip["insufficient_coverage_main"] += 1
-                if len(suppressed) < 40:
-                    suppressed.append({
-                        "ticker": ticker,
-                        "pattern_id": pat.id,
-                        "reason": "insufficient_coverage_main",
-                        "coverage": ratio,
-                        "missing_indicators": missing[:8],
-                    })
+                _append_suppressed({
+                    "ticker": ticker,
+                    "pattern_id": pat.id,
+                    "reason": "insufficient_coverage_main",
+                    "coverage": ratio,
+                    "missing_indicators": _sample_missing_indicators(missing),
+                })
                 continue
 
             if all_pass:
                 skip["all_conditions_met"] += 1
                 continue
-            if readiness < min_rd or readiness >= cap_rd:
+            signal_lane = STANDARD_SIGNAL_LANE
+            readiness_gap_to_min: float | None = None
+            if readiness < min_rd:
+                readiness_gap_to_min = min_rd - readiness
+                _append_readiness_band_miss(
+                    reason=READINESS_SKIP_BELOW_MIN,
+                    ticker=ticker,
+                    pat=pat,
+                    readiness=readiness,
+                    coverage=ratio,
+                    missing=missing,
+                    gap=readiness_gap_to_min,
+                )
+                pat_stage = (getattr(pat, "lifecycle_stage", "") or "").strip().lower()
+                shadow_near_miss_ok = (
+                    shadow_near_miss_enabled
+                    and apply_main_dispatch_filters
+                    and pat_stage in shadow_near_miss_lifecycle_stages
+                    and readiness_gap_to_min <= shadow_near_miss_max_gap
+                )
+                if shadow_near_miss_ok:
+                    signal_lane = SHADOW_NEAR_MISS_SIGNAL_LANE
+                    shadow_near_miss_eligible += 1
+                else:
+                    skip["readiness_outside_band"] += 1
+                    skip[READINESS_SKIP_BELOW_MIN] += 1
+                    continue
+            elif readiness >= cap_rd:
                 skip["readiness_outside_band"] += 1
+                skip[READINESS_SKIP_AT_OR_ABOVE_CAP] += 1
+                _append_readiness_band_miss(
+                    reason=READINESS_SKIP_AT_OR_ABOVE_CAP,
+                    ticker=ticker,
+                    pat=pat,
+                    readiness=readiness,
+                    coverage=ratio,
+                    missing=missing,
+                    gap=readiness - cap_rd,
+                )
                 continue
 
             eta_lo, eta_hi = estimate_breakout_eta_hours(
@@ -1003,14 +1272,13 @@ def gather_imminent_candidate_rows(
             )
             if apply_main_dispatch_filters and comp < min_comp_main:
                 skip["below_composite_main"] += 1
-                if len(suppressed) < 40:
-                    suppressed.append({
-                        "ticker": ticker,
-                        "pattern_id": pat.id,
-                        "reason": "below_composite_main",
-                        "composite": round(comp, 4),
-                        "coverage": ratio,
-                    })
+                _append_suppressed({
+                    "ticker": ticker,
+                    "pattern_id": pat.id,
+                    "reason": "below_composite_main",
+                    "composite": round(comp, 4),
+                    "coverage": ratio,
+                })
                 continue
 
             atr_f = (flat.get("atr") or 0) or 0
@@ -1043,7 +1311,9 @@ def gather_imminent_candidate_rows(
             candidates.append({
                 "pattern": pat,
                 "ticker": ticker,
+                "signal_lane": signal_lane,
                 "readiness": readiness,
+                "readiness_gap_to_min": readiness_gap_to_min,
                 "eta_lo": eta_lo,
                 "eta_hi": eta_hi,
                 "score": score,
@@ -1056,11 +1326,14 @@ def gather_imminent_candidate_rows(
                 "coverage_ratio": ratio,
                 "missing_indicators": missing,
             })
+            if signal_lane == SHADOW_NEAR_MISS_SIGNAL_LANE:
+                shadow_near_miss_admitted += 1
 
         if board_budget_hit or score_time_budget_hit:
             break
 
     candidates.sort(key=lambda x: (-x["composite"], x["eta_hi"]))
+    readiness_band_near_misses.sort(key=lambda row: (row["gap"], -row["readiness"]))
     meta = {
         "patterns_active": len(patterns),
         "patterns_with_tickers_evaluated": patterns_tried,
@@ -1077,6 +1350,22 @@ def gather_imminent_candidate_rows(
         "per_pattern_ticker_cap": per_pat_cap,
         "crypto_execution_filter_spot_tickers": len(coinbase_spot_tickers),
         "skip_reasons": skip,
+        "excluded_lifecycle_by_stage": dict(excluded_lifecycle_by_stage),
+        "readiness_band_near_misses": readiness_band_near_misses[:readiness_near_miss_limit],
+        "shadow_near_miss_enabled": shadow_near_miss_enabled,
+        "shadow_near_miss_max_gap": shadow_near_miss_max_gap,
+        "shadow_near_miss_lifecycle_stages": sorted(shadow_near_miss_lifecycle_stages),
+        "shadow_near_miss_eligible": shadow_near_miss_eligible,
+        "shadow_near_miss_admitted": shadow_near_miss_admitted,
+        "ticker_rotation_enabled": ticker_rotation_enabled,
+        "ticker_rotation_window_minutes": ticker_rotation_window_minutes,
+        "ticker_rotation_explore_tickers": min(
+            ticker_rotation_explore_tickers,
+            per_pat_cap,
+        ),
+        "ticker_rotation_applied": ticker_rotation_applied,
+        "ticker_rotation_total_available": ticker_rotation_total_available,
+        "ticker_rotation_samples": ticker_rotation_samples,
         "top_suppressed": suppressed,
         "equity_session_open": eq_open,
     }
@@ -1093,8 +1382,15 @@ def _candidate_pattern_stage(candidate: dict[str, Any]) -> str:
     return (getattr(pat, "lifecycle_stage", None) or "").strip().lower()
 
 
+def _candidate_signal_lane(candidate: dict[str, Any]) -> str:
+    return str(candidate.get("signal_lane") or STANDARD_SIGNAL_LANE).strip().lower()
+
+
 def _is_shadow_observation_candidate(candidate: dict[str, Any]) -> bool:
-    return _candidate_pattern_stage(candidate) == "shadow_promoted"
+    return (
+        _candidate_pattern_stage(candidate) == SHADOW_PROMOTED_STAGE
+        or _candidate_signal_lane(candidate) == SHADOW_NEAR_MISS_SIGNAL_LANE
+    )
 
 
 def _candidate_identity(candidate: dict[str, Any]) -> tuple[int, str]:
@@ -1308,6 +1604,7 @@ def run_pattern_imminent_scan(
                     coverage_ratio=float(c["coverage_ratio"]),
                     eta_lo=float(c["eta_lo"]),
                     eta_hi=float(c["eta_hi"]),
+                    signal_lane=str(c.get("signal_lane") or STANDARD_SIGNAL_LANE),
                 )
             except Exception as e:
                 logger.warning("[pattern_imminent] BreakoutAlert insert failed: %s", e)

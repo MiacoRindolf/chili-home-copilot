@@ -10,6 +10,18 @@ from typing import Any, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from ...config import (
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_MAX_REWARD_FRACTION,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_FRACTION,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE,
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_STATIC_TO_MANAGED_REWARD_RATIO,
+)
 from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from .ops_log_prefixes import CHILI_RISK_CACHE
 
@@ -31,6 +43,21 @@ CONFIDENCE_LEARNING_FACTOR: float = 0.85
 # Absolute confidence lower bound. Even a learned pattern with a great hit
 # rate cannot drop the floor below this.
 CONFIDENCE_ABSOLUTE_FLOOR: float = 0.55
+
+MANAGED_EDGE_MODE_OFF = "off"
+MANAGED_EDGE_MODE_SHADOW = "shadow"
+MANAGED_EDGE_MODE_COMPARE = "compare"
+MANAGED_EDGE_MODE_AUTHORITATIVE = "authoritative"
+MANAGED_EDGE_ACTIVE_MODES = frozenset(
+    {
+        MANAGED_EDGE_MODE_SHADOW,
+        MANAGED_EDGE_MODE_COMPARE,
+        MANAGED_EDGE_MODE_AUTHORITATIVE,
+    }
+)
+MANAGED_EDGE_GEOMETRY_SOURCE = "managed_directional_exit"
+REALIZED_DYNAMIC_GEOMETRY_SOURCE = "realized_dynamic_exit_blend"
+STATIC_TARGET_STOP_GEOMETRY_SOURCE = "static_target_stop"
 
 
 @dataclass
@@ -739,6 +766,15 @@ def _settings_float(
     return value
 
 
+def _settings_csv_set(settings: Any, name: str, default: str) -> set[str]:
+    raw = getattr(settings, name, default)
+    if isinstance(raw, (set, tuple, list)):
+        values = raw
+    else:
+        values = str(raw or default).split(",")
+    return {str(v).strip().lower() for v in values if str(v).strip()}
+
+
 def _bayes_lower_probability(
     *,
     successes: float,
@@ -997,6 +1033,240 @@ def _round_directional_evidence(evidence: dict[str, Any] | None) -> dict[str, An
         else:
             out[key] = value
     return out
+
+
+def _directional_component_for_managed_edge(
+    evidence: dict[str, Any] | None,
+    *,
+    scope: str,
+) -> dict[str, Any] | None:
+    if not evidence:
+        return None
+    try:
+        sample_n = int(evidence.get("sample_n") or evidence.get("observations") or 0)
+    except (TypeError, ValueError):
+        sample_n = 0
+    fav_pct = _finite_float(evidence.get("avg_max_favorable_pct"))
+    adv_pct = _finite_float(evidence.get("avg_max_adverse_pct"))
+    if sample_n <= 0 or fav_pct is None or adv_pct is None:
+        return None
+    if fav_pct <= 0.0:
+        return None
+    return {
+        "scope": scope,
+        "sample_n": sample_n,
+        "avg_max_favorable_pct": float(fav_pct),
+        "avg_max_adverse_pct": float(adv_pct),
+    }
+
+
+def _managed_exit_geometry_from_directional(
+    *,
+    alert: BreakoutAlert,
+    entry_price: float,
+    static_reward: float,
+    base_reward: float,
+    base_loss: float,
+    directional: dict[str, Any] | None,
+    settings: Any,
+) -> tuple[float, float, dict[str, Any]]:
+    mode = str(
+        getattr(
+            settings,
+            "chili_autotrader_managed_edge_mode",
+            AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE,
+        )
+        or AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE
+    ).strip().lower()
+    snap: dict[str, Any] = {
+        "used": False,
+        "selected": False,
+        "mode": mode,
+        "reason": "inactive",
+        "static_reward_fraction": round(static_reward, 8),
+        "base_reward_fraction": round(base_reward, 8),
+        "base_stop_loss_fraction": round(base_loss, 8),
+    }
+    if mode not in MANAGED_EDGE_ACTIVE_MODES:
+        snap["reason"] = "mode_inactive"
+        return base_reward, base_loss, snap
+
+    asset_type = str(getattr(alert, "asset_type", None) or "stock").strip().lower()
+    allowed_assets = _settings_csv_set(
+        settings,
+        "chili_autotrader_managed_edge_asset_types",
+        AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES,
+    )
+    snap["asset_type"] = asset_type
+    snap["allowed_asset_types"] = sorted(allowed_assets)
+    if "all" not in allowed_assets and asset_type not in allowed_assets:
+        snap["reason"] = "asset_type_not_enabled"
+        return base_reward, base_loss, snap
+
+    if not directional:
+        snap["reason"] = "missing_directional_evidence"
+        return base_reward, base_loss, snap
+
+    components = [
+        comp
+        for comp in (
+            _directional_component_for_managed_edge(
+                directional.get("ticker") if isinstance(directional, dict) else None,
+                scope="ticker",
+            ),
+            _directional_component_for_managed_edge(
+                directional.get("pattern") if isinstance(directional, dict) else None,
+                scope="pattern",
+            ),
+        )
+        if comp is not None
+    ]
+    min_samples = _settings_int(
+        settings,
+        "chili_autotrader_managed_edge_min_directional_samples",
+        AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES,
+        minimum=1,
+    )
+    sample_n = sum(int(comp["sample_n"]) for comp in components)
+    snap["sample_n"] = sample_n
+    snap["min_directional_samples"] = min_samples
+    snap["components"] = components
+    if sample_n < min_samples:
+        snap["reason"] = "insufficient_directional_samples"
+        return base_reward, base_loss, snap
+
+    fav_pct = (
+        sum(float(comp["avg_max_favorable_pct"]) * int(comp["sample_n"]) for comp in components)
+        / float(sample_n)
+    )
+    adv_pct = (
+        sum(float(comp["avg_max_adverse_pct"]) * int(comp["sample_n"]) for comp in components)
+        / float(sample_n)
+    )
+    observed_fav_fraction = max(0.0, fav_pct / 100.0)
+    observed_adv_fraction = abs(adv_pct) / 100.0
+    capture_fraction = _settings_float(
+        settings,
+        "chili_autotrader_managed_edge_capture_fraction",
+        AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    adverse_buffer = _settings_float(
+        settings,
+        "chili_autotrader_managed_edge_adverse_buffer",
+        AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER,
+        minimum=1.0,
+    )
+    min_reward = _settings_float(
+        settings,
+        "chili_autotrader_managed_edge_min_reward_fraction",
+        AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_FRACTION,
+        minimum=0.0,
+    )
+    max_reward = _settings_float(
+        settings,
+        "chili_autotrader_managed_edge_max_reward_fraction",
+        AUTOTRADER_MANAGED_EDGE_DEFAULT_MAX_REWARD_FRACTION,
+        minimum=0.0,
+    )
+    if max_reward > 0.0:
+        reward_ceiling = min(max_reward, base_reward)
+    else:
+        reward_ceiling = base_reward
+    managed_reward = min(reward_ceiling, max(min_reward, observed_fav_fraction * capture_fraction))
+    managed_loss = observed_adv_fraction * adverse_buffer
+    static_to_managed_ratio = (
+        static_reward / managed_reward
+        if managed_reward > 0.0
+        else 0.0
+    )
+    min_static_ratio = _settings_float(
+        settings,
+        "chili_autotrader_managed_edge_static_to_managed_reward_ratio",
+        AUTOTRADER_MANAGED_EDGE_DEFAULT_STATIC_TO_MANAGED_REWARD_RATIO,
+        minimum=1.0,
+    )
+    min_reward_risk = _settings_float(
+        settings,
+        "chili_autotrader_managed_edge_min_reward_risk",
+        AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK,
+        minimum=0.0,
+    )
+    snap.update(
+        observed_avg_max_favorable_pct=round(fav_pct, 6),
+        observed_avg_max_adverse_pct=round(adv_pct, 6),
+        observed_favorable_fraction=round(observed_fav_fraction, 8),
+        observed_adverse_fraction=round(observed_adv_fraction, 8),
+        capture_fraction=round(capture_fraction, 6),
+        adverse_buffer=round(adverse_buffer, 6),
+        min_reward_fraction=round(min_reward, 8),
+        max_reward_fraction=round(max_reward, 8),
+        min_static_to_managed_reward_ratio=round(min_static_ratio, 6),
+        min_reward_risk=round(min_reward_risk, 6),
+        candidate_reward_fraction=round(managed_reward, 8),
+        candidate_stop_loss_fraction=round(managed_loss, 8),
+        static_to_managed_reward_ratio=round(static_to_managed_ratio, 6),
+    )
+    if managed_reward <= 0.0 or managed_loss <= 0.0:
+        snap["reason"] = "invalid_managed_geometry"
+        return base_reward, base_loss, snap
+    if managed_reward >= base_reward:
+        snap["reason"] = "managed_reward_not_tighter_than_base"
+        return base_reward, base_loss, snap
+    if managed_loss >= base_loss:
+        snap["reason"] = "managed_stop_not_tighter_than_base"
+        return base_reward, base_loss, snap
+    if static_to_managed_ratio < min_static_ratio:
+        snap["reason"] = "static_bracket_not_overextended"
+        return base_reward, base_loss, snap
+    reward_risk = managed_reward / managed_loss if managed_loss > 0.0 else None
+    snap["reward_risk"] = round(float(reward_risk), 6) if reward_risk is not None else None
+    if reward_risk is None or reward_risk < min_reward_risk:
+        snap["reason"] = "managed_reward_risk_below_floor"
+        return base_reward, base_loss, snap
+
+    managed_target = entry_price * (1.0 + managed_reward)
+    managed_stop = entry_price * (1.0 - managed_loss)
+    snap.update(
+        used=True,
+        reason=MANAGED_EDGE_GEOMETRY_SOURCE,
+        managed_reward_fraction=round(managed_reward, 8),
+        managed_stop_loss_fraction=round(managed_loss, 8),
+        managed_target_price=round(managed_target, 8),
+        managed_stop_price=round(managed_stop, 8),
+    )
+    return managed_reward, managed_loss, snap
+
+
+def _expected_edge_components(
+    *,
+    probability: float,
+    reward: float,
+    loss: float,
+    cost_fraction: float,
+) -> dict[str, float | None]:
+    expected_reward = probability * reward
+    expected_loss = (1.0 - probability) * loss
+    expected_net = expected_reward - expected_loss - cost_fraction
+    breakeven_denom = reward + loss
+    breakeven_probability = (
+        (loss + cost_fraction) / breakeven_denom
+        if breakeven_denom > 0.0
+        else None
+    )
+    return {
+        "expected_reward": expected_reward,
+        "expected_loss": expected_loss,
+        "expected_net": expected_net,
+        "breakeven_probability": breakeven_probability,
+        "probability_edge": (
+            probability - breakeven_probability
+            if breakeven_probability is not None
+            else None
+        ),
+        "reward_risk": reward / loss if loss > 0.0 else None,
+    }
 
 
 def _alert_confidence_probability(confidence: float, settings: Any) -> tuple[float, dict[str, Any]]:
@@ -1365,25 +1635,27 @@ def evaluate_entry_edge(
         db, ticker=alert.ticker, settings=settings,
     )
 
-    expected_reward = prob * reward
-    expected_loss = (1.0 - prob) * loss
-    expected_net = expected_reward - expected_loss - cost_fraction
-    breakeven_denom = reward + loss
-    breakeven_probability = (
-        (loss + cost_fraction) / breakeven_denom
-        if breakeven_denom > 0
-        else None
+    edge_math = _expected_edge_components(
+        probability=prob,
+        reward=reward,
+        loss=loss,
+        cost_fraction=cost_fraction,
+    )
+    expected_reward = float(edge_math["expected_reward"] or 0.0)
+    expected_loss = float(edge_math["expected_loss"] or 0.0)
+    expected_net = float(edge_math["expected_net"] or 0.0)
+    breakeven_probability = edge_math["breakeven_probability"]
+    geometry_source = (
+        REALIZED_DYNAMIC_GEOMETRY_SOURCE
+        if realized_geometry.get("used")
+        else STATIC_TARGET_STOP_GEOMETRY_SOURCE
     )
     snap.update(
         probability=round(prob, 6),
         probability_source=prob_source,
         probability_sample_n=sample_n,
         probability_details=probability_details,
-        edge_geometry_source=(
-            "realized_dynamic_exit_blend"
-            if realized_geometry.get("used")
-            else "static_target_stop"
-        ),
+        edge_geometry_source=geometry_source,
         dynamic_exit_geometry=realized_geometry,
         target_reward_fraction=round(static_reward, 8),
         hard_stop_loss_fraction=round(static_loss, 8),
@@ -1402,12 +1674,153 @@ def evaluate_entry_edge(
             else None
         ),
         probability_edge=(
-            round(prob - float(breakeven_probability), 6)
+            round(float(edge_math["probability_edge"]), 6)
             if breakeven_probability is not None
             else None
         ),
-        reward_risk=round(reward / loss, 6) if loss > 0 else None,
+        reward_risk=(
+            round(float(edge_math["reward_risk"]), 6)
+            if edge_math["reward_risk"] is not None
+            else None
+        ),
     )
+    full_bracket_edge = {
+        "probability": snap.get("probability"),
+        "probability_source": snap.get("probability_source"),
+        "probability_sample_n": snap.get("probability_sample_n"),
+        "probability_details": snap.get("probability_details"),
+        "edge_geometry_source": snap.get("edge_geometry_source"),
+        "reward_fraction": snap.get("reward_fraction"),
+        "stop_loss_fraction": snap.get("stop_loss_fraction"),
+        "expected_net_fraction": snap.get("expected_net_fraction"),
+        "expected_net_pct": snap.get("expected_net_pct"),
+        "reward_risk": snap.get("reward_risk"),
+    }
+
+    managed_reward, managed_loss, managed_geometry = _managed_exit_geometry_from_directional(
+        alert=alert,
+        entry_price=e,
+        static_reward=static_reward,
+        base_reward=reward,
+        base_loss=loss,
+        directional=(
+            probability_details.get("directional_evidence")
+            if isinstance(probability_details, dict)
+            else None
+        ),
+        settings=settings,
+    )
+    managed_edge: dict[str, Any] = {
+        "selected": False,
+        "geometry": managed_geometry,
+    }
+    if managed_geometry.get("used"):
+        managed_prob, managed_source, managed_sample_n, managed_details = _pattern_probability(
+            db,
+            alert=alert,
+            pat_ctx=pat_ctx,
+            confidence=confidence,
+            settings=settings,
+            pattern=pattern,
+            reward=managed_reward,
+            loss=managed_loss,
+        )
+        managed_math = _expected_edge_components(
+            probability=managed_prob,
+            reward=managed_reward,
+            loss=managed_loss,
+            cost_fraction=cost_fraction,
+        )
+        managed_expected_reward = float(managed_math["expected_reward"] or 0.0)
+        managed_expected_loss = float(managed_math["expected_loss"] or 0.0)
+        managed_expected_net = float(managed_math["expected_net"] or 0.0)
+        managed_breakeven = managed_math["breakeven_probability"]
+        min_managed_net = (
+            _settings_float(
+                settings,
+                "chili_autotrader_managed_edge_min_expected_net_pct",
+                AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT,
+            )
+            / 100.0
+        )
+        managed_edge.update(
+            probability=round(managed_prob, 6),
+            probability_source=managed_source,
+            probability_sample_n=managed_sample_n,
+            probability_details=managed_details,
+            reward_fraction=round(managed_reward, 8),
+            stop_loss_fraction=round(managed_loss, 8),
+            expected_reward_fraction=round(managed_expected_reward, 8),
+            expected_loss_fraction=round(managed_expected_loss, 8),
+            expected_net_fraction=round(managed_expected_net, 8),
+            expected_net_pct=round(managed_expected_net * 100.0, 4),
+            min_expected_net_pct=round(min_managed_net * 100.0, 4),
+            breakeven_probability=(
+                round(float(managed_breakeven), 6)
+                if managed_breakeven is not None
+                else None
+            ),
+            probability_edge=(
+                round(float(managed_math["probability_edge"]), 6)
+                if managed_breakeven is not None
+                else None
+            ),
+            reward_risk=(
+                round(float(managed_math["reward_risk"]), 6)
+                if managed_math["reward_risk"] is not None
+                else None
+            ),
+        )
+        managed_mode = str(managed_geometry.get("mode") or "").strip().lower()
+        managed_selectable = (
+            managed_mode == MANAGED_EDGE_MODE_AUTHORITATIVE
+            and managed_expected_net > expected_net
+            and managed_expected_net > min_managed_net
+        )
+        if managed_selectable:
+            managed_edge["selected"] = True
+            managed_geometry["selected"] = True
+            snap["full_bracket_edge"] = full_bracket_edge
+            snap.update(
+                probability=round(managed_prob, 6),
+                probability_source=managed_source,
+                probability_sample_n=managed_sample_n,
+                probability_details=managed_details,
+                edge_geometry_source=MANAGED_EDGE_GEOMETRY_SOURCE,
+                reward_fraction=round(managed_reward, 8),
+                stop_loss_fraction=round(managed_loss, 8),
+                expected_reward_fraction=round(managed_expected_reward, 8),
+                expected_loss_fraction=round(managed_expected_loss, 8),
+                expected_net_fraction=round(managed_expected_net, 8),
+                expected_net_pct=round(managed_expected_net * 100.0, 4),
+                breakeven_probability=(
+                    round(float(managed_breakeven), 6)
+                    if managed_breakeven is not None
+                    else None
+                ),
+                probability_edge=(
+                    round(float(managed_math["probability_edge"]), 6)
+                    if managed_breakeven is not None
+                    else None
+                ),
+                reward_risk=(
+                    round(float(managed_math["reward_risk"]), 6)
+                    if managed_math["reward_risk"] is not None
+                    else None
+                ),
+            )
+            expected_net = managed_expected_net
+        else:
+            managed_edge["selection_reason"] = (
+                "mode_not_authoritative"
+                if managed_mode != MANAGED_EDGE_MODE_AUTHORITATIVE
+                else (
+                    "not_better_than_full_bracket"
+                    if managed_expected_net <= expected_net
+                    else "non_positive_managed_expected_edge"
+                )
+            )
+    snap["managed_exit_edge"] = managed_edge
     if expected_net <= 0.0:
         return EntryEdgeDecision(False, "non_positive_expected_edge", snap)
     return EntryEdgeDecision(True, "positive_expected_edge", snap)

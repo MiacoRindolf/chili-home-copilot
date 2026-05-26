@@ -695,6 +695,188 @@ def test_shadow_janitor_only_closes_stale_autotrader_shadow_rows(db, monkeypatch
     assert ordinary.status == "open"
 
 
+def test_shadow_capacity_janitor_evicts_low_value_before_pilot_evidence(
+    db,
+    monkeypatch,
+):
+    pat, alert = _seed_pattern_and_alert(db)
+    pat.lifecycle_stage = "candidate"
+    pilot = ScanPattern(
+        name=f"psm_pilot_{uuid4().hex[:12]}",
+        rules_json={},
+        origin="test",
+        asset_class="all",
+        timeframe="1d",
+        win_rate=0.5,
+        avg_return_pct=1.0,
+        lifecycle_stage="pilot_promoted",
+    )
+    db.add(pilot)
+    db.commit()
+    db.refresh(pilot)
+    old_at = datetime.utcnow() - timedelta(hours=3)
+    low_value = PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pat.id,
+        ticker="LOW",
+        direction="long",
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        quantity=1,
+        status="open",
+        entry_date=datetime.utcnow(),
+        signal_json={
+            "auto_trader_v1": True,
+            "paper_shadow": True,
+            "shadow_decision": "legacy_shadow_bucket",
+        },
+    )
+    high_value = PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pilot.id,
+        ticker="HIGH",
+        direction="long",
+        entry_price=100.0,
+        stop_price=99.0,
+        target_price=101.0,
+        quantity=1,
+        status="open",
+        entry_date=old_at,
+        signal_json={
+            "auto_trader_v1": True,
+            "paper_shadow": True,
+            "shadow_decision": "blocked_shadow_promoted",
+            "paper_observation_signal_lane": "shadow_near_miss",
+        },
+    )
+    standard = PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pat.id,
+        ticker="STD",
+        direction="long",
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        quantity=1,
+        status="open",
+        entry_date=old_at + timedelta(minutes=1),
+        signal_json={
+            "auto_trader_v1": True,
+            "paper_shadow": True,
+            "shadow_decision": "placed",
+        },
+    )
+    db.add_all([low_value, high_value, standard])
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.market_data.fetch_quote",
+        lambda ticker: {"price": 101.0},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.paper_trading._apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    result = prune_autotrader_paper_shadow_capacity(
+        db,
+        alert.user_id,
+        max_open=4,
+        max_age_hours=100,
+        buffer=1,
+    )
+
+    db.refresh(low_value)
+    db.refresh(high_value)
+    db.refresh(standard)
+    assert result["capacity_closed"] == 1
+    assert result["eviction_policy"] == "priority_evidence_buffer"
+    assert low_value.status == "closed"
+    assert high_value.status == "open"
+    assert standard.status == "open"
+
+
+def test_reject_shadow_reclaims_buffer_slot_when_capacity_full(db, monkeypatch):
+    pat, alert = _seed_pattern_and_alert(db)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_max_open", 2,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_max_age_hours", 100,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_buffer", 0,
+    )
+    db.add_all([
+        PaperTrade(
+            user_id=alert.user_id,
+            scan_pattern_id=pat.id,
+            ticker="OLD1",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1,
+            status="open",
+            entry_date=datetime.utcnow() - timedelta(hours=2),
+            signal_json={"auto_trader_v1": True, "paper_shadow": True},
+        ),
+        PaperTrade(
+            user_id=alert.user_id,
+            scan_pattern_id=pat.id,
+            ticker="OLD2",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1,
+            status="open",
+            entry_date=datetime.utcnow() - timedelta(hours=1),
+            signal_json={"auto_trader_v1": True, "paper_shadow": True},
+        ),
+    ])
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.market_data.fetch_quote",
+        lambda ticker: {"price": 101.0},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.paper_trading._apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    _maybe_open_reject_paper_shadow(
+        db,
+        uid=alert.user_id,
+        alert=alert,
+        px=100.0,
+        snap={},
+        reason="non_positive_expected_edge",
+        existing_qty=TEST_SHADOW_QUANTITY,
+    )
+
+    rows = db.query(PaperTrade).filter(PaperTrade.user_id == alert.user_id).all()
+    assert sum(1 for row in rows if row.status == "open") == 2
+    assert any(row.paper_shadow_of_alert_id == alert.id for row in rows)
+    assert any(row.exit_reason == "shadow_capacity_janitor" for row in rows)
+
+
 # ---------------------------------------------------------------------------
 # Bonus: live-branch wiring guard (regression)
 # ---------------------------------------------------------------------------
