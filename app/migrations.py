@@ -19067,6 +19067,53 @@ def _migration_272_backtest_pattern_oos_indexes(conn) -> None:
     logger.info("[mig272] trading_backtests scan_pattern/OOS indexes installed")
 
 
+def _migration_273_coinbase_envelope_position_backfill(conn) -> None:
+    """Backfill Coinbase envelope position_id from position current_envelope_id.
+
+    Phase 5B exposed a one-sided Coinbase sync write: position rows had
+    ``current_envelope_id`` pointing at the live Trade envelope, but the
+    envelope's inverse ``position_id`` stayed NULL. Keep historical debt
+    separate, but repair currently-open broker envelopes so Phase 5C has a
+    zero-hard-linkage surface.
+    """
+    tables = _tables(conn)
+    if not {"trading_trades", "trading_positions"}.issubset(tables):
+        return
+
+    result = conn.execute(text("""
+        UPDATE trading_trades t
+           SET position_id = p.id
+          FROM trading_positions p
+         WHERE t.position_id IS NULL
+           AND t.status = 'open'
+           AND t.broker_source = 'coinbase'
+           AND p.broker_source = 'coinbase'
+           AND p.current_envelope_id = t.id
+    """))
+
+    bracket_count = 0
+    if "trading_bracket_intents" in tables:
+        bracket_result = conn.execute(text("""
+            UPDATE trading_bracket_intents bi
+               SET position_id = t.position_id,
+                   updated_at = NOW()
+              FROM trading_trades t
+             WHERE bi.trade_id = t.id
+               AND bi.position_id IS NULL
+               AND t.position_id IS NOT NULL
+               AND t.broker_source = 'coinbase'
+        """))
+        bracket_count = int(bracket_result.rowcount or 0)
+
+    conn.commit()
+    logger.info(
+        "[mig273] backfilled %d open Coinbase envelope position links "
+        "and %d bracket intent links",
+        int(result.rowcount or 0),
+        bracket_count,
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19393,6 +19440,8 @@ MIGRATIONS = [
      _migration_271_scan_patterns_default_contract),
     ("272_backtest_pattern_oos_indexes",
      _migration_272_backtest_pattern_oos_indexes),
+    ("273_coinbase_envelope_position_backfill",
+     _migration_273_coinbase_envelope_position_backfill),
 ]
 
 
