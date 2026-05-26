@@ -30,6 +30,114 @@ from .scanner import _score_ticker
 logger = logging.getLogger(__name__)
 
 
+def _coerce_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
+def _trade_date_label(trade: Any) -> str:
+    dt = getattr(trade, "entry_date", None)
+    return dt.strftime("%Y-%m-%d") if dt and hasattr(dt, "strftime") else "N/A"
+
+
+def _is_option_trade_safe(trade: Any) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
+def _option_meta_from_trade(trade: Any) -> dict[str, Any]:
+    snap = getattr(trade, "indicator_snapshot", None) or {}
+    if isinstance(snap, str):
+        try:
+            snap = json.loads(snap)
+        except Exception:
+            snap = {}
+    if not isinstance(snap, dict):
+        return {}
+    meta = snap.get("option_meta")
+    if isinstance(meta, dict):
+        return meta
+    breakout = snap.get("breakout_alert")
+    if isinstance(breakout, str):
+        try:
+            breakout = json.loads(breakout)
+        except Exception:
+            breakout = None
+    if isinstance(breakout, dict) and isinstance(breakout.get("option_meta"), dict):
+        return breakout["option_meta"]
+    return {}
+
+
+def _format_option_contract_label(trade: Any) -> str:
+    meta = _option_meta_from_trade(trade)
+    underlying = str(meta.get("underlying") or getattr(trade, "ticker", "") or "").upper()
+    expiration = str(meta.get("expiration") or "").strip()
+    strike = meta.get("strike")
+    opt_type = str(meta.get("option_type") or "").strip().lower()
+    parts = [p for p in (underlying, expiration) if p]
+    if strike not in (None, ""):
+        parts.append(f"strike={strike}")
+    if opt_type:
+        parts.append(opt_type)
+    return " ".join(parts) if parts else str(getattr(trade, "ticker", "") or "option")
+
+
+def _format_open_trade_context_line(trade: Any) -> str:
+    """Human/LLM-facing open-position row with option price domains explicit."""
+    direction = str(getattr(trade, "direction", "") or "").upper()
+    qty = getattr(trade, "quantity", None)
+    entry = _coerce_float(getattr(trade, "entry_price", None))
+    entered = _trade_date_label(trade)
+
+    if not _is_option_trade_safe(trade):
+        return (
+            f"  - {direction} {qty}x @ ${getattr(trade, 'entry_price', None)} "
+            f"(entered {entered})"
+        )
+
+    quote: dict[str, Any] | None = None
+    try:
+        from .broker_quotes import broker_quote_for_trade
+
+        quote = broker_quote_for_trade(trade, purpose="display")
+    except Exception:
+        quote = None
+    current = _coerce_float((quote or {}).get("price"))
+    quote_source = str((quote or {}).get("source") or "option_premium_unavailable")
+    qty_f = _coerce_float(qty)
+    pnl_text = "P&L unavailable"
+    if entry and current and qty_f:
+        per_contract = current - entry
+        if str(getattr(trade, "direction", "") or "").lower() == "short":
+            per_contract = -per_contract
+        pnl_usd = per_contract * qty_f * 100.0
+        pnl_pct = (per_contract / entry) * 100.0
+        sign = "+" if pnl_usd >= 0 else ""
+        pct_sign = "+" if pnl_pct >= 0 else ""
+        pnl_text = f"P&L {sign}${pnl_usd:,.2f} ({pct_sign}{pnl_pct:.1f}%)"
+    current_text = (
+        f"current premium ${current:,.4f}"
+        if current is not None
+        else "current premium unavailable"
+    )
+    entry_text = f"${entry:,.4f}" if entry is not None else "$?"
+    return (
+        f"  - [OPTIONS] {direction} {qty} contract(s) @ {entry_text} premium "
+        f"(entered {entered}) | {current_text} | {pnl_text} | "
+        f"contract_multiplier=100 | quote_source={quote_source} | "
+        f"contract={_format_option_contract_label(trade)}"
+    )
+
+
 def _build_pattern_monitor_alignment_block(
     db: Session,
     open_trades: list,
@@ -755,9 +863,7 @@ def build_ai_context(
         if open_trades:
             lines.append("OPEN DB POSITIONS:")
             for tr in open_trades:
-                lines.append(
-                    f"  - {tr.direction.upper()} {tr.quantity}x @ ${tr.entry_price} (entered {tr.entry_date.strftime('%Y-%m-%d') if tr.entry_date else 'N/A'})"
-                )
+                lines.append(_format_open_trade_context_line(tr))
         if closed_trades:
             lines.append("CLOSED (recent):")
             for tr in closed_trades[:5]:
