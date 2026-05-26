@@ -17,6 +17,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any
 
 from sqlalchemy import text
@@ -28,7 +29,7 @@ from .trading.broker_position_sync import (
     collapse_open_broker_position_duplicates,
     dedupe_positions_by_ticker,
 )
-from .trading.tick_normalizer import normalize_price
+from .trading.tick_normalizer import normalize_price, normalize_quantity
 
 logger = logging.getLogger(__name__)
 
@@ -3338,6 +3339,190 @@ def _to_crypto_base(ticker: str) -> str:
     return s
 
 
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        out = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return out if out > 0 else None
+
+
+def _decimal_plain(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
+def _floor_to_increment(value: Decimal, increment: Decimal) -> Decimal:
+    if increment <= 0:
+        return value
+    units = (value / increment).to_integral_value(rounding=ROUND_DOWN)
+    return units * increment
+
+
+def _round_to_increment(value: Decimal, increment: Decimal) -> Decimal:
+    if increment <= 0:
+        return value
+    units = (value / increment).to_integral_value(rounding=ROUND_HALF_UP)
+    return units * increment
+
+
+def _get_robinhood_crypto_pair_info(base: str) -> dict[str, Any] | None:
+    """Return Robinhood's pair metadata, cached briefly with other broker data."""
+    symbol = _to_crypto_base(base)
+    if not symbol:
+        return None
+    key = f"crypto_pair_info:{symbol}"
+    cached = _cache.get(key)
+    if cached and (time.time() - cached[0]) < _CACHE_TTL:
+        data = cached[1]
+        return data if isinstance(data, dict) else None
+    try:
+        import robin_stocks.robinhood as rh
+
+        data = rh.crypto.get_crypto_info(symbol)
+        if isinstance(data, dict) and data:
+            _cache[key] = (time.time(), data)
+            return data
+    except Exception:
+        logger.debug(
+            "[broker] could not load crypto pair info for %s",
+            symbol,
+            exc_info=True,
+        )
+    return None
+
+
+def _normalize_robinhood_crypto_quantity(
+    base: str,
+    quantity: float | int | Decimal | str,
+) -> tuple[str | None, dict[str, Any]]:
+    """Align crypto quantity to Robinhood's per-pair order increment.
+
+    Robinhood advertises pair-specific ``min_order_quantity_increment``.
+    Some pairs, for example COMP, reject otherwise valid 8-decimal crypto
+    quantities. Floor the size so we never accidentally submit a larger
+    buy than intended or a sell above available inventory.
+    """
+    symbol = _to_crypto_base(base)
+    ticker = f"{symbol}-USD" if symbol else str(base or "")
+    raw = _decimal_or_none(quantity)
+    if raw is None:
+        return None, {"error": f"invalid quantity: {quantity!r}"}
+
+    info = _get_robinhood_crypto_pair_info(symbol) or {}
+    increment = (
+        _decimal_or_none(info.get("min_order_quantity_increment"))
+        or Decimal("0.00000001")
+    )
+    min_size = _decimal_or_none(info.get("min_order_size"))
+    max_size = _decimal_or_none(info.get("max_order_size"))
+
+    if not info:
+        # Preserve the legacy 8-decimal fallback when metadata is unavailable.
+        raw = _decimal_or_none(normalize_quantity(raw, ticker)) or raw
+
+    aligned = _floor_to_increment(raw, increment)
+    if aligned <= 0:
+        return None, {
+            "error": (
+                f"quantity_below_increment:{symbol}:"
+                f"qty={_decimal_plain(raw)} increment={_decimal_plain(increment)}"
+            )
+        }
+    if min_size is not None and aligned < min_size:
+        return None, {
+            "error": (
+                f"quantity_below_min_size:{symbol}:"
+                f"qty={_decimal_plain(aligned)} min={_decimal_plain(min_size)}"
+            )
+        }
+    if max_size is not None and aligned > max_size:
+        return None, {
+            "error": (
+                f"quantity_above_max_size:{symbol}:"
+                f"qty={_decimal_plain(aligned)} max={_decimal_plain(max_size)}"
+            )
+        }
+
+    meta = {
+        "symbol": symbol,
+        "raw_quantity": _decimal_plain(raw),
+        "quantity": _decimal_plain(aligned),
+        "min_order_quantity_increment": _decimal_plain(increment),
+        "min_order_size": _decimal_plain(min_size) if min_size is not None else None,
+        "max_order_size": _decimal_plain(max_size) if max_size is not None else None,
+        "adjusted": aligned != raw,
+    }
+    return meta["quantity"], meta
+
+
+def _normalize_robinhood_crypto_limit_price(
+    base: str,
+    limit_price: float | int | Decimal | str,
+) -> float:
+    symbol = _to_crypto_base(base)
+    info = _get_robinhood_crypto_pair_info(symbol) or {}
+    raw = _decimal_or_none(limit_price)
+    increment = _decimal_or_none(info.get("min_order_price_increment"))
+    if raw is None or increment is None:
+        return normalize_price(limit_price, f"{symbol}-USD", asset_class="crypto")
+    return float(_round_to_increment(raw, increment))
+
+
+def _extract_robinhood_error_message(result: Any, fallback: str) -> str:
+    if not isinstance(result, dict):
+        return str(result) if result else fallback
+    for key in ("detail", "error", "message"):
+        value = result.get(key)
+        if value:
+            return str(value)
+    for key, value in result.items():
+        if isinstance(value, list) and value:
+            return f"{key}: {'; '.join(str(v) for v in value)}"
+        if isinstance(value, dict) and value:
+            return f"{key}: {value}"
+    return fallback
+
+
+def _robinhood_crypto_order_payload_quantity(quantity: str) -> float:
+    """Use a numeric payload while preserving prior Decimal tick alignment."""
+    return float(Decimal(str(quantity)))
+
+
+def _coerce_robinhood_crypto_order_response(
+    result: Any,
+    *,
+    fallback: str,
+) -> tuple[dict[str, Any] | None, str | None, Any | None]:
+    """Normalize robin_stocks crypto order responses.
+
+    ``robin_stocks`` treats HTTP 422 as an exception and, when asked for JSON,
+    returns ``None`` after printing the status. Calling it with
+    ``jsonify=False`` returns the underlying response object, so parse it here
+    and keep the broker's rejection body for logs and alert decisions.
+    """
+    if hasattr(result, "status_code"):
+        status = int(getattr(result, "status_code", 0) or 0)
+        try:
+            body = result.json()
+        except Exception:
+            body = (getattr(result, "text", "") or "").strip()
+        if 200 <= status < 300:
+            if isinstance(body, dict):
+                return body, None, body
+            return None, f"Robinhood crypto HTTP {status}: non-JSON response", body
+        if isinstance(body, dict):
+            msg = _extract_robinhood_error_message(body, fallback)
+        else:
+            msg = str(body or fallback)
+        return None, f"Robinhood crypto HTTP {status}: {msg}", body
+
+    if isinstance(result, dict):
+        return result, None, result
+    return None, str(result) if result else fallback, result
+
+
 # audit-unsupported-crypto-prefilter (2026-05-04) — static whitelist of
 # crypto bases Robinhood actually trades. The intent is a cheap, offline,
 # deterministic prefilter that runs BEFORE any broker call, complementing
@@ -3434,6 +3619,19 @@ def place_crypto_buy_order(
             "error": f"crypto_not_supported_on_robinhood:{base}",
         }
 
+    order_quantity, qty_meta = _normalize_robinhood_crypto_quantity(base, quantity)
+    if order_quantity is None:
+        return {"ok": False, "error": qty_meta.get("error", "invalid crypto quantity")}
+    if qty_meta.get("adjusted"):
+        logger.info(
+            "[broker] BUY-CRYPTO quantity aligned: %s raw=%s qty=%s increment=%s",
+            base,
+            qty_meta.get("raw_quantity"),
+            qty_meta.get("quantity"),
+            qty_meta.get("min_order_quantity_increment"),
+        )
+    order_quantity_payload = _robinhood_crypto_order_payload_quantity(order_quantity)
+
     try:
         import robin_stocks.robinhood as rh
 
@@ -3443,49 +3641,54 @@ def place_crypto_buy_order(
                     raise ValueError("limit_price required for crypto limit order")
                 return rh.orders.order_buy_crypto_limit(
                     symbol=base,
-                    quantity=quantity,
+                    quantity=order_quantity_payload,
                     # Phase 1 (2026-05-01): crypto needs 8-decimal precision.
                     # The previous round(*, 2) silently destroyed sub-penny
                     # crypto prices (DOGE-USD 0.10984 → 0.11 = 1.4% slippage).
                     # ``ticker`` (full -USD form) drives venue detection.
-                    limitPrice=normalize_price(limit_price, ticker, asset_class="crypto"),
+                    limitPrice=_normalize_robinhood_crypto_limit_price(base, limit_price),
                     timeInForce="gtc",
-                    jsonify=True,
+                    jsonify=False,
                 )
             return rh.orders.order_buy_crypto_by_quantity(
                 symbol=base,
-                quantity=quantity,
-                jsonify=True,
+                quantity=order_quantity_payload,
+                jsonify=False,
             )
 
         result = _retry_api_call(_do_buy, label=f"BUY-CRYPTO {base}")
+        result, transport_error, raw_result = _coerce_robinhood_crypto_order_response(
+            result,
+            fallback="Empty response from Robinhood crypto",
+        )
+        if transport_error:
+            logger.error("[broker] BUY-CRYPTO order failed for %s: %s", base, transport_error)
+            return {"ok": False, "error": transport_error, "raw": raw_result}
 
         if result and isinstance(result, dict):
             order_id = result.get("id") or ""
             state = result.get("state", "unknown")
             if not order_id:
-                error_msg = (
-                    result.get("detail")
-                    or result.get("error")
-                    or result.get("message")
-                    or "Robinhood crypto endpoint returned no order_id"
+                error_msg = _extract_robinhood_error_message(
+                    result,
+                    "Robinhood crypto endpoint returned no order_id",
                 )
                 logger.error(
                     "[broker] BUY-CRYPTO rejected (no order_id): %s x%s response=%s",
-                    base, quantity, result,
+                    base, order_quantity, result,
                 )
                 return {"ok": False, "error": str(error_msg)[:500], "raw": result}
             logger.info(
                 "[broker] BUY-CRYPTO order placed: %s x%s (%s) -> %s",
-                base, quantity, order_type, state,
+                base, order_quantity, order_type, state,
             )
             _cache.pop("crypto_positions", None)
             _cache.pop("portfolio", None)
             return {"ok": True, "order_id": order_id, "state": state, "raw": result}
 
-        error_msg = str(result) if result else "Empty response from Robinhood crypto"
+        error_msg = "Empty response from Robinhood crypto"
         logger.error("[broker] BUY-CRYPTO order failed for %s: %s", base, error_msg)
-        return {"ok": False, "error": error_msg}
+        return {"ok": False, "error": error_msg, "raw": raw_result}
 
     except Exception as e:
         logger.error(
@@ -3516,6 +3719,19 @@ def place_crypto_sell_order(
             "error": f"crypto_not_supported_on_robinhood:{base}",
         }
 
+    order_quantity, qty_meta = _normalize_robinhood_crypto_quantity(base, quantity)
+    if order_quantity is None:
+        return {"ok": False, "error": qty_meta.get("error", "invalid crypto quantity")}
+    if qty_meta.get("adjusted"):
+        logger.info(
+            "[broker] SELL-CRYPTO quantity aligned: %s raw=%s qty=%s increment=%s",
+            base,
+            qty_meta.get("raw_quantity"),
+            qty_meta.get("quantity"),
+            qty_meta.get("min_order_quantity_increment"),
+        )
+    order_quantity_payload = _robinhood_crypto_order_payload_quantity(order_quantity)
+
     try:
         import robin_stocks.robinhood as rh
 
@@ -3525,46 +3741,51 @@ def place_crypto_sell_order(
                     raise ValueError("limit_price required for crypto limit order")
                 return rh.orders.order_sell_crypto_limit(
                     symbol=base,
-                    quantity=quantity,
+                    quantity=order_quantity_payload,
                     # Phase 1 (2026-05-01): see place_crypto_buy_order for context.
-                    limitPrice=normalize_price(limit_price, ticker, asset_class="crypto"),
+                    limitPrice=_normalize_robinhood_crypto_limit_price(base, limit_price),
                     timeInForce="gtc",
-                    jsonify=True,
+                    jsonify=False,
                 )
             return rh.orders.order_sell_crypto_by_quantity(
                 symbol=base,
-                quantity=quantity,
-                jsonify=True,
+                quantity=order_quantity_payload,
+                jsonify=False,
             )
 
         result = _retry_api_call(_do_sell, label=f"SELL-CRYPTO {base}")
+        result, transport_error, raw_result = _coerce_robinhood_crypto_order_response(
+            result,
+            fallback="Empty response from Robinhood crypto",
+        )
+        if transport_error:
+            logger.error("[broker] SELL-CRYPTO order failed for %s: %s", base, transport_error)
+            return {"ok": False, "error": transport_error, "raw": raw_result}
 
         if result and isinstance(result, dict):
             order_id = result.get("id") or ""
             state = result.get("state", "unknown")
             if not order_id:
-                error_msg = (
-                    result.get("detail")
-                    or result.get("error")
-                    or result.get("message")
-                    or "Robinhood crypto endpoint returned no order_id"
+                error_msg = _extract_robinhood_error_message(
+                    result,
+                    "Robinhood crypto endpoint returned no order_id",
                 )
                 logger.error(
                     "[broker] SELL-CRYPTO rejected (no order_id): %s x%s response=%s",
-                    base, quantity, result,
+                    base, order_quantity, result,
                 )
                 return {"ok": False, "error": str(error_msg)[:500], "raw": result}
             logger.info(
                 "[broker] SELL-CRYPTO order placed: %s x%s (%s) -> %s",
-                base, quantity, order_type, state,
+                base, order_quantity, order_type, state,
             )
             _cache.pop("crypto_positions", None)
             _cache.pop("portfolio", None)
             return {"ok": True, "order_id": order_id, "state": state, "raw": result}
 
-        error_msg = str(result) if result else "Empty response from Robinhood crypto"
+        error_msg = "Empty response from Robinhood crypto"
         logger.error("[broker] SELL-CRYPTO order failed for %s: %s", base, error_msg)
-        return {"ok": False, "error": error_msg}
+        return {"ok": False, "error": error_msg, "raw": raw_result}
 
     except Exception as e:
         logger.error(

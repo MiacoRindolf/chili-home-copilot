@@ -171,6 +171,53 @@ def test_robinhood_adapter_returns_stale_blue_ocean_instead_of_regular_quote() -
     assert is_fresh_enough(fresh) is False
 
 
+def test_robinhood_adapter_prefers_fresher_stale_bbo_over_older_blue_ocean() -> None:
+    import robin_stocks.robinhood as _rh
+
+    from app.services.trading.venue.protocol import is_fresh_enough
+    from app.services.trading.venue.robinhood_spot import RobinhoodSpotAdapter
+
+    adapter = RobinhoodSpotAdapter()
+    stale_but_recent = (
+        datetime.now(timezone.utc) - timedelta(seconds=60)
+    ).isoformat().replace("+00:00", "Z")
+    older_boats = datetime.now(timezone.utc) - timedelta(minutes=30)
+    fake_stocks = MagicMock()
+    fake_stocks.get_quotes.return_value = [
+        {
+            "bid_price": "79.00",
+            "ask_price": "80.89",
+            "last_trade_price": "73.50",
+            "last_extended_hours_trade_price": "80.00",
+            "last_non_reg_trade_price": "80.00",
+            "venue_bid_time": stale_but_recent,
+            "venue_ask_time": stale_but_recent,
+            "venue_last_non_reg_trade_time": stale_but_recent,
+            "updated_at": stale_but_recent,
+        }
+    ]
+    boats = {
+        "price": 78.88,
+        "last_price": 78.88,
+        "provider_time_utc": older_boats,
+        "quote_ts": older_boats.isoformat(),
+        "volume": 35.0,
+    }
+
+    with patch(
+        "app.services.trading.tradingview_blue_ocean.fetch_boats_quote",
+        return_value=boats,
+    ), patch.object(_rh, "stocks", fake_stocks):
+        ticker, fresh = adapter.get_best_bid_ask("ACMR")
+
+    assert ticker is not None
+    assert ticker.raw.get("source") != "tradingview_boats"
+    assert ticker.bid == 79.0
+    assert ticker.ask == 80.89
+    assert ticker.last_price == 80.0
+    assert is_fresh_enough(fresh) is False
+
+
 def test_broker_quote_surfaces_stale_blue_ocean_price_with_metadata() -> None:
     from app.services.trading.broker_quotes import broker_quote_for_trade
     from app.services.trading.venue.protocol import FreshnessMeta, NormalizedTicker
