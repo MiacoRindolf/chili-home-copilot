@@ -27,7 +27,10 @@ fresh-data parity gate.
 ## Tasks
 
 1. Wait for fresh entries and at least a few fresh closes after mig 275.
-2. Rerun:
+   The scheduled task `CHILI-phase5e-reporting-soak-probe` now runs daily at
+   18:20 local time and writes
+   `scripts/dispatch-phase5e-reporting-soak-probe-out.txt`.
+2. Rerun manually when needed:
    `/api/trading/attribution/live-vs-research?phase5b_compare=true`
 3. Verify:
    - `mismatched_closed_envelopes = 0`
@@ -52,4 +55,5 @@ blocked and write a targeted Phase 5F repair brief.
 
 - `docs/STRATEGY/CC_REPORTS/2026-05-26_f-position-identity-phase-5c-reporting-reader-adoption.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-26_f-position-identity-phase-5d-decision-pattern-attribution-repair.md`
+- `docs/RUNBOOKS/WATCHER_phase5e_reporting_soak.md`
 - Migrations: 274, 275
