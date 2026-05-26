@@ -16,7 +16,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ...config import settings
+from ...config import (
+    RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY,
+    RECERT_QUEUE_DEFAULT_DISPATCH_LIMIT,
+    settings,
+)
 from .backtest_queue import boost_pattern
 from .recert_queue_service import (
     mode_is_active,
@@ -36,11 +40,15 @@ def dispatch_due_recerts(
     if not mode_is_active(mode) or mode == "authoritative":
         return {"ok": True, "skipped": True, "reason": f"mode:{mode}"}
     row_limit = int(limit if limit is not None else getattr(
-        settings, "brain_recert_queue_dispatch_limit", 5,
-    ) or 5)
+        settings,
+        "brain_recert_queue_dispatch_limit",
+        RECERT_QUEUE_DEFAULT_DISPATCH_LIMIT,
+    ) or RECERT_QUEUE_DEFAULT_DISPATCH_LIMIT)
     boost_priority = int(priority if priority is not None else getattr(
-        settings, "brain_recert_queue_backtest_priority", 250,
-    ) or 250)
+        settings,
+        "brain_recert_queue_backtest_priority",
+        RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY,
+    ) or RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY)
     reconciled = reconcile_dispatched_recerts_from_backtests(db, limit=row_limit)
     rows = db.execute(text("""
         SELECT id, recert_id, scan_pattern_id, pattern_name, payload_json

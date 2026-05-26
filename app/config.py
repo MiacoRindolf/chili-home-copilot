@@ -16,6 +16,15 @@ BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB = 768
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS = 1
 BACKTEST_PRIORITY_SCORE_MAX = 100
 BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR = BACKTEST_PRIORITY_SCORE_MAX
+RECERT_QUEUE_DEFAULT_DISPATCH_INTERVAL_MINUTES = 60
+RECERT_QUEUE_DEFAULT_DISPATCH_LIMIT = 5
+RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY = 250
+RECERT_QUEUE_DEFAULT_PRIORITY_PATTERN_IDS = "585"
+RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ENABLED = True
+RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ORIGINS = "autotrader_signal_fastlane"
+RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_PRIORITY = (
+    RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY
+)
 DATABASE_DEFAULT_POOL_SIZE = 25
 DATABASE_DEFAULT_MAX_OVERFLOW = 55
 DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
@@ -667,10 +676,23 @@ class Settings(BaseSettings):
     brain_recert_queue_mode: str = "shadow"
     brain_recert_queue_ops_log_enabled: bool = True
     brain_recert_queue_include_yellow: bool = False
-    brain_recert_queue_dispatch_interval_minutes: int = 60
-    brain_recert_queue_dispatch_limit: int = 5
-    brain_recert_queue_backtest_priority: int = 250
-    brain_recert_queue_priority_pattern_ids: str = "585"
+    brain_recert_queue_dispatch_interval_minutes: int = (
+        RECERT_QUEUE_DEFAULT_DISPATCH_INTERVAL_MINUTES
+    )
+    brain_recert_queue_dispatch_limit: int = RECERT_QUEUE_DEFAULT_DISPATCH_LIMIT
+    brain_recert_queue_backtest_priority: int = RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY
+    brain_recert_queue_priority_pattern_ids: str = (
+        RECERT_QUEUE_DEFAULT_PRIORITY_PATTERN_IDS
+    )
+    brain_recert_queue_immediate_dispatch_enabled: bool = (
+        RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ENABLED
+    )
+    brain_recert_queue_immediate_dispatch_origins: str = (
+        RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ORIGINS
+    )
+    brain_recert_queue_immediate_dispatch_priority: int = (
+        RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_PRIORITY
+    )
 
     # Phase K - Divergence panel + ops health endpoint (shadow rollout).
     brain_divergence_scorer_mode: str = "shadow"

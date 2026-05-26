@@ -15,10 +15,13 @@ from app.services.trading.recert_queue_service import (
     complete_open_recerts_from_backtest,
     queue_from_drift,
     queue_manual,
+    queue_scheduler,
     recert_summary,
     mode_is_active,
     reconcile_dispatched_recerts_from_backtests,
 )
+
+TEST_IMMEDIATE_DISPATCH_PRIORITY = 250
 
 
 def _cleanup(db) -> None:
@@ -30,6 +33,33 @@ def _force_mode(monkeypatch, mode: str) -> None:
     monkeypatch.setattr(
         "app.services.trading.recert_queue_service.settings.brain_recert_queue_mode",
         mode,
+        raising=False,
+    )
+
+
+def _force_immediate_dispatch(
+    monkeypatch,
+    *,
+    enabled: bool = True,
+    origins: str = "autotrader_signal_fastlane",
+    priority: int = TEST_IMMEDIATE_DISPATCH_PRIORITY,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.trading.recert_queue_service.settings."
+        "brain_recert_queue_immediate_dispatch_enabled",
+        enabled,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.recert_queue_service.settings."
+        "brain_recert_queue_immediate_dispatch_origins",
+        origins,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.recert_queue_service.settings."
+        "brain_recert_queue_immediate_dispatch_priority",
+        priority,
         raising=False,
     )
 
@@ -185,6 +215,89 @@ class TestIdempotencyAndManual:
         assert row[1] == "proposed"
         assert row[2] == "operator initiated"
         assert row[3] is None
+
+
+class TestImmediateSignalDispatch:
+    def test_autotrader_signal_fastlane_dispatches_without_hourly_wait(
+        self, db, monkeypatch,
+    ):
+        _cleanup(db)
+        _force_mode(monkeypatch, "shadow")
+        _force_immediate_dispatch(
+            monkeypatch,
+            priority=TEST_IMMEDIATE_DISPATCH_PRIORITY,
+        )
+        pat = ScanPattern(
+            name="active signal recert",
+            rules_json={},
+            active=True,
+            lifecycle_stage="promoted",
+            recert_required=True,
+            recert_reason="missing_oos_recert",
+            backtest_priority=0,
+        )
+        db.add(pat)
+        db.commit()
+
+        res = queue_scheduler(
+            db,
+            scan_pattern_id=pat.id,
+            pattern_name=pat.name,
+            as_of_date=date(2026, 5, 26),
+            reason="autotrader_signal:pattern_recert_required",
+            severity="red",
+            payload={
+                "origin": "autotrader_signal_fastlane",
+                "ticker": "AAPD",
+            },
+        )
+
+        assert res is not None
+        assert res.status == "dispatched"
+        db.refresh(pat)
+        assert pat.backtest_priority == TEST_IMMEDIATE_DISPATCH_PRIORITY
+        row = db.execute(text(
+            "SELECT status, payload_json->'dispatch'->>'dispatcher', "
+            "       payload_json->'dispatch'->>'immediate' "
+            "FROM trading_pattern_recert_log WHERE id = :id"
+        ), {"id": res.log_id}).one()
+        assert row[0] == "dispatched"
+        assert row[1] == "recert_queue_service.immediate"
+        assert row[2] == "true"
+
+    def test_non_fastlane_scheduler_recert_stays_proposed(self, db, monkeypatch):
+        _cleanup(db)
+        _force_mode(monkeypatch, "shadow")
+        _force_immediate_dispatch(
+            monkeypatch,
+            priority=TEST_IMMEDIATE_DISPATCH_PRIORITY,
+        )
+        pat = ScanPattern(
+            name="maintenance recert",
+            rules_json={},
+            active=True,
+            lifecycle_stage="promoted",
+            recert_required=True,
+            recert_reason="missing_oos_recert",
+            backtest_priority=0,
+        )
+        db.add(pat)
+        db.commit()
+
+        res = queue_scheduler(
+            db,
+            scan_pattern_id=pat.id,
+            pattern_name=pat.name,
+            as_of_date=date(2026, 5, 26),
+            reason="alpha_portfolio_gate:missing_oos_recert",
+            severity="red",
+            payload={"origin": "alpha_portfolio_gate"},
+        )
+
+        assert res is not None
+        assert res.status == "proposed"
+        db.refresh(pat)
+        assert pat.backtest_priority == 0
 
 
 class TestBacktestCompletion:
