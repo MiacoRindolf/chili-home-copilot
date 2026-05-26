@@ -530,6 +530,174 @@ def _recent_extrema_trigger_on_stale_quote(
     return None
 
 
+def _broker_range_lookback_minutes() -> int:
+    try:
+        from ...config import settings
+
+        minutes = int(
+            getattr(
+                settings,
+                "chili_broker_position_price_monitor_bar_lookback_minutes",
+                720,
+            )
+            or 720
+        )
+    except Exception:
+        minutes = 720
+    return max(5, min(minutes, 1440))
+
+
+def _load_recent_broker_touch_decisions(db: Session, trade_id: int) -> list[Any]:
+    from ...models.trading import StopDecision as SDModel
+
+    return (
+        db.query(SDModel)
+        .filter(
+            SDModel.trade_id == trade_id,
+            SDModel.trigger.in_(["STOP_HIT", "TARGET_HIT"]),
+        )
+        .order_by(SDModel.as_of_ts.desc())
+        .limit(5)
+        .all()
+    )
+
+
+def _persisted_trigger_on_stale_quote(
+    *,
+    result: StopDecisionResult,
+    trade,
+    market: MarketContext,
+    db: Session | None,
+    entry: float,
+    stop: float | None,
+    target: float | None,
+    is_long: bool,
+    brain: BrainContext,
+) -> StopDecisionResult | None:
+    """Retain a recent audited broker-session touch when extrema fetch is empty."""
+    if db is None or not getattr(trade, "id", None):
+        return None
+
+    def _same_level(a: float | None, b: float | None) -> bool:
+        if a is None or b is None:
+            return True
+        return abs(float(a) - float(b)) <= max(1e-6, abs(float(b)) * 1e-6)
+
+    def _trigger_ts(value: Any, fallback: datetime | None) -> datetime | None:
+        return _to_naive_utc(value) or _to_naive_utc(fallback)
+
+    def _fresh_enough(ts: datetime | None) -> bool:
+        if ts is None:
+            return False
+        age = (_now_naive_utc() - ts).total_seconds()
+        return age <= _broker_range_lookback_minutes() * 60
+
+    def _current_txt() -> str:
+        return f"${market.price:,.4f}" if market.price and market.price > 0 else "unavailable"
+
+    def _decision_source(decision: Any, inputs: dict[str, Any]) -> str:
+        source = inputs.get("source")
+        if source:
+            return str(source)
+        reason = str(getattr(decision, "reason", "") or "")
+        marker = "source="
+        if marker in reason:
+            tail = reason.split(marker, 1)[1]
+            parsed = tail.split(",", 1)[0].split(")", 1)[0].strip()
+            if parsed:
+                return parsed
+        return market.range_source or "broker_range"
+
+    try:
+        decisions = _load_recent_broker_touch_decisions(db, int(trade.id))
+    except Exception:
+        logger.debug(
+            "[stop_engine] prior broker touch lookup failed trade=%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+        return None
+
+    for decision in decisions:
+        trigger = (getattr(decision, "trigger", None) or "").upper()
+        inputs = getattr(decision, "inputs_json", None) or {}
+        trigger_price = _safe_market_float(inputs.get("trigger_price"))
+        trigger_basis = str(inputs.get("trigger_basis") or "broker_bar")
+        trigger_ts = _trigger_ts(inputs.get("trigger_ts"), getattr(decision, "as_of_ts", None))
+        if trigger_price is None or not _fresh_enough(trigger_ts):
+            continue
+
+        persisted_stop = _safe_market_float(inputs.get("stop"))
+        persisted_target = _safe_market_float(inputs.get("target"))
+        source = _decision_source(decision, inputs)
+        decision_id = getattr(decision, "id", None)
+        decision_ts = _to_naive_utc(getattr(decision, "as_of_ts", None))
+        base_inputs = {
+            "price": market.price if market.price and market.price > 0 else None,
+            "entry": entry,
+            "stop": stop,
+            "target": target,
+            "trigger_basis": trigger_basis,
+            "trigger_price": trigger_price,
+            "quote_stale": bool(market.is_stale),
+            "source": source,
+            "persisted_decision_id": decision_id,
+            "brain": brain.summary_dict(),
+        }
+        if trigger_ts:
+            base_inputs["trigger_ts"] = trigger_ts.isoformat()
+        if decision_ts:
+            base_inputs["persisted_decision_ts"] = decision_ts.isoformat()
+
+        if (
+            trigger == "TARGET_HIT"
+            and target
+            and _same_level(persisted_target, target)
+            and ((is_long and trigger_price >= target) or (not is_long and trigger_price <= target))
+        ):
+            pnl_pct = round(
+                ((trigger_price - entry) / entry * 100)
+                if is_long else ((entry - trigger_price) / entry * 100),
+                2,
+            )
+            result.alert_event = "TARGET_HIT"
+            result.recommended_action = "reduce"
+            result.reason = (
+                f"target touched by previously audited broker bar {trigger_basis}=${trigger_price:,.4f}"
+                f" at {trigger_ts.isoformat()}Z (target=${target:,.4f}, current={_current_txt()}, "
+                f"P&L=+{pnl_pct:.1f}%, source={source}, "
+                f"strategy={brain.pattern_name or trade.stop_model}; latest quote stale/unavailable)"
+            )
+            result.inputs = base_inputs
+            return result
+
+        if (
+            trigger == "STOP_HIT"
+            and stop
+            and _same_level(persisted_stop, stop)
+            and ((is_long and trigger_price <= stop) or (not is_long and trigger_price >= stop))
+        ):
+            pnl_pct = round(
+                ((trigger_price - entry) / entry * 100)
+                if is_long else ((entry - trigger_price) / entry * 100),
+                2,
+            )
+            result.state = StopState.TRIGGERED
+            result.alert_event = "STOP_HIT"
+            result.recommended_action = "exit"
+            result.reason = (
+                f"stop touched by previously audited broker bar {trigger_basis}=${trigger_price:,.4f}"
+                f" at {trigger_ts.isoformat()}Z (stop=${stop:,.4f}, current={_current_txt()}, "
+                f"P&L={pnl_pct:+.1f}%, source={source}, "
+                f"strategy={brain.pattern_name or trade.stop_model}, regime={brain.regime}; "
+                "latest quote stale/unavailable)"
+            )
+            result.inputs = base_inputs
+            return result
+
+    return None
+
+
 def evaluate_trade(
     trade,
     market: MarketContext,
@@ -575,6 +743,19 @@ def evaluate_trade(
         )
         if recent_trigger is not None:
             return recent_trigger
+        persisted_trigger = _persisted_trigger_on_stale_quote(
+            result=result,
+            trade=trade,
+            market=market,
+            db=db,
+            entry=float(entry),
+            stop=trade.stop_loss,
+            target=trade.take_profit,
+            is_long=is_long,
+            brain=brain,
+        )
+        if persisted_trigger is not None:
+            return persisted_trigger
 
     if market.price <= 0:
         result.reason = "no valid price"

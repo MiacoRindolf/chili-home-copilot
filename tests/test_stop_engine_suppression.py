@@ -12,7 +12,7 @@ from app.services.trading.stop_engine import (
     _should_suppress_alert,
     evaluate_trade,
 )
-from app.services.trading import market_data
+from app.services.trading import market_data, stop_engine
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -191,6 +191,64 @@ def test_evaluate_trade_keeps_recent_target_touch_when_current_quote_stale():
     assert result.inputs["trigger_basis"] == "recent_high"
     assert result.inputs["quote_stale"] is True
     assert "latest quote stale/unavailable" in result.reason
+
+
+def test_evaluate_trade_keeps_persisted_target_touch_when_extrema_fetch_empty(monkeypatch):
+    trade = SimpleNamespace(
+        id=2065,
+        ticker="ACMR",
+        direction="long",
+        entry_price=67.40,
+        entry_date=datetime.now(timezone.utc),
+        stop_loss=68.6349,
+        take_profit=81.52,
+        stop_model="snapshot",
+        trade_type=None,
+        high_watermark=None,
+        trail_stop=None,
+    )
+    trigger_ts = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=30)
+    decision = SimpleNamespace(
+        id=99411,
+        trigger="TARGET_HIT",
+        as_of_ts=trigger_ts + timedelta(minutes=1),
+        inputs_json={
+            "entry": 67.40,
+            "stop": 68.6349,
+            "target": 81.52,
+            "trigger_basis": "recent_high",
+            "trigger_price": 84.50,
+            "trigger_ts": trigger_ts.isoformat(),
+        },
+        reason="target touched by broker bar recent_high=$84.5000 "
+        "(target=$81.5200, current=$81.0500, P&L=+25.4%, "
+        "source=robinhood_legend_blue_ocean, strategy=Falling Wedge Breakout)",
+    )
+    monkeypatch.setattr(
+        stop_engine,
+        "_load_recent_broker_touch_decisions",
+        lambda _db, _trade_id: [decision],
+    )
+    monkeypatch.setattr(stop_engine, "_broker_range_lookback_minutes", lambda: 720)
+
+    result = evaluate_trade(
+        trade,
+        MarketContext(
+            price=79.0,
+            range_source="robinhood_stale",
+            is_stale=True,
+        ),
+        db=object(),
+        brain=BrainContext(pattern_name="Falling Wedge Breakout"),
+    )
+
+    assert result.alert_event == "TARGET_HIT"
+    assert result.recommended_action == "reduce"
+    assert result.inputs["trigger_basis"] == "recent_high"
+    assert result.inputs["trigger_price"] == 84.50
+    assert result.inputs["persisted_decision_id"] == 99411
+    assert result.inputs["source"] == "robinhood_legend_blue_ocean"
+    assert "previously audited broker bar" in result.reason
 
 
 def test_fetch_market_context_backfills_stale_broker_range_when_quote_empty(monkeypatch):
