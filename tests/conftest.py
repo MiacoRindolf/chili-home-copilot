@@ -196,6 +196,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_autotrader_pdt_soft_warn.py",
     "test_autotrader_position_overrides.py",
     "test_broker_sync.py",
+    "test_crypto_exit_monitor_pattern_exit_now.py",
     "test_emergency_liquidation_no_quote.py",
     "test_market_data_dead_cache_fallback.py",
     "test_monitor_api_execution_state.py",
@@ -206,6 +207,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_pattern_imminent_alerts.py",
     "test_stop_engine_options_auto_exec.py",
     "test_stuck_order_watchdog.py",
+    "test_trade_assign_pattern.py",
     "test_trades_sync.py",
     "test_venue_robinhood_adapter.py",
 )
