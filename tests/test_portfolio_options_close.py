@@ -56,3 +56,68 @@ def test_portfolio_close_option_uses_contract_multiplier_and_preserves_meta() ->
     assert trade.tca_reference_exit_price is None
     db.commit.assert_called_once()
     db.refresh.assert_called_once_with(trade)
+
+
+def test_portfolio_summary_option_uses_premium_mark_and_contract_multiplier() -> None:
+    from app.services.trading.portfolio import get_portfolio_summary
+
+    option_meta = {
+        "breakout_alert": {
+            "asset_type": "options",
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+            },
+        }
+    }
+    trade = SimpleNamespace(
+        id=6602,
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2,
+        status="open",
+        indicator_snapshot=option_meta,
+        broker_source="robinhood",
+        exit_date=None,
+        pnl=None,
+    )
+
+    open_q = MagicMock()
+    open_q.filter.return_value.all.return_value = [trade]
+    closed_q = MagicMock()
+    closed_q.filter.return_value.order_by.return_value.all.return_value = []
+    db = MagicMock()
+    db.query.side_effect = [open_q, closed_q]
+
+    with patch(
+        "app.services.trading.portfolio.fetch_quote",
+        side_effect=AssertionError("option summary must not use underlying quote"),
+    ), patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 1.45, "source": "robinhood_options"},
+    ), patch(
+        "app.services.trading.portfolio.get_trade_stats",
+        return_value={
+            "total_trades": 0,
+            "win_rate": 0,
+            "total_pnl": 0,
+            "best_trade": 0,
+            "worst_trade": 0,
+            "max_drawdown": 0,
+        },
+    ):
+        summary = get_portfolio_summary(db, user_id=1)
+
+    row = summary["positions"][0]
+    assert row["asset_type"] == "options"
+    assert row["contract_multiplier"] == 100.0
+    assert row["current_price"] == 1.45
+    assert row["unrealized_pnl"] == 40.0
+    assert row["unrealized_pct"] == 16.0
+    assert summary["total_invested"] == 250.0
+    assert summary["total_current"] == 290.0
+    assert summary["unrealized_pnl"] == 40.0

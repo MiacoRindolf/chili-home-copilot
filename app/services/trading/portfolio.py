@@ -1084,20 +1084,52 @@ def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
     allocation: dict[str, float] = {}
 
     for t in open_trades:
-        quote = fetch_quote(t.ticker)
-        current_price = quote.get("price", t.entry_price) if quote else t.entry_price
-        unrealized = (current_price - t.entry_price) * t.quantity
+        trade_is_option = _is_option_trade_safe(t)
+        if trade_is_option:
+            try:
+                from .broker_quotes import broker_quote_for_trade
+
+                quote = broker_quote_for_trade(t, purpose="display")
+            except Exception:
+                logger.debug(
+                    "[portfolio] option quote failed for trade_id=%s ticker=%s",
+                    getattr(t, "id", None),
+                    getattr(t, "ticker", None),
+                    exc_info=True,
+                )
+                quote = None
+        else:
+            quote = fetch_quote(t.ticker)
+        raw_price = quote.get("price") if quote else None
+        if raw_price in (None, "") and quote:
+            raw_price = quote.get("last")
+        try:
+            current_price = (
+                float(raw_price)
+                if raw_price not in (None, "")
+                else float(t.entry_price)
+            )
+        except (TypeError, ValueError):
+            current_price = float(t.entry_price)
+        multiplier = 100.0 if trade_is_option else 1.0
+        unrealized = (current_price - t.entry_price) * t.quantity * multiplier
         if t.direction == "short":
             unrealized = -unrealized
-        position_value = current_price * t.quantity
+        position_value = current_price * t.quantity * multiplier
+        invested = t.entry_price * t.quantity * multiplier
+        asset_type = "options" if trade_is_option else (
+            "crypto" if is_crypto(t.ticker) else "stock"
+        )
 
         positions.append({
             "id": t.id, "ticker": t.ticker, "direction": t.direction,
             "entry_price": t.entry_price, "current_price": current_price,
             "quantity": t.quantity, "unrealized_pnl": round(unrealized, 2),
-            "unrealized_pct": round(unrealized / (t.entry_price * t.quantity) * 100, 2) if t.entry_price > 0 else 0,
+            "unrealized_pct": round(unrealized / invested * 100, 2) if invested > 0 else 0,
+            "asset_type": asset_type,
+            "contract_multiplier": multiplier if trade_is_option else None,
         })
-        total_invested += t.entry_price * t.quantity
+        total_invested += invested
         total_current += position_value
         allocation[t.ticker] = allocation.get(t.ticker, 0) + position_value
 
