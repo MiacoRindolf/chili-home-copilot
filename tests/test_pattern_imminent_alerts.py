@@ -1,4 +1,4 @@
-"""Tests for ScanPattern imminent breakout alert helpers."""
+﻿"""Tests for ScanPattern imminent breakout alert helpers."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -570,7 +570,11 @@ def test_gather_imminent_reports_readiness_band_and_lifecycle_diagnostics(
         TEST_CAP_READINESS_TICKER: TEST_CAP_READINESS_RSI,
     }
 
-    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
         score_calls.append(ticker)
         return {
             "price": TEST_SCORE_PRICE,
@@ -874,7 +878,11 @@ def test_gather_imminent_memoizes_ticker_scores_across_patterns(
     )
     score_calls: list[str] = []
 
-    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
         score_calls.append(ticker)
         return {
             "price": TEST_SCORE_PRICE,
@@ -1007,7 +1015,11 @@ def test_gather_imminent_filters_explicit_non_coinbase_crypto(
     )
     score_calls: list[str] = []
 
-    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
         score_calls.append(ticker)
         return {
             "price": TEST_SCORE_PRICE,
@@ -1089,7 +1101,11 @@ def test_gather_imminent_cools_repeated_score_failures(
     )
     score_calls: list[str] = []
 
-    def _failing_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _failing_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
         score_calls.append(ticker)
         return None
 
@@ -1189,7 +1205,11 @@ def test_gather_imminent_honors_score_time_budget(
     )
     score_calls: list[str] = []
 
-    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
         score_calls.append(ticker)
         return {
             "price": TEST_SCORE_PRICE,
@@ -1297,7 +1317,11 @@ def test_gather_imminent_prioritizes_promoted_when_score_budget_tight(
     )
     score_calls: list[str] = []
 
-    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
         score_calls.append(ticker)
         return {
             "price": TEST_SCORE_PRICE,
@@ -1377,8 +1401,14 @@ def test_gather_imminent_reuses_score_resistance_without_extra_fetch(
         "_coinbase_spot_ticker_set",
         lambda: frozenset({TEST_EXECUTABLE_CRYPTO_TICKER}),
     )
+    score_modes: list[tuple[bool, bool]] = []
 
-    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
+        score_modes.append((skip_fundamentals, skip_pattern_engine))
         return {
             "price": TEST_SCORE_PRICE,
             "entry_price": TEST_SCORE_PRICE,
@@ -1402,13 +1432,15 @@ def test_gather_imminent_reuses_score_resistance_without_extra_fetch(
         ),
     )
 
-    candidates, _meta = gather_imminent_candidate_rows(
+    candidates, meta = gather_imminent_candidate_rows(
         db,
         user_id=TEST_USER_ID,
         equity_session_open=False,
         apply_main_dispatch_filters=True,
     )
 
+    assert score_modes == [(True, imminent_mod.IMMINENT_SCORE_SKIP_PATTERN_ENGINE)]
+    assert meta["score_skip_pattern_engine"] is True
     assert [c["ticker"] for c in candidates] == [TEST_EXECUTABLE_CRYPTO_TICKER]
     assert candidates[0]["flat"]["resistance"] == TEST_SCORE_RESISTANCE
 
@@ -1462,7 +1494,11 @@ def test_gather_imminent_caps_tickers_per_pattern(
     )
     score_calls: list[str] = []
 
-    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
         score_calls.append(ticker)
         return {
             "price": TEST_SCORE_PRICE,
@@ -1568,7 +1604,11 @@ def test_gather_imminent_deflects_open_position_before_ticker_cap(
     )
     score_calls: list[str] = []
 
-    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
         score_calls.append(ticker)
         return {
             "price": TEST_SCORE_PRICE,

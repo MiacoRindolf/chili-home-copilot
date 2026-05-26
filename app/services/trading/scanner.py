@@ -773,23 +773,32 @@ _SCORE_CACHE_MAX = 1000
 SWING_RESISTANCE_LOOKBACK_BARS = 20
 
 
-def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
+def _score_ticker(
+    ticker: str,
+    *,
+    skip_fundamentals: bool = False,
+    skip_pattern_engine: bool = False,
+) -> dict[str, Any] | None:
     """Score a single ticker using multi-signal confluence (1-10).
 
     When *skip_fundamentals* is True the expensive ``get_fundamentals()``
     call is skipped — used during bulk scans where the prescreener already
     pre-filtered for fundamental quality.
 
-    Results are cached for 3 minutes keyed on (ticker, skip_fundamentals).
+    Results are cached for 5 minutes keyed on the scoring mode.
     """
-    cache_key = (ticker.upper(), skip_fundamentals)
+    cache_key = (ticker.upper(), skip_fundamentals, skip_pattern_engine)
     now = time.time()
     with _score_cache_lock:
         entry = _score_cache.get(cache_key)
         if entry and now - entry[0] < _SCORE_CACHE_TTL:
             return entry[1]
 
-    result = _score_ticker_impl(ticker, skip_fundamentals=skip_fundamentals)
+    result = _score_ticker_impl(
+        ticker,
+        skip_fundamentals=skip_fundamentals,
+        skip_pattern_engine=skip_pattern_engine,
+    )
 
     _cache_put(_score_cache, _score_cache_lock, cache_key, result, _SCORE_CACHE_TTL, _SCORE_CACHE_MAX)
     return result
@@ -868,7 +877,12 @@ def _enrich_snapshot_cross_tf(
     return snap
 
 
-def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
+def _score_ticker_impl(
+    ticker: str,
+    *,
+    skip_fundamentals: bool = False,
+    skip_pattern_engine: bool = False,
+) -> dict[str, Any] | None:
     """Actual scoring logic (no cache)."""
     try:
         from ta.trend import SMAIndicator
@@ -1066,100 +1080,101 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
             score += get_adaptive_weight("swing_below_major_mas")
             signals.append("Below SMA50 & EMA50 — falling-knife risk")
 
-        # ── Composable Pattern Engine evaluation (composite pattern rules) ──
-        try:
-            from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
-            from ...db import SessionLocal as _SL
-            _pe_db = _SL()
+        if not skip_pattern_engine:
+            # Composable Pattern Engine evaluation (composite pattern rules)
             try:
-                _asset_class = "crypto" if is_crypto_ticker else "stocks"
-                _pe_patterns = get_active_patterns(_pe_db, asset_class=_asset_class)
-                if _pe_patterns:
-                    _sw_resistance = (
-                        swing_resistance
-                        if swing_resistance is not None
-                        else float(
-                            high.rolling(SWING_RESISTANCE_LOOKBACK_BARS).max().iloc[-1]
-                        )
-                    )
-                    _pe_conditions: list[dict[str, Any]] = []
-                    for _p in _pe_patterns:
-                        try:
-                            _rules = json.loads(_p.rules_json or "{}")
-                            _conds = _rules.get("conditions") or []
-                            if isinstance(_conds, dict):
-                                _conds = [_conds]
-                            if isinstance(_conds, list):
-                                _pe_conditions.extend(
-                                    c for c in _conds if isinstance(c, dict) and c
-                                )
-                        except Exception:
-                            continue
-                    _series_last: dict[str, Any] = {}
-                    if _pe_conditions:
-                        try:
-                            from app.services.backtest_service import _compute_series_for_conditions
-
-                            _series = _compute_series_for_conditions(df, _pe_conditions)
-                            for _k, _vals in _series.items():
-                                if isinstance(_vals, list) and _vals:
-                                    _series_last[_k] = _vals[-1]
-                            _res = _series_last.get("resistance")
-                            if _res is not None:
-                                _sw_resistance = float(_res)
-                                if _sw_resistance > 0:
-                                    swing_resistance = _sw_resistance
-                        except Exception:
-                            logger.debug(
-                                "[scanner] _score_ticker_impl: series parity enrich failed",
-                                exc_info=True,
-                            )
-                    _pe_snap = build_indicator_snapshot(
-                        price=price,
-                        indicators={
-                            "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
-                            "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
-                            "adx": float(adx_val) if pd.notna(adx_val) else None,
-                            "bb_pct": (price - float(bb_lower)) / (float(bb_upper) - float(bb_lower))
-                                if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
-                            "rel_vol": vol_latest / vol_avg if vol_avg > 0 else None,
-                            "ema_stack_bullish": ema_stack_bullish,
-                            "ema_stack_bearish": ema_stack_bearish,
-                            "ema_20": float(ema_20) if pd.notna(ema_20) else None,
-                            "ema_50": float(ema_50) if pd.notna(ema_50) else None,
-                            "sma_20": float(sma_20) if pd.notna(sma_20) else None,
-                            "sma_50": float(sma_50) if pd.notna(sma_50) else None,
-                            **_series_last,
-                        },
-                        resistance=_sw_resistance,
-                        extra={
-                            "stoch_k": float(stoch_k) if pd.notna(stoch_k) else None,
-                            "stochastic_k": float(stoch_k) if pd.notna(stoch_k) else None,
-                            "macd_histogram": float(macd_hist) if pd.notna(macd_hist) else None,
-                        },
-                    )
-                    _pe_snap = _enrich_snapshot_cross_tf(_pe_snap, _pe_patterns, ticker, df)
-                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_regime_label)
-                    for m in _pe_matches:
-                        if score >= m.get("min_base_score", 0):
-                            score += m["score_boost"]
-                            signals.append(f"Pattern: {m['name']} (+{m['score_boost']:.1f})")
-            finally:
-                # FIX 46 (2026-04-29): explicit rollback to end the implicit
-                # read-only transaction. SQLAlchemy's session.close() returns
-                # the connection to the pool but doesn't ROLLBACK by default —
-                # leaving it as 'idle in transaction' in pg_stat_activity.
-                # Found via FIX 45b's per-app DB tagging: 62 of 69 sessions
-                # on chili-scheduler-cron were stuck on SELECT scan_patterns.*.
-                # rollback() ends the txn cleanly so the connection state is
-                # 'idle' (clean) when returned to the pool.
+                from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
+                from ...db import SessionLocal as _SL
+                _pe_db = _SL()
                 try:
-                    _pe_db.rollback()
-                except Exception:
-                    pass
-                _pe_db.close()
-        except Exception:
-            logger.debug("[scanner] _score_ticker_impl: pattern engine scoring failed (non-fatal)", exc_info=True)
+                    _asset_class = "crypto" if is_crypto_ticker else "stocks"
+                    _pe_patterns = get_active_patterns(_pe_db, asset_class=_asset_class)
+                    if _pe_patterns:
+                        _sw_resistance = (
+                            swing_resistance
+                            if swing_resistance is not None
+                            else float(
+                                high.rolling(SWING_RESISTANCE_LOOKBACK_BARS).max().iloc[-1]
+                            )
+                        )
+                        _pe_conditions: list[dict[str, Any]] = []
+                        for _p in _pe_patterns:
+                            try:
+                                _rules = json.loads(_p.rules_json or "{}")
+                                _conds = _rules.get("conditions") or []
+                                if isinstance(_conds, dict):
+                                    _conds = [_conds]
+                                if isinstance(_conds, list):
+                                    _pe_conditions.extend(
+                                        c for c in _conds if isinstance(c, dict) and c
+                                    )
+                            except Exception:
+                                continue
+                        _series_last: dict[str, Any] = {}
+                        if _pe_conditions:
+                            try:
+                                from app.services.backtest_service import _compute_series_for_conditions
+
+                                _series = _compute_series_for_conditions(df, _pe_conditions)
+                                for _k, _vals in _series.items():
+                                    if isinstance(_vals, list) and _vals:
+                                        _series_last[_k] = _vals[-1]
+                                _res = _series_last.get("resistance")
+                                if _res is not None:
+                                    _sw_resistance = float(_res)
+                                    if _sw_resistance > 0:
+                                        swing_resistance = _sw_resistance
+                            except Exception:
+                                logger.debug(
+                                    "[scanner] _score_ticker_impl: series parity enrich failed",
+                                    exc_info=True,
+                                )
+                        _pe_snap = build_indicator_snapshot(
+                            price=price,
+                            indicators={
+                                "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
+                                "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
+                                "adx": float(adx_val) if pd.notna(adx_val) else None,
+                                "bb_pct": (price - float(bb_lower)) / (float(bb_upper) - float(bb_lower))
+                                    if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
+                                "rel_vol": vol_latest / vol_avg if vol_avg > 0 else None,
+                                "ema_stack_bullish": ema_stack_bullish,
+                                "ema_stack_bearish": ema_stack_bearish,
+                                "ema_20": float(ema_20) if pd.notna(ema_20) else None,
+                                "ema_50": float(ema_50) if pd.notna(ema_50) else None,
+                                "sma_20": float(sma_20) if pd.notna(sma_20) else None,
+                                "sma_50": float(sma_50) if pd.notna(sma_50) else None,
+                                **_series_last,
+                            },
+                            resistance=_sw_resistance,
+                            extra={
+                                "stoch_k": float(stoch_k) if pd.notna(stoch_k) else None,
+                                "stochastic_k": float(stoch_k) if pd.notna(stoch_k) else None,
+                                "macd_histogram": float(macd_hist) if pd.notna(macd_hist) else None,
+                            },
+                        )
+                        _pe_snap = _enrich_snapshot_cross_tf(_pe_snap, _pe_patterns, ticker, df)
+                        _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_regime_label)
+                        for m in _pe_matches:
+                            if score >= m.get("min_base_score", 0):
+                                score += m["score_boost"]
+                                signals.append(f"Pattern: {m['name']} (+{m['score_boost']:.1f})")
+                finally:
+                    # FIX 46 (2026-04-29): explicit rollback to end the implicit
+                    # read-only transaction. SQLAlchemy's session.close() returns
+                    # the connection to the pool but doesn't ROLLBACK by default —
+                    # leaving it as 'idle in transaction' in pg_stat_activity.
+                    # Found via FIX 45b's per-app DB tagging: 62 of 69 sessions
+                    # on chili-scheduler-cron were stuck on SELECT scan_patterns.*.
+                    # rollback() ends the txn cleanly so the connection state is
+                    # 'idle' (clean) when returned to the pool.
+                    try:
+                        _pe_db.rollback()
+                    except Exception:
+                        pass
+                    _pe_db.close()
+            except Exception:
+                logger.debug("[scanner] _score_ticker_impl: pattern engine scoring failed (non-fatal)", exc_info=True)
 
         score = max(1.0, min(10.0, score))
 
@@ -2477,52 +2492,53 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         if macd_negative and not breakout_confirmed:
             score = min(score, get_adaptive_weight("crypto_bo_macd_neg_cap"))
 
-        # ── Composable Pattern Engine evaluation ──
-        try:
-            from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
-            from ...db import SessionLocal as _SL
-            _pe_db = _SL()
+        if not skip_pattern_engine:
+            # Composable Pattern Engine evaluation (composite pattern rules)
             try:
-                _pe_patterns = get_active_patterns(_pe_db, asset_class="crypto")
-                if _pe_patterns:
-                    _pe_snap = build_indicator_snapshot(
-                        price=price,
-                        indicators={
-                            "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
-                            "ema_20": float(ema_20) if pd.notna(ema_20) else None,
-                            "ema_50": float(ema_50) if pd.notna(ema_50) else None,
-                            "ema_100": float(ema_100) if pd.notna(ema_100) else None,
-                            "bb_squeeze": bb_squeeze,
-                            "adx": float(adx_val) if pd.notna(adx_val) else None,
-                            "rel_vol": rvol,
-                            "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
-                            "narrow_range": _detect_narrow_range(high, low),
-                            "vcp_count": _detect_vcp(high, low, volume, lookback=20),
-                        },
-                        resistance=resistance,
-                        retest_info=retest_info,
-                    )
-                    _cbo_regime = None
+                from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
+                from ...db import SessionLocal as _SL
+                _pe_db = _SL()
+                try:
+                    _pe_patterns = get_active_patterns(_pe_db, asset_class="crypto")
+                    if _pe_patterns:
+                        _pe_snap = build_indicator_snapshot(
+                            price=price,
+                            indicators={
+                                "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
+                                "ema_20": float(ema_20) if pd.notna(ema_20) else None,
+                                "ema_50": float(ema_50) if pd.notna(ema_50) else None,
+                                "ema_100": float(ema_100) if pd.notna(ema_100) else None,
+                                "bb_squeeze": bb_squeeze,
+                                "adx": float(adx_val) if pd.notna(adx_val) else None,
+                                "rel_vol": rvol,
+                                "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
+                                "narrow_range": _detect_narrow_range(high, low),
+                                "vcp_count": _detect_vcp(high, low, volume, lookback=20),
+                            },
+                            resistance=resistance,
+                            retest_info=retest_info,
+                        )
+                        _cbo_regime = None
+                        try:
+                            _cbo_regime = get_market_regime().get("regime")
+                        except Exception:
+                            pass
+                        _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_cbo_regime)
+                        for m in _pe_matches:
+                            if score >= m.get("min_base_score", 0):
+                                score += m["score_boost"]
+                                signals.append(f"Pattern match: {m['name']} (+{m['score_boost']:.1f})")
+                finally:
+                    # FIX 46 (2026-04-29): see _score_ticker_impl. Explicit rollback
+                    # ends the implicit read-only transaction so the connection
+                    # returns to the pool 'idle' instead of 'idle in transaction'.
                     try:
-                        _cbo_regime = get_market_regime().get("regime")
+                        _pe_db.rollback()
                     except Exception:
                         pass
-                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_cbo_regime)
-                    for m in _pe_matches:
-                        if score >= m.get("min_base_score", 0):
-                            score += m["score_boost"]
-                            signals.append(f"Pattern match: {m['name']} (+{m['score_boost']:.1f})")
-            finally:
-                # FIX 46 (2026-04-29): see _score_ticker_impl. Explicit rollback
-                # ends the implicit read-only transaction so the connection
-                # returns to the pool 'idle' instead of 'idle in transaction'.
-                try:
-                    _pe_db.rollback()
-                except Exception:
-                    pass
-                _pe_db.close()
-        except Exception:
-            logger.debug("[scanner] _score_crypto_breakout: optional signal component failed", exc_info=True)
+                    _pe_db.close()
+            except Exception:
+                logger.debug("[scanner] _score_crypto_breakout: optional signal component failed", exc_info=True)
 
         score = max(1.0, min(10.0, score))
 
@@ -3259,53 +3275,54 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 score += get_adaptive_weight("bo_news_bearish_penalty")
                 signals.append("Recent news sentiment is bearish — breakout may face headwinds")
 
-        # ── Composable Pattern Engine evaluation ──
-        try:
-            from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
-            from ...models.trading import ScanPattern as _SP
-            from ...db import SessionLocal as _SL
-            _pe_db = _SL()
+        if not skip_pattern_engine:
+            # Composable Pattern Engine evaluation (composite pattern rules)
             try:
-                _pe_patterns = get_active_patterns(_pe_db, asset_class="stocks")
-                if _pe_patterns:
-                    _pe_snap = build_indicator_snapshot(
-                        price=price,
-                        indicators={
-                            "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
-                            "ema_20": float(ema_20) if pd.notna(ema_20) else None,
-                            "ema_50": float(ema_50) if pd.notna(ema_50) else None,
-                            "ema_100": float(ema_100) if pd.notna(ema_100) else None,
-                            "bb_squeeze": is_squeeze,
-                            "adx": float(adx_val) if pd.notna(adx_val) else None,
-                            "rel_vol": rel_vol,
-                            "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
-                            "narrow_range": _detect_narrow_range(high, low),
-                            "vcp_count": _detect_vcp(high, low, volume, lookback=20),
-                        },
-                        resistance=resistance,
-                        retest_info=retest_info,
-                    )
-                    _bo_regime = None
+                from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
+                from ...models.trading import ScanPattern as _SP
+                from ...db import SessionLocal as _SL
+                _pe_db = _SL()
+                try:
+                    _pe_patterns = get_active_patterns(_pe_db, asset_class="stocks")
+                    if _pe_patterns:
+                        _pe_snap = build_indicator_snapshot(
+                            price=price,
+                            indicators={
+                                "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
+                                "ema_20": float(ema_20) if pd.notna(ema_20) else None,
+                                "ema_50": float(ema_50) if pd.notna(ema_50) else None,
+                                "ema_100": float(ema_100) if pd.notna(ema_100) else None,
+                                "bb_squeeze": is_squeeze,
+                                "adx": float(adx_val) if pd.notna(adx_val) else None,
+                                "rel_vol": rel_vol,
+                                "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
+                                "narrow_range": _detect_narrow_range(high, low),
+                                "vcp_count": _detect_vcp(high, low, volume, lookback=20),
+                            },
+                            resistance=resistance,
+                            retest_info=retest_info,
+                        )
+                        _bo_regime = None
+                        try:
+                            _bo_regime = get_market_regime().get("regime")
+                        except Exception:
+                            pass
+                        _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_bo_regime)
+                        for m in _pe_matches:
+                            if score >= m.get("min_base_score", 0):
+                                score += m["score_boost"]
+                                signals.append(f"Pattern match: {m['name']} (+{m['score_boost']:.1f})")
+                finally:
+                    # FIX 46 (2026-04-29): see _score_ticker_impl. Explicit rollback
+                    # ends the implicit read-only transaction so the connection
+                    # returns to the pool 'idle' instead of 'idle in transaction'.
                     try:
-                        _bo_regime = get_market_regime().get("regime")
+                        _pe_db.rollback()
                     except Exception:
                         pass
-                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_bo_regime)
-                    for m in _pe_matches:
-                        if score >= m.get("min_base_score", 0):
-                            score += m["score_boost"]
-                            signals.append(f"Pattern match: {m['name']} (+{m['score_boost']:.1f})")
-            finally:
-                # FIX 46 (2026-04-29): see _score_ticker_impl. Explicit rollback
-                # ends the implicit read-only transaction so the connection
-                # returns to the pool 'idle' instead of 'idle in transaction'.
-                try:
-                    _pe_db.rollback()
-                except Exception:
-                    pass
-                _pe_db.close()
-        except Exception:
-            logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
+                    _pe_db.close()
+            except Exception:
+                logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
 
         score = max(1.0, min(10.0, score))
         _bo_ready = get_adaptive_weight("bo_signal_ready")

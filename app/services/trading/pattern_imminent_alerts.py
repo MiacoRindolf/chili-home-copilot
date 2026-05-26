@@ -89,6 +89,7 @@ READINESS_SKIP_BELOW_MIN = "readiness_below_min"
 READINESS_SKIP_AT_OR_ABOVE_CAP = "readiness_at_or_above_cap"
 STANDARD_SIGNAL_LANE = "standard"
 SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
+IMMINENT_SCORE_SKIP_PATTERN_ENGINE = True
 PATTERN_ID_ROTATION_FALLBACK = 0
 MIN_POSITIVE_CONFIG_INT = 1
 FRACTION_UPPER_BOUND = 1.0
@@ -1218,7 +1219,11 @@ def gather_imminent_candidate_rows(
             score_cache[cache_key] = None
             return None
         score_cache_misses += 1
-        score = _score_ticker(raw_ticker, skip_fundamentals=True)
+        score = _score_ticker(
+            raw_ticker,
+            skip_fundamentals=True,
+            skip_pattern_engine=IMMINENT_SCORE_SKIP_PATTERN_ENGINE,
+        )
         score_cache[cache_key] = score or None
         if score:
             _record_score_success(cache_key)
@@ -1505,6 +1510,7 @@ def gather_imminent_candidate_rows(
         "score_cache_size": len(score_cache),
         "score_cache_hits": score_cache_hits,
         "score_cache_misses": score_cache_misses,
+        "score_skip_pattern_engine": IMMINENT_SCORE_SKIP_PATTERN_ENGINE,
         "score_failure_cooldown_cache_size": len(_SCORE_FAILURE_CACHE),
         "score_time_budget_seconds": score_time_budget_s,
         "score_time_budget_hit": score_time_budget_hit,
