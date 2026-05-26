@@ -9,6 +9,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE = 0
 FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
 REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = "ticker_regime,cross_asset_regime"
+AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
+AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
+AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
+AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_CYCLES = 4
+AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
+    * AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_CYCLES
+)
+AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
+)
+AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 24
+)
+AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK = 2
 AUTOTRADER_SYNERGY_DEFAULT_FRACTION = 0.25
 AUTOTRADER_SYNERGY_DEFAULT_MAX_NOTIONAL_USD = 50.0
 AUTOTRADER_SYNERGY_DEFAULT_MAX_TOTAL_ADD_FRACTION = 0.75
@@ -2314,6 +2329,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PER_TRADE_RISK_PCT"),
         description="Percent of effective account equity allocated before adaptive sizing overlays.",
     )
+    chili_autotrader_candidate_batch_size: int = Field(
+        default=AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+        ge=1,
+        le=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_CANDIDATE_BATCH_SIZE"),
+        description="Maximum AutoTrader alerts processed in one tick.",
+    )
     chili_autotrader_synergy_scale_notional_usd: float = Field(
         default=0.0,
         ge=0.0,
@@ -2358,6 +2380,35 @@ class Settings(BaseSettings):
     chili_autotrader_synergy_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_ENABLED"),
+    )
+    chili_autotrader_synergy_retry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_RETRY_ENABLED"),
+        description=(
+            "Allow spare AutoTrader batch slots to re-evaluate recent "
+            "synergy_not_applicable alerts after scale-in policy changes."
+        ),
+    )
+    chili_autotrader_synergy_retry_lookback_minutes: int = Field(
+        default=AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES,
+        ge=AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
+        le=AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SYNERGY_RETRY_LOOKBACK_MINUTES"
+        ),
+        description=(
+            "Lookback window for one-shot synergy retry candidates, expressed "
+            "as a named multiple of the imminent scanner cadence."
+        ),
+    )
+    chili_autotrader_synergy_retry_max_per_tick: int = Field(
+        default=AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK,
+        ge=0,
+        le=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SYNERGY_RETRY_MAX_PER_TICK"
+        ),
+        description="Maximum synergy retry candidates allowed to fill spare tick slots.",
     )
     chili_autotrader_daily_loss_cap_usd: float = Field(
         default=150.0,

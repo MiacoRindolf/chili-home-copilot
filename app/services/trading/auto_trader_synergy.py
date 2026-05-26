@@ -201,6 +201,13 @@ def _scale_in_pattern_ids_from_legacy_alerts(db: Session, trade: Trade) -> set[i
     return out
 
 
+def used_scale_in_pattern_ids(db: Session, trade: Trade) -> set[int]:
+    return (
+        scale_in_pattern_ids_from_trade(trade)
+        | _scale_in_pattern_ids_from_legacy_alerts(db, trade)
+    )
+
+
 def _resolve_scale_in_notional(existing_notional: float, settings: Any) -> float:
     explicit = _settings_float(
         settings,
@@ -258,10 +265,7 @@ def maybe_scale_in(
         return None
     if int(t.scan_pattern_id or 0) == confirming_pattern_id:
         return None
-    used_confirming_pattern_ids = (
-        scale_in_pattern_ids_from_trade(t)
-        | _scale_in_pattern_ids_from_legacy_alerts(db, t)
-    )
+    used_confirming_pattern_ids = used_scale_in_pattern_ids(db, t)
     if confirming_pattern_id in used_confirming_pattern_ids:
         return None
     max_scale_ins = resolve_max_scale_ins_per_trade(db, settings)

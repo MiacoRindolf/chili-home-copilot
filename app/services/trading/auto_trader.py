@@ -11,10 +11,16 @@ from sqlalchemy import or_, text
 from sqlalchemy.orm import Session, aliased
 
 from ...config import (
+    AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+    AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES,
+    AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK,
+    AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES,
+    AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
     settings,
 )
 from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
@@ -41,6 +47,7 @@ from .auto_trader_synergy import (
     find_open_autotrader_paper,
     find_open_autotrader_trade,
     maybe_scale_in,
+    used_scale_in_pattern_ids,
 )
 from .coinbase_maker_pricing import plan_post_only_buy_limit
 from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
@@ -62,9 +69,12 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "skipped_non_positive_expected_edge",
     "skipped_synergy_disabled_second_signal",
     "skipped_synergy_not_applicable",
+    "skipped_synergy_retry_not_applicable",
 })
 
 AUTOTRADER_VERSION = "v1"
+SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
+SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
 PROBATION_RECERT_ALLOWANCE = "probation"
 PILOT_BOOTSTRAP_RECERT_ALLOWANCE = "pilot_bootstrap"
 PROBATION_TIMEZONE = "America/New_York"
@@ -232,6 +242,157 @@ def _maybe_log_candidate_pool_zero(db: Session, *, uid: int) -> dict[str, Any] |
         diag.get("lifecycle_counts") or {},
     )
     return diag
+
+
+def _settings_int_clamped(name: str, default: int, *, lower: int, upper: int) -> int:
+    raw = getattr(settings, name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(int(lower), min(int(upper), value))
+
+
+def _autotrader_candidate_batch_size() -> int:
+    return _settings_int_clamped(
+        "chili_autotrader_candidate_batch_size",
+        AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+        lower=1,
+        upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    )
+
+
+def _synergy_retry_limits(batch_slots_available: int) -> tuple[bool, int, int]:
+    enabled = bool(getattr(settings, "chili_autotrader_synergy_retry_enabled", True))
+    if not enabled or batch_slots_available <= 0:
+        return False, 0, 0
+    lookback_minutes = _settings_int_clamped(
+        "chili_autotrader_synergy_retry_lookback_minutes",
+        AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES,
+        lower=AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
+        upper=AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES,
+    )
+    max_per_tick = _settings_int_clamped(
+        "chili_autotrader_synergy_retry_max_per_tick",
+        AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK,
+        lower=0,
+        upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    )
+    limit = min(int(batch_slots_available), int(max_per_tick))
+    return limit > 0, lookback_minutes, limit
+
+
+def _synergy_retry_candidates(
+    db: Session,
+    *,
+    uid: int,
+    limit: int,
+) -> tuple[int, list[BreakoutAlert]]:
+    enabled, lookback_minutes, capped_limit = _synergy_retry_limits(limit)
+    if not enabled:
+        return 0, []
+
+    rows = db.execute(
+        text(
+            """
+            WITH latest AS (
+                SELECT DISTINCT ON (ar.breakout_alert_id)
+                       ar.breakout_alert_id,
+                       ar.id AS source_run_id,
+                       ar.reason,
+                       ar.created_at
+                  FROM trading_autotrader_runs ar
+                  JOIN trading_breakout_alerts ba
+                    ON ba.id = ar.breakout_alert_id
+                 WHERE ar.created_at >= NOW() - (:lookback_minutes * INTERVAL '1 minute')
+                   AND ba.alert_tier = 'pattern_imminent'
+                   AND (ba.user_id = :uid OR ba.user_id IS NULL)
+                 ORDER BY ar.breakout_alert_id, ar.created_at DESC, ar.id DESC
+            ),
+            eligible AS (
+                SELECT ba.id AS alert_id,
+                       latest.source_run_id,
+                       latest.created_at,
+                       COUNT(*) OVER () AS retry_pool
+                  FROM latest
+                  JOIN trading_breakout_alerts ba
+                    ON ba.id = latest.breakout_alert_id
+                  JOIN LATERAL (
+                        SELECT t.id, t.scan_pattern_id, t.entry_date
+                          FROM trading_trades t
+                         WHERE UPPER(t.ticker) = UPPER(ba.ticker)
+                           AND t.status = 'open'
+                           AND t.auto_trader_version = :autotrader_version
+                           AND (t.user_id = :uid OR t.user_id IS NULL)
+                         ORDER BY t.entry_date DESC NULLS LAST, t.id DESC
+                         LIMIT 1
+                  ) open_trade ON TRUE
+                 WHERE latest.reason = :source_reason
+                   AND COALESCE(open_trade.scan_pattern_id, 0)
+                       <> COALESCE(ba.scan_pattern_id, 0)
+                 ORDER BY latest.created_at DESC, ba.id DESC
+                 LIMIT :query_limit
+            )
+            SELECT alert_id, source_run_id, retry_pool
+              FROM eligible
+            """
+        ),
+        {
+            "uid": int(uid),
+            "lookback_minutes": int(lookback_minutes),
+            "query_limit": int(AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE),
+            "source_reason": SYNERGY_RETRY_SOURCE_REASON,
+            "autotrader_version": AUTOTRADER_VERSION,
+        },
+    ).mappings().all()
+    if not rows:
+        return 0, []
+
+    retry_pool = int(rows[0].get("retry_pool") or len(rows))
+    ordered_ids = [int(row["alert_id"]) for row in rows]
+    source_run_by_alert = {
+        int(row["alert_id"]): int(row["source_run_id"]) for row in rows
+    }
+    alerts = (
+        db.query(BreakoutAlert)
+        .filter(BreakoutAlert.id.in_(ordered_ids))
+        .all()
+    )
+    by_id = {int(alert.id): alert for alert in alerts}
+    out: list[BreakoutAlert] = []
+    for alert_id in ordered_ids:
+        alert = by_id.get(alert_id)
+        if alert is None:
+            continue
+        open_trade = find_open_autotrader_trade(
+            db,
+            user_id=uid,
+            ticker=alert.ticker,
+        )
+        if open_trade is not None:
+            try:
+                if int(alert.scan_pattern_id or 0) in used_scale_in_pattern_ids(
+                    db, open_trade,
+                ):
+                    continue
+            except Exception:
+                logger.debug(
+                    "[autotrader] synergy retry used-pattern filter failed "
+                    "alert_id=%s",
+                    alert_id,
+                    exc_info=True,
+                )
+        setattr(alert, "_chili_synergy_retry", True)
+        setattr(
+            alert,
+            "_chili_synergy_retry_source_run_id",
+            source_run_by_alert.get(alert_id),
+        )
+        setattr(alert, "_chili_synergy_retry_lookback_minutes", lookback_minutes)
+        out.append(alert)
+        if len(out) >= capped_limit:
+            break
+    return retry_pool, out
 
 # Namespace byte for advisory locks so we can't collide with other
 # subsystems that also use pg_advisory_lock on alert-shaped ints. The
@@ -667,6 +828,7 @@ def _qualified_reject_shadow_decision(reason: str | None) -> str | None:
     if r in {
         "synergy_disabled_second_signal",
         "synergy_not_applicable",
+        SYNERGY_RETRY_EXHAUSTED_REASON,
     }:
         return f"skipped_{r}"
     if r in {
@@ -1162,16 +1324,31 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             ar.id.is_(None),
         )
     )
-    candidate_pool = int(candidate_base.count())
+    batch_limit = _autotrader_candidate_batch_size()
+    fresh_candidate_pool = int(candidate_base.count())
     candidates = (
-        candidate_base.order_by(BreakoutAlert.id.asc()).limit(5).all()
+        candidate_base.order_by(BreakoutAlert.id.asc()).limit(batch_limit).all()
     )
+    retry_pool = 0
+    retry_candidates: list[BreakoutAlert] = []
+    spare_slots = batch_limit - len(candidates)
+    if spare_slots > 0:
+        retry_pool, retry_candidates = _synergy_retry_candidates(
+            db,
+            uid=uid,
+            limit=spare_slots,
+        )
+        candidates.extend(retry_candidates)
+    candidate_pool = fresh_candidate_pool + retry_pool
 
     out: dict[str, Any] = {
         "processed": 0,
         "placed": 0,
         "scaled_in": 0,
         "skipped": 0,
+        "fresh_candidate_pool": fresh_candidate_pool,
+        "synergy_retry_pool": retry_pool,
+        "synergy_retry_batch": len(retry_candidates),
         "tick_last_kind": None,
         "tick_last_reason": None,
         "tick_last_alert_id": None,
@@ -1196,7 +1373,11 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             # Re-check race (another worker may have inserted between the
             # outer candidate query and our claim).
             db.expire_all()
-            if breakout_alert_already_processed(db, int(alert.id)):
+            is_synergy_retry = bool(getattr(alert, "_chili_synergy_retry", False))
+            if (
+                breakout_alert_already_processed(db, int(alert.id))
+                and not is_synergy_retry
+            ):
                 _autotrader_tick_note(
                     out,
                     kind="skipped",
@@ -1224,7 +1405,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
 
     logger.info(
         "[autotrader] tick uid=%s candidate_pool=%d batch=%d processed=%d placed=%d "
-        "scaled_in=%d skipped=%d last_kind=%s last_reason=%s last_alert_id=%s last_ticker=%s",
+        "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
+        "synergy_retry_batch=%d last_kind=%s last_reason=%s last_alert_id=%s last_ticker=%s",
         uid,
         candidate_pool,
         len(candidates),
@@ -1232,6 +1414,9 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out["placed"],
         out["scaled_in"],
         out["skipped"],
+        fresh_candidate_pool,
+        retry_pool,
+        len(retry_candidates),
         out.get("tick_last_kind") or "-",
         out.get("tick_last_reason") or "-",
         out.get("tick_last_alert_id") if out.get("tick_last_alert_id") is not None else "-",
@@ -1861,27 +2046,54 @@ def _process_one_alert(
             )
             return
         if scale_plan is None:
+            is_synergy_retry = bool(getattr(alert, "_chili_synergy_retry", False))
             reason = (
                 "synergy_disabled_second_signal"
                 if not getattr(settings, "chili_autotrader_synergy_enabled", False)
-                else "synergy_not_applicable"
+                else (
+                    SYNERGY_RETRY_EXHAUSTED_REASON
+                    if is_synergy_retry
+                    else SYNERGY_RETRY_SOURCE_REASON
+                )
             )
-            _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason)
+            synergy_snap = {
+                "existing_trade_id": getattr(existing_trade, "id", None),
+                "existing_trade_scan_pattern_id": getattr(
+                    existing_trade, "scan_pattern_id", None,
+                ),
+                "existing_trade_entry_date": (
+                    existing_trade.entry_date.isoformat()
+                    if getattr(existing_trade, "entry_date", None) else None
+                ),
+                "existing_trade_scale_in_count": int(
+                    getattr(existing_trade, "scale_in_count", 0) or 0
+                ),
+            }
+            if is_synergy_retry:
+                synergy_snap["synergy_retry"] = True
+                synergy_snap["synergy_retry_source_reason"] = (
+                    SYNERGY_RETRY_SOURCE_REASON
+                )
+                synergy_snap["synergy_retry_source_run_id"] = getattr(
+                    alert, "_chili_synergy_retry_source_run_id", None,
+                )
+                synergy_snap["synergy_retry_lookback_minutes"] = getattr(
+                    alert, "_chili_synergy_retry_lookback_minutes", None,
+                )
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="skipped",
+                reason=reason,
+                rule_snapshot=synergy_snap,
+            )
             _maybe_open_reject_paper_shadow(
                 db,
                 uid=uid,
                 alert=alert,
                 px=px,
-                snap={
-                    "existing_trade_id": getattr(existing_trade, "id", None),
-                    "existing_trade_scan_pattern_id": getattr(
-                        existing_trade, "scan_pattern_id", None,
-                    ),
-                    "existing_trade_entry_date": (
-                        existing_trade.entry_date.isoformat()
-                        if getattr(existing_trade, "entry_date", None) else None
-                    ),
-                },
+                snap=synergy_snap,
                 reason=reason,
                 existing_qty=getattr(existing_trade, "quantity", None),
             )
