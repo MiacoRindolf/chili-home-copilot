@@ -18,8 +18,9 @@ Three orthogonal probes AND'd together for the 200/503 verdict:
 
 * ``executor_learning_freshness`` - when fresh alerts are landing,
   is the paper/live executor still writing decisions to
-  ``fast_executions``? This catches the dangerous state where scanner
-  learning looks alive upstream, but paper-trade learning has stalled.
+  ``fast_executions`` or maker-attempt decisions? This catches the
+  dangerous state where scanner learning looks alive upstream, but
+  paper-trade learning has stalled.
 
 Boot grace (30s after start) returns 200 unconditionally so the
 snapshot replay has time to populate the in-memory state.
@@ -73,8 +74,12 @@ HEALTH_REASON_EXECUTOR_LEARNING_STALE = "executor_learning_stale"
 FAST_LEARNING_FRESHNESS_KEY = "fast_learning_freshness"
 LEARNING_LATEST_ALERT_AT_KEY = "latest_alert_at"
 LEARNING_LATEST_EXECUTION_AT_KEY = "latest_execution_at"
+LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY = "latest_maker_attempt_at"
+LEARNING_LATEST_MAKER_FILL_AT_KEY = "latest_maker_fill_at"
+LEARNING_LATEST_DECISION_AT_KEY = "latest_learning_decision_at"
 LEARNING_LATEST_EXIT_AT_KEY = "latest_exit_at"
 LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY = "alert_to_execution_lag_s"
+LEARNING_ALERT_TO_DECISION_LAG_S_KEY = "alert_to_learning_decision_lag_s"
 
 # The executor polls fresh alerts once per second. A two-minute lag is
 # deliberately loose: it avoids clock-skew / deploy flaps while still
@@ -332,16 +337,35 @@ class HealthzServer:
 
         latest_alert_at = freshness.get(LEARNING_LATEST_ALERT_AT_KEY)
         latest_execution_at = freshness.get(LEARNING_LATEST_EXECUTION_AT_KEY)
+        latest_maker_attempt_at = freshness.get(
+            LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY
+        )
+        latest_maker_fill_at = freshness.get(LEARNING_LATEST_MAKER_FILL_AT_KEY)
+        latest_decision_at = (
+            freshness.get(LEARNING_LATEST_DECISION_AT_KEY)
+            or latest_execution_at
+        )
         latest_exit_at = freshness.get(LEARNING_LATEST_EXIT_AT_KEY)
         lag_s = self._coerce_float(
+            freshness.get(LEARNING_ALERT_TO_DECISION_LAG_S_KEY)
+        )
+        execution_lag_s = self._coerce_float(
             freshness.get(LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY)
         )
+        if lag_s is None:
+            lag_s = execution_lag_s
 
         detail = {
             LEARNING_LATEST_ALERT_AT_KEY: latest_alert_at,
             LEARNING_LATEST_EXECUTION_AT_KEY: latest_execution_at,
+            LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY: latest_maker_attempt_at,
+            LEARNING_LATEST_MAKER_FILL_AT_KEY: latest_maker_fill_at,
+            LEARNING_LATEST_DECISION_AT_KEY: latest_decision_at,
             LEARNING_LATEST_EXIT_AT_KEY: latest_exit_at,
             LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
+                round(execution_lag_s, 2) if execution_lag_s is not None else None
+            ),
+            LEARNING_ALERT_TO_DECISION_LAG_S_KEY: (
                 round(lag_s, 2) if lag_s is not None else None
             ),
         }
@@ -376,33 +400,33 @@ class HealthzServer:
                 "executor_learning_phase": "alert_stream_quiet",
             }
 
-        execution_age_s = self._age_seconds(latest_execution_at)
-        if lag_s is None and execution_age_s is not None:
-            lag_s = max(0.0, execution_age_s - alert_age_s)
-            detail[LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY] = round(lag_s, 2)
-        detail["latest_execution_age_s"] = (
-            round(execution_age_s, 2) if execution_age_s is not None else None
+        decision_age_s = self._age_seconds(latest_decision_at)
+        if lag_s is None and decision_age_s is not None:
+            lag_s = max(0.0, decision_age_s - alert_age_s)
+            detail[LEARNING_ALERT_TO_DECISION_LAG_S_KEY] = round(lag_s, 2)
+        detail["latest_learning_decision_age_s"] = (
+            round(decision_age_s, 2) if decision_age_s is not None else None
         )
 
-        if not latest_execution_at:
+        if not latest_decision_at:
             return False, {
                 **detail,
-                "executor_learning_phase": "no_execution_decisions",
+                "executor_learning_phase": "no_learning_decisions",
             }
-        if execution_age_s is None:
+        if decision_age_s is None:
             return False, {
                 **detail,
-                "executor_learning_phase": "unparseable_execution_timestamp",
+                "executor_learning_phase": "unparseable_decision_timestamp",
             }
         if lag_s is None:
             return False, {
                 **detail,
-                "executor_learning_phase": "unmeasurable_execution_lag",
+                "executor_learning_phase": "unmeasurable_decision_lag",
             }
         if lag_s > EXECUTOR_LEARNING_MAX_LAG_S:
             return False, {
                 **detail,
-                "executor_learning_phase": "stale_execution_decision",
+                "executor_learning_phase": "stale_learning_decision",
             }
         return True, {**detail, "executor_learning_phase": "ok"}
 
@@ -438,8 +462,12 @@ __all__ = [
     "HEALTH_REASON_EXECUTOR_LEARNING_STALE",
     "HEALTH_REASON_NO_SUBSCRIBED_PAIRS",
     "HealthzServer",
+    "LEARNING_ALERT_TO_DECISION_LAG_S_KEY",
     "LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY",
+    "LEARNING_LATEST_DECISION_AT_KEY",
     "LEARNING_LATEST_ALERT_AT_KEY",
     "LEARNING_LATEST_EXECUTION_AT_KEY",
     "LEARNING_LATEST_EXIT_AT_KEY",
+    "LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY",
+    "LEARNING_LATEST_MAKER_FILL_AT_KEY",
 ]

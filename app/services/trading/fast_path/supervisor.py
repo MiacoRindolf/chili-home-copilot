@@ -26,11 +26,15 @@ from .decay_miner import FastPathDecayMiner
 from .executor import FastPathExecutor
 from .exit_manager import FastPathExitManager
 from .healthz import (
+    LEARNING_ALERT_TO_DECISION_LAG_S_KEY,
     FAST_LEARNING_FRESHNESS_KEY,
     LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY,
     LEARNING_LATEST_ALERT_AT_KEY,
+    LEARNING_LATEST_DECISION_AT_KEY,
     LEARNING_LATEST_EXECUTION_AT_KEY,
     LEARNING_LATEST_EXIT_AT_KEY,
+    LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY,
+    LEARNING_LATEST_MAKER_FILL_AT_KEY,
     HealthzServer,
 )
 from .settings import FastPathSettings
@@ -51,6 +55,8 @@ FAST_LEARNING_FRESHNESS_SQL = text(
     SELECT
       (SELECT MAX(fired_at) FROM fast_alerts) AS latest_alert_at,
       (SELECT MAX(decided_at) FROM fast_executions) AS latest_execution_at,
+      (SELECT MAX(placed_at) FROM fast_path_maker_attempts) AS latest_maker_attempt_at,
+      (SELECT MAX(filled_at) FROM fast_path_maker_attempts) AS latest_maker_fill_at,
       (SELECT MAX(exited_at) FROM fast_exits) AS latest_exit_at
     """
 )
@@ -432,12 +438,15 @@ class FastPathSupervisor:
         if learning_stats:
             logger.info(
                 "[fast_path] learning_freshness ok=%s latest_alert=%s "
-                "latest_execution=%s alert_to_execution_lag_s=%s "
+                "latest_execution=%s latest_maker_attempt=%s "
+                "latest_decision=%s alert_to_decision_lag_s=%s "
                 "latest_exit=%s error=%s",
                 learning_stats.get("ok"),
                 learning_stats.get(LEARNING_LATEST_ALERT_AT_KEY),
                 learning_stats.get(LEARNING_LATEST_EXECUTION_AT_KEY),
-                learning_stats.get(LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY),
+                learning_stats.get(LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY),
+                learning_stats.get(LEARNING_LATEST_DECISION_AT_KEY),
+                learning_stats.get(LEARNING_ALERT_TO_DECISION_LAG_S_KEY),
                 learning_stats.get(LEARNING_LATEST_EXIT_AT_KEY),
                 learning_stats.get("error"),
             )
@@ -526,14 +535,27 @@ class FastPathSupervisor:
 
         latest_alert_at = row.get(LEARNING_LATEST_ALERT_AT_KEY)
         latest_execution_at = row.get(LEARNING_LATEST_EXECUTION_AT_KEY)
+        latest_maker_attempt_at = row.get(LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY)
+        latest_maker_fill_at = row.get(LEARNING_LATEST_MAKER_FILL_AT_KEY)
         latest_exit_at = row.get(LEARNING_LATEST_EXIT_AT_KEY)
-        lag_s = None
+        execution_lag_s = None
+        decision_lag_s = None
         latest_alert_dt = self._naive_utc_datetime(latest_alert_at)
         latest_execution_dt = self._naive_utc_datetime(latest_execution_at)
+        latest_maker_attempt_dt = self._naive_utc_datetime(latest_maker_attempt_at)
+        latest_decision_dt = self._latest_datetime(
+            latest_execution_dt,
+            latest_maker_attempt_dt,
+        )
         if latest_alert_dt is not None and latest_execution_dt is not None:
-            lag_s = max(
+            execution_lag_s = max(
                 0.0,
                 (latest_alert_dt - latest_execution_dt).total_seconds(),
+            )
+        if latest_alert_dt is not None and latest_decision_dt is not None:
+            decision_lag_s = max(
+                0.0,
+                (latest_alert_dt - latest_decision_dt).total_seconds(),
             )
 
         return {
@@ -542,9 +564,21 @@ class FastPathSupervisor:
             LEARNING_LATEST_EXECUTION_AT_KEY: self._iso_or_none(
                 latest_execution_at
             ),
+            LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY: self._iso_or_none(
+                latest_maker_attempt_at
+            ),
+            LEARNING_LATEST_MAKER_FILL_AT_KEY: self._iso_or_none(
+                latest_maker_fill_at
+            ),
+            LEARNING_LATEST_DECISION_AT_KEY: self._iso_or_none(
+                latest_decision_dt
+            ),
             LEARNING_LATEST_EXIT_AT_KEY: self._iso_or_none(latest_exit_at),
             LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
-                round(lag_s, 3) if lag_s is not None else None
+                round(execution_lag_s, 3) if execution_lag_s is not None else None
+            ),
+            LEARNING_ALERT_TO_DECISION_LAG_S_KEY: (
+                round(decision_lag_s, 3) if decision_lag_s is not None else None
             ),
         }
 
@@ -563,6 +597,11 @@ class FastPathSupervisor:
         if value.tzinfo is None:
             return value
         return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    @staticmethod
+    def _latest_datetime(*values: datetime | None) -> datetime | None:
+        present = [value for value in values if value is not None]
+        return max(present) if present else None
 
 
 __all__ = ["FastPathSupervisor"]

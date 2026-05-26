@@ -9,10 +9,13 @@ from app.services.trading.fast_path.healthz import (
     FAST_LEARNING_FRESHNESS_KEY,
     HEALTH_REASON_EXECUTOR_LEARNING_STALE,
     HEALTH_REASON_NO_SUBSCRIBED_PAIRS,
+    LEARNING_ALERT_TO_DECISION_LAG_S_KEY,
     LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY,
+    LEARNING_LATEST_DECISION_AT_KEY,
     LEARNING_LATEST_ALERT_AT_KEY,
     LEARNING_LATEST_EXECUTION_AT_KEY,
     LEARNING_LATEST_EXIT_AT_KEY,
+    LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY,
     HealthzServer,
 )
 
@@ -65,7 +68,39 @@ def test_healthz_fails_when_fresh_alerts_are_not_becoming_executions():
     assert ok is False
     assert body["executor_learning_freshness"] is False
     assert body["reason"] == HEALTH_REASON_EXECUTOR_LEARNING_STALE
-    assert body["details"]["executor_learning_phase"] == "stale_execution_decision"
+    assert body["details"]["executor_learning_phase"] == "stale_learning_decision"
+
+
+def test_healthz_accepts_fresh_maker_attempt_as_learning_decision():
+    server = HealthzServer(port=8090, snapshot_fn=lambda: {})
+    server._started_at -= BOOT_GRACE_S + 1.0
+
+    now = _utcnow_naive()
+    alert_at = now - timedelta(seconds=5.0)
+    maker_attempt_at = now - timedelta(seconds=4.0)
+    execution_at = alert_at - timedelta(
+        seconds=EXECUTOR_LEARNING_MAX_LAG_S + 1.0
+    )
+
+    ok, body = server._evaluate(_healthy_snapshot(
+        now=now,
+        learning={
+            "ok": True,
+            LEARNING_LATEST_ALERT_AT_KEY: alert_at.isoformat(),
+            LEARNING_LATEST_EXECUTION_AT_KEY: execution_at.isoformat(),
+            LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY: maker_attempt_at.isoformat(),
+            LEARNING_LATEST_DECISION_AT_KEY: maker_attempt_at.isoformat(),
+            LEARNING_LATEST_EXIT_AT_KEY: None,
+            LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
+                EXECUTOR_LEARNING_MAX_LAG_S + 1.0
+            ),
+            LEARNING_ALERT_TO_DECISION_LAG_S_KEY: 0.0,
+        },
+    ))
+
+    assert ok is True
+    assert body["executor_learning_freshness"] is True
+    assert body["details"]["executor_learning_phase"] == "ok"
 
 
 def test_healthz_allows_stale_executions_when_alert_stream_is_quiet():
