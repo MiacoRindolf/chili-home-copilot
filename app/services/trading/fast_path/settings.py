@@ -213,6 +213,13 @@ class FastPathSettings:
     with ``CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N``; set to
     0 to disable the exploration floor."""
 
+    universe_market_velocity_cost_parity_ratio: float = 1.0
+    """Minimum recent realized-move / round-trip-cost ratio required before
+    the rotator backfills shadow exploration slots that learned filters would
+    otherwise skip. ``1.0`` means recent 1m movement must at least cover
+    estimated fees + spread. Override via
+    ``CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_COST_PARITY_RATIO``."""
+
     universe_min_trades_24h: int = 1_000
     """Minimum 24h trade count. Below this, the order book is too
     thin / discontinuous for the rotator's price snapshots to be
@@ -469,6 +476,10 @@ def load() -> FastPathSettings:
         universe_min_shadow_exploration_n=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N",
             _env_int("CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", 3),
+        ),
+        universe_market_velocity_cost_parity_ratio=_env_float(
+            "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_COST_PARITY_RATIO",
+            1.0,
         ),
         universe_min_trades_24h=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H", 1_000),

@@ -112,7 +112,7 @@ _MAKER_ATTEMPT_SPARSE_VERDICTS = frozenset({
     _MAKER_ATTEMPT_INSUFFICIENT_VERDICT,
 })
 _DEFAULT_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H = 24
-_MARKET_VELOCITY_COST_PARITY_RATIO = 1.0
+_DEFAULT_MARKET_VELOCITY_COST_PARITY_RATIO = 1.0
 
 
 @dataclass
@@ -704,6 +704,22 @@ def _effective_min_shadow_exploration_n(settings, target_ranked: int) -> int:
     except (TypeError, ValueError):
         floor = 0
     return min(max(floor, 0), max(int(target_ranked or 0), 0))
+
+
+def _market_velocity_cost_parity_ratio(settings) -> float:
+    """Configured recent movement / cost floor for shadow backfill."""
+    raw = getattr(
+        settings,
+        "universe_market_velocity_cost_parity_ratio",
+        _DEFAULT_MARKET_VELOCITY_COST_PARITY_RATIO,
+    )
+    try:
+        ratio = float(raw)
+    except (TypeError, ValueError):
+        ratio = _DEFAULT_MARKET_VELOCITY_COST_PARITY_RATIO
+    if not math.isfinite(ratio):
+        return _DEFAULT_MARKET_VELOCITY_COST_PARITY_RATIO
+    return max(ratio, 0.0)
 
 
 def _previous_pass_status(db) -> dict[str, tuple[str, Optional[int]]]:
@@ -1535,8 +1551,11 @@ def run_rotation_pass(
         "observed_opportunity_median_round_trip_cost_bps": None,
         "observed_opportunity_median_realized_move_to_cost": None,
         "prior_observed_opportunity_median_realized_move_to_cost": None,
+        "market_velocity_cost_parity_ratio": None,
         "observed_opportunity_rank_skips": 0,
         "market_velocity_backfill_skips": 0,
+        "shadow_exploration_force_velocity_blocked": 0,
+        "shadow_exploration_force_velocity_ratio": None,
         "rotation_at": rotation_at.isoformat(),
     }
 
@@ -1547,6 +1566,10 @@ def run_rotation_pass(
     promotion_decay_table, promotion_fee_bps = _promotion_decay_source(settings)
     out["promotion_decay_table"] = promotion_decay_table
     out["promotion_fee_bps"] = promotion_fee_bps
+    market_velocity_cost_parity_ratio = _market_velocity_cost_parity_ratio(
+        settings
+    )
+    out["market_velocity_cost_parity_ratio"] = market_velocity_cost_parity_ratio
 
     products = list_usd_products_fn()
     out["scanned"] = len(products)
@@ -1866,7 +1889,7 @@ def run_rotation_pass(
         )
         if (
             move_to_cost is not None
-            and float(move_to_cost) < _MARKET_VELOCITY_COST_PARITY_RATIO
+            and float(move_to_cost) < market_velocity_cost_parity_ratio
             and not has_observed_move
         ):
             velocity_backfill_skips.append(cand)
@@ -1902,22 +1925,34 @@ def run_rotation_pass(
     force_slots = min_shadow_exploration_n - len(cut_ranked)
     if force_slots > 0:
         force_slots = min(force_slots, max(target_ranked - len(cut_ranked), 0))
-        exhausted_rank_skips, force_slots = _force_shadow_exploration(
-            exhausted_rank_skips,
-            reason=_SHADOW_EXPLORATION_FORCE_EDGE_EXHAUSTED,
-            slots=force_slots,
-        )
-        observed_rank_skips, force_slots = _force_shadow_exploration(
-            observed_rank_skips,
-            reason=_SHADOW_EXPLORATION_FORCE_OBSERVED_RANK,
-            slots=force_slots,
-        )
-        velocity_backfill_skips, force_slots = _force_shadow_exploration(
-            velocity_backfill_skips,
-            reason=_SHADOW_EXPLORATION_FORCE_MARKET_VELOCITY,
-            slots=force_slots,
-        )
-        cut_ranked.extend(selected_forced)
+        force_move_to_cost = out[
+            "observed_opportunity_median_realized_move_to_cost"
+        ]
+        if force_move_to_cost is None:
+            force_move_to_cost = prior_move_to_cost
+        out["shadow_exploration_force_velocity_ratio"] = force_move_to_cost
+        if (
+            force_move_to_cost is not None
+            and float(force_move_to_cost) < market_velocity_cost_parity_ratio
+        ):
+            out["shadow_exploration_force_velocity_blocked"] = force_slots
+        else:
+            exhausted_rank_skips, force_slots = _force_shadow_exploration(
+                exhausted_rank_skips,
+                reason=_SHADOW_EXPLORATION_FORCE_EDGE_EXHAUSTED,
+                slots=force_slots,
+            )
+            observed_rank_skips, force_slots = _force_shadow_exploration(
+                observed_rank_skips,
+                reason=_SHADOW_EXPLORATION_FORCE_OBSERVED_RANK,
+                slots=force_slots,
+            )
+            velocity_backfill_skips, force_slots = _force_shadow_exploration(
+                velocity_backfill_skips,
+                reason=_SHADOW_EXPLORATION_FORCE_MARKET_VELOCITY,
+                slots=force_slots,
+            )
+            cut_ranked.extend(selected_forced)
 
     if selected_forced:
         out["shadow_exploration_forced"] = len(selected_forced)
