@@ -64,10 +64,23 @@ RH_CRYPTO_DEGRADED_REASON_BELOW_THRESHOLD = "below_failure_threshold"
 RH_CRYPTO_DEGRADED_REASON_FAILURE_THRESHOLD = "failure_threshold"
 RH_CRYPTO_DEGRADED_REASON_QUERY_FAILED = "query_failed"
 RH_CRYPTO_FALLBACK_DECISION_BLOCKED = "blocked"
+RH_CRYPTO_FALLBACK_BROKER_REASON_NO_ORDER_ID = (
+    "%broker:robinhood crypto endpoint returned no order_id%"
+)
+RH_CRYPTO_FALLBACK_BROKER_REASON_EMPTY_RESPONSE = (
+    "%broker:empty response from robinhood crypto%"
+)
+RH_CRYPTO_FALLBACK_BROKER_REASON_GENERIC_NO_ORDER_ID = (
+    "%broker:robinhood crypto%no order_id%"
+)
+RH_CRYPTO_FALLBACK_BROKER_REASON_HTTP_422_ASK_MOVED = (
+    "%broker:robinhood crypto http 422:%ask price has risen%"
+)
 RH_CRYPTO_FALLBACK_BROKER_REASON_PATTERNS = (
-    "%broker:robinhood crypto endpoint returned no order_id%",
-    "%broker:empty response from robinhood crypto%",
-    "%broker:robinhood crypto%no order_id%",
+    RH_CRYPTO_FALLBACK_BROKER_REASON_NO_ORDER_ID,
+    RH_CRYPTO_FALLBACK_BROKER_REASON_EMPTY_RESPONSE,
+    RH_CRYPTO_FALLBACK_BROKER_REASON_GENERIC_NO_ORDER_ID,
+    RH_CRYPTO_FALLBACK_BROKER_REASON_HTTP_422_ASK_MOVED,
 )
 
 

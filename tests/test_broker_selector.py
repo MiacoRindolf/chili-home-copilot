@@ -275,3 +275,13 @@ def test_reason_constants_have_expected_values():
     assert REASON_COINBASE_WHITELIST == "coinbase_whitelist_match"
     assert REASON_COINBASE_RH_CRYPTO_DEGRADED == "coinbase_rh_crypto_degraded"
     assert REASON_NO_VENUE == "no_venue_supports"
+
+
+def test_rh_crypto_degraded_patterns_include_transient_price_move_reject():
+    assert (
+        bs.RH_CRYPTO_FALLBACK_BROKER_REASON_HTTP_422_ASK_MOVED
+        in bs.RH_CRYPTO_FALLBACK_BROKER_REASON_PATTERNS
+    )
+    assert "ask price has risen" in (
+        bs.RH_CRYPTO_FALLBACK_BROKER_REASON_HTTP_422_ASK_MOVED
+    )
