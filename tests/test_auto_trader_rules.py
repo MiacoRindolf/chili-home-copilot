@@ -11,6 +11,8 @@ from app.services.trading.auto_trader_rules import (
     EntryEdgeDecision,
     RuleGateContext,
     alert_confidence_from_score,
+    count_autotrader_v1_open,
+    count_autotrader_v1_open_by_lane,
     evaluate_entry_edge,
     projected_profit_pct,
     passes_rule_gate,
@@ -48,6 +50,59 @@ def test_alert_confidence_from_score():
         price_at_alert=10.0,
     )
     assert abs(alert_confidence_from_score(a) - min(0.95, 0.55 + 0.2)) < 1e-6
+
+
+class _FakeQuery:
+    def __init__(self, result_count: int = 1):
+        self.criteria = []
+        self.result_count = result_count
+
+    def filter(self, *criteria):
+        self.criteria.extend(criteria)
+        return self
+
+    def count(self):
+        return self.result_count
+
+
+class _FakeDb:
+    def __init__(self):
+        self.query_obj = _FakeQuery()
+        self.executed_sql = ""
+        self.executed_params = None
+
+    def query(self, _model):
+        return self.query_obj
+
+    def execute(self, sql, params=None):
+        self.executed_sql = str(sql)
+        self.executed_params = params
+        class _Result:
+            def fetchall(self):
+                return [("option", 1), ("crypto", 2), ("stock", 3)]
+
+        return _Result()
+
+
+def test_count_autotrader_v1_open_treats_working_as_active():
+    db = _FakeDb()
+
+    assert count_autotrader_v1_open(db, 123) == 1
+
+    status_filters = [
+        str(c) for c in db.query_obj.criteria if "trading_trades.status" in str(c)
+    ]
+    assert any(" IN " in c for c in status_filters)
+
+
+def test_count_autotrader_v1_open_by_lane_counts_working_and_asset_kind():
+    db = _FakeDb()
+
+    counts = count_autotrader_v1_open_by_lane(db, 123)
+
+    assert counts == {"equity": 3, "crypto": 2, "options": 1}
+    assert "t.status IN ('open', 'working')" in db.executed_sql
+    assert "t.asset_kind" in db.executed_sql
 
 
 def test_passes_rule_gate_confidence_fail():

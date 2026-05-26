@@ -84,6 +84,7 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_shadow_promoted",
     "skipped_duplicate_pattern_already_open",
     "skipped_non_positive_expected_edge",
+    "skipped_pending_entry_already_working",
     "skipped_synergy_disabled_second_signal",
     f"skipped_{SYNERGY_RETRY_SOURCE_REASON}",
     f"skipped_{SYNERGY_RETRY_EXHAUSTED_REASON}",
@@ -150,6 +151,7 @@ SHADOW_OBSERVATION_NOTIONAL_SOURCE_ASSUMED = "shadow_observation_assumed_capital
 SHADOW_OBSERVATION_NOTIONAL_SOURCE_UNAVAILABLE = "shadow_observation_capital_unavailable"
 LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION = "shadow_observation_only"
 LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH = "options_path"
+PENDING_ENTRY_ALREADY_WORKING_REASON = "pending_entry_already_working"
 _OPTION_ENTRY_FILLED_STATES = frozenset({"filled", "done", "completed", "complete"})
 _OPTION_ENTRY_PARTIAL_STATES = frozenset(
     {"partially_filled", "partial", "partial_filled"}
@@ -2631,6 +2633,42 @@ def _process_one_alert(
         existing_paper = find_open_autotrader_paper(db, user_id=uid, ticker=alert.ticker)
 
     scale_plan = None
+    if live and existing_trade is not None and str(existing_trade.status or "").lower() == "working":
+        pending_snap = {
+            "existing_trade_id": getattr(existing_trade, "id", None),
+            "existing_trade_status": getattr(existing_trade, "status", None),
+            "existing_trade_broker_status": getattr(existing_trade, "broker_status", None),
+            "existing_trade_broker_order_id": getattr(existing_trade, "broker_order_id", None),
+            "existing_trade_entry_date": (
+                existing_trade.entry_date.isoformat()
+                if getattr(existing_trade, "entry_date", None) else None
+            ),
+        }
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="skipped",
+            reason=PENDING_ENTRY_ALREADY_WORKING_REASON,
+            rule_snapshot=pending_snap,
+        )
+        _maybe_open_reject_paper_shadow(
+            db,
+            uid=uid,
+            alert=alert,
+            px=px,
+            snap=pending_snap,
+            reason=PENDING_ENTRY_ALREADY_WORKING_REASON,
+            existing_qty=getattr(existing_trade, "quantity", None),
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(
+            out,
+            kind="skipped",
+            reason=PENDING_ENTRY_ALREADY_WORKING_REASON,
+            alert=alert,
+        )
+        return
     if live and existing_trade is not None:
         scale_plan = maybe_scale_in(
             db,

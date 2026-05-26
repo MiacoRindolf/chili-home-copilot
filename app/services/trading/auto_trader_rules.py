@@ -2243,7 +2243,7 @@ def count_autotrader_v1_open(db: Session, user_id: Optional[int], *, paper_mode:
         return n
     q = db.query(Trade).filter(
         Trade.auto_trader_version == "v1",
-        Trade.status == "open",
+        Trade.status.in_(("open", "working")),
     )
     if user_id is not None:
         q = q.filter(Trade.user_id == user_id)
@@ -2262,9 +2262,9 @@ def count_autotrader_v1_open_by_lane(
 ) -> dict:
     """Return ``{'equity': int, 'crypto': int, 'options': int}``.
 
-    Counts open AutoTrader-v1 trades per asset-class lane. Used by the rule
-    gate to enforce per-lane concurrency caps. Best-effort: any failure
-    returns zeros (the gate's outer global cap still protects the system).
+    Counts active AutoTrader-v1 trades per asset-class lane. Live rows include
+    both filled positions (open) and acknowledged-but-not-yet-filled entries
+    (working), because a resting entry order still consumes exposure budget.
     """
     out = {"equity": 0, "crypto": 0, "options": 0}
     try:
@@ -2290,12 +2290,13 @@ def count_autotrader_v1_open_by_lane(
         from sqlalchemy import text as _text
         params = {}
         sql = (
-            "SELECT COALESCE(LOWER(NULLIF(a.asset_type, '')), 'stock') AS at, "
+            "SELECT COALESCE(LOWER(NULLIF(a.asset_type, '')), "
+            "              LOWER(NULLIF(t.asset_kind, '')), 'stock') AS at, "
             "       COUNT(*) AS n "
             "FROM trading_trades t "
             "LEFT JOIN trading_breakout_alerts a ON a.id = t.related_alert_id "
             "WHERE t.auto_trader_version = 'v1' "
-            "  AND t.status = 'open' "
+            "  AND t.status IN ('open', 'working') "
         )
         if user_id is not None:
             sql += " AND t.user_id = :uid"
@@ -2306,7 +2307,7 @@ def count_autotrader_v1_open_by_lane(
             at_l = (at or "stock").lower()
             if at_l == "crypto":
                 out["crypto"] += int(n)
-            elif at_l == "options":
+            elif at_l in ("option", "options"):
                 out["options"] += int(n)
             else:
                 # 'stock', NULL/empty, forex, anything unrecognized → equity bucket
