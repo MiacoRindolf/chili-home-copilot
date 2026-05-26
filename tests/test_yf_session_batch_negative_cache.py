@@ -8,6 +8,17 @@ from app.services import yf_session
 GOOD_EQUITY = "AAPL"
 MISSING_EQUITY = "BADX"
 MISSING_CRYPTO = "MISSING-USD"
+FAST_INFO_EMPTY_ERROR = "'PriceHistory' object has no attribute '_dividends'"
+EXTRA_PROBE_AFTER_THRESHOLD = 1
+
+
+class _RaisingFastInfoTicker:
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    @property
+    def fast_info(self):
+        raise self._exc
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +41,9 @@ def _reset_yf_state(monkeypatch):
     yf_session._reset_breaker_for_tests()
 
 
-def test_batch_download_negative_caches_missing_equity_after_threshold(monkeypatch):
+def test_batch_download_does_not_dead_cache_mixed_batch_missing_equity(
+    monkeypatch,
+):
     calls: list[tuple[str, ...]] = []
 
     def _download(symbols, **_kwargs):
@@ -49,8 +62,25 @@ def test_batch_download_negative_caches_missing_equity_after_threshold(monkeypat
     for _ in range(yf_session._EMPTY_THRESHOLD):
         yf_session.batch_download([GOOD_EQUITY, MISSING_EQUITY], period="5d")
 
-    assert yf_session._is_dead(MISSING_EQUITY) is True
+    assert yf_session._is_dead(MISSING_EQUITY) is False
     assert yf_session._is_dead(GOOD_EQUITY) is False
+
+
+def test_batch_download_negative_caches_single_missing_equity_after_threshold(
+    monkeypatch,
+):
+    calls: list[tuple[str, ...]] = []
+
+    def _download(symbols, **_kwargs):
+        calls.append(tuple(symbols))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(yf_session.yf, "download", _download)
+
+    for _ in range(yf_session._EMPTY_THRESHOLD):
+        yf_session.batch_download([MISSING_EQUITY], period="5d")
+
+    assert yf_session._is_dead(MISSING_EQUITY) is True
 
     calls_before_dead_skip = len(calls)
     yf_session.batch_download([MISSING_EQUITY], period="5d")
@@ -70,3 +100,76 @@ def test_batch_download_negative_caches_missing_crypto_with_short_crypto_ttl(
         yf_session.batch_download([MISSING_CRYPTO], period="5d")
 
     assert yf_session._is_dead(MISSING_CRYPTO) is True
+
+
+def test_fast_info_negative_caches_explicit_missing_equity_after_threshold(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _RaisingFastInfoTicker(
+            Exception("No data found, symbol may be delisted")
+        )
+
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+
+    for _ in range(yf_session._EMPTY_THRESHOLD):
+        assert yf_session.get_fast_info(MISSING_EQUITY) is None
+
+    assert yf_session._is_dead(MISSING_EQUITY) is True
+
+    calls_before_dead_skip = len(calls)
+    assert yf_session.get_fast_info(MISSING_EQUITY) is None
+    assert len(calls) == calls_before_dead_skip
+
+
+def test_fast_info_internal_empty_error_does_not_dead_cache_equity(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _RaisingFastInfoTicker(Exception(FAST_INFO_EMPTY_ERROR))
+
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+
+    for _ in range(yf_session._EMPTY_THRESHOLD + EXTRA_PROBE_AFTER_THRESHOLD):
+        assert yf_session.get_fast_info(GOOD_EQUITY) is None
+
+    assert yf_session._is_dead(GOOD_EQUITY) is False
+    assert len(calls) == (
+        yf_session._EMPTY_THRESHOLD + EXTRA_PROBE_AFTER_THRESHOLD
+    )
+
+
+def test_fast_info_negative_caches_crypto_and_uses_fallback_after_threshold(
+    monkeypatch,
+):
+    calls: list[str] = []
+    fallback_calls: list[str] = []
+    fallback_quote = {"last_price": 1.23, "previous_close": 1.11}
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _RaisingFastInfoTicker(Exception(FAST_INFO_EMPTY_ERROR))
+
+    def _fallback(symbol):
+        fallback_calls.append(symbol)
+        return fallback_quote
+
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+    monkeypatch.setattr(yf_session, "_coingecko_quote", _fallback)
+
+    for _ in range(yf_session._EMPTY_THRESHOLD - 1):
+        assert yf_session.get_fast_info(MISSING_CRYPTO) is None
+
+    assert yf_session.get_fast_info(MISSING_CRYPTO) == fallback_quote
+    assert yf_session._is_dead(MISSING_CRYPTO) is True
+    assert fallback_calls == [MISSING_CRYPTO]
+
+    calls_before_cached_fallback = len(calls)
+    assert yf_session.get_fast_info(MISSING_CRYPTO) == fallback_quote
+    assert len(calls) == calls_before_cached_fallback

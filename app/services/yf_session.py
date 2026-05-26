@@ -263,6 +263,15 @@ _EMPTY_THRESHOLD = 3
 _empty_counts: dict[str, int] = {}
 _empty_lock = threading.Lock()
 
+_YF_NO_DATA_ERROR_MARKERS = (
+    "delisted",
+    "no data",
+)
+_YF_FAST_INFO_EMPTY_ERROR_MARKERS = (
+    "pricehistory",
+    "_dividends",
+)
+
 
 def _bump_empty(symbol: str) -> int:
     with _empty_lock:
@@ -288,6 +297,31 @@ def _record_empty_yf_result(symbol: str, *, allow_crypto: bool = False) -> None:
     if streak >= _EMPTY_THRESHOLD:
         _mark_dead(symbol)
         _reset_empty(symbol)
+
+
+def _record_yf_batch_miss(symbol: str, *, single_symbol_batch: bool) -> None:
+    """Record a Yahoo batch miss only when the evidence is symbol-specific.
+
+    Mixed Yahoo batches can omit live equities during transient provider
+    trouble, so equity misses from a mixed batch are too weak for dead-cache
+    evidence. Crypto misses are still useful because the dead cache is short
+    lived and routes quotes toward the crypto fallback path.
+    """
+    if single_symbol_batch or _is_crypto(symbol):
+        _record_empty_yf_result(symbol, allow_crypto=True)
+
+
+def _looks_like_yf_no_data_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _YF_NO_DATA_ERROR_MARKERS)
+
+
+def _looks_like_yf_fast_info_empty_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        _looks_like_yf_no_data_error(exc)
+        or any(marker in text for marker in _YF_FAST_INFO_EMPTY_ERROR_MARKERS)
+    )
 
 
 def _is_crypto(symbol: str) -> bool:
@@ -425,7 +459,7 @@ def get_history(symbol: str, **kwargs) -> Any:
         df = pd.DataFrame()
         failed = True
         # Only mark as dead on actual errors, not just empty data
-        if "delisted" in str(e).lower() or "no data" in str(e).lower():
+        if _looks_like_yf_no_data_error(e):
             _mark_dead(symbol)
 
     # For crypto, don't mark as dead just because yfinance returned empty
@@ -486,7 +520,9 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
     if cached is not None:
         return cached
 
-    if _is_dead(symbol) and symbol.upper().endswith("-USD"):
+    is_crypto = _is_crypto(symbol)
+
+    if _is_dead(symbol) and is_crypto:
         result = _coingecko_quote(symbol)
         if result:
             _cache_set(cache_key, result)
@@ -517,6 +553,14 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
     except Exception as e:
         logger.warning(f"[yf_session] fast_info({symbol}) failed: {e}")
         result = None
+        if _looks_like_yf_no_data_error(e) or (
+            is_crypto and _looks_like_yf_fast_info_empty_error(e)
+        ):
+            _record_empty_yf_result(symbol, allow_crypto=is_crypto)
+            if is_crypto and _is_dead(symbol):
+                result = _coingecko_quote(symbol)
+                if result:
+                    _cache_set(cache_key, result)
         _breaker_on_failure()
 
     _cache_set(cache_key, result)
@@ -665,8 +709,9 @@ def batch_download(
     if df.empty:
         # Empty batch on a non-empty input list signals an upstream
         # problem -- count as breaker failure.
+        single_symbol_batch = len(uncached) == 1
         for sym in uncached:
-            _record_empty_yf_result(sym, allow_crypto=True)
+            _record_yf_batch_miss(sym, single_symbol_batch=single_symbol_batch)
         _breaker_on_failure()
         return result
     _breaker_on_success()
@@ -725,7 +770,7 @@ def batch_download(
 
     for sym in uncached:
         if sym not in found_symbols:
-            _record_empty_yf_result(sym, allow_crypto=True)
+            _record_yf_batch_miss(sym, single_symbol_batch=False)
 
     logger.info(f"[yf_session] batch_download: {len(uncached)} requested, {len(result)} returned")
     return result
