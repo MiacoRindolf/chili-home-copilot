@@ -164,6 +164,47 @@ def main() -> int:
         ),
     )
     _print_table(
+        f"Stock missed-entry slippage direction, last {params['days']}d",
+        _rows(
+            """
+            WITH missed AS (
+                SELECT ar.created_at,
+                       ar.ticker,
+                       a.entry_price,
+                       NULLIF(ar.rule_snapshot->>'current_price', '')::numeric
+                           AS current_price,
+                       NULLIF(
+                           ar.rule_snapshot->'entry_edge'->>'expected_net_pct',
+                           ''
+                       )::numeric AS expected_net_pct,
+                       NULLIF(
+                           ar.rule_snapshot->>'entry_slippage_pct',
+                           ''
+                       )::numeric AS entry_slippage_pct
+                FROM trading_autotrader_runs ar
+                LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+                WHERE ar.created_at >= NOW() - (:days * INTERVAL '1 day')
+                  AND ar.reason = 'missed_entry_slippage'
+                  AND COALESCE(a.asset_type, 'stock') = 'stock'
+            )
+            SELECT CASE
+                       WHEN current_price < entry_price THEN 'favorable_pullback'
+                       WHEN current_price > entry_price THEN 'adverse_chase'
+                       ELSE 'flat_or_unknown'
+                   END AS slippage_direction,
+                   COUNT(*) AS n,
+                   ROUND(MAX(entry_slippage_pct), 4) AS max_entry_slippage_pct,
+                   ROUND(MAX(expected_net_pct), 4) AS max_expected_net_pct,
+                   MAX(created_at) AS latest_created_at
+            FROM missed
+            GROUP BY 1
+            ORDER BY n DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
         f"Pattern-imminent alert supply by lifecycle, last {params['days']}d",
         _rows(
             """

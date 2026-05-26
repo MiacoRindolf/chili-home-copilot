@@ -36,6 +36,15 @@ AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
 AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
 AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD = 50.0
 AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED = True
+AUTOTRADER_MAX_ENTRY_SLIPPAGE_DEFAULT_PCT = 1.0
+AUTOTRADER_MAX_ENTRY_SLIPPAGE_CONFIG_LIMIT_PCT = 50.0
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ENABLED = True
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ASSET_TYPES = "stock"
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_SLIPPAGE_MULTIPLE = 2.5
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MIN_SLIPPAGE_MULTIPLE = 1.0
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_SLIPPAGE_MULTIPLE = 5.0
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_MAX_PCT = 5.0
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_CONFIG_LIMIT_PCT = 20.0
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
 AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TICKS = 6
 AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS = (
@@ -2663,10 +2672,44 @@ class Settings(BaseSettings):
         ),
     )
     chili_autotrader_max_entry_slippage_pct: float = Field(
-        default=1.0,
+        default=AUTOTRADER_MAX_ENTRY_SLIPPAGE_DEFAULT_PCT,
         ge=0.0,
-        le=50.0,
+        le=AUTOTRADER_MAX_ENTRY_SLIPPAGE_CONFIG_LIMIT_PCT,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_ENTRY_SLIPPAGE_PCT"),
+    )
+    chili_autotrader_favorable_entry_drift_enabled: bool = Field(
+        default=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_ENABLED"
+        ),
+        description=(
+            "Allow stock entries to accept a bounded favorable pullback below "
+            "the alert entry only after re-checking expected net edge at the "
+            "current price. Adverse upward drift still uses the normal "
+            "slippage block."
+        ),
+    )
+    chili_autotrader_favorable_entry_drift_asset_types: str = Field(
+        default=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ASSET_TYPES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_ASSET_TYPES"
+        ),
+    )
+    chili_autotrader_favorable_entry_drift_slippage_multiple: float = Field(
+        default=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_SLIPPAGE_MULTIPLE,
+        ge=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MIN_SLIPPAGE_MULTIPLE,
+        le=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_SLIPPAGE_MULTIPLE,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_SLIPPAGE_MULTIPLE"
+        ),
+    )
+    chili_autotrader_favorable_entry_drift_max_pct: float = Field(
+        default=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_MAX_PCT,
+        ge=0.0,
+        le=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_CONFIG_LIMIT_PCT,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_PCT"
+        ),
     )
     chili_autotrader_monitor_interval_seconds: int = Field(
         default=30,
