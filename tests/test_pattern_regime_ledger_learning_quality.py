@@ -68,3 +68,61 @@ def test_regime_ledger_excludes_closed_trades_without_exit_price(db):
     for row in cells:
         assert row["mean_pnl_pct"] == pytest.approx(10.0)
         assert row["sum_pnl"] == pytest.approx(2.0)
+
+
+def test_regime_ledger_option_fallback_pnl_uses_contract_multiplier(db):
+    pattern = ScanPattern(
+        name="ledger-option-pattern",
+        rules_json={},
+        timeframe="1d",
+    )
+    db.add(pattern)
+    db.flush()
+
+    now = datetime.utcnow()
+    db.add(
+        Trade(
+            ticker="XYZ",
+            direction="long",
+            entry_price=1.25,
+            exit_price=1.45,
+            quantity=2.0,
+            entry_date=now - timedelta(days=2),
+            exit_date=now - timedelta(days=1),
+            status="closed",
+            scan_pattern_id=pattern.id,
+            pnl=None,
+            asset_kind="option",
+            indicator_snapshot={
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "XYZ",
+                    "symbol": "XYZ260619C00100000",
+                    "strike": 100.0,
+                    "right": "call",
+                    "expiration": "2026-06-19",
+                },
+            },
+        )
+    )
+    db.commit()
+
+    result = build_ledger(db, window_days=30)
+    cells = db.execute(
+        text(
+            """
+            SELECT regime_dimension, n_trades, n_wins, mean_pnl_pct, sum_pnl
+            FROM trading_pattern_regime_performance_daily
+            WHERE ledger_run_id = :run_id AND pattern_id = :pattern_id
+            ORDER BY regime_dimension
+            """
+        ),
+        {"run_id": result["run_id"], "pattern_id": pattern.id},
+    ).mappings().all()
+
+    assert cells
+    assert {row["n_trades"] for row in cells} == {1}
+    assert {row["n_wins"] for row in cells} == {1}
+    for row in cells:
+        assert row["mean_pnl_pct"] == pytest.approx(16.0)
+        assert row["sum_pnl"] == pytest.approx(40.0)

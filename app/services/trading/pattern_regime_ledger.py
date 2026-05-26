@@ -48,7 +48,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .realized_pnl_sql import trade_contract_multiplier_sql
+
 logger = logging.getLogger(__name__)
+
+
+_TRADE_CONTRACT_MULTIPLIER_SQL = trade_contract_multiplier_sql("t")
 
 
 # Each dimension is a (regime_dimension_name, sql_for_(pid, regime_label, pnl,
@@ -56,7 +61,7 @@ logger = logging.getLogger(__name__)
 # levels join by exit_date::date only.
 REGIME_DIMENSIONS: dict[str, str] = {
     "ticker_regime": (
-        """
+        f"""
         SELECT t.scan_pattern_id AS pid,
                COALESCE(r.ticker_regime_label, 'unknown') AS regime_label,
                COALESCE(
@@ -66,8 +71,8 @@ REGIME_DIMENSIONS: dict[str, str] = {
                    THEN
                      CASE
                        WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                       THEN (t.entry_price - t.exit_price) * t.quantity
-                       ELSE (t.exit_price - t.entry_price) * t.quantity
+                       THEN (t.entry_price - t.exit_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
+                       ELSE (t.exit_price - t.entry_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
                      END
                    ELSE NULL
                  END
@@ -102,7 +107,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
         """
     ),
     "breadth_regime": (
-        """
+        f"""
         SELECT t.scan_pattern_id AS pid,
                COALESCE(b.breadth_label, 'unknown') AS regime_label,
                COALESCE(
@@ -112,8 +117,8 @@ REGIME_DIMENSIONS: dict[str, str] = {
                    THEN
                      CASE
                        WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                       THEN (t.entry_price - t.exit_price) * t.quantity
-                       ELSE (t.exit_price - t.entry_price) * t.quantity
+                       THEN (t.entry_price - t.exit_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
+                       ELSE (t.exit_price - t.entry_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
                      END
                    ELSE NULL
                  END
@@ -146,7 +151,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
         """
     ),
     "cross_asset_regime": (
-        """
+        f"""
         SELECT t.scan_pattern_id AS pid,
                COALESCE(c.cross_asset_label, 'unknown') AS regime_label,
                COALESCE(
@@ -156,8 +161,8 @@ REGIME_DIMENSIONS: dict[str, str] = {
                    THEN
                      CASE
                        WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                       THEN (t.entry_price - t.exit_price) * t.quantity
-                       ELSE (t.exit_price - t.entry_price) * t.quantity
+                       THEN (t.entry_price - t.exit_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
+                       ELSE (t.exit_price - t.entry_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
                      END
                    ELSE NULL
                  END
@@ -190,7 +195,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
         """
     ),
     "vol_regime": (
-        """
+        f"""
         SELECT t.scan_pattern_id AS pid,
                COALESCE(v.vol_regime_label, 'unknown') AS regime_label,
                COALESCE(
@@ -200,8 +205,8 @@ REGIME_DIMENSIONS: dict[str, str] = {
                    THEN
                      CASE
                        WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                       THEN (t.entry_price - t.exit_price) * t.quantity
-                       ELSE (t.exit_price - t.entry_price) * t.quantity
+                       THEN (t.entry_price - t.exit_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
+                       ELSE (t.exit_price - t.entry_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
                      END
                    ELSE NULL
                  END
