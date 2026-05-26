@@ -53,10 +53,26 @@ def is_option_trade(trade: Trade) -> bool:
     """True if this Trade is an options position (vs equity / crypto).
 
     String-tolerant: trade.indicator_snapshot may be returned as a JSON
-    string instead of a dict (legacy / mixed-storage rows). We json.loads
-    it before inspecting.
+    string instead of a dict (legacy / mixed-storage rows). Also honors the
+    explicit ``asset_kind`` column added by migration/backfill, because some
+    repaired rows can be option-typed even when metadata is sparse.
     """
     import json as _json
+    def _optionish(value: object) -> bool:
+        return str(value or "").strip().lower() in {"option", "options"}
+
+    try:
+        if _optionish(getattr(trade, "asset_kind", None)):
+            return True
+    except Exception:
+        pass
+    try:
+        tags = str(getattr(trade, "tags", "") or "").strip().lower()
+        if "option" in tags:
+            return True
+    except Exception:
+        pass
+
     try:
         snap = trade.indicator_snapshot
     except Exception:
@@ -65,10 +81,14 @@ def is_option_trade(trade: Trade) -> bool:
         try:
             snap = _json.loads(snap)
         except Exception:
-            return False
+            snap = {}
     if not isinstance(snap, dict):
         return False
     if snap.get("option_meta"):
+        return True
+    if _optionish(snap.get("asset_type")):
+        return True
+    if str(snap.get("options_path") or "").strip().lower() in {"1", "true", "yes", "on"}:
         return True
     ba = snap.get("breakout_alert")
     if isinstance(ba, str):
@@ -77,7 +97,9 @@ def is_option_trade(trade: Trade) -> bool:
         except Exception:
             ba = None
     if isinstance(ba, dict):
-        if (ba.get("asset_type") or "").lower() == "options":
+        if _optionish(ba.get("asset_type")):
+            return True
+        if str(ba.get("options_path") or "").strip().lower() in {"1", "true", "yes", "on"}:
             return True
         if ba.get("option_meta"):
             return True
