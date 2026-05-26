@@ -210,12 +210,19 @@ def api_monitor_active(
 
     last_check = max((d.created_at for d in all_decisions if d.created_at), default=None)
 
-    tickers = list({t.ticker.upper() for t in trades})
-    quotes_map: dict[str, dict[str, Any]] = {}
     try:
-        quotes_map = ts.fetch_quotes_batch(tickers, allow_provider_fallback=True)
+        from ...services.trading.autopilot_scope import is_option_trade
     except Exception:
-        logger.warning("[monitor] fetch_quotes_batch failed", exc_info=True)
+        def is_option_trade(_trade: Trade) -> bool:  # type: ignore[no-redef]
+            return False
+
+    tickers = list({t.ticker.upper() for t in trades if not is_option_trade(t)})
+    quotes_map: dict[str, dict[str, Any]] = {}
+    if tickers:
+        try:
+            quotes_map = ts.fetch_quotes_batch(tickers, allow_provider_fallback=True)
+        except Exception:
+            logger.warning("[monitor] fetch_quotes_batch failed", exc_info=True)
 
     setups: list[dict[str, Any]] = []
     health_scores: list[float] = []
@@ -241,10 +248,13 @@ def api_monitor_active(
                     patterns[pid] = p2
                     pat = p2
 
+        trade_is_option = is_option_trade(trade)
         q = None
-        if broker_quote_for_trade is not None and (trade.broker_source or "").strip():
+        if broker_quote_for_trade is not None and (
+            (trade.broker_source or "").strip() or trade_is_option
+        ):
             q = broker_quote_for_trade(trade, purpose="display")
-        if not q or q.get("price") is None:
+        if (not q or q.get("price") is None) and not trade_is_option:
             q = quotes_map.get(trade.ticker.upper()) or quotes_map.get(trade.ticker)
         cur = _quote_price(q)
         entry = float(trade.entry_price)

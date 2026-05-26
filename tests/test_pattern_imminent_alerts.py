@@ -59,6 +59,9 @@ TEST_SHADOW_NEAR_MISS_TICKER = "NEARMISS-USD"
 TEST_SHADOW_NEAR_MISS_ADAPTIVE_TICKER = "ADAPTNEAR-USD"
 TEST_SHADOW_NEAR_MISS_ADAPTIVE_LOW_TICKER = "ADAPTLOW-USD"
 TEST_PILOT_NEAR_MISS_TICKER = "PILOTNEAR-USD"
+TEST_HARD_RECERT_TICKER = "HARDRECERT"
+TEST_HARD_RECERT_REASON = "negative_oos_recert"
+TEST_SOFT_RECERT_REASON = "missing_oos_recert"
 TEST_SHADOW_NEAR_MISS_RSI = 70.0
 TEST_SHADOW_NEAR_MISS_MIN_READINESS = 0.45
 TEST_SHADOW_NEAR_MISS_MAX_GAP = 0.10
@@ -67,6 +70,7 @@ TEST_SHADOW_NEAR_MISS_ADAPTIVE_MIN_FRACTION = 0.80
 TEST_SHADOW_NEAR_MISS_ADAPTIVE_STRICT_FRACTION = 0.95
 TEST_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN = 1
 TEST_MIN_COMPOSITE_DISABLED = 0.0
+TEST_HARD_RECERT_MIN_READINESS = 0.30
 TEST_ROTATION_CAP = 2
 TEST_ROTATION_WINDOW_MINUTES = 1
 TEST_ROTATION_EPOCH_SECONDS = 0
@@ -758,6 +762,103 @@ def test_gather_imminent_admits_shadow_near_miss_observation_lane(
     assert candidate["readiness_gap_to_min"] <= TEST_SHADOW_NEAR_MISS_MAX_GAP
     assert meta["shadow_near_miss_eligible"] >= 1
     assert meta["shadow_near_miss_admitted"] >= 1
+
+
+def test_gather_imminent_routes_hard_recert_debt_to_shadow_lane(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {
+                "indicator": "rsi_14",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_RSI_TRIGGER,
+            },
+            {
+                "indicator": "adx",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_ADX_TRIGGER,
+            },
+        ],
+    }
+    pattern = ScanPattern(
+        name="Hard recert shadow evidence",
+        rules_json=rules,
+        origin="test",
+        asset_class="stocks",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_HARD_RECERT_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+        recert_required=True,
+        recert_reason=f"{TEST_HARD_RECERT_REASON},{TEST_SOFT_RECERT_REASON}",
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_hard_recert_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_HARD_RECERT_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_composite_main",
+        TEST_MIN_COMPOSITE_DISABLED,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_HARD_RECERT_TICKER], {}),
+    )
+    monkeypatch.setattr(imminent_mod, "_coinbase_spot_ticker_set", frozenset)
+    monkeypatch.setattr(
+        imminent_mod,
+        "_score_ticker",
+        lambda ticker, skip_fundamentals=True, skip_pattern_engine=False: {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SHADOW_NEAR_MISS_RSI,
+                "adx": TEST_FAILED_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        },
+    )
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=True,
+        apply_main_dispatch_filters=True,
+    )
+
+    matches = [c for c in candidates if c["ticker"] == TEST_HARD_RECERT_TICKER]
+    assert len(matches) == 1
+    candidate = matches[0]
+    assert candidate["signal_lane"] == imminent_mod.HARD_RECERT_SHADOW_SIGNAL_LANE
+    assert candidate["hard_recert_reasons"] == [TEST_HARD_RECERT_REASON]
+    assert meta["hard_recert_shadow_patterns"] >= 1
+    assert meta["hard_recert_shadow_eligible"] >= 1
+    assert meta["hard_recert_shadow_admitted"] >= 1
+    assert meta["hard_recert_shadow_reason_counts"][TEST_HARD_RECERT_REASON] >= 1
 
 
 def test_gather_imminent_admits_adaptive_shadow_near_miss_buffer(
@@ -2223,3 +2324,108 @@ def test_run_pattern_imminent_scan_reserves_signal_lane_observation_slots(
         imminent_mod.SHADOW_NEAR_MISS_SIGNAL_LANE,
     )
     assert ("MAIN", 21, "promoted", imminent_mod.STANDARD_SIGNAL_LANE) in inserted
+
+
+def test_run_pattern_imminent_scan_reserves_hard_recert_observation_slots(
+    db,
+    monkeypatch,
+) -> None:
+    inserted: list[tuple[str, int, str, str, list[str]]] = []
+
+    def _candidate(
+        pattern_id: int,
+        ticker: str,
+        composite: float,
+        signal_lane: str = imminent_mod.STANDARD_SIGNAL_LANE,
+        hard_recert_reasons: list[str] | None = None,
+    ):
+        pattern = SimpleNamespace(
+            id=pattern_id,
+            name=f"Pattern {pattern_id}",
+            description="Test imminent pattern",
+            lifecycle_stage="promoted",
+        )
+        row = {
+            "pattern": pattern,
+            "ticker": ticker,
+            "eta_lo": 0.5,
+            "eta_hi": 1.0,
+            "score": {
+                "price": 100.0,
+                "entry_price": 101.0,
+                "stop_loss": 97.5,
+                "take_profit": 110.0,
+                "signals": ["Tight range", "Volume building"],
+            },
+            "trade_type": "swing",
+            "duration_estimate": "2-5 days",
+            "hold_label": "2-5 days",
+            "composite": composite,
+            "readiness": 0.82,
+            "flat": {"price": 100.0},
+            "score_breakdown": {"quality": composite},
+            "coverage_ratio": 0.75,
+            "signal_lane": signal_lane,
+        }
+        if hard_recert_reasons:
+            row["hard_recert_reasons"] = hard_recert_reasons
+        return row
+
+    candidates = [
+        _candidate(
+            31,
+            "HARDRECERT",
+            0.92,
+            imminent_mod.HARD_RECERT_SHADOW_SIGNAL_LANE,
+            [TEST_HARD_RECERT_REASON],
+        ),
+        _candidate(32, "MAIN", 0.91),
+    ]
+
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_max_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_observation_enabled", True)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_reserve_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_extra_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_max_per_ticker_per_run", 2)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_shadow_max_per_pattern_per_run", 2)
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts.gather_imminent_candidate_rows",
+        lambda *args, **kwargs: (
+            candidates,
+            {"patterns_active": 2, "tickers_scored": 2},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts._cooldown_active",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts.dispatch_alert",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts._insert_imminent_breakout_alert",
+        lambda db, user_id, pat, ticker, *args, **kwargs: inserted.append(
+            (
+                ticker,
+                pat.id,
+                pat.lifecycle_stage,
+                kwargs["signal_lane"],
+                kwargs["hard_recert_reasons"],
+            )
+        ),
+    )
+
+    result = run_pattern_imminent_scan(db, user_id=1)
+
+    assert result["alerts_sent"] == 2
+    assert result["main_alerts_sent"] == 1
+    assert result["shadow_alerts_sent"] == 1
+    assert inserted[0] == (
+        "HARDRECERT",
+        31,
+        "promoted",
+        imminent_mod.HARD_RECERT_SHADOW_SIGNAL_LANE,
+        [TEST_HARD_RECERT_REASON],
+    )
+    assert ("MAIN", 32, "promoted", imminent_mod.STANDARD_SIGNAL_LANE, []) in inserted

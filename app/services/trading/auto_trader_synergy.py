@@ -263,6 +263,13 @@ def maybe_scale_in(
     t = find_open_autotrader_trade(db, user_id=user_id, ticker=ticker)
     if t is None:
         return None
+    try:
+        from .autopilot_scope import is_option_trade
+
+        if is_option_trade(t):
+            return None
+    except Exception:
+        pass
     if int(t.scan_pattern_id or 0) == confirming_pattern_id:
         return None
     used_confirming_pattern_ids = used_scale_in_pattern_ids(db, t)

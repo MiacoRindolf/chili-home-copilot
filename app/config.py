@@ -135,6 +135,13 @@ AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED = True
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
     "shadow_promoted,pilot_promoted"
 )
+PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE = "hard_recert_shadow"
+PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_LIFECYCLE_STAGES = "promoted,live"
+PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_REASONS = (
+    "negative_oos_recert,negative_realized_ev,weak_oos_win_rate_recert,"
+    "promotion_gate_not_currently_passed,promotion_gate_not_passed,"
+    "promotion_gate_failed,cpcv_promotion_gate_failed"
+)
 AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY = (
     BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR
 )
@@ -4568,6 +4575,15 @@ class Settings(BaseSettings):
     )
     pattern_imminent_shadow_near_miss_lifecycle_stages: str = (
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES
+    )
+    # Hard failed recert debt should not spend main live-alert capacity, but
+    # can still produce paper/shadow evidence for future requalification.
+    pattern_imminent_hard_recert_shadow_enabled: bool = True
+    pattern_imminent_hard_recert_shadow_lifecycle_stages: str = (
+        PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_LIFECYCLE_STAGES
+    )
+    pattern_imminent_hard_recert_shadow_reasons: str = (
+        PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_REASONS
     )
     pattern_imminent_ticker_rotation_enabled: bool = True
     pattern_imminent_ticker_rotation_window_minutes: int = (

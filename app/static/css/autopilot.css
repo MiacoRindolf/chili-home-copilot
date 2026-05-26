@@ -328,6 +328,10 @@
   border-color: rgba(45, 212, 191, 0.4);
   color: #99f6e4;
 }
+.ap-badge.options {
+  border-color: rgba(244, 114, 182, 0.42);
+  color: #fbcfe8;
+}
 .ap-badge.compatible,
 .ap-badge.live,
 .ap-badge.open {

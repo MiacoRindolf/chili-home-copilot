@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 from ...config import (
     PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS,
+    PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_LIFECYCLE_STAGES,
+    PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_REASONS,
     PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN,
     PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT,
     PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT,
@@ -29,6 +31,7 @@ from ...config import (
     PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT,
     PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS,
     PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES,
+    PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE,
     PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES,
     PATTERN_IMMINENT_OPEN_POSITION_DEFLECTION_DEFAULT_ENABLED,
     PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES,
@@ -92,8 +95,15 @@ READINESS_SKIP_BELOW_MIN = "readiness_below_min"
 READINESS_SKIP_AT_OR_ABOVE_CAP = "readiness_at_or_above_cap"
 STANDARD_SIGNAL_LANE = "standard"
 SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
+HARD_RECERT_SHADOW_SIGNAL_LANE = PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE
+SHADOW_OBSERVATION_SIGNAL_LANES = frozenset({
+    SHADOW_NEAR_MISS_SIGNAL_LANE,
+    HARD_RECERT_SHADOW_SIGNAL_LANE,
+})
 SHADOW_NEAR_MISS_SOURCE_FIXED_GAP = "fixed_gap"
 SHADOW_NEAR_MISS_SOURCE_ADAPTIVE_BUFFER = "adaptive_priority_buffer"
+CSV_TOKEN_SEPARATOR = ","
+PORTFOLIO_GATE_RECERT_REASONS_KEY = "recert_reasons"
 IMMINENT_SCORE_SKIP_PATTERN_ENGINE = True
 PATTERN_ID_ROTATION_FALLBACK = 0
 MIN_POSITIVE_CONFIG_INT = 1
@@ -158,13 +168,69 @@ def _csv_stage_setting(name: str, default: str) -> frozenset[str]:
     if isinstance(raw, (set, frozenset, list, tuple)):
         values = raw
     else:
-        values = str(raw).split(",")
+        values = str(raw).split(CSV_TOKEN_SEPARATOR)
     stages = {
         str(value).strip().lower()
         for value in values
         if str(value).strip()
     }
     return frozenset(stages)
+
+
+def _normalized_token_set(raw: Any) -> frozenset[str]:
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        values: list[Any] = list(raw.split(CSV_TOKEN_SEPARATOR))
+    elif isinstance(raw, (set, frozenset, list, tuple)):
+        values = []
+        for item in raw:
+            if isinstance(item, str):
+                values.extend(item.split(CSV_TOKEN_SEPARATOR))
+            else:
+                values.append(item)
+    else:
+        values = [raw]
+    return frozenset(
+        str(value).strip().lower()
+        for value in values
+        if str(value).strip()
+    )
+
+
+def _csv_token_setting(name: str, default: str) -> frozenset[str]:
+    return _normalized_token_set(getattr(settings, name, default) or default)
+
+
+def _recert_reason_tokens(pat: ScanPattern) -> frozenset[str]:
+    reasons = set(_normalized_token_set(getattr(pat, "recert_reason", None)))
+    gate_json = getattr(pat, "portfolio_gate_json", None)
+    if isinstance(gate_json, str):
+        try:
+            gate_json = json.loads(gate_json)
+        except Exception:
+            gate_json = None
+    if isinstance(gate_json, dict):
+        reasons.update(
+            _normalized_token_set(gate_json.get(PORTFOLIO_GATE_RECERT_REASONS_KEY))
+        )
+    return frozenset(reasons)
+
+
+def _hard_recert_shadow_reasons_for_pattern(
+    pat: ScanPattern,
+    *,
+    enabled: bool,
+    lifecycle_stages: frozenset[str],
+    hard_reasons: frozenset[str],
+) -> frozenset[str]:
+    if not enabled or not bool(getattr(pat, "recert_required", False)):
+        return frozenset()
+    stage = _lifecycle_stage(pat)
+    promotion_status = (getattr(pat, "promotion_status", None) or "").strip().lower()
+    if stage not in lifecycle_stages and promotion_status not in lifecycle_stages:
+        return frozenset()
+    return frozenset(_recert_reason_tokens(pat) & hard_reasons)
 
 
 def _open_autotrader_position_keys(
@@ -989,6 +1055,7 @@ def _insert_imminent_breakout_alert(
     signal_lane: str | None = None,
     readiness_gap_to_min: float | None = None,
     shadow_near_miss_source: str | None = None,
+    hard_recert_reasons: list[str] | None = None,
 ) -> None:
     price = float(score.get("price") or 0)
     scorecard = {
@@ -1005,6 +1072,8 @@ def _insert_imminent_breakout_alert(
         scorecard["readiness_gap_to_min"] = readiness_gap_to_min
     if shadow_near_miss_source:
         scorecard["shadow_near_miss_source"] = shadow_near_miss_source
+    if hard_recert_reasons:
+        scorecard["hard_recert_reasons"] = hard_recert_reasons
     snap = {
         "flat_indicators": {k: v for k, v in flat.items() if v is not None},
         "imminent_scorecard": scorecard,
@@ -1120,6 +1189,19 @@ def gather_imminent_candidate_rows(
         "pattern_imminent_shadow_near_miss_lifecycle_stages",
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES,
     )
+    hard_recert_shadow_enabled = (
+        bool(getattr(settings, "pattern_imminent_hard_recert_shadow_enabled", True))
+        and bool(apply_main_dispatch_filters)
+        and not bool(for_opportunity_board)
+    )
+    hard_recert_shadow_lifecycle_stages = _csv_stage_setting(
+        "pattern_imminent_hard_recert_shadow_lifecycle_stages",
+        PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_LIFECYCLE_STAGES,
+    )
+    hard_recert_shadow_reasons = _csv_token_setting(
+        "pattern_imminent_hard_recert_shadow_reasons",
+        PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_REASONS,
+    )
     ticker_rotation_enabled = (
         bool(getattr(settings, "pattern_imminent_ticker_rotation_enabled", True))
         and bool(apply_main_dispatch_filters)
@@ -1199,6 +1281,10 @@ def gather_imminent_candidate_rows(
     shadow_near_miss_adaptive_selected = 0
     shadow_near_miss_adaptive_admitted = 0
     shadow_near_miss_adaptive_skipped_not_selected = 0
+    hard_recert_shadow_patterns = 0
+    hard_recert_shadow_eligible = 0
+    hard_recert_shadow_admitted = 0
+    hard_recert_shadow_reason_counts: Counter[str] = Counter()
     ticker_rotation_applied = 0
     ticker_rotation_total_available = 0
     ticker_rotation_samples: list[dict[str, Any]] = []
@@ -1306,10 +1392,12 @@ def gather_imminent_candidate_rows(
         signal_lane: str,
         readiness_gap_to_min: float | None,
         shadow_near_miss_source: str | None = None,
+        hard_recert_reasons: list[str] | None = None,
     ) -> bool:
         nonlocal shadow_near_miss_admitted
         nonlocal shadow_near_miss_gap_admitted
         nonlocal shadow_near_miss_adaptive_admitted
+        nonlocal hard_recert_shadow_admitted
 
         eta_lo, eta_hi = estimate_breakout_eta_hours(
             readiness, pat.timeframe, k=k_eta, max_eta_hours=max_eta,
@@ -1395,6 +1483,8 @@ def gather_imminent_candidate_rows(
         }
         if shadow_near_miss_source:
             candidate["shadow_near_miss_source"] = shadow_near_miss_source
+        if hard_recert_reasons:
+            candidate["hard_recert_reasons"] = hard_recert_reasons
         candidates.append(candidate)
         if signal_lane == SHADOW_NEAR_MISS_SIGNAL_LANE:
             shadow_near_miss_admitted += 1
@@ -1402,6 +1492,9 @@ def gather_imminent_candidate_rows(
                 shadow_near_miss_gap_admitted += 1
             elif shadow_near_miss_source == SHADOW_NEAR_MISS_SOURCE_ADAPTIVE_BUFFER:
                 shadow_near_miss_adaptive_admitted += 1
+        elif signal_lane == HARD_RECERT_SHADOW_SIGNAL_LANE:
+            hard_recert_shadow_admitted += 1
+            hard_recert_shadow_reason_counts.update(hard_recert_reasons or [])
         return True
 
     def _pending_shadow_near_miss_priority(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -1441,6 +1534,15 @@ def gather_imminent_candidate_rows(
                 ),
             })
             continue
+
+        hard_recert_reasons_for_pat = _hard_recert_shadow_reasons_for_pattern(
+            pat,
+            enabled=hard_recert_shadow_enabled,
+            lifecycle_stages=hard_recert_shadow_lifecycle_stages,
+            hard_reasons=hard_recert_shadow_reasons,
+        )
+        if hard_recert_reasons_for_pat:
+            hard_recert_shadow_patterns += 1
 
         tickers = _tickers_for_pattern(pat, global_uni, equity_open=eq_open)
         tickers, dropped_crypto, _spot_count = _filter_crypto_to_execution_universe(
@@ -1552,7 +1654,12 @@ def gather_imminent_candidate_rows(
             if all_pass:
                 skip["all_conditions_met"] += 1
                 continue
-            signal_lane = STANDARD_SIGNAL_LANE
+            hard_recert_reason_list = sorted(hard_recert_reasons_for_pat)
+            signal_lane = (
+                HARD_RECERT_SHADOW_SIGNAL_LANE
+                if hard_recert_reason_list
+                else STANDARD_SIGNAL_LANE
+            )
             readiness_gap_to_min: float | None = None
             shadow_near_miss_source: str | None = None
             if readiness < min_rd:
@@ -1576,12 +1683,14 @@ def gather_imminent_candidate_rows(
                     shadow_near_miss_base_ok
                     and readiness_gap_to_min <= shadow_near_miss_max_gap
                 )
-                if shadow_near_miss_ok:
+                if not hard_recert_reason_list and shadow_near_miss_ok:
                     signal_lane = SHADOW_NEAR_MISS_SIGNAL_LANE
                     shadow_near_miss_source = SHADOW_NEAR_MISS_SOURCE_FIXED_GAP
                     shadow_near_miss_eligible += 1
                     shadow_near_miss_gap_eligible += 1
                 elif (
+                    not hard_recert_reason_list
+                    and
                     shadow_near_miss_adaptive_enabled
                     and shadow_near_miss_adaptive_max_per_run > 0
                     and shadow_near_miss_base_ok
@@ -1618,6 +1727,9 @@ def gather_imminent_candidate_rows(
                 )
                 continue
 
+            if hard_recert_reason_list:
+                hard_recert_shadow_eligible += 1
+
             _append_candidate_from_score(
                 pat=pat,
                 ticker=ticker,
@@ -1629,6 +1741,7 @@ def gather_imminent_candidate_rows(
                 signal_lane=signal_lane,
                 readiness_gap_to_min=readiness_gap_to_min,
                 shadow_near_miss_source=shadow_near_miss_source,
+                hard_recert_reasons=hard_recert_reason_list,
             )
 
         if board_budget_hit or score_time_budget_hit:
@@ -1702,6 +1815,15 @@ def gather_imminent_candidate_rows(
         "shadow_near_miss_adaptive_skipped_not_selected": (
             shadow_near_miss_adaptive_skipped_not_selected
         ),
+        "hard_recert_shadow_enabled": hard_recert_shadow_enabled,
+        "hard_recert_shadow_lifecycle_stages": sorted(
+            hard_recert_shadow_lifecycle_stages
+        ),
+        "hard_recert_shadow_reasons": sorted(hard_recert_shadow_reasons),
+        "hard_recert_shadow_patterns": hard_recert_shadow_patterns,
+        "hard_recert_shadow_eligible": hard_recert_shadow_eligible,
+        "hard_recert_shadow_admitted": hard_recert_shadow_admitted,
+        "hard_recert_shadow_reason_counts": dict(hard_recert_shadow_reason_counts),
         "ticker_rotation_enabled": ticker_rotation_enabled,
         "ticker_rotation_window_minutes": ticker_rotation_window_minutes,
         "ticker_rotation_explore_tickers": min(
@@ -1737,7 +1859,7 @@ def _candidate_signal_lane(candidate: dict[str, Any]) -> str:
 def _is_shadow_observation_candidate(candidate: dict[str, Any]) -> bool:
     return (
         _candidate_pattern_stage(candidate) == SHADOW_PROMOTED_STAGE
-        or _candidate_signal_lane(candidate) == SHADOW_NEAR_MISS_SIGNAL_LANE
+        or _candidate_signal_lane(candidate) in SHADOW_OBSERVATION_SIGNAL_LANES
     )
 
 
@@ -1957,6 +2079,7 @@ def run_pattern_imminent_scan(
                     shadow_near_miss_source=(
                         str(c.get("shadow_near_miss_source") or "").strip() or None
                     ),
+                    hard_recert_reasons=list(c.get("hard_recert_reasons") or []),
                 )
             except Exception as e:
                 logger.warning("[pattern_imminent] BreakoutAlert insert failed: %s", e)
