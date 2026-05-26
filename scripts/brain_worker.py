@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 # Repo-root data/ — must match app.db.DATA_DIR (not process cwd)
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 STATUS_FILE = DATA_DIR / "brain_worker_status.json"
+STATUS_TMP_SUFFIX = ".tmp"
 STOP_SIGNAL = DATA_DIR / "brain_worker_stop"
 PAUSE_SIGNAL = DATA_DIR / "brain_worker_pause"
 WAKE_SIGNAL = DATA_DIR / "brain_worker_wake"
@@ -90,6 +91,19 @@ FAST_BACKTEST_RATE_MIN_ELAPSED_SECONDS = 0.001
 # Global lock file handle (kept open while running)
 _lock_handle = None
 _lock_path: Path | None = None
+
+
+def _status_tmp_file() -> Path:
+    """Per-process/thread temp path for atomic status writes.
+
+    Multiple worker modes can run at once. A shared ``brain_worker_status.json.tmp``
+    lets one process replace another process's temp file before it calls
+    ``replace()``, producing noisy FileNotFoundError tracebacks during startup
+    and shutdown.
+    """
+    return STATUS_FILE.with_name(
+        f"{STATUS_FILE.name}.{os.getpid()}.{threading.get_ident()}{STATUS_TMP_SUFFIX}"
+    )
 
 
 def _parse_non_negative_int(value: object, default: int) -> int:
@@ -338,7 +352,7 @@ class BrainWorkerStatus:
             "learning": learning_snap,
             "updated_at": datetime.utcnow().isoformat(),
         }
-        tmp = STATUS_FILE.with_suffix(".json.tmp")
+        tmp = _status_tmp_file()
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
         tmp.replace(STATUS_FILE)

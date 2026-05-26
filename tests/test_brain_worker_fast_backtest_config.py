@@ -18,6 +18,9 @@ QUEUE_PROMOTION_PATH_DEBT_AFTER = 1
 QUEUE_BACKTESTS_RUN = 11
 QUEUE_PATTERNS_PROCESSED = 3
 QUEUE_EXECUTOR = "process"
+STATUS_TEST_PID = 4242
+STATUS_THREAD_ONE = 111
+STATUS_THREAD_TWO = 222
 
 
 def test_fast_backtest_batch_defaults_are_mode_aware(monkeypatch):
@@ -67,6 +70,33 @@ def test_worker_locks_are_mode_specific():
     assert lean_lock.name == LEAN_CYCLE_LOCK_NAME
     assert backtest_lock.name == BACKTEST_LOCK_SUFFIX
     assert backtest_lock != lean_lock
+
+
+def test_status_tmp_files_are_process_thread_specific(monkeypatch):
+    monkeypatch.setattr(brain_worker.os, "getpid", lambda: STATUS_TEST_PID)
+    monkeypatch.setattr(
+        brain_worker.threading,
+        "get_ident",
+        lambda: STATUS_THREAD_ONE,
+    )
+    first = brain_worker._status_tmp_file()
+
+    monkeypatch.setattr(
+        brain_worker.threading,
+        "get_ident",
+        lambda: STATUS_THREAD_TWO,
+    )
+    second = brain_worker._status_tmp_file()
+
+    assert first != second
+    assert first.name == (
+        f"{brain_worker.STATUS_FILE.name}."
+        f"{STATUS_TEST_PID}.{STATUS_THREAD_ONE}{brain_worker.STATUS_TMP_SUFFIX}"
+    )
+    assert second.name == (
+        f"{brain_worker.STATUS_FILE.name}."
+        f"{STATUS_TEST_PID}.{STATUS_THREAD_TWO}{brain_worker.STATUS_TMP_SUFFIX}"
+    )
 
 
 def test_lean_cycle_fast_backtest_timer_stays_off_when_batch_is_zero(monkeypatch):
