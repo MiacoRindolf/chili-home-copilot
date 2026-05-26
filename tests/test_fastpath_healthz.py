@@ -20,6 +20,7 @@ from app.services.trading.fast_path.healthz import (
 )
 
 SAMPLE_PAIR = "SUI-USD"
+ROTATED_PAIR = "TAO-USD"
 
 
 def test_healthz_fails_after_boot_when_universe_has_no_pairs():
@@ -101,6 +102,59 @@ def test_healthz_accepts_fresh_maker_attempt_as_learning_decision():
     assert ok is True
     assert body["executor_learning_freshness"] is True
     assert body["details"]["executor_learning_phase"] == "ok"
+    assert body["details"]["subscribed_pairs"] == 1
+
+
+def test_healthz_ignores_rotated_paused_pair_errors_when_streaming_pairs_are_fresh():
+    server = HealthzServer(port=8090, snapshot_fn=lambda: {})
+    server._started_at -= BOOT_GRACE_S + 1.0
+
+    now = _utcnow_naive()
+    snap = _healthy_snapshot(now=now, learning={})
+    snap["status"]["pairs"][ROTATED_PAIR] = {
+        "state": "paused",
+        "last_bar_at": (now - timedelta(minutes=30)).isoformat(),
+        "error_count_60s": 5,
+        "last_error": "universe_rotated",
+    }
+
+    ok, body = server._evaluate(snap)
+
+    assert ok is True
+    assert body["ws_connected"] is True
+    assert body["details"]["tracked_pairs"] == 2
+    assert body["details"]["subscribed_pairs"] == 1
+    assert body["details"]["ignored_pair_states"] == {"paused": 1}
+
+
+def test_healthz_fails_when_every_tracked_pair_is_paused():
+    server = HealthzServer(port=8090, snapshot_fn=lambda: {})
+    server._started_at -= BOOT_GRACE_S + 1.0
+
+    now = _utcnow_naive()
+    ok, body = server._evaluate({
+        "enabled": True,
+        "writer": {
+            "queue_depth": 0,
+            "queue_max": 100,
+            "consecutive_batch_failures": 0,
+        },
+        "status": {
+            "pairs": {
+                ROTATED_PAIR: {
+                    "state": "paused",
+                    "last_bar_at": now.isoformat(),
+                    "error_count_60s": 0,
+                },
+            },
+        },
+        "ws": {"book": {"last_emit_at_wall": now.isoformat()}},
+    })
+
+    assert ok is False
+    assert body["reason"] == HEALTH_REASON_NO_SUBSCRIBED_PAIRS
+    assert body["details"]["tracked_pairs"] == 1
+    assert body["details"]["subscribed_pairs"] == 0
 
 
 def test_healthz_allows_stale_executions_when_alert_stream_is_quiet():

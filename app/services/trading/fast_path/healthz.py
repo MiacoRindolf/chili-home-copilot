@@ -70,6 +70,7 @@ CANDLE_FRESHNESS_WINDOW_S = 300.0
 WS_ERROR_CIRCUIT_BREAKER = 5
 HEALTH_REASON_NO_SUBSCRIBED_PAIRS = "no_subscribed_pairs"
 HEALTH_REASON_EXECUTOR_LEARNING_STALE = "executor_learning_stale"
+HEALTH_SUBSCRIBED_PAIR_STATES = frozenset({"streaming", "degraded"})
 
 FAST_LEARNING_FRESHNESS_KEY = "fast_learning_freshness"
 LEARNING_LATEST_ALERT_AT_KEY = "latest_alert_at"
@@ -186,7 +187,8 @@ class HealthzServer:
                 "reason": "db_write_failing",
             }
 
-        pairs = (snap.get("status") or {}).get("pairs") or {}
+        tracked_pairs = (snap.get("status") or {}).get("pairs") or {}
+        pairs = self._subscribed_pairs(tracked_pairs)
         if not pairs:
             return False, {
                 "ws_connected": False,
@@ -196,7 +198,9 @@ class HealthzServer:
                 "details": {
                     "ws_window_s": WS_FRESHNESS_WINDOW_S,
                     "candle_window_s": CANDLE_FRESHNESS_WINDOW_S,
+                    "tracked_pairs": len(tracked_pairs),
                     "subscribed_pairs": 0,
+                    "ignored_pair_states": self._pair_state_counts(tracked_pairs),
                 },
             }
 
@@ -225,12 +229,41 @@ class HealthzServer:
                     EXECUTOR_LEARNING_ACTIVE_ALERT_WINDOW_S
                 ),
                 "executor_learning_max_lag_s": EXECUTOR_LEARNING_MAX_LAG_S,
+                "tracked_pairs": len(tracked_pairs),
+                "subscribed_pairs": len(pairs),
+                "ignored_pair_states": self._ignored_pair_state_counts(tracked_pairs),
                 **ws_detail,
                 **candle_detail,
                 **learning_detail,
             },
         }
         return (ws_ok and candle_ok and learning_ok), body
+
+    @staticmethod
+    def _subscribed_pairs(pairs: dict) -> dict:
+        return {
+            ticker: pair
+            for ticker, pair in pairs.items()
+            if str(pair.get("state") or "").strip().lower()
+            in HEALTH_SUBSCRIBED_PAIR_STATES
+        }
+
+    @staticmethod
+    def _pair_state_counts(pairs: dict) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for pair in pairs.values():
+            state = str(pair.get("state") or "unknown").strip().lower()
+            counts[state] = counts.get(state, 0) + 1
+        return counts
+
+    @classmethod
+    def _ignored_pair_state_counts(cls, pairs: dict) -> dict[str, int]:
+        counts = cls._pair_state_counts(pairs)
+        return {
+            state: count
+            for state, count in counts.items()
+            if state not in HEALTH_SUBSCRIBED_PAIR_STATES
+        }
 
     def _probe_ws_connected(
         self, snap: dict, pairs: dict,
@@ -461,6 +494,7 @@ __all__ = [
     "FAST_LEARNING_FRESHNESS_KEY",
     "HEALTH_REASON_EXECUTOR_LEARNING_STALE",
     "HEALTH_REASON_NO_SUBSCRIBED_PAIRS",
+    "HEALTH_SUBSCRIBED_PAIR_STATES",
     "HealthzServer",
     "LEARNING_ALERT_TO_DECISION_LAG_S_KEY",
     "LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY",
