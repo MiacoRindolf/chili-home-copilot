@@ -353,6 +353,46 @@ def test_shadow_maker_probe_rechecks_terminal_denials_when_enabled(monkeypatch):
     ex._latest_universe_status_sync.assert_called_once_with("BTC-USD")
 
 
+def test_shadow_maker_probe_capacity_block_is_observe_only(monkeypatch):
+    settings = replace(
+        _make_settings(execution_mode="maker_only"),
+        universe_rotation_enabled=True,
+        universe_shadow_capacity_probe_enabled=True,
+    )
+    ex = _make_executor(settings)
+    ex._build_context = MagicMock(return_value=_make_ctx(spread_bps=2.0))
+    ex._latest_universe_status_sync = MagicMock(return_value=UNIVERSE_STATUS_SHADOW)
+    gate_run = GateRunResult(
+        allow=False,
+        deny_reason="capacity:pair_already_held",
+        results=[
+            GateResult(
+                name="capacity",
+                allow=False,
+                reason="pair_already_held",
+                detail={"open": 1, "max": 1},
+            ),
+        ],
+    )
+    monkeypatch.setattr(ex_mod, "run_gates", lambda *_a, **_kw: gate_run)
+    calls = []
+
+    async def _record_maker_probe(**kwargs):
+        calls.append(kwargs)
+
+    async def _fail_reject(*_a, **_kw):
+        raise AssertionError("shadow capacity block should route to observe-only maker")
+
+    ex._process_alert_maker = _record_maker_probe
+    ex._write_decision = _fail_reject
+
+    asyncio.run(ex._process_alert(_make_alert()))
+
+    assert len(calls) == 1
+    assert calls[0]["observe_only"] is True
+    ex._latest_universe_status_sync.assert_called_once_with("BTC-USD")
+
+
 def test_shadow_maker_probe_keeps_operational_denials_blocking(monkeypatch):
     settings = replace(
         _make_settings(execution_mode="maker_only"),
@@ -843,6 +883,69 @@ def test_maker_timeout_shadow_fill_records_decay_without_paper_position():
         "placed_at": 0.0,
         "quantity": 0.001,
         "notional_usd": 10.0,
+    }
+
+    async def run():
+        orig_sleep = asyncio.sleep
+        async def _instant(_): return None
+        asyncio.sleep = _instant
+        try:
+            await ex._maker_timeout_handler(
+                cap_key=("BTC-USD", "buy"), attempt=attempt,
+                timeout_s=1, unfilled_outcome="cancelled",
+                ctx=ctx_place, alert=_make_alert(), gate_run=_make_gate_run(),
+            )
+        finally:
+            asyncio.sleep = orig_sleep
+
+    asyncio.run(run())
+
+    payload = ex._update_maker_attempt_sync.call_args.args[0]
+    assert payload["fill_outcome"] == "filled"
+    assert ex._metrics.maker_attempts_filled == 1
+    assert ex._metrics.maker_observe_only_fills == 1
+    assert ex._metrics.decisions_paper_fill == 0
+    assert writes == []
+    assert ex._open_positions == {}
+    assert ex._daily_notional_used_usd == pytest.approx(0.0)
+    decay.record_maker_outcome.assert_called_once()
+
+
+def test_maker_timeout_observe_only_fill_records_decay_without_position():
+    settings = replace(
+        _make_settings(execution_mode="maker_only", maker_cancel_on_timeout_s=1),
+        universe_rotation_enabled=True,
+        universe_shadow_paper_fills_enabled=True,
+    )
+    decay = MagicMock()
+    ex = _make_executor(settings, decay_miner=decay)
+    ex._paper_position_allowed_for_universe = MagicMock(return_value=(True, None))
+
+    ctx_place = _make_ctx(best_bid=100.0, best_ask=100.10)
+    ctx_after = _make_ctx(best_bid=100.005, best_ask=100.005)
+    ex._build_context = MagicMock(return_value=ctx_after)
+    writes = []
+
+    async def _record_write(*a, **kw):
+        writes.append(kw)
+        return None
+    ex._write_decision = _record_write
+
+    attempt = {
+        "attempt_id": 8,
+        "alert_id": 1,
+        "ticker": "BTC-USD",
+        "side": "buy",
+        "limit_price": 100.005,
+        "broker_order_id": None,
+        "execution_mode": "maker_only",
+        "alert_type": "imbalance_long",
+        "signal_score": 0.85,
+        "fired_at": datetime.now(timezone.utc).replace(tzinfo=None),
+        "placed_at": 0.0,
+        "quantity": 0.001,
+        "notional_usd": 10.0,
+        "observe_only": True,
     }
 
     async def run():

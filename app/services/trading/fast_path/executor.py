@@ -82,6 +82,11 @@ _SHADOW_MAKER_PROBE_BYPASS_GATES = frozenset({
 })
 """Learned denials that shadow maker probes are allowed to re-measure."""
 
+_SHADOW_MAKER_PROBE_CAPACITY_GATES = frozenset({
+    "capacity",
+})
+"""Paper-only shadow denials that may be re-measured as observe-only probes."""
+
 _SHADOW_MAKER_PROBE_TERMINAL_VERDICTS = frozenset({
     "negative_edge",
     "below_cost",
@@ -579,6 +584,10 @@ class FastPathExecutor:
             shadow_maker_probe = await self._shadow_maker_probe_allowed_async(
                 alert, ctx, gate_run,
             )
+        shadow_maker_probe_observe_only = (
+            shadow_maker_probe
+            and self._shadow_maker_probe_observe_only(gate_run)
+        )
         if not gate_run.allow and not shadow_maker_probe:
             # Reject path
             await self._write_decision(
@@ -642,6 +651,7 @@ class FastPathExecutor:
                 quantity=quantity, fill_price=fill_price,
                 notional_usd=notional_usd, decided_at=decided_at,
                 latency_ms=latency_ms, execution_mode=execution_mode,
+                observe_only=shadow_maker_probe_observe_only,
             )
             return
 
@@ -775,7 +785,22 @@ class FastPathExecutor:
         denied = {r.name for r in gate_run.results if not r.allow}
         if not denied:
             return False
-        if not denied.issubset(_SHADOW_MAKER_PROBE_BYPASS_GATES):
+        capacity_probe_enabled = bool(getattr(
+            self._settings,
+            "universe_shadow_capacity_probe_enabled",
+            False,
+        ))
+        bypass_gates = set(_SHADOW_MAKER_PROBE_BYPASS_GATES)
+        if capacity_probe_enabled:
+            bypass_gates.update(_SHADOW_MAKER_PROBE_CAPACITY_GATES)
+        if not denied.issubset(bypass_gates):
+            return False
+        if any(
+            r.name == "capacity"
+            and not r.allow
+            and str(r.reason or "") != "pair_already_held"
+            for r in gate_run.results
+        ):
             return False
         if (
             not getattr(
@@ -813,6 +838,14 @@ class FastPathExecutor:
                 return False
         return True
 
+    @staticmethod
+    def _shadow_maker_probe_observe_only(gate_run: GateRunResult) -> bool:
+        return any(
+            result.name in _SHADOW_MAKER_PROBE_CAPACITY_GATES
+            and not result.allow
+            for result in gate_run.results
+        )
+
     async def _process_alert_maker(
         self,
         *,
@@ -826,6 +859,7 @@ class FastPathExecutor:
         decided_at: datetime,
         latency_ms: float,
         execution_mode: str,
+        observe_only: bool = False,
     ) -> None:
         """Maker-only / maker-first-then-taker placement entry point.
 
@@ -990,6 +1024,7 @@ class FastPathExecutor:
             "placed_at": time.monotonic(),
             "quantity": float(quantity),
             "notional_usd": float(notional_usd),
+            "observe_only": bool(observe_only),
             "_placement_ctx": ctx,
             "_alert": alert,
             "_gate_run": gate_run,
@@ -1215,9 +1250,12 @@ class FastPathExecutor:
             decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
             fill_price = float(final_price or limit_price)
             filled_notional = float(attempt.get("notional_usd") or 0.0)
-            paper_allowed, universe_status = (
-                await self._paper_position_allowed_for_universe_async(ticker)
-            )
+            if bool(attempt.get("observe_only")):
+                paper_allowed, universe_status = False, "shadow_capacity_probe"
+            else:
+                paper_allowed, universe_status = (
+                    await self._paper_position_allowed_for_universe_async(ticker)
+                )
             if not paper_allowed:
                 self._metrics.maker_observe_only_fills += 1
                 logger.info(

@@ -9193,6 +9193,15 @@ function loadMonitorData(showRefreshFlash) {
     if (bEl) bEl.textContent = sum.benefit_rate != null ? (Number(sum.benefit_rate) * 100).toFixed(0) + '%' : '—';
     var lEl = document.getElementById('mon-sum-last');
     if (lEl) lEl.textContent = sum.last_check ? sum.last_check : '—';
+    var suppressedCount = Number(sum.suppressed_stale_count || 0);
+    var monStatus = document.getElementById('monitor-status');
+    if (suppressedCount > 0 && monStatus && !showRefreshFlash) {
+      monStatus.style.display = 'block';
+      monStatus.className = 'mon-status ok';
+      monStatus.textContent = 'Synced: hidden ' + suppressedCount + ' closed broker position' + (suppressedCount === 1 ? '' : 's');
+    } else if (suppressedCount <= 0 && monStatus && !showRefreshFlash && monStatus.textContent.indexOf('Synced: hidden ') === 0) {
+      monStatus.style.display = 'none';
+    }
     var mode = (document.getElementById('monitor-sort') || {}).value || 'health';
     renderMonitorCards(_monitorSortSetups(d.setups || [], mode));
     if (emptyEl) emptyEl.style.display = (d.setups && d.setups.length) ? 'none' : 'block';
