@@ -11,7 +11,15 @@ FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
 REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = "ticker_regime,cross_asset_regime"
 AUTOTRADER_SYNERGY_DEFAULT_FRACTION = 0.25
 AUTOTRADER_SYNERGY_DEFAULT_MAX_NOTIONAL_USD = 50.0
-AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE = 1
+AUTOTRADER_SYNERGY_DEFAULT_MAX_TOTAL_ADD_FRACTION = 0.75
+AUTOTRADER_SYNERGY_MIN_ACTIVE_SCALE_INS_PER_TRADE = 1
+AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE = max(
+    AUTOTRADER_SYNERGY_MIN_ACTIVE_SCALE_INS_PER_TRADE,
+    round(
+        AUTOTRADER_SYNERGY_DEFAULT_MAX_TOTAL_ADD_FRACTION
+        / AUTOTRADER_SYNERGY_DEFAULT_FRACTION
+    ),
+)
 AUTOTRADER_SYNERGY_MAX_SCALE_INS_CONFIG_LIMIT = 10
 AUTOTRADER_PROBATION_DEFAULT_NOTIONAL_MULTIPLIER = 0.25
 AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_PER_DAY = 1
@@ -2341,7 +2349,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_SYNERGY_MAX_SCALE_INS_PER_TRADE"
         ),
-        description="Maximum confirming-pattern scale-ins allowed per open trade.",
+        description=(
+            "Maximum distinct confirming-pattern scale-ins allowed per open trade. "
+            "The default is derived from the scale-in fraction and total add budget; "
+            "set 0 to disable synergy scale-ins."
+        ),
     )
     chili_autotrader_synergy_enabled: bool = Field(
         default=False,

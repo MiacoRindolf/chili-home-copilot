@@ -635,6 +635,41 @@ def test_scale_in_blocks_live_capital_fallback(monkeypatch):
     assert blocked[0]["reason"] == "capital_unavailable:fallback:get_portfolio_timeout"
 
 
+def test_scale_in_records_confirming_pattern_history(monkeypatch):
+    db = MagicMock()
+    alert = SimpleNamespace(id=77, ticker="SCAP", scan_pattern_id=12)
+    trade = SimpleNamespace(
+        id=5,
+        entry_price=TEST_ENTRY_PRICE,
+        quantity=1.0,
+        stop_loss=TEST_STOP_PRICE,
+        take_profit=TEST_TARGET_PRICE,
+        scale_in_count=0,
+        indicator_snapshot={
+            at_mod.SCALE_IN_ALERT_IDS_SNAPSHOT_KEY: [70],
+            at_mod.SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY: [10],
+        },
+    )
+    plan = SimpleNamespace(
+        trade=trade,
+        added_quantity=1.0,
+        new_avg_entry=51.0,
+        new_stop=TEST_STOP_PRICE,
+        new_target=TEST_TARGET_PRICE,
+        confirming_pattern_id=12,
+    )
+    monkeypatch.setattr(at_mod, "_audit", lambda *a, **k: None)
+    monkeypatch.setattr(at_mod, "_autotrader_tick_note", lambda *a, **k: None)
+
+    out = {"scaled_in": 0}
+
+    at_mod._execute_scale_in(db, 1, alert, plan, TEST_ENTRY_PRICE, {}, None, False, out)
+
+    assert trade.scale_in_count == 1
+    assert trade.indicator_snapshot[at_mod.SCALE_IN_ALERT_IDS_SNAPSHOT_KEY] == [70, 77]
+    assert trade.indicator_snapshot[at_mod.SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY] == [10, 12]
+
+
 def test_coinbase_cap_uses_passed_price(monkeypatch):
     from app import config as config_mod
     from app.services.trading import broker_selector, cost_aware_gate, governance

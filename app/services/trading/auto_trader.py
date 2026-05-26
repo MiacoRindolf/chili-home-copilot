@@ -36,6 +36,8 @@ from .autopilot_scope import (
     check_autopilot_entry_gate,
 )
 from .auto_trader_synergy import (
+    SCALE_IN_ALERT_IDS_SNAPSHOT_KEY,
+    SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY,
     find_open_autotrader_paper,
     find_open_autotrader_trade,
     maybe_scale_in,
@@ -2841,10 +2843,29 @@ def _execute_scale_in(
     if t.indicator_snapshot is None:
         t.indicator_snapshot = {}
     if isinstance(t.indicator_snapshot, dict):
+        confirming_pattern_id = getattr(
+            plan, "confirming_pattern_id", getattr(alert, "scan_pattern_id", None)
+        )
+        def _snapshot_list(value: Any) -> list[Any]:
+            if value is None:
+                return []
+            if isinstance(value, list):
+                return list(value)
+            if isinstance(value, tuple):
+                return list(value)
+            return [value]
+
+        existing_alert_ids = _snapshot_list(
+            t.indicator_snapshot.get(SCALE_IN_ALERT_IDS_SNAPSHOT_KEY)
+        )
+        existing_pattern_ids = _snapshot_list(
+            t.indicator_snapshot.get(SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY)
+        )
         t.indicator_snapshot = {
             **t.indicator_snapshot,
-            "autotrader_scale_in_alert_ids": (t.indicator_snapshot.get("autotrader_scale_in_alert_ids") or [])
-            + [alert.id],
+            SCALE_IN_ALERT_IDS_SNAPSHOT_KEY: existing_alert_ids + [alert.id],
+            SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY: existing_pattern_ids
+            + ([confirming_pattern_id] if confirming_pattern_id is not None else []),
         }
     db.add(t)
     db.commit()
