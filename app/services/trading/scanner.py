@@ -771,6 +771,19 @@ _score_cache_lock = threading.Lock()
 _SCORE_CACHE_TTL = 300  # 5 min
 _SCORE_CACHE_MAX = 1000
 SWING_RESISTANCE_LOOKBACK_BARS = 20
+PATTERN_STRUCTURAL_VCP_LOOKBACK_BARS = 40
+PATTERN_STRUCTURAL_RETEST_LOOKBACK_BARS = 20
+PATTERN_STRUCTURAL_RETEST_TOLERANCE_PCT = 1.5
+PATTERN_STRUCTURAL_SUPPORT_LOOKBACK_BARS = SWING_RESISTANCE_LOOKBACK_BARS
+PATTERN_STRUCTURAL_BB_WINDOW_BARS = 20
+PATTERN_STRUCTURAL_BB_STD_DEV = 2
+PATTERN_STRUCTURAL_BB_WIDTH_LOOKBACK_BARS = 50
+PATTERN_STRUCTURAL_BB_SQUEEZE_QUANTILE = 0.20
+PATTERN_STRUCTURAL_BB_WIDTH_DIRECT_SQUEEZE_THRESHOLD = 0.04
+PULLBACK_STRETCH_HIGH_LOOKBACK_BARS = 10
+PULLBACK_STRETCH_AVERAGE_RANGE_LOOKBACK_BARS = 25
+PULLBACK_STRETCH_RANGE_MULTIPLE = 2.5
+VWAP_RECLAIM_RELATIVE_VOLUME_MIN = 1.2
 
 
 def _score_ticker(
@@ -1209,6 +1222,11 @@ def _score_ticker_impl(
             risk = "medium"
         else:
             risk = "low"
+        pattern_structural_indicators = _pattern_structural_indicators_from_df(
+            df,
+            price=price,
+            resistance=swing_resistance,
+        )
 
         return {
             "ticker": ticker.upper(),
@@ -1249,6 +1267,7 @@ def _score_ticker_impl(
                 "gap_pct": round(
                     (price - float(close.iloc[-2])) / float(close.iloc[-2]) * 100, 2
                 ) if len(close) >= 2 and float(close.iloc[-2]) > 0 else 0.0,
+                **pattern_structural_indicators,
             },
         }
     except Exception:
@@ -1911,6 +1930,208 @@ def _detect_narrow_range(high: pd.Series, low: pd.Series) -> str | None:
     if current_range <= min(ranges_4[1:]):
         return "NR4"
     return None
+
+
+def _pattern_structural_indicators_from_df(
+    df: pd.DataFrame,
+    *,
+    price: float,
+    resistance: float | None,
+) -> dict[str, Any]:
+    """Live structural fields used by mined stock patterns and backtests."""
+    out: dict[str, Any] = {}
+    if df.empty:
+        return out
+
+    try:
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        volume = df["Volume"].astype(float)
+    except Exception:
+        return out
+
+    try:
+        last_high = float(high.iloc[-1])
+        last_low = float(low.iloc[-1])
+        bar_range = last_high - last_low
+        if bar_range > 0:
+            out["ibs"] = (float(price) - last_low) / bar_range
+    except Exception:
+        pass
+
+    if len(df) >= PULLBACK_STRETCH_AVERAGE_RANGE_LOOKBACK_BARS:
+        try:
+            high_trigger = high.rolling(
+                PULLBACK_STRETCH_HIGH_LOOKBACK_BARS,
+                min_periods=PULLBACK_STRETCH_HIGH_LOOKBACK_BARS,
+            ).max().iloc[-1]
+            avg_high = high.rolling(
+                PULLBACK_STRETCH_AVERAGE_RANGE_LOOKBACK_BARS,
+                min_periods=PULLBACK_STRETCH_AVERAGE_RANGE_LOOKBACK_BARS,
+            ).mean().iloc[-1]
+            avg_low = low.rolling(
+                PULLBACK_STRETCH_AVERAGE_RANGE_LOOKBACK_BARS,
+                min_periods=PULLBACK_STRETCH_AVERAGE_RANGE_LOOKBACK_BARS,
+            ).mean().iloc[-1]
+            if pd.notna(high_trigger) and pd.notna(avg_high) and pd.notna(avg_low):
+                threshold = float(high_trigger) - (
+                    PULLBACK_STRETCH_RANGE_MULTIPLE
+                    * (float(avg_high) - float(avg_low))
+                )
+                out["pullback_stretch_entry"] = bool(float(price) < threshold)
+        except Exception:
+            pass
+
+    try:
+        if len(close) >= 2:
+            prev_close = float(close.iloc[-2])
+            if prev_close > 0:
+                out["daily_change_pct"] = (float(price) - prev_close) / prev_close * 100
+    except Exception:
+        pass
+
+    try:
+        bb = BollingerBands(
+            close=close,
+            window=PATTERN_STRUCTURAL_BB_WINDOW_BARS,
+            window_dev=PATTERN_STRUCTURAL_BB_STD_DEV,
+        )
+        bb_width = bb.bollinger_wband()
+        bb_width_current = bb_width.iloc[-1]
+        if pd.notna(bb_width_current):
+            bb_width_current_f = float(bb_width_current)
+            out["bb_width"] = bb_width_current_f
+            width_window = bb_width.dropna().iloc[
+                -PATTERN_STRUCTURAL_BB_WIDTH_LOOKBACK_BARS:
+            ]
+            if not width_window.empty:
+                width_percentile = float(
+                    (width_window < bb_width_current_f).sum()
+                    / len(width_window)
+                )
+                out["bb_width_percentile"] = width_percentile
+                out["bb_width_pctile"] = width_percentile * 100
+                squeeze_now = (
+                    width_percentile <= PATTERN_STRUCTURAL_BB_SQUEEZE_QUANTILE
+                )
+            else:
+                squeeze_now = (
+                    bb_width_current_f
+                    < PATTERN_STRUCTURAL_BB_WIDTH_DIRECT_SQUEEZE_THRESHOLD
+                )
+            out["bb_squeeze"] = bool(squeeze_now)
+
+            previous_window = bb_width.dropna().iloc[
+                -(PATTERN_STRUCTURAL_BB_WIDTH_LOOKBACK_BARS + 1):-1
+            ]
+            previous_width = bb_width.iloc[-2] if len(bb_width) >= 2 else None
+            squeeze_previous = False
+            if previous_width is not None and pd.notna(previous_width):
+                previous_width_f = float(previous_width)
+                if not previous_window.empty:
+                    previous_percentile = float(
+                        (previous_window < previous_width_f).sum()
+                        / len(previous_window)
+                    )
+                    squeeze_previous = (
+                        previous_percentile
+                        <= PATTERN_STRUCTURAL_BB_SQUEEZE_QUANTILE
+                    )
+                else:
+                    squeeze_previous = (
+                        previous_width_f
+                        < PATTERN_STRUCTURAL_BB_WIDTH_DIRECT_SQUEEZE_THRESHOLD
+                    )
+            out["bb_squeeze_firing"] = bool(squeeze_previous and not squeeze_now)
+    except Exception:
+        pass
+
+    try:
+        vol_avg = volume.rolling(PATTERN_STRUCTURAL_RETEST_LOOKBACK_BARS).mean().iloc[-1]
+        rel_vol = float(volume.iloc[-1]) / float(vol_avg) if float(vol_avg) > 0 else None
+        cumulative_volume = volume.cumsum()
+        vwap_series = (close * volume).cumsum() / cumulative_volume.where(
+            cumulative_volume != 0
+        )
+        vwap = vwap_series.iloc[-1]
+        previous_close = close.iloc[-2] if len(close) >= 2 else None
+        if (
+            rel_vol is not None
+            and previous_close is not None
+            and pd.notna(vwap)
+            and pd.notna(previous_close)
+        ):
+            out["vwap_reclaim"] = bool(
+                float(previous_close) < float(vwap)
+                and float(price) > float(vwap)
+                and rel_vol >= VWAP_RECLAIM_RELATIVE_VOLUME_MIN
+            )
+    except Exception:
+        pass
+
+    try:
+        support = low.rolling(PATTERN_STRUCTURAL_SUPPORT_LOOKBACK_BARS).min().iloc[-1]
+        previous_support = (
+            low.shift(1)
+            .rolling(PATTERN_STRUCTURAL_SUPPORT_LOOKBACK_BARS)
+            .min()
+            .iloc[-1]
+        )
+        if pd.notna(support) and float(price) > 0:
+            support_f = float(support)
+            out["support"] = support_f
+            out["price_dist_to_support_pct"] = (
+                (float(price) - support_f) / float(price) * 100
+            )
+        if pd.notna(previous_support):
+            previous_support_f = float(previous_support)
+            last_low = float(low.iloc[-1])
+            low_pierce = (
+                (previous_support_f - last_low) / previous_support_f * 100
+                if previous_support_f > 0 and last_low < previous_support_f
+                else 0.0
+            )
+            out["low_pierce_support_pct"] = low_pierce
+            out["close_above_support"] = bool(float(price) > previous_support_f)
+            previous_close = float(close.iloc[-2]) if len(close) >= 2 else float(price)
+            out["close_higher_after_test"] = bool(
+                last_low <= previous_support_f and float(price) > previous_close
+            )
+    except Exception:
+        pass
+
+    try:
+        out["narrow_range"] = _detect_narrow_range(high, low)
+    except Exception:
+        pass
+    try:
+        out["vcp_count"] = _detect_vcp(
+            high,
+            low,
+            volume,
+            lookback=PATTERN_STRUCTURAL_VCP_LOOKBACK_BARS,
+        )
+    except Exception:
+        pass
+
+    try:
+        if resistance is not None and float(resistance) > 0:
+            retests = _detect_resistance_retests(
+                high,
+                close,
+                float(resistance),
+                tolerance_pct=PATTERN_STRUCTURAL_RETEST_TOLERANCE_PCT,
+                lookback=PATTERN_STRUCTURAL_RETEST_LOOKBACK_BARS,
+            )
+            out["resistance_retests"] = int(retests.get("retest_count") or 0)
+            out["retest_range_tightening"] = bool(
+                retests.get("range_tightening")
+            )
+    except Exception:
+        pass
+
+    return out
 
 
 def _detect_accumulation(close: pd.Series, volume: pd.Series,
