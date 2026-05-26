@@ -62,6 +62,7 @@ AUTOTRADER_PAPER_DYNAMIC_DEFAULT_MONITOR_COOLDOWN_MINUTES = 5
 AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES = 240
 AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN = True
 AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY = True
+AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION = True
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE = "authoritative"
 AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES = "crypto"
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES = 8
@@ -3547,6 +3548,12 @@ class Settings(BaseSettings):
     chili_autotrader_llm_revalidation_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LLM_REVALIDATION_ENABLED"),
+    )
+    chili_autotrader_llm_revalidation_skip_shadow_observation: bool = Field(
+        default=AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_LLM_REVALIDATION_SKIP_SHADOW_OBSERVATION"
+        ),
     )
     # Task KK — gate the autotrader's crypto path. Robinhood crypto trades
     # 24/7 with no PDT regulation, so when this flag is ON the rule gate

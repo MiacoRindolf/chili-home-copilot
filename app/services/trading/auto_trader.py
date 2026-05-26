@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, aliased
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
@@ -114,6 +115,7 @@ SHADOW_OBSERVATION_REASON_SIGNAL_LANE = "selector:shadow_observation_signal_lane
 SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED = (
     "selector:shadow_observation_signal_lane_disabled"
 )
+LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION = "shadow_observation_only"
 
 
 def _alert_signal_lane(alert: BreakoutAlert) -> str:
@@ -126,6 +128,23 @@ def _alert_signal_lane(alert: BreakoutAlert) -> str:
 
 def _alert_requests_shadow_observation(alert: BreakoutAlert) -> bool:
     return _alert_signal_lane(alert) in SHADOW_OBSERVATION_SIGNAL_LANES
+
+
+def _should_run_llm_revalidation(alert: BreakoutAlert) -> tuple[bool, str | None]:
+    if not bool(getattr(settings, "chili_autotrader_llm_revalidation_enabled", True)):
+        return False, None
+    if (
+        bool(getattr(alert, "_chili_shadow_observation_only", False))
+        and bool(
+            getattr(
+                settings,
+                "chili_autotrader_llm_revalidation_skip_shadow_observation",
+                AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
+            )
+        )
+    ):
+        return False, LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION
+    return True, None
 
 
 def _autotrader_tick_note(
@@ -2283,7 +2302,11 @@ def _process_one_alert(
         return
 
     llm_snap: dict[str, Any] | None = None
-    if getattr(settings, "chili_autotrader_llm_revalidation_enabled", True):
+    _run_llm_revalidation, _llm_skip_reason = _should_run_llm_revalidation(alert)
+    if _llm_skip_reason:
+        snap["llm_revalidation_skipped"] = True
+        snap["llm_revalidation_skip_reason"] = _llm_skip_reason
+    if _run_llm_revalidation:
         ohlcv = _ohlcv_summary(alert.ticker)
         viable, llm_snap = run_revalidation_llm(
             alert,

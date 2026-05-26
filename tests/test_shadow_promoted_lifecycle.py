@@ -36,7 +36,10 @@ from app.models.trading import (
     Trade,
 )
 from app.services.trading import auto_trader
-from app.services.trading.auto_trader import is_shadow_promoted_pattern
+from app.services.trading.auto_trader import (
+    LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION,
+    is_shadow_promoted_pattern,
+)
 from app.services.trading.opportunity_scoring import (
     scan_pattern_eligible_main_imminent,
 )
@@ -313,6 +316,91 @@ def test_autotrader_routes_shadow_promoted_to_shadow_log_no_broker_call(
     assert shadows[0].ticker == "SHDW1"
     assert shadows[0].scan_pattern_id == pat.id
     assert shadows[0].signal_json["shadow_decision"] == "blocked_shadow_promoted"
+
+
+def test_shadow_observation_skips_llm_revalidation_latency(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_shadow_promoted_lifecycle_enabled", True)
+    monkeypatch.setattr(
+        settings, "chili_autotrader_shadow_promoted_paper_observation_enabled", True,
+    )
+    monkeypatch.setattr(settings, "chili_autotrader_llm_revalidation_enabled", True)
+    monkeypatch.setattr(
+        settings,
+        "chili_autotrader_llm_revalidation_skip_shadow_observation",
+        True,
+    )
+    monkeypatch.setattr(settings, "chili_autotrader_paper_shadow_enabled", False)
+    monkeypatch.setattr(
+        settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(settings, "chili_autotrader_paper_shadow_max_open", 100)
+
+    u = _make_user(db, name="shadow_llm_skip_user")
+    pat = _make_pattern(
+        db, name="shadow_llm_skip_pat", lifecycle_stage="shadow_promoted"
+    )
+    alert = _make_alert(db, pattern_id=pat.id, ticker="SHLMSKIP")
+
+    out = {"scaled_in": 0, "skipped": 0, "entered": 0}
+    runtime = {"live_orders_effective": True, "paper_mode_effective": False}
+
+    from app.services.trading import paper_trading as pt_mod
+
+    patches = list(_autotrader_scaffold_patches())
+    patches.extend([
+        patch.object(
+            auto_trader,
+            "_resolve_entry_risk_notional",
+            return_value=(100.0, {
+                "notional_capital_usd": 10_000.0,
+                "notional_explicit_fallback_usd": 100.0,
+                "notional_risk_pct": 1.0,
+            }),
+        ),
+        patch.object(pt_mod, "_compute_atr_levels", return_value=(9.0, 12.0, 1.0)),
+        patch.object(
+            pt_mod,
+            "_apply_slippage",
+            side_effect=lambda price, direction, is_entry: price,
+        ),
+        patch(
+            "app.services.trading.position_sizer_emitter.emit_shadow_proposal",
+            return_value=None,
+        ),
+        patch(
+            "app.services.trading.position_sizer_writer.mode_is_authoritative",
+            return_value=False,
+        ),
+    ])
+    for p in patches:
+        p.start()
+    broker_patch = patch.object(auto_trader, "_execute_broker_buy")
+    broker_buy = broker_patch.start()
+    llm_patch = patch.object(
+        auto_trader,
+        "run_revalidation_llm",
+        side_effect=AssertionError("shadow observation should not call LLM"),
+    )
+    llm = llm_patch.start()
+    try:
+        auto_trader._process_one_alert(db, u.id, alert, out, runtime)
+    finally:
+        llm_patch.stop()
+        broker_patch.stop()
+        patch.stopall()
+
+    broker_buy.assert_not_called()
+    llm.assert_not_called()
+    run = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == alert.id)
+        .one()
+    )
+    assert run.reason == "selector:shadow_promoted_pattern_eval"
+    assert run.rule_snapshot["llm_revalidation_skipped"] is True
+    assert run.rule_snapshot["llm_revalidation_skip_reason"] == (
+        LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION
+    )
 
 
 def test_autotrader_byte_identical_for_live_pattern(db, monkeypatch):
