@@ -19,6 +19,7 @@ from ...models.trading import (
     Trade,
 )
 from ...services import trading_service as ts
+from ...services.trading.broker_position_truth import filter_broker_stale_open_trades
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
 from ._utils import json_safe
@@ -40,6 +41,25 @@ def _monitored_open_trades_query(db: Session, user_id: int | None):
         Trade.entry_price > 0,
     )
     return _user_trade_filter(q, user_id)
+
+
+def _monitored_live_trades_with_suppressed(
+    db: Session,
+    user_id: int | None,
+) -> tuple[list[Trade], list[dict[str, Any]]]:
+    """Return monitor-eligible trades after broker-position truth filtering.
+
+    ``Trade`` rows are management envelopes. For live broker-backed positions,
+    the broker-position identity row is the inventory truth. If a Robinhood
+    position row is already closed/zero/missing past the grace window, the
+    Monitoring tab must not keep rendering it as an active card.
+    """
+    rows = (
+        _monitored_open_trades_query(db, user_id)
+        .order_by(Trade.entry_date.desc())
+        .all()
+    )
+    return filter_broker_stale_open_trades(db, rows)
 
 
 def _fraction_to_health_percent(score: float | None) -> float | None:
@@ -131,7 +151,9 @@ def api_monitor_active(
     ctx = get_identity_ctx(request, db)
     user_id = ctx["user_id"]
 
-    trades = _monitored_open_trades(db, user_id)
+    trades, suppressed_stale_trades = _monitored_live_trades_with_suppressed(
+        db, user_id,
+    )
     if not trades:
         return JSONResponse(
             {
@@ -142,8 +164,10 @@ def api_monitor_active(
                     "actions_today": 0,
                     "benefit_rate": None,
                     "last_check": None,
+                    "suppressed_stale_count": len(suppressed_stale_trades),
                 },
                 "setups": [],
+                "suppressed_stale_trades": json_safe(suppressed_stale_trades),
             }
         )
 
@@ -313,14 +337,17 @@ def api_monitor_active(
                 "actions_today": actions_today,
                 "benefit_rate": json_safe(benefit_rate) if benefit_rate is not None else None,
                 "last_check": last_check.isoformat() if last_check else None,
+                "suppressed_stale_count": len(suppressed_stale_trades),
             },
             "setups": json_safe(setups),
+            "suppressed_stale_trades": json_safe(suppressed_stale_trades),
         }
     )
 
 
 def _monitored_open_trades(db: Session, user_id: int | None) -> list[Trade]:
-    return _monitored_open_trades_query(db, user_id).order_by(Trade.entry_date.desc()).all()
+    trades, _suppressed = _monitored_live_trades_with_suppressed(db, user_id)
+    return trades
 
 
 @router.get("/monitor/decisions")

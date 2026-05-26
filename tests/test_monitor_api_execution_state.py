@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from app import models
-from app.models.trading import PatternMonitorDecision, Trade
+from app.models.trading import PatternMonitorDecision, Trade, TradingPosition
 
 
 def test_active_setups_exposes_execution_state(db, paired_client):
@@ -67,3 +67,48 @@ def test_active_setups_exposes_execution_state(db, paired_client):
     assert setup["execution_reason"] == "Weekend closed"
     assert setup["pending_exit_status"] == "deferred"
     assert setup["next_eligible_session_at"] is not None
+
+
+def test_active_setups_suppresses_closed_broker_position(db, paired_client):
+    client, user = paired_client
+
+    pos = TradingPosition(
+        user_id=user.id,
+        broker_source="robinhood",
+        account_type="cash",
+        ticker="MONCLOSED",
+        direction="long",
+        current_quantity=0,
+        current_avg_price=10.0,
+        state="closed",
+    )
+    db.add(pos)
+    db.flush()
+
+    trade = Trade(
+        user_id=user.id,
+        ticker="MONCLOSED",
+        direction="long",
+        entry_price=10.0,
+        quantity=1.0,
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+        status="open",
+        stop_loss=9.0,
+        take_profit=12.0,
+        broker_source="robinhood",
+        position_id=pos.id,
+    )
+    db.add(trade)
+    db.commit()
+
+    resp = client.get("/api/trading/active-setups")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert all(row["ticker"] != "MONCLOSED" for row in body["setups"])
+    assert body["summary"]["suppressed_stale_count"] >= 1
+    assert any(
+        row["ticker"] == "MONCLOSED" and row["reason"] == "position_identity_closed"
+        for row in body["suppressed_stale_trades"]
+    )
