@@ -140,6 +140,13 @@ class FastPathSettings:
     only refreshes paper evidence for the learner. Override with
     ``CHILI_FAST_PATH_UNIVERSE_SHADOW_TERMINAL_REPROBE_ENABLED=true``."""
 
+    universe_shadow_capacity_probe_enabled: bool = False
+    """When True, paper-mode shadow pairs may place observe-only maker
+    probes when the only operational block is an existing paper
+    position for that ticker. Fills update maker-attempt/decay evidence
+    but do not create another dashboard paper position. Override with
+    ``CHILI_FAST_PATH_UNIVERSE_SHADOW_CAPACITY_PROBE_ENABLED=true``."""
+
     universe_top_n: int = 25
     """Top-N pairs by composite_score that the rotator promotes per
     pass. Mid-tier sweet spot per the 2026-05-07 alpha replay; tighten
@@ -434,6 +441,8 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_PAPER_FILLS_ENABLED", False),
         universe_shadow_terminal_reprobe_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_TERMINAL_REPROBE_ENABLED", False),
+        universe_shadow_capacity_probe_enabled=_env_bool(
+            "CHILI_FAST_PATH_UNIVERSE_SHADOW_CAPACITY_PROBE_ENABLED", False),
         universe_top_n=_env_int("CHILI_FAST_PATH_UNIVERSE_TOP_N", 25),
         universe_hysteresis_ranks=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", 3),

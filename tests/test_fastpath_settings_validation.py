@@ -153,6 +153,19 @@ def test_universe_shadow_terminal_reprobe_env_override_works():
     assert loaded.universe_shadow_terminal_reprobe_enabled is True
 
 
+def test_universe_shadow_capacity_probe_default_off():
+    assert FastPathSettings().universe_shadow_capacity_probe_enabled is False
+
+
+def test_universe_shadow_capacity_probe_env_override_works():
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_UNIVERSE_SHADOW_CAPACITY_PROBE_ENABLED": "true"},
+    ):
+        loaded = load()
+    assert loaded.universe_shadow_capacity_probe_enabled is True
+
+
 def test_negative_edge_filter_ttl_env_override_works():
     with mock.patch.dict(
         os.environ,
