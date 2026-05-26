@@ -365,6 +365,26 @@ def _batch_miss_key(symbol: str) -> str:
     return f"{_BATCH_MISS_CACHE_PREFIX}{symbol}"
 
 
+def _should_skip_crypto_yahoo_after_batch_miss(symbol: str) -> bool:
+    """Avoid immediate single-symbol Yahoo probes for crypto batch misses."""
+    return _is_crypto(symbol) and _cache_get(_batch_miss_key(symbol)) is not None
+
+
+def _cache_crypto_fallback_quote(
+    symbol: str,
+    *,
+    cache_key: str,
+    miss_key: str,
+) -> dict[str, Any] | None:
+    result = _coingecko_quote(symbol)
+    if result:
+        _cache_set(cache_key, result)
+        _cache_pop(miss_key)
+    else:
+        _cache_set(miss_key, True)
+    return result
+
+
 def _cache_get(key: str) -> Any | None:
     with _cache_lock:
         entry = _cache.get(key)
@@ -464,6 +484,12 @@ def get_history(symbol: str, **kwargs) -> Any:
 
     if _is_dead(symbol):
         return pd.DataFrame()
+    if _should_skip_crypto_yahoo_after_batch_miss(symbol):
+        logger.debug(
+            "[yf_session] history(%s) skipped by batch-miss cooldown",
+            symbol,
+        )
+        return pd.DataFrame()
 
     period = kwargs.get("period", "6mo")
     interval = kwargs.get("interval", "1d")
@@ -525,6 +551,7 @@ def get_history(symbol: str, **kwargs) -> Any:
     elif not df.empty:
         # Reset the streak so a single recovery clears prior empties.
         _reset_empty(symbol)
+        _cache_pop(_batch_miss_key(symbol))
 
     if failed:
         _breaker_on_failure()
@@ -580,6 +607,17 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
     if _is_dead(symbol):
         return None
 
+    if _should_skip_crypto_yahoo_after_batch_miss(symbol):
+        logger.debug(
+            "[yf_session] fast_info(%s) routed to crypto fallback by batch-miss cooldown",
+            symbol,
+        )
+        return _cache_crypto_fallback_quote(
+            symbol,
+            cache_key=cache_key,
+            miss_key=miss_key,
+        )
+
     if _breaker_should_short_circuit():
         return None
 
@@ -609,10 +647,11 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
         ):
             _record_empty_yf_result(symbol, allow_crypto=is_crypto)
             if is_crypto and _is_dead(symbol):
-                result = _coingecko_quote(symbol)
-                if result:
-                    _cache_set(cache_key, result)
-                    _cache_pop(miss_key)
+                result = _cache_crypto_fallback_quote(
+                    symbol,
+                    cache_key=cache_key,
+                    miss_key=miss_key,
+                )
         if result is None and not is_crypto and not explicit_no_data:
             _cache_set(miss_key, True)
         _breaker_on_failure()

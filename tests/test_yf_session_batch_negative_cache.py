@@ -15,6 +15,16 @@ FIRST_FAST_INFO_PROBE_COUNT = 1
 SECOND_FAST_INFO_PROBE_COUNT = 2
 BATCH_MISS_FIRST_PROBE_COUNT = 1
 BATCH_MISS_SECOND_PROBE_COUNT = 2
+NO_HISTORY_PROBE_COUNT = 0
+HISTORY_PROBE_COUNT = 1
+NO_FAST_INFO_PROBE_COUNT = 0
+HISTORY_OPEN = 1.0
+HISTORY_HIGH = 1.1
+HISTORY_LOW = 0.9
+HISTORY_CLOSE = 1.0
+HISTORY_VOLUME = 1000
+FALLBACK_LAST_PRICE = 1.23
+FALLBACK_PREVIOUS_CLOSE = 1.11
 
 
 class _RaisingFastInfoTicker:
@@ -24,6 +34,36 @@ class _RaisingFastInfoTicker:
     @property
     def fast_info(self):
         raise self._exc
+
+
+class _HistoryTicker:
+    def __init__(self, df: pd.DataFrame):
+        self._df = df
+
+    def history(self, **_kwargs):
+        return self._df
+
+
+def _history_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            [
+                HISTORY_OPEN,
+                HISTORY_HIGH,
+                HISTORY_LOW,
+                HISTORY_CLOSE,
+                HISTORY_VOLUME,
+            ]
+        ],
+        columns=["Open", "High", "Low", "Close", "Volume"],
+    )
+
+
+def _fallback_quote() -> dict[str, float]:
+    return {
+        "last_price": FALLBACK_LAST_PRICE,
+        "previous_close": FALLBACK_PREVIOUS_CLOSE,
+    }
 
 
 def _expire_quote_miss(symbol: str) -> None:
@@ -135,6 +175,91 @@ def test_batch_download_negative_caches_missing_crypto_with_short_crypto_ttl(
     assert yf_session._is_dead(MISSING_CRYPTO) is True
 
 
+def test_crypto_history_skips_yfinance_during_batch_miss_cooldown(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _HistoryTicker(_history_frame())
+
+    yf_session._cache_set(yf_session._batch_miss_key(MISSING_CRYPTO), True)
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+
+    assert yf_session.get_history(MISSING_CRYPTO, period="5d").empty
+    assert len(calls) == NO_HISTORY_PROBE_COUNT
+
+
+def test_equity_history_ignores_batch_miss_cooldown_and_clears_it(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _HistoryTicker(_history_frame())
+
+    yf_session._cache_set(yf_session._batch_miss_key(MISSING_EQUITY), True)
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+
+    assert not yf_session.get_history(MISSING_EQUITY, period="5d").empty
+    assert calls == [MISSING_EQUITY]
+    assert len(calls) == HISTORY_PROBE_COUNT
+    assert (
+        yf_session._cache_get(yf_session._batch_miss_key(MISSING_EQUITY))
+        is None
+    )
+
+
+def test_crypto_fast_info_uses_fallback_during_batch_miss_cooldown(
+    monkeypatch,
+):
+    calls: list[str] = []
+    fallback_calls: list[str] = []
+    fallback_quote = _fallback_quote()
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _RaisingFastInfoTicker(Exception(FAST_INFO_EMPTY_ERROR))
+
+    def _fallback(symbol):
+        fallback_calls.append(symbol)
+        return fallback_quote
+
+    yf_session._cache_set(yf_session._batch_miss_key(MISSING_CRYPTO), True)
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+    monkeypatch.setattr(yf_session, "_coingecko_quote", _fallback)
+
+    assert yf_session.get_fast_info(MISSING_CRYPTO) == fallback_quote
+    assert len(calls) == NO_FAST_INFO_PROBE_COUNT
+    assert fallback_calls == [MISSING_CRYPTO]
+
+
+def test_crypto_fast_info_batch_miss_fallback_miss_short_caches(
+    monkeypatch,
+):
+    calls: list[str] = []
+    fallback_calls: list[str] = []
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _RaisingFastInfoTicker(Exception(FAST_INFO_EMPTY_ERROR))
+
+    def _fallback(symbol):
+        fallback_calls.append(symbol)
+        return None
+
+    yf_session._cache_set(yf_session._batch_miss_key(MISSING_CRYPTO), True)
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+    monkeypatch.setattr(yf_session, "_coingecko_quote", _fallback)
+
+    assert yf_session.get_fast_info(MISSING_CRYPTO) is None
+    assert yf_session.get_fast_info(MISSING_CRYPTO) is None
+    assert len(calls) == NO_FAST_INFO_PROBE_COUNT
+    assert fallback_calls == [MISSING_CRYPTO]
+
+
 def test_fast_info_negative_caches_explicit_missing_equity_after_threshold(
     monkeypatch,
 ):
@@ -186,7 +311,7 @@ def test_fast_info_negative_caches_crypto_and_uses_fallback_after_threshold(
 ):
     calls: list[str] = []
     fallback_calls: list[str] = []
-    fallback_quote = {"last_price": 1.23, "previous_close": 1.11}
+    fallback_quote = _fallback_quote()
 
     def _ticker(symbol, **_kwargs):
         calls.append(symbol)
