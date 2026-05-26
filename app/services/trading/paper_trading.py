@@ -42,6 +42,45 @@ DEFAULT_ATR_TARGET_MULT = 3.0
 TRAILING_STOP_ACTIVATION_R = 1.0  # activate trailing after 1R move
 PAPER_TRADE_CAPACITY_SCOPE_ALL = "all"
 PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW = "autotrader_shadow"
+PAPER_SHADOW_PRIORITY_UNKNOWN = 0
+PAPER_SHADOW_PRIORITY_CANDIDATE = 10
+PAPER_SHADOW_PRIORITY_CHALLENGED = 15
+PAPER_SHADOW_PRIORITY_VALIDATED = 25
+PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE = 30
+PAPER_SHADOW_PRIORITY_SHADOW_PROMOTED = 45
+PAPER_SHADOW_PRIORITY_PILOT_PROMOTED = 55
+PAPER_SHADOW_PRIORITY_LIVE_READY = 65
+PAPER_SHADOW_PRIORITY_RECERT = 75
+PAPER_SHADOW_PRIORITY_NEAR_MISS_SIGNAL_LANE = 50
+PAPER_SHADOW_STAGE_PRIORITY = {
+    "candidate": PAPER_SHADOW_PRIORITY_CANDIDATE,
+    "backtested": PAPER_SHADOW_PRIORITY_VALIDATED,
+    "validated": PAPER_SHADOW_PRIORITY_VALIDATED,
+    "challenged": PAPER_SHADOW_PRIORITY_CHALLENGED,
+    "decayed": PAPER_SHADOW_PRIORITY_CHALLENGED,
+    "shadow_promoted": PAPER_SHADOW_PRIORITY_SHADOW_PROMOTED,
+    "pilot_promoted": PAPER_SHADOW_PRIORITY_PILOT_PROMOTED,
+    "promoted": PAPER_SHADOW_PRIORITY_LIVE_READY,
+    "live": PAPER_SHADOW_PRIORITY_LIVE_READY,
+}
+PAPER_SHADOW_DECISION_PRIORITY = {
+    "blocked_recert_required": PAPER_SHADOW_PRIORITY_RECERT,
+    "blocked_shadow_promoted": PAPER_SHADOW_PRIORITY_SHADOW_PROMOTED,
+    "blocked_coinbase_cap": PAPER_SHADOW_PRIORITY_LIVE_READY,
+    "blocked_max_concurrent_crypto": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "blocked_max_concurrent_equity": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "blocked_max_concurrent_global": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "blocked_max_concurrent_options": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "blocked_regime_gate": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "placed": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "skipped_non_positive_expected_edge": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "skipped_duplicate_pattern_already_open": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "skipped_synergy_disabled_second_signal": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+    "skipped_synergy_not_applicable": PAPER_SHADOW_PRIORITY_STANDARD_EVIDENCE,
+}
+PAPER_SHADOW_SIGNAL_LANE_PRIORITY = {
+    "shadow_near_miss": PAPER_SHADOW_PRIORITY_NEAR_MISS_SIGNAL_LANE,
+}
 
 
 def _utc_iso(ts: datetime | None = None) -> str:
@@ -252,6 +291,100 @@ def _is_autotrader_paper_shadow_row(pt: PaperTrade) -> bool:
     )
 
 
+def _paper_shadow_signal_json(pt: PaperTrade) -> dict[str, Any]:
+    return pt.signal_json if isinstance(pt.signal_json, dict) else {}
+
+
+def _paper_shadow_pattern_stage_map(
+    db: Session,
+    rows: list[PaperTrade],
+) -> dict[int, str]:
+    pattern_ids = {
+        int(pt.scan_pattern_id)
+        for pt in rows
+        if getattr(pt, "scan_pattern_id", None) is not None
+    }
+    if not pattern_ids:
+        return {}
+    try:
+        stage_rows = (
+            db.query(ScanPattern.id, ScanPattern.lifecycle_stage)
+            .filter(ScanPattern.id.in_(pattern_ids))
+            .all()
+        )
+    except Exception:
+        logger.debug("[paper_shadow_janitor] stage lookup failed", exc_info=True)
+        return {}
+    out: dict[int, str] = {}
+    for row in stage_rows:
+        try:
+            pattern_id = int(row[0])
+            stage = str(row[1] or "").strip().lower()
+        except Exception:
+            continue
+        out[pattern_id] = stage
+    return out
+
+
+def _paper_shadow_evidence_priority(
+    pt: PaperTrade,
+    *,
+    pattern_stage_by_id: dict[int, str],
+) -> dict[str, Any]:
+    sig = _paper_shadow_signal_json(pt)
+    pattern_id = int(pt.scan_pattern_id or 0)
+    stage = pattern_stage_by_id.get(pattern_id, "")
+    stage_priority = PAPER_SHADOW_STAGE_PRIORITY.get(
+        stage,
+        PAPER_SHADOW_PRIORITY_UNKNOWN,
+    )
+    decision = str(
+        sig.get("shadow_decision")
+        or sig.get("paper_shadow_decision")
+        or sig.get("paper_shadow_reject_decision")
+        or ""
+    ).strip().lower()
+    decision_priority = PAPER_SHADOW_DECISION_PRIORITY.get(
+        decision,
+        PAPER_SHADOW_PRIORITY_UNKNOWN,
+    )
+    lane = str(
+        sig.get("paper_observation_signal_lane")
+        or sig.get("paper_shadow_signal_lane")
+        or sig.get("signal_lane")
+        or ""
+    ).strip().lower()
+    lane_priority = PAPER_SHADOW_SIGNAL_LANE_PRIORITY.get(
+        lane,
+        PAPER_SHADOW_PRIORITY_UNKNOWN,
+    )
+    priority = max(stage_priority, decision_priority, lane_priority)
+    return {
+        "priority": priority,
+        "stage": stage or None,
+        "stage_priority": stage_priority,
+        "decision": decision or None,
+        "decision_priority": decision_priority,
+        "signal_lane": lane or None,
+        "signal_lane_priority": lane_priority,
+    }
+
+
+def _paper_shadow_evict_key(
+    pt: PaperTrade,
+    *,
+    pattern_stage_by_id: dict[int, str],
+) -> tuple[int, datetime]:
+    evidence = _paper_shadow_evidence_priority(
+        pt,
+        pattern_stage_by_id=pattern_stage_by_id,
+    )
+    return (
+        int(evidence["priority"]),
+        pt.entry_date or datetime.min,
+    )
+
+
 def _paper_close_ledger_safe(db: Session, pt: PaperTrade) -> None:
     try:
         from .brain_work.execution_hooks import on_paper_trade_closed
@@ -268,6 +401,7 @@ def prune_autotrader_paper_shadow_capacity(
     max_open: int,
     max_age_hours: int,
     buffer: int = 5,
+    reserve_new_slot: bool = True,
 ) -> dict[str, Any]:
     """Close stale autotrader paper-shadow rows before opening more evidence.
 
@@ -290,6 +424,9 @@ def prune_autotrader_paper_shadow_capacity(
             "stale_closed": 0,
             "capacity_closed": 0,
             "max_open": open_limit,
+            "target_open": target_open,
+            "reserve_new_slot": bool(reserve_new_slot),
+            "eviction_policy": "priority_evidence_buffer",
         }
 
     stale: list[PaperTrade] = []
@@ -302,11 +439,25 @@ def prune_autotrader_paper_shadow_capacity(
     to_close: list[tuple[PaperTrade, str]] = [(pt, "stale") for pt in stale]
     selected_ids = {int(pt.id) for pt, _ in to_close if pt.id is not None}
     remaining_open = len(rows) - len(selected_ids)
-    if remaining_open >= open_limit:
-        excess = max(0, remaining_open - target_open)
+    capacity_trigger = (
+        max(1, target_open)
+        if bool(reserve_new_slot)
+        else open_limit
+    )
+    if remaining_open >= capacity_trigger:
+        desired_open = (
+            max(0, target_open - 1)
+            if bool(reserve_new_slot)
+            else target_open
+        )
+        excess = max(0, remaining_open - desired_open)
+        pattern_stage_by_id = _paper_shadow_pattern_stage_map(db, rows)
         capacity_pool = sorted(
             [pt for pt in rows if int(pt.id or 0) not in selected_ids],
-            key=lambda pt: pt.entry_date or datetime.min,
+            key=lambda pt: _paper_shadow_evict_key(
+                pt,
+                pattern_stage_by_id=pattern_stage_by_id,
+            ),
         )
         for pt in capacity_pool[:excess]:
             to_close.append((pt, "capacity"))
@@ -320,6 +471,9 @@ def prune_autotrader_paper_shadow_capacity(
             "stale_closed": 0,
             "capacity_closed": 0,
             "max_open": open_limit,
+            "target_open": target_open,
+            "reserve_new_slot": bool(reserve_new_slot),
+            "eviction_policy": "priority_evidence_buffer",
         }
 
     from .market_data import fetch_quote
@@ -347,6 +501,9 @@ def prune_autotrader_paper_shadow_capacity(
         "stale_closed": stale_closed,
         "capacity_closed": capacity_closed,
         "max_open": open_limit,
+        "target_open": target_open,
+        "reserve_new_slot": bool(reserve_new_slot),
+        "eviction_policy": "priority_evidence_buffer",
     }
     logger.info("[paper_shadow_janitor] %s", result)
     return result

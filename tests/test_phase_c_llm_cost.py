@@ -173,6 +173,29 @@ def test_input_gate_misses_when_health_moves_outside_bucket():
 
 # ── c4: agent_shared.txt loads ──────────────────────────────────────────
 
+def test_pattern_adjustment_parses_fenced_json_reply():
+    mock_llm = MagicMock(return_value='Sure.\n```json\n{"action":"hold","new_stop":null,"new_target":null,"confidence":0.6,"reasoning":"ok"}\n```')
+    with patch("app.services.llm_caller.call_llm", mock_llm):
+        rec = paa.get_adjustment(**_make_inputs())
+
+    assert rec.action == "hold"
+    assert rec.confidence == 0.6
+    assert rec.reasoning == "ok"
+
+
+def test_pattern_adjustment_caches_hold_fallback_on_unparseable_reply():
+    mock_llm = MagicMock(return_value="not json")
+    with patch("app.services.llm_caller.call_llm", mock_llm):
+        r1 = paa.get_adjustment(**_make_inputs())
+        r2 = paa.get_adjustment(**_make_inputs())
+
+    assert r1.action == r2.action == "hold"
+    assert mock_llm.call_count == 1
+    stats = paa.get_input_gate_stats()
+    assert stats["hits"] == 1
+    assert stats["misses"] == 1
+
+
 def test_agent_shared_prompt_loaded():
     from app.services.project_brain.base import AGENT_SHARED_PROMPT
     assert "ONLY valid JSON" in AGENT_SHARED_PROMPT

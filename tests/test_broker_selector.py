@@ -14,6 +14,7 @@ import pytest
 from app.services.trading import broker_selector as bs
 from app.services.trading.broker_selector import (
     REASON_COINBASE_WHITELIST,
+    REASON_COINBASE_RH_CRYPTO_DEGRADED,
     REASON_FAST_PATH_ACTIVE,
     REASON_KILL_SWITCH_GLOBAL,
     REASON_KILL_SWITCH_GOVERNANCE,
@@ -30,6 +31,7 @@ def _settings_stub(*, kill_switch: bool = False, coinbase_live: bool = False):
     return SimpleNamespace(
         chili_autotrader_kill_switch=kill_switch,
         chili_coinbase_autotrader_live=coinbase_live,
+        chili_broker_selector_rh_crypto_degraded_fallback_enabled=False,
     )
 
 
@@ -117,6 +119,40 @@ def test_branch3_rh_whitelisted_crypto_routes_rh():
 
 
 # ── Branch 4 — Coinbase long-tail ───────────────────────────────────
+
+
+def test_branch3_rh_whitelisted_crypto_falls_back_when_rh_degraded(monkeypatch):
+    s = _settings_stub()
+    s.chili_broker_selector_rh_crypto_degraded_fallback_enabled = True
+    min_failures = 2
+    lookback_minutes = 60
+
+    def _degraded_state(_ticker, *, db=None, settings_=None):
+        assert settings_ is s
+        return bs.RhCryptoDegradationState(
+            degraded=True,
+            failures=min_failures,
+            min_failures=min_failures,
+            lookback_minutes=lookback_minutes,
+            reason=bs.RH_CRYPTO_DEGRADED_REASON_FAILURE_THRESHOLD,
+        )
+
+    monkeypatch.setattr(bs, "rh_crypto_degradation_state", _degraded_state)
+
+    res = select_venue(
+        ticker="BTC-USD",
+        settings_=s,
+        db=object(),
+        fast_path_active=False,
+    )
+
+    assert res.venue == "coinbase"
+    assert res.reason == REASON_COINBASE_RH_CRYPTO_DEGRADED
+    assert res.extra == {
+        "rh_failures": min_failures,
+        "rh_min_failures": min_failures,
+        "rh_lookback_minutes": lookback_minutes,
+    }
 
 
 def test_branch4_coinbase_only_crypto_routes_coinbase():
@@ -237,4 +273,15 @@ def test_reason_constants_have_expected_values():
     assert REASON_FAST_PATH_ACTIVE == "fast_path_active"
     assert REASON_RH_WHITELIST == "rh_whitelist_match"
     assert REASON_COINBASE_WHITELIST == "coinbase_whitelist_match"
+    assert REASON_COINBASE_RH_CRYPTO_DEGRADED == "coinbase_rh_crypto_degraded"
     assert REASON_NO_VENUE == "no_venue_supports"
+
+
+def test_rh_crypto_degraded_patterns_include_transient_price_move_reject():
+    assert (
+        bs.RH_CRYPTO_FALLBACK_BROKER_REASON_HTTP_422_ASK_MOVED
+        in bs.RH_CRYPTO_FALLBACK_BROKER_REASON_PATTERNS
+    )
+    assert "ask price has risen" in (
+        bs.RH_CRYPTO_FALLBACK_BROKER_REASON_HTTP_422_ASK_MOVED
+    )

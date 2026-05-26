@@ -27,6 +27,7 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import text
 
+from app.services.trading import broker_selector as bs
 from app.services.trading import cost_aware_gate as cag
 from app.services.trading.cost_aware_gate import (
     REASON_CAP_NOTIONAL,
@@ -55,6 +56,7 @@ def _settings_stub(
         chili_coinbase_max_concurrent_positions=max_positions,
         chili_coinbase_cost_gate_include_tca_estimates=include_tca,
         chili_coinbase_cost_gate_min_tca_samples=min_tca_samples,
+        chili_broker_selector_rh_crypto_degraded_fallback_enabled=False,
     )
 
 
@@ -104,6 +106,66 @@ def test_gate_rh_whitelisted_crypto_fee_zero():
         assert res.allowed is True
         assert res.reason == REASON_GATE_RH_FEE_FREE
         assert res.fee_bps == 0
+
+
+def test_gate_rh_crypto_degraded_fallback_uses_coinbase_fee_floor(monkeypatch):
+    s = _settings_stub()
+    s.chili_broker_selector_rh_crypto_degraded_fallback_enabled = True
+    min_failures = 2
+    lookback_minutes = 60
+
+    monkeypatch.setattr(
+        bs,
+        "rh_crypto_degradation_state",
+        lambda *_args, **_kwargs: bs.RhCryptoDegradationState(
+            degraded=True,
+            failures=min_failures,
+            min_failures=min_failures,
+            lookback_minutes=lookback_minutes,
+            reason=bs.RH_CRYPTO_DEGRADED_REASON_FAILURE_THRESHOLD,
+        ),
+    )
+
+    res = cost_aware_min_edge_gate(
+        ticker="BTC-USD",
+        projected_profit_pct=1.0,
+        settings_=s,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_COINBASE_BLOCKED
+    assert res.fee_bps == 120
+    assert res.threshold_bps == 150
+
+
+def test_gate_rh_crypto_degraded_fallback_passes_high_edge(monkeypatch):
+    s = _settings_stub()
+    s.chili_broker_selector_rh_crypto_degraded_fallback_enabled = True
+    min_failures = 2
+    lookback_minutes = 60
+
+    monkeypatch.setattr(
+        bs,
+        "rh_crypto_degradation_state",
+        lambda *_args, **_kwargs: bs.RhCryptoDegradationState(
+            degraded=True,
+            failures=min_failures,
+            min_failures=min_failures,
+            lookback_minutes=lookback_minutes,
+            reason=bs.RH_CRYPTO_DEGRADED_REASON_FAILURE_THRESHOLD,
+        ),
+    )
+
+    res = cost_aware_min_edge_gate(
+        ticker="BTC-USD",
+        projected_profit_pct=2.0,
+        settings_=s,
+    )
+
+    assert res.allowed is True
+    assert res.reason == REASON_GATE_COINBASE_PASSED
+    assert res.fee_bps == 120
+    assert res.threshold_bps == 150
 
 
 def test_gate_coinbase_high_edge_passes():

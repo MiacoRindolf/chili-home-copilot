@@ -143,6 +143,8 @@ def _latest_quote_timestamp(raw: dict[str, Any]) -> datetime | None:
 def _legend_boats_ticker(
     ticker: str,
     anchor_raw: dict[str, Any] | None = None,
+    *,
+    allow_stale: bool = True,
 ) -> tuple[Optional[NormalizedTicker], FreshnessMeta]:
     """Fallback to the Blue Ocean feed that Robinhood Legend uses overnight."""
     from ....config import settings
@@ -164,16 +166,18 @@ def _legend_boats_ticker(
     if not isinstance(provider_dt, datetime):
         provider_dt = _parse_rh_timestamp(snap.get("quote_ts"))
     fresh = _now_freshness(max_age=max_age, provider_time_utc=provider_dt)
-    if not is_fresh_enough(fresh):
+    stale = not is_fresh_enough(fresh)
+    if stale:
         logger.debug(
             "[rh_adapter] Legend/BOATS quote stale ticker=%s age=%.3fs max=%.3fs",
             ticker,
             fresh.age_seconds(),
             fresh.max_age_seconds,
         )
-        return None, fresh
     last = _sf(snap.get("price")) or _sf(snap.get("last_price"))
     if last is None or last <= 0:
+        return None, fresh
+    if stale and not allow_stale:
         return None, fresh
     raw = dict(snap)
     if isinstance(anchor_raw, dict):
@@ -197,6 +201,57 @@ def _legend_boats_ticker(
         freshness=fresh,
         raw=raw,
     ), fresh
+
+
+def _normalize_rh_equity_quote(
+    ticker: str,
+    q: dict[str, Any],
+    fresh: FreshnessMeta,
+    *,
+    allow_regular_last: bool,
+) -> Optional[NormalizedTicker]:
+    bid = _sf(q.get("bid_price"))
+    ask = _sf(q.get("ask_price"))
+    regular_last = _sf(q.get("last_trade_price"))
+    extended_last = _sf(q.get("last_extended_hours_trade_price"))
+    non_reg_last = _sf(q.get("last_non_reg_trade_price"))
+    last = extended_last or non_reg_last or (regular_last if allow_regular_last else None)
+    bid_size = _sf(q.get("bid_size"))
+    ask_size = _sf(q.get("ask_size"))
+
+    if bid and ask and bid > 0 and ask > 0:
+        mid = (bid + ask) / 2.0
+        spread_abs = ask - bid
+        spread_bps = (spread_abs / mid) * 10_000 if mid > 0 else None
+    elif last and last > 0:
+        mid = last
+        bid = bid or last
+        ask = ask or last
+        spread_abs = (ask or last) - (bid or last)
+        spread_bps = (spread_abs / mid) * 10_000 if mid > 0 and spread_abs else 0.0
+    else:
+        return None
+
+    return NormalizedTicker(
+        product_id=ticker,
+        bid=bid,
+        ask=ask,
+        mid=mid,
+        spread_abs=spread_abs,
+        spread_bps=spread_bps,
+        last_price=last,
+        last_size=None,
+        bid_size=bid_size,
+        ask_size=ask_size,
+        base_volume_24h=None,
+        quote_volume_24h=None,
+        freshness=fresh,
+        raw=q,
+    )
+
+
+def _freshness_provider_time(meta: FreshnessMeta | None) -> datetime | None:
+    return getattr(meta, "provider_time_utc", None) if meta is not None else None
 
 
 def _normalize_rh_order(od: dict[str, Any]) -> NormalizedOrder:
@@ -376,51 +431,33 @@ class RobinhoodSpotAdapter(VenueAdapter):
             quotes = rh.stocks.get_quotes([ticker])
             q = quotes[0] if quotes else None
             if not q or not isinstance(q, dict):
-                boats_ticker, boats_fresh = _legend_boats_ticker(ticker)
+                boats_ticker, boats_fresh = _legend_boats_ticker(ticker, allow_stale=True)
                 return boats_ticker, boats_fresh
             fresh = _now_freshness(provider_time_utc=_latest_quote_timestamp(q))
-            if not is_fresh_enough(fresh):
-                boats_ticker, boats_fresh = _legend_boats_ticker(ticker, q)
+            rh_is_fresh = is_fresh_enough(fresh)
+            rh_ticker = _normalize_rh_equity_quote(
+                ticker,
+                q,
+                fresh,
+                allow_regular_last=rh_is_fresh,
+            )
+            if not rh_is_fresh:
+                boats_ticker, boats_fresh = _legend_boats_ticker(
+                    ticker,
+                    q,
+                    allow_stale=True,
+                )
                 if boats_ticker is not None:
-                    return boats_ticker, boats_fresh
+                    rh_ts = _freshness_provider_time(fresh)
+                    boats_ts = _freshness_provider_time(boats_fresh)
+                    if rh_ticker is None or (
+                        boats_ts is not None
+                        and (rh_ts is None or boats_ts > rh_ts)
+                    ):
+                        return boats_ticker, boats_fresh
+                return rh_ticker, fresh
 
-            bid = _sf(q.get("bid_price"))
-            ask = _sf(q.get("ask_price"))
-            regular_last = _sf(q.get("last_trade_price"))
-            extended_last = _sf(q.get("last_extended_hours_trade_price"))
-            last = extended_last or regular_last
-            bid_size = _sf(q.get("bid_size"))
-            ask_size = _sf(q.get("ask_size"))
-
-            if bid and ask and bid > 0 and ask > 0:
-                mid = (bid + ask) / 2.0
-                spread_abs = ask - bid
-                spread_bps = (spread_abs / mid) * 10_000 if mid > 0 else None
-            elif last and last > 0:
-                mid = last
-                bid = bid or last
-                ask = ask or last
-                spread_abs = (ask or last) - (bid or last)
-                spread_bps = (spread_abs / mid) * 10_000 if mid > 0 and spread_abs else 0.0
-            else:
-                return None, fresh
-
-            return NormalizedTicker(
-                product_id=ticker,
-                bid=bid,
-                ask=ask,
-                mid=mid,
-                spread_abs=spread_abs,
-                spread_bps=spread_bps,
-                last_price=last,
-                last_size=None,
-                bid_size=bid_size,
-                ask_size=ask_size,
-                base_volume_24h=None,
-                quote_volume_24h=None,
-                freshness=fresh,
-                raw=q,
-            ), fresh
+            return rh_ticker, fresh
         except Exception as e:
             logger.warning("[rh_adapter] get_best_bid_ask(%s) failed: %s", ticker, e)
             return None, fresh

@@ -11,6 +11,71 @@ import os
 logger = logging.getLogger(__name__)
 
 CHILD_ENV_FLAG = "CHILI_MP_BACKTEST_CHILD"
+MIN_QUEUE_TICKER_COUNT = 1
+DEFAULT_OPERATIONAL_REFRESH_LIFECYCLES = (
+    "promoted",
+    "live",
+    "shadow_promoted",
+    "pilot_promoted",
+)
+
+
+def _positive_int(value: object, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = int(fallback)
+    return max(MIN_QUEUE_TICKER_COUNT, parsed)
+
+
+def _csv_tokens(raw: object) -> set[str]:
+    return {
+        part.strip().lower()
+        for part in str(raw or "").split(",")
+        if part.strip()
+    }
+
+
+def _operational_refresh_lane(settings: object, pattern: object) -> bool:
+    if not bool(getattr(settings, "brain_queue_operational_refresh_enabled", True)):
+        return False
+    lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
+    allowed = _csv_tokens(
+        getattr(
+            settings,
+            "brain_queue_operational_refresh_lifecycles",
+            ",".join(DEFAULT_OPERATIONAL_REFRESH_LIFECYCLES),
+        )
+    )
+    return lifecycle in allowed
+
+
+def queue_target_tickers_for_pattern(settings: object, pattern: object) -> int:
+    full_target = _positive_int(
+        getattr(settings, "brain_queue_target_tickers", None),
+        MIN_QUEUE_TICKER_COUNT,
+    )
+    if not _operational_refresh_lane(settings, pattern):
+        return full_target
+    operational_target = _positive_int(
+        getattr(settings, "brain_queue_operational_target_tickers", None),
+        full_target,
+    )
+    return min(full_target, operational_target)
+
+
+def queue_stored_refresh_max_tickers_for_pattern(settings: object, pattern: object) -> int:
+    full_target = _positive_int(
+        getattr(settings, "brain_queue_stored_refresh_max_tickers", None),
+        queue_target_tickers_for_pattern(settings, pattern),
+    )
+    if not _operational_refresh_lane(settings, pattern):
+        return full_target
+    operational_target = _positive_int(
+        getattr(settings, "brain_queue_operational_stored_refresh_max_tickers", None),
+        full_target,
+    )
+    return min(full_target, operational_target)
 
 
 def configure_multiprocess_child_db_env(pool_size: int, max_overflow: int) -> None:
@@ -102,6 +167,20 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         hydrate_scan_pattern_rules_json(db, pattern, insight)
         db.refresh(pattern)
 
+        target_tickers = queue_target_tickers_for_pattern(settings, pattern)
+        stored_refresh_max_tickers = queue_stored_refresh_max_tickers_for_pattern(
+            settings, pattern,
+        )
+        if _operational_refresh_lane(settings, pattern):
+            logger.info(
+                "[backtest_queue] operational_refresh_budget pattern_id=%s "
+                "lifecycle=%s target_tickers=%s stored_refresh_max_tickers=%s",
+                pattern.id,
+                getattr(pattern, "lifecycle_stage", None),
+                target_tickers,
+                stored_refresh_max_tickers,
+            )
+
         prio: list[str] = []
         if getattr(settings, "brain_queue_priority_stored_refresh", True):
             from .backtest_engine import priority_tickers_from_stored_backtests_for_refresh
@@ -111,7 +190,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 insight_id=int(insight.id),
                 scan_pattern_id=int(pattern.id),
                 pattern_name=str(pattern.name or ""),
-                max_tickers=int(getattr(settings, "brain_queue_stored_refresh_max_tickers", 40)),
+                max_tickers=stored_refresh_max_tickers,
                 stale_trade_cap=int(getattr(settings, "brain_queue_stored_stale_trade_cap", 2)),
                 stale_days=int(getattr(settings, "brain_queue_stored_stale_days", 14)),
             )
@@ -215,7 +294,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         result = smart_backtest_insight(
             db,
             insight,
-            target_tickers=max(20, getattr(settings, "brain_queue_target_tickers", 50)),
+            target_tickers=target_tickers,
             update_confidence=True,
             priority_tickers=prio if prio else None,
         )

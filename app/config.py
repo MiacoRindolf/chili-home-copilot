@@ -9,9 +9,32 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE = 0
 FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
 REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = "ticker_regime,cross_asset_regime"
+AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
+AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
+AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
+AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_CYCLES = 4
+AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
+    * AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_CYCLES
+)
+AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
+)
+AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 24
+)
+AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK = 2
 AUTOTRADER_SYNERGY_DEFAULT_FRACTION = 0.25
 AUTOTRADER_SYNERGY_DEFAULT_MAX_NOTIONAL_USD = 50.0
-AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE = 1
+AUTOTRADER_SYNERGY_DEFAULT_MAX_TOTAL_ADD_FRACTION = 0.75
+AUTOTRADER_SYNERGY_MIN_ACTIVE_SCALE_INS_PER_TRADE = 1
+AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE = max(
+    AUTOTRADER_SYNERGY_MIN_ACTIVE_SCALE_INS_PER_TRADE,
+    round(
+        AUTOTRADER_SYNERGY_DEFAULT_MAX_TOTAL_ADD_FRACTION
+        / AUTOTRADER_SYNERGY_DEFAULT_FRACTION
+    ),
+)
 AUTOTRADER_SYNERGY_MAX_SCALE_INS_CONFIG_LIMIT = 10
 AUTOTRADER_PROBATION_DEFAULT_NOTIONAL_MULTIPLIER = 0.25
 AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_PER_DAY = 1
@@ -27,6 +50,16 @@ AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_BUFFER = 100
 AUTOTRADER_PAPER_DYNAMIC_DEFAULT_MONITOR_COOLDOWN_MINUTES = 5
 AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES = 240
 AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN = True
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE = "authoritative"
+AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES = "crypto"
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES = 8
+AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION = 0.60
+AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER = 1.50
+AUTOTRADER_MANAGED_EDGE_DEFAULT_STATIC_TO_MANAGED_REWARD_RATIO = 1.50
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_FRACTION = 0.005
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MAX_REWARD_FRACTION = 0.08
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK = 1.25
+AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT = 0.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS = 2.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS = 6
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT = 0.0
@@ -38,10 +71,21 @@ PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN = 12
 PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT = 40
 PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT = 8
 PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT = 12
-PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP = 0.10
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP = 0.15
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
+    "shadow_promoted,pilot_promoted"
+)
 PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES = 5
 PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES = 1
 PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS = 3
+PATTERN_IMMINENT_OPEN_POSITION_DEFLECTION_DEFAULT_ENABLED = True
+BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_ENABLED = True
+BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_LOOKBACK_MINUTES = 60
+BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_MIN_LOOKBACK_MINUTES = 1
+BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_MAX_LOOKBACK_MINUTES = 24 * 60
+BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_MIN_FAILURES = 2
+BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_MIN_FAILURES = 1
+BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_MAX_FAILURES = 20
 
 # ── Config profiles ──────────────────────────────────────────────────────
 CONFIG_PROFILES: dict[str, dict[str, Any]] = {
@@ -2201,6 +2245,63 @@ class Settings(BaseSettings):
         le=AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_DYNAMIC_MONITOR_COOLDOWN_MINUTES"),
     )
+    # Managed-exit edge overlay. Some scanner brackets are intentionally wide
+    # hard plans, especially on crypto, while the live/paper monitors often
+    # harvest earlier MFE and tighten risk. This gate can evaluate that
+    # managed geometry from directional MFE/MAE evidence, but still requires a
+    # positive expected net edge and records the original full-bracket verdict.
+    chili_autotrader_managed_edge_mode: str = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MODE"),
+    )
+    chili_autotrader_managed_edge_asset_types: str = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_ASSET_TYPES"),
+    )
+    chili_autotrader_managed_edge_min_directional_samples: int = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_MANAGED_EDGE_MIN_DIRECTIONAL_SAMPLES"
+        ),
+    )
+    chili_autotrader_managed_edge_capture_fraction: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_CAPTURE_FRACTION"),
+    )
+    chili_autotrader_managed_edge_adverse_buffer: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_ADVERSE_BUFFER"),
+    )
+    chili_autotrader_managed_edge_static_to_managed_reward_ratio: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_STATIC_TO_MANAGED_REWARD_RATIO,
+        ge=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_MANAGED_EDGE_STATIC_TO_MANAGED_REWARD_RATIO"
+        ),
+    )
+    chili_autotrader_managed_edge_min_reward_fraction: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_FRACTION,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MIN_REWARD_FRACTION"),
+    )
+    chili_autotrader_managed_edge_max_reward_fraction: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MAX_REWARD_FRACTION,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MAX_REWARD_FRACTION"),
+    )
+    chili_autotrader_managed_edge_min_reward_risk: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MIN_REWARD_RISK"),
+    )
+    chili_autotrader_managed_edge_min_expected_net_pct: float = Field(
+        default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MIN_EXPECTED_NET_PCT"),
+    )
     # f-handler-live-drift + f-handler-execution-robustness (Phase 2
     # #8/#9, 2026-05-06): trade-close-driven observability. Both share
     # the trade-close batch size with demote/regime_ledger via
@@ -2227,6 +2328,13 @@ class Settings(BaseSettings):
         le=100.0,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PER_TRADE_RISK_PCT"),
         description="Percent of effective account equity allocated before adaptive sizing overlays.",
+    )
+    chili_autotrader_candidate_batch_size: int = Field(
+        default=AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+        ge=1,
+        le=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_CANDIDATE_BATCH_SIZE"),
+        description="Maximum AutoTrader alerts processed in one tick.",
     )
     chili_autotrader_synergy_scale_notional_usd: float = Field(
         default=0.0,
@@ -2263,11 +2371,44 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_SYNERGY_MAX_SCALE_INS_PER_TRADE"
         ),
-        description="Maximum confirming-pattern scale-ins allowed per open trade.",
+        description=(
+            "Maximum distinct confirming-pattern scale-ins allowed per open trade. "
+            "The default is derived from the scale-in fraction and total add budget; "
+            "set 0 to disable synergy scale-ins."
+        ),
     )
     chili_autotrader_synergy_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_ENABLED"),
+    )
+    chili_autotrader_synergy_retry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_RETRY_ENABLED"),
+        description=(
+            "Allow spare AutoTrader batch slots to re-evaluate recent "
+            "synergy_not_applicable alerts after scale-in policy changes."
+        ),
+    )
+    chili_autotrader_synergy_retry_lookback_minutes: int = Field(
+        default=AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES,
+        ge=AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
+        le=AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SYNERGY_RETRY_LOOKBACK_MINUTES"
+        ),
+        description=(
+            "Lookback window for one-shot synergy retry candidates, expressed "
+            "as a named multiple of the imminent scanner cadence."
+        ),
+    )
+    chili_autotrader_synergy_retry_max_per_tick: int = Field(
+        default=AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK,
+        ge=0,
+        le=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SYNERGY_RETRY_MAX_PER_TICK"
+        ),
+        description="Maximum synergy retry candidates allowed to fill spare tick slots.",
     )
     chili_autotrader_daily_loss_cap_usd: float = Field(
         default=150.0,
@@ -2690,6 +2831,28 @@ class Settings(BaseSettings):
     chili_coinbase_autotrader_live: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_COINBASE_AUTOTRADER_LIVE"),
+    )
+    chili_broker_selector_rh_crypto_degraded_fallback_enabled: bool = Field(
+        default=BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_ENABLED"
+        ),
+    )
+    chili_broker_selector_rh_crypto_degraded_lookback_minutes: int = Field(
+        default=BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_LOOKBACK_MINUTES,
+        ge=BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_MIN_LOOKBACK_MINUTES,
+        le=BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_MAX_LOOKBACK_MINUTES,
+        validation_alias=AliasChoices(
+            "CHILI_BROKER_SELECTOR_RH_CRYPTO_DEGRADED_LOOKBACK_MINUTES"
+        ),
+    )
+    chili_broker_selector_rh_crypto_degraded_min_failures: int = Field(
+        default=BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_MIN_FAILURES,
+        ge=BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_MIN_FAILURES,
+        le=BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_MAX_FAILURES,
+        validation_alias=AliasChoices(
+            "CHILI_BROKER_SELECTOR_RH_CRYPTO_DEGRADED_MIN_FAILURES"
+        ),
     )
     # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
     # (2026-05-09): bracket writer's Coinbase SELL stop-limit places
@@ -3277,6 +3440,10 @@ class Settings(BaseSettings):
     chili_autotrader_shadow_promoted_paper_observation_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_SHADOW_PROMOTED_PAPER_OBSERVATION_ENABLED"),
+    )
+    chili_autotrader_shadow_signal_lane_observation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SHADOW_SIGNAL_LANE_OBSERVATION_ENABLED"),
     )
     chili_autotrader_live_require_venue_health_enabled: bool = Field(
         default=False,
@@ -3987,12 +4154,15 @@ class Settings(BaseSettings):
     pattern_imminent_readiness_near_miss_limit: int = (
         PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT
     )
-    # Shadow-promoted only: admit close readiness misses into paper/shadow
-    # observation, never live broker flow. This increases measured learning
-    # samples without weakening promoted/live entry gates.
+    # Close readiness misses can enter paper/shadow observation, never live
+    # broker flow. This increases measured learning samples without weakening
+    # promoted/live entry gates.
     pattern_imminent_shadow_near_miss_enabled: bool = True
     pattern_imminent_shadow_near_miss_max_gap: float = (
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP
+    )
+    pattern_imminent_shadow_near_miss_lifecycle_stages: str = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES
     )
     pattern_imminent_ticker_rotation_enabled: bool = True
     pattern_imminent_ticker_rotation_window_minutes: int = (
@@ -4000,6 +4170,9 @@ class Settings(BaseSettings):
     )
     pattern_imminent_ticker_rotation_explore_tickers: int = (
         PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS
+    )
+    pattern_imminent_open_position_deflection_enabled: bool = (
+        PATTERN_IMMINENT_OPEN_POSITION_DEFLECTION_DEFAULT_ENABLED
     )
     pattern_imminent_research_mode: bool = False
     pattern_imminent_research_nearmiss_log: bool = False

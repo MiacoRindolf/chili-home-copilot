@@ -105,8 +105,11 @@ def broker_quote_for_trade(
                 age_seconds = float(age_fn())
             except (TypeError, ValueError):
                 age_seconds = None
-        if age_seconds is not None and max_age_seconds is not None and age_seconds > max_age_seconds:
-            return {**base, "source": f"{broker_source}_stale", "stale": True}
+        is_stale = bool(
+            age_seconds is not None
+            and max_age_seconds is not None
+            and age_seconds > max_age_seconds
+        )
 
         raw = getattr(tick, "raw", None) or {}
         bid = _safe_float(getattr(tick, "bid", None))
@@ -163,6 +166,8 @@ def broker_quote_for_trade(
             if raw_source == "tradingview_boats"
             else broker_source
         )
+        if is_stale:
+            source = f"{source}_stale"
         return {
             **base,
             "price": round(float(price), 6),
@@ -182,7 +187,7 @@ def broker_quote_for_trade(
             "source": source,
             "broker_source": broker_source,
             "broker_held": True,
-            "stale": False,
+            "stale": is_stale,
             "age_seconds": round(float(age_seconds), 3) if age_seconds is not None else None,
             "max_age_seconds": max_age_seconds,
         }
@@ -283,8 +288,10 @@ def broker_recent_extrema_for_source(
 
     high_bar = max(recent, key=lambda b: float(b.get("high") or 0.0))
     low_bar = min(recent, key=lambda b: float(b.get("low") or float("inf")))
+    last_bar = max(recent, key=lambda b: float(b.get("time") or 0.0))
     high = _safe_float(high_bar.get("high"))
     low = _safe_float(low_bar.get("low"))
+    last = _safe_float(last_bar.get("close"))
     if high is None and low is None:
         return None
     return {
@@ -294,8 +301,11 @@ def broker_recent_extrema_for_source(
         "bar_count": len(recent),
         "high": high,
         "low": low,
+        "last": last,
         "high_ts": datetime.fromtimestamp(int(high_bar["time"]), timezone.utc).isoformat()
         if high is not None else None,
         "low_ts": datetime.fromtimestamp(int(low_bar["time"]), timezone.utc).isoformat()
         if low is not None else None,
+        "last_ts": datetime.fromtimestamp(int(last_bar["time"]), timezone.utc).isoformat()
+        if last is not None else None,
     }

@@ -11,15 +11,22 @@ from sqlalchemy import or_, text
 from sqlalchemy.orm import Session, aliased
 
 from ...config import (
+    AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+    AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES,
+    AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK,
+    AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES,
+    AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
     settings,
 )
 from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_rules import (
+    MANAGED_EDGE_GEOMETRY_SOURCE,
     RuleGateContext,
     alert_confidence_from_score,
     autotrader_paper_realized_pnl_today_et,
@@ -35,9 +42,12 @@ from .autopilot_scope import (
     check_autopilot_entry_gate,
 )
 from .auto_trader_synergy import (
+    SCALE_IN_ALERT_IDS_SNAPSHOT_KEY,
+    SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY,
     find_open_autotrader_paper,
     find_open_autotrader_trade,
     maybe_scale_in,
+    used_scale_in_pattern_ids,
 )
 from .coinbase_maker_pricing import plan_post_only_buy_limit
 from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
@@ -59,9 +69,12 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "skipped_non_positive_expected_edge",
     "skipped_synergy_disabled_second_signal",
     "skipped_synergy_not_applicable",
+    "skipped_synergy_retry_not_applicable",
 })
 
 AUTOTRADER_VERSION = "v1"
+SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
+SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
 PROBATION_RECERT_ALLOWANCE = "probation"
 PILOT_BOOTSTRAP_RECERT_ALLOWANCE = "pilot_bootstrap"
 PROBATION_TIMEZONE = "America/New_York"
@@ -81,6 +94,26 @@ PROBATION_NOTIONAL_BELOW_TRADE_UNIT_REASON = "probation_notional_below_trade_uni
 PAPER_SHADOW_DUPLICATE_POLICY_STRICT = "strict_open_dedupe"
 PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS = "reject_observation_bypass"
 PAPER_SHADOW_AUDIT_PREFIX = "paper_shadow_"
+MANAGED_EDGE_PRICE_ROUND_DIGITS = 8
+SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
+SHADOW_OBSERVATION_SIGNAL_LANES = frozenset({SHADOW_NEAR_MISS_SIGNAL_LANE})
+SHADOW_OBSERVATION_REASON_STAGE = "selector:shadow_promoted_pattern_eval"
+SHADOW_OBSERVATION_REASON_SIGNAL_LANE = "selector:shadow_observation_signal_lane"
+SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED = (
+    "selector:shadow_observation_signal_lane_disabled"
+)
+
+
+def _alert_signal_lane(alert: BreakoutAlert) -> str:
+    snap = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+    scorecard = snap.get("imminent_scorecard") if isinstance(snap, dict) else {}
+    if not isinstance(scorecard, dict):
+        return ""
+    return str(scorecard.get("signal_lane") or "").strip().lower()
+
+
+def _alert_requests_shadow_observation(alert: BreakoutAlert) -> bool:
+    return _alert_signal_lane(alert) in SHADOW_OBSERVATION_SIGNAL_LANES
 
 
 def _autotrader_tick_note(
@@ -209,6 +242,157 @@ def _maybe_log_candidate_pool_zero(db: Session, *, uid: int) -> dict[str, Any] |
         diag.get("lifecycle_counts") or {},
     )
     return diag
+
+
+def _settings_int_clamped(name: str, default: int, *, lower: int, upper: int) -> int:
+    raw = getattr(settings, name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(int(lower), min(int(upper), value))
+
+
+def _autotrader_candidate_batch_size() -> int:
+    return _settings_int_clamped(
+        "chili_autotrader_candidate_batch_size",
+        AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+        lower=1,
+        upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    )
+
+
+def _synergy_retry_limits(batch_slots_available: int) -> tuple[bool, int, int]:
+    enabled = bool(getattr(settings, "chili_autotrader_synergy_retry_enabled", True))
+    if not enabled or batch_slots_available <= 0:
+        return False, 0, 0
+    lookback_minutes = _settings_int_clamped(
+        "chili_autotrader_synergy_retry_lookback_minutes",
+        AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES,
+        lower=AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
+        upper=AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES,
+    )
+    max_per_tick = _settings_int_clamped(
+        "chili_autotrader_synergy_retry_max_per_tick",
+        AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK,
+        lower=0,
+        upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    )
+    limit = min(int(batch_slots_available), int(max_per_tick))
+    return limit > 0, lookback_minutes, limit
+
+
+def _synergy_retry_candidates(
+    db: Session,
+    *,
+    uid: int,
+    limit: int,
+) -> tuple[int, list[BreakoutAlert]]:
+    enabled, lookback_minutes, capped_limit = _synergy_retry_limits(limit)
+    if not enabled:
+        return 0, []
+
+    rows = db.execute(
+        text(
+            """
+            WITH latest AS (
+                SELECT DISTINCT ON (ar.breakout_alert_id)
+                       ar.breakout_alert_id,
+                       ar.id AS source_run_id,
+                       ar.reason,
+                       ar.created_at
+                  FROM trading_autotrader_runs ar
+                  JOIN trading_breakout_alerts ba
+                    ON ba.id = ar.breakout_alert_id
+                 WHERE ar.created_at >= NOW() - (:lookback_minutes * INTERVAL '1 minute')
+                   AND ba.alert_tier = 'pattern_imminent'
+                   AND (ba.user_id = :uid OR ba.user_id IS NULL)
+                 ORDER BY ar.breakout_alert_id, ar.created_at DESC, ar.id DESC
+            ),
+            eligible AS (
+                SELECT ba.id AS alert_id,
+                       latest.source_run_id,
+                       latest.created_at,
+                       COUNT(*) OVER () AS retry_pool
+                  FROM latest
+                  JOIN trading_breakout_alerts ba
+                    ON ba.id = latest.breakout_alert_id
+                  JOIN LATERAL (
+                        SELECT t.id, t.scan_pattern_id, t.entry_date
+                          FROM trading_trades t
+                         WHERE UPPER(t.ticker) = UPPER(ba.ticker)
+                           AND t.status = 'open'
+                           AND t.auto_trader_version = :autotrader_version
+                           AND (t.user_id = :uid OR t.user_id IS NULL)
+                         ORDER BY t.entry_date DESC NULLS LAST, t.id DESC
+                         LIMIT 1
+                  ) open_trade ON TRUE
+                 WHERE latest.reason = :source_reason
+                   AND COALESCE(open_trade.scan_pattern_id, 0)
+                       <> COALESCE(ba.scan_pattern_id, 0)
+                 ORDER BY latest.created_at DESC, ba.id DESC
+                 LIMIT :query_limit
+            )
+            SELECT alert_id, source_run_id, retry_pool
+              FROM eligible
+            """
+        ),
+        {
+            "uid": int(uid),
+            "lookback_minutes": int(lookback_minutes),
+            "query_limit": int(AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE),
+            "source_reason": SYNERGY_RETRY_SOURCE_REASON,
+            "autotrader_version": AUTOTRADER_VERSION,
+        },
+    ).mappings().all()
+    if not rows:
+        return 0, []
+
+    retry_pool = int(rows[0].get("retry_pool") or len(rows))
+    ordered_ids = [int(row["alert_id"]) for row in rows]
+    source_run_by_alert = {
+        int(row["alert_id"]): int(row["source_run_id"]) for row in rows
+    }
+    alerts = (
+        db.query(BreakoutAlert)
+        .filter(BreakoutAlert.id.in_(ordered_ids))
+        .all()
+    )
+    by_id = {int(alert.id): alert for alert in alerts}
+    out: list[BreakoutAlert] = []
+    for alert_id in ordered_ids:
+        alert = by_id.get(alert_id)
+        if alert is None:
+            continue
+        open_trade = find_open_autotrader_trade(
+            db,
+            user_id=uid,
+            ticker=alert.ticker,
+        )
+        if open_trade is not None:
+            try:
+                if int(alert.scan_pattern_id or 0) in used_scale_in_pattern_ids(
+                    db, open_trade,
+                ):
+                    continue
+            except Exception:
+                logger.debug(
+                    "[autotrader] synergy retry used-pattern filter failed "
+                    "alert_id=%s",
+                    alert_id,
+                    exc_info=True,
+                )
+        setattr(alert, "_chili_synergy_retry", True)
+        setattr(
+            alert,
+            "_chili_synergy_retry_source_run_id",
+            source_run_by_alert.get(alert_id),
+        )
+        setattr(alert, "_chili_synergy_retry_lookback_minutes", lookback_minutes)
+        out.append(alert)
+        if len(out) >= capped_limit:
+            break
+    return retry_pool, out
 
 # Namespace byte for advisory locks so we can't collide with other
 # subsystems that also use pg_advisory_lock on alert-shaped ints. The
@@ -414,6 +598,72 @@ def _resolve_entry_risk_notional(
     return 0.0, {**snap, "notional_source": "capital_unavailable"}
 
 
+def _managed_edge_execution_levels(
+    alert: BreakoutAlert,
+    *,
+    px: float,
+    snap: dict[str, Any] | None,
+) -> tuple[float | None, float | None, dict[str, Any] | None]:
+    stop_price = float(alert.stop_loss) if alert.stop_loss is not None else None
+    target_price = float(alert.target_price) if alert.target_price is not None else None
+    if not isinstance(snap, dict):
+        return stop_price, target_price, None
+    edge = snap.get("entry_edge")
+    if not isinstance(edge, dict):
+        return stop_price, target_price, None
+    managed = edge.get("managed_exit_edge")
+    if not isinstance(managed, dict) or not bool(managed.get("selected")):
+        return stop_price, target_price, None
+    if edge.get("edge_geometry_source") != MANAGED_EDGE_GEOMETRY_SOURCE:
+        return stop_price, target_price, None
+    geometry = managed.get("geometry")
+    if not isinstance(geometry, dict):
+        geometry = {}
+
+    try:
+        px_f = float(px)
+    except (TypeError, ValueError):
+        px_f = 0.0
+    managed_target = geometry.get("managed_target_price")
+    managed_stop = geometry.get("managed_stop_price")
+    if managed_target is None:
+        try:
+            managed_target = px_f * (1.0 + float(edge.get("reward_fraction")))
+        except (TypeError, ValueError):
+            managed_target = None
+    if managed_stop is None:
+        try:
+            managed_stop = px_f * (1.0 - float(edge.get("stop_loss_fraction")))
+        except (TypeError, ValueError):
+            managed_stop = None
+
+    applied: dict[str, Any] = {
+        "source": MANAGED_EDGE_GEOMETRY_SOURCE,
+        "full_bracket_target_price": target_price,
+        "full_bracket_stop_price": stop_price,
+    }
+    try:
+        target_f = float(managed_target)
+    except (TypeError, ValueError):
+        target_f = 0.0
+    if target_f > 0.0 and (px_f <= 0.0 or target_f > px_f):
+        target_price = round(target_f, MANAGED_EDGE_PRICE_ROUND_DIGITS)
+        applied["managed_target_price"] = target_price
+    try:
+        stop_f = float(managed_stop)
+    except (TypeError, ValueError):
+        stop_f = 0.0
+    if stop_f > 0.0 and (px_f <= 0.0 or stop_f < px_f):
+        stop_price = round(stop_f, MANAGED_EDGE_PRICE_ROUND_DIGITS)
+        applied["managed_stop_price"] = stop_price
+    if (
+        applied.get("managed_target_price") is None
+        and applied.get("managed_stop_price") is None
+    ):
+        return stop_price, target_price, None
+    return stop_price, target_price, applied
+
+
 def _maybe_open_paper_shadow(
     db: Session,
     *,
@@ -480,6 +730,10 @@ def _maybe_open_paper_shadow(
                 else PAPER_SHADOW_DUPLICATE_POLICY_STRICT
             ),
         }
+        if snap.get("paper_observation_signal_lane"):
+            sig["paper_observation_signal_lane"] = snap.get(
+                "paper_observation_signal_lane"
+            )
         sig.update({
             k: v
             for k, v in (snap or {}).items()
@@ -515,11 +769,16 @@ def _maybe_open_paper_shadow(
                     or 0
                 ),
             )
+        shadow_stop, shadow_target, managed_exit_execution = (
+            _managed_edge_execution_levels(alert, px=px, snap=snap)
+        )
+        if managed_exit_execution is not None:
+            sig["managed_exit_execution"] = managed_exit_execution
         pt = open_paper_trade(
             db, uid, alert.ticker, px,
             scan_pattern_id=alert.scan_pattern_id,
-            stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
-            target_price=float(alert.target_price) if alert.target_price is not None else None,
+            stop_price=shadow_stop,
+            target_price=shadow_target,
             direction="long",
             quantity=float(qty),
             signal_json=sig,
@@ -569,6 +828,7 @@ def _qualified_reject_shadow_decision(reason: str | None) -> str | None:
     if r in {
         "synergy_disabled_second_signal",
         "synergy_not_applicable",
+        SYNERGY_RETRY_EXHAUSTED_REASON,
     }:
         return f"skipped_{r}"
     if r in {
@@ -1064,16 +1324,31 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             ar.id.is_(None),
         )
     )
-    candidate_pool = int(candidate_base.count())
+    batch_limit = _autotrader_candidate_batch_size()
+    fresh_candidate_pool = int(candidate_base.count())
     candidates = (
-        candidate_base.order_by(BreakoutAlert.id.asc()).limit(5).all()
+        candidate_base.order_by(BreakoutAlert.id.asc()).limit(batch_limit).all()
     )
+    retry_pool = 0
+    retry_candidates: list[BreakoutAlert] = []
+    spare_slots = batch_limit - len(candidates)
+    if spare_slots > 0:
+        retry_pool, retry_candidates = _synergy_retry_candidates(
+            db,
+            uid=uid,
+            limit=spare_slots,
+        )
+        candidates.extend(retry_candidates)
+    candidate_pool = fresh_candidate_pool + retry_pool
 
     out: dict[str, Any] = {
         "processed": 0,
         "placed": 0,
         "scaled_in": 0,
         "skipped": 0,
+        "fresh_candidate_pool": fresh_candidate_pool,
+        "synergy_retry_pool": retry_pool,
+        "synergy_retry_batch": len(retry_candidates),
         "tick_last_kind": None,
         "tick_last_reason": None,
         "tick_last_alert_id": None,
@@ -1098,7 +1373,11 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             # Re-check race (another worker may have inserted between the
             # outer candidate query and our claim).
             db.expire_all()
-            if breakout_alert_already_processed(db, int(alert.id)):
+            is_synergy_retry = bool(getattr(alert, "_chili_synergy_retry", False))
+            if (
+                breakout_alert_already_processed(db, int(alert.id))
+                and not is_synergy_retry
+            ):
                 _autotrader_tick_note(
                     out,
                     kind="skipped",
@@ -1126,7 +1405,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
 
     logger.info(
         "[autotrader] tick uid=%s candidate_pool=%d batch=%d processed=%d placed=%d "
-        "scaled_in=%d skipped=%d last_kind=%s last_reason=%s last_alert_id=%s last_ticker=%s",
+        "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
+        "synergy_retry_batch=%d last_kind=%s last_reason=%s last_alert_id=%s last_ticker=%s",
         uid,
         candidate_pool,
         len(candidates),
@@ -1134,6 +1414,9 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out["placed"],
         out["scaled_in"],
         out["skipped"],
+        fresh_candidate_pool,
+        retry_pool,
+        len(retry_candidates),
         out.get("tick_last_kind") or "-",
         out.get("tick_last_reason") or "-",
         out.get("tick_last_alert_id") if out.get("tick_last_alert_id") is not None else "-",
@@ -1548,6 +1831,38 @@ def _process_one_alert(
     runtime: dict[str, Any],
 ) -> None:
     live = bool(runtime.get("live_orders_effective"))
+    shadow_signal_lane = _alert_signal_lane(alert)
+    if _alert_requests_shadow_observation(alert):
+        if bool(
+            getattr(
+                settings,
+                "chili_autotrader_shadow_signal_lane_observation_enabled",
+                True,
+            )
+        ):
+            setattr(alert, "_chili_shadow_observation_only", True)
+            setattr(
+                alert,
+                "_chili_shadow_observation_reason",
+                SHADOW_OBSERVATION_REASON_SIGNAL_LANE,
+            )
+            setattr(alert, "_chili_shadow_observation_signal_lane", shadow_signal_lane)
+        else:
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="blocked",
+                reason=SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED,
+                alert=alert,
+            )
+            return
     # 2026-04-28 lifecycle gate. Evidence audit demotes patterns to 'challenged'
     # but the entry funnel had been ignoring lifecycle_stage, so 32 of 34 entries
     # last week landed on demoted patterns (driving most of the bleed). Enforce
@@ -1580,8 +1895,14 @@ def _process_one_alert(
                     )
                 ):
                     setattr(alert, "_chili_shadow_observation_only", True)
+                    if not getattr(alert, "_chili_shadow_observation_reason", None):
+                        setattr(
+                            alert,
+                            "_chili_shadow_observation_reason",
+                            SHADOW_OBSERVATION_REASON_STAGE,
+                        )
                 else:
-                    _shadow_reason = "selector:shadow_promoted_pattern_eval"
+                    _shadow_reason = SHADOW_OBSERVATION_REASON_STAGE
                     _audit(db, user_id=uid, alert=alert,
                            decision="blocked", reason=_shadow_reason)
                     out["skipped"] += 1
@@ -1725,27 +2046,54 @@ def _process_one_alert(
             )
             return
         if scale_plan is None:
+            is_synergy_retry = bool(getattr(alert, "_chili_synergy_retry", False))
             reason = (
                 "synergy_disabled_second_signal"
                 if not getattr(settings, "chili_autotrader_synergy_enabled", False)
-                else "synergy_not_applicable"
+                else (
+                    SYNERGY_RETRY_EXHAUSTED_REASON
+                    if is_synergy_retry
+                    else SYNERGY_RETRY_SOURCE_REASON
+                )
             )
-            _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason)
+            synergy_snap = {
+                "existing_trade_id": getattr(existing_trade, "id", None),
+                "existing_trade_scan_pattern_id": getattr(
+                    existing_trade, "scan_pattern_id", None,
+                ),
+                "existing_trade_entry_date": (
+                    existing_trade.entry_date.isoformat()
+                    if getattr(existing_trade, "entry_date", None) else None
+                ),
+                "existing_trade_scale_in_count": int(
+                    getattr(existing_trade, "scale_in_count", 0) or 0
+                ),
+            }
+            if is_synergy_retry:
+                synergy_snap["synergy_retry"] = True
+                synergy_snap["synergy_retry_source_reason"] = (
+                    SYNERGY_RETRY_SOURCE_REASON
+                )
+                synergy_snap["synergy_retry_source_run_id"] = getattr(
+                    alert, "_chili_synergy_retry_source_run_id", None,
+                )
+                synergy_snap["synergy_retry_lookback_minutes"] = getattr(
+                    alert, "_chili_synergy_retry_lookback_minutes", None,
+                )
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="skipped",
+                reason=reason,
+                rule_snapshot=synergy_snap,
+            )
             _maybe_open_reject_paper_shadow(
                 db,
                 uid=uid,
                 alert=alert,
                 px=px,
-                snap={
-                    "existing_trade_id": getattr(existing_trade, "id", None),
-                    "existing_trade_scan_pattern_id": getattr(
-                        existing_trade, "scan_pattern_id", None,
-                    ),
-                    "existing_trade_entry_date": (
-                        existing_trade.entry_date.isoformat()
-                        if getattr(existing_trade, "entry_date", None) else None
-                    ),
-                },
+                snap=synergy_snap,
                 reason=reason,
                 existing_qty=getattr(existing_trade, "quantity", None),
             )
@@ -1806,6 +2154,23 @@ def _process_one_alert(
         db, alert, settings=settings, ctx=ctx, for_new_entry=for_new, fallback_user_id=uid,
     )
     if not ok:
+        if (
+            bool(getattr(alert, "_chili_shadow_observation_only", False))
+            or shadow_signal_lane in SHADOW_OBSERVATION_SIGNAL_LANES
+        ):
+            shadow_reason = str(
+                getattr(
+                    alert,
+                    "_chili_shadow_observation_reason",
+                    SHADOW_OBSERVATION_REASON_STAGE,
+                )
+                or SHADOW_OBSERVATION_REASON_STAGE
+            )
+            snap["paper_observation_reason"] = shadow_reason
+            snap["paper_observation_live_orders_effective"] = bool(live)
+            snap["rule_gate_reject_reason"] = str(reason)
+            if shadow_signal_lane:
+                snap["paper_observation_signal_lane"] = shadow_signal_lane
         if reason == "non_positive_expected_edge":
             _log_expected_edge_reject(alert, snap)
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)
@@ -2193,7 +2558,7 @@ def _execute_broker_buy(
     # log only). Skip decisions audit + return early.
     try:
         from .broker_selector import select_venue
-        _venue_decision = select_venue(ticker=alert.ticker)
+        _venue_decision = select_venue(ticker=alert.ticker, db=db)
     except Exception as exc:
         _block_live_order(
             db,
@@ -2690,10 +3055,29 @@ def _execute_scale_in(
     if t.indicator_snapshot is None:
         t.indicator_snapshot = {}
     if isinstance(t.indicator_snapshot, dict):
+        confirming_pattern_id = getattr(
+            plan, "confirming_pattern_id", getattr(alert, "scan_pattern_id", None)
+        )
+        def _snapshot_list(value: Any) -> list[Any]:
+            if value is None:
+                return []
+            if isinstance(value, list):
+                return list(value)
+            if isinstance(value, tuple):
+                return list(value)
+            return [value]
+
+        existing_alert_ids = _snapshot_list(
+            t.indicator_snapshot.get(SCALE_IN_ALERT_IDS_SNAPSHOT_KEY)
+        )
+        existing_pattern_ids = _snapshot_list(
+            t.indicator_snapshot.get(SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY)
+        )
         t.indicator_snapshot = {
             **t.indicator_snapshot,
-            "autotrader_scale_in_alert_ids": (t.indicator_snapshot.get("autotrader_scale_in_alert_ids") or [])
-            + [alert.id],
+            SCALE_IN_ALERT_IDS_SNAPSHOT_KEY: existing_alert_ids + [alert.id],
+            SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY: existing_pattern_ids
+            + ([confirming_pattern_id] if confirming_pattern_id is not None else []),
         }
     db.add(t)
     db.commit()
@@ -3141,9 +3525,22 @@ def _execute_new_entry(
         snap["qty_raw"] = round(qty_raw, 8)
 
     if bool(getattr(alert, "_chili_shadow_observation_only", False)):
-        _reason = "selector:shadow_promoted_pattern_eval"
+        _reason = str(
+            getattr(
+                alert,
+                "_chili_shadow_observation_reason",
+                SHADOW_OBSERVATION_REASON_STAGE,
+            )
+            or SHADOW_OBSERVATION_REASON_STAGE
+        )
         snap["paper_observation_reason"] = _reason
         snap["paper_observation_live_orders_effective"] = bool(live)
+        if getattr(alert, "_chili_shadow_observation_signal_lane", None):
+            snap["paper_observation_signal_lane"] = getattr(
+                alert,
+                "_chili_shadow_observation_signal_lane",
+                None,
+            )
         _audit(
             db,
             user_id=uid,
@@ -3317,6 +3714,9 @@ def _execute_new_entry(
         _entry_broker_status = "accepted" if _is_coinbase_entry else None
         _entry_filled_qty = 0.0 if _is_coinbase_entry else None
         _entry_remaining_qty = _broker_qty if _is_coinbase_entry else None
+        _trade_stop, _trade_target, _managed_exit_execution = (
+            _managed_edge_execution_levels(alert, px=px, snap=snap)
+        )
         _entry_execution_snapshot = {
             "broker_source": _broker_source_for_trade,
             "client_order_id": res.get("client_order_id"),
@@ -3347,6 +3747,7 @@ def _execute_new_entry(
             "cost_gate_fee_bps": snap.get("cost_gate_fee_bps"),
             "cost_gate_threshold_bps": snap.get("cost_gate_threshold_bps"),
             "cost_gate_tca_cost_bps": snap.get("cost_gate_tca_cost_bps"),
+            "managed_exit_execution": _managed_exit_execution,
         }
         # f-tca-writer-wiring (2026-05-18): capture the AUTOTRADER's decision
         # price ``px`` as the entry-side TCA reference. ``fill`` (above) is
@@ -3371,8 +3772,8 @@ def _execute_new_entry(
             remaining_quantity=_entry_remaining_qty,
             submitted_at=_entry_now if _is_coinbase_entry else None,
             acknowledged_at=_entry_now if _is_coinbase_entry else None,
-            stop_loss=float(alert.stop_loss) if alert.stop_loss is not None else None,
-            take_profit=float(alert.target_price) if alert.target_price is not None else None,
+            stop_loss=_trade_stop,
+            take_profit=_trade_target,
             scan_pattern_id=alert.scan_pattern_id,
             related_alert_id=alert.id,
             broker_source=_broker_source_for_trade,
@@ -3471,14 +3872,19 @@ def _execute_new_entry(
         "breakout_alert_id": alert.id,
         "projected": snap.get("projected_profit_pct"),
     }
+    paper_stop, paper_target, managed_exit_execution = (
+        _managed_edge_execution_levels(alert, px=px, snap=snap)
+    )
+    if managed_exit_execution is not None:
+        sig["managed_exit_execution"] = managed_exit_execution
     pt = open_paper_trade(
         db,
         uid,
         alert.ticker,
         px,
         scan_pattern_id=alert.scan_pattern_id,
-        stop_price=float(alert.stop_loss) if alert.stop_loss is not None else None,
-        target_price=float(alert.target_price) if alert.target_price is not None else None,
+        stop_price=paper_stop,
+        target_price=paper_target,
         direction="long",
         quantity=float(qty),
         signal_json=sig,

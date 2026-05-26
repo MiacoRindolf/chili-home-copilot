@@ -10,13 +10,14 @@ Covers:
 """
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app import models
-from app.models.trading import AutoTraderRun, BreakoutAlert, PatternRecertLog, ScanPattern
+from app.models.trading import AutoTraderRun, BreakoutAlert, PatternRecertLog, ScanPattern, Trade
 from app.services.trading import auto_trader as at_mod
 
 TEST_ENTRY_PRICE = 50.0
@@ -286,6 +287,165 @@ def test_qualified_block_shadow_decisions_cover_learning_dead_ends():
         at_mod._qualified_reject_shadow_decision("synergy_disabled_second_signal")
         == "skipped_synergy_disabled_second_signal"
     )
+    assert (
+        at_mod._qualified_reject_shadow_decision("synergy_retry_not_applicable")
+        == "skipped_synergy_retry_not_applicable"
+    )
+
+
+def test_synergy_retry_candidates_revisit_recent_distinct_pattern(db, monkeypatch):
+    user = models.User(name="synergy_retry_candidate")
+    db.add(user)
+    db.flush()
+    base_pattern = ScanPattern(name="Base", rules_json={}, active=True)
+    confirming_pattern = ScanPattern(name="Confirm", rules_json={}, active=True)
+    db.add_all([base_pattern, confirming_pattern])
+    db.flush()
+    alert = BreakoutAlert(
+        ticker="SYN-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        scan_pattern_id=confirming_pattern.id,
+        user_id=user.id,
+    )
+    trade = Trade(
+        user_id=user.id,
+        ticker="SYN-USD",
+        direction="long",
+        entry_price=10.0,
+        quantity=1.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=12.0,
+        scan_pattern_id=base_pattern.id,
+        auto_trader_version="v1",
+        scale_in_count=1,
+    )
+    db.add_all([alert, trade])
+    db.flush()
+    source_run = AutoTraderRun(
+        user_id=user.id,
+        breakout_alert_id=alert.id,
+        scan_pattern_id=confirming_pattern.id,
+        ticker="SYN-USD",
+        decision="skipped",
+        reason="synergy_not_applicable",
+    )
+    db.add(source_run)
+    db.commit()
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(
+            chili_autotrader_synergy_retry_enabled=True,
+            chili_autotrader_synergy_retry_lookback_minutes=60,
+            chili_autotrader_synergy_retry_max_per_tick=1,
+        ),
+    )
+
+    retry_pool, alerts = at_mod._synergy_retry_candidates(
+        db,
+        uid=user.id,
+        limit=1,
+    )
+
+    assert retry_pool == 1
+    assert [row.id for row in alerts] == [alert.id]
+    assert getattr(alerts[0], "_chili_synergy_retry") is True
+    assert getattr(alerts[0], "_chili_synergy_retry_source_run_id") == source_run.id
+
+
+def test_run_tick_processes_synergy_retry_even_when_alert_has_prior_run(
+    db,
+    monkeypatch,
+):
+    user = models.User(name="synergy_retry_tick")
+    db.add(user)
+    db.flush()
+    base_pattern = ScanPattern(name="Base tick", rules_json={}, active=True)
+    confirming_pattern = ScanPattern(name="Confirm tick", rules_json={}, active=True)
+    db.add_all([base_pattern, confirming_pattern])
+    db.flush()
+    alert = BreakoutAlert(
+        ticker="SYNT-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        scan_pattern_id=confirming_pattern.id,
+        user_id=user.id,
+    )
+    trade = Trade(
+        user_id=user.id,
+        ticker="SYNT-USD",
+        direction="long",
+        entry_price=10.0,
+        quantity=1.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=12.0,
+        scan_pattern_id=base_pattern.id,
+        auto_trader_version="v1",
+        scale_in_count=1,
+    )
+    db.add_all([alert, trade])
+    db.flush()
+    db.add(
+        AutoTraderRun(
+            user_id=user.id,
+            breakout_alert_id=alert.id,
+            scan_pattern_id=confirming_pattern.id,
+            ticker="SYNT-USD",
+            decision="skipped",
+            reason="synergy_not_applicable",
+        )
+    )
+    db.commit()
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(
+            chili_autotrader_enabled=True,
+            chili_autotrader_candidate_batch_size=1,
+            chili_autotrader_synergy_retry_enabled=True,
+            chili_autotrader_synergy_retry_lookback_minutes=60,
+            chili_autotrader_synergy_retry_max_per_tick=1,
+        ),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "effective_autotrader_runtime",
+        lambda _db: {"tick_allowed": True},
+    )
+    monkeypatch.setattr(at_mod, "_resolve_user_id", lambda: user.id)
+    seen: list[dict] = []
+
+    def _fake_process(_db, _uid, retry_alert, out, _rt):
+        seen.append({
+            "alert_id": retry_alert.id,
+            "retry": getattr(retry_alert, "_chili_synergy_retry", False),
+        })
+        out["skipped"] += 1
+
+    monkeypatch.setattr(at_mod, "_process_one_alert", _fake_process)
+
+    out = at_mod.run_auto_trader_tick(db)
+
+    assert out["processed"] == 1
+    assert out["synergy_retry_batch"] == 1
+    assert seen == [{"alert_id": alert.id, "retry": True}]
 
 
 def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db, monkeypatch):
@@ -633,6 +793,41 @@ def test_scale_in_blocks_live_capital_fallback(monkeypatch):
 
     assert blocked
     assert blocked[0]["reason"] == "capital_unavailable:fallback:get_portfolio_timeout"
+
+
+def test_scale_in_records_confirming_pattern_history(monkeypatch):
+    db = MagicMock()
+    alert = SimpleNamespace(id=77, ticker="SCAP", scan_pattern_id=12)
+    trade = SimpleNamespace(
+        id=5,
+        entry_price=TEST_ENTRY_PRICE,
+        quantity=1.0,
+        stop_loss=TEST_STOP_PRICE,
+        take_profit=TEST_TARGET_PRICE,
+        scale_in_count=0,
+        indicator_snapshot={
+            at_mod.SCALE_IN_ALERT_IDS_SNAPSHOT_KEY: [70],
+            at_mod.SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY: [10],
+        },
+    )
+    plan = SimpleNamespace(
+        trade=trade,
+        added_quantity=1.0,
+        new_avg_entry=51.0,
+        new_stop=TEST_STOP_PRICE,
+        new_target=TEST_TARGET_PRICE,
+        confirming_pattern_id=12,
+    )
+    monkeypatch.setattr(at_mod, "_audit", lambda *a, **k: None)
+    monkeypatch.setattr(at_mod, "_autotrader_tick_note", lambda *a, **k: None)
+
+    out = {"scaled_in": 0}
+
+    at_mod._execute_scale_in(db, 1, alert, plan, TEST_ENTRY_PRICE, {}, None, False, out)
+
+    assert trade.scale_in_count == 1
+    assert trade.indicator_snapshot[at_mod.SCALE_IN_ALERT_IDS_SNAPSHOT_KEY] == [70, 77]
+    assert trade.indicator_snapshot[at_mod.SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY] == [10, 12]
 
 
 def test_coinbase_cap_uses_passed_price(monkeypatch):

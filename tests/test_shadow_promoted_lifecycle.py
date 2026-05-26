@@ -505,6 +505,60 @@ def test_autotrader_mixed_alerts_route_independently(db, monkeypatch):
     assert live_runs_blocked == []
 
 
+def test_autotrader_routes_shadow_signal_lane_to_observation_only(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        settings,
+        "chili_autotrader_shadow_signal_lane_observation_enabled",
+        True,
+    )
+
+    u = _make_user(db, name="lane_shadow_user")
+    pat = _make_pattern(
+        db, name="pilot_lane_shadow", lifecycle_stage="pilot_promoted"
+    )
+    alert = _make_alert(db, pattern_id=pat.id, ticker="PLANE1")
+    alert.indicator_snapshot = {
+        "imminent_scorecard": {
+            "signal_lane": auto_trader.SHADOW_NEAR_MISS_SIGNAL_LANE,
+        },
+    }
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+
+    out = {"scaled_in": 0, "skipped": 0, "entered": 0}
+    runtime = {"live_orders_effective": True, "paper_mode_effective": False}
+    exec_calls: list[tuple[int, bool, str | None]] = []
+
+    def _spy(db_, uid, alert_, px, snap, llm_snap, live, out_):
+        exec_calls.append((
+            int(alert_.id),
+            bool(getattr(alert_, "_chili_shadow_observation_only", False)),
+            getattr(alert_, "_chili_shadow_observation_reason", None),
+        ))
+        out_["skipped"] = out_.get("skipped", 0) + 1
+
+    patches = list(_autotrader_scaffold_patches())
+    patches.append(patch.object(auto_trader, "_execute_new_entry", side_effect=_spy))
+    for p in patches:
+        p.start()
+    try:
+        auto_trader._process_one_alert(db, u.id, alert, out, runtime)
+    finally:
+        patch.stopall()
+
+    assert exec_calls == [(
+        int(alert.id),
+        True,
+        auto_trader.SHADOW_OBSERVATION_REASON_SIGNAL_LANE,
+    )]
+    assert out["skipped"] == 1
+    assert db.query(Trade).filter(Trade.ticker == "PLANE1").count() == 0
+
+
 def test_autotrader_shadow_promoted_with_flag_off_falls_through_to_lifecycle_reject(
     db, monkeypatch
 ):
