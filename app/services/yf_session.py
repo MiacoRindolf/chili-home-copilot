@@ -37,7 +37,10 @@ import threading
 import time
 from typing import Any
 
+import requests
 import yfinance as yf
+
+from .socket_budget import mount_bounded_http_adapters
 
 logger = logging.getLogger(__name__)
 
@@ -521,12 +524,13 @@ def _safe_float(val: Any) -> float | None:
 
 
 _COINGECKO_SYMBOL_MAP: dict[str, str] = {}
+_COINGECKO_SESSION = requests.Session()
+mount_bounded_http_adapters(_COINGECKO_SESSION)
 
 
 def _coingecko_quote(symbol: str) -> dict[str, Any] | None:
     """Fallback: fetch price from CoinGecko for crypto tickers yfinance can't resolve."""
     try:
-        import requests
         coin_id = symbol.upper().replace("-USD", "").lower()
         # CoinGecko needs coin IDs, not symbols — try common mappings first
         known = {
@@ -546,7 +550,7 @@ def _coingecko_quote(symbol: str) -> dict[str, Any] | None:
         cg_id = known.get(coin_id) or _COINGECKO_SYMBOL_MAP.get(coin_id)
         if not cg_id:
             try:
-                search_resp = requests.get(
+                search_resp = _COINGECKO_SESSION.get(
                     "https://api.coingecko.com/api/v3/search",
                     params={"query": coin_id}, timeout=6,
                 )
@@ -561,7 +565,7 @@ def _coingecko_quote(symbol: str) -> dict[str, Any] | None:
                 pass
             if not cg_id:
                 cg_id = coin_id
-        resp = requests.get(
+        resp = _COINGECKO_SESSION.get(
             f"https://api.coingecko.com/api/v3/simple/price",
             params={"ids": cg_id, "vs_currencies": "usd", "include_24hr_change": "true",
                     "include_24hr_vol": "true", "include_market_cap": "true"},

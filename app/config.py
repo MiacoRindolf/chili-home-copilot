@@ -9,9 +9,33 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE = 0
 FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
 REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = "ticker_regime,cross_asset_regime"
+BRAIN_QUEUE_MP_CHILD_TICKER_WORKERS_DEFAULT = 2
+BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED = True
+BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB = 1536
+BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB = 768
+BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS = 1
+BACKTEST_PRIORITY_SCORE_MAX = 100
+BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR = BACKTEST_PRIORITY_SCORE_MAX
+DATABASE_DEFAULT_POOL_SIZE = 25
+DATABASE_DEFAULT_MAX_OVERFLOW = 55
+DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
+DATABASE_PYTEST_DEFAULT_POOL_SIZE = 1
+DATABASE_PYTEST_DEFAULT_MAX_OVERFLOW = 1
+DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
 AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
+AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
+AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TICKS = 6
+AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS = (
+    AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS
+    * AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TICKS
+)
+AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MIN_TTL_SECONDS = 0
+AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MAX_TTL_SECONDS = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 60
+)
+AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE = True
 AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_CYCLES = 4
 AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
@@ -50,6 +74,11 @@ AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_BUFFER = 100
 AUTOTRADER_PAPER_DYNAMIC_DEFAULT_MONITOR_COOLDOWN_MINUTES = 5
 AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES = 240
 AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN = True
+AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY = True
+AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
+)
+AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION = True
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE = "authoritative"
 AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES = "crypto"
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES = 8
@@ -72,6 +101,9 @@ PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT = 40
 PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT = 8
 PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT = 12
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP = 0.15
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_ENABLED = True
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN = 2
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MIN_READINESS_FRACTION = 0.50
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
     "shadow_promoted,pilot_promoted"
 )
@@ -318,7 +350,26 @@ class Settings(BaseSettings):
     brain_queue_process_cap: int | None = None  # max process pool workers (None = use brain_backtest_parallel)
     brain_mp_child_database_pool_size: int = 1   # SQLAlchemy pool per child process (avoid P * parent pool connections)
     brain_mp_child_database_max_overflow: int = 2
-    brain_smart_bt_max_workers_in_process: int = 8  # cap ticker-thread pool inside each process worker
+    brain_smart_bt_max_workers_in_process: int = BRAIN_QUEUE_MP_CHILD_TICKER_WORKERS_DEFAULT
+    brain_queue_process_memory_guard_enabled: bool = Field(
+        default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED,
+        validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_ENABLED"),
+    )
+    brain_queue_process_memory_guard_reserve_mb: int = Field(
+        default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB,
+        ge=0,
+        validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_RESERVE_MB"),
+    )
+    brain_queue_process_memory_guard_worker_mb: int = Field(
+        default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB,
+        ge=1,
+        validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_WORKER_MB"),
+    )
+    brain_queue_process_memory_guard_min_workers: int = Field(
+        default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS,
+        ge=1,
+        validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_MIN_WORKERS"),
+    )
     brain_queue_batch_size: int = 80      # patterns pulled from queue per learning cycle
     # Durable work ledger (event-first brain; not mesh activations)
     brain_work_ledger_enabled: bool = True
@@ -1049,6 +1100,17 @@ class Settings(BaseSettings):
     # 1. priority scorer runs daily and updates backtest_priority based
     #    on lifecycle/staleness/evidence-gap signals.
     chili_backtest_priority_scorer_enabled: bool = True
+    # Daily scored priority should mostly order genuinely eligible queue rows,
+    # not make every fresh challenged/candidate pattern pending again. Values
+    # at or above this floor are treated as explicit operator/recert boosts and
+    # may bypass the normal retest interval.
+    chili_backtest_priority_bypass_retest_floor: int = Field(
+        default=BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_BACKTEST_PRIORITY_BYPASS_RETEST_FLOOR"
+        ),
+    )
     # Promotion-path evidence debt should drain before generic research
     # backlog. This does not relax CPCV or EV gates; it only prioritizes
     # shadow/pilot patterns whose stored gate reasons say they need more
@@ -1291,9 +1353,50 @@ class Settings(BaseSettings):
         description="Optional PostgreSQL URL for production-shaped staging (e.g. chili_staging on localhost:5433)",
         validation_alias=AliasChoices("STAGING_DATABASE_URL", "staging_database_url"),
     )
-    # Pool: brain worker + parallel queue backtests can hold many connections; default 30 is too small.
-    database_pool_size: int = 25
-    database_max_overflow: int = 55
+    # Pool: brain worker + parallel queue backtests can hold many connections.
+    # Pytest has its own much smaller cap below to avoid Windows socket exhaustion.
+    database_pool_size: int = Field(
+        default=DATABASE_DEFAULT_POOL_SIZE,
+        ge=1,
+        validation_alias=AliasChoices("DATABASE_POOL_SIZE", "database_pool_size"),
+    )
+    database_max_overflow: int = Field(
+        default=DATABASE_DEFAULT_MAX_OVERFLOW,
+        ge=0,
+        validation_alias=AliasChoices("DATABASE_MAX_OVERFLOW", "database_max_overflow"),
+    )
+    database_pool_timeout_seconds: float = Field(
+        default=DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS,
+        ge=1.0,
+        validation_alias=AliasChoices(
+            "DATABASE_POOL_TIMEOUT_SECONDS",
+            "database_pool_timeout_seconds",
+        ),
+    )
+    database_pytest_pool_size: int = Field(
+        default=DATABASE_PYTEST_DEFAULT_POOL_SIZE,
+        ge=1,
+        validation_alias=AliasChoices(
+            "DATABASE_PYTEST_POOL_SIZE",
+            "database_pytest_pool_size",
+        ),
+    )
+    database_pytest_max_overflow: int = Field(
+        default=DATABASE_PYTEST_DEFAULT_MAX_OVERFLOW,
+        ge=0,
+        validation_alias=AliasChoices(
+            "DATABASE_PYTEST_MAX_OVERFLOW",
+            "database_pytest_max_overflow",
+        ),
+    )
+    database_pytest_pool_timeout_seconds: float = Field(
+        default=DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS,
+        ge=1.0,
+        validation_alias=AliasChoices(
+            "DATABASE_PYTEST_POOL_TIMEOUT_SECONDS",
+            "database_pytest_pool_timeout_seconds",
+        ),
+    )
 
     # Optional shared secret so an external Brain UI (different port / origin) can trigger
     # GET/POST /api/v1/brain-next-cycle without chili_device_token. Set in .env as BRAIN_V1_WAKE_SECRET.
@@ -2229,6 +2332,19 @@ class Settings(BaseSettings):
         default=AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_PAPER_SHADOW_REJECT_ALLOW_DUPLICATE_OPEN"
+        ),
+    )
+    chili_autotrader_paper_shadow_dedupe_same_alert_reason_family: bool = Field(
+        default=AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAPER_SHADOW_DEDUPE_SAME_ALERT_REASON_FAMILY"
+        ),
+    )
+    chili_autotrader_paper_shadow_dedupe_recent_reason_family_minutes: int = Field(
+        default=AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAPER_SHADOW_DEDUPE_RECENT_REASON_FAMILY_MINUTES"
         ),
     )
     # Paper-shadow evidence should be scored against the same kind of dynamic
@@ -3467,6 +3583,12 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LLM_REVALIDATION_ENABLED"),
     )
+    chili_autotrader_llm_revalidation_skip_shadow_observation: bool = Field(
+        default=AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_LLM_REVALIDATION_SKIP_SHADOW_OBSERVATION"
+        ),
+    )
     # Task KK — gate the autotrader's crypto path. Robinhood crypto trades
     # 24/7 with no PDT regulation, so when this flag is ON the rule gate
     # accepts asset_type='crypto' alerts, skips the RTH/extended-hours
@@ -3513,6 +3635,18 @@ class Settings(BaseSettings):
             "When true, bullish equity entries are translated to long "
             "ATM calls instead of stock buys. Substitution is skipped "
             "(falls back to equity) when the chain is illiquid."
+        ),
+    )
+    chili_autotrader_options_substitute_requires_underlying_positive_edge: bool = Field(
+        default=AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_OPTIONS_SUBSTITUTE_REQUIRES_UNDERLYING_POSITIVE_EDGE"
+        ),
+        description=(
+            "When true, equity-to-options substitution first requires the "
+            "underlying stock setup to pass expected-net-edge evaluation. "
+            "This prevents expensive option-chain synthesis from bypassing "
+            "the live positive-edge discipline."
         ),
     )
     # DTE target for substitution (calendar days). Default 30 for the
@@ -3572,6 +3706,22 @@ class Settings(BaseSettings):
             "the cap."
         ),
     )
+    # Option-substitution miss cache. Keeps repeated no-survivor searches
+    # from monopolizing the autotrader tick while preserving every quality gate.
+    chili_autotrader_options_synthesis_no_survivor_cache_ttl_seconds: int = Field(
+        default=AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS,
+        ge=AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MIN_TTL_SECONDS,
+        le=AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MAX_TTL_SECONDS,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_TTL_SECONDS"
+        ),
+        description=(
+            "Seconds to suppress repeated option-substitution synthesis for "
+            "the same recently rejected contract-search context. Set 0 to "
+            "disable. This is an execution-throughput cache, not an entry "
+            "quality override."
+        ),
+    )
     # Task PP Phase 5 — option-aware exit monitor. When ON, the scheduler
     # ticks the options_exit_pass which closes open option Trade rows
     # on three triggers: DTE threshold (default 7d), premium stop-loss
@@ -3610,7 +3760,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_ASSUMED_CAPITAL_USD"),
     )
     chili_autotrader_tick_interval_seconds: int = Field(
-        default=10,
+        default=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
         ge=5,
         le=120,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_INTERVAL_SECONDS"),
@@ -4160,6 +4310,15 @@ class Settings(BaseSettings):
     pattern_imminent_shadow_near_miss_enabled: bool = True
     pattern_imminent_shadow_near_miss_max_gap: float = (
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP
+    )
+    pattern_imminent_shadow_near_miss_adaptive_enabled: bool = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_ENABLED
+    )
+    pattern_imminent_shadow_near_miss_adaptive_max_per_run: int = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN
+    )
+    pattern_imminent_shadow_near_miss_adaptive_min_readiness_fraction: float = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MIN_READINESS_FRACTION
     )
     pattern_imminent_shadow_near_miss_lifecycle_stages: str = (
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES

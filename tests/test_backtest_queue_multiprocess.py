@@ -30,6 +30,72 @@ def test_bt_workers_uses_cap_in_mp_child(monkeypatch):
     assert w == max(2, int(settings.brain_smart_bt_max_workers_in_process))
 
 
+def test_process_memory_guard_caps_process_workers():
+    from app.config import (
+        BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS,
+        BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB,
+        BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB,
+    )
+    from app.services.trading.learning import (
+        BYTES_PER_MIB,
+        _process_memory_guard_worker_cap,
+    )
+
+    cfg = SimpleNamespace(
+        brain_queue_process_memory_guard_enabled=True,
+        brain_queue_process_memory_guard_reserve_mb=(
+            BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB
+        ),
+        brain_queue_process_memory_guard_worker_mb=(
+            BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB
+        ),
+        brain_queue_process_memory_guard_min_workers=(
+            BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS
+        ),
+    )
+
+    cap = _process_memory_guard_worker_cap(
+        cfg,
+        memory_limit_bytes=5 * 1024 * BYTES_PER_MIB,
+    )
+
+    expected = (
+        (5 * 1024 - BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB)
+        // BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB
+    )
+    assert cap == expected
+
+
+def test_process_memory_guard_can_be_disabled():
+    from app.config import (
+        BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS,
+        BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB,
+        BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB,
+    )
+    from app.services.trading.learning import (
+        BYTES_PER_MIB,
+        _process_memory_guard_worker_cap,
+    )
+
+    cfg = SimpleNamespace(
+        brain_queue_process_memory_guard_enabled=False,
+        brain_queue_process_memory_guard_reserve_mb=(
+            BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB
+        ),
+        brain_queue_process_memory_guard_worker_mb=(
+            BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB
+        ),
+        brain_queue_process_memory_guard_min_workers=(
+            BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS
+        ),
+    )
+
+    assert _process_memory_guard_worker_cap(
+        cfg,
+        memory_limit_bytes=5 * 1024 * BYTES_PER_MIB,
+    ) is None
+
+
 def test_settings_normalizes_queue_executor(monkeypatch):
     monkeypatch.setenv("BRAIN_QUEUE_BACKTEST_EXECUTOR", "mp")
     from app.config import Settings

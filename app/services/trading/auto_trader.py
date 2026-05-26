@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, time as datetime_time, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -12,18 +12,22 @@ from sqlalchemy.orm import Session, aliased
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+    AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
     AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES,
     AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK,
     AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES,
     AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
     settings,
 )
-from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
+from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_rules import (
     MANAGED_EDGE_GEOMETRY_SOURCE,
@@ -34,7 +38,9 @@ from .auto_trader_rules import (
     breakout_alert_already_processed,
     count_autotrader_v1_open,
     count_autotrader_v1_open_by_lane,
+    evaluate_entry_edge,
     passes_rule_gate,
+    resolve_pattern_signal_context,
 )
 from .autotrader_desk import effective_autotrader_runtime
 from .autopilot_scope import (
@@ -55,6 +61,9 @@ from .ops_log_prefixes import CHILI_MARKET_DATA
 
 logger = logging.getLogger(__name__)
 
+SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
+SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
+
 QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_coinbase_cap",
     "blocked_llm_not_viable",
@@ -68,13 +77,11 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "skipped_duplicate_pattern_already_open",
     "skipped_non_positive_expected_edge",
     "skipped_synergy_disabled_second_signal",
-    "skipped_synergy_not_applicable",
-    "skipped_synergy_retry_not_applicable",
+    f"skipped_{SYNERGY_RETRY_SOURCE_REASON}",
+    f"skipped_{SYNERGY_RETRY_EXHAUSTED_REASON}",
 })
 
 AUTOTRADER_VERSION = "v1"
-SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
-SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
 PROBATION_RECERT_ALLOWANCE = "probation"
 PILOT_BOOTSTRAP_RECERT_ALLOWANCE = "pilot_bootstrap"
 PROBATION_TIMEZONE = "America/New_York"
@@ -91,8 +98,23 @@ PROBATION_QUOTA_REASON_PORTFOLIO = "probation_quota_exceeded:portfolio"
 PROBATION_OPTIONS_PATH_BLOCKED_REASON = "probation_options_path_blocked"
 PROBATION_NOTIONAL_UNAVAILABLE_REASON = "probation_notional_unavailable"
 PROBATION_NOTIONAL_BELOW_TRADE_UNIT_REASON = "probation_notional_below_trade_unit"
+OPTIONS_SUBSTITUTE_UNDERLYING_EDGE_BLOCK_REASON = "underlying_expected_edge_not_positive"
+OPTIONS_SUBSTITUTE_SHADOW_OBSERVATION_BLOCK_REASON = "shadow_observation_only"
 PAPER_SHADOW_DUPLICATE_POLICY_STRICT = "strict_open_dedupe"
 PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS = "reject_observation_bypass"
+PAPER_SHADOW_DUPLICATE_SKIP_REASON_SAME_ALERT_FAMILY = (
+    "duplicate_same_alert_reason_family"
+)
+PAPER_SHADOW_DUPLICATE_SKIP_REASON_RECENT_CANDIDATE_FAMILY = (
+    "duplicate_recent_candidate_reason_family"
+)
+PAPER_SHADOW_REASON_FAMILY_SYNERGY_NOT_APPLICABLE = "synergy_not_applicable"
+PAPER_SHADOW_REASON_FAMILY_PREFIXES = ("skipped_", "blocked_")
+PAPER_SHADOW_REASON_FAMILY_SNAPSHOT_KEYS = (
+    "shadow_decision",
+    "paper_shadow_reject_decision",
+    "paper_shadow_reject_reason",
+)
 PAPER_SHADOW_AUDIT_PREFIX = "paper_shadow_"
 MANAGED_EDGE_PRICE_ROUND_DIGITS = 8
 SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
@@ -102,6 +124,7 @@ SHADOW_OBSERVATION_REASON_SIGNAL_LANE = "selector:shadow_observation_signal_lane
 SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED = (
     "selector:shadow_observation_signal_lane_disabled"
 )
+LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION = "shadow_observation_only"
 
 
 def _alert_signal_lane(alert: BreakoutAlert) -> str:
@@ -114,6 +137,23 @@ def _alert_signal_lane(alert: BreakoutAlert) -> str:
 
 def _alert_requests_shadow_observation(alert: BreakoutAlert) -> bool:
     return _alert_signal_lane(alert) in SHADOW_OBSERVATION_SIGNAL_LANES
+
+
+def _should_run_llm_revalidation(alert: BreakoutAlert) -> tuple[bool, str | None]:
+    if not bool(getattr(settings, "chili_autotrader_llm_revalidation_enabled", True)):
+        return False, None
+    if (
+        bool(getattr(alert, "_chili_shadow_observation_only", False))
+        and bool(
+            getattr(
+                settings,
+                "chili_autotrader_llm_revalidation_skip_shadow_observation",
+                AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
+            )
+        )
+    ):
+        return False, LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION
+    return True, None
 
 
 def _autotrader_tick_note(
@@ -664,6 +704,104 @@ def _managed_edge_execution_levels(
     return stop_price, target_price, applied
 
 
+def _paper_shadow_reason_family(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for prefix in PAPER_SHADOW_REASON_FAMILY_PREFIXES:
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    if raw in {SYNERGY_RETRY_SOURCE_REASON, SYNERGY_RETRY_EXHAUSTED_REASON}:
+        return PAPER_SHADOW_REASON_FAMILY_SYNERGY_NOT_APPLICABLE
+    return raw or None
+
+
+def _paper_shadow_reason_families(
+    decision: str | None,
+    snap: dict[str, Any] | None,
+) -> frozenset[str]:
+    values: list[Any] = [decision]
+    if isinstance(snap, dict):
+        values.extend(snap.get(key) for key in PAPER_SHADOW_REASON_FAMILY_SNAPSHOT_KEYS)
+    return frozenset(
+        family for family in (_paper_shadow_reason_family(value) for value in values)
+        if family
+    )
+
+
+def _find_same_alert_reason_family_shadow(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    reason_families: frozenset[str],
+) -> tuple[PaperTrade | None, str | None]:
+    if not reason_families:
+        return None, None
+    rows = (
+        db.query(PaperTrade)
+        .filter(
+            PaperTrade.user_id == uid,
+            PaperTrade.paper_shadow_of_alert_id == int(alert.id),
+        )
+        .order_by(PaperTrade.id.desc())
+        .all()
+    )
+    for row in rows:
+        sig = row.signal_json if isinstance(row.signal_json, dict) else {}
+        existing_families = _paper_shadow_reason_families(
+            str(sig.get("shadow_decision") or ""),
+            sig,
+        )
+        matched = reason_families & existing_families
+        if matched:
+            return row, sorted(matched)[0]
+    return None, None
+
+
+def _find_recent_candidate_reason_family_shadow(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    reason_families: frozenset[str],
+    window_minutes: int,
+) -> tuple[PaperTrade | None, str | None]:
+    if not reason_families or window_minutes <= 0:
+        return None, None
+    try:
+        now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        cutoff = now_utc_naive - timedelta(minutes=int(window_minutes))
+        pattern_id = int(alert.scan_pattern_id or 0)
+    except (TypeError, ValueError):
+        return None, None
+    if pattern_id <= 0:
+        return None, None
+    rows = (
+        db.query(PaperTrade)
+        .filter(
+            PaperTrade.user_id == uid,
+            PaperTrade.ticker == (alert.ticker or "").upper(),
+            PaperTrade.scan_pattern_id == pattern_id,
+            PaperTrade.paper_shadow_of_alert_id.isnot(None),
+            PaperTrade.entry_date >= cutoff,
+        )
+        .order_by(PaperTrade.id.desc())
+        .all()
+    )
+    for row in rows:
+        sig = row.signal_json if isinstance(row.signal_json, dict) else {}
+        existing_families = _paper_shadow_reason_families(
+            str(sig.get("shadow_decision") or ""),
+            sig,
+        )
+        matched = reason_families & existing_families
+        if matched:
+            return row, sorted(matched)[0]
+    return None, None
+
+
 def _maybe_open_paper_shadow(
     db: Session,
     *,
@@ -739,6 +877,65 @@ def _maybe_open_paper_shadow(
             for k, v in (snap or {}).items()
             if isinstance(k, str) and k.startswith(PAPER_SHADOW_AUDIT_PREFIX)
         })
+        if bool(
+            getattr(
+                settings,
+                "chili_autotrader_paper_shadow_dedupe_same_alert_reason_family",
+                AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
+            )
+        ):
+            reason_families = _paper_shadow_reason_families(decision, sig)
+            duplicate, duplicate_family = _find_same_alert_reason_family_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                reason_families=reason_families,
+            )
+            if duplicate is not None:
+                logger.info(
+                    "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
+                    "decision=%s skipped reason=%s family=%s existing_paper_trade_id=%s",
+                    alert.id,
+                    alert.scan_pattern_id,
+                    alert.ticker,
+                    decision,
+                    PAPER_SHADOW_DUPLICATE_SKIP_REASON_SAME_ALERT_FAMILY,
+                    duplicate_family,
+                    getattr(duplicate, "id", None),
+                )
+                return
+        if effective_allow_duplicate_open:
+            reason_families = _paper_shadow_reason_families(decision, sig)
+            recent_window_minutes = int(
+                getattr(
+                    settings,
+                    "chili_autotrader_paper_shadow_dedupe_recent_reason_family_minutes",
+                    AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
+                )
+                or 0
+            )
+            duplicate, duplicate_family = _find_recent_candidate_reason_family_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                reason_families=reason_families,
+                window_minutes=recent_window_minutes,
+            )
+            if duplicate is not None:
+                logger.info(
+                    "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
+                    "decision=%s skipped reason=%s family=%s "
+                    "existing_paper_trade_id=%s window_minutes=%s",
+                    alert.id,
+                    alert.scan_pattern_id,
+                    alert.ticker,
+                    decision,
+                    PAPER_SHADOW_DUPLICATE_SKIP_REASON_RECENT_CANDIDATE_FAMILY,
+                    duplicate_family,
+                    getattr(duplicate, "id", None),
+                    recent_window_minutes,
+                )
+                return
         shadow_max_open = int(
             getattr(
                 settings,
@@ -1457,6 +1654,14 @@ def _maybe_substitute_with_options(
                 getattr(alert, "id", None),
             )
             return
+        if bool(getattr(alert, "_chili_shadow_observation_only", False)):
+            logger.info(
+                "[autotrader_options_substitute] skipped alert_id=%s ticker=%s reason=%s",
+                getattr(alert, "id", None),
+                getattr(alert, "ticker", None),
+                OPTIONS_SUBSTITUTE_SHADOW_OBSERVATION_BLOCK_REASON,
+            )
+            return
         if (alert.asset_type or "").lower() != "stock":
             return
         # Bullish-only check: target above entry
@@ -1464,6 +1669,42 @@ def _maybe_substitute_with_options(
         tgt = float(alert.target_price or 0)
         if not (ent > 0 and tgt > ent):
             return
+
+        if bool(
+            getattr(
+                settings,
+                "chili_autotrader_options_substitute_requires_underlying_positive_edge",
+                AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
+            )
+        ):
+            pat_ctx = resolve_pattern_signal_context(
+                db,
+                pattern_id=alert.scan_pattern_id,
+            )
+            confidence = alert_confidence_from_score(alert)
+            edge_decision = evaluate_entry_edge(
+                db,
+                alert,
+                settings=settings,
+                pat_ctx=pat_ctx,
+                confidence=confidence,
+            )
+            snap = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+            snap = dict(snap)
+            snap["options_substitution_underlying_edge"] = edge_decision.snapshot
+            snap["options_substitution_underlying_edge_reason"] = edge_decision.reason
+            alert.indicator_snapshot = snap
+            if not edge_decision.allowed:
+                logger.info(
+                    "[autotrader_options_substitute] skipped alert_id=%s ticker=%s "
+                    "reason=%s edge_reason=%s expected_net_pct=%s",
+                    getattr(alert, "id", None),
+                    getattr(alert, "ticker", None),
+                    OPTIONS_SUBSTITUTE_UNDERLYING_EDGE_BLOCK_REASON,
+                    edge_decision.reason,
+                    edge_decision.snapshot.get("expected_net_pct"),
+                )
+                return
 
         from .options.synthesis import synthesize_option_meta
         notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)
@@ -2188,7 +2429,11 @@ def _process_one_alert(
         return
 
     llm_snap: dict[str, Any] | None = None
-    if getattr(settings, "chili_autotrader_llm_revalidation_enabled", True):
+    _run_llm_revalidation, _llm_skip_reason = _should_run_llm_revalidation(alert)
+    if _llm_skip_reason:
+        snap["llm_revalidation_skipped"] = True
+        snap["llm_revalidation_skip_reason"] = _llm_skip_reason
+    if _run_llm_revalidation:
         ohlcv = _ohlcv_summary(alert.ticker)
         viable, llm_snap = run_revalidation_llm(
             alert,

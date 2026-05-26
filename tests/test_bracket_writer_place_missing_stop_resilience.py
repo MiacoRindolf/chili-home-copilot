@@ -28,6 +28,7 @@ import pytest
 
 from app.services.trading import bracket_writer_g2 as bw
 from app.services.trading.bracket_reconciler import ReconciliationDecision
+from app.services.trading.venue.protocol import NormalizedOrder
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -288,6 +289,69 @@ def test_exception_cooldown_secs_reads_settings(monkeypatch):
         raising=False,
     )
     assert bw._exception_cooldown_secs() == 42
+
+
+def _coinbase_stop(order_id: str, *, product_id: str, base_size: str, stop_price: str) -> NormalizedOrder:
+    return NormalizedOrder(
+        order_id=order_id,
+        client_order_id=None,
+        product_id=product_id,
+        side="sell",
+        status="open",
+        order_type="STOP_LIMIT",
+        filled_size=0.0,
+        average_filled_price=None,
+        raw={
+            "order_configuration": {
+                "stop_limit_stop_limit_gtc": {
+                    "base_size": base_size,
+                    "stop_price": stop_price,
+                }
+            }
+        },
+    )
+
+
+def test_coinbase_tiny_uncovered_split_stop_gap_is_adopted(
+    reset_cooldowns, monkeypatch,
+):
+    """Do not submit an unplaceable dust remainder when split Coinbase
+    stops already cover the actionable intent size.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chili_bracket_writer_g2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_bracket_writer_g2_place_missing_stop", True, raising=False)
+    monkeypatch.setattr(
+        "app.services.trading.bracket_writer_g2._g2_event",
+        lambda *a, **kw: None,
+    )
+
+    adapter = MagicMock()
+    adapter.get_products.return_value = ([], True)
+    adapter.list_open_orders.return_value = ([
+        _coinbase_stop("cb-1", product_id="ALCX-USD", base_size="0.705", stop_price="3.62"),
+        _coinbase_stop("cb-2", product_id="ALCX-USD", base_size="0.3022", stop_price="3.62"),
+        _coinbase_stop("cb-3", product_id="ALCX-USD", base_size="0.2529", stop_price="3.62"),
+    ], True)
+
+    res = bw.place_missing_stop(
+        db=MagicMock(),
+        trade_id=2108,
+        bracket_intent_id=502,
+        ticker="ALCX-USD",
+        broker_source="coinbase",
+        decision=_decision_missing_stop(),
+        local_quantity=1.2601961995249407,
+        stop_price=3.602922,
+        adapter_factory=lambda src: adapter,
+    )
+
+    assert res.ok is True
+    assert res.reason == "existing_coinbase_stop_coverage"
+    assert res.new_stop_order_id == "cb-3"
+    assert res.new_stop_qty == pytest.approx(1.2601)
+    adapter.place_stop_limit_order_gtc.assert_not_called()
 
 
 def test_phase_e_source_removed():

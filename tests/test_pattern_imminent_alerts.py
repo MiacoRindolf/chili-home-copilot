@@ -56,10 +56,16 @@ TEST_LOW_READINESS_RSI = 55.0
 TEST_CAP_READINESS_RSI = 100.0
 TEST_FAILED_ADX = 0.0
 TEST_SHADOW_NEAR_MISS_TICKER = "NEARMISS-USD"
+TEST_SHADOW_NEAR_MISS_ADAPTIVE_TICKER = "ADAPTNEAR-USD"
+TEST_SHADOW_NEAR_MISS_ADAPTIVE_LOW_TICKER = "ADAPTLOW-USD"
 TEST_PILOT_NEAR_MISS_TICKER = "PILOTNEAR-USD"
 TEST_SHADOW_NEAR_MISS_RSI = 70.0
 TEST_SHADOW_NEAR_MISS_MIN_READINESS = 0.45
 TEST_SHADOW_NEAR_MISS_MAX_GAP = 0.10
+TEST_SHADOW_NEAR_MISS_STRICT_GAP = 0.01
+TEST_SHADOW_NEAR_MISS_ADAPTIVE_MIN_FRACTION = 0.80
+TEST_SHADOW_NEAR_MISS_ADAPTIVE_STRICT_FRACTION = 0.95
+TEST_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN = 1
 TEST_MIN_COMPOSITE_DISABLED = 0.0
 TEST_ROTATION_CAP = 2
 TEST_ROTATION_WINDOW_MINUTES = 1
@@ -454,7 +460,7 @@ def test_gather_imminent_skips_poor_shadow_pattern_but_keeps_healthy(
     monkeypatch.setattr(
         imminent_mod,
         "_score_ticker",
-        lambda ticker, skip_fundamentals=True: {
+        lambda ticker, skip_fundamentals=True, skip_pattern_engine=False: {
             "price": 100.0,
             "entry_price": 100.0,
             "stop_loss": 95.0,
@@ -682,7 +688,7 @@ def test_gather_imminent_admits_shadow_near_miss_observation_lane(
     monkeypatch.setattr(
         imminent_mod,
         "_score_ticker",
-        lambda ticker, skip_fundamentals=True: {
+        lambda ticker, skip_fundamentals=True, skip_pattern_engine=False: {
             "price": TEST_SCORE_PRICE,
             "entry_price": TEST_SCORE_PRICE,
             "stop_loss": TEST_SCORE_STOP_LOSS,
@@ -715,6 +721,236 @@ def test_gather_imminent_admits_shadow_near_miss_observation_lane(
     assert candidate["readiness_gap_to_min"] <= TEST_SHADOW_NEAR_MISS_MAX_GAP
     assert meta["shadow_near_miss_eligible"] >= 1
     assert meta["shadow_near_miss_admitted"] >= 1
+
+
+def test_gather_imminent_admits_adaptive_shadow_near_miss_buffer(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {
+                "indicator": "rsi_14",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_RSI_TRIGGER,
+            },
+            {
+                "indicator": "adx",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_ADX_TRIGGER,
+            },
+        ],
+    }
+    pattern = ScanPattern(
+        name="Adaptive shadow near-miss observation",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="shadow_promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_SHADOW_NEAR_MISS_ADAPTIVE_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(imminent_mod.settings, "chili_shadow_promoted_lifecycle_enabled", True)
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_max_gap",
+        TEST_SHADOW_NEAR_MISS_STRICT_GAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_adaptive_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_adaptive_max_per_run",
+        TEST_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_adaptive_min_readiness_fraction",
+        TEST_SHADOW_NEAR_MISS_ADAPTIVE_MIN_FRACTION,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_SHADOW_NEAR_MISS_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_composite_main", 0.0)
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_SHADOW_NEAR_MISS_ADAPTIVE_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_SHADOW_NEAR_MISS_ADAPTIVE_TICKER}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_score_ticker",
+        lambda ticker, skip_fundamentals=True, skip_pattern_engine=False: {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SHADOW_NEAR_MISS_RSI,
+                "adx": TEST_FAILED_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        },
+    )
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+    )
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["ticker"] == TEST_SHADOW_NEAR_MISS_ADAPTIVE_TICKER
+    assert candidate["signal_lane"] == "shadow_near_miss"
+    assert (
+        candidate["shadow_near_miss_source"]
+        == imminent_mod.SHADOW_NEAR_MISS_SOURCE_ADAPTIVE_BUFFER
+    )
+    assert candidate["readiness_gap_to_min"] > TEST_SHADOW_NEAR_MISS_STRICT_GAP
+    assert meta["shadow_near_miss_gap_eligible"] == 0
+    assert meta["shadow_near_miss_adaptive_eligible"] == 1
+    assert meta["shadow_near_miss_adaptive_selected"] == 1
+    assert meta["shadow_near_miss_adaptive_admitted"] == 1
+
+
+def test_gather_imminent_adaptive_shadow_near_miss_respects_readiness_floor(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {
+                "indicator": "rsi_14",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_RSI_TRIGGER,
+            },
+            {
+                "indicator": "adx",
+                "op": ">",
+                "value": TEST_DIAGNOSTIC_ADX_TRIGGER,
+            },
+        ],
+    }
+    pattern = ScanPattern(
+        name="Adaptive shadow near-miss too weak",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="shadow_promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_SHADOW_NEAR_MISS_ADAPTIVE_LOW_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(imminent_mod.settings, "chili_shadow_promoted_lifecycle_enabled", True)
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_max_gap",
+        TEST_SHADOW_NEAR_MISS_STRICT_GAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_adaptive_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_adaptive_max_per_run",
+        TEST_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_near_miss_adaptive_min_readiness_fraction",
+        TEST_SHADOW_NEAR_MISS_ADAPTIVE_STRICT_FRACTION,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_SHADOW_NEAR_MISS_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_composite_main", 0.0)
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_SHADOW_NEAR_MISS_ADAPTIVE_LOW_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_SHADOW_NEAR_MISS_ADAPTIVE_LOW_TICKER}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_score_ticker",
+        lambda ticker, skip_fundamentals=True, skip_pattern_engine=False: {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SHADOW_NEAR_MISS_RSI,
+                "adx": TEST_FAILED_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        },
+    )
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+    )
+
+    assert candidates == []
+    assert meta["shadow_near_miss_adaptive_eligible"] == 0
+    assert meta["skip_reasons"]["readiness_below_min"] == 1
 
 
 def test_gather_imminent_admits_pilot_near_miss_as_shadow_observation_lane(
@@ -789,7 +1025,7 @@ def test_gather_imminent_admits_pilot_near_miss_as_shadow_observation_lane(
     monkeypatch.setattr(
         imminent_mod,
         "_score_ticker",
-        lambda ticker, skip_fundamentals=True: {
+        lambda ticker, skip_fundamentals=True, skip_pattern_engine=False: {
             "price": TEST_SCORE_PRICE,
             "entry_price": TEST_SCORE_PRICE,
             "stop_loss": TEST_SCORE_STOP_LOSS,

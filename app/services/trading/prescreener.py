@@ -9,11 +9,14 @@ FinViz is retained ONLY as a silent fallback for chart-pattern screens that have
 from __future__ import annotations
 
 import logging
+import requests
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from typing import Any
+
+from ..socket_budget import mount_bounded_http_adapters
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,8 @@ _cache: dict[str, Any] = {}
 _cache_lock = threading.Lock()
 _CACHE_TTL = 3600  # 1 hour — auxiliary lists only (main universe is DB-backed)
 _finviz_sem = threading.Semaphore(2)  # only used for chart-pattern fallback
+_HTTP_SESSION = requests.Session()
+mount_bounded_http_adapters(_HTTP_SESSION)
 
 _prescreen_status: dict[str, Any] = {
     "running": False,
@@ -443,8 +448,7 @@ def _crypto_top_movers() -> list[str]:
     if cached is not None:
         return cached
     try:
-        import requests
-        resp = requests.get(
+        resp = _HTTP_SESSION.get(
             "https://api.coingecko.com/api/v3/coins/markets",
             params={
                 "vs_currency": "usd",
@@ -484,8 +488,7 @@ def get_trending_crypto() -> list[str]:
 
     trending: list[str] = []
     try:
-        import requests
-        resp = requests.get(
+        resp = _HTTP_SESSION.get(
             "https://api.coingecko.com/api/v3/search/trending",
             timeout=10,
         )

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from app.config import settings
 from app.models.trading import ScanPattern
-from app.services.trading.backtest_queue import get_pending_patterns, get_queue_status
+from app.services.trading.backtest_queue import (
+    get_pending_patterns,
+    get_priority_bypass_retest_floor,
+    get_queue_status,
+)
 
 
 def _deactivate_existing_patterns(db) -> None:
@@ -25,6 +31,7 @@ def _queued_pattern(
     promotion_gate_reasons: list[str] | None = None,
     promotion_gate_passed: bool | None = None,
     recert_required: bool = False,
+    last_backtest_at: datetime | None = None,
 ) -> ScanPattern:
     pat = ScanPattern(
         name=name,
@@ -42,6 +49,7 @@ def _queued_pattern(
         cpcv_n_paths=20 if promotion_gate_passed is not None else None,
         recert_required=recert_required,
         recert_reason="missing_oos_recert" if recert_required else None,
+        last_backtest_at=last_backtest_at,
     )
     db.add(pat)
     db.flush()
@@ -105,3 +113,56 @@ def test_promotion_path_debt_priority_can_be_disabled(db, monkeypatch):
     pending = get_pending_patterns(db, limit=2)
 
     assert [p.id for p in pending] == [generic.id, path_debt.id]
+
+
+def test_scored_priority_does_not_requeue_fresh_pattern_below_bypass_floor(db):
+    _deactivate_existing_patterns(db)
+    bypass_floor = get_priority_bypass_retest_floor()
+    fresh = datetime.now(timezone.utc).replace(tzinfo=None)
+    _queued_pattern(
+        db,
+        name="fresh scored candidate",
+        lifecycle_stage="candidate",
+        backtest_priority=bypass_floor - 1,
+        last_backtest_at=fresh,
+    )
+    manual = _queued_pattern(
+        db,
+        name="fresh explicit boost",
+        lifecycle_stage="candidate",
+        backtest_priority=bypass_floor,
+        last_backtest_at=fresh,
+    )
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=5)
+    status = get_queue_status(db, use_cache=False)
+
+    assert [p.id for p in pending] == [manual.id]
+    assert status["pending"] == 1
+    assert status["boosted"] == 2
+    assert status["priority_bypass"] == 1
+    assert status["priority_bypass_floor"] == bypass_floor
+
+
+def test_fresh_promoted_recert_stays_pending_without_priority_bypass(db):
+    _deactivate_existing_patterns(db)
+    bypass_floor = get_priority_bypass_retest_floor()
+    fresh = datetime.now(timezone.utc).replace(tzinfo=None)
+    recert = _queued_pattern(
+        db,
+        name="fresh recert",
+        lifecycle_stage="promoted",
+        backtest_priority=bypass_floor - 1,
+        recert_required=True,
+        last_backtest_at=fresh,
+    )
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=5)
+    status = get_queue_status(db, use_cache=False)
+
+    assert [p.id for p in pending] == [recert.id]
+    assert status["pending"] == 1
+    assert status["recert_pending"] == 1
+    assert status["priority_bypass"] == 0

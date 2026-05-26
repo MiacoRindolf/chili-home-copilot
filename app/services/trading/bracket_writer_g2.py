@@ -1105,6 +1105,55 @@ def _coinbase_stop_order_base_size(order: Any) -> float:
     return 0.0
 
 
+def _coinbase_stop_coverage_dust_notional_usd() -> float:
+    try:
+        from .. import coinbase_service
+
+        return float(getattr(coinbase_service, "_MIN_AUTO_CREATE_NOTIONAL_USD", 1.0))
+    except Exception:
+        return 1.0
+
+
+def _coinbase_stop_coverage_full_enough(
+    *,
+    target_qty: float,
+    stop_qty: float,
+    stop_price: float | None,
+) -> bool:
+    """Return True when any uncovered Coinbase stop remainder is dust.
+
+    Coinbase rejects below-min-notional stop-limit orders. If split resting
+    stops already cover the actionable quantity except for an unplaceable
+    remainder, adopt that broker truth instead of hammering the venue with
+    doomed residual orders.
+    """
+    try:
+        target = float(target_qty or 0.0)
+        covered = float(stop_qty or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if target <= 0:
+        return True
+    uncovered = max(0.0, target - covered)
+    if uncovered <= 1e-9:
+        return True
+    try:
+        rel_gap = uncovered / target
+    except ZeroDivisionError:
+        rel_gap = 0.0
+    if rel_gap <= 1e-4:
+        return True
+    try:
+        px = float(stop_price or 0.0)
+    except (TypeError, ValueError):
+        px = 0.0
+    if px > 0:
+        threshold = _coinbase_stop_coverage_dust_notional_usd()
+        if threshold > 0 and uncovered * px < threshold:
+            return True
+    return False
+
+
 def _coinbase_open_stop_orders_for_ticker(adapter: Any, ticker: str) -> list[Any]:
     """Return working Coinbase SELL stop orders for one product.
 
@@ -1439,14 +1488,18 @@ def place_missing_stop(
                 for o in existing_stop_orders
                 if getattr(o, "order_id", None)
             ]
-            if uncovered_qty <= 1e-9:
+            if _coinbase_stop_coverage_full_enough(
+                target_qty=target_qty,
+                stop_qty=existing_stop_qty,
+                stop_price=stop_price,
+            ):
                 adopted_oid = order_ids[-1] if order_ids else None
                 logger.info(
                     f"{BRACKET_WRITER_G2} place_missing_stop COINBASE-COVERED "
                     "intent=%s ticker=%s target_qty=%s existing_stop_qty=%s "
-                    "orders=%s",
+                    "uncovered_qty=%s orders=%s",
                     bracket_intent_id, ticker, target_qty, existing_stop_qty,
-                    len(order_ids),
+                    uncovered_qty, len(order_ids),
                 )
                 try:
                     from .bracket_intent_writer import (
@@ -1480,6 +1533,7 @@ def place_missing_stop(
                     extra={
                         "target_qty": target_qty,
                         "existing_stop_qty": existing_stop_qty,
+                        "uncovered_qty": uncovered_qty,
                         "order_ids": order_ids,
                     },
                 )

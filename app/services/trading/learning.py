@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import requests
 import time
 import threading
 import uuid
@@ -39,6 +40,7 @@ from .brain_io_concurrency import (
     io_workers_for_snapshot_batch,
     snapshot_batch_stats,
 )
+from ..socket_budget import mount_bounded_http_adapters
 from .snapshot_bar_ops import (
     dedupe_sample_rows,
     normalize_bar_start_utc,
@@ -69,6 +71,8 @@ def _get_current_predictions_impl(*args, **kwargs):
 
 
 logger = logging.getLogger(__name__)
+_PROVIDER_PREFLIGHT_SESSION = requests.Session()
+mount_bounded_http_adapters(_PROVIDER_PREFLIGHT_SESSION)
 
 _PROVIDER_EGRESS_LOCK = threading.Lock()
 _PROVIDER_EGRESS_CACHE: dict[str, Any] = {"ts": 0.0, "ok": True}
@@ -122,9 +126,7 @@ def provider_egress_available_for_brain_work() -> bool:
     ok = False
     for name, url, params in probes:
         try:
-            import requests
-
-            resp = requests.get(url, params=params, timeout=timeout_s)
+            resp = _PROVIDER_PREFLIGHT_SESSION.get(url, params=params, timeout=timeout_s)
             if resp.status_code < 500 and resp.status_code not in (401, 403, 429):
                 ok = True
                 break
@@ -3719,6 +3721,64 @@ def _backtest_one_pattern_from_queue(pattern_id: int, user_id: int | None) -> tu
     return execute_queue_backtest_for_pattern(pattern_id, user_id)
 
 
+CGROUP_MEMORY_LIMIT_PATHS = (
+    "/sys/fs/cgroup/memory.max",
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+)
+CGROUP_UNBOUNDED_MEMORY_SENTINELS = {"", "max"}
+CGROUP_UNBOUNDED_MEMORY_BYTES = 1 << 60
+BYTES_PER_MIB = 1024 * 1024
+
+
+def _read_cgroup_memory_limit_bytes(
+    paths: tuple[str, ...] = CGROUP_MEMORY_LIMIT_PATHS,
+) -> int | None:
+    """Return the container memory limit, or None when no hard limit is visible."""
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = fh.read().strip().lower()
+        except OSError:
+            continue
+        if raw in CGROUP_UNBOUNDED_MEMORY_SENTINELS:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0 or value >= CGROUP_UNBOUNDED_MEMORY_BYTES:
+            continue
+        return value
+    return None
+
+
+def _process_memory_guard_worker_cap(
+    settings_obj: Any,
+    *,
+    memory_limit_bytes: int | None,
+) -> int | None:
+    """Cap process workers from the actual container memory envelope."""
+    if not bool(getattr(settings_obj, "brain_queue_process_memory_guard_enabled", True)):
+        return None
+    if memory_limit_bytes is None:
+        return None
+    reserve_mb = max(
+        0,
+        int(getattr(settings_obj, "brain_queue_process_memory_guard_reserve_mb", 0) or 0),
+    )
+    worker_mb = max(
+        1,
+        int(getattr(settings_obj, "brain_queue_process_memory_guard_worker_mb", 1) or 1),
+    )
+    min_workers = max(
+        1,
+        int(getattr(settings_obj, "brain_queue_process_memory_guard_min_workers", 1) or 1),
+    )
+    limit_mb = max(0, int(memory_limit_bytes // BYTES_PER_MIB))
+    usable_mb = max(0, limit_mb - reserve_mb)
+    return max(min_workers, usable_mb // worker_mb)
+
+
 def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int | None = None) -> dict[str, Any]:
     """Process ScanPatterns from the priority queue (parallel when configured).
     
@@ -3852,15 +3912,28 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         max_workers = min(max_workers, max(1, int(proc_cap)))
 
     exec_mode = (getattr(settings, "brain_queue_backtest_executor", "threads") or "threads").strip().lower()
+    memory_guard_cap: int | None = None
+    memory_limit_bytes: int | None = None
+    if exec_mode == "process":
+        memory_limit_bytes = _read_cgroup_memory_limit_bytes()
+        memory_guard_cap = _process_memory_guard_worker_cap(
+            settings,
+            memory_limit_bytes=memory_limit_bytes,
+        )
+        if memory_guard_cap is not None:
+            max_workers = min(max_workers, memory_guard_cap)
     use_process = exec_mode == "process" and max_workers > 1
 
     logger.info(
-        "[learning] Queue backtest: executor=%s max_workers=%s patterns=%s child_pool=%s+%s",
+        "[learning] Queue backtest: executor=%s max_workers=%s patterns=%s child_pool=%s+%s "
+        "memory_guard_cap=%s memory_limit_mb=%s",
         "process" if use_process else "threads",
         max_workers,
         len(pattern_ids),
         settings.brain_mp_child_database_pool_size,
         settings.brain_mp_child_database_max_overflow,
+        memory_guard_cap,
+        int(memory_limit_bytes // BYTES_PER_MIB) if memory_limit_bytes else None,
     )
 
     backtests_run = 0
@@ -10667,4 +10740,3 @@ def run_learning_cycle(
             except Exception:
                 logger.debug("[learning] run_learning_cycle: non-critical operation failed", exc_info=True)
     return {"ok": True, **report}
-

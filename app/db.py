@@ -6,6 +6,8 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 from .config import settings
 
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes"})
+
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -49,25 +51,51 @@ if not _app_name:
     else:
         _app_name = "chili-app"
 
+def _is_true_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _is_pytest_process() -> bool:
+    return _is_true_env("CHILI_PYTEST") or "pytest" in ((sys.argv[0] if sys.argv else "") or "").lower()
+
+
+def _resolve_pool_config(settings_obj, *, mp_child: bool, pytest_process: bool) -> tuple[int, int, float]:
+    if mp_child:
+        return (
+            int(settings_obj.brain_mp_child_database_pool_size),
+            int(settings_obj.brain_mp_child_database_max_overflow),
+            float(settings_obj.database_pool_timeout_seconds),
+        )
+    if pytest_process:
+        return (
+            min(int(settings_obj.database_pool_size), int(settings_obj.database_pytest_pool_size)),
+            min(int(settings_obj.database_max_overflow), int(settings_obj.database_pytest_max_overflow)),
+            float(settings_obj.database_pytest_pool_timeout_seconds),
+        )
+    return (
+        int(settings_obj.database_pool_size),
+        int(settings_obj.database_max_overflow),
+        float(settings_obj.database_pool_timeout_seconds),
+    )
+
+
 # Process-pool queue workers set CHILI_MP_BACKTEST_CHILD before first db import (see backtest_queue_worker).
-_mp_child = os.environ.get("CHILI_MP_BACKTEST_CHILD", "").strip().lower() in ("1", "true", "yes")
+_mp_child = _is_true_env("CHILI_MP_BACKTEST_CHILD")
 if _mp_child:
     _app_name = "chili-backtest-child"
-_pool_size = (
-    settings.brain_mp_child_database_pool_size
-    if _mp_child
-    else settings.database_pool_size
-)
-_max_overflow = (
-    settings.brain_mp_child_database_max_overflow
-    if _mp_child
-    else settings.database_max_overflow
+_pytest_process = _is_pytest_process()
+_pool_size, _max_overflow, _pool_timeout = _resolve_pool_config(
+    settings,
+    mp_child=_mp_child,
+    pytest_process=_pytest_process,
 )
 
 engine = create_engine(
     DATABASE_URL,
     pool_size=_pool_size,
     max_overflow=_max_overflow,
+    pool_timeout=float(_pool_timeout),
+    pool_use_lifo=True,
     pool_pre_ping=True,  # detect stale connections at checkout
     pool_recycle=3600,  # recycle at checkout if older than 1h
     # FIX 13+14 (deep audit 2026-04-28): keep-alives at the TCP level so a

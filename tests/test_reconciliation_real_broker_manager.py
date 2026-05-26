@@ -14,7 +14,7 @@ These tests drive the real function and only stub the lowest-level
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import text
 
@@ -26,6 +26,7 @@ from app.services.trading.bracket_reconciliation_service import (
     broker_manager_view_fn,
     run_reconciliation_sweep,
 )
+from app.services.trading.venue.protocol import NormalizedOrder
 
 
 def _shadow_mode(monkeypatch) -> None:
@@ -149,7 +150,135 @@ def test_broker_manager_view_fn_splits_by_broker_source(monkeypatch):
     assert by_src[("ETH", "coinbase")].position_quantity == 0.75
 
 
+def _coinbase_stop(order_id: str, *, product_id: str, base_size: str, stop_price: str) -> NormalizedOrder:
+    return NormalizedOrder(
+        order_id=order_id,
+        client_order_id=None,
+        product_id=product_id,
+        side="sell",
+        status="open",
+        order_type="STOP_LIMIT",
+        filled_size=0.0,
+        average_filled_price=None,
+        created_time=f"2026-05-26T10:00:0{order_id[-1:]}Z",
+        raw={
+            "order_configuration": {
+                "stop_limit_stop_limit_gtc": {
+                    "base_size": base_size,
+                    "stop_price": stop_price,
+                }
+            }
+        },
+    )
+
+
+def test_broker_manager_view_fn_keeps_coinbase_split_stop_when_gap_is_dust(monkeypatch):
+    """A split Coinbase stop that misses the local intent by sub-$1 dust
+    should still surface as a working stop. Otherwise the writer tries to
+    place an untradeable residual every sweep.
+    """
+    adapter = MagicMock()
+    adapter.list_open_orders.return_value = ([
+        _coinbase_stop("cb-1", product_id="ALCX-USD", base_size="0.705", stop_price="3.62"),
+        _coinbase_stop("cb-2", product_id="ALCX-USD", base_size="0.3022", stop_price="3.62"),
+        _coinbase_stop("cb-3", product_id="ALCX-USD", base_size="0.2529", stop_price="3.62"),
+    ], None)
+
+    with patch(
+        "app.services.broker_manager.get_combined_positions",
+        return_value=[{
+            "ticker": "ALCX-USD",
+            "quantity": 3.6773,
+            "broker_source": "coinbase",
+        }],
+    ), patch("app.services.trading.venue.factory.get_adapter", return_value=adapter):
+        views = broker_manager_view_fn([{
+            "ticker": "ALCX-USD",
+            "broker_source": "coinbase",
+            "quantity": 1.2601961995,
+        }])
+
+    assert len(views) == 1
+    assert views[0].available is True
+    assert views[0].stop_order_id == "cb-3"
+    assert views[0].stop_order_state == "open"
+    assert views[0].stop_order_price == 3.62
+
+
+def test_broker_manager_view_fn_clears_coinbase_stop_when_gap_is_actionable(monkeypatch):
+    """A meaningful uncovered remainder must still classify as missing_stop."""
+    adapter = MagicMock()
+    adapter.list_open_orders.return_value = ([
+        _coinbase_stop("cb-1", product_id="ALCX-USD", base_size="0.5", stop_price="3.62"),
+    ], None)
+
+    with patch(
+        "app.services.broker_manager.get_combined_positions",
+        return_value=[{
+            "ticker": "ALCX-USD",
+            "quantity": 3.0,
+            "broker_source": "coinbase",
+        }],
+    ), patch("app.services.trading.venue.factory.get_adapter", return_value=adapter):
+        views = broker_manager_view_fn([{
+            "ticker": "ALCX-USD",
+            "broker_source": "coinbase",
+            "quantity": 2.0,
+        }])
+
+    assert views[0].available is True
+    assert views[0].stop_order_id is None
+    assert views[0].stop_order_state is None
+
+
 # ── Full sweep driving broker_manager_view_fn for real ────────────────
+
+
+def test_sweep_preserves_local_quantity_for_coinbase_split_stop_dust(
+    db, monkeypatch,
+):
+    """The production sweep must pass local trade quantity into the broker
+    provider. Otherwise account-level crypto quantity makes a trade-sized
+    split stop look falsely uncovered.
+    """
+    _shadow_mode(monkeypatch)
+    u = models.User(name="real_bm_cb_split_dust_u")
+    db.add(u)
+    db.flush()
+
+    t = _make_trade_with_intent(
+        db,
+        user_id=u.id,
+        ticker="ALCX-USD",
+        qty=1.2601961995,
+        broker_source="coinbase",
+    )
+
+    adapter = MagicMock()
+    adapter.list_open_orders.return_value = ([
+        _coinbase_stop("cb-1", product_id="ALCX-USD", base_size="0.705", stop_price="3.62"),
+        _coinbase_stop("cb-2", product_id="ALCX-USD", base_size="0.3022", stop_price="3.62"),
+        _coinbase_stop("cb-3", product_id="ALCX-USD", base_size="0.2529", stop_price="3.62"),
+    ], None)
+
+    with patch(
+        "app.services.broker_manager.get_combined_positions",
+        return_value=[{
+            "ticker": "ALCX-USD",
+            "quantity": 3.6773,
+            "broker_source": "coinbase",
+        }],
+    ), patch("app.services.trading.venue.factory.get_adapter", return_value=adapter):
+        summary = run_reconciliation_sweep(
+            db, broker_view_fn=broker_manager_view_fn,
+        )
+
+    row = db.execute(text("""
+        SELECT kind FROM trading_bracket_reconciliation_log
+        WHERE sweep_id = :sid AND trade_id = :tid
+    """), {"sid": summary.sweep_id, "tid": t.id}).fetchone()
+    assert row is not None
+    assert row[0] != "missing_stop"
 
 
 def test_sweep_with_real_broker_manager_view_fn_agree_path(db, monkeypatch):

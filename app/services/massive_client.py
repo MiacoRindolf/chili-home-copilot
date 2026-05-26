@@ -22,6 +22,7 @@ from typing import Any
 import requests
 
 from ..config import settings
+from .socket_budget import mount_bounded_http_adapters
 
 logger = logging.getLogger(__name__)
 
@@ -147,15 +148,16 @@ def _cache_set(key: str, val: Any) -> None:
 # ---------------------------------------------------------------------------
 def _mount_massive_adapters(sess: requests.Session) -> None:
     """Size urllib3 pool from settings so concurrent batch workers do not exhaust it."""
-    from requests.adapters import HTTPAdapter
-
     pc = max(10, int(getattr(settings, "massive_http_pool_connections", 128)))
     pm = max(pc, int(getattr(settings, "massive_http_pool_maxsize", 512)))
-    adapter = HTTPAdapter(pool_connections=pc, pool_maxsize=pm)
-    sess.mount("https://", adapter)
-    sess.mount("http://", adapter)
+    mount_bounded_http_adapters(
+        sess,
+        pool_connections=pc,
+        pool_maxsize=pm,
+        pool_block=True,
+    )
     logger.info(
-        "[massive] HTTP pool api.massive.com: pool_connections=%s pool_maxsize=%s "
+        "[massive] HTTP pool api.massive.com: pool_connections=%s pool_maxsize=%s pool_block=True "
         "(raise MASSIVE_HTTP_* if you still see urllib3 'pool is full')",
         pc,
         pm,

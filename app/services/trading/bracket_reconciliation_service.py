@@ -157,6 +157,55 @@ def _is_working_stop_order_state(state: Optional[str]) -> bool:
     )
 
 
+def _coinbase_stop_coverage_dust_notional_usd() -> float:
+    try:
+        from .. import coinbase_service
+
+        return float(getattr(coinbase_service, "_MIN_AUTO_CREATE_NOTIONAL_USD", 1.0))
+    except Exception:
+        return 1.0
+
+
+def _coinbase_stop_coverage_full_enough(
+    *,
+    target_qty: float | None,
+    stop_qty: float | None,
+    stop_price: float | None,
+) -> bool:
+    """True when resting Coinbase stops cover the actionable quantity.
+
+    Coinbase often rounds base sizes to the product increment and rejects
+    sub-min-notional residual stop orders. Treat those dust residuals as
+    effectively covered so the reconciler does not retry an impossible
+    ``place_missing_stop`` every sweep.
+    """
+    try:
+        target = float(target_qty or 0.0)
+        covered = float(stop_qty or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if target <= 0:
+        return True
+    uncovered = max(0.0, target - covered)
+    if uncovered <= 1e-9:
+        return True
+    try:
+        rel_gap = uncovered / target
+    except ZeroDivisionError:
+        rel_gap = 0.0
+    if rel_gap <= 1e-4:
+        return True
+    try:
+        px = float(stop_price or 0.0)
+    except (TypeError, ValueError):
+        px = 0.0
+    if px > 0:
+        threshold = _coinbase_stop_coverage_dust_notional_usd()
+        if threshold > 0 and uncovered * px < threshold:
+            return True
+    return False
+
+
 def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]:
     """Phase G.2 broker provider: positions + working stop orders.
 
@@ -409,15 +458,28 @@ def broker_manager_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]
             (src or "").lower() == "coinbase"
             and tkr
             and stop_oid is not None
-            and cb_stop_qty_by_ticker.get(tkr, 0.0) < qty_f - 1e-9
         ):
-            logger.info(
-                f"{BRACKET_RECONCILIATION} Coinbase stop coverage partial "
-                "ticker=%s broker_qty=%s stop_qty=%s; classifying as "
-                "missing_stop so writer places uncovered remainder",
-                tkr, qty_f, cb_stop_qty_by_ticker.get(tkr, 0.0),
-            )
-            stop_oid, stop_state, stop_price = None, None, None
+            stop_qty = cb_stop_qty_by_ticker.get(tkr, 0.0)
+            try:
+                local_qty_f = float(row.get("quantity") or 0.0)
+            except (TypeError, ValueError):
+                local_qty_f = 0.0
+            coverage_target = qty_f
+            if local_qty_f > 0:
+                coverage_target = min(qty_f, local_qty_f) if qty_f > 0 else local_qty_f
+            if not _coinbase_stop_coverage_full_enough(
+                target_qty=coverage_target,
+                stop_qty=stop_qty,
+                stop_price=stop_price,
+            ):
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} Coinbase stop coverage partial "
+                    "ticker=%s target_qty=%s broker_qty=%s stop_qty=%s; "
+                    "classifying as missing_stop so writer places uncovered "
+                    "remainder",
+                    tkr, coverage_target, qty_f, stop_qty,
+                )
+                stop_oid, stop_state, stop_price = None, None, None
         views.append(BrokerView(
             available=True,
             ticker=tkr,
@@ -670,7 +732,13 @@ def _stage_fetch_broker(batch: SweepBatch, broker_view_fn: BrokerViewFn) -> None
     ``missing_stop``.
     """
     broker_input: list[dict[str, Any]] = [
-        {"ticker": lv.ticker, "broker_source": lv.broker_source}
+        {
+            "trade_id": lv.trade_id,
+            "ticker": lv.ticker,
+            "broker_source": lv.broker_source,
+            "quantity": lv.quantity,
+            "stop_price": lv.stop_price,
+        }
         for lv in batch.local_views
     ]
     raw_views = broker_view_fn(broker_input)
@@ -2156,7 +2224,13 @@ def _run_sweep_legacy(
     if backfilled:
         local_rows = _load_local_view(db, user_id=user_id)
     broker_input: list[dict[str, Any]] = [
-        {"ticker": r["ticker"], "broker_source": r["broker_source"]}
+        {
+            "trade_id": r.get("trade_id"),
+            "ticker": r["ticker"],
+            "broker_source": r["broker_source"],
+            "quantity": r.get("quantity"),
+            "stop_price": r.get("stop_price"),
+        }
         for r in local_rows
     ]
     broker_views = broker_view_fn(broker_input)

@@ -21,6 +21,7 @@ import requests
 
 from ..config import settings
 from .massive_client import crypto_aggregate_symbol_candidates, is_crypto, to_massive_ticker
+from .socket_budget import mount_bounded_http_adapters
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ def _cache_set(key: str, val: Any) -> None:
 # ---------------------------------------------------------------------------
 _session = requests.Session()
 _session.headers.update({"Accept": "application/json"})
+mount_bounded_http_adapters(_session)
 
 _MAX_RETRIES = 2
 _BACKOFF_BASE = 1.0
