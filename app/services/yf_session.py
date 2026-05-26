@@ -679,6 +679,8 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
         ):
             if is_crypto:
                 _cache_set(_crypto_history_miss_key(symbol), True)
+            else:
+                _cache_set(miss_key, True)
             _record_empty_yf_result(symbol, allow_crypto=is_crypto)
             if is_crypto and _is_dead(symbol):
                 result = _cache_crypto_fallback_quote(

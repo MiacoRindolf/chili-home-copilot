@@ -331,14 +331,37 @@ def test_fast_info_negative_caches_explicit_missing_equity_after_threshold(
 
     monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
 
-    for _ in range(yf_session._EMPTY_THRESHOLD):
+    for attempt in range(yf_session._EMPTY_THRESHOLD):
         assert yf_session.get_fast_info(MISSING_EQUITY) is None
+        if attempt < yf_session._EMPTY_THRESHOLD - 1:
+            _expire_quote_miss(MISSING_EQUITY)
 
     assert yf_session._is_dead(MISSING_EQUITY) is True
+    assert len(calls) == yf_session._EMPTY_THRESHOLD
 
     calls_before_dead_skip = len(calls)
     assert yf_session.get_fast_info(MISSING_EQUITY) is None
     assert len(calls) == calls_before_dead_skip
+
+
+def test_fast_info_explicit_missing_equity_short_caches_between_probes(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _RaisingFastInfoTicker(
+            Exception("No data found, symbol may be delisted")
+        )
+
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+
+    assert yf_session.get_fast_info(MISSING_EQUITY) is None
+    assert yf_session.get_fast_info(MISSING_EQUITY) is None
+
+    assert yf_session._is_dead(MISSING_EQUITY) is False
+    assert len(calls) == FIRST_FAST_INFO_PROBE_COUNT
 
 
 def test_fast_info_internal_empty_error_short_caches_without_dead_cache(
