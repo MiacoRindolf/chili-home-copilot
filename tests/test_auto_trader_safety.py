@@ -21,6 +21,7 @@ from app.config import (
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
 )
 from app.models.trading import (
     AutoTraderRun,
@@ -78,6 +79,9 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         ),
         chili_autotrader_shadow_stock_fastlane_lifecycle_stages=(
             AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES
+        ),
+        chili_autotrader_shadow_stock_fastlane_reboost_cooldown_minutes=(
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES
         ),
         brain_recert_queue_mode="shadow",
         chili_autotrader_probation_live_enabled=True,
@@ -606,6 +610,61 @@ def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
     }]
     assert invalidated == [True]
     db.flush.assert_called_once()
+
+
+def test_shadow_stock_fastlane_respects_recent_backtest_cooldown(monkeypatch):
+    settings = _minimal_settings(1)
+    monkeypatch.setattr(at_mod, "settings", settings)
+    emitted: list[dict] = []
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        lambda db, scan_pattern_id, source: emitted.append({
+            "scan_pattern_id": scan_pattern_id,
+            "source": source,
+        }) or 1,
+    )
+    db = MagicMock()
+    pat = ScanPattern(
+        id=124,
+        name="Recently tested stock shadow",
+        rules_json={},
+        lifecycle_stage="shadow_promoted",
+        active=True,
+        backtest_priority=0,
+        last_backtest_at=datetime.utcnow(),
+    )
+    alert = BreakoutAlert(
+        id=457,
+        ticker="COOLD",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=1,
+        scan_pattern_id=pat.id,
+    )
+    snap = {"entry_edge": {"expected_net_pct": TEST_POSITIVE_EXPECTED_NET_PCT}}
+
+    fastlane = at_mod._queue_shadow_stock_fastlane_for_observation(
+        db,
+        alert=alert,
+        pattern=pat,
+        reason=at_mod.SHADOW_OBSERVATION_REASON_STAGE,
+        snap=snap,
+    )
+
+    assert fastlane is not None
+    assert fastlane["queued"] is False
+    assert fastlane["reason"] == "recent_backtest_cooldown"
+    assert fastlane["reboost_cooldown_minutes"] == (
+        AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES
+    )
+    assert pat.backtest_priority == 0
+    assert emitted == []
+    db.flush.assert_not_called()
 
 
 def test_live_recert_block_waives_pilot_bootstrap_cert_debt(monkeypatch):

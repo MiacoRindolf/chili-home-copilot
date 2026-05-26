@@ -104,6 +104,9 @@ AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT = (
 AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES = (
     PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES
 )
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
+)
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS = 2.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS = 6
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT = 0.0
@@ -3620,6 +3623,19 @@ class Settings(BaseSettings):
         default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_LIFECYCLE_STAGES"
+        ),
+    )
+    chili_autotrader_shadow_stock_fastlane_reboost_cooldown_minutes: float = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_REBOOST_COOLDOWN_MINUTES"
+        ),
+        description=(
+            "Minimum minutes after a pattern backtest before stock shadow "
+            "fastlane may re-boost the same pattern. Default follows the "
+            "imminent scanner cadence so one scanner wave cannot churn the "
+            "same pattern through repeated backtests."
         ),
     )
     chili_autotrader_live_require_venue_health_enabled: bool = Field(

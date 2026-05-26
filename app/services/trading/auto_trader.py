@@ -18,6 +18,7 @@ from ...config import (
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
@@ -1259,6 +1260,37 @@ def _queue_shadow_stock_fastlane_for_observation(
             "min_expected_net_pct": min_expected_net_pct,
             "lifecycle_stage": lifecycle,
         }
+
+    reboost_cooldown_minutes = max(
+        0.0,
+        float(
+            getattr(
+                settings,
+                "chili_autotrader_shadow_stock_fastlane_reboost_cooldown_minutes",
+                AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
+            )
+            or 0.0
+        ),
+    )
+    last_backtest_at = getattr(pattern, "last_backtest_at", None)
+    if reboost_cooldown_minutes > 0.0 and isinstance(last_backtest_at, datetime):
+        last_bt = last_backtest_at
+        if last_bt.tzinfo is not None:
+            last_bt = last_bt.astimezone(timezone.utc).replace(tzinfo=None)
+        cooldown_until = last_bt + timedelta(minutes=reboost_cooldown_minutes)
+        now_utc = datetime.utcnow()
+        if now_utc < cooldown_until:
+            return {
+                "queued": False,
+                "reason": "recent_backtest_cooldown",
+                "pattern_id": pattern_id,
+                "expected_net_pct": expected_net_pct,
+                "min_expected_net_pct": min_expected_net_pct,
+                "lifecycle_stage": lifecycle,
+                "last_backtest_at": last_bt.isoformat(),
+                "cooldown_until": cooldown_until.isoformat(),
+                "reboost_cooldown_minutes": reboost_cooldown_minutes,
+            }
 
     priority = max(
         1,
