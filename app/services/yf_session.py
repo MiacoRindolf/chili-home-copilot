@@ -265,6 +265,13 @@ _TTL_BATCH_MISS = _env_float(
     _BATCH_MISS_COOLDOWN_DEFAULT_S,
     minimum=_MIN_BATCH_MISS_COOLDOWN_S,
 )
+_YF_CRYPTO_HISTORY_MISS_COOLDOWN_ENV = "CHILI_YF_CRYPTO_HISTORY_MISS_COOLDOWN_S"
+_CRYPTO_HISTORY_MISS_COOLDOWN_DEFAULT_S = _TTL_BATCH_MISS
+_TTL_CRYPTO_HISTORY_MISS = _env_float(
+    _YF_CRYPTO_HISTORY_MISS_COOLDOWN_ENV,
+    _CRYPTO_HISTORY_MISS_COOLDOWN_DEFAULT_S,
+    minimum=_MIN_BATCH_MISS_COOLDOWN_S,
+)
 _TTL_SEARCH = 3600     # 1 hour for search results
 _TTL_FUNDAMENTALS = 86400  # 24 hours for fundamental data
 _TTL_TICKER_INFO = 3600   # 1 hour for ticker info strip
@@ -297,6 +304,7 @@ _YF_FAST_INFO_EMPTY_ERROR_MARKERS = (
 )
 _QUOTE_MISS_CACHE_PREFIX = "quote_miss:"
 _BATCH_MISS_CACHE_PREFIX = "batch_miss:"
+_CRYPTO_HISTORY_MISS_CACHE_PREFIX = "crypto_history_miss:"
 
 
 def _bump_empty(symbol: str) -> int:
@@ -365,9 +373,16 @@ def _batch_miss_key(symbol: str) -> str:
     return f"{_BATCH_MISS_CACHE_PREFIX}{symbol}"
 
 
-def _should_skip_crypto_yahoo_after_batch_miss(symbol: str) -> bool:
-    """Avoid immediate single-symbol Yahoo probes for crypto batch misses."""
-    return _is_crypto(symbol) and _cache_get(_batch_miss_key(symbol)) is not None
+def _crypto_history_miss_key(symbol: str) -> str:
+    return f"{_CRYPTO_HISTORY_MISS_CACHE_PREFIX}{symbol}"
+
+
+def _should_skip_crypto_yahoo_probe(symbol: str) -> bool:
+    """Avoid repeated single-symbol Yahoo probes for recent crypto misses."""
+    return _is_crypto(symbol) and (
+        _cache_get(_batch_miss_key(symbol)) is not None
+        or _cache_get(_crypto_history_miss_key(symbol)) is not None
+    )
 
 
 def _cache_crypto_fallback_quote(
@@ -417,6 +432,8 @@ def _get_ttl(key: str) -> float:
         return _TTL_QUOTE_MISS
     if key.startswith(_BATCH_MISS_CACHE_PREFIX):
         return _TTL_BATCH_MISS
+    if key.startswith(_CRYPTO_HISTORY_MISS_CACHE_PREFIX):
+        return _TTL_CRYPTO_HISTORY_MISS
     if key.startswith("quote:"):
         return _TTL_QUOTE
     if key.startswith("search:"):
@@ -484,9 +501,9 @@ def get_history(symbol: str, **kwargs) -> Any:
 
     if _is_dead(symbol):
         return pd.DataFrame()
-    if _should_skip_crypto_yahoo_after_batch_miss(symbol):
+    if _should_skip_crypto_yahoo_probe(symbol):
         logger.debug(
-            "[yf_session] history(%s) skipped by batch-miss cooldown",
+            "[yf_session] history(%s) skipped by crypto Yahoo cooldown",
             symbol,
         )
         return pd.DataFrame()
@@ -548,10 +565,13 @@ def get_history(symbol: str, **kwargs) -> Any:
         # responded but with no data). Crypto-empty is non-signal and
         # is handled outside this branch, so no breaker tick.
         failed = True
+    elif df.empty:
+        _cache_set(_crypto_history_miss_key(symbol), True)
     elif not df.empty:
         # Reset the streak so a single recovery clears prior empties.
         _reset_empty(symbol)
         _cache_pop(_batch_miss_key(symbol))
+        _cache_pop(_crypto_history_miss_key(symbol))
 
     if failed:
         _breaker_on_failure()
@@ -607,9 +627,9 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
     if _is_dead(symbol):
         return None
 
-    if _should_skip_crypto_yahoo_after_batch_miss(symbol):
+    if _should_skip_crypto_yahoo_probe(symbol):
         logger.debug(
-            "[yf_session] fast_info(%s) routed to crypto fallback by batch-miss cooldown",
+            "[yf_session] fast_info(%s) routed to crypto fallback by Yahoo cooldown",
             symbol,
         )
         return _cache_crypto_fallback_quote(
@@ -645,6 +665,8 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
         if explicit_no_data or (
             is_crypto and _looks_like_yf_fast_info_empty_error(e)
         ):
+            if is_crypto:
+                _cache_set(_crypto_history_miss_key(symbol), True)
             _record_empty_yf_result(symbol, allow_crypto=is_crypto)
             if is_crypto and _is_dead(symbol):
                 result = _cache_crypto_fallback_quote(

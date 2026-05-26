@@ -18,6 +18,8 @@ BATCH_MISS_SECOND_PROBE_COUNT = 2
 NO_HISTORY_PROBE_COUNT = 0
 HISTORY_PROBE_COUNT = 1
 NO_FAST_INFO_PROBE_COUNT = 0
+FIRST_HISTORY_PERIOD = "5d"
+SECOND_HISTORY_PERIOD = "1mo"
 HISTORY_OPEN = 1.0
 HISTORY_HIGH = 1.1
 HISTORY_LOW = 0.9
@@ -212,6 +214,52 @@ def test_equity_history_ignores_batch_miss_cooldown_and_clears_it(
     )
 
 
+def test_crypto_history_empty_short_caches_direct_yahoo_miss(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _HistoryTicker(pd.DataFrame())
+
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+
+    assert yf_session.get_history(MISSING_CRYPTO, period=FIRST_HISTORY_PERIOD).empty
+    assert yf_session.get_history(MISSING_CRYPTO, period=SECOND_HISTORY_PERIOD).empty
+    assert len(calls) == HISTORY_PROBE_COUNT
+    assert (
+        yf_session._cache_get(
+            yf_session._crypto_history_miss_key(MISSING_CRYPTO)
+        )
+        is True
+    )
+
+
+def test_crypto_fast_info_uses_fallback_during_history_miss_cooldown(
+    monkeypatch,
+):
+    calls: list[str] = []
+    fallback_calls: list[str] = []
+    fallback_quote = _fallback_quote()
+
+    def _ticker(symbol, **_kwargs):
+        calls.append(symbol)
+        return _HistoryTicker(pd.DataFrame())
+
+    def _fallback(symbol):
+        fallback_calls.append(symbol)
+        return fallback_quote
+
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+    monkeypatch.setattr(yf_session, "_coingecko_quote", _fallback)
+
+    assert yf_session.get_history(MISSING_CRYPTO, period=FIRST_HISTORY_PERIOD).empty
+    assert yf_session.get_fast_info(MISSING_CRYPTO) == fallback_quote
+    assert len(calls) == HISTORY_PROBE_COUNT
+    assert fallback_calls == [MISSING_CRYPTO]
+
+
 def test_crypto_fast_info_uses_fallback_during_batch_miss_cooldown(
     monkeypatch,
 ):
@@ -306,7 +354,7 @@ def test_fast_info_internal_empty_error_short_caches_without_dead_cache(
     assert len(calls) == SECOND_FAST_INFO_PROBE_COUNT
 
 
-def test_fast_info_negative_caches_crypto_and_uses_fallback_after_threshold(
+def test_fast_info_crypto_empty_uses_fallback_after_first_history_miss(
     monkeypatch,
 ):
     calls: list[str] = []
@@ -324,11 +372,10 @@ def test_fast_info_negative_caches_crypto_and_uses_fallback_after_threshold(
     monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
     monkeypatch.setattr(yf_session, "_coingecko_quote", _fallback)
 
-    for _ in range(yf_session._EMPTY_THRESHOLD - 1):
-        assert yf_session.get_fast_info(MISSING_CRYPTO) is None
-
+    assert yf_session.get_fast_info(MISSING_CRYPTO) is None
     assert yf_session.get_fast_info(MISSING_CRYPTO) == fallback_quote
-    assert yf_session._is_dead(MISSING_CRYPTO) is True
+    assert yf_session._is_dead(MISSING_CRYPTO) is False
+    assert len(calls) == FIRST_FAST_INFO_PROBE_COUNT
     assert fallback_calls == [MISSING_CRYPTO]
 
     calls_before_cached_fallback = len(calls)
