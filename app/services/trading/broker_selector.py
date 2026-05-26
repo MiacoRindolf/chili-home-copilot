@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,19 @@ REASON_KILL_SWITCH_GOVERNANCE = "kill_switch_governance"
 REASON_FAST_PATH_ACTIVE = "fast_path_active"
 REASON_RH_WHITELIST = "rh_whitelist_match"
 REASON_COINBASE_WHITELIST = "coinbase_whitelist_match"
+REASON_COINBASE_RH_CRYPTO_DEGRADED = "coinbase_rh_crypto_degraded"
 REASON_NO_VENUE = "no_venue_supports"
+RH_CRYPTO_DEGRADED_REASON_DISABLED = "disabled"
+RH_CRYPTO_DEGRADED_REASON_NOT_FALLBACK_ELIGIBLE = "not_fallback_eligible"
+RH_CRYPTO_DEGRADED_REASON_BELOW_THRESHOLD = "below_failure_threshold"
+RH_CRYPTO_DEGRADED_REASON_FAILURE_THRESHOLD = "failure_threshold"
+RH_CRYPTO_DEGRADED_REASON_QUERY_FAILED = "query_failed"
+RH_CRYPTO_FALLBACK_DECISION_BLOCKED = "blocked"
+RH_CRYPTO_FALLBACK_BROKER_REASON_PATTERNS = (
+    "%broker:robinhood crypto endpoint returned no order_id%",
+    "%broker:empty response from robinhood crypto%",
+    "%broker:robinhood crypto%no order_id%",
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +78,17 @@ class VenueDecision:
     venue: str
     reason: str
     extra: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class RhCryptoDegradationState:
+    """Recent Robinhood crypto execution health for one both-listed ticker."""
+
+    degraded: bool
+    failures: int
+    min_failures: int
+    lookback_minutes: int
+    reason: str
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -129,6 +153,183 @@ def resolve_coinbase_whitelist(ticker: str) -> bool:
     if not t.endswith("-USD"):
         return False
     return True
+
+
+def _rh_crypto_fallback_config(settings_=None) -> tuple[bool, int, int]:
+    supplied_settings = settings_ is not None
+    try:
+        from ...config import (
+            BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_ENABLED,
+            BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_LOOKBACK_MINUTES,
+            BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_MIN_FAILURES,
+            settings as _settings,
+        )
+    except Exception:
+        if settings_ is None:
+            return False, 0, 0
+        s = settings_
+        default_enabled = False
+        default_lookback = 0
+        default_min_failures = 0
+    else:
+        s = settings_ or _settings
+        has_enabled_attr = hasattr(
+            s, "chili_broker_selector_rh_crypto_degraded_fallback_enabled"
+        )
+        default_enabled = (
+            False
+            if supplied_settings and not has_enabled_attr
+            else BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_ENABLED
+        )
+        default_lookback = (
+            BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_LOOKBACK_MINUTES
+        )
+        default_min_failures = (
+            BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_MIN_FAILURES
+        )
+
+    enabled = bool(getattr(
+        s,
+        "chili_broker_selector_rh_crypto_degraded_fallback_enabled",
+        default_enabled,
+    ))
+    lookback_minutes = int(getattr(
+        s,
+        "chili_broker_selector_rh_crypto_degraded_lookback_minutes",
+        default_lookback,
+    ))
+    min_failures = int(getattr(
+        s,
+        "chili_broker_selector_rh_crypto_degraded_min_failures",
+        default_min_failures,
+    ))
+    return enabled, lookback_minutes, min_failures
+
+
+def _rh_crypto_failure_count(*, db, ticker: str, cutoff: datetime) -> int:
+    from sqlalchemy import text
+
+    reason_clauses: list[str] = []
+    params: dict[str, Any] = {
+        "ticker": ticker,
+        "decision": RH_CRYPTO_FALLBACK_DECISION_BLOCKED,
+        "cutoff": cutoff,
+    }
+    for idx, pattern in enumerate(RH_CRYPTO_FALLBACK_BROKER_REASON_PATTERNS):
+        param_name = f"reason_pattern_{idx}"
+        reason_clauses.append(
+            f"LOWER(COALESCE(reason, '')) LIKE :{param_name}"
+        )
+        params[param_name] = pattern
+
+    result = db.execute(text(f"""
+        SELECT COUNT(*) AS failures
+          FROM trading_autotrader_runs
+         WHERE UPPER(ticker) = :ticker
+           AND decision = :decision
+           AND created_at >= :cutoff
+           AND ({" OR ".join(reason_clauses)})
+    """), params)
+    row = result.fetchone()
+    if row is None:
+        return 0
+    return int(row[0] or 0)
+
+
+def rh_crypto_degradation_state(
+    ticker: str,
+    *,
+    db=None,
+    settings_=None,
+) -> RhCryptoDegradationState:
+    """Detect short-lived Robinhood crypto placement degradation per ticker.
+
+    The fallback is deliberately narrow: it only applies to crypto tickers
+    supported by both Robinhood and Coinbase, and only after recent same-ticker
+    Robinhood broker failures cross the configured threshold.
+    """
+    enabled, lookback_minutes, min_failures = _rh_crypto_fallback_config(settings_)
+    if not enabled or lookback_minutes <= 0 or min_failures <= 0:
+        return RhCryptoDegradationState(
+            degraded=False,
+            failures=0,
+            min_failures=min_failures,
+            lookback_minutes=lookback_minutes,
+            reason=RH_CRYPTO_DEGRADED_REASON_DISABLED,
+        )
+
+    t = (ticker or "").strip().upper()
+    if (
+        not _is_crypto_ticker(t)
+        or not resolve_rh_whitelist(t)
+        or not resolve_coinbase_whitelist(t)
+    ):
+        return RhCryptoDegradationState(
+            degraded=False,
+            failures=0,
+            min_failures=min_failures,
+            lookback_minutes=lookback_minutes,
+            reason=RH_CRYPTO_DEGRADED_REASON_NOT_FALLBACK_ELIGIBLE,
+        )
+
+    session = db
+    owns_session = False
+    try:
+        if session is None:
+            from ...db import SessionLocal
+            session = SessionLocal()
+            owns_session = True
+        cutoff = datetime.utcnow() - timedelta(minutes=lookback_minutes)
+        failures = _rh_crypto_failure_count(db=session, ticker=t, cutoff=cutoff)
+    except Exception:
+        logger.debug(
+            "[broker_selector] RH crypto degradation query failed for %s",
+            t,
+            exc_info=True,
+        )
+        return RhCryptoDegradationState(
+            degraded=False,
+            failures=0,
+            min_failures=min_failures,
+            lookback_minutes=lookback_minutes,
+            reason=RH_CRYPTO_DEGRADED_REASON_QUERY_FAILED,
+        )
+    finally:
+        if owns_session and session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    degraded = failures >= min_failures
+    return RhCryptoDegradationState(
+        degraded=degraded,
+        failures=failures,
+        min_failures=min_failures,
+        lookback_minutes=lookback_minutes,
+        reason=(
+            RH_CRYPTO_DEGRADED_REASON_FAILURE_THRESHOLD
+            if degraded
+            else RH_CRYPTO_DEGRADED_REASON_BELOW_THRESHOLD
+        ),
+    )
+
+
+def rh_crypto_degraded_for_coinbase_fallback(
+    ticker: str,
+    *,
+    db=None,
+    settings_=None,
+) -> bool:
+    return rh_crypto_degradation_state(
+        ticker,
+        db=db,
+        settings_=settings_,
+    ).degraded
 
 
 def _is_fast_path_active(ticker: str) -> bool:
@@ -217,6 +418,7 @@ def select_venue(
     *,
     ticker: str,
     settings_=None,
+    db=None,
     fast_path_active: Optional[bool] = None,
 ) -> VenueDecision:
     """Five-branch decision tree. See module docstring.
@@ -255,12 +457,30 @@ def select_venue(
             venue="skip", reason=REASON_FAST_PATH_ACTIVE,
         )
 
-    # Branch 3: RH whitelist match (cost-cheaper preference).
-    if resolve_rh_whitelist(ticker):
+    # Branch 3: RH whitelist match (cost-cheaper preference), with a
+    # narrow same-ticker Coinbase fallback when RH crypto placement is
+    # currently degraded and the ticker is supported by both venues.
+    rh_whitelisted = resolve_rh_whitelist(ticker)
+    coinbase_whitelisted = resolve_coinbase_whitelist(ticker)
+    if rh_whitelisted:
+        if is_crypto and coinbase_whitelisted:
+            rh_state = rh_crypto_degradation_state(
+                ticker, db=db, settings_=settings_,
+            )
+            if rh_state.degraded:
+                return VenueDecision(
+                    venue="coinbase",
+                    reason=REASON_COINBASE_RH_CRYPTO_DEGRADED,
+                    extra={
+                        "rh_failures": rh_state.failures,
+                        "rh_min_failures": rh_state.min_failures,
+                        "rh_lookback_minutes": rh_state.lookback_minutes,
+                    },
+                )
         return VenueDecision(venue="rh", reason=REASON_RH_WHITELIST)
 
     # Branch 4: Coinbase whitelist match (long-tail crypto).
-    if resolve_coinbase_whitelist(ticker):
+    if coinbase_whitelisted:
         return VenueDecision(
             venue="coinbase", reason=REASON_COINBASE_WHITELIST,
         )
@@ -271,12 +491,16 @@ def select_venue(
 
 __all__ = [
     "REASON_COINBASE_WHITELIST",
+    "REASON_COINBASE_RH_CRYPTO_DEGRADED",
     "REASON_FAST_PATH_ACTIVE",
     "REASON_KILL_SWITCH_GLOBAL",
     "REASON_KILL_SWITCH_GOVERNANCE",
     "REASON_NO_VENUE",
     "REASON_RH_WHITELIST",
+    "RhCryptoDegradationState",
     "VenueDecision",
+    "rh_crypto_degradation_state",
+    "rh_crypto_degraded_for_coinbase_fallback",
     "resolve_coinbase_whitelist",
     "resolve_rh_whitelist",
     "select_venue",

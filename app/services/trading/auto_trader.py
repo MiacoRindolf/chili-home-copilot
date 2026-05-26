@@ -2327,7 +2327,7 @@ def _execute_broker_buy(
     # log only). Skip decisions audit + return early.
     try:
         from .broker_selector import select_venue
-        _venue_decision = select_venue(ticker=alert.ticker)
+        _venue_decision = select_venue(ticker=alert.ticker, db=db)
     except Exception as exc:
         _block_live_order(
             db,

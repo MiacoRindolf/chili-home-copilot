@@ -202,6 +202,7 @@ def cost_aware_min_edge_gate(
         from .broker_selector import (
             resolve_coinbase_whitelist,
             resolve_rh_whitelist,
+            rh_crypto_degradation_state,
         )
     except Exception:
         # If selector module isn't importable, default to "no opinion"
@@ -212,13 +213,23 @@ def cost_aware_min_edge_gate(
             fee_bps=0, threshold_bps=0, edge_bps=edge_bps,
         )
 
-    if resolve_rh_whitelist(ticker):
+    rh_whitelisted = resolve_rh_whitelist(ticker)
+    coinbase_whitelisted = resolve_coinbase_whitelist(ticker)
+    rh_crypto_degraded = False
+    if rh_whitelisted and coinbase_whitelisted:
+        rh_crypto_degraded = rh_crypto_degradation_state(
+            ticker,
+            db=db,
+            settings_=settings_,
+        ).degraded
+
+    if rh_whitelisted and not rh_crypto_degraded:
         return CostGateDecision(
             allowed=True, reason=REASON_GATE_RH_FEE_FREE,
             fee_bps=0, threshold_bps=0, edge_bps=edge_bps,
         )
 
-    if not resolve_coinbase_whitelist(ticker):
+    if not coinbase_whitelisted:
         # No venue supports — selector will skip downstream.
         return CostGateDecision(
             allowed=False, reason=REASON_GATE_NO_VENUE,
