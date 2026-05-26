@@ -47,6 +47,19 @@ _finviz_sem = threading.Semaphore(2)  # only used for chart-pattern fallback
 _HTTP_SESSION = requests.Session()
 mount_bounded_http_adapters(_HTTP_SESSION)
 
+_COINGECKO_RATE_LIMIT_STATUS = 429
+_COINGECKO_TOP_MOVERS_CACHE_KEY = "crypto_top_movers"
+_COINGECKO_TOP_MOVERS_STALE_CACHE_KEY = "crypto_top_movers_stale"
+_COINGECKO_TOP_MOVERS_BACKOFF_KEY = "crypto_top_movers_backoff_until"
+_COINGECKO_TOP_MOVERS_URL = "https://api.coingecko.com/api/v3/coins/markets"
+_COINGECKO_TOP_MOVERS_ORDER = "volume_desc"
+_COINGECKO_TOP_MOVERS_PER_PAGE = 100
+_COINGECKO_TOP_MOVERS_PAGE = 1
+_COINGECKO_REQUEST_TIMEOUT_S = 10
+_COINGECKO_RATE_LIMIT_BACKOFF_S = 900
+_COINGECKO_STALE_TTL_MULTIPLIER = 6
+_COINGECKO_STALE_TTL_S = _CACHE_TTL * _COINGECKO_STALE_TTL_MULTIPLIER
+
 _prescreen_status: dict[str, Any] = {
     "running": False,
     "candidates": 0,
@@ -75,6 +88,33 @@ def _cache_get(key: str) -> Any | None:
 def _cache_set(key: str, val: Any, ttl: int = _CACHE_TTL) -> None:
     with _cache_lock:
         _cache[key] = (time.time(), val, ttl)
+
+
+def _coingecko_top_movers_backoff_remaining_s() -> float:
+    until = _cache_get(_COINGECKO_TOP_MOVERS_BACKOFF_KEY)
+    if until is None:
+        return 0.0
+    try:
+        return max(0.0, float(until) - time.time())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _set_coingecko_top_movers_backoff() -> None:
+    until = time.time() + _COINGECKO_RATE_LIMIT_BACKOFF_S
+    _cache_set(
+        _COINGECKO_TOP_MOVERS_BACKOFF_KEY,
+        until,
+        ttl=_COINGECKO_RATE_LIMIT_BACKOFF_S,
+    )
+
+
+def _crypto_top_movers_stale_or_default() -> list[str]:
+    stale = _cache_get(_COINGECKO_TOP_MOVERS_STALE_CACHE_KEY)
+    if stale is not None:
+        return stale
+    from .market_data import DEFAULT_CRYPTO_TICKERS
+    return list(DEFAULT_CRYPTO_TICKERS)
 
 
 # ── Massive.com Screener Queries (primary) ─────────────────────────────
@@ -444,20 +484,28 @@ def invalidate_cache() -> None:
 
 def _crypto_top_movers() -> list[str]:
     """Fetch top crypto movers by 24h volume via CoinGecko (free, cached)."""
-    cached = _cache_get("crypto_top_movers")
+    cached = _cache_get(_COINGECKO_TOP_MOVERS_CACHE_KEY)
     if cached is not None:
         return cached
+    backoff_remaining = _coingecko_top_movers_backoff_remaining_s()
+    if backoff_remaining > 0:
+        logger.info(
+            "[prescreener] CoinGecko top movers in backoff; "
+            "using stale/default candidates for %.0fs",
+            backoff_remaining,
+        )
+        return _crypto_top_movers_stale_or_default()
     try:
         resp = _HTTP_SESSION.get(
-            "https://api.coingecko.com/api/v3/coins/markets",
+            _COINGECKO_TOP_MOVERS_URL,
             params={
                 "vs_currency": "usd",
-                "order": "volume_desc",
-                "per_page": 100,
-                "page": 1,
+                "order": _COINGECKO_TOP_MOVERS_ORDER,
+                "per_page": _COINGECKO_TOP_MOVERS_PER_PAGE,
+                "page": _COINGECKO_TOP_MOVERS_PAGE,
                 "sparkline": "false",
             },
-            timeout=10,
+            timeout=_COINGECKO_REQUEST_TIMEOUT_S,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -467,12 +515,34 @@ def _crypto_top_movers() -> list[str]:
             if sym in _CRYPTO_EXCLUDE:
                 continue
             tickers.append(sym.upper() + "-USD")
-        _cache_set("crypto_top_movers", tickers)
+        if not tickers:
+            logger.warning(
+                "[prescreener] CoinGecko top movers returned no usable "
+                "tickers; using stale/default candidates"
+            )
+            return _crypto_top_movers_stale_or_default()
+        _cache_set(_COINGECKO_TOP_MOVERS_CACHE_KEY, tickers)
+        _cache_set(
+            _COINGECKO_TOP_MOVERS_STALE_CACHE_KEY,
+            tickers,
+            ttl=_COINGECKO_STALE_TTL_S,
+        )
         return tickers
+    except requests.HTTPError as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == _COINGECKO_RATE_LIMIT_STATUS:
+            _set_coingecko_top_movers_backoff()
+            logger.warning(
+                "[prescreener] CoinGecko top movers rate-limited; "
+                "using stale/default candidates for %ss",
+                _COINGECKO_RATE_LIMIT_BACKOFF_S,
+            )
+        else:
+            logger.warning(f"[prescreener] CoinGecko top movers failed: {e}")
+        return _crypto_top_movers_stale_or_default()
     except Exception as e:
         logger.warning(f"[prescreener] CoinGecko top movers failed: {e}")
-        from .market_data import DEFAULT_CRYPTO_TICKERS
-        return list(DEFAULT_CRYPTO_TICKERS)
+        return _crypto_top_movers_stale_or_default()
 
 
 def get_trending_crypto() -> list[str]:
