@@ -292,6 +292,61 @@ class TestFetchOHLCVBatchProviderFallback:
         assert result == {}
         mock_batch_dl.assert_not_called()
 
+    @patch("app.services.trading.market_data._yf_history")
+    @patch("app.services.yf_session.batch_download")
+    @patch("app.services.trading.market_data._use_polygon", return_value=False)
+    @patch("app.services.trading.market_data._use_massive", return_value=True)
+    @patch("app.services.trading.market_data._massive")
+    def test_batch_crypto_uses_coinbase_and_skips_yfinance(
+        self,
+        mock_massive_mod,
+        _use_m,
+        _use_p,
+        mock_batch_dl,
+        mock_yf_hist,
+        monkeypatch,
+    ):
+        from app.services.trading import coinbase_ohlcv
+        from app.services.trading import market_data as md
+
+        monkeypatch.setattr(md.settings, "brain_market_data_coinbase_fallback", True)
+        monkeypatch.setattr(coinbase_ohlcv, "get_ohlcv", lambda *_args, **_kwargs: _make_bars())
+        mock_massive_mod.get_aggregates_df_batch.return_value = {}
+        mock_massive_mod.massive_aggregate_variants_all_dead.return_value = False
+
+        result = md.fetch_ohlcv_batch(["BTC-USD"])
+
+        assert "BTC-USD" in result
+        assert not result["BTC-USD"].empty
+        mock_batch_dl.assert_not_called()
+        mock_yf_hist.assert_not_called()
+
+    @patch("app.services.trading.market_data._yf_history")
+    @patch("app.services.yf_session.batch_download")
+    @patch("app.services.trading.market_data._use_polygon", return_value=False)
+    @patch("app.services.trading.market_data._use_massive", return_value=True)
+    @patch("app.services.trading.market_data._massive")
+    def test_batch_crypto_skips_yfinance_when_coinbase_disabled(
+        self,
+        mock_massive_mod,
+        _use_m,
+        _use_p,
+        mock_batch_dl,
+        mock_yf_hist,
+        monkeypatch,
+    ):
+        from app.services.trading import market_data as md
+
+        monkeypatch.setattr(md.settings, "brain_market_data_coinbase_fallback", False)
+        mock_massive_mod.get_aggregates_df_batch.return_value = {}
+        mock_massive_mod.massive_aggregate_variants_all_dead.return_value = False
+
+        result = md.fetch_ohlcv_batch(["BTC-USD"])
+
+        assert result == {}
+        mock_batch_dl.assert_not_called()
+        mock_yf_hist.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # fetch_quotes_batch provider selection

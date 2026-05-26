@@ -364,6 +364,7 @@ class Settings(BaseSettings):
     # After Massive, allow Polygon + yfinance for OHLCV/quotes (scanner batch, prescreener, etc.).
     # Set MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false to use Massive only and avoid Yahoo noise in logs.
     market_data_allow_provider_fallback: bool = True
+    market_data_polygon_batch_workers: int = 48
 
     # Learning schedule (1h = faster research cycles if worker + OHLCV provider keep up)
     learning_interval_hours: int = 1

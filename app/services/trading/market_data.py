@@ -26,6 +26,9 @@ from ..symbol_hygiene import clean_equity_universe
 
 logger = logging.getLogger(__name__)
 
+_MIN_PROVIDER_WORKERS = 1
+
+
 def _log_ohlcv_outcome(
     ticker: str,
     interval: str,
@@ -659,7 +662,11 @@ def fetch_ohlcv_batch(
                 return t, df
             except Exception:
                 return t, pd.DataFrame()
-        with ThreadPoolExecutor(max_workers=48) as pool:
+        worker_count = max(
+            _MIN_PROVIDER_WORKERS,
+            int(settings.market_data_polygon_batch_workers),
+        )
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
             for t, df in pool.map(_poly_one, tickers):
                 if not df.empty:
                     results[t] = df
@@ -668,9 +675,78 @@ def fetch_ohlcv_batch(
             return results
         tickers = missing
 
-    from ..yf_session import batch_download
-    batch_download(tickers, period=period, interval=interval)
+    crypto_tickers = [t for t in tickers if t.upper().endswith("-USD")]
+    if crypto_tickers and getattr(settings, "brain_market_data_coinbase_fallback", True):
+        try:
+            from .coinbase_ohlcv import get_ohlcv as _cb_get_ohlcv
+
+            for t in crypto_tickers:
+                if t in results:
+                    continue
+                bars = _cb_get_ohlcv(t, interval=interval, period=period)
+                if not bars:
+                    continue
+                df = pd.DataFrame([
+                    {
+                        "Open": r["open"],
+                        "High": r["high"],
+                        "Low": r["low"],
+                        "Close": r["close"],
+                        "Volume": r["volume"],
+                    }
+                    for r in bars
+                ], index=pd.to_datetime([r["time"] for r in bars], unit="s", utc=True))
+                finalized = _finalize_ohlcv_df(
+                    df,
+                    ticker=t,
+                    interval=interval,
+                    provider="coinbase",
+                )
+                if finalized.empty:
+                    continue
+                results[t] = finalized
+                _log_ohlcv_outcome(
+                    t,
+                    interval,
+                    provider="coinbase",
+                    reason="ok_after_polygon_empty_batch",
+                    row_count=len(results[t]),
+                )
+        except Exception as e:
+            logger.warning("[market_data] Coinbase batch fallback failed: %s", e)
+
+    yahoo_tickers = [
+        t for t in tickers
+        if t not in results and not t.upper().endswith("-USD")
+    ]
     for t in tickers:
+        if t not in results and t.upper().endswith("-USD"):
+            _log_ohlcv_outcome(
+                t,
+                interval,
+                provider="yfinance",
+                reason="skipped_crypto_batch_path",
+                row_count=0,
+            )
+
+    if not yahoo_tickers:
+        return results
+
+    from ..yf_session import batch_download
+    batch_results = batch_download(yahoo_tickers, period=period, interval=interval)
+    for t, df in batch_results.items():
+        if df is None or df.empty:
+            continue
+        finalized = _finalize_ohlcv_df(
+            df,
+            ticker=t,
+            interval=interval,
+            provider="yfinance",
+        )
+        if not finalized.empty:
+            results[t] = finalized
+
+    for t in yahoo_tickers:
         if t in results:
             continue
         p = _clamp_period(interval, period)
