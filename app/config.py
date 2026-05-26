@@ -24,7 +24,18 @@ DATABASE_PYTEST_DEFAULT_MAX_OVERFLOW = 1
 DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
 AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
+AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
+AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TICKS = 6
+AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS = (
+    AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS
+    * AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TICKS
+)
+AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MIN_TTL_SECONDS = 0
+AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MAX_TTL_SECONDS = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 60
+)
+AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE = True
 AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_CYCLES = 4
 AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
@@ -3626,6 +3637,18 @@ class Settings(BaseSettings):
             "(falls back to equity) when the chain is illiquid."
         ),
     )
+    chili_autotrader_options_substitute_requires_underlying_positive_edge: bool = Field(
+        default=AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_OPTIONS_SUBSTITUTE_REQUIRES_UNDERLYING_POSITIVE_EDGE"
+        ),
+        description=(
+            "When true, equity-to-options substitution first requires the "
+            "underlying stock setup to pass expected-net-edge evaluation. "
+            "This prevents expensive option-chain synthesis from bypassing "
+            "the live positive-edge discipline."
+        ),
+    )
     # DTE target for substitution (calendar days). Default 30 for the
     # theta-vs-gamma sweet spot.
     chili_autotrader_options_substitute_dte: int = Field(
@@ -3683,6 +3706,22 @@ class Settings(BaseSettings):
             "the cap."
         ),
     )
+    # Option-substitution miss cache. Keeps repeated no-survivor searches
+    # from monopolizing the autotrader tick while preserving every quality gate.
+    chili_autotrader_options_synthesis_no_survivor_cache_ttl_seconds: int = Field(
+        default=AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS,
+        ge=AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MIN_TTL_SECONDS,
+        le=AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MAX_TTL_SECONDS,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_TTL_SECONDS"
+        ),
+        description=(
+            "Seconds to suppress repeated option-substitution synthesis for "
+            "the same recently rejected contract-search context. Set 0 to "
+            "disable. This is an execution-throughput cache, not an entry "
+            "quality override."
+        ),
+    )
     # Task PP Phase 5 — option-aware exit monitor. When ON, the scheduler
     # ticks the options_exit_pass which closes open option Trade rows
     # on three triggers: DTE threshold (default 7d), premium stop-loss
@@ -3721,7 +3760,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_ASSUMED_CAPITAL_USD"),
     )
     chili_autotrader_tick_interval_seconds: int = Field(
-        default=10,
+        default=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
         ge=5,
         le=120,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_INTERVAL_SECONDS"),

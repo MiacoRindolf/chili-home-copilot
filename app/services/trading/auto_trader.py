@@ -20,6 +20,7 @@ from ...config import (
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+    AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
     AUTOTRADER_SYNERGY_RETRY_DEFAULT_LOOKBACK_MINUTES,
     AUTOTRADER_SYNERGY_RETRY_DEFAULT_MAX_PER_TICK,
     AUTOTRADER_SYNERGY_RETRY_MAX_LOOKBACK_MINUTES,
@@ -37,7 +38,9 @@ from .auto_trader_rules import (
     breakout_alert_already_processed,
     count_autotrader_v1_open,
     count_autotrader_v1_open_by_lane,
+    evaluate_entry_edge,
     passes_rule_gate,
+    resolve_pattern_signal_context,
 )
 from .autotrader_desk import effective_autotrader_runtime
 from .autopilot_scope import (
@@ -95,6 +98,8 @@ PROBATION_QUOTA_REASON_PORTFOLIO = "probation_quota_exceeded:portfolio"
 PROBATION_OPTIONS_PATH_BLOCKED_REASON = "probation_options_path_blocked"
 PROBATION_NOTIONAL_UNAVAILABLE_REASON = "probation_notional_unavailable"
 PROBATION_NOTIONAL_BELOW_TRADE_UNIT_REASON = "probation_notional_below_trade_unit"
+OPTIONS_SUBSTITUTE_UNDERLYING_EDGE_BLOCK_REASON = "underlying_expected_edge_not_positive"
+OPTIONS_SUBSTITUTE_SHADOW_OBSERVATION_BLOCK_REASON = "shadow_observation_only"
 PAPER_SHADOW_DUPLICATE_POLICY_STRICT = "strict_open_dedupe"
 PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS = "reject_observation_bypass"
 PAPER_SHADOW_DUPLICATE_SKIP_REASON_SAME_ALERT_FAMILY = (
@@ -1649,6 +1654,14 @@ def _maybe_substitute_with_options(
                 getattr(alert, "id", None),
             )
             return
+        if bool(getattr(alert, "_chili_shadow_observation_only", False)):
+            logger.info(
+                "[autotrader_options_substitute] skipped alert_id=%s ticker=%s reason=%s",
+                getattr(alert, "id", None),
+                getattr(alert, "ticker", None),
+                OPTIONS_SUBSTITUTE_SHADOW_OBSERVATION_BLOCK_REASON,
+            )
+            return
         if (alert.asset_type or "").lower() != "stock":
             return
         # Bullish-only check: target above entry
@@ -1656,6 +1669,42 @@ def _maybe_substitute_with_options(
         tgt = float(alert.target_price or 0)
         if not (ent > 0 and tgt > ent):
             return
+
+        if bool(
+            getattr(
+                settings,
+                "chili_autotrader_options_substitute_requires_underlying_positive_edge",
+                AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
+            )
+        ):
+            pat_ctx = resolve_pattern_signal_context(
+                db,
+                pattern_id=alert.scan_pattern_id,
+            )
+            confidence = alert_confidence_from_score(alert)
+            edge_decision = evaluate_entry_edge(
+                db,
+                alert,
+                settings=settings,
+                pat_ctx=pat_ctx,
+                confidence=confidence,
+            )
+            snap = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+            snap = dict(snap)
+            snap["options_substitution_underlying_edge"] = edge_decision.snapshot
+            snap["options_substitution_underlying_edge_reason"] = edge_decision.reason
+            alert.indicator_snapshot = snap
+            if not edge_decision.allowed:
+                logger.info(
+                    "[autotrader_options_substitute] skipped alert_id=%s ticker=%s "
+                    "reason=%s edge_reason=%s expected_net_pct=%s",
+                    getattr(alert, "id", None),
+                    getattr(alert, "ticker", None),
+                    OPTIONS_SUBSTITUTE_UNDERLYING_EDGE_BLOCK_REASON,
+                    edge_decision.reason,
+                    edge_decision.snapshot.get("expected_net_pct"),
+                )
+                return
 
         from .options.synthesis import synthesize_option_meta
         notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)

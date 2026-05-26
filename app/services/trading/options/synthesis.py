@@ -9,6 +9,7 @@ entry-quality model agrees with the underlying stop/target scenario.
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -37,6 +38,9 @@ STRIKE_INCREMENT_MAX: float = 10.0
 DEFAULT_MAX_CONTRACT_NOTIONAL_USD: float = 0.0
 PERCENT_SCALE: float = 100.0
 NO_BID_SPREAD_PCT: float = 100.0
+NO_SURVIVOR_CACHE_PRICE_DECIMALS: int = 4
+NO_SURVIVOR_CACHE_MONEY_DECIMALS: int = 2
+NO_SURVIVOR_CACHE_RATIO_DECIMALS: int = 6
 STRIKE_SEARCH_OFFSETS: tuple[float, ...] = (
     0.0,
     -1.0,
@@ -47,6 +51,7 @@ STRIKE_SEARCH_OFFSETS: tuple[float, ...] = (
     3.0,
 )
 STRIKE_QUANTUM = Decimal("0.01")
+_NO_SURVIVOR_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 
 
 def _register_synthesis_parameters(db: Session) -> None:
@@ -159,6 +164,111 @@ def _candidate_strikes(base_strike: float, increment: float) -> list[float]:
         seen.add(strike)
         strikes.append(strike)
     return strikes
+
+
+def clear_synthesis_no_survivor_cache() -> None:
+    """Clear the process-local synthesis miss cache for tests and restarts."""
+    _NO_SURVIVOR_CACHE.clear()
+
+
+def _cache_float(value: Optional[float], places: int) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return round(float(value), places)
+    except (TypeError, ValueError):
+        return None
+
+
+def _no_survivor_cache_ttl_seconds(settings: Any) -> float:
+    from ....config import (
+        AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS,
+        AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MAX_TTL_SECONDS,
+        AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MIN_TTL_SECONDS,
+    )
+
+    try:
+        raw = float(
+            getattr(
+                settings,
+                "chili_autotrader_options_synthesis_no_survivor_cache_ttl_seconds",
+                AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS,
+            )
+        )
+    except (TypeError, ValueError):
+        raw = float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS)
+    return max(
+        float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MIN_TTL_SECONDS),
+        min(float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MAX_TTL_SECONDS), raw),
+    )
+
+
+def _no_survivor_cache_key(
+    *,
+    sym: str,
+    target_dte: int,
+    max_spread_pct: float,
+    strike_increment: float,
+    base_strike: float,
+    contract_budget_usd: float,
+    underlying_target: Optional[float],
+    underlying_stop: Optional[float],
+    confidence: Optional[float],
+) -> tuple[Any, ...]:
+    return (
+        "no_survivor_v1",
+        sym,
+        int(target_dte),
+        _cache_float(max_spread_pct, NO_SURVIVOR_CACHE_RATIO_DECIMALS),
+        _cache_float(strike_increment, NO_SURVIVOR_CACHE_PRICE_DECIMALS),
+        _cache_float(base_strike, NO_SURVIVOR_CACHE_PRICE_DECIMALS),
+        _cache_float(contract_budget_usd, NO_SURVIVOR_CACHE_MONEY_DECIMALS),
+        _cache_float(underlying_target, NO_SURVIVOR_CACHE_PRICE_DECIMALS),
+        _cache_float(underlying_stop, NO_SURVIVOR_CACHE_PRICE_DECIMALS),
+        _cache_float(confidence, NO_SURVIVOR_CACHE_RATIO_DECIMALS),
+    )
+
+
+def _prune_no_survivor_cache(now: float) -> None:
+    expired = [
+        key
+        for key, (expires_at, _payload) in _NO_SURVIVOR_CACHE.items()
+        if expires_at <= now
+    ]
+    for key in expired:
+        _NO_SURVIVOR_CACHE.pop(key, None)
+
+
+def _no_survivor_cache_hit(
+    cache_key: tuple[Any, ...],
+    *,
+    ttl_seconds: float,
+    now: float,
+) -> dict[str, Any] | None:
+    if ttl_seconds <= 0:
+        return None
+    _prune_no_survivor_cache(now)
+    cached = _NO_SURVIVOR_CACHE.get(cache_key)
+    if cached is None:
+        return None
+    expires_at, payload = cached
+    if expires_at <= now:
+        _NO_SURVIVOR_CACHE.pop(cache_key, None)
+        return None
+    return payload
+
+
+def _remember_no_survivor_cache(
+    cache_key: tuple[Any, ...],
+    *,
+    ttl_seconds: float,
+    now: float,
+    payload: dict[str, Any],
+) -> None:
+    if ttl_seconds <= 0:
+        return
+    _prune_no_survivor_cache(now)
+    _NO_SURVIVOR_CACHE[cache_key] = (now + ttl_seconds, dict(payload))
 
 
 def _quote_prices(quote: dict[str, Any]) -> Optional[tuple[float, float, float, float]]:
@@ -274,17 +384,51 @@ def synthesize_option_meta(
         if max_contract_notional_usd > 0
         else notional_usd
     )
+    base_strike = _pick_strike(spot, increment=strike_increment)
+    candidate_strikes = _candidate_strikes(base_strike, strike_increment)
+    cache_ttl_s = _no_survivor_cache_ttl_seconds(settings)
+    cache_key = _no_survivor_cache_key(
+        sym=sym,
+        target_dte=target_dte,
+        max_spread_pct=max_spread_pct,
+        strike_increment=strike_increment,
+        base_strike=base_strike,
+        contract_budget_usd=contract_budget_usd,
+        underlying_target=underlying_target,
+        underlying_stop=underlying_stop,
+        confidence=confidence,
+    )
+    now = time.monotonic()
+    cached_reject = _no_survivor_cache_hit(
+        cache_key,
+        ttl_seconds=cache_ttl_s,
+        now=now,
+    )
+    if cached_reject is not None:
+        logger.info(
+            "[options_synth] %s: recent no-survivor context cached; "
+            "ttl_s=%.1f base_strike=%s rejects=%s",
+            sym,
+            cache_ttl_s,
+            base_strike,
+            cached_reject.get("rejects") or {},
+        )
+        return None
 
     adapter = RobinhoodOptionsAdapter()
     expiration = _pick_expiration(adapter, sym, target_dte=target_dte)
     if not expiration:
         logger.info("[options_synth] %s: no expiration near %dDTE; skipping", sym, target_dte)
+        _remember_no_survivor_cache(
+            cache_key,
+            ttl_seconds=cache_ttl_s,
+            now=now,
+            payload={"rejects": {"no_expiration": 1}},
+        )
         return None
 
-    base_strike = _pick_strike(spot, increment=strike_increment)
     accepted: list[dict[str, Any]] = []
     reject_counts: Counter[str] = Counter()
-    candidate_strikes = _candidate_strikes(base_strike, strike_increment)
 
     for strike in candidate_strikes:
         contract = adapter.find_contract(sym, expiration, strike, "call")
@@ -362,8 +506,19 @@ def synthesize_option_meta(
             base_strike,
             dict(reject_counts),
         )
+        _remember_no_survivor_cache(
+            cache_key,
+            ttl_seconds=cache_ttl_s,
+            now=now,
+            payload={
+                "expiration": expiration,
+                "base_strike": base_strike,
+                "rejects": dict(reject_counts),
+            },
+        )
         return None
 
+    _NO_SURVIVOR_CACHE.pop(cache_key, None)
     selected = max(accepted, key=_quality_sort_key)
     selected["synthesis_selected_by"] = "expected_value_then_reward_risk_then_spread"
     selected["synthesis_reject_counts"] = dict(reject_counts)
@@ -380,4 +535,4 @@ def synthesize_option_meta(
     return selected
 
 
-__all__ = ["synthesize_option_meta"]
+__all__ = ["clear_synthesis_no_survivor_cache", "synthesize_option_meta"]

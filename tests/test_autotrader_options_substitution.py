@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from app.config import AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE
+from app.services.trading import auto_trader as at_mod
+
+
+def _stock_alert() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=101,
+        ticker="XYZ",
+        asset_type="stock",
+        entry_price=100.0,
+        target_price=112.0,
+        stop_loss=96.0,
+        score_at_alert=0.9,
+        scan_pattern_id=501,
+        indicator_snapshot={},
+    )
+
+
+def test_options_substitute_skips_synthesis_when_underlying_edge_is_negative(monkeypatch):
+    alert = _stock_alert()
+    synth_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_options_substitute_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_options_substitute_requires_underlying_positive_edge",
+        AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
+    )
+    monkeypatch.setattr(at_mod, "resolve_pattern_signal_context", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        at_mod,
+        "evaluate_entry_edge",
+        lambda *_a, **_k: SimpleNamespace(
+            allowed=False,
+            reason="non_positive_expected_edge",
+            snapshot={"expected_net_pct": -0.15},
+        ),
+    )
+
+    def _synthesize_option_meta(**_kwargs):
+        synth_calls["count"] += 1
+        return {"limit_price": 1.23}
+
+    from app.services.trading.options import synthesis
+
+    monkeypatch.setattr(synthesis, "synthesize_option_meta", _synthesize_option_meta)
+
+    at_mod._maybe_substitute_with_options(None, alert, 100.0, uid=1)
+
+    assert synth_calls["count"] == 0
+    assert alert.asset_type == "stock"
+    assert (
+        alert.indicator_snapshot["options_substitution_underlying_edge_reason"]
+        == "non_positive_expected_edge"
+    )
+
+
+def test_options_substitute_skips_shadow_observation_alerts(monkeypatch):
+    alert = _stock_alert()
+    alert._chili_shadow_observation_only = True
+    synth_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_options_substitute_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "evaluate_entry_edge",
+        lambda *_a, **_k: SimpleNamespace(
+            allowed=True,
+            reason="positive_expected_edge",
+            snapshot={"expected_net_pct": 0.25},
+        ),
+    )
+
+    def _synthesize_option_meta(**_kwargs):
+        synth_calls["count"] += 1
+        return {"limit_price": 1.23}
+
+    from app.services.trading.options import synthesis
+
+    monkeypatch.setattr(synthesis, "synthesize_option_meta", _synthesize_option_meta)
+
+    at_mod._maybe_substitute_with_options(None, alert, 100.0, uid=1)
+
+    assert synth_calls["count"] == 0
+    assert alert.asset_type == "stock"
+
+
+def test_options_substitute_runs_after_underlying_positive_edge(monkeypatch):
+    alert = _stock_alert()
+    synth_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_options_substitute_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_options_substitute_requires_underlying_positive_edge",
+        AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
+    )
+    monkeypatch.setattr(at_mod, "resolve_pattern_signal_context", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        at_mod,
+        "evaluate_entry_edge",
+        lambda *_a, **_k: SimpleNamespace(
+            allowed=True,
+            reason="positive_expected_edge",
+            snapshot={"expected_net_pct": 0.25},
+        ),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_entry_risk_notional",
+        lambda *_a, **_k: (300.0, {"notional_source": "test"}),
+    )
+
+    def _synthesize_option_meta(**_kwargs):
+        synth_calls["count"] += 1
+        return {
+            "expiration": "2026-06-18",
+            "strike": 105.0,
+            "option_type": "call",
+            "quantity": 1,
+            "limit_price": 1.23,
+        }
+
+    from app.services.trading.options import synthesis
+
+    monkeypatch.setattr(synthesis, "synthesize_option_meta", _synthesize_option_meta)
+
+    at_mod._maybe_substitute_with_options(None, alert, 100.0, uid=1)
+
+    assert synth_calls["count"] == 1
+    assert alert.asset_type == "options"
+    assert alert.entry_price == 1.23
+    assert alert.indicator_snapshot["option_meta"]["strike"] == 105.0
