@@ -330,6 +330,53 @@ def test_raw_writer_option_payoff_uses_contract_multiplier(db):
     assert pat.payoff_ratio_n == 2
 
 
+def test_raw_writer_option_tags_use_contract_multiplier(db):
+    pat = _make_pattern(db, name="raw_writer_option_tags_multiplier")
+
+    _make_closed_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        entry_offset_days=10,
+        exit_offset_days=9,
+        ticker="SPY",
+    ).tags = "autotrader_v1 option"
+    db.commit()
+
+    sync_realized_stats(db, dry_run=False)
+    db.refresh(pat)
+
+    assert pat.raw_realized_avg_return_pct == pytest.approx(16.0)
+    assert pat.avg_winner_pct == pytest.approx(0.16)
+
+
+def test_raw_writer_nested_options_path_uses_contract_multiplier(db):
+    pat = _make_pattern(db, name="raw_writer_nested_options_path_multiplier")
+
+    _make_closed_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        entry_offset_days=10,
+        exit_offset_days=9,
+        indicator_snapshot={"breakout_alert": {"options_path": True}},
+        ticker="SPY",
+    )
+    db.commit()
+
+    sync_realized_stats(db, dry_run=False)
+    db.refresh(pat)
+
+    assert pat.raw_realized_avg_return_pct == pytest.approx(16.0)
+    assert pat.avg_winner_pct == pytest.approx(0.16)
+
+
 def test_raw_writer_short_avg_return_uses_realized_pnl_sign(db):
     pat = _make_pattern(db, name="raw_writer_short_return_sign")
 
@@ -388,6 +435,34 @@ def test_raw_writer_option_paper_payoff_uses_contract_multiplier(db):
     assert pat.avg_loser_pct == pytest.approx(-0.20)
     assert pat.payoff_ratio == pytest.approx(1.0)
     assert pat.payoff_ratio_n == 2
+
+
+def test_raw_writer_nested_options_path_paper_uses_contract_multiplier(db):
+    pat = _make_pattern(db, name="raw_writer_nested_options_path_paper_multiplier")
+    option_signal = {
+        "auto_trader_v1": True,
+        "breakout_alert": {"options_path": True},
+    }
+
+    _make_closed_paper_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        entry_offset_days=10,
+        exit_offset_days=9,
+        signal_json=option_signal,
+        ticker="SPY",
+    )
+    db.commit()
+
+    sync_realized_stats(db, dry_run=False)
+    db.refresh(pat)
+
+    assert pat.raw_realized_avg_return_pct == pytest.approx(16.0)
+    assert pat.avg_winner_pct == pytest.approx(0.16)
 
 
 def test_race_corrected_then_raw_leaves_legacy_corrected(db):
