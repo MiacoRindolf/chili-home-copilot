@@ -14,6 +14,8 @@ BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED = True
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB = 1536
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB = 768
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS = 1
+BACKTEST_PRIORITY_SCORE_MAX = 100
+BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR = BACKTEST_PRIORITY_SCORE_MAX
 DATABASE_DEFAULT_POOL_SIZE = 25
 DATABASE_DEFAULT_MAX_OVERFLOW = 55
 DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
@@ -1087,6 +1089,17 @@ class Settings(BaseSettings):
     # 1. priority scorer runs daily and updates backtest_priority based
     #    on lifecycle/staleness/evidence-gap signals.
     chili_backtest_priority_scorer_enabled: bool = True
+    # Daily scored priority should mostly order genuinely eligible queue rows,
+    # not make every fresh challenged/candidate pattern pending again. Values
+    # at or above this floor are treated as explicit operator/recert boosts and
+    # may bypass the normal retest interval.
+    chili_backtest_priority_bypass_retest_floor: int = Field(
+        default=BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_BACKTEST_PRIORITY_BYPASS_RETEST_FLOOR"
+        ),
+    )
     # Promotion-path evidence debt should drain before generic research
     # backlog. This does not relax CPCV or EV gates; it only prioritizes
     # shadow/pilot patterns whose stored gate reasons say they need more
