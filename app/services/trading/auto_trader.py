@@ -213,6 +213,31 @@ def _float_or_none(value: Any) -> float | None:
     return out if out > 0 else None
 
 
+def _paper_entry_context_for_alert(
+    alert: BreakoutAlert,
+    *,
+    px: float,
+    snap: dict[str, Any] | None,
+) -> tuple[float, dict[str, Any]]:
+    if not isinstance(snap, dict):
+        return float(px), {}
+    option_meta = snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
+    if not (snap.get("options_path") and option_meta):
+        return float(px), {}
+    premium = (
+        _float_or_none(option_meta.get("limit_price"))
+        or _float_or_none(alert.entry_price)
+        or float(px)
+    )
+    return float(premium), {
+        "asset_type": "options",
+        "options_path": True,
+        "option_meta": dict(option_meta),
+        "underlying_price_at_entry": float(px),
+        "paper_entry_price_source": "option_premium",
+    }
+
+
 def _order_state_from_response(res: dict[str, Any]) -> str:
     raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
     return str(
@@ -1218,13 +1243,23 @@ def _maybe_open_paper_shadow(
                     or 0
                 ),
             )
+        paper_entry_px, option_paper_sig = _paper_entry_context_for_alert(
+            alert,
+            px=px,
+            snap=snap,
+        )
+        if option_paper_sig:
+            sig.update(option_paper_sig)
         shadow_stop, shadow_target, managed_exit_execution = (
             _managed_edge_execution_levels(alert, px=px, snap=snap)
         )
+        if option_paper_sig:
+            shadow_stop = None
+            shadow_target = None
         if managed_exit_execution is not None:
             sig["managed_exit_execution"] = managed_exit_execution
         pt = open_paper_trade(
-            db, uid, alert.ticker, px,
+            db, uid, alert.ticker, paper_entry_px,
             scan_pattern_id=alert.scan_pattern_id,
             stop_price=shadow_stop,
             target_price=shadow_target,
@@ -4714,16 +4749,26 @@ def _execute_new_entry(
         "breakout_alert_id": alert.id,
         "projected": snap.get("projected_profit_pct"),
     }
+    paper_entry_px, option_paper_sig = _paper_entry_context_for_alert(
+        alert,
+        px=px,
+        snap=snap,
+    )
+    if option_paper_sig:
+        sig.update(option_paper_sig)
     paper_stop, paper_target, managed_exit_execution = (
         _managed_edge_execution_levels(alert, px=px, snap=snap)
     )
+    if option_paper_sig:
+        paper_stop = None
+        paper_target = None
     if managed_exit_execution is not None:
         sig["managed_exit_execution"] = managed_exit_execution
     pt = open_paper_trade(
         db,
         uid,
         alert.ticker,
-        px,
+        paper_entry_px,
         scan_pattern_id=alert.scan_pattern_id,
         stop_price=paper_stop,
         target_price=paper_target,

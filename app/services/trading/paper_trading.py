@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -40,6 +41,7 @@ DEFAULT_SLIPPAGE_PCT = 0.05
 DEFAULT_ATR_STOP_MULT = 2.0
 DEFAULT_ATR_TARGET_MULT = 3.0
 TRAILING_STOP_ACTIVATION_R = 1.0  # activate trailing after 1R move
+OPTION_CONTRACT_MULTIPLIER = 100.0
 PAPER_TRADE_CAPACITY_SCOPE_ALL = "all"
 PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW = "autotrader_shadow"
 PAPER_SHADOW_PRIORITY_UNKNOWN = 0
@@ -63,6 +65,101 @@ PAPER_SHADOW_STAGE_PRIORITY = {
     "promoted": PAPER_SHADOW_PRIORITY_LIVE_READY,
     "live": PAPER_SHADOW_PRIORITY_LIVE_READY,
 }
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _paper_option_meta_from_signal(signal_json: Any) -> dict[str, Any]:
+    sig = _as_dict(signal_json)
+    meta = sig.get("option_meta")
+    if isinstance(meta, dict) and meta:
+        return meta
+    breakout = _as_dict(sig.get("breakout_alert"))
+    meta = breakout.get("option_meta")
+    if isinstance(meta, dict) and meta:
+        return meta
+    return {}
+
+
+def _is_option_signal(signal_json: Any) -> bool:
+    sig = _as_dict(signal_json)
+    if _paper_option_meta_from_signal(sig):
+        return True
+    if bool(sig.get("options_path")):
+        return True
+    if str(sig.get("asset_type") or "").strip().lower() in {"option", "options"}:
+        return True
+    breakout = _as_dict(sig.get("breakout_alert"))
+    return str(breakout.get("asset_type") or "").strip().lower() in {"option", "options"}
+
+
+def _is_option_paper_trade(pt: PaperTrade) -> bool:
+    return _is_option_signal(getattr(pt, "signal_json", None))
+
+
+def _paper_contract_multiplier(pt: PaperTrade) -> float:
+    return OPTION_CONTRACT_MULTIPLIER if _is_option_paper_trade(pt) else 1.0
+
+
+def _option_paper_levels(entry_price: float) -> tuple[float, float]:
+    stop_pct = float(getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0) or 50.0)
+    target_pct = float(getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0) or 100.0)
+    stop_price = max(float(entry_price) * max(0.0, 1.0 - stop_pct / 100.0), 0.01)
+    target_price = float(entry_price) * (1.0 + max(0.0, target_pct) / 100.0)
+    return round(stop_price, 4), round(target_price, 4)
+
+
+def _paper_current_mark_price(pt: PaperTrade, *, purpose: str = "display") -> float | None:
+    if _is_option_paper_trade(pt):
+        try:
+            from .broker_quotes import broker_quote_for_trade
+
+            proxy = SimpleNamespace(
+                ticker=getattr(pt, "ticker", ""),
+                direction=getattr(pt, "direction", "long"),
+                broker_source="robinhood",
+                indicator_snapshot=getattr(pt, "signal_json", None) or {},
+            )
+            quote = broker_quote_for_trade(proxy, purpose=purpose)
+            return _positive_float(
+                quote.get("price")
+                or quote.get("mark_price")
+                or quote.get("last_price")
+            )
+        except Exception:
+            logger.debug(
+                "[paper] option premium quote failed ticker=%s",
+                getattr(pt, "ticker", None),
+                exc_info=True,
+            )
+            return None
+    try:
+        from .market_data import fetch_quote
+
+        quote = fetch_quote(pt.ticker)
+        return _positive_float((quote or {}).get("price"))
+    except Exception:
+        return None
 PAPER_SHADOW_DECISION_PRIORITY = {
     "blocked_recert_required": PAPER_SHADOW_PRIORITY_RECERT,
     "blocked_shadow_promoted": PAPER_SHADOW_PRIORITY_SHADOW_PROMOTED,
@@ -211,8 +308,15 @@ def open_paper_trade(
 
     exit_cfg = _get_pattern_exit_config(db, scan_pattern_id)
     atr_val = None
+    is_option_paper = _is_option_signal(signal_json)
 
-    if stop_price is None or target_price is None:
+    if is_option_paper and (stop_price is None or target_price is None):
+        option_stop, option_target = _option_paper_levels(float(entry_price))
+        if stop_price is None:
+            stop_price = option_stop
+        if target_price is None:
+            target_price = option_target
+    elif stop_price is None or target_price is None:
         atr_stop, atr_target, atr_val = _compute_atr_levels(ticker, entry_price, exit_cfg)
         if stop_price is None:
             stop_price = atr_stop if atr_stop else entry_price * 0.97
@@ -221,7 +325,7 @@ def open_paper_trade(
 
     fill_price = _apply_slippage(entry_price, direction, is_entry=True)
 
-    meta = dict(signal_json or {})
+    meta = dict(_as_dict(signal_json))
     meta["_paper_meta"] = {
         "original_entry": entry_price,
         "fill_price": fill_price,
@@ -235,6 +339,11 @@ def open_paper_trade(
         "lowest_price": fill_price if direction == "short" else None,
         "expiry_days": _expiry_days_for_timeframe(exit_cfg.get("timeframe", "1d")),
     }
+    if is_option_paper:
+        meta["_paper_meta"]["asset_type"] = "options"
+        meta["_paper_meta"]["contract_multiplier"] = OPTION_CONTRACT_MULTIPLIER
+        meta["_paper_meta"]["premium_stop_price"] = stop_price
+        meta["_paper_meta"]["premium_target_price"] = target_price
 
     pt = PaperTrade(
         user_id=user_id,
@@ -476,14 +585,11 @@ def prune_autotrader_paper_shadow_capacity(
             "eviction_policy": "priority_evidence_buffer",
         }
 
-    from .market_data import fetch_quote
-
     stale_closed = 0
     capacity_closed = 0
     for pt, kind in to_close:
         try:
-            quote = fetch_quote(pt.ticker)
-            raw_exit = float((quote or {}).get("price") or pt.entry_price)
+            raw_exit = float(_paper_current_mark_price(pt, purpose="exit") or pt.entry_price)
         except Exception:
             raw_exit = float(pt.entry_price)
         exit_p = _apply_slippage(raw_exit, pt.direction or "long", is_entry=False)
@@ -915,8 +1021,6 @@ def check_paper_exits(
     ``skip_trade_ids`` lets the caller hold specific rows past their stop/target
     (used by AutoTrader v1 per-position monitor pause from the Autopilot desk).
     """
-    from .market_data import fetch_quote
-
     open_trades = db.query(PaperTrade).filter(
         PaperTrade.status == "open",
     )
@@ -944,8 +1048,8 @@ def check_paper_exits(
             meta = (pt.signal_json or {}).get("_paper_meta", {})
             expiry = meta.get("expiry_days", PAPER_TRADE_EXPIRY_DAYS)
 
-            quote = fetch_quote(pt.ticker)
-            if not quote or not quote.get("price"):
+            price = _paper_current_mark_price(pt)
+            if price is None:
                 if pt.entry_date and (datetime.utcnow() - pt.entry_date).days >= expiry:
                     exit_p = _apply_slippage(pt.entry_price, pt.direction, is_entry=False)
                     _close_paper_trade(pt, exit_p, "expired")
@@ -953,14 +1057,14 @@ def check_paper_exits(
                     closed += 1
                 continue
 
-            price = float(quote["price"])
+            quote_source = "robinhood_options" if _is_option_paper_trade(pt) else "market_data"
             is_long = pt.direction == "long"
 
             dynamic_decision = _paper_dynamic_monitor_decision(
                 db,
                 pt,
                 price=price,
-                quote_source="market_data",
+                quote_source=quote_source,
             )
             if dynamic_decision and dynamic_decision.get("action") == "exit_now":
                 exit_p = _apply_slippage(price, pt.direction, is_entry=False)
@@ -1094,11 +1198,10 @@ def place_partial_close(
         return {"ok": False, "error": f"computed_qty_non_positive:{qty_to_close}"}
 
     if current_price is None:
-        from .market_data import fetch_quote
-        q = fetch_quote(trade.ticker)
-        if not q or not q.get("price"):
+        mark_price = _paper_current_mark_price(trade, purpose="exit")
+        if mark_price is None:
             return {"ok": False, "error": "no_quote"}
-        current_price = float(q["price"])
+        current_price = float(mark_price)
 
     fill_price = _apply_slippage(float(current_price), trade.direction, is_entry=False)
 
@@ -1125,17 +1228,18 @@ def _close_paper_trade(pt: PaperTrade, exit_price: float, reason: str) -> None:
     pt.exit_price = exit_price
     pt.exit_reason = reason
 
+    multiplier = _paper_contract_multiplier(pt)
     if pt.direction == "long":
-        gross_pnl = (exit_price - pt.entry_price) * pt.quantity
+        gross_pnl = (exit_price - pt.entry_price) * pt.quantity * multiplier
         gross_pct = (exit_price - pt.entry_price) / pt.entry_price * 100
     else:
-        gross_pnl = (pt.entry_price - exit_price) * pt.quantity
+        gross_pnl = (pt.entry_price - exit_price) * pt.quantity * multiplier
         gross_pct = (pt.entry_price - exit_price) / pt.entry_price * 100
 
     commission_rate = float(getattr(settings, "backtest_commission", 0.0) or 0.0)
-    commission_cost = (pt.entry_price + exit_price) * pt.quantity * commission_rate
+    commission_cost = (pt.entry_price + exit_price) * pt.quantity * multiplier * commission_rate
     net_pnl = gross_pnl - commission_cost
-    notional = max(pt.entry_price * pt.quantity, 1e-9)
+    notional = max(pt.entry_price * pt.quantity * multiplier, 1e-9)
     net_pct = (net_pnl / notional) * 100
     pt.pnl = round(net_pnl, 2)
     pt.pnl_pct = round(net_pct, 2)
