@@ -288,6 +288,57 @@ def api_sell_trade(
         return JSONResponse({"ok": False, "error": f"Cannot sell {body.quantity}, only {trade.quantity} held"}, status_code=400)
 
     is_full_exit = abs(body.quantity - trade.quantity) < 0.0001
+    try:
+        from ...services.trading.autopilot_scope import is_option_trade
+    except Exception:
+        is_option_trade = None
+    if callable(is_option_trade) and is_option_trade(trade):
+        if not is_full_exit:
+            return JSONResponse(
+                {"ok": False, "error": "option_partial_sell_not_supported"},
+                status_code=400,
+            )
+        if (trade.broker_source or "").lower() == "robinhood":
+            from ...services.trading.auto_trader_position_overrides import (
+                _close_option_trade_now,
+            )
+
+            res = _close_option_trade_now(
+                db,
+                t=trade,
+                updated_by="api_sell_trade",
+                exit_reason="api_sell_trade",
+            )
+            if not res.get("ok"):
+                return JSONResponse(
+                    {"ok": False, "error": res.get("error", "Option sell failed")},
+                    status_code=500,
+                )
+            return JSONResponse({
+                "ok": True,
+                "trade_id": trade.id,
+                "sold_qty": body.quantity,
+                "remaining_qty": round(trade.quantity, 6),
+                "broker_state": res.get("pending_exit_status") or res.get("state"),
+                "order_id": res.get("order_id"),
+                "broker": "robinhood_options",
+                "status": trade.status,
+            })
+
+        exit_price = body.limit_price or trade.entry_price
+        trade.status = "closed"
+        trade.exit_price = exit_price
+        trade.exit_date = datetime.utcnow()
+        trade.pnl = round((exit_price - trade.entry_price) * trade.quantity * 100.0, 2)
+        trade.exit_reason = trade.exit_reason or "api_sell_manual_option"
+        db.commit()
+        return JSONResponse({
+            "ok": True,
+            "trade_id": trade.id,
+            "sold_qty": body.quantity,
+            "remaining_qty": round(trade.quantity, 6),
+            "status": trade.status,
+        })
 
     if trade.broker_source in ("robinhood", "coinbase"):
         broker_connected = (

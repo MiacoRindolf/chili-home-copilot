@@ -65,6 +65,7 @@
     var s = String(src || '').toLowerCase();
     if (s === 'market_data') return 'via market data';
     if (s === 'robinhood_legend_blue_ocean') return 'via Robinhood Legend / Blue Ocean';
+    if (s === 'robinhood_options') return 'via Robinhood options feed';
     if (s.indexOf('_stale') > -1) return brokerLabel(s) + ' quote stale';
     if (s.indexOf('_unavailable') > -1) return brokerLabel(s) + ' quote unavailable';
     if (s === 'robinhood' || s === 'coinbase') return 'via ' + brokerLabel(s) + ' broker feed';
@@ -133,8 +134,11 @@
 
   function rowBadges(r) {
     var out = [];
+    var assetType = String(r.asset_type || '').toLowerCase();
+    var assetLabel = assetType === 'crypto' ? 'CRYPTO' : (assetType === 'options' ? 'OPTIONS' : 'STOCK');
+    var assetClass = assetType === 'crypto' ? 'crypto' : (assetType === 'options' ? 'options' : 'stock');
     out.push(badge(r.kind === 'trade' ? 'LIVE' : 'PAPER', r.kind === 'trade' ? 'live' : 'paper'));
-    out.push(badge(r.asset_type === 'crypto' ? 'CRYPTO' : 'STOCK', r.asset_type === 'crypto' ? 'crypto' : 'stock'));
+    out.push(badge(assetLabel, assetClass));
     if (r.auto_trader_v1) {
       out.push(badge('AUTO V1', 'compatible'));
     } else if (r.monitor_scope === 'plan_levels') {

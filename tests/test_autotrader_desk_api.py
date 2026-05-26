@@ -1,6 +1,9 @@
 """API tests for Autopilot pattern desk + autotrader desk PATCH."""
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
+import pytest
 from sqlalchemy.orm import Session
 
 from app.models.trading import BrainRuntimeMode, BreakoutAlert, Trade, TradingPosition
@@ -118,6 +121,63 @@ def test_autotrader_desk_lists_plan_level_trade(paired_client, db: Session) -> N
     assert row["monitor_scope"] == "plan_levels"
     assert row["scan_pattern_id"] is None
     assert row["related_alert_id"] is None
+
+
+def test_autotrader_desk_option_trade_uses_premium_mark(
+    paired_client,
+    db: Session,
+) -> None:
+    c, user = paired_client
+    t = Trade(
+        user_id=user.id,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        stop_loss=0.80,
+        take_profit=2.50,
+        broker_source="robinhood",
+        auto_trader_version="v1",
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+    )
+    db.add(t)
+    db.commit()
+
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "spy-729c"}
+    fake_options.get_quote.return_value = {"mark_price": "1.45", "bid_price": "1.40", "ask_price": "1.50"}
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("option desk rows must not fetch underlying spot"),
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ):
+        r = c.get("/api/trading/autotrader/desk")
+
+    assert r.status_code == 200
+    payload = r.json()
+    row = next(x for x in payload["trades"] if x["ticker"] == "SPY")
+    assert row["asset_type"] == "options"
+    assert row["current_price"] == pytest.approx(1.45)
+    assert row["quote_source"] == "robinhood_options"
+    assert row["unrealized_pnl_usd"] == pytest.approx(40.0)
+    assert row["unrealized_pnl_pct"] == pytest.approx(16.0)
+    fake_options.find_contract.assert_called_once_with("SPY", "2026-06-19", 729.0, "call")
+    fake_options.get_quote.assert_called_once_with("spy-729c")
 
 
 def test_autotrader_desk_suppresses_closed_broker_position(

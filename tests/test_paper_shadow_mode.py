@@ -27,6 +27,7 @@ import pytest
 from app.config import (
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
+    PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE,
 )
 from app import models
 from app.models.trading import (
@@ -121,6 +122,18 @@ def test_reject_shadow_decision_map():
         "max_concurrent_crypto"
     ) == "blocked_max_concurrent_crypto"
     assert at_mod._qualified_reject_shadow_decision("no_quote") is None
+
+
+def test_hard_recert_signal_lane_requests_shadow_observation() -> None:
+    alert = BreakoutAlert(
+        indicator_snapshot={
+            "imminent_scorecard": {
+                "signal_lane": PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE,
+            },
+        },
+    )
+
+    assert at_mod._alert_requests_shadow_observation(alert) is True
 
 
 def test_helper_no_op_when_flag_off(db, monkeypatch):

@@ -68,7 +68,21 @@ def broker_quote_for_trade(
         "broker_source": broker_source or None,
         "broker_held": True,
     }
-    if not broker_source or not ticker:
+    if not ticker:
+        return base
+    try:
+        from .autopilot_scope import is_option_trade
+
+        if is_option_trade(trade):
+            return _option_quote_for_trade(trade, base, purpose=purpose)
+    except Exception:
+        logger.debug(
+            "[broker_quotes] option quote detection failed ticker=%s",
+            ticker,
+            exc_info=True,
+        )
+        return {**base, "source": "robinhood_options_unavailable"}
+    if not broker_source:
         return base
     try:
         from .venue.factory import get_adapter
@@ -199,6 +213,109 @@ def broker_quote_for_trade(
             exc_info=True,
         )
         return base
+
+
+def _option_quote_for_trade(
+    trade: Trade,
+    base: dict[str, Any],
+    *,
+    purpose: str,
+) -> dict[str, Any]:
+    """Option-premium quote for an option Trade row; never use underlying spot."""
+    unavailable = {**base, "source": "robinhood_options_unavailable"}
+    try:
+        from .options.exit_monitor import _opt_meta
+        from .venue.robinhood_options import RobinhoodOptionsAdapter
+
+        meta = _opt_meta(trade)
+        expiration = str(meta.get("expiration") or "").strip()
+        strike = _safe_float(meta.get("strike"))
+        option_type = str(meta.get("option_type") or "").strip().lower()
+        if not (expiration and strike is not None and option_type in ("call", "put")):
+            return unavailable
+
+        underlying = str(meta.get("underlying") or getattr(trade, "ticker", "") or "").strip().upper()
+        if not underlying:
+            return unavailable
+
+        adapter = RobinhoodOptionsAdapter()
+        is_enabled = getattr(adapter, "is_enabled", None)
+        if callable(is_enabled) and not is_enabled():
+            return unavailable
+
+        option_id = str(meta.get("option_id") or meta.get("contract_id") or "").strip()
+        contract: dict[str, Any] | None = None
+        if not option_id:
+            contract = adapter.find_contract(underlying, expiration, float(strike), option_type)
+            if not contract:
+                return unavailable
+            option_id = str(contract.get("id") or "").strip()
+        if not option_id:
+            return unavailable
+
+        quote = adapter.get_quote(option_id)
+        if not quote:
+            return unavailable
+
+        bid = _safe_float(quote.get("bid_price"))
+        ask = _safe_float(quote.get("ask_price"))
+        mid = ((bid + ask) / 2.0) if bid is not None and ask is not None else None
+        mark = _safe_float(quote.get("mark_price"))
+        adjusted_mark = _safe_float(quote.get("adjusted_mark_price"))
+        last = _safe_float(quote.get("last_trade_price") or quote.get("last_price"))
+        side = (getattr(trade, "direction", None) or "long").strip().lower()
+        executable = ask if side == "short" else bid
+        if purpose == "exit":
+            candidates = (executable, mark, adjusted_mark, mid, last, bid, ask)
+        else:
+            candidates = (mark, adjusted_mark, last, mid, executable, bid, ask)
+        price = next((px for px in candidates if px is not None), None)
+        if price is None:
+            return unavailable
+
+        spread_bps = None
+        if bid is not None and ask is not None and mid and mid > 0:
+            spread_bps = ((ask - bid) / mid) * 10_000.0
+
+        quote_dt = (
+            quote.get("updated_at")
+            or quote.get("last_trade_at")
+            or quote.get("previous_close_date")
+        )
+        return {
+            **base,
+            "ticker": underlying,
+            "price": round(float(price), 6),
+            "last_price": round(float(last), 6) if last is not None else None,
+            "bid": round(float(bid), 6) if bid is not None else None,
+            "ask": round(float(ask), 6) if ask is not None else None,
+            "mid": round(float(mid), 6) if mid is not None else None,
+            "mark_price": round(float(mark), 6) if mark is not None else None,
+            "adjusted_mark_price": (
+                round(float(adjusted_mark), 6) if adjusted_mark is not None else None
+            ),
+            "executable_price": round(float(executable), 6) if executable is not None else None,
+            "change": None,
+            "change_pct": None,
+            "quote_ts": str(quote_dt) if quote_dt else None,
+            "spread_bps": round(float(spread_bps), 6) if spread_bps is not None else None,
+            "volume": _safe_float(quote.get("volume")),
+            "source": "robinhood_options",
+            "broker_source": (getattr(trade, "broker_source", None) or "robinhood"),
+            "broker_held": True,
+            "option_id": option_id,
+            "option_underlying": underlying,
+            "option_expiration": expiration,
+            "option_strike": round(float(strike), 6),
+            "option_type": option_type,
+        }
+    except Exception:
+        logger.debug(
+            "[broker_quotes] option quote failed ticker=%s",
+            getattr(trade, "ticker", None),
+            exc_info=True,
+        )
+        return unavailable
 
 
 def broker_quote_for_user_ticker(

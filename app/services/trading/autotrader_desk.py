@@ -19,6 +19,7 @@ from ...config import settings
 from ...models.trading import BrainRuntimeMode, PaperTrade, ScanPattern, Trade
 from .autopilot_scope import (
     classify_live_autopilot_trade_scope,
+    is_option_trade,
     live_autopilot_trade_filter,
 )
 from .broker_position_truth import filter_broker_stale_open_trades
@@ -118,7 +119,7 @@ def _safe_quote_float(value: Any) -> float | None:
 def _broker_quote_price_for_trade(trade: Trade) -> tuple[float | None, str]:
     """Broker-source quote for a live trade; never cross-feed venues."""
     broker_source = (trade.broker_source or "").strip().lower()
-    if not broker_source:
+    if not broker_source and not is_option_trade(trade):
         return None, "unavailable"
     try:
         from .broker_quotes import broker_quote_for_trade
@@ -136,7 +137,7 @@ def _broker_quote_price_for_trade(trade: Trade) -> tuple[float | None, str]:
             trade.ticker,
             exc_info=True,
         )
-    return None, f"{broker_source}_unavailable"
+    return None, f"{broker_source or 'broker'}_unavailable"
 
 
 def _fallback_quote(ticker: str) -> float | None:
@@ -156,6 +157,7 @@ def _compute_unrealized(
     current_price: float | None,
     quantity: float | None,
     direction: str | None,
+    multiplier: float = 1.0,
 ) -> tuple[float | None, float | None]:
     """(pnl_usd, pnl_pct) — long/short aware. Returns (None, None) when unknown."""
     try:
@@ -164,15 +166,25 @@ def _compute_unrealized(
         entry = float(entry_price)
         curr = float(current_price)
         qty = float(quantity)
-        if entry <= 0 or qty <= 0:
+        mult = float(multiplier or 1.0)
+        if entry <= 0 or qty <= 0 or mult <= 0:
             return (None, None)
         side = (direction or "long").lower()
         per_unit = (curr - entry) if side != "short" else (entry - curr)
-        pnl_usd = per_unit * qty
+        pnl_usd = per_unit * qty * mult
         pnl_pct = (per_unit / entry) * 100.0
         return (round(pnl_usd, 4), round(pnl_pct, 4))
     except (TypeError, ValueError):
         return (None, None)
+
+
+def _trade_asset_type(trade: Trade) -> str:
+    if is_option_trade(trade):
+        return "options"
+    ticker = (trade.ticker or "").strip().upper()
+    if ticker.endswith("-USD"):
+        return "crypto"
+    return "stock"
 
 
 def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, Any]:
@@ -237,8 +249,9 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
         is_atv1 = (t.auto_trader_version or "") == "v1"
         ov = overrides_map.get(("trade", int(t.id)))
         opened_today = bool(t.entry_date and _opened_today_et(t.entry_date))
+        trade_is_option = is_option_trade(t)
         current_price, quote_source = _broker_quote_price_for_trade(t)
-        if current_price is None and not (t.broker_source or "").strip():
+        if current_price is None and not trade_is_option and not (t.broker_source or "").strip():
             current_price = _fallback_quote(t.ticker)
             quote_source = "market_data" if current_price is not None else "unavailable"
         pnl_usd, pnl_pct = _compute_unrealized(
@@ -246,6 +259,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
             current_price=current_price,
             quantity=float(t.quantity or 0),
             direction=t.direction,
+            multiplier=100.0 if trade_is_option else 1.0,
         )
         out_trades.append(
             {
@@ -263,7 +277,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
                 "monitor_scope": monitor_scope,
                 "related_alert_id": t.related_alert_id,
                 "broker_source": t.broker_source,
-                "asset_type": "stock",
+                "asset_type": _trade_asset_type(t),
                 "auto_trader_v1": is_atv1,
                 "scale_in_count": int(t.scale_in_count or 0),
                 "tags": t.tags,

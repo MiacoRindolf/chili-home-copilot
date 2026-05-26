@@ -202,7 +202,9 @@ class TestPartialSellEndpoint:
         t.exit_price = None
         t.exit_date = None
         t.pnl = None
+        t.exit_reason = kw.get("exit_reason", None)
         t.notes = ""
+        t.indicator_snapshot = kw.get("indicator_snapshot", {})
         return t
 
     @patch("app.services.broker_service.is_connected", return_value=True)
@@ -291,3 +293,69 @@ class TestPartialSellEndpoint:
         assert trade.status == "closed"
         assert trade.exit_price == 6.0
         assert trade.pnl == 10.0
+
+    def test_option_partial_sell_rejected_before_stock_sell(self):
+        trade = self._mock_trade(
+            ticker="SPY",
+            broker_source="robinhood",
+            quantity=2.0,
+            entry_price=1.25,
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = trade
+
+        from app.routers.trading_sub.trades import api_sell_trade
+        from app.schemas.trading import TradeSell
+
+        body = TradeSell(quantity=1.0, limit_price=1.40)
+        request = MagicMock()
+
+        with patch(
+            "app.routers.trading_sub.trades.get_identity_ctx",
+            return_value={"user_id": None},
+        ), patch(
+            "app.routers.trading_sub.trades.broker_manager.place_sell_order",
+            side_effect=AssertionError("option partial sell must not use stock sell"),
+        ):
+            resp = api_sell_trade(trade_id=1, body=body, request=request, db=db)
+
+        import json
+        data = json.loads(resp.body)
+        assert resp.status_code == 400
+        assert data["error"] == "option_partial_sell_not_supported"
+        assert trade.status == "open"
+
+    def test_manual_option_full_sell_uses_contract_multiplier(self):
+        trade = self._mock_trade(
+            ticker="SPY",
+            broker_source=None,
+            quantity=2.0,
+            entry_price=1.25,
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = trade
+
+        from app.routers.trading_sub.trades import api_sell_trade
+        from app.schemas.trading import TradeSell
+
+        body = TradeSell(quantity=2.0, limit_price=1.45)
+        request = MagicMock()
+
+        with patch(
+            "app.routers.trading_sub.trades.get_identity_ctx",
+            return_value={"user_id": None},
+        ), patch(
+            "app.routers.trading_sub.trades.broker_manager.place_sell_order",
+            side_effect=AssertionError("manual option sell must not use stock sell"),
+        ):
+            resp = api_sell_trade(trade_id=1, body=body, request=request, db=db)
+
+        import json
+        data = json.loads(resp.body)
+        assert data["ok"] is True
+        assert trade.status == "closed"
+        assert trade.exit_price == 1.45
+        assert trade.pnl == 40.0
+        assert trade.exit_reason == "api_sell_manual_option"
