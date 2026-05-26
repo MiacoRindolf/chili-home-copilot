@@ -303,14 +303,35 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
         is_atv1 = bool(sj.get("auto_trader_v1"))
         ov = overrides_map.get(("paper", int(pt.id)))
         opened_today = bool(pt.entry_date and _opened_today_et(pt.entry_date))
-        # Paper: simulation — generic provider is the right source of truth.
-        current_price = _fallback_quote(pt.ticker)
-        quote_source = "market_data" if current_price is not None else "unavailable"
+        # Paper options still live in premium space; stock/crypto paper rows use spot.
+        try:
+            from .paper_trading import _is_option_paper_trade, _paper_current_mark_price
+
+            paper_is_option = _is_option_paper_trade(pt)
+        except Exception:
+            paper_is_option = False
+        if paper_is_option:
+            try:
+                current_price = _paper_current_mark_price(pt, purpose="display")  # type: ignore[name-defined]
+            except Exception:
+                current_price = None
+            quote_source = (
+                "robinhood_options"
+                if current_price is not None
+                else "option_premium_unavailable"
+            )
+        else:
+            current_price = _fallback_quote(pt.ticker)
+            quote_source = "market_data" if current_price is not None else "unavailable"
         pnl_usd, pnl_pct = _compute_unrealized(
             entry_price=float(pt.entry_price),
             current_price=current_price,
             quantity=float(pt.quantity or 0),
             direction=pt.direction,
+            multiplier=100.0 if paper_is_option else 1.0,
+        )
+        paper_asset_type = "options" if paper_is_option else (
+            "crypto" if (pt.ticker or "").strip().upper().endswith("-USD") else "stock"
         )
         out_paper.append(
             {
@@ -330,6 +351,8 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
                 "opened_today_et": opened_today,
                 "controls_supported": True,
                 "close_supported": True,
+                "asset_type": paper_asset_type,
+                "contract_multiplier": 100.0 if paper_is_option else None,
                 "current_price": float(current_price) if current_price is not None else None,
                 "unrealized_pnl_usd": pnl_usd,
                 "unrealized_pnl_pct": pnl_pct,
