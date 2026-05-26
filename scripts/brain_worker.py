@@ -34,7 +34,6 @@ from pathlib import Path
 
 os.environ.setdefault("TQDM_DISABLE", "1")
 os.environ.setdefault("BRAIN_SMART_BT_MAX_WORKERS", "1")
-os.environ.setdefault("CHILI_BRAIN_FAST_BACKTEST_BATCH", "0")
 os.environ.setdefault("CHILI_BRAIN_DISPATCH_MARKET_SNAPSHOTS_ENABLED", "0")
 os.environ.setdefault("BRAIN_IO_WORKERS_HIGH", "2")
 os.environ.setdefault("BRAIN_IO_WORKERS_MED", "2")
@@ -71,11 +70,121 @@ STOP_SIGNAL = DATA_DIR / "brain_worker_stop"
 PAUSE_SIGNAL = DATA_DIR / "brain_worker_pause"
 WAKE_SIGNAL = DATA_DIR / "brain_worker_wake"
 LOCK_FILE = DATA_DIR / "brain_worker.lock"
+LOCK_FILE_PREFIX = "brain_worker"
+LOCK_FILE_SUFFIX = ".lock"
 
 DEFAULT_CYCLE_INTERVAL = 5  # minutes between cycles when queue empty (override with --interval)
+FAST_BACKTEST_BATCH_ENV = "CHILI_BRAIN_FAST_BACKTEST_BATCH"
+FAST_BACKTEST_BATCH_SOURCE_ENV = "env"
+FAST_BACKTEST_BATCH_SOURCE_MODE_DEFAULT = "mode_default"
+FAST_BACKTEST_MODE_LEAN_CYCLE = "lean-cycle"
+FAST_BACKTEST_MODE_BACKTEST = "backtest"
+FAST_BACKTEST_DEFAULT_BATCH_BY_MODE = {
+    FAST_BACKTEST_MODE_LEAN_CYCLE: 0,
+    FAST_BACKTEST_MODE_BACKTEST: 30,
+}
+FAST_BACKTEST_DEFAULT_BATCH = 0
+FAST_BACKTEST_RATE_SECONDS_PER_MINUTE = 60.0
+FAST_BACKTEST_RATE_MIN_ELAPSED_SECONDS = 0.001
 
 # Global lock file handle (kept open while running)
 _lock_handle = None
+_lock_path: Path | None = None
+
+
+def _parse_non_negative_int(value: object, default: int) -> int:
+    try:
+        return max(0, int(str(value).strip()))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
+def _fast_backtest_default_batch_for_mode(mode: str) -> int:
+    normalized = (mode or "").strip().lower()
+    try:
+        from app.config import settings as _settings
+
+        if normalized == FAST_BACKTEST_MODE_LEAN_CYCLE:
+            return _parse_non_negative_int(
+                getattr(
+                    _settings,
+                    "brain_fast_backtest_batch_lean_cycle",
+                    FAST_BACKTEST_DEFAULT_BATCH_BY_MODE[FAST_BACKTEST_MODE_LEAN_CYCLE],
+                ),
+                FAST_BACKTEST_DEFAULT_BATCH_BY_MODE[FAST_BACKTEST_MODE_LEAN_CYCLE],
+            )
+        if normalized == FAST_BACKTEST_MODE_BACKTEST:
+            return _parse_non_negative_int(
+                getattr(
+                    _settings,
+                    "brain_fast_backtest_batch_backtest",
+                    FAST_BACKTEST_DEFAULT_BATCH_BY_MODE[FAST_BACKTEST_MODE_BACKTEST],
+                ),
+                FAST_BACKTEST_DEFAULT_BATCH_BY_MODE[FAST_BACKTEST_MODE_BACKTEST],
+            )
+    except Exception:
+        pass
+    return FAST_BACKTEST_DEFAULT_BATCH_BY_MODE.get(
+        normalized,
+        FAST_BACKTEST_DEFAULT_BATCH,
+    )
+
+
+def _configure_fast_backtest_batch_for_mode(mode: str) -> dict[str, object]:
+    raw = os.environ.get(FAST_BACKTEST_BATCH_ENV)
+    if raw is None or not str(raw).strip():
+        batch_size = _fast_backtest_default_batch_for_mode(mode)
+        os.environ[FAST_BACKTEST_BATCH_ENV] = str(batch_size)
+        source = FAST_BACKTEST_BATCH_SOURCE_MODE_DEFAULT
+    else:
+        batch_size = _parse_non_negative_int(raw, FAST_BACKTEST_DEFAULT_BATCH)
+        os.environ[FAST_BACKTEST_BATCH_ENV] = str(batch_size)
+        source = FAST_BACKTEST_BATCH_SOURCE_ENV
+    return {"mode": mode, "batch_size": batch_size, "source": source}
+
+
+def _fast_backtest_batch_size() -> int:
+    return _parse_non_negative_int(
+        os.environ.get(FAST_BACKTEST_BATCH_ENV),
+        FAST_BACKTEST_DEFAULT_BATCH,
+    )
+
+
+def _fast_backtest_executor_label() -> str:
+    try:
+        from app.config import settings as _settings
+
+        return str(getattr(_settings, "brain_queue_backtest_executor", "threads") or "threads")
+    except Exception:
+        return "unknown"
+
+
+def _fast_backtest_queue_status_snapshot() -> dict[str, object]:
+    db = SessionLocal()
+    try:
+        from app.services.trading.backtest_queue import get_queue_status
+
+        return dict(get_queue_status(db, use_cache=False))
+    except Exception as exc:
+        logger.debug("[brain:subtask] fast_backtest queue status unavailable: %s", exc)
+        return {}
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _lock_file_for_mode(mode: str | None) -> Path:
+    normalized = (mode or FAST_BACKTEST_MODE_LEAN_CYCLE).strip().lower()
+    if normalized == FAST_BACKTEST_MODE_LEAN_CYCLE:
+        return LOCK_FILE
+    token = "".join(
+        ch if ch.isalnum() or ch in ("-", "_") else "_"
+        for ch in normalized
+    ) or "worker"
+    return DATA_DIR / f"{LOCK_FILE_PREFIX}.{token}{LOCK_FILE_SUFFIX}"
 
 
 def _db_heartbeat_tick() -> None:
@@ -103,16 +212,17 @@ def _db_heartbeat_tick() -> None:
         logger.debug("[brain] heartbeat tick failed: %s", exc)
 
 
-def acquire_lock() -> bool:
-    """Acquire an exclusive lock to prevent multiple brain workers.
+def acquire_lock(mode: str | None = None) -> bool:
+    """Acquire an exclusive lock to prevent duplicate workers for one mode.
     
-    Returns True if lock acquired, False if another worker is running.
+    Returns True if lock acquired, False if this mode is already running.
     """
-    global _lock_handle
+    global _lock_handle, _lock_path
     DATA_DIR.mkdir(exist_ok=True)
+    lock_path = _lock_file_for_mode(mode)
     
     try:
-        _lock_handle = open(LOCK_FILE, "w")
+        _lock_handle = open(lock_path, "w")
         if sys.platform == "win32":
             import msvcrt
             msvcrt.locking(_lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
@@ -123,6 +233,7 @@ def acquire_lock() -> bool:
         # Write PID to lock file
         _lock_handle.write(str(os.getpid()))
         _lock_handle.flush()
+        _lock_path = lock_path
         return True
     except (IOError, OSError) as e:
         logger.error(f"[brain] Failed to acquire lock — another worker may be running: {e}")
@@ -134,7 +245,7 @@ def acquire_lock() -> bool:
 
 def release_lock():
     """Release the exclusive lock."""
-    global _lock_handle
+    global _lock_handle, _lock_path
     if _lock_handle:
         try:
             if sys.platform == "win32":
@@ -150,10 +261,12 @@ def release_lock():
     
     # Remove lock file
     try:
-        if LOCK_FILE.exists():
-            LOCK_FILE.unlink()
+        lock_path = _lock_path or LOCK_FILE
+        if lock_path.exists():
+            lock_path.unlink()
     except Exception:
         pass
+    _lock_path = None
 
 
 class BrainWorkerStatus:
@@ -505,11 +618,10 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
 
     Override via ``CHILI_BRAIN_FAST_BACKTEST_BATCH`` env var.
 
-    Each item still runs in its own session (open + close per item) so a
-    failed pattern can't poison the rest of the batch.
+    Delegates to the shared queue executor so ``brain_queue_backtest_executor``
+    and process caps are honored; each worker item still owns its DB session.
     """
     status.set_step("FastBacktest", "Processing backtest queue...")
-    from app.services.trading.backtest_queue import get_pending_patterns
     from app.config import settings as _s
 
     try:
@@ -554,39 +666,117 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
             logger.debug("[brain:subtask] fast_backtest breaker probe failed: %s", e)
 
     uid = getattr(_s, "brain_default_user_id", None)
-    batch_size = max(0, int(os.environ.get("CHILI_BRAIN_FAST_BACKTEST_BATCH", "30")))
+    queue_before = _fast_backtest_queue_status_snapshot()
+    pending_before = int(queue_before.get("pending") or 0)
+    batch_size = _fast_backtest_batch_size()
     if batch_size <= 0:
-        logger.info("[brain:subtask] fast_backtest skipped - batch disabled")
+        log_fn = logger.warning if pending_before > 0 else logger.info
+        log_fn(
+            "[brain:subtask] fast_backtest skipped - batch disabled "
+            "pending=%d boosted=%s needs_retest=%s promotion_path_debt=%s executor=%s",
+            pending_before,
+            queue_before.get("boosted", "-"),
+            queue_before.get("needs_retest", "-"),
+            queue_before.get("promotion_path_debt_pending", "-"),
+            _fast_backtest_executor_label(),
+        )
         return {
             "completed": 0,
             "errors": 0,
             "skipped": True,
             "skip_reason": "batch_disabled",
             "batch_size": batch_size,
+            "pending_before": pending_before,
+            "pending_after": pending_before,
+            "promotion_path_debt_pending_before": queue_before.get(
+                "promotion_path_debt_pending"
+            ),
+            "promotion_path_debt_pending_after": queue_before.get(
+                "promotion_path_debt_pending"
+            ),
+            "drain_rate_per_min": 0.0,
         }
+    logger.info(
+        "[brain:subtask] fast_backtest start batch_size=%d executor=%s "
+        "pending=%d boosted=%s needs_retest=%s never_tested=%s "
+        "promotion_path_debt=%s",
+        batch_size,
+        _fast_backtest_executor_label(),
+        pending_before,
+        queue_before.get("boosted", "-"),
+        queue_before.get("needs_retest", "-"),
+        queue_before.get("never_tested", "-"),
+        queue_before.get("promotion_path_debt_pending", "-"),
+    )
+    started_at = time.monotonic()
     completed = 0
     errors = 0
-    for _ in range(batch_size):
-        db = SessionLocal()
+    processed_patterns = 0
+    queue_executor = _fast_backtest_executor_label()
+    db = SessionLocal()
+    try:
+        from app.services.trading.learning import _auto_backtest_from_queue
+
+        result = _auto_backtest_from_queue(db, uid, batch_size=batch_size)
+        completed = int(result.get("backtests_run") or 0)
+        processed_patterns = int(result.get("patterns_processed") or 0)
+        queue_executor = str(result.get("queue_executor") or queue_executor)
+        logger.info(
+            "[brain:subtask] fast_backtest queue executor finished "
+            "executor=%s processed_patterns=%d completed=%d",
+            queue_executor,
+            processed_patterns,
+            completed,
+        )
+    except Exception as e:
+        logger.warning("[brain:subtask] fast_backtest queue executor failed: %s", e)
+        errors += 1
+    finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
         try:
-            patterns = get_pending_patterns(db, limit=1)
-            if not patterns:
-                break
-            pat = patterns[0]
-            from app.services.trading.backtest_queue_worker import execute_queue_backtest_for_pattern
-            bt_count, _err = execute_queue_backtest_for_pattern(pat.id, uid)
-            completed += bt_count
-        except Exception as e:
-            logger.warning("[brain:subtask] fast_backtest item failed: %s", e)
-            errors += 1
-        finally:
-            # FIX 46 pattern: rollback before close (read txn cleanup).
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            db.close()
-    return {"completed": completed, "errors": errors, "batch_size": batch_size}
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+    queue_after = _fast_backtest_queue_status_snapshot()
+    pending_after_raw = queue_after.get("pending")
+    pending_after = int(pending_after_raw) if pending_after_raw is not None else pending_before
+    drained = max(0, pending_before - pending_after)
+    elapsed_s = max(
+        FAST_BACKTEST_RATE_MIN_ELAPSED_SECONDS,
+        time.monotonic() - started_at,
+    )
+    drain_rate = drained / (elapsed_s / FAST_BACKTEST_RATE_SECONDS_PER_MINUTE)
+    logger.info(
+        "[brain:subtask] fast_backtest done processed_patterns=%d completed=%d "
+        "errors=%d pending_before=%d pending_after=%d "
+        "promotion_path_debt_before=%s promotion_path_debt_after=%s "
+        "drain_rate_per_min=%.2f",
+        processed_patterns,
+        completed,
+        errors,
+        pending_before,
+        pending_after,
+        queue_before.get("promotion_path_debt_pending", "-"),
+        queue_after.get("promotion_path_debt_pending", "-"),
+        drain_rate,
+    )
+    return {
+        "completed": completed,
+        "errors": errors,
+        "batch_size": batch_size,
+        "processed_patterns": processed_patterns,
+        "queue_executor": queue_executor,
+        "pending_before": pending_before,
+        "pending_after": pending_after,
+        "promotion_path_debt_pending_before": queue_before.get(
+            "promotion_path_debt_pending"
+        ),
+        "promotion_path_debt_pending_after": queue_after.get(
+            "promotion_path_debt_pending"
+        ),
+        "drain_rate_per_min": drain_rate,
+    }
 
 
 def _run_subtask_pattern_regime_ledger(status: "BrainWorkerStatus") -> dict:
@@ -733,8 +923,17 @@ def _run_fast_backtest_independent_loop(stop_event: "threading.Event", status: "
         "CHILI_BRAIN_FAST_BACKTEST_INTERVAL_S",
         str(getattr(_settings, "brain_fast_backtest_interval_s", 60)),
     ))
-    logger.info("[brain:fast_backtest_loop] starting (interval=%ds, batch_size=%s)",
-                interval_s, os.environ.get("CHILI_BRAIN_FAST_BACKTEST_BATCH", "30"))
+    queue_status = _fast_backtest_queue_status_snapshot()
+    logger.info(
+        "[brain:fast_backtest_loop] starting interval=%ds batch_size=%d "
+        "executor=%s pending=%s boosted=%s promotion_path_debt=%s",
+        interval_s,
+        _fast_backtest_batch_size(),
+        _fast_backtest_executor_label(),
+        queue_status.get("pending", "-"),
+        queue_status.get("boosted", "-"),
+        queue_status.get("promotion_path_debt_pending", "-"),
+    )
     while not stop_event.is_set():
         try:
             # Lock prevents concurrent fast_backtest with the after-cycle sweep
@@ -751,8 +950,16 @@ def _run_fast_backtest_independent_loop(stop_event: "threading.Event", status: "
                     errors = int((r or {}).get("errors", 0) or 0)
                     if completed > 0 or errors > 0:
                         logger.info(
-                            "[brain:fast_backtest_loop] tick completed=%d errors=%d elapsed=%.1fs",
-                            completed, errors, elapsed
+                            "[brain:fast_backtest_loop] tick completed=%d "
+                            "processed_patterns=%s errors=%d pending_before=%s "
+                            "pending_after=%s drain_rate_per_min=%.2f elapsed=%.1fs",
+                            completed,
+                            (r or {}).get("processed_patterns", "-"),
+                            errors,
+                            (r or {}).get("pending_before", "-"),
+                            (r or {}).get("pending_after", "-"),
+                            float((r or {}).get("drain_rate_per_min") or 0.0),
+                            elapsed,
                         )
                 finally:
                     _FAST_BACKTEST_LOCK.release()
@@ -1708,6 +1915,17 @@ def _run_mining_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> Non
 
 def _run_backtest_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
     sleep_s = max(30, min(300, int(args.interval) * 60 if args.interval else 60))
+    queue_status = _fast_backtest_queue_status_snapshot()
+    logger.info(
+        "[brain] backtest queue owner starting batch_size=%d executor=%s "
+        "pending=%s boosted=%s needs_retest=%s promotion_path_debt=%s",
+        _fast_backtest_batch_size(),
+        _fast_backtest_executor_label(),
+        queue_status.get("pending", "-"),
+        queue_status.get("boosted", "-"),
+        queue_status.get("needs_retest", "-"),
+        queue_status.get("promotion_path_debt_pending", "-"),
+    )
     while True:
         if check_pause_signal():
             status.status = "paused"
@@ -1807,9 +2025,9 @@ def main():
     )
     args = parser.parse_args()
     
-    # Acquire exclusive lock to prevent multiple workers
-    if not acquire_lock():
-        logger.error("[brain] Another brain worker is already running. Exiting.")
+    # Acquire exclusive lock to prevent duplicate workers for this mode.
+    if not acquire_lock(args.mode):
+        logger.error("[brain] Another %s worker is already running. Exiting.", args.mode)
         sys.exit(1)
     
     status = BrainWorkerStatus()
@@ -1832,9 +2050,17 @@ def main():
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
     
+    fast_backtest_config = _configure_fast_backtest_batch_for_mode(args.mode)
     logger.info(f"[brain] Brain Worker starting (PID: {status.pid}, mode: {args.mode})")
     logger.info(f"[brain] DATA_DIR (must match app DB / API): {DATA_DIR.resolve()}")
     logger.info(f"[brain] Cycle interval: {args.interval} minutes")
+    logger.info(
+        "[brain] fast_backtest config mode=%s batch_size=%s source=%s executor=%s",
+        fast_backtest_config["mode"],
+        fast_backtest_config["batch_size"],
+        fast_backtest_config["source"],
+        _fast_backtest_executor_label(),
+    )
     if log_brain_io_profile:
         log_brain_io_profile(logger)
 

@@ -327,7 +327,18 @@ def _pattern_capital_gate(db: Session, *, scan_pattern_id: int | None, execution
     is_live = str(execution_mode or "").strip().lower() == "live"
     hard_reason = None
     if is_live and recert_required and bool(getattr(settings, "chili_autotrader_block_live_on_recert_required", True)):
-        hard_reason = "pattern_recert_required"
+        pilot_soft_allowed = False
+        try:
+            from .alpha_portfolio_gate import pilot_bootstrap_recert_allows_live
+
+            pilot_soft_allowed = pilot_bootstrap_recert_allows_live(
+                pattern,
+                settings_=settings,
+            )
+        except Exception:
+            pilot_soft_allowed = False
+        if not pilot_soft_allowed:
+            hard_reason = "pattern_recert_required"
     if is_live and hard_reason is None and lifecycle in {"retired", "decayed", "challenged"}:
         hard_reason = "pattern_lifecycle_degraded"
 
@@ -1008,4 +1019,3 @@ def allocate_momentum_session_entry(
         "portfolio_allocator_live_hard_block": allocator_live_hard_block,
         "pattern_capital_gate": pattern_gate,
     }
-

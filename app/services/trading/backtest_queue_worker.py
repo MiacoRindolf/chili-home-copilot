@@ -30,6 +30,33 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
     from .learning_events import log_learning_event
     from datetime import datetime
 
+    def _complete_recert_if_open(
+        *,
+        total: int | None,
+        wins: int | None,
+        win_rate: float | None,
+        avg_return: float | None,
+        backtests_run: int | None,
+    ) -> None:
+        try:
+            from .recert_queue_service import complete_open_recerts_from_backtest
+
+            complete_open_recerts_from_backtest(
+                db,
+                scan_pattern_id=int(pattern.id),
+                total=total,
+                wins=wins,
+                win_rate=win_rate,
+                avg_return=avg_return,
+                backtests_run=backtests_run,
+            )
+        except Exception:
+            logger.debug(
+                "[backtest_queue] recert completion failed pattern_id=%s",
+                getattr(pattern, "id", None),
+                exc_info=True,
+            )
+
     db = SessionLocal()
     try:
         pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
@@ -120,6 +147,13 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             win_rate = wins / total if total >= 3 else None
             avg_return = result.get("avg_return")
             mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
+            _complete_recert_if_open(
+                total=total,
+                wins=wins,
+                win_rate=win_rate,
+                avg_return=avg_return,
+                backtests_run=backtests_run,
+            )
             pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
             if pattern and total >= 2 and wr_pct >= min_pre:
                 pattern.queue_tier = "full"
@@ -169,6 +203,13 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 )
             else:
                 mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
+                _complete_recert_if_open(
+                    total=total,
+                    wins=wins,
+                    win_rate=win_rate,
+                    avg_return=avg_return,
+                    backtests_run=backtests_run,
+                )
             return (backtests_run, 1)
 
         result = smart_backtest_insight(
@@ -184,6 +225,13 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         win_rate = wins / total if total >= 3 else None
         avg_return = result.get("avg_return")
         mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
+        _complete_recert_if_open(
+            total=total,
+            wins=wins,
+            win_rate=win_rate,
+            avg_return=avg_return,
+            backtests_run=backtests_run,
+        )
         if total >= 3:
             log_learning_event(
                 db,

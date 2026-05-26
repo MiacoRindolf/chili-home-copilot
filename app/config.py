@@ -6,6 +6,36 @@ from typing import Any, Optional
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE = 0
+FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
+REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = "ticker_regime,cross_asset_regime"
+AUTOTRADER_SYNERGY_DEFAULT_FRACTION = 0.25
+AUTOTRADER_SYNERGY_DEFAULT_MAX_NOTIONAL_USD = 50.0
+AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE = 1
+AUTOTRADER_SYNERGY_MAX_SCALE_INS_CONFIG_LIMIT = 10
+AUTOTRADER_PROBATION_DEFAULT_NOTIONAL_MULTIPLIER = 0.25
+AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_PER_DAY = 1
+AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_DAY = 3
+AUTOTRADER_PROBATION_DEFAULT_MIN_CPCV_SHARPE = 1.0
+AUTOTRADER_PROBATION_DEFAULT_MIN_REALIZED_TRADES = 5
+AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN = 100
+AUTOTRADER_PAPER_SHADOW_MAX_OPEN_CONFIG_LIMIT = 1000
+AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS = 72
+AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_MAX_AGE_HOURS = 24 * 30
+AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER = 5
+AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_BUFFER = 100
+AUTOTRADER_PAPER_DYNAMIC_DEFAULT_MONITOR_COOLDOWN_MINUTES = 5
+AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES = 240
+AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN = True
+PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS = 2.0
+PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS = 6
+PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT = 0.0
+PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS = 3600
+PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES = 30.0
+PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES = 1
+PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS = 50.0
+PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN = 12
+
 # ── Config profiles ──────────────────────────────────────────────────────
 CONFIG_PROFILES: dict[str, dict[str, Any]] = {
     "default": {},
@@ -441,6 +471,8 @@ class Settings(BaseSettings):
     # stuck on a stalled provider chain. Bridge to FIX 31 endgame.
     brain_fast_backtest_independent_loop: bool = True
     brain_fast_backtest_interval_s: int = 60
+    brain_fast_backtest_batch_lean_cycle: int = FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE
+    brain_fast_backtest_batch_backtest: int = FAST_BACKTEST_BATCH_DEFAULT_BACKTEST
 
     # FIX 36 (Phase 2 of FIX 31, 2026-04-29): event-driven mine handler.
     # Replaces Step 1 of run_learning_cycle by reacting to
@@ -518,6 +550,7 @@ class Settings(BaseSettings):
     brain_recert_queue_dispatch_interval_minutes: int = 60
     brain_recert_queue_dispatch_limit: int = 5
     brain_recert_queue_backtest_priority: int = 250
+    brain_recert_queue_priority_pattern_ids: str = "585"
 
     # Phase K - Divergence panel + ops health endpoint (shadow rollout).
     brain_divergence_scorer_mode: str = "shadow"
@@ -919,6 +952,11 @@ class Settings(BaseSettings):
     chili_realized_ev_min_trades: int = 5
     chili_realized_ev_min_avg_return_pct: float = 0.0
     chili_realized_ev_min_win_rate: float = 0.0
+    # Let paper/shadow evidence from raw_realized_* clear the EV gate only
+    # when corrected/live evidence is missing or still below the minimum sample.
+    # It never overrides a live/corrected sample that already shows clear loss.
+    chili_realized_ev_gate_allow_raw_fallback: bool = True
+    chili_shadow_vetting_require_realized_ev_for_full: bool = True
     # 2026-04-28: ticker-scope autotune. Reads per-ticker realized PnL and
     # narrows ``ticker_scope`` from 'universal' to 'explicit_list' when
     # a pattern has both edge AND bleed tickers. The brain LEARNS its
@@ -929,11 +967,15 @@ class Settings(BaseSettings):
     chili_ticker_autotune_lookback_days: int = 90
     chili_ticker_autotune_dry_run: bool = False
     # 2026-04-28: realized stats sync. Recomputes ScanPattern columns from
-    # trading_trades. Closes the gap exposed by the audit (8 patterns had
-    # actual trades but stored trade_count=0).
+    # trading_trades plus qualified autotrader paper/shadow outcomes. Closes
+    # the gap exposed by the audit (8 patterns had actual trades but stored
+    # trade_count=0), and lets paper/pilot evidence clear thin-EV debt without
+    # manual certification work.
     chili_realized_sync_enabled: bool = True
     chili_realized_sync_lookback_days: int = 365
     chili_realized_sync_min_n: int = 1
+    chili_realized_sync_interval_minutes: int = 30
+    chili_realized_sync_include_paper_dynamic: bool = True
     # f-canonical-outcome-layer Phase A (2026-05-14). Shadow-log raw-vs-
     # corrected win-rate divergence thresholds. INFO ≥ info_pct, WARNING
     # ≥ warn_pct. Phase A is pure observation -- no DB row, no metric --
@@ -950,6 +992,16 @@ class Settings(BaseSettings):
     # 1. priority scorer runs daily and updates backtest_priority based
     #    on lifecycle/staleness/evidence-gap signals.
     chili_backtest_priority_scorer_enabled: bool = True
+    # Promotion-path evidence debt should drain before generic research
+    # backlog. This does not relax CPCV or EV gates; it only prioritizes
+    # shadow/pilot patterns whose stored gate reasons say they need more
+    # CPCV path evidence before they can graduate.
+    chili_backtest_prioritize_promotion_path_debt: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_BACKTEST_PRIORITIZE_PROMOTION_PATH_DEBT"
+        ),
+    )
     # 2. switch backtest executor to process pool for true CPU
     #    parallelism. Threads are GIL-bound on the indicator-compute
     #    portion of each backtest. Set per-worker memory cap so process
@@ -991,6 +1043,13 @@ class Settings(BaseSettings):
     # selected: prevents single-dim noise from over-blocking while still
     # catching cases where multiple dimensions agree on regime risk.
     chili_regime_gate_min_negatives: int = 2
+    # Crypto markets are 24/7 and should not be vetoed by equity breadth
+    # plus equity-vol risk alone. When enabled, a crypto regime block needs
+    # at least one negative anchor from the listed dimensions.
+    chili_regime_gate_require_crypto_anchor_negative: bool = True
+    chili_regime_gate_crypto_anchor_dimensions: str = (
+        REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS
+    )
     # When >0, :func:`evaluate_pattern_cpcv` subsamples labeled rows before CV/LightGBM
     # (memory safety for patterns with huge trading_pattern_trades). 0 = no cap.
     chili_cpcv_max_labeled_rows: int = 0
@@ -2060,9 +2119,9 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_ENABLED"),
     )
     chili_autotrader_paper_shadow_max_open: int = Field(
-        default=100,
+        default=AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
         ge=1,
-        le=1000,
+        le=AUTOTRADER_PAPER_SHADOW_MAX_OPEN_CONFIG_LIMIT,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_MAX_OPEN"),
     )
     chili_autotrader_paper_shadow_janitor_enabled: bool = Field(
@@ -2070,15 +2129,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_JANITOR_ENABLED"),
     )
     chili_autotrader_paper_shadow_janitor_max_age_hours: int = Field(
-        default=72,
+        default=AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
         ge=1,
-        le=24 * 30,
+        le=AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_MAX_AGE_HOURS,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_JANITOR_MAX_AGE_HOURS"),
     )
     chili_autotrader_paper_shadow_janitor_buffer: int = Field(
-        default=5,
+        default=AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
         ge=0,
-        le=100,
+        le=AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_BUFFER,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_JANITOR_BUFFER"),
     )
     # Open paper-shadow evidence for live candidates that are blocked by
@@ -2090,6 +2149,12 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_SHADOW_QUALIFIED_BLOCKS_ENABLED"),
     )
+    chili_autotrader_paper_shadow_reject_allow_duplicate_open: bool = Field(
+        default=AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAPER_SHADOW_REJECT_ALLOW_DUPLICATE_OPEN"
+        ),
+    )
     # Paper-shadow evidence should be scored against the same kind of dynamic
     # position management used live, not only against the original stop/target.
     # This lightweight overlay lets autotrader-tagged PaperTrade rows react to
@@ -2099,9 +2164,9 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_DYNAMIC_MONITOR_ENABLED"),
     )
     chili_autotrader_paper_dynamic_monitor_cooldown_minutes: int = Field(
-        default=5,
+        default=AUTOTRADER_PAPER_DYNAMIC_DEFAULT_MONITOR_COOLDOWN_MINUTES,
         ge=0,
-        le=240,
+        le=AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PAPER_DYNAMIC_MONITOR_COOLDOWN_MINUTES"),
     )
     # f-handler-live-drift + f-handler-execution-robustness (Phase 2
@@ -2139,6 +2204,34 @@ class Settings(BaseSettings):
             "Explicit dollar add-on for scale-ins. Leave at 0 unless the "
             "operator intentionally enables synergy sizing."
         ),
+    )
+    chili_autotrader_synergy_fraction: float = Field(
+        default=AUTOTRADER_SYNERGY_DEFAULT_FRACTION,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_FRACTION"),
+        description=(
+            "Default scale-in fraction of the existing position when the "
+            "explicit synergy add-on is left at 0."
+        ),
+    )
+    chili_autotrader_synergy_max_notional_usd: float = Field(
+        default=AUTOTRADER_SYNERGY_DEFAULT_MAX_NOTIONAL_USD,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_MAX_NOTIONAL_USD"),
+        description=(
+            "Small-dollar cap for fraction-based synergy scale-ins. Set 0 "
+            "only for an intentional uncapped paper/live soak."
+        ),
+    )
+    chili_autotrader_synergy_max_scale_ins_per_trade: int = Field(
+        default=AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE,
+        ge=0,
+        le=AUTOTRADER_SYNERGY_MAX_SCALE_INS_CONFIG_LIMIT,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SYNERGY_MAX_SCALE_INS_PER_TRADE"
+        ),
+        description="Maximum confirming-pattern scale-ins allowed per open trade.",
     )
     chili_autotrader_synergy_enabled: bool = Field(
         default=False,
@@ -2272,6 +2365,27 @@ class Settings(BaseSettings):
         ge=0.0,
         le=250.0,
         validation_alias=AliasChoices("CHILI_COINBASE_MAKER_FIRST_TAKER_PRICE_BUFFER_BPS"),
+    )
+
+    chili_coinbase_maker_only_improve_bid_ticks: int = Field(
+        default=1,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices("CHILI_COINBASE_MAKER_ONLY_IMPROVE_BID_TICKS"),
+    )
+    chili_coinbase_maker_first_edge_thin_hold_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_MAKER_FIRST_EDGE_THIN_HOLD_ENABLED"
+        ),
+    )
+    chili_coinbase_maker_first_edge_thin_hold_seconds: int = Field(
+        default=1800,
+        ge=30,
+        le=86400,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_MAKER_FIRST_EDGE_THIN_HOLD_SECONDS"
+        ),
     )
 
     # P0.6 — execution-event lag telemetry. Measures recorded_at - event_at
@@ -2967,6 +3081,18 @@ class Settings(BaseSettings):
         default=5,
         validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MIN_REALIZED_TRADES"),
     )
+    chili_alpha_portfolio_min_oos_trades: int = Field(
+        default=5,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MIN_OOS_TRADES"),
+    )
+    chili_alpha_portfolio_min_oos_avg_return_pct: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MIN_OOS_AVG_RETURN_PCT"),
+    )
+    chili_alpha_portfolio_min_oos_win_rate: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MIN_OOS_WIN_RATE"),
+    )
     chili_alpha_portfolio_min_risk_sleeves: int = Field(
         default=3,
         validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MIN_RISK_SLEEVES"),
@@ -2997,6 +3123,30 @@ class Settings(BaseSettings):
             "CHILI_ALPHA_PORTFOLIO_EXECUTION_MAX_P90_SLIPPAGE_PCT"
         ),
     )
+    chili_alpha_portfolio_maintenance_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MAINTENANCE_ENABLED"),
+    )
+    chili_alpha_portfolio_maintenance_interval_minutes: int = Field(
+        default=30,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_MAINTENANCE_INTERVAL_MINUTES"),
+    )
+    chili_alpha_portfolio_auto_queue_recert_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_AUTO_QUEUE_RECERT_ENABLED"),
+    )
+    chili_alpha_portfolio_sync_realized_on_maintenance: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_SYNC_REALIZED_ON_MAINTENANCE"),
+    )
+    chili_alpha_portfolio_refresh_quality_on_maintenance: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_REFRESH_QUALITY_ON_MAINTENANCE"),
+    )
+    chili_alpha_portfolio_auto_stage_shadow_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPHA_PORTFOLIO_AUTO_STAGE_SHADOW_ENABLED"),
+    )
     # Shadow vetting finalizer. ``shadow_promoted`` is the broker-blocked
     # observation stage; this flag lets the scheduler advance fully scored,
     # top-pool shadow patterns to normal ``promoted`` lifecycle once their
@@ -3026,6 +3176,10 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_ALLOW_PILOT_PROMOTED_LIVE"),
     )
+    chili_pilot_promoted_allow_bootstrap_recert_live: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_PILOT_PROMOTED_ALLOW_BOOTSTRAP_RECERT_LIVE"),
+    )
     chili_autotrader_block_live_on_capital_fallback: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_BLOCK_LIVE_ON_CAPITAL_FALLBACK"),
@@ -3033,6 +3187,44 @@ class Settings(BaseSettings):
     chili_autotrader_block_live_on_recert_required: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_BLOCK_LIVE_ON_RECERT_REQUIRED"),
+    )
+    chili_autotrader_probation_live_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PROBATION_LIVE_ENABLED"),
+    )
+    chili_autotrader_probation_notional_multiplier: float = Field(
+        default=AUTOTRADER_PROBATION_DEFAULT_NOTIONAL_MULTIPLIER,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PROBATION_NOTIONAL_MULTIPLIER"),
+    )
+    chili_autotrader_probation_max_trades_per_pattern_per_day: int = Field(
+        default=AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_PER_DAY,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PROBATION_MAX_TRADES_PER_PATTERN_PER_DAY"
+        ),
+    )
+    chili_autotrader_probation_max_trades_per_day: int = Field(
+        default=AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_DAY,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PROBATION_MAX_TRADES_PER_DAY"),
+    )
+    chili_autotrader_probation_min_cpcv_sharpe: float = Field(
+        default=AUTOTRADER_PROBATION_DEFAULT_MIN_CPCV_SHARPE,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PROBATION_MIN_CPCV_SHARPE"),
+    )
+    chili_autotrader_probation_min_realized_trades: int = Field(
+        default=AUTOTRADER_PROBATION_DEFAULT_MIN_REALIZED_TRADES,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PROBATION_MIN_REALIZED_TRADES"),
+    )
+    chili_autotrader_recert_signal_fastlane_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_RECERT_SIGNAL_FASTLANE_ENABLED"),
     )
     chili_autotrader_shadow_promoted_paper_observation_enabled: bool = Field(
         default=True,
@@ -3702,6 +3894,42 @@ class Settings(BaseSettings):
     pattern_imminent_shadow_max_per_pattern_per_run: int = 2
     pattern_imminent_shadow_cooldown_hours: float = 1.0
     pattern_imminent_shadow_cooldown_hours_crypto: float = 0.25
+    # Keep broker-blocked shadow observation useful without letting one
+    # recently rejected negative-edge pattern monopolize the scanner's shadow
+    # slots. This does not demote the pattern or affect promoted/live alerts.
+    pattern_imminent_shadow_poor_edge_cooldown_enabled: bool = True
+    pattern_imminent_shadow_poor_edge_lookback_hours: float = (
+        PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS
+    )
+    pattern_imminent_shadow_poor_edge_min_rejects: int = (
+        PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS
+    )
+    pattern_imminent_shadow_poor_edge_max_avg_return_pct: float = (
+        PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT
+    )
+    # Activity throughput: for crypto imminent scans, spend latency on symbols
+    # that the live Coinbase spot venue can actually execute. If Coinbase
+    # universe metadata is unavailable, the scanner fails open.
+    pattern_imminent_filter_crypto_to_coinbase_spot: bool = True
+    pattern_imminent_coinbase_spot_filter_ttl_seconds: int = (
+        PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS
+    )
+    # Repeated OHLCV/integrity failures should not monopolize every fast-scan
+    # minute. This is an abstention cooldown only; a skipped score cannot
+    # create a candidate and therefore cannot weaken live-entry gates.
+    pattern_imminent_score_failure_cooldown_enabled: bool = True
+    pattern_imminent_score_failure_cooldown_minutes: float = (
+        PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES
+    )
+    pattern_imminent_score_failure_min_failures: int = (
+        PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES
+    )
+    pattern_imminent_score_time_budget_seconds: float = (
+        PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS
+    )
+    pattern_imminent_max_tickers_per_pattern: int = (
+        PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN
+    )
     pattern_imminent_research_mode: bool = False
     pattern_imminent_research_nearmiss_log: bool = False
     pattern_imminent_debug_dry_run: bool = False

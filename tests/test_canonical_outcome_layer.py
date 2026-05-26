@@ -6,7 +6,8 @@ Tests the canonical outcome split:
   ``corrected_*`` and the legacy ``{trade_count, win_rate,
   avg_return_pct}`` columns.
 * ``realized_stats_sync.sync_realized_stats`` writes ONLY
-  ``raw_realized_*`` and NEVER touches legacy.
+  ``raw_realized_*`` and NEVER touches legacy. It may include qualified
+  AutoTrader paper/shadow outcomes in those raw evidence fields.
 * When both writers fire in sequence (race), the legacy columns retain
   their corrected values -- no last-writer-wins.
 """
@@ -14,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.models.trading import ScanPattern, Trade
+from app.models.trading import PaperTrade, ScanPattern, Trade
 from app.services.trading.learning import update_pattern_stats_from_closed_trades
 from app.services.trading.realized_stats_sync import sync_realized_stats
 
@@ -73,6 +74,39 @@ def _make_closed_trade(
     db.add(t)
     db.flush()
     return t
+
+
+def _make_closed_paper_trade(
+    db,
+    *,
+    pattern_id: int,
+    entry_price: float,
+    exit_price: float,
+    entry_offset_days: int,
+    exit_offset_days: int,
+    signal_json: dict | None = None,
+    ticker: str = "TEST",
+) -> PaperTrade:
+    entry_dt = datetime.utcnow() - timedelta(days=entry_offset_days)
+    exit_dt = datetime.utcnow() - timedelta(days=exit_offset_days)
+    pnl = exit_price - entry_price
+    pt = PaperTrade(
+        ticker=ticker,
+        direction="long",
+        entry_price=entry_price,
+        exit_price=exit_price,
+        quantity=1.0,
+        entry_date=entry_dt,
+        exit_date=exit_dt,
+        status="closed",
+        pnl=pnl,
+        pnl_pct=((exit_price - entry_price) / entry_price) * 100.0,
+        scan_pattern_id=pattern_id,
+        signal_json=signal_json or {},
+    )
+    db.add(pt)
+    db.flush()
+    return pt
 
 
 # ── tests ────────────────────────────────────────────────────────────
@@ -190,6 +224,50 @@ def test_raw_writer_never_touches_legacy(db):
     # Avg of (+1.0%, -10.0%, -15.0%) ≈ -8.0 %.
     assert pat.raw_realized_avg_return_pct < 0.0
     assert pat.raw_realized_stats_updated_at is not None
+
+
+def test_raw_writer_includes_qualified_autotrader_paper_outcomes(db):
+    """AutoTrader paper outcomes should feed raw evidence, while untagged
+    manual paper rows stay out of the promotion/recert loop."""
+    pat = _make_pattern(db, name="raw_writer_paper_dynamic")
+
+    _make_closed_paper_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=100.0,
+        exit_price=110.0,
+        entry_offset_days=10,
+        exit_offset_days=9,
+        signal_json={"auto_trader_v1": True},
+    )
+    _make_closed_paper_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=100.0,
+        exit_price=90.0,
+        entry_offset_days=8,
+        exit_offset_days=7,
+        signal_json={"paper_shadow": True},
+    )
+    _make_closed_paper_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=100.0,
+        exit_price=200.0,
+        entry_offset_days=6,
+        exit_offset_days=5,
+        signal_json={},
+    )
+    db.commit()
+
+    result = sync_realized_stats(db, dry_run=False)
+    assert result["updated"] >= 1
+    assert result["paper_dynamic_trades"] >= 2
+
+    db.refresh(pat)
+    assert pat.raw_realized_trade_count == 2
+    assert pat.raw_realized_win_rate == 0.5
+    assert abs((pat.raw_realized_avg_return_pct or 0.0) - 0.0) < 1e-6
 
 
 def test_race_corrected_then_raw_leaves_legacy_corrected(db):

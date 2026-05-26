@@ -738,6 +738,7 @@ def run_shadow_vetting_cycle(
 
     promoted_ids: list[int] = []
     pilot_ids: list[int] = []
+    realized_ev_blocked_ids: list[int] = []
     collecting = 0
     held = 0
 
@@ -753,6 +754,33 @@ def run_shadow_vetting_cycle(
         if pattern is None:
             continue
         old_lifecycle = (pattern.lifecycle_stage or "").strip().lower()
+        if row["eligible"] and bool(
+            getattr(settings_, "chili_shadow_vetting_require_realized_ev_for_full", True)
+        ):
+            try:
+                from .realized_ev_gate import check_realized_ev_blocking
+
+                ev_blocked, ev_reasons, ev_snapshot = check_realized_ev_blocking(pattern)
+            except Exception as exc:
+                ev_blocked = True
+                ev_reasons = [f"realized_ev_gate_failed:{type(exc).__name__}"]
+                ev_snapshot = {"ok": False, "error": str(exc)[:500]}
+                logger.warning(
+                    "%s realized EV full-promotion gate failed pattern_id=%s: %s",
+                    LOG_PREFIX,
+                    pid,
+                    exc,
+                    exc_info=True,
+                )
+            row["realized_ev_gate"] = {
+                "blocked": bool(ev_blocked),
+                "reasons": list(ev_reasons),
+                "snapshot": dict(ev_snapshot or {}),
+            }
+            if ev_blocked:
+                row["eligible"] = False
+                row["realized_ev_blocked"] = True
+                realized_ev_blocked_ids.append(pid)
         if row["eligible"]:
             old_status = (pattern.promotion_status or "").strip()
             pattern.lifecycle_stage = "promoted"
@@ -784,6 +812,7 @@ def run_shadow_vetting_cycle(
                         "recent_directional_wr": row["recent_directional_wr"],
                         "directional_decay": row["directional_decay"],
                         "freshness": row["freshness"],
+                        "realized_ev_gate": row.get("realized_ev_gate"),
                     },
                 )
             except Exception:
@@ -845,6 +874,8 @@ def run_shadow_vetting_cycle(
         "promoted_ids": promoted_ids,
         "pilot_count": len(pilot_ids),
         "pilot_ids": pilot_ids,
+        "realized_ev_blocked_count": len(realized_ev_blocked_ids),
+        "realized_ev_blocked_ids": realized_ev_blocked_ids,
         "collecting_ev": collecting,
         "held": held,
         "alpha_portfolio_gate": {

@@ -24,15 +24,22 @@ from uuid import uuid4
 
 import pytest
 
+from app.config import AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN
 from app import models
 from app.models.trading import (
     BreakoutAlert, PaperTrade, ScanPattern,
 )
 from app.services.trading import auto_trader as at_mod
-from app.services.trading.auto_trader import _maybe_open_paper_shadow
+from app.services.trading.auto_trader import (
+    PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS,
+    PAPER_SHADOW_DUPLICATE_POLICY_STRICT,
+    _maybe_open_paper_shadow,
+    _maybe_open_reject_paper_shadow,
+)
 from app.services.trading.paper_trading import prune_autotrader_paper_shadow_capacity
 
 REPO = Path(__file__).resolve().parent.parent
+TEST_SHADOW_QUANTITY = 1
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +80,25 @@ def _seed_pattern_and_alert(db) -> tuple[ScanPattern, BreakoutAlert]:
     db.commit()
     db.refresh(alert)
     return pat, alert
+
+
+def _seed_sibling_alert(db, alert: BreakoutAlert) -> BreakoutAlert:
+    sibling = BreakoutAlert(
+        ticker=alert.ticker,
+        alert_tier=alert.alert_tier,
+        score_at_alert=alert.score_at_alert,
+        price_at_alert=alert.price_at_alert,
+        entry_price=alert.entry_price,
+        alerted_at=datetime.utcnow(),
+        user_id=alert.user_id,
+        scan_pattern_id=alert.scan_pattern_id,
+        stop_loss=alert.stop_loss,
+        target_price=alert.target_price,
+    )
+    db.add(sibling)
+    db.commit()
+    db.refresh(sibling)
+    return sibling
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +172,215 @@ def test_helper_creates_shadow_when_flag_on_placed(db, monkeypatch):
     assert pt.entry_price == pytest.approx(100.0)
     assert pt.signal_json.get("paper_shadow") is True
     assert pt.signal_json.get("shadow_decision") == "placed"
+    assert (
+        pt.signal_json.get("paper_shadow_duplicate_policy")
+        == PAPER_SHADOW_DUPLICATE_POLICY_STRICT
+    )
+
+
+def test_placed_shadow_keeps_duplicate_dedupe_strict(db, monkeypatch):
+    pat, alert = _seed_pattern_and_alert(db)
+    sibling = _seed_sibling_alert(db, alert)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", True,
+    )
+    from app.services.trading import paper_trading as pt_mod
+    monkeypatch.setattr(
+        pt_mod, "_compute_atr_levels",
+        lambda ticker, entry_price, exit_cfg: (
+            entry_price * 0.97, entry_price * 1.10, 1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        pt_mod, "_apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    _maybe_open_paper_shadow(
+        db,
+        uid=alert.user_id,
+        alert=alert,
+        qty=TEST_SHADOW_QUANTITY,
+        px=float(alert.entry_price),
+        snap={},
+        decision="placed",
+    )
+    _maybe_open_paper_shadow(
+        db,
+        uid=sibling.user_id,
+        alert=sibling,
+        qty=TEST_SHADOW_QUANTITY,
+        px=float(sibling.entry_price),
+        snap={},
+        decision="placed",
+    )
+    db.commit()
+
+    duplicate_scope_rows = db.query(PaperTrade).filter(
+        PaperTrade.user_id == alert.user_id,
+        PaperTrade.ticker == alert.ticker,
+        PaperTrade.scan_pattern_id == pat.id,
+        PaperTrade.status == "open",
+    ).all()
+    sibling_rows = db.query(PaperTrade).filter(
+        PaperTrade.paper_shadow_of_alert_id == sibling.id
+    ).all()
+    assert len(duplicate_scope_rows) == 1
+    assert len(sibling_rows) == 0
+
+
+def test_reject_shadow_can_bypass_duplicate_dedupe_for_learning(
+    db, monkeypatch,
+):
+    pat, alert = _seed_pattern_and_alert(db)
+    sibling = _seed_sibling_alert(db, alert)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_max_open",
+        AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
+    )
+    from app.services.trading import paper_trading as pt_mod
+    monkeypatch.setattr(
+        pt_mod, "_compute_atr_levels",
+        lambda ticker, entry_price, exit_cfg: (
+            entry_price * 0.97, entry_price * 1.10, 1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        pt_mod, "_apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+    db.add(PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pat.id,
+        ticker=alert.ticker,
+        direction="long",
+        entry_price=float(alert.entry_price),
+        stop_price=float(alert.stop_loss),
+        target_price=float(alert.target_price),
+        quantity=TEST_SHADOW_QUANTITY,
+        status="open",
+        entry_date=datetime.utcnow(),
+        signal_json={"auto_trader_v1": True, "paper_shadow": True},
+        paper_shadow_of_alert_id=alert.id,
+    ))
+    db.commit()
+
+    _maybe_open_reject_paper_shadow(
+        db,
+        uid=sibling.user_id,
+        alert=sibling,
+        px=float(sibling.entry_price),
+        snap={},
+        reason="non_positive_expected_edge",
+        existing_qty=TEST_SHADOW_QUANTITY,
+    )
+    db.commit()
+
+    duplicate_scope_rows = db.query(PaperTrade).filter(
+        PaperTrade.user_id == alert.user_id,
+        PaperTrade.ticker == alert.ticker,
+        PaperTrade.scan_pattern_id == pat.id,
+        PaperTrade.status == "open",
+    ).all()
+    sibling_rows = db.query(PaperTrade).filter(
+        PaperTrade.paper_shadow_of_alert_id == sibling.id
+    ).all()
+    assert len(duplicate_scope_rows) == 2
+    assert len(sibling_rows) == 1
+    assert sibling_rows[0].signal_json.get("shadow_decision") == (
+        "skipped_non_positive_expected_edge"
+    )
+    assert sibling_rows[0].signal_json.get("paper_shadow_reject_reason") == (
+        "non_positive_expected_edge"
+    )
+    assert sibling_rows[0].signal_json.get("paper_shadow_duplicate_policy") == (
+        PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
+    )
+
+
+def test_qualified_block_shadow_bypasses_duplicate_dedupe_for_recert_debt(
+    db, monkeypatch,
+):
+    pat, alert = _seed_pattern_and_alert(db)
+    sibling = _seed_sibling_alert(db, alert)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
+        True,
+    )
+    from app.services.trading import paper_trading as pt_mod
+    monkeypatch.setattr(
+        pt_mod, "_compute_atr_levels",
+        lambda ticker, entry_price, exit_cfg: (
+            entry_price * 0.97, entry_price * 1.10, 1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        pt_mod, "_apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+    db.add(PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pat.id,
+        ticker=alert.ticker,
+        direction="long",
+        entry_price=float(alert.entry_price),
+        stop_price=float(alert.stop_loss),
+        target_price=float(alert.target_price),
+        quantity=TEST_SHADOW_QUANTITY,
+        status="open",
+        entry_date=datetime.utcnow(),
+        signal_json={"auto_trader_v1": True, "paper_shadow": True},
+        paper_shadow_of_alert_id=alert.id,
+    ))
+    db.commit()
+
+    _maybe_open_paper_shadow(
+        db,
+        uid=sibling.user_id,
+        alert=sibling,
+        qty=TEST_SHADOW_QUANTITY,
+        px=float(sibling.entry_price),
+        snap={"paper_shadow_reject_reason": "pattern_recert_required"},
+        decision="blocked_recert_required",
+    )
+    db.commit()
+
+    duplicate_scope_rows = db.query(PaperTrade).filter(
+        PaperTrade.user_id == alert.user_id,
+        PaperTrade.ticker == alert.ticker,
+        PaperTrade.scan_pattern_id == pat.id,
+        PaperTrade.status == "open",
+    ).all()
+    sibling_rows = db.query(PaperTrade).filter(
+        PaperTrade.paper_shadow_of_alert_id == sibling.id
+    ).all()
+    assert len(duplicate_scope_rows) == 2
+    assert len(sibling_rows) == 1
+    assert sibling_rows[0].signal_json.get("shadow_decision") == (
+        "blocked_recert_required"
+    )
+    assert sibling_rows[0].signal_json.get("paper_shadow_duplicate_policy") == (
+        PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
+    )
 
 
 # ---------------------------------------------------------------------------

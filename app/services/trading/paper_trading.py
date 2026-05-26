@@ -40,6 +40,8 @@ DEFAULT_SLIPPAGE_PCT = 0.05
 DEFAULT_ATR_STOP_MULT = 2.0
 DEFAULT_ATR_TARGET_MULT = 3.0
 TRAILING_STOP_ACTIVATION_R = 1.0  # activate trailing after 1R move
+PAPER_TRADE_CAPACITY_SCOPE_ALL = "all"
+PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW = "autotrader_shadow"
 
 
 def _utc_iso(ts: datetime | None = None) -> str:
@@ -131,26 +133,42 @@ def open_paper_trade(
     signal_json: dict | None = None,
     paper_shadow_of_alert_id: int | None = None,
     max_open_trades: int | None = None,
+    capacity_scope: str = PAPER_TRADE_CAPACITY_SCOPE_ALL,
+    allow_duplicate_open: bool = False,
 ) -> PaperTrade | None:
     """Open a simulated paper trade with ATR-based adaptive levels."""
     open_limit = MAX_OPEN_PAPER_TRADES if max_open_trades is None else int(max_open_trades)
-    open_count = db.query(PaperTrade).filter(
+    open_q = db.query(PaperTrade).filter(
         PaperTrade.user_id == user_id,
         PaperTrade.status == "open",
-    ).count()
+    )
+    normalized_capacity_scope = (
+        capacity_scope or PAPER_TRADE_CAPACITY_SCOPE_ALL
+    ).strip().lower()
+    if normalized_capacity_scope == PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW:
+        open_count = sum(
+            1 for pt in open_q.all() if _is_autotrader_paper_shadow_row(pt)
+        )
+    else:
+        open_count = open_q.count()
     if open_count >= open_limit:
         logger.debug("[paper] Max open paper trades (%d) reached", open_limit)
         return None
 
-    existing = db.query(PaperTrade).filter(
-        PaperTrade.user_id == user_id,
-        PaperTrade.ticker == ticker.upper(),
-        PaperTrade.status == "open",
-        PaperTrade.scan_pattern_id == scan_pattern_id,
-    ).first()
-    if existing:
-        logger.debug("[paper] Already have open paper trade for %s pattern %s", ticker, scan_pattern_id)
-        return None
+    if not allow_duplicate_open:
+        existing = db.query(PaperTrade).filter(
+            PaperTrade.user_id == user_id,
+            PaperTrade.ticker == ticker.upper(),
+            PaperTrade.status == "open",
+            PaperTrade.scan_pattern_id == scan_pattern_id,
+        ).first()
+        if existing:
+            logger.debug(
+                "[paper] Already have open paper trade for %s pattern %s",
+                ticker,
+                scan_pattern_id,
+            )
+            return None
 
     exit_cfg = _get_pattern_exit_config(db, scan_pattern_id)
     atr_val = None

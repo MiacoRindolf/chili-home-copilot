@@ -3328,6 +3328,32 @@ def _run_pattern_quality_score_refresh_job() -> None:
     run_scheduler_job_guarded("pattern_quality_score_refresh", _work)
 
 
+def _run_realized_stats_sync_job() -> None:
+    """Refresh raw realized EV so paper/pilot outcomes can clear gate debt."""
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_realized_sync_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.realized_stats_sync import sync_realized_stats
+
+        sess = SessionLocal()
+        try:
+            out = sync_realized_stats(sess, dry_run=False)
+            logger.info("[scheduler] realized_stats_sync result=%s", out)
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("realized_stats_sync", _work)
+
+
 def _run_pattern_cohort_promote_job() -> None:
     """f-promotion-pipeline-rebalance Phase 4: weekly cohort
     auto-promote.
@@ -3359,6 +3385,34 @@ def _run_pattern_cohort_promote_job() -> None:
             sess.close()
 
     run_scheduler_job_guarded("pattern_cohort_promote", _work)
+
+
+def _run_alpha_portfolio_gate_maintenance_job() -> None:
+    """Persist alpha gate state and auto-queue pattern certification work."""
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "chili_alpha_portfolio_gate_enabled", False)):
+        return
+    if not bool(getattr(_settings, "chili_alpha_portfolio_maintenance_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.alpha_portfolio_gate import run_alpha_portfolio_maintenance
+
+        sess = SessionLocal()
+        try:
+            out = run_alpha_portfolio_maintenance(sess)
+            logger.info("[scheduler] alpha_portfolio_gate_maintenance result=%s", out)
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("alpha_portfolio_gate_maintenance", _work)
 
 
 def _run_pattern_shadow_vetting_job() -> None:
@@ -4199,6 +4253,23 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                 )
+                _rs_interval = max(
+                    15,
+                    int(getattr(
+                        settings,
+                        "chili_realized_sync_interval_minutes",
+                        30,
+                    ) or 30),
+                )
+                _scheduler.add_job(
+                    _run_realized_stats_sync_job,
+                    trigger=IntervalTrigger(minutes=_rs_interval),
+                    id="realized_stats_sync",
+                    name=f"Pattern realized stats sync (every {_rs_interval}min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=85),
+                )
                 _scheduler.add_job(
                     _run_pattern_cohort_promote_job,
                     trigger=CronTrigger(
@@ -4209,6 +4280,26 @@ def start_scheduler():
                     name="Pattern cohort auto-promote to shadow_promoted (Sun 22:00 PT)",
                     replace_existing=True,
                     max_instances=1,
+                )
+                _apg_interval = max(
+                    15,
+                    int(getattr(
+                        settings,
+                        "chili_alpha_portfolio_maintenance_interval_minutes",
+                        30,
+                    ) or 30),
+                )
+                _scheduler.add_job(
+                    _run_alpha_portfolio_gate_maintenance_job,
+                    trigger=IntervalTrigger(minutes=_apg_interval),
+                    id="alpha_portfolio_gate_maintenance",
+                    name=(
+                        "Alpha portfolio gate maintenance "
+                        f"(every {_apg_interval}min)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=95),
                 )
                 _scheduler.add_job(
                     _run_pattern_shadow_vetting_job,

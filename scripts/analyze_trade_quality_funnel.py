@@ -20,6 +20,10 @@ sys.path.insert(0, str(REPO_ROOT))
 os.environ.setdefault("CHILI_APP_NAME", "chili-trade-quality-funnel")
 
 from app.db import SessionLocal  # noqa: E402
+from app.config import settings  # noqa: E402
+
+FAST_BACKTEST_BATCH_ENV = "CHILI_BRAIN_FAST_BACKTEST_BATCH"
+UNKNOWN_BATCH = "unset"
 
 
 def _rows(sql: str, params: dict) -> list[dict]:
@@ -39,6 +43,36 @@ def _print_table(title: str, rows: Iterable[dict]) -> None:
     print("-+-".join("-" * widths[k] for k in keys))
     for row in rows:
         print(" | ".join(str(row.get(k, "")).ljust(widths[k]) for k in keys))
+
+
+def _queue_health_rows() -> list[dict]:
+    with SessionLocal() as db:
+        from app.services.trading.backtest_queue import get_queue_status
+
+        queue = get_queue_status(db, use_cache=False)
+    batch_raw = os.environ.get(FAST_BACKTEST_BATCH_ENV, UNKNOWN_BATCH)
+    try:
+        batch_size = int(batch_raw)
+    except (TypeError, ValueError):
+        batch_size = None
+    pending = int(queue.get("pending") or 0)
+    return [{
+        **queue,
+        "fast_backtest_batch_env": batch_raw,
+        "disabled_with_pending": bool(
+            pending > 0 and batch_size is not None and batch_size <= 0
+        ),
+        "backtest_mode_default_batch": getattr(
+            settings,
+            "brain_fast_backtest_batch_backtest",
+            None,
+        ),
+        "lean_cycle_default_batch": getattr(
+            settings,
+            "brain_fast_backtest_batch_lean_cycle",
+            None,
+        ),
+    }]
 
 
 def main() -> int:
@@ -125,6 +159,68 @@ def main() -> int:
             FROM scan_patterns
             GROUP BY 1, 2, 3
             ORDER BY patterns DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table("Backtest queue health", _queue_health_rows())
+    _print_table(
+        "Recert backlog by status/source",
+        _rows(
+            """
+            SELECT COALESCE(status, 'none') AS status,
+                   COALESCE(source, 'none') AS source,
+                   COUNT(*) AS n,
+                   MIN(observed_at) AS oldest_observed_at,
+                   MAX(observed_at) AS newest_observed_at
+            FROM trading_pattern_recert_log
+            WHERE observed_at >= NOW() - (:trade_days * INTERVAL '1 day')
+               OR status IN ('proposed', 'dispatched')
+            GROUP BY 1, 2
+            ORDER BY n DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
+        "Paper shadow capacity",
+        _rows(
+            """
+            SELECT COUNT(*) FILTER (WHERE status = 'open') AS open_total,
+                   COUNT(*) FILTER (
+                       WHERE status = 'open'
+                         AND (
+                             paper_shadow_of_alert_id IS NOT NULL
+                             OR COALESCE(signal_json, '{}'::jsonb)
+                                @> '{"paper_shadow": true}'::jsonb
+                         )
+                   ) AS open_shadow,
+                   :shadow_max_open AS configured_shadow_max_open
+            FROM trading_paper_trades
+            """,
+            {
+                **params,
+                "shadow_max_open": int(
+                    getattr(settings, "chili_autotrader_paper_shadow_max_open", 0)
+                    or 0
+                ),
+            },
+        ),
+    )
+    _print_table(
+        f"Coinbase cap blocks, last {params['days']}d",
+        _rows(
+            """
+            SELECT reason,
+                   COUNT(*) AS n,
+                   MAX(created_at) AS latest_created_at
+            FROM trading_autotrader_runs
+            WHERE created_at >= NOW() - (:days * INTERVAL '1 day')
+              AND reason LIKE 'coinbase_cap:%'
+            GROUP BY reason
+            ORDER BY n DESC
             LIMIT :limit
             """,
             params,

@@ -16,8 +16,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app import models
-from app.models.trading import AutoTraderRun, BreakoutAlert, ScanPattern
+from app.models.trading import AutoTraderRun, BreakoutAlert, PatternRecertLog, ScanPattern
 from app.services.trading import auto_trader as at_mod
+
+TEST_ENTRY_PRICE = 50.0
+TEST_STOP_PRICE = 48.0
+TEST_TARGET_PRICE = 55.0
+TEST_RISK_NOTIONAL = 100.0
+TEST_ACCOUNT_EQUITY = 10_000.0
+TEST_PROBATION_MULTIPLIER = 0.25
+TEST_PROBATION_MAX_PER_PATTERN = 1
+TEST_PROBATION_MAX_PORTFOLIO = 3
+TEST_CPCV_PATHS = 35
+TEST_STRONG_CPCV_SHARPE = 1.4
+TEST_REALIZED_TRADE_COUNT = 20
+TEST_REALIZED_AVG_RETURN_PCT = 1.2
 
 
 def _minimal_settings(user_id: int) -> SimpleNamespace:
@@ -42,6 +55,16 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_feature_parity_enabled=False,
         chili_autotrader_live_require_feature_parity=False,
         chili_autotrader_live_require_venue_health_enabled=False,
+        chili_autotrader_recert_signal_fastlane_enabled=True,
+        brain_recert_queue_mode="shadow",
+        chili_autotrader_probation_live_enabled=True,
+        chili_autotrader_probation_notional_multiplier=TEST_PROBATION_MULTIPLIER,
+        chili_autotrader_probation_max_trades_per_pattern_per_day=(
+            TEST_PROBATION_MAX_PER_PATTERN
+        ),
+        chili_autotrader_probation_max_trades_per_day=TEST_PROBATION_MAX_PORTFOLIO,
+        chili_autotrader_probation_min_cpcv_sharpe=TEST_STRONG_CPCV_SHARPE,
+        chili_autotrader_probation_min_realized_trades=TEST_REALIZED_TRADE_COUNT,
     )
 
 
@@ -248,6 +271,23 @@ def test_feature_parity_uses_decision_snapshot_not_recomputed(monkeypatch):
     assert captured["features"] == {"rsi_14", "ema_stack", "price"}
 
 
+def test_qualified_block_shadow_decisions_cover_learning_dead_ends():
+    assert (
+        at_mod._qualified_reject_shadow_decision(
+            "regime_gate:negative_ev_consensus:n_neg=2/4"
+        )
+        == "blocked_regime_gate"
+    )
+    assert (
+        at_mod._qualified_reject_shadow_decision("llm_not_viable")
+        == "blocked_llm_not_viable"
+    )
+    assert (
+        at_mod._qualified_reject_shadow_decision("synergy_disabled_second_signal")
+        == "skipped_synergy_disabled_second_signal"
+    )
+
+
 def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db, monkeypatch):
     u = models.User(name="recert_block_u")
     db.add(u)
@@ -306,13 +346,191 @@ def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db
 
     out = {"skipped": 0, "blocked": 0}
     setattr(alert, "_chili_recert_required", True)
-    at_mod._execute_new_entry(db, u.id, alert, 50.0, {}, None, True, out)
+    at_mod._execute_new_entry(db, u.id, alert, TEST_ENTRY_PRICE, {}, None, True, out)
 
     runs = db.query(AutoTraderRun).filter(AutoTraderRun.breakout_alert_id == alert.id).all()
     assert runs
     assert {r.reason for r in runs} == {"pattern_recert_required"}
+    assert runs[0].rule_snapshot["recert_signal_fastlane"]["queued"] is True
     assert shadow_calls
     assert shadow_calls[0]["decision"] == "blocked_recert_required"
+
+    recert_logs = (
+        db.query(PatternRecertLog)
+        .filter(PatternRecertLog.scan_pattern_id == pat.id)
+        .all()
+    )
+    assert len(recert_logs) == 1
+    assert recert_logs[0].source == "scheduler"
+    assert recert_logs[0].reason == "autotrader_signal:pattern_recert_required"
+
+
+def test_live_recert_block_waives_pilot_bootstrap_cert_debt(monkeypatch):
+    settings = _minimal_settings(123)
+    settings.chili_autotrader_block_live_on_recert_required = True
+    settings.chili_pilot_promoted_allow_bootstrap_recert_live = True
+    monkeypatch.setattr(at_mod, "settings", settings)
+
+    soft_pilot = ScanPattern(
+        lifecycle_stage="pilot_promoted",
+        recert_required=True,
+        recert_reason="missing_oos_recert,missing_quality_composite_score,thin_realized_ev",
+    )
+    hard_pilot = ScanPattern(
+        lifecycle_stage="pilot_promoted",
+        recert_required=True,
+        recert_reason="missing_oos_recert,negative_realized_ev",
+    )
+    full_risk = ScanPattern(
+        lifecycle_stage="promoted",
+        recert_required=True,
+        recert_reason="missing_oos_recert",
+    )
+    probation_full_risk = ScanPattern(
+        lifecycle_stage="promoted",
+        recert_required=True,
+        recert_reason="missing_oos_recert",
+        promotion_gate_passed=True,
+        cpcv_n_paths=TEST_CPCV_PATHS,
+        cpcv_median_sharpe=TEST_STRONG_CPCV_SHARPE,
+        raw_realized_trade_count=TEST_REALIZED_TRADE_COUNT,
+        raw_realized_avg_return_pct=TEST_REALIZED_AVG_RETURN_PCT,
+    )
+
+    assert at_mod._live_recert_block_applies(soft_pilot) is False
+    assert at_mod._live_recert_block_applies(hard_pilot) is True
+    assert at_mod._live_recert_block_applies(full_risk) is True
+    assert at_mod._live_recert_block_applies(probation_full_risk) is False
+    assert at_mod._live_recert_allowance(probation_full_risk) == at_mod.PROBATION_RECERT_ALLOWANCE
+
+
+def test_probation_recert_live_entry_reduces_size_and_enforces_daily_quota(db, monkeypatch):
+    u = models.User(name="probation_recert_u")
+    db.add(u)
+    db.flush()
+    pat = ScanPattern(
+        name="Strong promoted soft OOS debt",
+        rules_json={},
+        lifecycle_stage="promoted",
+        active=True,
+        recert_required=True,
+        recert_reason="missing_oos_recert",
+        promotion_gate_passed=True,
+        cpcv_n_paths=TEST_CPCV_PATHS,
+        cpcv_median_sharpe=TEST_STRONG_CPCV_SHARPE,
+        raw_realized_trade_count=TEST_REALIZED_TRADE_COUNT,
+        raw_realized_avg_return_pct=TEST_REALIZED_AVG_RETURN_PCT,
+    )
+    db.add(pat)
+    db.flush()
+
+    settings = _minimal_settings(u.id)
+    settings.chili_autotrader_block_live_on_recert_required = True
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_entry_risk_notional",
+        lambda *a, **k: (TEST_RISK_NOTIONAL, {
+            "notional_capital_usd": TEST_ACCOUNT_EQUITY,
+            "notional_explicit_fallback_usd": 0.0,
+            "notional_risk_pct": settings.chili_autotrader_per_trade_risk_pct,
+            "notional_source": "test",
+            "notional_capital_source": "test",
+        }),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.tick_normalizer.normalize_quantity",
+        lambda qty, _ticker: qty,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pdt_guard.can_open_intraday_round_trip",
+        lambda *a, **k: SimpleNamespace(allowed=True, reason="ok", snapshot={}),
+    )
+
+    broker_calls: list[dict] = []
+
+    def _fake_broker_buy(*_args, **kwargs):
+        broker_calls.append(kwargs)
+        return {
+            "ok": True,
+            "order_id": f"probation-order-{len(broker_calls)}",
+            "raw": {"average_price": TEST_ENTRY_PRICE},
+        }
+
+    monkeypatch.setattr(at_mod, "_execute_broker_buy", _fake_broker_buy)
+
+    first_alert = BreakoutAlert(
+        ticker="PBRT",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=u.id,
+        scan_pattern_id=pat.id,
+    )
+    db.add(first_alert)
+    db.commit()
+    db.refresh(first_alert)
+
+    out = {"skipped": 0, "placed": 0, "blocked": 0}
+    setattr(first_alert, "_chili_probation_recert_allowed", True)
+    at_mod._execute_new_entry(
+        db,
+        u.id,
+        first_alert,
+        TEST_ENTRY_PRICE,
+        {},
+        None,
+        True,
+        out,
+    )
+
+    assert out["placed"] == 1
+    assert broker_calls
+    expected_qty = (
+        TEST_RISK_NOTIONAL * TEST_PROBATION_MULTIPLIER / TEST_ENTRY_PRICE
+    )
+    assert broker_calls[0]["qty"] == expected_qty
+
+    second_alert = BreakoutAlert(
+        ticker="PBRT2",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=u.id,
+        scan_pattern_id=pat.id,
+    )
+    db.add(second_alert)
+    db.commit()
+    db.refresh(second_alert)
+
+    setattr(second_alert, "_chili_probation_recert_allowed", True)
+    at_mod._execute_new_entry(
+        db,
+        u.id,
+        second_alert,
+        TEST_ENTRY_PRICE,
+        {},
+        None,
+        True,
+        out,
+    )
+
+    assert len(broker_calls) == TEST_PROBATION_MAX_PER_PATTERN
+    reasons = {
+        row.reason
+        for row in db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == second_alert.id)
+        .all()
+    }
+    assert at_mod.PROBATION_QUOTA_REASON_PATTERN in reasons
 
 
 def test_feature_parity_blocks_price_only_snapshot_when_required(monkeypatch):

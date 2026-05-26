@@ -400,6 +400,64 @@ def test_coinbase_limit_only_market_rejection_falls_back_to_marketable_limit(
     assert limit_kwargs["post_only"] is False
 
 
+def test_coinbase_limit_only_fallback_balance_error_cancels_stale_sell_and_retries(
+    db,
+    monkeypatch,
+):
+    t = _seed_open_crypto_trade(
+        db,
+        ticker="DIEM-USD",
+        name_suffix="coinbase_limit_only_reserved_balance",
+        broker_source="coinbase",
+    )
+    monkeypatch.setattr(
+        "app.config.settings.chili_coinbase_exit_limit_fallback_buffer_pct",
+        0.02,
+        raising=False,
+    )
+
+    cb_adapter = MagicMock()
+    cb_adapter.place_market_order.return_value = {
+        "ok": False,
+        "error": "Orderbook is in limit only mode - please use limit order type",
+    }
+    cb_adapter.place_limit_order_gtc.side_effect = [
+        {"ok": False, "error": "Insufficient balance"},
+        {"ok": True, "order_id": "cb-limit-exit-retry", "raw": {}},
+    ]
+
+    with patch(
+        "app.services.trading.crypto.exit_monitor._current_crypto_price",
+        return_value=8.50,
+    ), patch(
+        "app.services.coinbase_service.get_positions",
+        return_value=[{"ticker": "DIEM-USD", "quantity": 3.0}],
+    ), patch(
+        "app.services.trading.crypto.exit_monitor._coinbase_spot_adapter",
+        return_value=cb_adapter,
+    ), patch(
+        "app.services.coinbase_service.get_open_orders",
+        return_value=[{"order_id": "cb-old-stop", "side": "SELL"}],
+    ) as get_open_orders, patch(
+        "app.services.coinbase_service.cancel_order_by_id",
+        return_value={"ok": True},
+    ) as cancel_order, patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ):
+        from app.services.trading.crypto.exit_monitor import run_crypto_exit_pass
+
+        out = run_crypto_exit_pass(db)
+
+    assert out.get("closed") == 1
+    db.refresh(t)
+    assert t.pending_exit_order_id == "cb-limit-exit-retry"
+    assert cb_adapter.place_market_order.call_count == 2
+    assert cb_adapter.place_limit_order_gtc.call_count == 2
+    get_open_orders.assert_called_once_with(product_ids=["DIEM-USD"])
+    cancel_order.assert_called_once_with("cb-old-stop")
+
+
 def test_coinbase_dust_detection_uses_notional_threshold():
     from app.services.trading.crypto.exit_monitor import _is_coinbase_unmarketable_dust
 

@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from ...config import (
+    AUTOTRADER_SYNERGY_DEFAULT_FRACTION,
+    AUTOTRADER_SYNERGY_DEFAULT_MAX_NOTIONAL_USD,
+    AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE,
+)
 from ...models.trading import PaperTrade, Trade
+
+SYNERGY_DEFAULT_SCALE_FRACTION = AUTOTRADER_SYNERGY_DEFAULT_FRACTION
+SYNERGY_DEFAULT_MAX_NOTIONAL_USD = AUTOTRADER_SYNERGY_DEFAULT_MAX_NOTIONAL_USD
 
 
 @dataclass
@@ -55,6 +64,61 @@ def find_open_autotrader_trade(
     return q.order_by(Trade.id.desc()).first()
 
 
+def _settings_float(settings: Any, name: str, default: float) -> float:
+    raw = getattr(settings, name, default)
+    if isinstance(raw, Real):
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            return float(raw.strip())
+        except ValueError:
+            return float(default)
+    return float(default)
+
+
+def _settings_int(settings: Any, name: str, default: int) -> int:
+    raw = getattr(settings, name, default)
+    if isinstance(raw, Real):
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return int(default)
+    return int(default)
+
+
+def _resolve_scale_in_notional(existing_notional: float, settings: Any) -> float:
+    explicit = _settings_float(
+        settings,
+        "chili_autotrader_synergy_scale_notional_usd",
+        0.0,
+    )
+    if explicit > 0.0:
+        return explicit
+
+    fraction = max(
+        0.0,
+        min(
+            1.0,
+            _settings_float(
+                settings,
+                "chili_autotrader_synergy_fraction",
+                SYNERGY_DEFAULT_SCALE_FRACTION,
+            ),
+        ),
+    )
+    add = max(0.0, float(existing_notional) * fraction)
+    cap = _settings_float(
+        settings,
+        "chili_autotrader_synergy_max_notional_usd",
+        SYNERGY_DEFAULT_MAX_NOTIONAL_USD,
+    )
+    if cap > 0.0:
+        add = min(add, cap)
+    return add
+
+
 def maybe_scale_in(
     db: Session,
     *,
@@ -77,7 +141,14 @@ def maybe_scale_in(
         return None
     if int(t.scan_pattern_id or 0) == int(new_scan_pattern_id):
         return None
-    if int(t.scale_in_count or 0) >= 1:
+    max_scale_ins = _settings_int(
+        settings,
+        "chili_autotrader_synergy_max_scale_ins_per_trade",
+        AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE,
+    )
+    if max_scale_ins <= 0:
+        return None
+    if int(t.scale_in_count or 0) >= max_scale_ins:
         return None
 
     # Respect desk per-position override: skip scale-in when excluded.
@@ -90,12 +161,8 @@ def maybe_scale_in(
         pass
 
     existing_notional = float(t.entry_price) * float(t.quantity)
-    base = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 0.0) or 0.0)
-    add = float(getattr(settings, "chili_autotrader_synergy_scale_notional_usd", 0.0) or 0.0)
+    add = _resolve_scale_in_notional(existing_notional, settings)
     if add <= 0 or current_price <= 0:
-        return None
-    max_total = (base if base > 0 else existing_notional) + add
-    if existing_notional + add > max_total + 1e-6:
         return None
 
     old_stop = float(t.stop_loss or 0)

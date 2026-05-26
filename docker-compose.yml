@@ -7,8 +7,12 @@
 #   4) Neural processing: brain-worker — ``lean-cycle`` (full learning cycle + optional Postgres
 #      activation batch when TRADING_BRAIN_NEURAL_MESH_ENABLED=1). For queue-only soak use
 #      ``--mode activation-loop`` (see scripts/brain_worker.py).
-#   5) Specialized execution (profile ``workers``): mining-worker, backtest-worker, fast-scan-worker
+#   5) Specialized execution: backtest-worker + fast-scan-worker are part of the normal stack; optional workers profile adds mining
 #      — each uses the matching ``brain_worker.py --mode`` (mining / backtest / fast-scan).
+#
+# Note: backtest-worker is now part of the normal stack so the queue has a
+# dedicated owner. fast-scan-worker is also normal-stack so activity discovery
+# keeps running after ordinary stack restarts; the workers profile remains for mining-worker.
 #
 # Persistent data: Postgres, Ollama, and /app/data bind to D:/CHILI-Docker/{postgres,ollama,chili-data} so large state
 # lives off C:. Change these paths if your drive letter or folder differs.
@@ -400,8 +404,11 @@ services:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - DATABASE_POOL_SIZE=6
       - DATABASE_MAX_OVERFLOW=10
+      # Normal queue owner. Mirrors brain_worker backtest-mode default while
+      # keeping lean-cycle overrides separate from the dedicated worker.
+      - CHILI_BRAIN_FAST_BACKTEST_BATCH=${CHILI_BACKTEST_WORKER_FAST_BACKTEST_BATCH:-30}
       - BRAIN_QUEUE_BACKTEST_EXECUTOR=${BRAIN_QUEUE_BACKTEST_EXECUTOR:-process}
-      - BRAIN_QUEUE_PROCESS_CAP=${BRAIN_QUEUE_PROCESS_CAP:-8}
+      - BRAIN_QUEUE_PROCESS_CAP=${BRAIN_BACKTEST_WORKER_PROCESS_CAP:-8}
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=5
@@ -413,8 +420,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    profiles:
-      - workers
     deploy:
       resources:
         limits:
@@ -431,7 +436,7 @@ services:
   fast-scan-worker:
     image: chili-app:local
     restart: unless-stopped
-    command: ["python", "scripts/brain_worker.py", "--mode", "fast-scan"]
+    command: ["python", "scripts/brain_worker.py", "--mode", "fast-scan", "--interval", "${CHILI_FAST_SCAN_INTERVAL_MINUTES:-1}"]
     env_file:
       - path: .env
         required: false
@@ -455,8 +460,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    profiles:
-      - workers
     deploy:
       resources:
         limits:
@@ -755,6 +758,9 @@ services:
       # opens a PaperTrade tagged paper_shadow_of_alert_id. Default off
       # in app/config.py; flip to 1 here for the production canary run.
       - CHILI_AUTOTRADER_PAPER_SHADOW_ENABLED=1
+      # Measured Pilot: allow bounded confirming-pattern scale-ins. The
+      # fraction, max notional, and per-trade add cap stay in named settings.
+      - CHILI_AUTOTRADER_SYNERGY_ENABLED=${CHILI_AUTOTRADER_SYNERGY_ENABLED:-true}
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app

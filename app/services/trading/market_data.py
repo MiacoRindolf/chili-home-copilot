@@ -857,6 +857,33 @@ def _apply_boundary_guard(
     return quote
 
 
+def _coinbase_quote_fallback(ticker: str, *, reason: str) -> dict[str, Any] | None:
+    """Use Coinbase public ticker data as the final crypto quote source."""
+    if not getattr(settings, "brain_market_data_coinbase_fallback", True):
+        return None
+    try:
+        from .coinbase_ohlcv import get_quote as _cb_get_quote, is_crypto_usd
+
+        if not is_crypto_usd(ticker):
+            return None
+        fi = _cb_get_quote(ticker)
+        if fi and fi.get("last_price") is not None:
+            return _build_quote_result(ticker, fi)
+        logger.debug(
+            "[market_data] Coinbase quote fallback empty for %s reason=%s",
+            ticker,
+            reason,
+        )
+    except Exception as e:
+        logger.warning(
+            "[market_data] Coinbase quote fallback failed for %s reason=%s: %s",
+            ticker,
+            reason,
+            e,
+        )
+    return None
+
+
 def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> dict[str, Any] | None:
     """Current price + enriched info, with implausible-quote boundary guard.
 
@@ -948,6 +975,9 @@ def _fetch_quote_unguarded(
             logger.warning(f"[market_data] Massive quote failed for {ticker}: {e}")
 
     if _massive_dead and _massive.is_crypto(ticker):
+        cb_quote = _coinbase_quote_fallback(ticker, reason="massive_dead_crypto")
+        if cb_quote:
+            return cb_quote
         # Phase F fix: see fetch_ohlcv. Equities fall through to Polygon/yfinance.
         return None
 
@@ -965,6 +995,10 @@ def _fetch_quote_unguarded(
             fi = None
         except Exception as e:
             logger.warning(f"[market_data] Polygon quote failed for {ticker}: {e}")
+
+    cb_quote = _coinbase_quote_fallback(ticker, reason="provider_chain_empty")
+    if cb_quote:
+        return cb_quote
 
     # --- yfinance / CoinGecko fallback ---
     fi = _yf_fast_info(ticker)

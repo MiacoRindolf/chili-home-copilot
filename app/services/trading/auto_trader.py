@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, time as datetime_time, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session, aliased
 
-from ...config import settings
+from ...config import (
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+    settings,
+)
 from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_rules import (
@@ -32,6 +39,7 @@ from .auto_trader_synergy import (
     find_open_autotrader_trade,
     maybe_scale_in,
 )
+from .coinbase_maker_pricing import plan_post_only_buy_limit
 from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
 from .ops_log_prefixes import CHILI_MARKET_DATA
 
@@ -39,17 +47,40 @@ logger = logging.getLogger(__name__)
 
 QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_coinbase_cap",
+    "blocked_llm_not_viable",
     "blocked_max_concurrent_crypto",
     "blocked_max_concurrent_equity",
     "blocked_max_concurrent_global",
     "blocked_max_concurrent_options",
+    "blocked_regime_gate",
     "blocked_recert_required",
     "blocked_shadow_promoted",
     "skipped_duplicate_pattern_already_open",
     "skipped_non_positive_expected_edge",
+    "skipped_synergy_disabled_second_signal",
+    "skipped_synergy_not_applicable",
 })
 
 AUTOTRADER_VERSION = "v1"
+PROBATION_RECERT_ALLOWANCE = "probation"
+PILOT_BOOTSTRAP_RECERT_ALLOWANCE = "pilot_bootstrap"
+PROBATION_TIMEZONE = "America/New_York"
+ENTRY_EXECUTION_SNAPSHOT_KEY = "entry_execution"
+PROBATION_ENTRY_FLAG = "probation_recert_allowed"
+PROBATION_ENTRY_POLICY = "reduced_risk_soft_oos_recert"
+PROBATION_JSON_TRUE = "true"
+PROBATION_JSON_FALSE = "false"
+PROBATION_DEFAULT_NOTIONAL_MULTIPLIER = 0.25
+MONEY_ROUND_DIGITS = 2
+MULTIPLIER_ROUND_DIGITS = 6
+PROBATION_QUOTA_REASON_PATTERN = "probation_quota_exceeded:pattern"
+PROBATION_QUOTA_REASON_PORTFOLIO = "probation_quota_exceeded:portfolio"
+PROBATION_OPTIONS_PATH_BLOCKED_REASON = "probation_options_path_blocked"
+PROBATION_NOTIONAL_UNAVAILABLE_REASON = "probation_notional_unavailable"
+PROBATION_NOTIONAL_BELOW_TRADE_UNIT_REASON = "probation_notional_below_trade_unit"
+PAPER_SHADOW_DUPLICATE_POLICY_STRICT = "strict_open_dedupe"
+PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS = "reject_observation_bypass"
+PAPER_SHADOW_AUDIT_PREFIX = "paper_shadow_"
 
 
 def _autotrader_tick_note(
@@ -392,6 +423,7 @@ def _maybe_open_paper_shadow(
     px: float,
     snap: dict[str, Any],
     decision: str,
+    allow_duplicate_open: bool = False,
 ) -> None:
     """f-add-paper-shadow-mode (2026-05-06): always-on within the live
     branch when ``chili_autotrader_paper_shadow_enabled`` is True. Opens
@@ -401,8 +433,10 @@ def _maybe_open_paper_shadow(
     live-placement-rate periods.
 
     Idempotent at the (user_id, ticker, pattern_id) tuple via the
-    existing dedupe in ``open_paper_trade``. Failures swallowed at this
-    boundary -- shadow must never break the live decision flow.
+    existing dedupe in ``open_paper_trade`` unless a qualified block/reject
+    is allowed to bypass duplicate paper rows for counterfactual outcome
+    learning. Failures swallowed at this boundary -- shadow must never
+    break the live decision flow.
     """
     base_enabled = bool(getattr(settings, "chili_autotrader_paper_shadow_enabled", False))
     qualified_enabled = bool(
@@ -415,7 +449,21 @@ def _maybe_open_paper_shadow(
     if uid is None:
         return
     try:
+        effective_allow_duplicate_open = bool(
+            allow_duplicate_open
+            or (
+                decision in QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+                and bool(
+                    getattr(
+                        settings,
+                        "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
+                        AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+                    )
+                )
+            )
+        )
         from .paper_trading import (
+            PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW,
             open_paper_trade,
             prune_autotrader_paper_shadow_capacity,
         )
@@ -426,9 +474,24 @@ def _maybe_open_paper_shadow(
             "shadow_of_alert_id": int(alert.id),
             "shadow_decision": decision,
             "projected": snap.get("projected_profit_pct"),
+            "paper_shadow_duplicate_policy": (
+                PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
+                if effective_allow_duplicate_open
+                else PAPER_SHADOW_DUPLICATE_POLICY_STRICT
+            ),
         }
+        sig.update({
+            k: v
+            for k, v in (snap or {}).items()
+            if isinstance(k, str) and k.startswith(PAPER_SHADOW_AUDIT_PREFIX)
+        })
         shadow_max_open = int(
-            getattr(settings, "chili_autotrader_paper_shadow_max_open", 100) or 100
+            getattr(
+                settings,
+                "chili_autotrader_paper_shadow_max_open",
+                AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
+            )
+            or AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN
         )
         if bool(getattr(settings, "chili_autotrader_paper_shadow_janitor_enabled", True)):
             prune_autotrader_paper_shadow_capacity(
@@ -439,15 +502,15 @@ def _maybe_open_paper_shadow(
                     getattr(
                         settings,
                         "chili_autotrader_paper_shadow_janitor_max_age_hours",
-                        72,
+                        AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
                     )
-                    or 72
+                    or AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS
                 ),
                 buffer=int(
                     getattr(
                         settings,
                         "chili_autotrader_paper_shadow_janitor_buffer",
-                        5,
+                        AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
                     )
                     or 0
                 ),
@@ -462,6 +525,8 @@ def _maybe_open_paper_shadow(
             signal_json=sig,
             paper_shadow_of_alert_id=int(alert.id),
             max_open_trades=shadow_max_open,
+            capacity_scope=PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW,
+            allow_duplicate_open=effective_allow_duplicate_open,
         )
         if pt is None:
             logger.info(
@@ -490,9 +555,20 @@ def _maybe_open_paper_shadow(
 def _qualified_reject_shadow_decision(reason: str | None) -> str | None:
     """Map live-only reject reasons to safe paper-shadow observation labels."""
     r = (reason or "").strip()
+    if r.startswith("regime_gate:"):
+        return "blocked_regime_gate"
     if r in {
         "duplicate_pattern_already_open",
         "non_positive_expected_edge",
+    }:
+        return f"skipped_{r}"
+    if r in {
+        "llm_not_viable",
+    }:
+        return f"blocked_{r}"
+    if r in {
+        "synergy_disabled_second_signal",
+        "synergy_not_applicable",
     }:
         return f"skipped_{r}"
     if r in {
@@ -569,7 +645,72 @@ def _maybe_open_reject_paper_shadow(
         px=px_f,
         snap=shadow_snap,
         decision=decision,
+        allow_duplicate_open=bool(
+            getattr(
+                settings,
+                "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
+                AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+            )
+        ),
     )
+
+
+def _queue_recert_for_blocked_signal(
+    db: Session,
+    *,
+    alert: BreakoutAlert,
+    pattern: ScanPattern | None,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Fast-lane recert work for patterns that are actively emitting signals."""
+    if not bool(getattr(settings, "chili_autotrader_recert_signal_fastlane_enabled", True)):
+        return None
+    try:
+        pattern_id = int(getattr(alert, "scan_pattern_id", None) or 0)
+    except (TypeError, ValueError):
+        pattern_id = 0
+    if pattern_id <= 0:
+        return None
+    try:
+        from .recert_queue_service import queue_scheduler
+
+        result = queue_scheduler(
+            db,
+            scan_pattern_id=pattern_id,
+            pattern_name=getattr(pattern, "name", None),
+            as_of_date=datetime.utcnow().date(),
+            reason=f"autotrader_signal:{reason}",
+            severity="red",
+            payload={
+                "origin": "autotrader_signal_fastlane",
+                "alert_id": int(getattr(alert, "id", 0) or 0),
+                "ticker": (getattr(alert, "ticker", "") or "").upper(),
+                "pattern_recert_reason": getattr(pattern, "recert_reason", None),
+                "pattern_lifecycle_stage": getattr(pattern, "lifecycle_stage", None),
+            },
+            mode_override=getattr(settings, "brain_recert_queue_mode", None),
+        )
+        if result is None:
+            return {"queued": False, "reason": "recert_queue_off"}
+        return {
+            "queued": True,
+            "log_id": result.log_id,
+            "recert_id": result.recert_id,
+            "status": result.status,
+            "mode": result.mode,
+        }
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            "[autotrader] recert signal fastlane failed alert_id=%s pattern_id=%s",
+            getattr(alert, "id", None),
+            pattern_id,
+            exc_info=True,
+        )
+        return {"queued": False, "reason": "queue_failed"}
 
 
 def _audit(
@@ -738,6 +879,12 @@ def _pattern_name(db: Session, scan_pattern_id: Optional[int]) -> str | None:
         return None
     p = db.query(ScanPattern).filter(ScanPattern.id == int(scan_pattern_id)).first()
     return p.name if p else None
+
+
+def _pattern_row(db: Session, scan_pattern_id: Optional[int]) -> ScanPattern | None:
+    if not scan_pattern_id:
+        return None
+    return db.query(ScanPattern).filter(ScanPattern.id == int(scan_pattern_id)).first()
 
 
 # ── Market-data fetches (Phase B) ────────────────────────────────────
@@ -1021,6 +1168,12 @@ def _maybe_substitute_with_options(
     try:
         if not bool(getattr(settings, "chili_autotrader_options_substitute_enabled", False)):
             return
+        if bool(getattr(alert, "_chili_probation_recert_allowed", False)):
+            logger.info(
+                "[autotrader_options_substitute] skipped probation recert alert_id=%s",
+                getattr(alert, "id", None),
+            )
+            return
         if (alert.asset_type or "").lower() != "stock":
             return
         # Bullish-only check: target above entry
@@ -1251,6 +1404,36 @@ def is_shadow_promoted_pattern(pat: ScanPattern) -> bool:
     return bool(getattr(settings, "chili_shadow_promoted_lifecycle_enabled", True))
 
 
+def _live_recert_block_applies(pat: ScanPattern) -> bool:
+    """Return True when recert debt must block live entry for this pattern."""
+    if not bool(getattr(pat, "recert_required", False)):
+        return False
+    if not bool(getattr(settings, "chili_autotrader_block_live_on_recert_required", True)):
+        return False
+    return _live_recert_allowance(pat) is None
+
+
+def _live_recert_allowance(pat: ScanPattern) -> str | None:
+    """Return the reduced-risk lane that may pass recert debt, if any."""
+    if not bool(getattr(pat, "recert_required", False)):
+        return None
+    if not bool(getattr(settings, "chili_autotrader_block_live_on_recert_required", True)):
+        return PILOT_BOOTSTRAP_RECERT_ALLOWANCE
+    try:
+        from .alpha_portfolio_gate import (
+            broker_risk_probation_allows_live,
+            pilot_bootstrap_recert_allows_live,
+        )
+
+        if pilot_bootstrap_recert_allows_live(pat, settings_=settings):
+            return PILOT_BOOTSTRAP_RECERT_ALLOWANCE
+        if broker_risk_probation_allows_live(pat, settings_=settings):
+            return PROBATION_RECERT_ALLOWANCE
+    except Exception:
+        logger.debug("[autotrader] recert soft-gate check failed", exc_info=True)
+    return None
+
+
 def _log_expected_edge_reject(alert: BreakoutAlert, snap: dict[str, Any] | None) -> None:
     edge = (snap or {}).get("entry_edge") if isinstance(snap, dict) else None
     if not isinstance(edge, dict):
@@ -1272,6 +1455,89 @@ def _log_expected_edge_reject(alert: BreakoutAlert, snap: dict[str, Any] | None)
         edge.get("probability_source"),
         edge.get("probability_sample_n"),
     )
+
+
+def _probation_day_start_utc(now: datetime | None = None) -> datetime:
+    now_utc = now or datetime.utcnow()
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    et = ZoneInfo(PROBATION_TIMEZONE)
+    now_et = now_utc.astimezone(et)
+    start_et = datetime.combine(now_et.date(), datetime_time.min, tzinfo=et)
+    return start_et.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _probation_trade_count_today(
+    db: Session,
+    *,
+    uid: int | None,
+    pattern_id: int | None = None,
+    now: datetime | None = None,
+) -> int:
+    start_utc = _probation_day_start_utc(now)
+    pattern_clause = ""
+    params: dict[str, Any] = {
+        "uid": uid,
+        "version": AUTOTRADER_VERSION,
+        "start_utc": start_utc,
+        "flag": PROBATION_JSON_TRUE,
+    }
+    if pattern_id is not None:
+        pattern_clause = "AND scan_pattern_id = :pattern_id"
+        params["pattern_id"] = int(pattern_id)
+    row = db.execute(text(f"""
+        SELECT COUNT(*) AS n
+        FROM trading_trades
+        WHERE user_id IS NOT DISTINCT FROM :uid
+          AND COALESCE(auto_trader_version, '') = :version
+          AND entry_date >= :start_utc
+          AND COALESCE(
+              jsonb_extract_path_text(
+                  indicator_snapshot,
+                  :entry_execution_key,
+                  :probation_flag_key
+              ),
+              :false_flag
+          ) = :flag
+          {pattern_clause}
+    """), {
+        **params,
+        "entry_execution_key": ENTRY_EXECUTION_SNAPSHOT_KEY,
+        "probation_flag_key": PROBATION_ENTRY_FLAG,
+        "false_flag": PROBATION_JSON_FALSE,
+    }).scalar()
+    return int(row or 0)
+
+
+def _probation_quota_block_reason(
+    db: Session,
+    *,
+    uid: int | None,
+    pattern_id: int | None,
+) -> str | None:
+    if pattern_id is None:
+        return PROBATION_QUOTA_REASON_PORTFOLIO
+    per_pattern_limit = int(
+        getattr(settings, "chili_autotrader_probation_max_trades_per_pattern_per_day", 0)
+        or 0
+    )
+    portfolio_limit = int(
+        getattr(settings, "chili_autotrader_probation_max_trades_per_day", 0)
+        or 0
+    )
+    if per_pattern_limit <= 0 or portfolio_limit <= 0:
+        return PROBATION_QUOTA_REASON_PORTFOLIO
+    pattern_count = _probation_trade_count_today(
+        db,
+        uid=uid,
+        pattern_id=pattern_id,
+    )
+    if pattern_count >= per_pattern_limit:
+        return PROBATION_QUOTA_REASON_PATTERN
+    portfolio_count = _probation_trade_count_today(db, uid=uid)
+    if portfolio_count >= portfolio_limit:
+        return PROBATION_QUOTA_REASON_PORTFOLIO
+    return None
 
 
 def _process_one_alert(
@@ -1326,9 +1592,14 @@ def _process_one_alert(
             elif (
                 live
                 and bool(getattr(_pat, "recert_required", False))
-                and bool(getattr(settings, "chili_autotrader_block_live_on_recert_required", True))
             ):
-                setattr(alert, "_chili_recert_required", True)
+                _recert_allowance = _live_recert_allowance(_pat)
+                if _recert_allowance is None:
+                    setattr(alert, "_chili_recert_required", True)
+                elif _recert_allowance == PROBATION_RECERT_ALLOWANCE:
+                    setattr(alert, "_chili_probation_recert_allowed", True)
+                else:
+                    setattr(alert, "_chili_pilot_bootstrap_recert_allowed", True)
             _allowed = _eligible_lifecycle_stages(live=live)
             if (
                 not bool(getattr(alert, "_chili_shadow_observation_only", False))
@@ -1357,11 +1628,26 @@ def _process_one_alert(
             ticker=alert.ticker,
         )
         if _rg_block:
+            _rg_full_reason = f"regime_gate:{_rg_reason}"
             _audit(db, user_id=uid, alert=alert, decision="skipped",
-                   reason=f"regime_gate:{_rg_reason}")
+                   reason=_rg_full_reason)
+            if live:
+                _rg_px = _current_price(alert.ticker)
+                if _rg_px is not None:
+                    _maybe_open_reject_paper_shadow(
+                        db,
+                        uid=uid,
+                        alert=alert,
+                        px=_rg_px,
+                        snap={
+                            "paper_observation_reason": _rg_full_reason,
+                            "regime_gate_reason": _rg_reason,
+                        },
+                        reason=_rg_full_reason,
+                    )
             out["skipped"] += 1
             _autotrader_tick_note(out, kind="skipped",
-                                  reason=f"regime_gate:{_rg_reason}", alert=alert)
+                                  reason=_rg_full_reason, alert=alert)
             return
     except Exception as _rg_exc:
         # Defense-in-depth: never let the regime gate's wiring error block
@@ -1445,6 +1731,24 @@ def _process_one_alert(
                 else "synergy_not_applicable"
             )
             _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason)
+            _maybe_open_reject_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                px=px,
+                snap={
+                    "existing_trade_id": getattr(existing_trade, "id", None),
+                    "existing_trade_scan_pattern_id": getattr(
+                        existing_trade, "scan_pattern_id", None,
+                    ),
+                    "existing_trade_entry_date": (
+                        existing_trade.entry_date.isoformat()
+                        if getattr(existing_trade, "entry_date", None) else None
+                    ),
+                },
+                reason=reason,
+                existing_qty=getattr(existing_trade, "quantity", None),
+            )
             out["skipped"] += 1
             _autotrader_tick_note(out, kind="skipped", reason=reason, alert=alert)
             return
@@ -1538,6 +1842,15 @@ def _process_one_alert(
                 rule_snapshot=snap,
                 llm_snapshot=llm_snap,
             )
+            if live:
+                _maybe_open_reject_paper_shadow(
+                    db,
+                    uid=uid,
+                    alert=alert,
+                    px=px,
+                    snap={**(snap or {}), "llm_snapshot": llm_snap},
+                    reason="llm_not_viable",
+                )
             out["skipped"] += 1
             _autotrader_tick_note(out, kind="blocked", reason="llm_not_viable", alert=alert)
             return
@@ -2098,6 +2411,7 @@ def _execute_broker_buy(
             try:
                 _bbo, _fr = cb_ad.get_best_bid_ask(alert.ticker)
                 _bid = getattr(_bbo, "bid", None) if _bbo is not None else None
+                _ask = getattr(_bbo, "ask", None) if _bbo is not None else None
                 if _bid is None or float(_bid) <= 0:
                     logger.warning(
                         "[autotrader] maker-only: no best_bid for %s; "
@@ -2105,33 +2419,70 @@ def _execute_broker_buy(
                         alert.ticker,
                     )
                 else:
-                    cb_res = cb_ad.place_limit_order_gtc(
-                        product_id=alert.ticker,
-                        side="buy",
-                        base_size=str(qty),
-                        limit_price=str(float(_bid)),
-                        client_order_id=client_order_id,
-                        post_only=True,
+                    _prod = None
+                    try:
+                        _prod, _ = cb_ad.get_product(alert.ticker)
+                    except Exception:
+                        _prod = None
+                    _price_increment = None
+                    if _prod is not None:
+                        _price_increment = (
+                            getattr(_prod, "price_increment", None)
+                            or getattr(_prod, "quote_increment", None)
+                        )
+                    _limit_plan = plan_post_only_buy_limit(
+                        bid=_bid,
+                        ask=_ask,
+                        price_increment=_price_increment,
+                        improve_ticks=int(getattr(
+                            _settings,
+                            "chili_coinbase_maker_only_improve_bid_ticks",
+                            0,
+                        ) or 0),
                     )
-                    if isinstance(cb_res, dict):
+                    if _limit_plan is None:
+                        logger.warning(
+                            "[autotrader] maker-only: unusable best_bid for %s; "
+                            "falling back to market order",
+                            alert.ticker,
+                        )
+                        cb_res = None
+                    else:
+                        cb_res = cb_ad.place_limit_order_gtc(
+                            product_id=alert.ticker,
+                            side="buy",
+                            base_size=str(qty),
+                            limit_price=_limit_plan.limit_price_text,
+                            client_order_id=client_order_id,
+                            post_only=True,
+                        )
+                    if _limit_plan is not None and isinstance(cb_res, dict):
                         cb_res["_chili_maker_only"] = True
-                        cb_res["_chili_maker_limit_price"] = float(_bid)
-                    if isinstance(cb_res, dict) and cb_res.get("ok"):
+                        cb_res["_chili_maker_limit_price"] = _limit_plan.limit_price
+                        cb_res["_chili_maker_bid"] = _limit_plan.bid
+                        cb_res["_chili_maker_ask"] = _limit_plan.ask
+                        cb_res["_chili_maker_price_increment"] = _limit_plan.price_increment
+                        cb_res["_chili_maker_improved_ticks"] = _limit_plan.improved_ticks
+                    if _limit_plan is not None and isinstance(cb_res, dict) and cb_res.get("ok"):
                         logger.info(
                             "[autotrader] maker-only accepted limit_buy %s "
-                            "qty=%s limit=%s order_id=%s post_only=True",
+                            "qty=%s limit=%s bid=%s ask=%s improved_ticks=%s "
+                            "order_id=%s post_only=True",
                             alert.ticker,
                             cb_res.get("base_size") or qty,
-                            cb_res.get("limit_price") or _bid,
+                            cb_res.get("limit_price") or _limit_plan.limit_price_text,
+                            _limit_plan.bid,
+                            _limit_plan.ask,
+                            _limit_plan.improved_ticks,
                             cb_res.get("order_id"),
                         )
-                    else:
+                    elif _limit_plan is not None:
                         logger.warning(
                             "[autotrader] maker-only rejected limit_buy %s "
                             "qty=%s limit=%s error=%s",
                             alert.ticker,
                             qty,
-                            _bid,
+                            _limit_plan.limit_price_text,
                             cb_res.get("error") if isinstance(cb_res, dict) else cb_res,
                         )
             except Exception:
@@ -2380,6 +2731,12 @@ def _execute_new_entry(
     # fallback is honored only when explicitly configured above zero.
     notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)
     snap.update(_notional_snap)
+    if bool(getattr(alert, "_chili_pilot_bootstrap_recert_allowed", False)):
+        snap["pilot_bootstrap_recert_allowed"] = True
+        snap["pilot_bootstrap_recert_policy"] = "allowed_for_pilot_only"
+    if bool(getattr(alert, "_chili_probation_recert_allowed", False)):
+        snap[PROBATION_ENTRY_FLAG] = True
+        snap["probation_recert_policy"] = PROBATION_ENTRY_POLICY
     equity = float(_notional_snap.get("notional_capital_usd") or 0.0)
     fallback_notional = float(_notional_snap.get("notional_explicit_fallback_usd") or 0.0)
     if notional <= 0.0:
@@ -2635,6 +2992,79 @@ def _execute_new_entry(
         except Exception as _psizer_e:
             snap["position_sizer_error"] = str(_psizer_e)[:200]
 
+    if bool(getattr(alert, "_chili_probation_recert_allowed", False)):
+        if snap.get("options_path") or (alert.asset_type or "").strip().lower() == "options":
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="skipped",
+                reason=PROBATION_OPTIONS_PATH_BLOCKED_REASON,
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="skipped",
+                reason=PROBATION_OPTIONS_PATH_BLOCKED_REASON,
+                alert=alert,
+            )
+            return
+        _quota_reason = _probation_quota_block_reason(
+            db,
+            uid=uid,
+            pattern_id=int(alert.scan_pattern_id) if alert.scan_pattern_id else None,
+        )
+        if _quota_reason is not None:
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="skipped",
+                reason=_quota_reason,
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="skipped", reason=_quota_reason, alert=alert,
+            )
+            return
+        _probation_mult = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        settings,
+                        "chili_autotrader_probation_notional_multiplier",
+                        PROBATION_DEFAULT_NOTIONAL_MULTIPLIER,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        if _probation_mult <= 0.0:
+            _audit(
+                db, user_id=uid, alert=alert,
+                decision="skipped",
+                reason=PROBATION_NOTIONAL_UNAVAILABLE_REASON,
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="skipped",
+                reason=PROBATION_NOTIONAL_UNAVAILABLE_REASON,
+                alert=alert,
+            )
+            return
+        snap["notional_before_probation_sizing"] = round(notional, MONEY_ROUND_DIGITS)
+        snap["probation_recert_notional_multiplier"] = round(
+            _probation_mult,
+            MULTIPLIER_ROUND_DIGITS,
+        )
+        notional = float(notional) * _probation_mult
+        snap["notional_effective"] = round(notional, MONEY_ROUND_DIGITS)
+        snap["notional_source"] = (
+            snap.get("notional_source", "unknown") + "+probation_recert"
+        )
+
     # Options use contract quantity from option_meta. Stock/crypto quantities
     # use the broker tick normalizer, so fractional sizing is preserved when
     # the venue supports it.
@@ -2661,6 +3091,23 @@ def _execute_new_entry(
         snap["qty_source"] = "risk_notional_fractional"
 
     if qty <= 0 and px > 0:
+        if bool(getattr(alert, "_chili_probation_recert_allowed", False)):
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="skipped",
+                reason=PROBATION_NOTIONAL_BELOW_TRADE_UNIT_REASON,
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="skipped",
+                reason=PROBATION_NOTIONAL_BELOW_TRADE_UNIT_REASON,
+                alert=alert,
+            )
+            return
         if snap.get("pilot_promoted_risk_multiplier") is not None:
             _audit(
                 db, user_id=uid, alert=alert,
@@ -2723,6 +3170,14 @@ def _execute_new_entry(
         if bool(getattr(alert, "_chili_recert_required", False)):
             _reason = "pattern_recert_required"
             snap["paper_observation_reason"] = _reason
+            _recert_fastlane = _queue_recert_for_blocked_signal(
+                db,
+                alert=alert,
+                pattern=_pattern_row(db, alert.scan_pattern_id),
+                reason=_reason,
+            )
+            if _recert_fastlane is not None:
+                snap["recert_signal_fastlane"] = _recert_fastlane
             _audit(
                 db,
                 user_id=uid,
@@ -2878,7 +3333,16 @@ def _execute_new_entry(
             ),
             "coinbase_maker_only": bool(res.get("_chili_maker_only")),
             "maker_limit_price": res.get("_chili_maker_limit_price") or res.get("limit_price"),
+            "maker_best_bid": res.get("_chili_maker_bid"),
+            "maker_best_ask": res.get("_chili_maker_ask"),
+            "maker_price_increment": res.get("_chili_maker_price_increment"),
+            "maker_improved_ticks": res.get("_chili_maker_improved_ticks"),
             "broker_base_size": _broker_qty,
+            PROBATION_ENTRY_FLAG: bool(snap.get(PROBATION_ENTRY_FLAG)),
+            "probation_recert_policy": snap.get("probation_recert_policy"),
+            "probation_recert_notional_multiplier": snap.get(
+                "probation_recert_notional_multiplier"
+            ),
             "entry_edge_expected_net_pct": snap.get("entry_edge_expected_net_pct"),
             "cost_gate_fee_bps": snap.get("cost_gate_fee_bps"),
             "cost_gate_threshold_bps": snap.get("cost_gate_threshold_bps"),

@@ -4,18 +4,44 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from app.models.trading import AlertHistory, ScanPattern
+from app.models.trading import AlertHistory, AutoTraderRun, ScanPattern
 from app.services.trading import pattern_imminent_alerts as imminent_mod
 from app.services.trading.alerts import PATTERN_BREAKOUT_IMMINENT
 from app.services.trading.pattern_imminent_alerts import (
     _cooldown_active,
+    _shadow_poor_edge_pattern_ids,
     estimate_breakout_eta_hours,
     evaluate_imminent_readiness,
     format_eta_range,
+    gather_imminent_candidate_rows,
     run_pattern_imminent_scan,
     timeframe_to_hours_per_step,
     us_stock_session_open,
 )
+
+TEST_POOR_EDGE_MIN_REJECTS = 2
+TEST_CACHE_TICKER = "CACHE-USD"
+TEST_SCORE_PRICE = 100.0
+TEST_SCORE_STOP_LOSS = 95.0
+TEST_SCORE_TAKE_PROFIT = 110.0
+TEST_SCORE_RSI = 55.0
+TEST_SCORE_ADX = 20.0
+TEST_SCORE_ATR = 2.0
+TEST_RSI_BREAKOUT_TRIGGER = 60
+TEST_EXECUTABLE_CRYPTO_TICKER = "GOOD-USD"
+TEST_UNSUPPORTED_CRYPTO_TICKER = "BAD-USD"
+TEST_SCORE_FAILURE_TICKER = "FAIL-USD"
+TEST_PATTERN_AVG_RETURN_PCT = 0.5
+TEST_PATTERN_WIN_RATE = 0.6
+TEST_PATTERN_EVIDENCE_COUNT = 10
+TEST_MIN_READINESS = 0.0
+TEST_FULL_READINESS_CAP = 1.0
+TEST_UNIVERSE_CAP = 10
+TEST_SCORE_FAILURE_COOLDOWN_MINUTES = 30.0
+TEST_SCORE_FAILURE_MIN_FAILURES = 1
+TEST_SCORE_TIME_BUDGET_SECONDS = 1.0
+TEST_SCORE_BUDGET_EXPIRED_SECONDS = 2.0
+TEST_PER_PATTERN_TICKER_CAP = 1
 
 
 def test_timeframe_to_hours_per_step_defaults() -> None:
@@ -128,6 +154,644 @@ def test_cooldown_ignores_failed_imminent_delivery(db) -> None:
     db.commit()
 
     assert _cooldown_active(db, 1, "SPY", pattern.id, 3.0) is True
+
+
+def test_shadow_poor_edge_cooldown_requires_negative_stored_return(
+    db,
+    monkeypatch,
+) -> None:
+    poor = ScanPattern(
+        name="Poor shadow pattern",
+        rules_json={},
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="shadow_promoted",
+        avg_return_pct=-0.5,
+    )
+    healthy = ScanPattern(
+        name="Healthy shadow pattern",
+        rules_json={},
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="shadow_promoted",
+        avg_return_pct=0.25,
+    )
+    db.add_all([poor, healthy])
+    db.flush()
+    now = datetime.utcnow()
+    for pattern in (poor, healthy):
+        for _ in range(TEST_POOR_EDGE_MIN_REJECTS):
+            db.add(AutoTraderRun(
+                user_id=1,
+                scan_pattern_id=pattern.id,
+                ticker="EDGE-USD",
+                decision="skipped",
+                reason="non_positive_expected_edge",
+                created_at=now,
+            ))
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_cooldown_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_min_rejects",
+        TEST_POOR_EDGE_MIN_REJECTS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_lookback_hours",
+        2.0,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_max_avg_return_pct",
+        0.0,
+    )
+
+    cooldown_ids, counts = _shadow_poor_edge_pattern_ids(
+        db,
+        [poor, healthy],
+        user_id=1,
+    )
+
+    assert int(poor.id) in cooldown_ids
+    assert int(healthy.id) not in cooldown_ids
+    assert counts[int(poor.id)] == TEST_POOR_EDGE_MIN_REJECTS
+
+
+def test_gather_imminent_skips_poor_shadow_pattern_but_keeps_healthy(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {"conditions": [{"indicator": "rsi_14", "op": ">", "value": 60}]}
+    poor = ScanPattern(
+        name="Poor shadow scanner",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="shadow_promoted",
+        avg_return_pct=-0.5,
+        ticker_scope="explicit_list",
+        scope_tickers='["POOR-USD"]',
+        win_rate=0.1,
+        evidence_count=10,
+    )
+    healthy = ScanPattern(
+        name="Healthy shadow scanner",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="shadow_promoted",
+        avg_return_pct=0.5,
+        ticker_scope="explicit_list",
+        scope_tickers='["GOOD-USD"]',
+        win_rate=0.6,
+        evidence_count=10,
+    )
+    db.add_all([poor, healthy])
+    db.flush()
+    for _ in range(TEST_POOR_EDGE_MIN_REJECTS):
+        db.add(AutoTraderRun(
+            user_id=1,
+            scan_pattern_id=poor.id,
+            ticker="POOR-USD",
+            decision="skipped",
+            reason="non_positive_expected_edge",
+            created_at=datetime.utcnow(),
+        ))
+    db.commit()
+
+    monkeypatch.setattr(imminent_mod.settings, "chili_shadow_promoted_lifecycle_enabled", True)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_readiness", 0.0)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_composite_main", 0.0)
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_min_rejects",
+        TEST_POOR_EDGE_MIN_REJECTS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_lookback_hours",
+        2.0,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: (["POOR-USD", "GOOD-USD"], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({"POOR-USD", "GOOD-USD"}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_score_ticker",
+        lambda ticker, skip_fundamentals=True: {
+            "price": 100.0,
+            "entry_price": 100.0,
+            "stop_loss": 95.0,
+            "take_profit": 110.0,
+            "signals": ["test"],
+            "indicators": {"rsi": 55.0, "adx": 20.0, "atr": 2.0},
+        },
+    )
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+    )
+
+    assert [c["ticker"] for c in candidates] == ["GOOD-USD"]
+    assert meta["skip_reasons"]["shadow_poor_edge_cooldown"] == 1
+    assert meta["top_suppressed"][0]["reason"] == "shadow_poor_edge_cooldown"
+
+
+def test_gather_imminent_memoizes_ticker_scores_across_patterns(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {"indicator": "rsi_14", "op": ">", "value": TEST_RSI_BREAKOUT_TRIGGER}
+        ]
+    }
+    first = ScanPattern(
+        name="First cached pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_CACHE_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    second = ScanPattern(
+        name="Second cached pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_CACHE_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add_all([first, second])
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_CACHE_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_CACHE_TICKER}),
+    )
+    score_calls: list[str] = []
+
+    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+        score_calls.append(ticker)
+        return {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SCORE_RSI,
+                "adx": TEST_SCORE_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        }
+
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _fake_score_ticker)
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+    )
+
+    assert score_calls == [TEST_CACHE_TICKER]
+    assert {int(c["pattern"].id) for c in candidates} == {int(first.id), int(second.id)}
+    assert meta["tickers_scored"] == len(candidates)
+    assert meta["score_cache_size"] == 1
+    assert meta["score_cache_misses"] == 1
+    assert meta["score_cache_hits"] == 1
+
+
+def test_build_imminent_universe_filters_non_coinbase_crypto(
+    db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_filter_crypto_to_coinbase_spot",
+        True,
+    )
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_use_prescreener_universe", False)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_use_predictions_universe", False)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_use_scanner_universe", False)
+    monkeypatch.setattr(imminent_mod, "DEFAULT_SCAN_TICKERS", [])
+    monkeypatch.setattr(
+        imminent_mod,
+        "DEFAULT_CRYPTO_TICKERS",
+        [TEST_EXECUTABLE_CRYPTO_TICKER, TEST_UNSUPPORTED_CRYPTO_TICKER],
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_EXECUTABLE_CRYPTO_TICKER}),
+    )
+
+    tickers, counts = imminent_mod.build_imminent_ticker_universe(
+        db,
+        user_id=1,
+        cap=TEST_UNIVERSE_CAP,
+    )
+
+    assert tickers == [TEST_EXECUTABLE_CRYPTO_TICKER]
+    assert counts["crypto_execution_filter_dropped"] == 1
+    assert counts["crypto_execution_filter_spot_tickers"] == 1
+
+
+def test_gather_imminent_filters_explicit_non_coinbase_crypto(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {"indicator": "rsi_14", "op": ">", "value": TEST_RSI_BREAKOUT_TRIGGER}
+        ]
+    }
+    executable = ScanPattern(
+        name="Executable crypto pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_EXECUTABLE_CRYPTO_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    unsupported = ScanPattern(
+        name="Unsupported crypto pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_UNSUPPORTED_CRYPTO_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add_all([executable, unsupported])
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_filter_crypto_to_coinbase_spot",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: (
+            [TEST_EXECUTABLE_CRYPTO_TICKER, TEST_UNSUPPORTED_CRYPTO_TICKER],
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_EXECUTABLE_CRYPTO_TICKER}),
+    )
+    score_calls: list[str] = []
+
+    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+        score_calls.append(ticker)
+        return {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SCORE_RSI,
+                "adx": TEST_SCORE_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        }
+
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _fake_score_ticker)
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+    )
+
+    assert score_calls == [TEST_EXECUTABLE_CRYPTO_TICKER]
+    assert [c["ticker"] for c in candidates] == [TEST_EXECUTABLE_CRYPTO_TICKER]
+    assert meta["skip_reasons"]["crypto_execution_universe_filtered"] == 1
+    assert meta["crypto_execution_filter_spot_tickers"] == 1
+
+
+def test_gather_imminent_cools_repeated_score_failures(
+    db,
+    monkeypatch,
+) -> None:
+    imminent_mod._SCORE_FAILURE_CACHE.clear()
+    rules = {
+        "conditions": [
+            {"indicator": "rsi_14", "op": ">", "value": TEST_RSI_BREAKOUT_TRIGGER}
+        ]
+    }
+    pattern = ScanPattern(
+        name="Score failure cooldown pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_SCORE_FAILURE_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_score_failure_cooldown_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_score_failure_cooldown_minutes",
+        TEST_SCORE_FAILURE_COOLDOWN_MINUTES,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_score_failure_min_failures",
+        TEST_SCORE_FAILURE_MIN_FAILURES,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_SCORE_FAILURE_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_SCORE_FAILURE_TICKER}),
+    )
+    score_calls: list[str] = []
+
+    def _failing_score_ticker(ticker: str, skip_fundamentals: bool = True):
+        score_calls.append(ticker)
+        return None
+
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _failing_score_ticker)
+
+    try:
+        _candidates_1, meta_1 = gather_imminent_candidate_rows(
+            db,
+            user_id=1,
+            equity_session_open=False,
+        )
+        _candidates_2, meta_2 = gather_imminent_candidate_rows(
+            db,
+            user_id=1,
+            equity_session_open=False,
+        )
+    finally:
+        imminent_mod._SCORE_FAILURE_CACHE.clear()
+
+    assert score_calls == [TEST_SCORE_FAILURE_TICKER]
+    assert meta_1["skip_reasons"]["score_failed"] == 1
+    assert meta_2["skip_reasons"]["score_failure_cooldown"] == 1
+    assert meta_2["score_cache_misses"] == 0
+
+
+def test_gather_imminent_honors_score_time_budget(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {"indicator": "rsi_14", "op": ">", "value": TEST_RSI_BREAKOUT_TRIGGER}
+        ]
+    }
+    first = ScanPattern(
+        name="Budget first pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_EXECUTABLE_CRYPTO_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    second = ScanPattern(
+        name="Budget second pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_CACHE_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add_all([first, second])
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_score_time_budget_seconds",
+        TEST_SCORE_TIME_BUDGET_SECONDS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_EXECUTABLE_CRYPTO_TICKER, TEST_CACHE_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_EXECUTABLE_CRYPTO_TICKER, TEST_CACHE_TICKER}),
+    )
+    monotonic_values = iter([
+        0.0,
+        0.0,
+        TEST_SCORE_BUDGET_EXPIRED_SECONDS,
+        TEST_SCORE_BUDGET_EXPIRED_SECONDS,
+    ])
+    monkeypatch.setattr(
+        imminent_mod._time,
+        "monotonic",
+        lambda: next(monotonic_values, TEST_SCORE_BUDGET_EXPIRED_SECONDS),
+    )
+    score_calls: list[str] = []
+
+    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+        score_calls.append(ticker)
+        return {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SCORE_RSI,
+                "adx": TEST_SCORE_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        }
+
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _fake_score_ticker)
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+    )
+
+    assert score_calls == [TEST_EXECUTABLE_CRYPTO_TICKER]
+    assert [c["ticker"] for c in candidates] == [TEST_EXECUTABLE_CRYPTO_TICKER]
+    assert meta["score_time_budget_hit"] is True
+
+
+def test_gather_imminent_caps_tickers_per_pattern(
+    db,
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {"indicator": "rsi_14", "op": ">", "value": TEST_RSI_BREAKOUT_TRIGGER}
+        ]
+    }
+    pattern = ScanPattern(
+        name="Per-pattern ticker cap",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_max_tickers_per_pattern",
+        TEST_PER_PATTERN_TICKER_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_EXECUTABLE_CRYPTO_TICKER, TEST_CACHE_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_EXECUTABLE_CRYPTO_TICKER, TEST_CACHE_TICKER}),
+    )
+    score_calls: list[str] = []
+
+    def _fake_score_ticker(ticker: str, skip_fundamentals: bool = True):
+        score_calls.append(ticker)
+        return {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SCORE_RSI,
+                "adx": TEST_SCORE_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        }
+
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _fake_score_ticker)
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+    )
+
+    assert score_calls == [TEST_EXECUTABLE_CRYPTO_TICKER]
+    assert [c["ticker"] for c in candidates] == [TEST_EXECUTABLE_CRYPTO_TICKER]
+    assert meta["per_pattern_ticker_cap"] == TEST_PER_PATTERN_TICKER_CAP
 
 
 def test_run_pattern_imminent_scan_counts_persisted_alert_when_delivery_fails(

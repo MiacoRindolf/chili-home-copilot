@@ -18,7 +18,10 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from .backtest_queue import boost_pattern
-from .recert_queue_service import mode_is_active
+from .recert_queue_service import (
+    mode_is_active,
+    reconcile_dispatched_recerts_from_backtests,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,7 @@ def dispatch_due_recerts(
     boost_priority = int(priority if priority is not None else getattr(
         settings, "brain_recert_queue_backtest_priority", 250,
     ) or 250)
+    reconciled = reconcile_dispatched_recerts_from_backtests(db, limit=row_limit)
     rows = db.execute(text("""
         SELECT id, recert_id, scan_pattern_id, pattern_name, payload_json
         FROM trading_pattern_recert_log
@@ -108,6 +112,7 @@ def dispatch_due_recerts(
         "dispatched": dispatched,
         "failed": failed,
         "failures": failures,
+        "reconciled": reconciled,
     }
 
 

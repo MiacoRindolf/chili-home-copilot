@@ -5,10 +5,9 @@ Given a ``DriftMonitorOutput`` (or a user-initiated request), it
 decides whether a re-cert proposal should be created and, if so,
 returns a ``RecertProposal`` with a deterministic id.
 
-Phase J.1 uses the proposal **only** to write a row into
-``trading_pattern_recert_log``. No downstream consumer reads this
-table in J.1; Phase J.2 will wire it into the backtest queue and the
-lifecycle FSM.
+The proposal is persisted to ``trading_pattern_recert_log``. Scheduler and
+alpha-gate sweeps can emit system recert proposals when a broker-risk
+pattern is missing current certification evidence.
 
 This module is 100% pure - no DB, no logging, no config reads.
 """
@@ -182,10 +181,48 @@ def propose_manual(
     )
 
 
+def propose_scheduler(
+    *,
+    scan_pattern_id: int,
+    pattern_name: str | None,
+    as_of_date: date | str,
+    reason: str,
+    severity: str | None = "red",
+    payload: dict | None = None,
+) -> RecertProposal:
+    """Construct a system/scheduler-originated re-cert proposal."""
+    recert_id = compute_recert_id(
+        scan_pattern_id=scan_pattern_id,
+        as_of_date=as_of_date,
+        source="scheduler",
+    )
+    as_of_value = (
+        as_of_date
+        if isinstance(as_of_date, date)
+        else date.fromisoformat(str(as_of_date))
+    )
+    return RecertProposal(
+        recert_id=recert_id,
+        scan_pattern_id=int(scan_pattern_id),
+        pattern_name=pattern_name,
+        as_of_date=as_of_value,
+        source="scheduler",
+        severity=severity,
+        status="proposed",
+        reason=reason,
+        drift_log_id=None,
+        payload={
+            "origin": "scheduler",
+            **(payload or {}),
+        },
+    )
+
+
 __all__ = [
     "RecertQueueConfig",
     "RecertProposal",
     "compute_recert_id",
     "propose_from_drift",
     "propose_manual",
+    "propose_scheduler",
 ]

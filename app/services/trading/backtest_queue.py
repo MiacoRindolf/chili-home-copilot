@@ -11,12 +11,22 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, case, false, func, or_
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
 
 logger = logging.getLogger(__name__)
+RECERT_PROMOTED_LIFECYCLES = ("promoted", "live")
+PROMOTION_PATH_DEBT_LIFECYCLES = ("shadow_promoted", "pilot_promoted")
+PROMOTION_PATH_DEBT_REASONS = (
+    "cpcv_n_paths_below_provisional_min",
+    "provisional_small_paths",
+)
+QUEUE_RANK_PRIORITY_RECERT = 0
+QUEUE_RANK_RECERT = 1
+QUEUE_RANK_PROMOTION_PATH_DEBT = 2
+QUEUE_RANK_GENERIC_BACKLOG = 3
 
 
 def get_retest_interval_days() -> int:
@@ -24,6 +34,50 @@ def get_retest_interval_days() -> int:
     from ...config import settings
 
     return max(1, int(getattr(settings, "brain_retest_interval_days", 7)))
+
+
+def _priority_recert_pattern_ids() -> list[int]:
+    try:
+        from ...config import settings
+
+        raw = str(getattr(settings, "brain_recert_queue_priority_pattern_ids", "") or "")
+    except Exception:
+        raw = ""
+    out: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            out.append(int(token))
+        except ValueError:
+            logger.debug("[backtest_queue] invalid priority recert pattern id: %s", token)
+    return out
+
+
+def _promotion_path_debt_enabled() -> bool:
+    try:
+        from ...config import settings
+
+        return bool(
+            getattr(settings, "chili_backtest_prioritize_promotion_path_debt", True)
+        )
+    except Exception:
+        return True
+
+
+def _promotion_path_debt_expr():
+    """Patterns close to pilot/live whose CPCV path debt should drain early."""
+    if not _promotion_path_debt_enabled():
+        return false()
+    reason_exprs = [
+        ScanPattern.promotion_gate_reasons.contains([reason])
+        for reason in PROMOTION_PATH_DEBT_REASONS
+    ]
+    return and_(
+        ScanPattern.lifecycle_stage.in_(PROMOTION_PATH_DEBT_LIFECYCLES),
+        or_(*reason_exprs),
+    )
 
 
 # Dashboard polls this frequently; cache avoids hammering Postgres when the pool is busy.
@@ -46,9 +100,10 @@ def get_pending_patterns(
     """Get patterns needing backtests, ordered by priority.
 
     Priority order:
-    1. Manually boosted patterns (highest backtest_priority first)
-    2. Never-tested patterns (last_backtest_at is NULL)
-    3. Oldest tested patterns (past the retest interval)
+    1. Explicitly prioritized promoted/live recerts
+    2. Other promoted/live recerts
+    3. Shadow/pilot promotion-path CPCV path debt
+    4. Generic backlog by backtest_priority, staleness, and age
 
     Boosted patterns (backtest_priority > 0) are always eligible, even if last_backtest_at
     is within the retest window — otherwise 'boost to front' would no-op for recently
@@ -68,6 +123,23 @@ def get_pending_patterns(
         (ScanPattern.queue_tier == "prescreen", 0),
         else_=1,
     )
+    recert_promoted = and_(
+        ScanPattern.recert_required.is_(True),
+        ScanPattern.lifecycle_stage.in_(RECERT_PROMOTED_LIFECYCLES),
+    )
+    priority_recert_ids = _priority_recert_pattern_ids()
+    recert_rank = case(
+        (
+            and_(
+                recert_promoted,
+                ScanPattern.id.in_(priority_recert_ids),
+            ),
+            QUEUE_RANK_PRIORITY_RECERT,
+        ),
+        (recert_promoted, QUEUE_RANK_RECERT),
+        (_promotion_path_debt_expr(), QUEUE_RANK_PROMOTION_PATH_DEBT),
+        else_=QUEUE_RANK_GENERIC_BACKLOG,
+    )
     q = (
         db.query(ScanPattern)
         .filter(
@@ -76,6 +148,7 @@ def get_pending_patterns(
         )
         .order_by(
             tier_rank.asc(),
+            recert_rank.asc(),
             ScanPattern.backtest_priority.desc(),
             ScanPattern.last_backtest_at.asc().nullsfirst(),
             ScanPattern.created_at.asc(),
@@ -265,6 +338,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
         ScanPattern.last_backtest_at.is_(None),
         ScanPattern.last_backtest_at < cutoff,
     )
+    promotion_path_debt_expr = _promotion_path_debt_expr()
 
     row = base.with_entities(
         func.count(ScanPattern.id).label("total_active"),
@@ -293,6 +367,14 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
             )
         ).label("recently_tested"),
         func.count(case((needs_backtest_expr, 1))).label("pending_queue"),
+        func.count(
+            case(
+                (
+                    and_(needs_backtest_expr, promotion_path_debt_expr),
+                    1,
+                )
+            )
+        ).label("promotion_path_debt_pending"),
     ).first()
 
     total_active = row.total_active or 0
@@ -301,6 +383,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
     boosted = row.boosted or 0
     recently_tested = row.recently_tested or 0
     pending = row.pending_queue or 0
+    promotion_path_debt_pending = row.promotion_path_debt_pending or 0
 
     out = {
         "total": total_active,
@@ -309,6 +392,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
         "needs_retest": needs_retest,
         "boosted": boosted,
         "recently_tested": recently_tested,
+        "promotion_path_debt_pending": promotion_path_debt_pending,
         "queue_empty": pending == 0,
     }
     if use_cache:

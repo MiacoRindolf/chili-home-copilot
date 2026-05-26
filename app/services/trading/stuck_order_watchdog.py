@@ -74,6 +74,34 @@ def _maker_first_fallback_timeout() -> timedelta:
     )
 
 
+def _maker_first_edge_thin_hold_enabled() -> bool:
+    return bool(
+        getattr(settings, "chili_coinbase_maker_first_edge_thin_hold_enabled", True)
+    )
+
+
+def _maker_first_edge_thin_hold_timeout() -> timedelta:
+    default_seconds = int(_limit_timeout().total_seconds())
+    return timedelta(
+        seconds=int(
+            getattr(
+                settings,
+                "chili_coinbase_maker_first_edge_thin_hold_seconds",
+                default_seconds,
+            )
+        )
+    )
+
+
+def _elapsed_since_submit(t: Trade, now: datetime) -> timedelta | None:
+    submit_time = _effective_submit_time(t)
+    if submit_time is None:
+        return None
+    if submit_time.tzinfo is not None:
+        submit_time = submit_time.astimezone(timezone.utc).replace(tzinfo=None)
+    return now - submit_time
+
+
 def _snapshot_dict(t: Trade) -> dict[str, Any]:
     snap = t.indicator_snapshot if isinstance(t.indicator_snapshot, dict) else {}
     return dict(snap)
@@ -412,6 +440,42 @@ def _try_maker_first_fallback(
         }
     }
     if net_after_cost_pct is None or net_after_cost_pct < min_net_pct:
+        hold_timeout = _maker_first_edge_thin_hold_timeout()
+        elapsed = _elapsed_since_submit(t, now)
+        if (
+            _maker_first_edge_thin_hold_enabled()
+            and elapsed is not None
+            and elapsed < hold_timeout
+        ):
+            entry_before_hold = _entry_execution_snapshot(t)
+            first_hold = not bool(entry_before_hold.get("maker_first_edge_thin_hold_started_at"))
+            t.broker_status = (
+                getattr(order_normalized, "status", None) or t.broker_status or "open"
+            ).lower()
+            t.last_broker_sync = datetime.utcnow()
+            _update_entry_execution(
+                t,
+                maker_first_fallback_decision="edge_too_thin_holding_maker",
+                maker_first_fallback_checked_at=now.isoformat(),
+                maker_first_fallback_costs=fallback_snapshot["maker_first_fallback"],
+                maker_first_edge_thin_hold_started_at=(
+                    entry_before_hold.get("maker_first_edge_thin_hold_started_at")
+                    or now.isoformat()
+                ),
+                maker_first_edge_thin_hold_seconds=int(hold_timeout.total_seconds()),
+                maker_first_edge_thin_hold_elapsed_seconds=int(elapsed.total_seconds()),
+            )
+            if first_hold:
+                _record_fallback_audit(
+                    db,
+                    t,
+                    decision="placed",
+                    reason="maker_first_edge_too_thin_holding_maker",
+                    snapshot=fallback_snapshot,
+                )
+            db.commit()
+            return "maker_first_edge_too_thin_holding_maker"
+
         cancel_result = _try_cancel(adapter, t)
         if cancel_result.get("ok"):
             t.status = "cancelled"

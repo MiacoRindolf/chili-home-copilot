@@ -35,12 +35,36 @@ RISK_LIFECYCLES = frozenset({"promoted", "live", "pilot_promoted"})
 FULL_RISK_LIFECYCLES = frozenset({"promoted", "live"})
 SHADOW_LIFECYCLE = "shadow_promoted"
 CANDIDATE_LIFECYCLES = frozenset({"candidate", "backtested", "challenged"})
+PILOT_BOOTSTRAP_RECERT_REASONS = frozenset({
+    "missing_oos_recert",
+    "thin_oos_recert",
+    "missing_quality_composite_score",
+    "thin_realized_ev",
+})
+BACKTEST_SOLVABLE_RECERT_REASONS = frozenset({
+    "missing_oos_recert",
+    "thin_oos_recert",
+    "stale_oos_recert",
+    "promotion_gate_not_currently_passed",
+})
+BROKER_RISK_PROBATION_RECERT_REASONS = frozenset({
+    "missing_oos_recert",
+    "thin_oos_recert",
+    "stale_oos_recert",
+})
+BROKER_RISK_PROBATION_LIFECYCLES = frozenset({"promoted"})
+BROKER_RISK_PROBATION_DEFAULT_MIN_CPCV_SHARPE = 1.0
+BROKER_RISK_PROBATION_DEFAULT_MIN_REALIZED_TRADES = 5
+PRIORITY_RECERT_PATTERN_IDS_SETTING = "brain_recert_queue_priority_pattern_ids"
 
 
 @dataclass(frozen=True)
 class AlphaPortfolioConfig:
     recert_stale_days: int = 30
     min_realized_trades: int = 5
+    min_oos_trades: int = 5
+    min_oos_avg_return_pct: float = 0.0
+    min_oos_win_rate: float = 0.0
     min_risk_sleeves: int = 3
     min_shadow_score: float = 0.52
     max_shadow_total: int = 4
@@ -57,6 +81,15 @@ def config_from_settings(settings_: Any) -> AlphaPortfolioConfig:
         )),
         min_realized_trades=int(getattr(
             settings_, "chili_alpha_portfolio_min_realized_trades", 5,
+        )),
+        min_oos_trades=int(getattr(
+            settings_, "chili_alpha_portfolio_min_oos_trades", 5,
+        )),
+        min_oos_avg_return_pct=float(getattr(
+            settings_, "chili_alpha_portfolio_min_oos_avg_return_pct", 0.0,
+        )),
+        min_oos_win_rate=float(getattr(
+            settings_, "chili_alpha_portfolio_min_oos_win_rate", 0.0,
         )),
         min_risk_sleeves=int(getattr(
             settings_, "chili_alpha_portfolio_min_risk_sleeves", 3,
@@ -109,6 +142,20 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except Exception:
         return None
+
+
+def _priority_recert_pattern_ids(settings_: Any) -> list[int]:
+    raw = str(getattr(settings_, PRIORITY_RECERT_PATTERN_IDS_SETTING, "") or "")
+    out: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            out.append(int(token))
+        except ValueError:
+            logger.debug("[alpha_portfolio_gate] invalid priority pattern id: %s", token)
+    return out
 
 
 def _clip(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -227,6 +274,22 @@ def recert_reasons_for_pattern(
         reasons.append("missing_oos_recert")
     elif isinstance(oos_at, datetime) and oos_at < now - timedelta(days=cfg.recert_stale_days):
         reasons.append("stale_oos_recert")
+    else:
+        oos_n = _safe_int(_get(pattern, "oos_trade_count", None)) or 0
+        if oos_n < cfg.min_oos_trades:
+            reasons.append("thin_oos_recert")
+        oos_avg = _safe_float(_get(pattern, "oos_avg_return_pct", None))
+        if oos_avg is not None and oos_avg < cfg.min_oos_avg_return_pct:
+            reasons.append("negative_oos_recert")
+        oos_wr = _safe_float(_get(pattern, "oos_win_rate", None))
+        if oos_wr is not None and oos_wr > 1.0:
+            oos_wr = oos_wr / 100.0
+        if (
+            cfg.min_oos_win_rate > 0.0
+            and oos_wr is not None
+            and oos_wr < cfg.min_oos_win_rate
+        ):
+            reasons.append("weak_oos_win_rate_recert")
 
     if _get(pattern, "quality_composite_score", None) is None:
         reasons.append("missing_quality_composite_score")
@@ -243,6 +306,135 @@ def recert_reasons_for_pattern(
         reasons.append("negative_realized_ev")
 
     return reasons
+
+
+def _recert_reason_set(pattern: Any) -> set[str]:
+    raw = _get(pattern, "recert_reason", None)
+    reasons: set[str] = set()
+    if isinstance(raw, str):
+        reasons.update(x.strip() for x in raw.split(",") if x.strip())
+    elif isinstance(raw, (list, tuple, set)):
+        reasons.update(str(x).strip() for x in raw if str(x).strip())
+
+    gate_json = _get(pattern, "portfolio_gate_json", None)
+    if isinstance(gate_json, Mapping):
+        nested = gate_json.get("recert_reasons")
+        if isinstance(nested, str):
+            reasons.update(x.strip() for x in nested.split(",") if x.strip())
+        elif isinstance(nested, (list, tuple, set)):
+            reasons.update(str(x).strip() for x in nested if str(x).strip())
+    return reasons
+
+
+def pilot_bootstrap_recert_allows_live(
+    pattern: Any,
+    *,
+    settings_: Any = None,
+    now: datetime | None = None,
+) -> bool:
+    """Allow tiny pilot live ramps through bootstrap certification debt only.
+
+    A ``pilot_promoted`` pattern is deliberately not full-risk certified yet.
+    Missing OOS, missing quality score, and thin realized EV are the exact
+    evidence gaps the pilot lane is designed to close. Hard failures like a
+    failed promotion gate, negative realized EV, or stale certification still
+    block broker orders.
+    """
+    if settings_ is None:
+        from ...config import settings as _settings
+
+        settings_ = _settings
+    if not bool(getattr(settings_, "chili_pilot_promoted_allow_bootstrap_recert_live", True)):
+        return False
+    lifecycle = str(_get(pattern, "lifecycle_stage", "") or "").strip().lower()
+    if lifecycle != "pilot_promoted":
+        return False
+    if not bool(_get(pattern, "recert_required", False)):
+        return False
+
+    reasons = _recert_reason_set(pattern)
+    if not reasons:
+        try:
+            reasons = set(
+                recert_reasons_for_pattern(
+                    pattern,
+                    now=now,
+                    config=config_from_settings(settings_),
+                )
+            )
+        except Exception:
+            reasons = set()
+    if not reasons:
+        return False
+    return reasons.issubset(PILOT_BOOTSTRAP_RECERT_REASONS)
+
+
+def broker_risk_probation_allows_live(
+    pattern: Any,
+    *,
+    settings_: Any = None,
+    now: datetime | None = None,
+) -> bool:
+    """Allow reduced-risk live entries through soft OOS recert debt only."""
+    if settings_ is None:
+        from ...config import settings as _settings
+
+        settings_ = _settings
+    if not bool(getattr(settings_, "chili_autotrader_probation_live_enabled", True)):
+        return False
+    lifecycle = str(_get(pattern, "lifecycle_stage", "") or "").strip().lower()
+    if lifecycle not in BROKER_RISK_PROBATION_LIFECYCLES:
+        return False
+    if not bool(_get(pattern, "recert_required", False)):
+        return False
+    if _get(pattern, "promotion_gate_passed", None) is not True:
+        return False
+
+    reasons = _recert_reason_set(pattern)
+    if not reasons:
+        try:
+            reasons = set(
+                recert_reasons_for_pattern(
+                    pattern,
+                    now=now,
+                    config=config_from_settings(settings_),
+                )
+            )
+        except Exception:
+            reasons = set()
+    if not reasons or not reasons.issubset(BROKER_RISK_PROBATION_RECERT_REASONS):
+        return False
+
+    cpcv = _safe_float(_get(pattern, "cpcv_median_sharpe", None))
+    min_cpcv = float(
+        getattr(
+            settings_,
+            "chili_autotrader_probation_min_cpcv_sharpe",
+            BROKER_RISK_PROBATION_DEFAULT_MIN_CPCV_SHARPE,
+        )
+    )
+    if cpcv is None or cpcv < min_cpcv:
+        return False
+
+    realized_n = (
+        _safe_int(_get(pattern, "raw_realized_trade_count", None))
+        or _safe_int(_get(pattern, "realized_n_trades", None))
+        or 0
+    )
+    min_realized = int(
+        getattr(
+            settings_,
+            "chili_autotrader_probation_min_realized_trades",
+            BROKER_RISK_PROBATION_DEFAULT_MIN_REALIZED_TRADES,
+        )
+    )
+    if realized_n < min_realized:
+        return False
+
+    realized_avg = _safe_float(_get(pattern, "raw_realized_avg_return_pct", None))
+    if realized_avg is None:
+        realized_avg = _safe_float(_get(pattern, "realized_avg_pnl_pct", None))
+    return bool(realized_avg is not None and realized_avg > 0.0)
 
 
 def _realized_edge_fraction(row: Mapping[str, Any]) -> tuple[float | None, int]:
@@ -361,6 +553,14 @@ def _candidate_floor_blocks(row: Mapping[str, Any], cfg: AlphaPortfolioConfig) -
     realized_avg = _safe_float(row.get("realized_avg_pnl_pct"))
     if realized_n >= cfg.min_realized_trades and realized_avg is not None and realized_avg <= 0.0:
         reasons.append("negative_realized_floor")
+    oos_at = row.get("oos_evaluated_at")
+    if oos_at is not None:
+        oos_n = _safe_int(row.get("oos_trade_count")) or 0
+        oos_avg = _safe_float(row.get("oos_avg_return_pct"))
+        if oos_n < cfg.min_oos_trades:
+            reasons.append("thin_oos_floor")
+        elif oos_avg is not None and oos_avg < cfg.min_oos_avg_return_pct:
+            reasons.append("negative_oos_floor")
     return reasons
 
 
@@ -536,6 +736,7 @@ def scan_alpha_portfolio(
     recert_required: list[dict[str, Any]] = []
     pattern_updates: list[dict[str, Any]] = []
     candidate_rows: list[dict[str, Any]] = []
+    blocked_candidate_rows: list[dict[str, Any]] = []
 
     for row in rows:
         recert_reasons = recert_reasons_for_pattern(row, now=now, config=cfg)
@@ -592,7 +793,9 @@ def scan_alpha_portfolio(
                 "diversity": score_info.get("diversity", {}),
                 "floor_blocks": floor_blocks,
             }
-            if not floor_blocks and score is not None:
+            if floor_blocks:
+                blocked_candidate_rows.append(candidate)
+            elif score is not None:
                 candidate_rows.append(candidate)
 
     candidate_rows.sort(
@@ -634,21 +837,37 @@ def scan_alpha_portfolio(
     if not execution.get("clean"):
         full_blocks.extend(execution.get("reasons") or ["execution_health_not_clean"])
 
-    pattern_585 = next((r for r in recert_required if int(r["scan_pattern_id"]) == 585), None)
-    if pattern_585 is None:
-        maybe_585 = next((r for r in rows if int(r.get("id") or 0) == 585), None)
-        if maybe_585 is not None:
-            pattern_585 = {
-                "scan_pattern_id": 585,
-                "name": maybe_585.get("name"),
-                "alpha_sleeve": maybe_585.get("alpha_sleeve"),
-                "lifecycle_stage": maybe_585.get("lifecycle_stage"),
-                "promotion_status": maybe_585.get("promotion_status"),
-                "reasons": maybe_585.get("recert_reasons") or [],
-                "portfolio_gate_score": (
-                    maybe_585.get("portfolio_score_info") or {}
-                ).get("portfolio_score"),
-            }
+    priority_recert_patterns: list[dict[str, Any]] = []
+    for priority_pattern_id in _priority_recert_pattern_ids(settings_):
+        priority_row = next(
+            (
+                r for r in recert_required
+                if int(r["scan_pattern_id"]) == int(priority_pattern_id)
+            ),
+            None,
+        )
+        if priority_row is None:
+            maybe_priority = next(
+                (r for r in rows if int(r.get("id") or 0) == int(priority_pattern_id)),
+                None,
+            )
+            if maybe_priority is not None:
+                priority_row = {
+                    "scan_pattern_id": int(priority_pattern_id),
+                    "name": maybe_priority.get("name"),
+                    "alpha_sleeve": maybe_priority.get("alpha_sleeve"),
+                    "lifecycle_stage": maybe_priority.get("lifecycle_stage"),
+                    "promotion_status": maybe_priority.get("promotion_status"),
+                    "reasons": maybe_priority.get("recert_reasons") or [],
+                    "portfolio_gate_score": (
+                        maybe_priority.get("portfolio_score_info") or {}
+                    ).get("portfolio_score"),
+                }
+        if priority_row is not None:
+            priority_recert_patterns.append(priority_row)
+    primary_priority_recert_pattern = (
+        priority_recert_patterns[0] if priority_recert_patterns else None
+    )
 
     return {
         "ok": True,
@@ -671,12 +890,14 @@ def scan_alpha_portfolio(
         "diversification_reasons": diversification_reasons,
         "recert_required_count": len(recert_required),
         "recert_required_patterns": recert_required,
-        "pattern_585": pattern_585,
+        "priority_recert_patterns": priority_recert_patterns,
+        "pattern_585": primary_priority_recert_pattern,
         "execution_health": execution,
         "full_promotion_blocked": bool(full_blocks),
         "full_promotion_block_reasons": sorted(set(full_blocks)),
         "candidate_count": len(candidate_rows),
         "candidates": candidate_rows[: max(0, int(limit))],
+        "blocked_candidates": blocked_candidate_rows[: max(0, int(limit))],
         "shadow_candidates": selected_shadow,
         "pattern_updates": pattern_updates,
     }
@@ -798,27 +1019,49 @@ def queue_recert_for_required(
     mode_override: str | None = None,
 ) -> dict[str, Any]:
     recerts = list(snapshot.get("recert_required_patterns") or [])
+    actionable: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for recert in recerts:
+        reasons = [str(x) for x in (recert.get("reasons") or [])]
+        if set(reasons).intersection(BACKTEST_SOLVABLE_RECERT_REASONS):
+            actionable.append(recert)
+        else:
+            skipped.append({
+                "scan_pattern_id": int(recert["scan_pattern_id"]),
+                "reasons": reasons,
+                "skip_reason": "no_backtest_solvable_recert_reason",
+            })
     if not execute:
         return {
             "ok": True,
             "dry_run": True,
-            "recert_planned": [int(r["scan_pattern_id"]) for r in recerts],
+            "recert_planned": [int(r["scan_pattern_id"]) for r in actionable],
+            "recert_skipped": skipped,
         }
 
-    from .recert_queue_service import queue_manual
+    from .recert_queue_service import queue_scheduler
 
     queued: list[dict[str, Any]] = []
-    for recert in recerts:
+    for recert in actionable:
+        reasons = [str(x) for x in (recert.get("reasons") or [])]
         reason = (
             "alpha_portfolio_gate:"
-            + ",".join(str(x) for x in (recert.get("reasons") or []))
+            + ",".join(reasons)
         )[:256]
-        result = queue_manual(
+        result = queue_scheduler(
             db,
             scan_pattern_id=int(recert["scan_pattern_id"]),
             pattern_name=recert.get("name"),
             as_of_date=date.today(),
             reason=reason,
+            severity="red",
+            payload={
+                "origin": "alpha_portfolio_gate",
+                "alpha_sleeve": recert.get("alpha_sleeve"),
+                "lifecycle_stage": recert.get("lifecycle_stage"),
+                "promotion_status": recert.get("promotion_status"),
+                "recert_reasons": reasons,
+            },
             mode_override=mode_override,
         )
         if result is not None:
@@ -829,7 +1072,12 @@ def queue_recert_for_required(
                 "status": result.status,
                 "mode": result.mode,
             })
-    return {"ok": True, "dry_run": False, "queued": queued}
+    return {
+        "ok": True,
+        "dry_run": False,
+        "queued": queued,
+        "skipped": skipped,
+    }
 
 
 def stage_shadow_candidates(
@@ -885,6 +1133,134 @@ def stage_shadow_candidates(
 
     db.commit()
     return {"ok": True, "dry_run": False, "shadow_staged": staged}
+
+
+def run_alpha_portfolio_maintenance(
+    db: Session,
+    *,
+    settings_: Any = None,
+    now: datetime | None = None,
+    execute: bool = True,
+) -> dict[str, Any]:
+    """Persist alpha-gate state and automatically feed certification work.
+
+    This is the scheduled "make it part of the system" loop: scan the book,
+    write current recert flags/gate audit, queue required recerts as scheduler
+    work, and stage portfolio-approved candidates into broker-blocked shadow.
+    """
+    if settings_ is None:
+        from ...config import settings as _settings
+
+        settings_ = _settings
+    if not bool(getattr(settings_, "chili_alpha_portfolio_gate_enabled", False)):
+        return {"ok": True, "skipped": "alpha_portfolio_gate_disabled"}
+    if not bool(getattr(settings_, "chili_alpha_portfolio_maintenance_enabled", True)):
+        return {"ok": True, "skipped": "maintenance_disabled"}
+
+    now = now or datetime.utcnow()
+    realized_sync_result: dict[str, Any] = {
+        "ok": True,
+        "skipped": "realized_sync_disabled",
+    }
+    if (
+        execute
+        and bool(getattr(settings_, "chili_alpha_portfolio_sync_realized_on_maintenance", True))
+    ):
+        try:
+            from .realized_stats_sync import sync_realized_stats
+
+            realized_sync_result = {"ok": True, **sync_realized_stats(db, dry_run=False)}
+        except Exception as exc:
+            db.rollback()
+            realized_sync_result = {
+                "ok": False,
+                "error": f"realized_sync_failed:{type(exc).__name__}",
+            }
+            logger.warning(
+                "[alpha_portfolio_gate] maintenance realized sync failed: %s",
+                exc,
+                exc_info=True,
+            )
+    elif not execute:
+        realized_sync_result = {
+            "ok": True,
+            "skipped": "dry_run_write_free",
+        }
+
+    quality_result: dict[str, Any] = {
+        "ok": True,
+        "skipped": "quality_refresh_disabled",
+    }
+    if (
+        execute
+        and bool(getattr(settings_, "chili_alpha_portfolio_refresh_quality_on_maintenance", True))
+    ):
+        try:
+            from .pattern_quality_score import compute_and_persist_scores
+
+            quality_result = compute_and_persist_scores(db, settings_=settings_)
+        except Exception as exc:
+            db.rollback()
+            quality_result = {
+                "ok": False,
+                "error": f"quality_refresh_failed:{type(exc).__name__}",
+            }
+            logger.warning(
+                "[alpha_portfolio_gate] maintenance quality refresh failed: %s",
+                exc,
+                exc_info=True,
+            )
+    elif not execute:
+        quality_result = {
+            "ok": True,
+            "skipped": "dry_run_write_free",
+        }
+
+    snapshot = scan_alpha_portfolio(db, settings_=settings_, now=now)
+    persist_result = persist_alpha_portfolio_snapshot(
+        db, snapshot, execute=execute,
+    )
+
+    queue_result: dict[str, Any] = {
+        "ok": True,
+        "skipped": "auto_queue_recert_disabled",
+    }
+    if bool(getattr(settings_, "chili_alpha_portfolio_auto_queue_recert_enabled", True)):
+        queue_result = queue_recert_for_required(
+            db,
+            snapshot,
+            execute=execute,
+            mode_override=getattr(settings_, "brain_recert_queue_mode", None),
+        )
+
+    stage_result: dict[str, Any] = {
+        "ok": True,
+        "skipped": "auto_stage_shadow_disabled",
+    }
+    if bool(getattr(settings_, "chili_alpha_portfolio_auto_stage_shadow_enabled", True)):
+        stage_result = stage_shadow_candidates(
+            db,
+            snapshot,
+            execute=execute,
+            now=now,
+        )
+
+    return {
+        "ok": True,
+        "dry_run": not execute,
+        "run_id": snapshot.get("run_id"),
+        "generated_at": snapshot.get("generated_at"),
+        "active_pattern_count": snapshot.get("active_pattern_count"),
+        "recert_required_count": snapshot.get("recert_required_count"),
+        "shadow_candidate_count": len(snapshot.get("shadow_candidates") or []),
+        "full_promotion_blocked": snapshot.get("full_promotion_blocked"),
+        "full_promotion_block_reasons": snapshot.get("full_promotion_block_reasons") or [],
+        "realized_sync": realized_sync_result,
+        "quality_refresh": quality_result,
+        "persist": persist_result,
+        "recert_queue": queue_result,
+        "shadow_stage": stage_result,
+    }
 
 
 def broker_risk_allowed(

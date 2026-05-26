@@ -33,6 +33,17 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+# Coinbase Exchange API endpoints and request defaults.
+_COINBASE_EXCHANGE_API_BASE_URL = "https://api.exchange.coinbase.com"
+_COINBASE_CANDLES_PATH_TEMPLATE = "/products/{product_id}/candles"
+_COINBASE_TICKER_PATH_TEMPLATE = "/products/{product_id}/ticker"
+_COINBASE_TIMEOUT_ENV = "CHILI_COINBASE_MARKET_DATA_TIMEOUT_SECONDS"
+_COINBASE_DEFAULT_TIMEOUT_S = 8.0
+_COINBASE_MIN_TIMEOUT_S = 0.1
+_COINBASE_PUBLIC_PROVIDER = "coinbase_public"
+_MIN_VALID_QUOTE_PRICE = 0.0
+
+
 # Coinbase Exchange API granularities (seconds). Anything else returns 400.
 _GRANULARITY_MAP = {
     "1m": 60,
@@ -78,6 +89,17 @@ def _env_int(name: str, default: int) -> int:
         return max(1, int(os.environ.get(name, str(default))))
     except (TypeError, ValueError):
         return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(_COINBASE_MIN_TIMEOUT_S, float(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _request_timeout_s() -> float:
+    return _env_float(_COINBASE_TIMEOUT_ENV, _COINBASE_DEFAULT_TIMEOUT_S)
 
 
 def _circuit_is_open(product_id: str, interval: str) -> bool:
@@ -171,10 +193,11 @@ def _request_chunk(
     start_dt: datetime,
     end_dt: datetime,
     *,
-    timeout_s: float = 8.0,
+    timeout_s: float = _COINBASE_DEFAULT_TIMEOUT_S,
 ) -> list[list[float]]:
     """Fetch one ≤300-candle chunk. Returns Coinbase's raw list-of-lists."""
-    url = f"https://api.exchange.coinbase.com/products/{product_id}/candles"
+    path = _COINBASE_CANDLES_PATH_TEMPLATE.format(product_id=product_id)
+    url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{path}"
     params = {
         "granularity": granularity_s,
         "start": start_dt.isoformat(),
@@ -229,7 +252,13 @@ def get_ohlcv(
     while cursor < end_dt:
         chunk_end = min(cursor + timedelta(seconds=chunk_seconds), end_dt)
         try:
-            rows = _request_chunk(product_id, granularity_s, cursor, chunk_end)
+            rows = _request_chunk(
+                product_id,
+                granularity_s,
+                cursor,
+                chunk_end,
+                timeout_s=_request_timeout_s(),
+            )
             _record_request_success()
         except requests.RequestException as e:
             _record_request_failure(e)
@@ -268,4 +297,61 @@ def get_ohlcv(
             except (ValueError, TypeError, IndexError):
                 continue
     out.sort(key=lambda r: r["time"])
+    return out
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_quote(ticker: str) -> dict[str, Any] | None:
+    """Fetch a public Coinbase ticker snapshot for ``BASE-USD`` products.
+
+    The return shape mirrors the raw provider payload consumed by
+    ``market_data._build_quote_result``. Empty or invalid responses fail closed
+    with ``None`` so the caller can abstain from trading.
+    """
+    if not is_crypto_usd(ticker):
+        return None
+    product_id = _to_product_id(ticker)
+    if _circuit_is_open(product_id, "quote"):
+        return None
+    path = _COINBASE_TICKER_PATH_TEMPLATE.format(product_id=product_id)
+    url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{path}"
+    try:
+        resp = requests.get(url, timeout=_request_timeout_s())
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        price = _as_float(data.get("price"))
+        if price is None or price <= _MIN_VALID_QUOTE_PRICE:
+            return None
+        _record_request_success()
+    except requests.RequestException as e:
+        _record_request_failure(e)
+        logger.warning("[coinbase_ohlcv] %s quote request failed: %s", product_id, e)
+        return None
+    except Exception as e:
+        logger.warning("[coinbase_ohlcv] %s quote parse failed: %s", product_id, e)
+        return None
+
+    out: dict[str, Any] = {
+        "last_price": price,
+        "provider": _COINBASE_PUBLIC_PROVIDER,
+    }
+    bid = _as_float(data.get("bid"))
+    ask = _as_float(data.get("ask"))
+    volume = _as_float(data.get("volume"))
+    if bid is not None and bid > _MIN_VALID_QUOTE_PRICE:
+        out["bid"] = bid
+    if ask is not None and ask > _MIN_VALID_QUOTE_PRICE:
+        out["ask"] = ask
+    if volume is not None:
+        out["volume"] = volume
+    if data.get("time"):
+        out["quote_ts"] = data.get("time")
     return out

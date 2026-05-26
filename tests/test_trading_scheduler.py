@@ -14,6 +14,8 @@ def test_scheduler_excludes_web_pattern_research_job(monkeypatch):
 
     stop_scheduler()
     monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+    monkeypatch.setattr(settings, "chili_alpha_portfolio_gate_enabled", True)
+    monkeypatch.setattr(settings, "chili_alpha_portfolio_maintenance_enabled", True)
     try:
         start_scheduler()
         info = get_scheduler_info()
@@ -27,6 +29,9 @@ def test_scheduler_excludes_web_pattern_research_job(monkeypatch):
         assert "daily_prescreen" in job_ids
         assert "daily_market_scan" in job_ids
         assert "brain_market_snapshots" in job_ids
+        assert "realized_stats_sync" in job_ids
+        assert "alpha_portfolio_gate_maintenance" in job_ids
+        assert "recert_queue_dispatch" in job_ids
     finally:
         stop_scheduler()
         monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
@@ -41,6 +46,10 @@ def test_brain_learning_cycle_config_defaults():
     assert getattr(settings, "brain_intraday_snapshots_enabled", None) is True
     assert int(getattr(settings, "brain_intraday_max_tickers", 0)) == 1000
     assert getattr(settings, "brain_market_snapshot_scheduler_enabled", None) is True
+    assert getattr(settings, "chili_realized_sync_include_paper_dynamic", None) is True
+    assert int(getattr(settings, "chili_realized_sync_interval_minutes", 0)) == 30
+    assert getattr(settings, "brain_recert_queue_mode", None) == "shadow"
+    assert int(getattr(settings, "brain_recert_queue_dispatch_interval_minutes", 0)) == 60
 
 
 def test_scheduler_web_role_omits_crypto_breakout(monkeypatch):

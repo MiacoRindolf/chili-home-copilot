@@ -19,6 +19,14 @@ import pytest
 
 from app.services.trading import market_data
 
+TEST_CRYPTO_TICKER = "BTC-USD"
+TEST_COINBASE_PRICE = 42_000.25
+TEST_COINBASE_BID = 42_000.0
+TEST_COINBASE_ASK = 42_000.5
+TEST_COINBASE_VOLUME = 123.45
+TEST_COINBASE_QUOTE_TIME = "2026-05-25T22:45:00Z"
+TEST_COINBASE_TIMEOUT_S = 3.5
+
 
 @pytest.fixture(autouse=True)
 def _reset_cache(monkeypatch):
@@ -152,3 +160,90 @@ class TestFetchOhlcvDfDeadCacheEquity:
 
         df = market_data.fetch_ohlcv_df("ETH-USD", interval="1d", period="5d")
         assert df.empty
+
+
+class TestFetchQuoteDeadCacheCrypto:
+    def test_crypto_quote_uses_coinbase_when_massive_dead(self, monkeypatch):
+        """Massive exhausted + crypto quote -> Coinbase public ticker fallback."""
+        from app.services.trading import coinbase_ohlcv
+
+        monkeypatch.setattr("app.services.trading.price_bus.get_live_quote", lambda _t: None)
+        monkeypatch.setattr(market_data, "_use_massive", lambda: True)
+        monkeypatch.setattr(market_data, "_use_polygon", lambda: False)
+        monkeypatch.setattr(market_data, "_effective_allow_fallback", lambda _x: True)
+        monkeypatch.setattr(market_data.settings, "brain_market_data_coinbase_fallback", True)
+
+        m = market_data._massive
+        monkeypatch.setattr(m, "get_ws_quote", lambda _t: None)
+        monkeypatch.setattr(m, "get_last_quote", lambda _t: None)
+        monkeypatch.setattr(m, "massive_aggregate_variants_all_dead", lambda _t: True)
+        monkeypatch.setattr(m, "is_crypto", lambda _t: True)
+
+        monkeypatch.setattr(
+            coinbase_ohlcv,
+            "get_quote",
+            lambda _t: {
+                "last_price": TEST_COINBASE_PRICE,
+                "bid": TEST_COINBASE_BID,
+                "ask": TEST_COINBASE_ASK,
+                "provider": "coinbase_public",
+            },
+        )
+        monkeypatch.setattr(
+            market_data,
+            "_yf_fast_info",
+            lambda _t: (_ for _ in ()).throw(
+                AssertionError("yfinance should not be needed after Coinbase quote fallback")
+            ),
+        )
+
+        quote = market_data.fetch_quote(TEST_CRYPTO_TICKER)
+        assert quote is not None
+        assert quote["price"] == TEST_COINBASE_PRICE
+        assert quote["bid"] == TEST_COINBASE_BID
+        assert quote["ask"] == TEST_COINBASE_ASK
+        assert quote["source"] == "coinbase_public"
+
+
+class TestCoinbasePublicQuote:
+    def test_get_quote_normalizes_public_ticker_payload(self, monkeypatch):
+        from app.services.trading import coinbase_ohlcv
+
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "price": str(TEST_COINBASE_PRICE),
+                    "bid": str(TEST_COINBASE_BID),
+                    "ask": str(TEST_COINBASE_ASK),
+                    "volume": str(TEST_COINBASE_VOLUME),
+                    "time": TEST_COINBASE_QUOTE_TIME,
+                }
+
+        seen: dict[str, object] = {}
+
+        def _fake_get(url: str, *, timeout: float):
+            seen["url"] = url
+            seen["timeout"] = timeout
+            return _Response()
+
+        monkeypatch.setenv(
+            "CHILI_COINBASE_MARKET_DATA_TIMEOUT_SECONDS",
+            str(TEST_COINBASE_TIMEOUT_S),
+        )
+        monkeypatch.setattr(coinbase_ohlcv, "_CIRCUIT_OPEN_UNTIL", 0.0)
+        monkeypatch.setattr(coinbase_ohlcv.requests, "get", _fake_get)
+
+        quote = coinbase_ohlcv.get_quote(TEST_CRYPTO_TICKER.lower())
+        assert quote == {
+            "last_price": TEST_COINBASE_PRICE,
+            "provider": "coinbase_public",
+            "bid": TEST_COINBASE_BID,
+            "ask": TEST_COINBASE_ASK,
+            "volume": TEST_COINBASE_VOLUME,
+            "quote_ts": TEST_COINBASE_QUOTE_TIME,
+        }
+        assert str(seen["url"]).endswith(f"/products/{TEST_CRYPTO_TICKER}/ticker")
+        assert seen["timeout"] == TEST_COINBASE_TIMEOUT_S

@@ -31,10 +31,12 @@ Tunable via :class:`~app.config.Settings`::
     chili_realized_ev_min_trades          = 5      # min realized n
     chili_realized_ev_min_avg_return_pct  = 0.0    # threshold (pct)
     chili_realized_ev_min_win_rate        = 0.0    # threshold (fraction)
+    chili_realized_ev_gate_allow_raw_fallback = True
 """
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,17 +65,34 @@ def _settings_get(name: str, default: Any) -> Any:
         return default
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        out = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    if out is None or not math.isfinite(out):
+        return None
+    return out
+
+
 def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
     """Check the pattern's realized stats against the EV gate.
 
-    Reads ``corrected_*`` first (the authoritative columns owned by
-    :func:`learning.update_pattern_stats_from_closed_trades`); falls
-    back to the legacy ``{win_rate, avg_return_pct, trade_count}``
-    columns when ``corrected_*`` is NULL. The fallback covers the
-    merge window before the one-shot backfill runs; once backfill
-    completes it is a no-op. Routing through
-    :func:`pattern_stats_accessor.get_corrected_pattern_stats` keeps
-    that contract in one place.
+    Reads ``corrected_*`` first (the authoritative live-trade columns owned
+    by :func:`learning.update_pattern_stats_from_closed_trades`), then the
+    legacy ``{win_rate, avg_return_pct, trade_count}`` columns. When that
+    sample is missing or below the required minimum, the gate may use
+    ``raw_realized_*`` as a bootstrap fallback. That raw family is refreshed
+    from live trades plus qualified AutoTrader paper/shadow outcomes, so
+    paper evidence can graduate a pattern without letting it override clear
+    live/corrected losses.
 
     Returns :class:`EvGateResult` with the snapshot of inputs (for
     auditability) and the pass/fail reasons. The snapshot is what gets
@@ -85,16 +104,63 @@ def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
     min_n = int(_settings_get("chili_realized_ev_min_trades", 5))
     min_ret = float(_settings_get("chili_realized_ev_min_avg_return_pct", 0.0))
     min_wr = float(_settings_get("chili_realized_ev_min_win_rate", 0.0))
+    allow_raw_fallback = bool(
+        _settings_get("chili_realized_ev_gate_allow_raw_fallback", True)
+    )
 
     stats = get_corrected_pattern_stats(scan_pattern)
+    raw_n = _safe_int(getattr(scan_pattern, "raw_realized_trade_count", None))
+    raw_wr = _safe_float(getattr(scan_pattern, "raw_realized_win_rate", None))
+    raw_ret = _safe_float(getattr(scan_pattern, "raw_realized_avg_return_pct", None))
+
+    n = int(stats.trade_count or 0)
+    wr = stats.win_rate
+    ret = stats.avg_return_pct
+    stats_source = "corrected_or_legacy"
+    raw_fallback_blocked_reason: str | None = None
+
+    corrected_clear_loss = False
+    if n > 0:
+        try:
+            corrected_clear_loss = (
+                (ret is not None and float(ret) <= min_ret)
+                or (wr is not None and float(wr) <= min_wr)
+            )
+        except (TypeError, ValueError):
+            corrected_clear_loss = False
+
+    if not allow_raw_fallback:
+        raw_fallback_blocked_reason = "disabled"
+    elif raw_n is None or raw_n < min_n:
+        raw_fallback_blocked_reason = f"raw_realized_n_below_min:{int(raw_n or 0)}<{min_n}"
+    elif n >= min_n:
+        raw_fallback_blocked_reason = f"corrected_sample_sufficient:{n}>={min_n}"
+    elif corrected_clear_loss:
+        raw_fallback_blocked_reason = "corrected_live_loss_takes_precedence"
+    else:
+        n = int(raw_n)
+        wr = raw_wr
+        ret = raw_ret
+        stats_source = "raw_realized_fallback"
+        raw_fallback_blocked_reason = None
 
     snapshot = {
-        "win_rate": stats.win_rate,
-        "avg_return_pct": stats.avg_return_pct,
-        "trade_count": stats.trade_count,
+        "win_rate": wr,
+        "avg_return_pct": ret,
+        "trade_count": n,
+        "stats_source": stats_source,
         "stats_source_win_rate": stats.source_win_rate,
         "stats_source_avg_return_pct": stats.source_avg_return_pct,
         "stats_source_trade_count": stats.source_trade_count,
+        "corrected_or_legacy_win_rate": stats.win_rate,
+        "corrected_or_legacy_avg_return_pct": stats.avg_return_pct,
+        "corrected_or_legacy_trade_count": stats.trade_count,
+        "raw_realized_win_rate": raw_wr,
+        "raw_realized_avg_return_pct": raw_ret,
+        "raw_realized_trade_count": raw_n,
+        "raw_realized_fallback_allowed": allow_raw_fallback,
+        "raw_realized_fallback_used": stats_source == "raw_realized_fallback",
+        "raw_realized_fallback_blocked_reason": raw_fallback_blocked_reason,
         "min_trades_required": min_n,
         "min_avg_return_pct_required": min_ret,
         "min_win_rate_required": min_wr,
@@ -107,9 +173,6 @@ def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
         return EvGateResult(passed=True, reasons=("gate_disabled",), snapshot=snapshot)
 
     reasons: list[str] = []
-    n = int(stats.trade_count or 0)
-    wr = stats.win_rate
-    ret = stats.avg_return_pct
 
     # Sample-size requirement: never promote on a 1-trade fluke.
     if n < min_n:

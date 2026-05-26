@@ -1,20 +1,23 @@
 """Phase J - DB integration tests for ``recert_queue_service``."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
 
+from app.models.trading import BacktestResult, ScanPattern
 from app.services.trading.drift_monitor_model import (
     DriftMonitorInput,
     compute_drift,
 )
 from app.services.trading.recert_queue_service import (
+    complete_open_recerts_from_backtest,
     queue_from_drift,
     queue_manual,
     recert_summary,
     mode_is_active,
+    reconcile_dispatched_recerts_from_backtests,
 )
 
 
@@ -182,6 +185,155 @@ class TestIdempotencyAndManual:
         assert row[1] == "proposed"
         assert row[2] == "operator initiated"
         assert row[3] is None
+
+
+class TestBacktestCompletion:
+    def test_completion_prefers_oos_backtest_evidence_over_full_run_totals(self, db, monkeypatch):
+        _cleanup(db)
+        _force_mode(monkeypatch, "shadow")
+        observed_at = datetime.utcnow() - timedelta(minutes=5)
+        pat = ScanPattern(
+            name="oos repair pattern",
+            rules_json={},
+            active=True,
+            lifecycle_stage="promoted",
+            promotion_status="promoted",
+            promotion_gate_passed=True,
+            cpcv_n_paths=10,
+            quality_composite_score=0.9,
+            raw_realized_trade_count=12,
+            raw_realized_avg_return_pct=1.2,
+            payoff_ratio=2.0,
+            payoff_ratio_n=12,
+            recert_required=True,
+            recert_reason="missing_oos_recert",
+        )
+        db.add(pat)
+        db.flush()
+        db.execute(text("""
+            INSERT INTO trading_pattern_recert_log (
+                recert_id, scan_pattern_id, pattern_name, as_of_date,
+                source, severity, status, reason, payload_json, mode, observed_at
+            ) VALUES (
+                :rid, :pid, :name, :as_of, 'scheduler', 'red', 'dispatched',
+                'alpha_portfolio_gate:missing_oos_recert', '{}'::jsonb, 'shadow', :observed_at
+            )
+        """), {
+            "rid": f"test-oos-{pat.id}",
+            "pid": pat.id,
+            "name": pat.name,
+            "as_of": date.today(),
+            "observed_at": observed_at,
+        })
+        db.add_all([
+            BacktestResult(
+                ticker="AAA",
+                strategy_name="test",
+                return_pct=10.0,
+                win_rate=1.0,
+                max_drawdown=0.0,
+                trade_count=10,
+                scan_pattern_id=pat.id,
+                ran_at=datetime.utcnow(),
+                oos_win_rate=0.5,
+                oos_return_pct=2.0,
+                oos_trade_count=2,
+            ),
+            BacktestResult(
+                ticker="BBB",
+                strategy_name="test",
+                return_pct=99.0,
+                win_rate=1.0,
+                max_drawdown=0.0,
+                trade_count=99,
+                scan_pattern_id=pat.id,
+                ran_at=datetime.utcnow(),
+                oos_win_rate=2.0 / 3.0,
+                oos_return_pct=4.0,
+                oos_trade_count=3,
+            ),
+        ])
+        db.commit()
+
+        out = complete_open_recerts_from_backtest(
+            db,
+            scan_pattern_id=pat.id,
+            total=99,
+            wins=99,
+            win_rate=1.0,
+            avg_return=99.0,
+            backtests_run=99,
+        )
+
+        db.refresh(pat)
+        assert out["completed"] == 1
+        assert pat.oos_trade_count == 5
+        assert pat.oos_win_rate == pytest.approx(0.6)
+        assert pat.oos_avg_return_pct == pytest.approx(3.2)
+        assert pat.recert_required is False
+        status = db.execute(text(
+            "SELECT status FROM trading_pattern_recert_log WHERE scan_pattern_id = :pid"
+        ), {"pid": pat.id}).scalar_one()
+        assert status == "completed"
+
+    def test_reconcile_repairs_dispatched_row_after_backtest_already_ran(self, db, monkeypatch):
+        _cleanup(db)
+        _force_mode(monkeypatch, "shadow")
+        observed_at = datetime.utcnow() - timedelta(hours=1)
+        pat = ScanPattern(
+            name="stale dispatched recert",
+            rules_json={},
+            active=True,
+            lifecycle_stage="promoted",
+            promotion_status="promoted",
+            promotion_gate_passed=True,
+            cpcv_n_paths=10,
+            quality_composite_score=0.8,
+            raw_realized_trade_count=8,
+            raw_realized_avg_return_pct=0.7,
+            recert_required=True,
+            recert_reason="missing_oos_recert",
+        )
+        db.add(pat)
+        db.flush()
+        db.execute(text("""
+            INSERT INTO trading_pattern_recert_log (
+                recert_id, scan_pattern_id, pattern_name, as_of_date,
+                source, severity, status, reason, payload_json, mode, observed_at
+            ) VALUES (
+                :rid, :pid, :name, :as_of, 'scheduler', 'red', 'dispatched',
+                'alpha_portfolio_gate:missing_oos_recert', '{}'::jsonb, 'shadow', :observed_at
+            )
+        """), {
+            "rid": f"test-reconcile-{pat.id}",
+            "pid": pat.id,
+            "name": pat.name,
+            "as_of": date.today(),
+            "observed_at": observed_at,
+        })
+        db.add(BacktestResult(
+            ticker="CCC",
+            strategy_name="test",
+            return_pct=3.0,
+            win_rate=0.5,
+            max_drawdown=0.0,
+            trade_count=4,
+            scan_pattern_id=pat.id,
+            ran_at=datetime.utcnow(),
+            oos_win_rate=0.75,
+            oos_return_pct=1.5,
+            oos_trade_count=5,
+        ))
+        db.commit()
+
+        out = reconcile_dispatched_recerts_from_backtests(db, limit=10)
+
+        db.refresh(pat)
+        assert out["completed"] >= 1
+        assert any(r["scan_pattern_id"] == pat.id for r in out["repaired"])
+        assert pat.oos_trade_count == 5
+        assert pat.oos_win_rate == pytest.approx(0.75)
+        assert pat.recert_required is False
 
 
 class TestSummary:

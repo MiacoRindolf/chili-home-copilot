@@ -19044,6 +19044,29 @@ def _migration_271_scan_patterns_default_contract(conn) -> None:
     logger.info("[mig271] scan_patterns DB-side defaults repaired")
 
 
+def _migration_272_backtest_pattern_oos_indexes(conn) -> None:
+    """Install hot-path indexes for recert/OOS backtest reconciliation."""
+    if "trading_backtests" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_backtests")
+    if not {"scan_pattern_id", "ran_at"}.issubset(cols):
+        return
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_bt_scan_pattern_ran_at_272
+        ON trading_backtests (scan_pattern_id, ran_at DESC)
+    """))
+    if {"oos_trade_count", "oos_win_rate"}.issubset(cols):
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_bt_scan_pattern_oos_ran_at_272
+            ON trading_backtests (scan_pattern_id, ran_at DESC)
+            WHERE oos_trade_count IS NOT NULL
+              AND oos_trade_count > 0
+              AND oos_win_rate IS NOT NULL
+        """))
+    conn.commit()
+    logger.info("[mig272] trading_backtests scan_pattern/OOS indexes installed")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19368,6 +19391,8 @@ MIGRATIONS = [
      _migration_270_pattern_directional_quality_packet_lineage_view),
     ("271_scan_patterns_default_contract",
      _migration_271_scan_patterns_default_contract),
+    ("272_backtest_pattern_oos_indexes",
+     _migration_272_backtest_pattern_oos_indexes),
 ]
 
 

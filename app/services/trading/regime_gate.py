@@ -54,6 +54,22 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+REGIME_DIM_TICKER = "ticker_regime"
+REGIME_DIM_BREADTH = "breadth_regime"
+REGIME_DIM_CROSS_ASSET = "cross_asset_regime"
+REGIME_DIM_VOL = "vol_regime"
+REGIME_GATE_DIMENSIONS = (
+    REGIME_DIM_TICKER,
+    REGIME_DIM_BREADTH,
+    REGIME_DIM_CROSS_ASSET,
+    REGIME_DIM_VOL,
+)
+CRYPTO_TICKER_SUFFIX = "-USD"
+DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = (
+    REGIME_DIM_TICKER,
+    REGIME_DIM_CROSS_ASSET,
+)
+
 
 @dataclass(frozen=True)
 class DimensionVote:
@@ -106,6 +122,27 @@ def _settings_get(name: str, default: Any) -> Any:
         return default
 
 
+def _is_crypto_ticker(ticker: str | None) -> bool:
+    return str(ticker or "").strip().upper().endswith(CRYPTO_TICKER_SUFFIX)
+
+
+def _settings_csv_set(name: str, default: tuple[str, ...]) -> set[str]:
+    raw = _settings_get(name, ",".join(default))
+    if isinstance(raw, (list, tuple, set)):
+        values = [str(x).strip() for x in raw]
+    else:
+        values = [x.strip() for x in str(raw or "").split(",")]
+    return {x for x in values if x in REGIME_GATE_DIMENSIONS}
+
+
+def _crypto_anchor_dimensions() -> set[str]:
+    configured = _settings_csv_set(
+        "chili_regime_gate_crypto_anchor_dimensions",
+        DEFAULT_CRYPTO_ANCHOR_DIMENSIONS,
+    )
+    return configured or set(DEFAULT_CRYPTO_ANCHOR_DIMENSIONS)
+
+
 # ── 4-dimension regime label feed ──────────────────────────────────────
 # Each entry: (regime_dimension_name_in_ledger, sql_to_resolve_label,
 #              params_extractor, source_table_for_logs)
@@ -152,13 +189,13 @@ def _current_regime_labels(sess: Session, ticker: str) -> dict[str, str | None]:
     try:
         row = sess.execute(text(_TICKER_REGIME_SQL),
                            {"ticker": ticker.upper()}).fetchone()
-        out["ticker_regime"] = str(row.lbl) if row and row.lbl is not None else None
+        out[REGIME_DIM_TICKER] = str(row.lbl) if row and row.lbl is not None else None
     except Exception:
-        out["ticker_regime"] = None
+        out[REGIME_DIM_TICKER] = None
     for dim, sql in (
-        ("breadth_regime", _BREADTH_REGIME_SQL),
-        ("cross_asset_regime", _CROSS_ASSET_REGIME_SQL),
-        ("vol_regime", _VOL_REGIME_SQL),
+        (REGIME_DIM_BREADTH, _BREADTH_REGIME_SQL),
+        (REGIME_DIM_CROSS_ASSET, _CROSS_ASSET_REGIME_SQL),
+        (REGIME_DIM_VOL, _VOL_REGIME_SQL),
     ):
         try:
             row = sess.execute(text(sql)).fetchone()
@@ -232,7 +269,7 @@ def evaluate_regime_gate(
     n_negative = 0
     worst_dim_view: dict[str, Any] | None = None
 
-    for dim in ("ticker_regime", "breadth_regime", "cross_asset_regime", "vol_regime"):
+    for dim in REGIME_GATE_DIMENSIONS:
         lbl = labels.get(dim)
         if lbl is None:
             votes.append(DimensionVote(
@@ -279,6 +316,34 @@ def evaluate_regime_gate(
         agg_n = None
         agg_hr = None
         agg_mp = None
+
+    crypto_anchor_required = bool(
+        _settings_get("chili_regime_gate_require_crypto_anchor_negative", True)
+    )
+    if (
+        _is_crypto_ticker(ticker)
+        and crypto_anchor_required
+        and n_negative >= min_negatives
+    ):
+        anchor_dims = _crypto_anchor_dimensions()
+        has_anchor_negative = any(
+            vote.negative and vote.dimension in anchor_dims for vote in votes
+        )
+        if not has_anchor_negative:
+            anchor_desc = ",".join(sorted(anchor_dims))
+            return RegimeGateResult(
+                blocked=False, mode=mode,
+                reason=(
+                    f"insufficient_crypto_anchor_negative_consensus:"
+                    f"n_neg={n_negative}/{n_with_evidence}:anchors={anchor_desc}"
+                ),
+                pattern_id=int(pattern_id), ticker=ticker,
+                regime_label=agg_label, n_trades=agg_n,
+                hit_rate=agg_hr, mean_pnl_pct=agg_mp,
+                votes=tuple(votes),
+                n_negative=n_negative,
+                n_dimensions_with_evidence=n_with_evidence,
+            )
 
     if n_negative >= min_negatives:
         reason = (

@@ -930,6 +930,42 @@ def api_trading_brain_recert_queue_diagnostics(
     return JSONResponse({"ok": True, "recert_queue": payload})
 
 
+@router.get("/api/trading/brain/alpha-portfolio/diagnostics")
+def api_trading_brain_alpha_portfolio_diagnostics(
+    request: Request,
+    limit: int = Query(50, ge=1, le=250),
+    pattern_id: int | None = Query(None, ge=1),
+    db: Session = Depends(get_db),
+):
+    """Read the current alpha portfolio promotion/certification gate."""
+    get_identity_ctx(request, db)
+    from ...services.trading.alpha_portfolio_gate import scan_alpha_portfolio
+
+    payload = scan_alpha_portfolio(
+        db,
+        limit=int(limit),
+        pattern_id=int(pattern_id) if pattern_id is not None else None,
+    )
+    return JSONResponse(to_jsonable({"ok": True, "alpha_portfolio": payload}))
+
+
+@router.post("/api/trading/brain/alpha-portfolio/maintenance")
+def api_trading_brain_alpha_portfolio_maintenance(
+    request: Request,
+    execute: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """Run alpha portfolio maintenance: persist gates, queue recerts, stage shadows."""
+    get_identity_ctx(request, db)
+    from ...services.trading.alpha_portfolio_gate import run_alpha_portfolio_maintenance
+
+    payload = run_alpha_portfolio_maintenance(
+        db,
+        execute=bool(execute),
+    )
+    return JSONResponse(to_jsonable({"ok": True, "alpha_portfolio_maintenance": payload}))
+
+
 @router.get("/api/trading/brain/divergence/diagnostics")
 def api_trading_brain_divergence_diagnostics(
     request: Request,

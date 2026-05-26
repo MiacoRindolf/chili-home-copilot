@@ -2,17 +2,18 @@
 
 Given a drift-monitor row (or a user-initiated request), this service
 writes one row into ``trading_pattern_recert_log`` with status
-``proposed``. In Phase J.1 there is no consumer of this table; Phase
-J.2 will wire it into the backtest queue + lifecycle FSM.
+``proposed``. The scheduler consumer then dispatches open proposals into
+the backtest queue and the backtest worker completes or fails the cert row.
 
 Design
 ------
 
-* **Two entry-points.** :func:`queue_from_drift` for automatic
-  proposals triggered by a drift row; :func:`queue_manual` for
-  operator-initiated requests.
-* **Refuses authoritative.** Until Phase J.2 opens explicitly the
-  service raises :class:`RuntimeError` on authoritative mode.
+* **Three entry-points.** :func:`queue_from_drift` for automatic
+  proposals triggered by a drift row; :func:`queue_scheduler` for
+  system certification sweeps; :func:`queue_manual` for operator-
+  initiated requests.
+* **Refuses authoritative.** Until full live-authoritative recert opens
+  explicitly, the service raises :class:`RuntimeError` on authoritative mode.
 * **Idempotent dedupe.** The pure ``recert_id`` stays stable for
   ``(pattern, as_of_date, source)`` so repeated calls don't
   double-insert.
@@ -40,6 +41,7 @@ from .recert_queue_model import (
     RecertQueueConfig,
     propose_from_drift,
     propose_manual,
+    propose_scheduler,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,63 @@ class RecertQueueResult:
     scan_pattern_id: int
     mode: str
     status: str
+
+
+def _aggregate_oos_backtest_evidence(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    since: datetime | None = None,
+) -> dict[str, Any]:
+    """Aggregate stored walk-forward/OOS rows for a pattern recert stamp."""
+    where = [
+        "scan_pattern_id = :pid",
+        "oos_trade_count IS NOT NULL",
+        "oos_trade_count > 0",
+        "oos_win_rate IS NOT NULL",
+    ]
+    params: dict[str, Any] = {"pid": int(scan_pattern_id)}
+    if since is not None:
+        where.append("ran_at >= :since")
+        params["since"] = since
+    row = db.execute(text(f"""
+        SELECT
+            COUNT(*) AS backtests_run,
+            COALESCE(SUM(oos_trade_count), 0) AS total,
+            COALESCE(SUM(
+                CASE
+                    WHEN oos_win_rate > 1.0 THEN oos_win_rate / 100.0
+                    ELSE oos_win_rate
+                END * oos_trade_count
+            ), 0.0) AS wins_float,
+            SUM(
+                COALESCE(oos_return_pct, 0.0) * oos_trade_count
+            ) / NULLIF(SUM(oos_trade_count), 0) AS avg_return
+        FROM trading_backtests
+        WHERE {" AND ".join(where)}
+    """), params).mappings().first()
+    if not row:
+        return {
+            "total": 0,
+            "wins": 0,
+            "win_rate": None,
+            "avg_return": None,
+            "backtests_run": 0,
+        }
+    total = int(row.get("total") or 0)
+    wins_float = float(row.get("wins_float") or 0.0)
+    wins = int(round(wins_float)) if total > 0 else 0
+    return {
+        "total": total,
+        "wins": wins,
+        "win_rate": (wins_float / total) if total > 0 else None,
+        "avg_return": (
+            float(row.get("avg_return"))
+            if row.get("avg_return") is not None
+            else None
+        ),
+        "backtests_run": int(row.get("backtests_run") or 0),
+    }
 
 
 def _already_queued(
@@ -271,6 +330,243 @@ def queue_manual(
     return _persist(db, prop, mode)
 
 
+def queue_scheduler(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    pattern_name: str | None,
+    as_of_date: date | str,
+    reason: str,
+    severity: str | None = "red",
+    payload: dict | None = None,
+    mode_override: str | None = None,
+) -> RecertQueueResult | None:
+    """Queue a system-owned re-cert proposal from a scheduled sweep."""
+    mode = _effective_mode(mode_override)
+    if mode == "off":
+        return None
+    _check_mode_or_raise(mode, scan_pattern_id=scan_pattern_id)
+
+    prop = propose_scheduler(
+        scan_pattern_id=scan_pattern_id,
+        pattern_name=pattern_name,
+        as_of_date=as_of_date,
+        reason=reason,
+        severity=severity,
+        payload=payload,
+    )
+    return _persist(db, prop, mode)
+
+
+def complete_open_recerts_from_backtest(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    total: int | None = None,
+    wins: int | None = None,
+    win_rate: float | None = None,
+    avg_return: float | None = None,
+    backtests_run: int | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Mark open recert work complete after a queue backtest certifies OOS.
+
+    The recert queue's job is not only to boost priority; once the worker
+    finishes, it must stamp the pattern with fresh OOS evidence so the alpha
+    gate can clear certification debt without an operator touching it.
+    """
+    pid = int(scan_pattern_id)
+    open_row = db.execute(text("""
+        SELECT COUNT(*) AS open_count, MIN(observed_at) AS first_observed_at
+        FROM trading_pattern_recert_log
+        WHERE scan_pattern_id = :pid
+          AND status IN ('proposed', 'dispatched')
+    """), {"pid": pid}).mappings().first()
+    open_count = int((open_row or {}).get("open_count") or 0)
+    if open_count <= 0:
+        return {"ok": True, "completed": 0, "scan_pattern_id": pid}
+
+    now = now or datetime.utcnow()
+    first_observed_at = (open_row or {}).get("first_observed_at")
+    oos_evidence = _aggregate_oos_backtest_evidence(
+        db,
+        scan_pattern_id=pid,
+        since=first_observed_at if isinstance(first_observed_at, datetime) else None,
+    )
+    if int(oos_evidence.get("total") or 0) > 0:
+        total = int(oos_evidence["total"])
+        wins = int(oos_evidence["wins"])
+        win_rate = oos_evidence.get("win_rate")
+        avg_return = oos_evidence.get("avg_return")
+        backtests_run = int(oos_evidence.get("backtests_run") or 0)
+    evidence_total = int(total or 0)
+    if evidence_total <= 0:
+        no_evidence_payload = {
+            "completion": {
+                "attempted_at": now.isoformat(),
+                "certifier": "backtest_queue_worker",
+                "status": "cert_failed_no_oos_evidence",
+                "total": total,
+                "wins": wins,
+                "win_rate": win_rate,
+                "avg_return": avg_return,
+                "backtests_run": backtests_run,
+            }
+        }
+        failed = int(db.execute(text("""
+            UPDATE trading_pattern_recert_log
+            SET status = 'cert_failed',
+                payload_json = COALESCE(payload_json, '{}'::jsonb)
+                    || CAST(:payload AS JSONB)
+            WHERE scan_pattern_id = :pid
+              AND status IN ('proposed', 'dispatched')
+        """), {
+            "pid": pid,
+            "payload": json.dumps(no_evidence_payload, default=str),
+        }).rowcount or 0)
+        db.commit()
+        return {
+            "ok": False,
+            "completed": 0,
+            "failed": failed,
+            "scan_pattern_id": pid,
+            "reason": "cert_failed_no_oos_evidence",
+        }
+
+    remaining_reasons: list[str] = []
+    try:
+        from ...models.trading import ScanPattern
+        from .alpha_portfolio_gate import (
+            config_from_settings,
+            recert_reasons_for_pattern,
+        )
+
+        pattern = db.get(ScanPattern, pid)
+        if pattern is not None:
+            normalized_wr = None
+            if win_rate is not None:
+                try:
+                    from .backtest_metrics import normalize_win_rate_for_db
+
+                    normalized_wr = normalize_win_rate_for_db(float(win_rate))
+                except Exception:
+                    normalized_wr = None
+            pattern.oos_evaluated_at = now
+            if total is not None:
+                pattern.oos_trade_count = int(total)
+            if normalized_wr is not None:
+                pattern.oos_win_rate = float(normalized_wr)
+            if avg_return is not None:
+                pattern.oos_avg_return_pct = float(avg_return)
+            remaining_reasons = recert_reasons_for_pattern(
+                pattern,
+                now=now,
+                config=config_from_settings(settings),
+            )
+            pattern.recert_required = bool(remaining_reasons)
+            pattern.recert_reason = (
+                ",".join(remaining_reasons) if remaining_reasons else None
+            )
+    except Exception:
+        logger.debug(
+            "[recert_queue] pattern certification stamp failed",
+            exc_info=True,
+        )
+
+    completion_payload = {
+        "completion": {
+            "completed_at": now.isoformat(),
+            "certifier": "backtest_queue_worker",
+            "total": total,
+            "wins": wins,
+            "win_rate": win_rate,
+            "avg_return": avg_return,
+            "backtests_run": backtests_run,
+            "remaining_recert_reasons": remaining_reasons,
+        }
+    }
+    updated = int(db.execute(text("""
+        UPDATE trading_pattern_recert_log
+        SET status = 'completed',
+            payload_json = COALESCE(payload_json, '{}'::jsonb)
+                || CAST(:payload AS JSONB)
+        WHERE scan_pattern_id = :pid
+          AND status IN ('proposed', 'dispatched')
+    """), {
+        "pid": pid,
+        "payload": json.dumps(completion_payload, default=str),
+    }).rowcount or 0)
+    db.commit()
+    return {
+        "ok": True,
+        "completed": updated,
+        "scan_pattern_id": pid,
+        "remaining_recert_reasons": remaining_reasons,
+    }
+
+
+def reconcile_dispatched_recerts_from_backtests(
+    db: Session,
+    *,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Complete dispatched recerts when their boosted backtests already ran.
+
+    This repairs the common operational gap where a recert row was dispatched,
+    the pattern was retested, but the completion hook did not stamp the pattern's
+    OOS certification columns. Without this reconciliation, signal-rich patterns
+    can keep blocking live orders on stale ``missing_oos_recert`` debt.
+    """
+    rows = db.execute(text("""
+        SELECT id, scan_pattern_id, observed_at
+        FROM trading_pattern_recert_log
+        WHERE status = 'dispatched'
+        ORDER BY observed_at ASC, id ASC
+        LIMIT :limit
+        FOR UPDATE SKIP LOCKED
+    """), {"limit": int(limit)}).mappings().all()
+    checked = 0
+    completed = 0
+    skipped = 0
+    repaired: list[dict[str, Any]] = []
+    for row in rows:
+        checked += 1
+        pid = int(row["scan_pattern_id"])
+        since = row.get("observed_at")
+        evidence = _aggregate_oos_backtest_evidence(
+            db,
+            scan_pattern_id=pid,
+            since=since if isinstance(since, datetime) else None,
+        )
+        if int(evidence.get("total") or 0) <= 0:
+            skipped += 1
+            continue
+        result = complete_open_recerts_from_backtest(
+            db,
+            scan_pattern_id=pid,
+            total=int(evidence["total"]),
+            wins=int(evidence["wins"]),
+            win_rate=evidence.get("win_rate"),
+            avg_return=evidence.get("avg_return"),
+            backtests_run=int(evidence.get("backtests_run") or 0),
+        )
+        completed += int(result.get("completed") or 0)
+        repaired.append({
+            "scan_pattern_id": pid,
+            "recert_log_id": int(row["id"]),
+            "oos_trade_count": int(evidence["total"]),
+            "backtests_run": int(evidence.get("backtests_run") or 0),
+            "remaining_recert_reasons": result.get("remaining_recert_reasons") or [],
+        })
+    return {
+        "ok": True,
+        "checked": checked,
+        "completed": completed,
+        "skipped_no_oos": skipped,
+        "repaired": repaired,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
@@ -375,5 +671,8 @@ __all__ = [
     "mode_is_authoritative",
     "queue_from_drift",
     "queue_manual",
+    "queue_scheduler",
+    "complete_open_recerts_from_backtest",
+    "reconcile_dispatched_recerts_from_backtests",
     "recert_summary",
 ]

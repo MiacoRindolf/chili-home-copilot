@@ -290,9 +290,22 @@ def _place_coinbase_sell_for_trade(
         )
         return limit_res
     if isinstance(market_res, dict) and isinstance(limit_res, dict):
+        fallback_error = str(limit_res.get("error") or "")
+        market_error = str(err or "")
+        logger.warning(
+            "[crypto_exit] Coinbase limit-only fallback failed trade#%s "
+            "ticker=%s market_error=%s fallback_error=%s",
+            getattr(trade, "id", None),
+            product_id,
+            market_error,
+            fallback_error,
+        )
         merged = dict(market_res)
-        merged["fallback_error"] = limit_res.get("error")
+        merged["market_error"] = market_error
+        merged["fallback_error"] = fallback_error
         merged["fallback_order_type"] = "limit"
+        if fallback_error:
+            merged["error"] = fallback_error
         return merged
     return market_res
 

@@ -7,15 +7,32 @@ from __future__ import annotations
 
 import json
 import logging
+import time as _time
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
-from ...config import settings
-from ...models.trading import AlertHistory, BreakoutAlert, ScanPattern, ScanResult
+from ...config import (
+    PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS,
+    PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN,
+    PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES,
+    PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES,
+    PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS,
+    PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS,
+    PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT,
+    PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS,
+    settings,
+)
+from ...models.trading import (
+    AlertHistory,
+    AutoTraderRun,
+    BreakoutAlert,
+    ScanPattern,
+    ScanResult,
+)
 from .alert_formatter import format_pattern_imminent
 from .alerts import PATTERN_BREAKOUT_IMMINENT, dispatch_alert
 from .market_data import DEFAULT_CRYPTO_TICKERS, DEFAULT_SCAN_TICKERS, fetch_ohlcv_df, is_crypto
@@ -49,6 +66,15 @@ _HOURS_PER_BAR = {
     "1d": 6.5,
     "1wk": 32.5,
 }
+SHADOW_PROMOTED_STAGE = "shadow_promoted"
+POOR_EDGE_REJECT_REASON = "non_positive_expected_edge"
+SECONDS_PER_MINUTE = 60.0
+UNBOUNDED_SCORE_BUDGET = 10**9
+_COINBASE_SPOT_TICKER_CACHE: dict[str, Any] = {
+    "expires_at": 0.0,
+    "tickers": frozenset(),
+}
+_SCORE_FAILURE_CACHE: dict[str, dict[str, float | int]] = {}
 
 
 def us_stock_session_open(now_utc: datetime | None = None) -> bool:
@@ -260,6 +286,169 @@ def _parse_scope_tickers(pat: ScanPattern) -> list[str]:
     return []
 
 
+def _crypto_execution_filter_enabled() -> bool:
+    return bool(getattr(settings, "pattern_imminent_filter_crypto_to_coinbase_spot", True))
+
+
+def _coinbase_spot_ticker_set() -> frozenset[str]:
+    """Return cached Coinbase USD spot products; empty means fail open."""
+    if not _crypto_execution_filter_enabled():
+        return frozenset()
+
+    ttl_s = max(
+        0,
+        int(
+            getattr(
+                settings,
+                "pattern_imminent_coinbase_spot_filter_ttl_seconds",
+                PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS,
+            )
+            or PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS
+        ),
+    )
+    now = _time.monotonic()
+    cached = _COINBASE_SPOT_TICKER_CACHE.get("tickers")
+    if (
+        isinstance(cached, frozenset)
+        and cached
+        and now < float(_COINBASE_SPOT_TICKER_CACHE.get("expires_at") or 0.0)
+    ):
+        return cached
+
+    try:
+        from .venue.coinbase_spot import CoinbaseSpotAdapter
+
+        rows = CoinbaseSpotAdapter().list_usd_spot_universe_entries()
+    except Exception:
+        logger.debug("[pattern_imminent] Coinbase spot universe filter unavailable", exc_info=True)
+        return frozenset()
+
+    tickers = frozenset(
+        str(row.get("ticker") or "").strip().upper()
+        for row in rows
+        if row.get("ticker")
+    )
+    if tickers:
+        _COINBASE_SPOT_TICKER_CACHE["tickers"] = tickers
+        _COINBASE_SPOT_TICKER_CACHE["expires_at"] = now + ttl_s
+    return tickers
+
+
+def _filter_crypto_to_execution_universe(
+    tickers: list[str],
+    *,
+    coinbase_spot_tickers: frozenset[str] | None = None,
+) -> tuple[list[str], int, int]:
+    """Drop crypto symbols that cannot graduate into Coinbase spot execution."""
+    if not _crypto_execution_filter_enabled():
+        return tickers, 0, 0
+    spot_tickers = (
+        coinbase_spot_tickers
+        if coinbase_spot_tickers is not None
+        else _coinbase_spot_ticker_set()
+    )
+    if not spot_tickers:
+        return tickers, 0, 0
+
+    kept: list[str] = []
+    dropped = 0
+    for ticker in tickers:
+        ticker_u = str(ticker or "").strip().upper()
+        if is_crypto(ticker_u) and ticker_u not in spot_tickers:
+            dropped += 1
+            continue
+        kept.append(ticker)
+    return kept, dropped, len(spot_tickers)
+
+
+def _score_failure_cooldown_enabled() -> bool:
+    return bool(getattr(settings, "pattern_imminent_score_failure_cooldown_enabled", True))
+
+
+def _score_failure_cooldown_minutes() -> float:
+    return max(
+        0.0,
+        _float_or_none(
+            getattr(
+                settings,
+                "pattern_imminent_score_failure_cooldown_minutes",
+                PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES,
+            )
+        )
+        or PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES,
+    )
+
+
+def _score_failure_min_failures() -> int:
+    return max(
+        1,
+        int(
+            getattr(
+                settings,
+                "pattern_imminent_score_failure_min_failures",
+                PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES,
+            )
+            or PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES
+        ),
+    )
+
+
+def _score_time_budget_seconds() -> float:
+    return max(
+        0.0,
+        _float_or_none(
+            getattr(
+                settings,
+                "pattern_imminent_score_time_budget_seconds",
+                PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS,
+            )
+        )
+        or PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS,
+    )
+
+
+def _score_failure_cooldown_active(ticker: str) -> bool:
+    if not _score_failure_cooldown_enabled():
+        return False
+    entry = _SCORE_FAILURE_CACHE.get(str(ticker or "").strip().upper())
+    if not entry:
+        return False
+    now = _time.monotonic()
+    cooldown_until = float(entry.get("cooldown_until") or 0.0)
+    if cooldown_until <= 0.0:
+        return False
+    if now < cooldown_until:
+        return True
+    _SCORE_FAILURE_CACHE.pop(str(ticker or "").strip().upper(), None)
+    return False
+
+
+def _record_score_failure(ticker: str) -> None:
+    if not _score_failure_cooldown_enabled():
+        return
+    cooldown_minutes = _score_failure_cooldown_minutes()
+    if cooldown_minutes <= 0.0:
+        return
+    ticker_u = str(ticker or "").strip().upper()
+    if not ticker_u:
+        return
+
+    now = _time.monotonic()
+    entry = _SCORE_FAILURE_CACHE.get(ticker_u) or {}
+    failures = int(entry.get("failures") or 0) + 1
+    cooldown_until = float(entry.get("cooldown_until") or 0.0)
+    if failures >= _score_failure_min_failures():
+        cooldown_until = now + (cooldown_minutes * SECONDS_PER_MINUTE)
+    _SCORE_FAILURE_CACHE[ticker_u] = {
+        "failures": failures,
+        "cooldown_until": cooldown_until,
+    }
+
+
+def _record_score_success(ticker: str) -> None:
+    _SCORE_FAILURE_CACHE.pop(str(ticker or "").strip().upper(), None)
+
+
 def build_imminent_ticker_universe(
     db: Session,
     user_id: int | None,
@@ -324,6 +513,9 @@ def build_imminent_ticker_universe(
     for t in DEFAULT_CRYPTO_TICKERS[:20]:
         add(t)
     counts["defaults"] = len(seen) - n4
+    seen, dropped, spot_count = _filter_crypto_to_execution_universe(seen)
+    counts["crypto_execution_filter_dropped"] = dropped
+    counts["crypto_execution_filter_spot_tickers"] = spot_count
 
     return seen[:cap], counts
 
@@ -399,6 +591,106 @@ def _cooldown_active(
         if spid is not None and int(spid) == int(pattern_id):
             return True
     return False
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _shadow_poor_edge_pattern_ids(
+    db: Session,
+    patterns: list[ScanPattern],
+    user_id: int | None,
+) -> tuple[set[int], dict[int, int]]:
+    """Shadow-promoted patterns to pause because recent edge rejects dominate.
+
+    This is scanner-slot hygiene, not a promotion/demotion decision. It only
+    applies when the pattern's stored average return is already non-positive
+    and AutoTrader has recently rejected it repeatedly for expected-edge math.
+    """
+    if not bool(
+        getattr(settings, "pattern_imminent_shadow_poor_edge_cooldown_enabled", True)
+    ):
+        return set(), {}
+
+    lookback_h = max(
+        0.0,
+        _float_or_none(
+            getattr(
+                settings,
+                "pattern_imminent_shadow_poor_edge_lookback_hours",
+                PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS,
+            )
+        )
+        or 0.0,
+    )
+    if lookback_h <= 0.0:
+        return set(), {}
+
+    min_rejects = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "pattern_imminent_shadow_poor_edge_min_rejects",
+                PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS,
+            )
+            or PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS
+        ),
+    )
+    max_avg_return = (
+        _float_or_none(
+            getattr(
+                settings,
+                "pattern_imminent_shadow_poor_edge_max_avg_return_pct",
+                PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT,
+            )
+        )
+        or PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT
+    )
+
+    candidate_ids: list[int] = []
+    for pat in patterns:
+        stage = (getattr(pat, "lifecycle_stage", "") or "").strip().lower()
+        if stage != SHADOW_PROMOTED_STAGE:
+            continue
+        avg_return = _float_or_none(getattr(pat, "avg_return_pct", None))
+        if avg_return is None or avg_return > max_avg_return:
+            continue
+        try:
+            candidate_ids.append(int(pat.id))
+        except (TypeError, ValueError):
+            continue
+
+    if not candidate_ids:
+        return set(), {}
+
+    cutoff = datetime.utcnow() - timedelta(hours=lookback_h)
+    q = (
+        db.query(
+            AutoTraderRun.scan_pattern_id,
+            func.count(AutoTraderRun.id),
+        )
+        .filter(
+            AutoTraderRun.scan_pattern_id.in_(candidate_ids),
+            AutoTraderRun.reason == POOR_EDGE_REJECT_REASON,
+            AutoTraderRun.created_at >= cutoff,
+        )
+        .group_by(AutoTraderRun.scan_pattern_id)
+    )
+    if user_id is not None:
+        q = q.filter(AutoTraderRun.user_id == user_id)
+    counts = {
+        int(pattern_id): int(count)
+        for pattern_id, count in q.all()
+        if pattern_id is not None
+    }
+    return {pid for pid, count in counts.items() if count >= min_rejects}, counts
 
 
 def _insert_imminent_breakout_alert(
@@ -497,13 +789,25 @@ def gather_imminent_candidate_rows(
     min_comp_main = float(getattr(settings, "pattern_imminent_min_composite_main", 0.42))
     allow_shortcut = bool(getattr(settings, "pattern_imminent_allow_evaluable_shortcut", True))
     k_eta = float(settings.pattern_imminent_eta_scale_k)
+    score_time_budget_s = _score_time_budget_seconds()
+    score_started_at = _time.monotonic()
 
     patterns = db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all()
+    poor_shadow_ids, poor_shadow_counts = _shadow_poor_edge_pattern_ids(
+        db,
+        patterns,
+        user_id,
+    )
     global_uni, uni_counts = build_imminent_ticker_universe(db, user_id, max_tickers)
+    coinbase_spot_tickers = _coinbase_spot_ticker_set()
 
     candidates: list[dict[str, Any]] = []
     patterns_tried = 0
     tickers_scored = 0
+    score_cache: dict[str, dict[str, Any] | None] = {}
+    score_cooldown_keys: set[str] = set()
+    score_cache_hits = 0
+    score_cache_misses = 0
     skip: dict[str, int] = {
         "pattern_no_tickers": 0,
         "pattern_no_conditions": 0,
@@ -515,23 +819,88 @@ def gather_imminent_candidate_rows(
         "excluded_promotion_lifecycle": 0,
         "insufficient_coverage_main": 0,
         "below_composite_main": 0,
+        "shadow_poor_edge_cooldown": 0,
+        "crypto_execution_universe_filtered": 0,
+        "score_failure_cooldown": 0,
     }
     suppressed: list[dict[str, Any]] = []
 
-    per_pat_cap = 10**9
-    score_budget = 10**9
+    per_pat_cap = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "pattern_imminent_max_tickers_per_pattern",
+                PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN,
+            )
+            or PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN
+        ),
+    )
+    score_budget = UNBOUNDED_SCORE_BUDGET
     if for_opportunity_board:
         per_pat_cap = max(1, int(getattr(settings, "opportunity_board_max_tickers_per_pattern", 10)))
         score_budget = max(1, int(getattr(settings, "opportunity_board_max_ticker_scores_per_request", 360)))
 
     board_budget_hit = False
+    score_time_budget_hit = False
+
+    def _score_time_budget_hit() -> bool:
+        if score_time_budget_s <= 0.0:
+            return False
+        return (_time.monotonic() - score_started_at) >= score_time_budget_s
+
+    def _score_cache_key(raw_ticker: str) -> str:
+        return str(raw_ticker or "").strip().upper()
+
+    def _score_ticker_cached(raw_ticker: str) -> dict[str, Any] | None:
+        nonlocal score_cache_hits, score_cache_misses
+        cache_key = _score_cache_key(raw_ticker)
+        if cache_key in score_cache:
+            score_cache_hits += 1
+            return score_cache[cache_key]
+        if _score_failure_cooldown_active(cache_key):
+            score_cooldown_keys.add(cache_key)
+            score_cache[cache_key] = None
+            return None
+        score_cache_misses += 1
+        score = _score_ticker(raw_ticker, skip_fundamentals=True)
+        score_cache[cache_key] = score or None
+        if score:
+            _record_score_success(cache_key)
+        else:
+            _record_score_failure(cache_key)
+        return score_cache[cache_key]
 
     for pat in patterns:
         if not all_active_patterns and not scan_pattern_eligible_main_imminent(pat):
             skip["excluded_promotion_lifecycle"] += 1
             continue
+        if (
+            not all_active_patterns
+            and (getattr(pat, "lifecycle_stage", "") or "").strip().lower()
+            == SHADOW_PROMOTED_STAGE
+            and int(getattr(pat, "id", 0) or 0) in poor_shadow_ids
+        ):
+            skip["shadow_poor_edge_cooldown"] += 1
+            if len(suppressed) < 40:
+                suppressed.append({
+                    "pattern_id": pat.id,
+                    "reason": "shadow_poor_edge_cooldown",
+                    "recent_non_positive_rejects": poor_shadow_counts.get(
+                        int(pat.id), 0,
+                    ),
+                    "avg_return_pct": _float_or_none(
+                        getattr(pat, "avg_return_pct", None)
+                    ),
+                })
+            continue
 
         tickers = _tickers_for_pattern(pat, global_uni, equity_open=eq_open)
+        tickers, dropped_crypto, _spot_count = _filter_crypto_to_execution_universe(
+            tickers,
+            coinbase_spot_tickers=coinbase_spot_tickers,
+        )
+        skip["crypto_execution_universe_filtered"] += dropped_crypto
         if not tickers:
             skip["pattern_no_tickers"] += 1
             continue
@@ -542,15 +911,26 @@ def gather_imminent_candidate_rows(
             continue
 
         patterns_tried += 1
-        if for_opportunity_board and len(tickers) > per_pat_cap:
+        if len(tickers) > per_pat_cap:
             tickers = tickers[:per_pat_cap]
         for ticker in tickers:
-            if for_opportunity_board and tickers_scored >= score_budget:
+            if _score_time_budget_hit():
+                score_time_budget_hit = True
+                break
+            cache_key = _score_cache_key(ticker)
+            if (
+                for_opportunity_board
+                and cache_key not in score_cache
+                and score_cache_misses >= score_budget
+            ):
                 board_budget_hit = True
                 break
-            score = _score_ticker(ticker, skip_fundamentals=True)
+            score = _score_ticker_cached(ticker)
             if not score:
-                skip["score_failed"] += 1
+                if cache_key in score_cooldown_keys:
+                    skip["score_failure_cooldown"] += 1
+                else:
+                    skip["score_failed"] += 1
                 continue
             tickers_scored += 1
 
@@ -677,7 +1057,7 @@ def gather_imminent_candidate_rows(
                 "missing_indicators": missing,
             })
 
-        if board_budget_hit:
+        if board_budget_hit or score_time_budget_hit:
             break
 
     candidates.sort(key=lambda x: (-x["composite"], x["eta_hi"]))
@@ -687,6 +1067,15 @@ def gather_imminent_candidate_rows(
         "global_ticker_universe": len(global_uni),
         "universe_by_source": uni_counts,
         "tickers_scored": tickers_scored,
+        "score_cache_size": len(score_cache),
+        "score_cache_hits": score_cache_hits,
+        "score_cache_misses": score_cache_misses,
+        "score_failure_cooldown_cache_size": len(_SCORE_FAILURE_CACHE),
+        "score_time_budget_seconds": score_time_budget_s,
+        "score_time_budget_hit": score_time_budget_hit,
+        "score_elapsed_seconds": _time.monotonic() - score_started_at,
+        "per_pattern_ticker_cap": per_pat_cap,
+        "crypto_execution_filter_spot_tickers": len(coinbase_spot_tickers),
         "skip_reasons": skip,
         "top_suppressed": suppressed,
         "equity_session_open": eq_open,

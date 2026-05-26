@@ -1,7 +1,7 @@
 """Pure unit tests for Phase J re-cert queue model."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -15,7 +15,9 @@ from app.services.trading.recert_queue_model import (
     compute_recert_id,
     propose_from_drift,
     propose_manual,
+    propose_scheduler,
 )
+from app.services.trading.recert_queue_service import complete_open_recerts_from_backtest
 
 
 def _red_drift(pattern_id: int = 42):
@@ -122,6 +124,67 @@ class TestManualProposal:
         assert prop.status == "proposed"
         assert prop.severity is None
         assert prop.reason == "operator requested"
+
+
+class TestSchedulerProposal:
+    def test_scheduler_proposal_marks_system_source(self):
+        prop = propose_scheduler(
+            scan_pattern_id=12,
+            pattern_name="auto_cert",
+            as_of_date=date(2026, 5, 25),
+            reason="alpha_portfolio_gate:missing_oos_recert",
+            payload={"origin": "alpha_portfolio_gate"},
+        )
+
+        assert prop.source == "scheduler"
+        assert prop.status == "proposed"
+        assert prop.severity == "red"
+        assert prop.reason == "alpha_portfolio_gate:missing_oos_recert"
+        assert prop.payload["origin"] == "alpha_portfolio_gate"
+
+
+class TestRecertCompletion:
+    def test_zero_trade_backtest_does_not_complete_recert(self):
+        class _Scalar:
+            rowcount = 0
+
+            def scalar_one(self):
+                return 1
+
+        class _Rows:
+            rowcount = 1
+
+        class _Db:
+            def __init__(self):
+                self.statements = []
+                self.commits = 0
+
+            def execute(self, stmt, params=None):
+                self.statements.append((str(stmt), params or {}))
+                return _Scalar() if len(self.statements) == 1 else _Rows()
+
+            def commit(self):
+                self.commits += 1
+
+        db = _Db()
+
+        out = complete_open_recerts_from_backtest(
+            db,
+            scan_pattern_id=77,
+            total=0,
+            wins=0,
+            win_rate=None,
+            avg_return=None,
+            backtests_run=0,
+            now=datetime(2026, 5, 25),
+        )
+
+        assert out["ok"] is False
+        assert out["completed"] == 0
+        assert out["failed"] == 1
+        assert out["reason"] == "cert_failed_no_oos_evidence"
+        assert "cert_failed" in db.statements[1][0]
+        assert db.commits == 1
 
 
 class TestDeterminism:

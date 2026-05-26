@@ -34,6 +34,7 @@ def _settings(**overrides):
         chili_cohort_score_weight_pbo_inverse=0.15,
         chili_cohort_score_weight_directional_wr=0.25,
         chili_cohort_score_weight_decay_inverse=0.10,
+        chili_shadow_vetting_require_realized_ev_for_full=True,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -239,6 +240,9 @@ def test_shadow_vetting_promotes_scored_top_pool_shadow(db, monkeypatch):
         lifecycle="shadow_promoted",
         quality_score=0.90,
     )
+    shadow.raw_realized_trade_count = 5
+    shadow.raw_realized_win_rate = 0.8
+    shadow.raw_realized_avg_return_pct = 2.0
     _seed_directional_outcomes(
         db, pattern_id=shadow.id, n_correct=24, n_incorrect=6,
     )
@@ -254,6 +258,41 @@ def test_shadow_vetting_promotes_scored_top_pool_shadow(db, monkeypatch):
     assert out["promoted_ids"] == [shadow.id]
     assert shadow.lifecycle_stage == "promoted"
     assert shadow.promotion_status == "promoted_via_shadow_vetting"
+
+
+def test_shadow_vetting_blocks_full_promotion_on_failed_realized_ev(db, monkeypatch):
+    _truncate_phase4_state(db)
+    _make_pattern(
+        db,
+        name="live_reference_for_ev_block",
+        lifecycle="promoted",
+        quality_score=0.50,
+    )
+    shadow = _make_pattern(
+        db,
+        name="negative_ev_shadow",
+        lifecycle="shadow_promoted",
+        quality_score=0.90,
+    )
+    shadow.raw_realized_trade_count = 5
+    shadow.raw_realized_win_rate = 0.4
+    shadow.raw_realized_avg_return_pct = -1.0
+    _seed_directional_outcomes(
+        db, pattern_id=shadow.id, n_correct=24, n_incorrect=6,
+    )
+
+    monkeypatch.setattr(
+        "app.services.trading.pattern_quality_score.compute_and_persist_scores",
+        lambda *_args, **_kwargs: {"ok": True, "scored": 1},
+    )
+
+    out = run_shadow_vetting_cycle(db, settings_=_settings())
+
+    db.refresh(shadow)
+    assert out["promoted_count"] == 0
+    assert out["realized_ev_blocked_ids"] == [shadow.id]
+    assert shadow.lifecycle_stage == "pilot_promoted"
+    assert shadow.promotion_status == "pilot_via_shadow_vetting"
 
 
 def test_shadow_vetting_holds_scored_shadow_below_adaptive_pool(db, monkeypatch):
