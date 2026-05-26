@@ -11,6 +11,10 @@ from typing import Any, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from ...config import (
+    AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_MAX_ROWS,
+    AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_Z,
+    AUTOTRADER_DIRECTIONAL_PROBABILITY_MAX_Z,
+    AUTOTRADER_DIRECTIONAL_PROBABILITY_MIN_ROWS,
     AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED,
     AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER,
@@ -966,15 +970,15 @@ def _directional_edge_probability(
     z = _settings_float(
         settings,
         "chili_autotrader_directional_probability_z",
-        1.0,
+        AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_Z,
         minimum=0.0,
-        maximum=3.0,
+        maximum=AUTOTRADER_DIRECTIONAL_PROBABILITY_MAX_Z,
     )
     limit = _settings_int(
         settings,
         "chili_autotrader_directional_probability_max_rows",
-        30,
-        minimum=1,
+        AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_MAX_ROWS,
+        minimum=AUTOTRADER_DIRECTIONAL_PROBABILITY_MIN_ROWS,
     )
     ticker_rows = _load_directional_outcome_rows(
         db,

@@ -984,6 +984,102 @@ def test_evaluate_entry_edge_selects_managed_exit_for_overextended_crypto_bracke
     assert decision.snapshot["expected_net_pct"] > 0
 
 
+def test_evaluate_entry_edge_selects_managed_exit_for_overextended_stock_by_default():
+    class _Result:
+        def __init__(self, rows=None, first=None):
+            self._rows = rows or []
+            self._first = first
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def first(self):
+            return self._first
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Db:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def execute(self, sql, params=None):
+            text = str(sql)
+            if "pattern_alert_directional_outcome" in text:
+                if "UPPER(ticker) = UPPER" in text:
+                    return _Result(rows=[
+                        {
+                            "ticker": "STOCKEDGE",
+                            "window_max_favorable_pct": 2.0,
+                            "window_max_adverse_pct": -0.2,
+                            "directional_correct": True,
+                        }
+                        for _ in range(12)
+                    ])
+                return _Result(rows=[])
+            return _Result(first=None)
+
+    alert = BreakoutAlert(
+        ticker="STOCKEDGE",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=777,
+        score_at_alert=0.9,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=112.0,
+        user_id=1,
+    )
+    default_stock_settings = SimpleNamespace(
+        chili_autotrader_managed_edge_mode="authoritative",
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=default_stock_settings,
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert decision.allowed
+    assert decision.reason == "positive_expected_edge"
+    assert decision.snapshot["edge_geometry_source"] == "managed_directional_exit"
+    assert decision.snapshot["managed_exit_edge"]["selected"] is True
+    assert (
+        "stock"
+        in decision.snapshot["managed_exit_edge"]["geometry"]["allowed_asset_types"]
+    )
+    assert decision.snapshot["full_bracket_edge"]["expected_net_pct"] < 0
+
+    crypto_only_settings = SimpleNamespace(
+        chili_autotrader_managed_edge_mode="authoritative",
+        chili_autotrader_managed_edge_asset_types="crypto",
+    )
+    blocked = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=crypto_only_settings,
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert not blocked.allowed
+    assert blocked.reason == "non_positive_expected_edge"
+    assert (
+        blocked.snapshot["managed_exit_edge"]["geometry"]["reason"]
+        == "asset_type_not_enabled"
+    )
+
+
 def test_evaluate_entry_edge_shrinks_uncalibrated_alert_confidence():
     class _Result:
         def mappings(self):

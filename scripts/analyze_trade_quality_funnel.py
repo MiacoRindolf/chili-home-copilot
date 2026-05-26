@@ -126,6 +126,44 @@ def main() -> int:
         ),
     )
     _print_table(
+        f"Stock managed-exit overlay on edge skips, last {params['days']}d",
+        _rows(
+            """
+            SELECT COALESCE(
+                       ar.rule_snapshot->'entry_edge'->'managed_exit_edge'
+                           ->'geometry'->>'reason',
+                       ar.rule_snapshot->'entry_edge'->'managed_exit_edge'
+                           ->>'selection_reason',
+                       'missing_managed_snapshot'
+                   ) AS managed_reason,
+                   COUNT(*) AS n,
+                   ROUND(MAX(
+                       NULLIF(
+                           ar.rule_snapshot->'entry_edge'->>'expected_net_pct',
+                           ''
+                       )::numeric
+                   ), 4) AS max_full_bracket_expected_net_pct,
+                   ROUND(MAX(
+                       NULLIF(
+                           ar.rule_snapshot->'entry_edge'->'managed_exit_edge'
+                               ->>'expected_net_pct',
+                           ''
+                       )::numeric
+                   ), 4) AS max_managed_expected_net_pct,
+                   MAX(ar.created_at) AS latest_created_at
+            FROM trading_autotrader_runs ar
+            LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+            WHERE ar.created_at >= NOW() - (:days * INTERVAL '1 day')
+              AND ar.reason = 'non_positive_expected_edge'
+              AND COALESCE(a.asset_type, 'stock') = 'stock'
+            GROUP BY 1
+            ORDER BY n DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
         f"Pattern-imminent alert supply by lifecycle, last {params['days']}d",
         _rows(
             """
