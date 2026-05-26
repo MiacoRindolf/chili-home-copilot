@@ -105,28 +105,38 @@ def set_desk_live_orders(db: Session, live_orders: bool | None, *, updated_by: s
     logger.info("[autotrader_desk] live_orders=%s by=%s", live_orders, updated_by)
 
 
-def _rh_quote_prices_for_trades(trades: list[Trade]) -> dict[str, float]:
-    """Batched Robinhood quote lookup for live stock tickers. Safe if adapter off."""
-    rh_stock_trades = [
-        t for t in trades
-        if (t.broker_source or "").strip().lower() == "robinhood"
-        and not (t.ticker or "").upper().endswith("-USD")
-    ]
-    if not rh_stock_trades:
-        return {}
+def _safe_quote_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
     try:
-        from .venue.robinhood_spot import RobinhoodSpotAdapter
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
 
-        adapter = RobinhoodSpotAdapter()
-        if not adapter.is_enabled():
-            return {}
-        tickers = sorted({(t.ticker or "").upper() for t in rh_stock_trades if t.ticker})
-        if not tickers:
-            return {}
-        return adapter.get_quote_prices_batch(tickers)
+
+def _broker_quote_price_for_trade(trade: Trade) -> tuple[float | None, str]:
+    """Broker-source quote for a live trade; never cross-feed venues."""
+    broker_source = (trade.broker_source or "").strip().lower()
+    if not broker_source:
+        return None, "unavailable"
+    try:
+        from .broker_quotes import broker_quote_for_trade
+
+        quote = broker_quote_for_trade(trade, purpose="display")
+        px = _safe_quote_float(quote.get("price"))
+        source = str(quote.get("source") or f"{broker_source}_unavailable")
+        if px is not None:
+            return px, source
+        return None, source
     except Exception:
-        logger.debug("[autotrader_desk] RH batched quote failed", exc_info=True)
-        return {}
+        logger.debug(
+            "[autotrader_desk] broker quote failed broker=%s ticker=%s",
+            broker_source,
+            trade.ticker,
+            exc_info=True,
+        )
+    return None, f"{broker_source}_unavailable"
 
 
 def _fallback_quote(ticker: str) -> float | None:
@@ -175,9 +185,10 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
     * ``opened_today_et`` — PDT soft-warn badge.
     * ``current_price`` / ``unrealized_pnl_usd`` / ``unrealized_pnl_pct`` — live
       metrics for the simulation-style card.
-    * ``quote_source`` — ``"robinhood"`` for live stock rows (RH's own feed,
-      same venue as fills), ``"market_data"`` fallback, ``"unavailable"`` when
-      no quote could be resolved.
+    * ``quote_source`` - broker name for live broker-backed rows, with
+      ``"<broker>_stale"`` / ``"<broker>_unavailable"`` when the broker feed
+      cannot provide a fresh executable quote. Legacy/manual rows may still use
+      ``"market_data"``.
     """
     from .auto_trader_position_overrides import (
         _opened_today_et,
@@ -215,9 +226,6 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
     override_pairs.extend(("paper", int(pt.id)) for pt in papers)
     overrides_map = list_position_overrides(db, override_pairs)
 
-    # Batched Robinhood quote for all live stock rows (one round-trip).
-    rh_prices = _rh_quote_prices_for_trades(trades)
-
     out_trades: list[dict[str, Any]] = []
     for t in trades:
         monitor_scope = classify_live_autopilot_trade_scope(t)
@@ -229,10 +237,8 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
         is_atv1 = (t.auto_trader_version or "") == "v1"
         ov = overrides_map.get(("trade", int(t.id)))
         opened_today = bool(t.entry_date and _opened_today_et(t.entry_date))
-        tkr_u = (t.ticker or "").upper()
-        current_price = rh_prices.get(tkr_u)
-        quote_source = "robinhood" if current_price is not None else None
-        if current_price is None:
+        current_price, quote_source = _broker_quote_price_for_trade(t)
+        if current_price is None and not (t.broker_source or "").strip():
             current_price = _fallback_quote(t.ticker)
             quote_source = "market_data" if current_price is not None else "unavailable"
         pnl_usd, pnl_pct = _compute_unrealized(

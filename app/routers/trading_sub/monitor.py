@@ -195,6 +195,10 @@ def api_monitor_active(
 
     setups: list[dict[str, Any]] = []
     health_scores: list[float] = []
+    try:
+        from ...services.trading.broker_quotes import broker_quote_for_trade
+    except Exception:
+        broker_quote_for_trade = None  # type: ignore[assignment]
 
     for trade in trades:
         decs = by_trade.get(trade.id, [])
@@ -213,7 +217,11 @@ def api_monitor_active(
                     patterns[pid] = p2
                     pat = p2
 
-        q = quotes_map.get(trade.ticker.upper()) or quotes_map.get(trade.ticker)
+        q = None
+        if broker_quote_for_trade is not None and (trade.broker_source or "").strip():
+            q = broker_quote_for_trade(trade, purpose="display")
+        if not q or q.get("price") is None:
+            q = quotes_map.get(trade.ticker.upper()) or quotes_map.get(trade.ticker)
         cur = _quote_price(q)
         entry = float(trade.entry_price)
         pnl_pct = None
@@ -259,6 +267,7 @@ def api_monitor_active(
                 "take_profit": json_safe(eff_tp) if eff_tp is not None else None,
                 "entry_date": trade.entry_date.isoformat() if trade.entry_date else None,
                 "current_price": json_safe(cur) if cur is not None else None,
+                "quote_source": q.get("source") if isinstance(q, dict) else None,
                 "pnl_pct": json_safe(pnl_pct) if pnl_pct is not None else None,
                 "latest_decision": _serialize_decision(latest) if latest else None,
                 "decision_count": len(decs),

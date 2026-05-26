@@ -26,10 +26,11 @@ class FreshnessMeta:
 
     def age_seconds(self, *, now: datetime | None = None) -> float:
         ref = now or datetime.now(timezone.utc)
-        if self.retrieved_at_utc.tzinfo is None:
-            ra = self.retrieved_at_utc.replace(tzinfo=timezone.utc)
+        src = self.provider_time_utc or self.retrieved_at_utc
+        if src.tzinfo is None:
+            ra = src.replace(tzinfo=timezone.utc)
         else:
-            ra = self.retrieved_at_utc
+            ra = src.astimezone(timezone.utc)
         return max(0.0, (ref - ra).total_seconds())
 
 
@@ -99,6 +100,7 @@ class NormalizedTicker:
     base_volume_24h: Optional[float] = None
     quote_volume_24h: Optional[float] = None
     freshness: Optional[FreshnessMeta] = None
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

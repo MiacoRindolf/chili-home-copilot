@@ -4388,6 +4388,12 @@ function refreshPrice() {
       var lbl = document.getElementById('price-label');
       if (t !== currentTicker) return;
       if (!d.ok || d.price == null) {
+        if (d && d.broker_held) {
+          lbl.innerHTML = '<strong>--</strong> <span class="change down">broker quote unavailable</span>';
+          _lastLiveDisplayedPrice = null;
+          _priceCache[currentTicker] = d;
+          return;
+        }
         if (!_paintToolbarPriceFromOhlcvFallback()) {
           lbl.innerHTML = '<strong>--</strong>';
           _lastLiveDisplayedPrice = null;
@@ -4668,12 +4674,15 @@ function selectTicker(t) {
   if (pl) pl.classList.remove('price-flash-up', 'price-flash-down');
   if (_priceLabelFlashTimer) { clearTimeout(_priceLabelFlashTimer); _priceLabelFlashTimer = null; }
   var cached = _priceCache[currentTicker];
-  if (cached) {
+  if (cached && cached.price != null) {
     var cls = (cached.change_pct||0) >= 0 ? 'up' : 'down';
     var sign = (cached.change_pct||0) >= 0 ? '+' : '';
     document.getElementById('price-label').innerHTML = '<strong>$' + cached.price + '</strong> <span class="change ' + cls + '">' + sign + (cached.change||0) + ' (' + sign + (cached.change_pct||0) + '%)</span>';
     var cp = parseFloat(cached.price);
     _lastLiveDisplayedPrice = isFinite(cp) ? cp : null;
+  } else if (cached && cached.broker_held) {
+    document.getElementById('price-label').innerHTML = '<strong>--</strong> <span class="change down">broker quote unavailable</span>';
+    _lastLiveDisplayedPrice = null;
   } else {
     _lastLiveDisplayedPrice = null;
   }
@@ -4807,9 +4816,13 @@ function prefetchWatchlistPrices() {
         if (el) {
           var priceEl = el.querySelector('.wl-price');
           if (priceEl) {
-            var cls = (q.change_pct||0) >= 0 ? 'up' : 'down';
-            var sign = (q.change_pct||0) >= 0 ? '+' : '';
-            priceEl.innerHTML = '$' + q.price + ' <small class="' + cls + '">' + sign + (q.change_pct||0) + '%</small>';
+            if (q.price == null) {
+              priceEl.innerHTML = '<span class="wl-price-muted">--</span>';
+            } else {
+              var cls = (q.change_pct||0) >= 0 ? 'up' : 'down';
+              var sign = (q.change_pct||0) >= 0 ? '+' : '';
+              priceEl.innerHTML = '$' + q.price + ' <small class="' + cls + '">' + sign + (q.change_pct||0) + '%</small>';
+            }
           }
         }
       });

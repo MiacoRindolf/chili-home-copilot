@@ -1983,6 +1983,88 @@ def _run_price_monitor_job():
     run_scheduler_job_guarded("price_monitor", _work)
 
 
+def _run_broker_position_price_monitor_job():
+    """24/7 broker-source price checks for live broker-backed positions.
+
+    Regular ``price_monitor`` is intentionally broad and still runs on its
+    human-alert cadence. This lane is narrower: only positions with a live
+    ``broker_source`` are evaluated, and ``stop_engine`` resolves quotes from
+    that broker first. That keeps overnight-eligible positions monitored
+    without pulling paper/manual watchlists through broker APIs all night.
+    """
+    from ..db import SessionLocal
+    from ..models.trading import Trade
+    from .trading.broker_position_truth import BROKER_POSITION_TRUTH_SOURCES
+    from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
+    from sqlalchemy import distinct, func
+
+    def _work() -> None:
+        db = SessionLocal()
+        pattern_tickers: list[str] = []
+        try:
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(
+                    Trade.status == "open",
+                    Trade.user_id.isnot(None),
+                    func.lower(Trade.broker_source).in_(
+                        list(BROKER_POSITION_TRUTH_SOURCES)
+                    ),
+                )
+                .all()
+            ]
+            if not user_ids:
+                return
+            for uid in user_ids:
+                try:
+                    result = evaluate_all(
+                        db,
+                        uid,
+                        broker_sources=BROKER_POSITION_TRUTH_SOURCES,
+                    )
+                    dispatched = dispatch_stop_alerts(db, uid, result)
+                    if dispatched or result.get("targets_hit") or result.get("stops_hit"):
+                        logger.info(
+                            "[scheduler] broker_position_price_monitor uid=%s: %s "
+                            "dispatched=%s",
+                            uid,
+                            result,
+                            dispatched,
+                        )
+                except Exception:
+                    db.rollback()
+                    logger.warning(
+                        "[scheduler] broker position price monitor failed for uid=%s",
+                        uid,
+                        exc_info=True,
+                    )
+
+            pattern_tickers = [
+                r[0] for r in db.query(distinct(Trade.ticker))
+                .filter(
+                    Trade.status == "open",
+                    Trade.related_alert_id.isnot(None),
+                    func.lower(Trade.broker_source).in_(
+                        list(BROKER_POSITION_TRUTH_SOURCES)
+                    ),
+                )
+                .all()
+            ]
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+        if pattern_tickers:
+            trigger_pattern_monitor_for_tickers(
+                pattern_tickers,
+                reason="broker_position_price_monitor",
+            )
+
+    run_scheduler_job_guarded("broker_position_price_monitor", _work)
+
+
 def _run_daytrade_fast_monitor_job():
     """1-minute fast check for day-trade and scalp positions (tighter exit timing)."""
     from ..db import SessionLocal
@@ -4145,6 +4227,28 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                 )
+
+                if getattr(settings, "chili_broker_position_price_monitor_enabled", True):
+                    _bppm_m = max(
+                        1,
+                        int(getattr(
+                            settings,
+                            "chili_broker_position_price_monitor_interval_minutes",
+                            5,
+                        )),
+                    )
+                    _scheduler.add_job(
+                        _run_broker_position_price_monitor_job,
+                        trigger=IntervalTrigger(minutes=_bppm_m),
+                        id="broker_position_price_monitor",
+                        name=(
+                            "Broker-backed position price monitor "
+                            f"(every {_bppm_m}min, 24/7)"
+                        ),
+                        replace_existing=True,
+                        max_instances=1,
+                        next_run_time=datetime.now() + timedelta(seconds=40),
+                    )
 
             if include_web_light:
                 _scheduler.add_job(

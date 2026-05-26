@@ -35,6 +35,13 @@ PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES = 30.0
 PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES = 1
 PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS = 50.0
 PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN = 12
+PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT = 40
+PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT = 8
+PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT = 12
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP = 0.10
+PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES = 5
+PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES = 1
+PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS = 3
 
 # ── Config profiles ──────────────────────────────────────────────────────
 CONFIG_PROFILES: dict[str, dict[str, Any]] = {
@@ -877,6 +884,12 @@ class Settings(BaseSettings):
             return "process"
         return "threads"
     brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
+    # Operational recert/debt lane: keep promoted/pilot/shadow evidence fresh
+    # without allowing one pattern to monopolize the queue for an hour.
+    brain_queue_operational_refresh_enabled: bool = True
+    brain_queue_operational_refresh_lifecycles: str = "promoted,live,shadow_promoted,pilot_promoted"
+    brain_queue_operational_target_tickers: int = 24
+    brain_queue_operational_stored_refresh_max_tickers: int = 24
     brain_use_gpu_ml: bool = False       # GPU for pattern meta-learner (LightGBM) â€” ML train step only, not queue BT
 
     # Full learning cycle (run_learning_cycle): optional slim mode
@@ -1349,6 +1362,25 @@ class Settings(BaseSettings):
     chili_robinhood_spot_adapter_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_ROBINHOOD_SPOT_ADAPTER_ENABLED"),
+    )
+    chili_robinhood_legend_quote_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_LEGEND_QUOTE_FALLBACK_ENABLED"),
+    )
+    chili_robinhood_legend_quote_max_age_seconds: float = Field(
+        default=1200.0,
+        ge=30.0,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_LEGEND_QUOTE_MAX_AGE_SECONDS"),
+    )
+    chili_robinhood_legend_quote_cache_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_LEGEND_QUOTE_CACHE_SECONDS"),
+    )
+    chili_robinhood_legend_quote_timeout_seconds: float = Field(
+        default=8.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_LEGEND_QUOTE_TIMEOUT_SECONDS"),
     )
 
     # Coinbase spot venue adapter (execution layer; neural momentum may consume readiness only).
@@ -2311,6 +2343,22 @@ class Settings(BaseSettings):
         le=600,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MONITOR_INTERVAL_SECONDS"),
     )
+    chili_broker_position_price_monitor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_BROKER_POSITION_PRICE_MONITOR_ENABLED"),
+    )
+    chili_broker_position_price_monitor_interval_minutes: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        validation_alias=AliasChoices("CHILI_BROKER_POSITION_PRICE_MONITOR_INTERVAL_MINUTES"),
+    )
+    chili_broker_position_price_monitor_bar_lookback_minutes: int = Field(
+        default=720,
+        ge=5,
+        le=1440,
+        validation_alias=AliasChoices("CHILI_BROKER_POSITION_PRICE_MONITOR_BAR_LOOKBACK_MINUTES"),
+    )
 
     # P0.7 — stuck-order watchdog. Auto-cancels orders that the broker
     # has acknowledged but never filled/rejected within the timeout. The
@@ -3242,10 +3290,10 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_ALLOW_EXTENDED_HOURS"),
         description=(
-            "When true and chili_autotrader_rth_only is also true, the monitor "
-            "runs during Mon-Fri US/Eastern 04:00-20:00 (pre + RTH + post) "
-            "instead of RTH only. Set rth_only=false to disable the session "
-            "gate entirely (weekends and overnight included)."
+            "Entry gate only. When true and chili_autotrader_rth_only is also "
+            "true, stock entries may run during Mon-Fri US/Eastern 04:00-20:00 "
+            "(pre + RTH + post) instead of RTH only. Open-position monitoring "
+            "runs independently from the broker source attached to the trade."
         ),
     )
     chili_autotrader_llm_revalidation_enabled: bool = Field(
@@ -3929,6 +3977,29 @@ class Settings(BaseSettings):
     )
     pattern_imminent_max_tickers_per_pattern: int = (
         PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN
+    )
+    pattern_imminent_suppressed_diagnostic_limit: int = (
+        PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT
+    )
+    pattern_imminent_missing_indicator_sample_limit: int = (
+        PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT
+    )
+    pattern_imminent_readiness_near_miss_limit: int = (
+        PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT
+    )
+    # Shadow-promoted only: admit close readiness misses into paper/shadow
+    # observation, never live broker flow. This increases measured learning
+    # samples without weakening promoted/live entry gates.
+    pattern_imminent_shadow_near_miss_enabled: bool = True
+    pattern_imminent_shadow_near_miss_max_gap: float = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP
+    )
+    pattern_imminent_ticker_rotation_enabled: bool = True
+    pattern_imminent_ticker_rotation_window_minutes: int = (
+        PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES
+    )
+    pattern_imminent_ticker_rotation_explore_tickers: int = (
+        PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS
     )
     pattern_imminent_research_mode: bool = False
     pattern_imminent_research_nearmiss_log: bool = False

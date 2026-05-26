@@ -420,11 +420,70 @@ def trading_backup_page(request: Request, db: Session = Depends(get_db)):
 
 # ── Market Data ─────────────────────────────────────────────────────────
 
+def _identity_user_id(request: Request, db: Session) -> int | None:
+    try:
+        ctx = get_identity_ctx(request, db)
+        return ctx.get("user_id")
+    except Exception:
+        return None
+
+
+def _overlay_broker_overnight_ohlcv(
+    db: Session,
+    *,
+    user_id: int | None,
+    ticker: str,
+    interval: str,
+    data: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Overlay Robinhood-held equities with the Legend/Blue Ocean overnight feed."""
+    try:
+        from ..services.trading.broker_quotes import open_broker_trade_for_ticker
+
+        trade = open_broker_trade_for_ticker(db, ticker, user_id=user_id)
+        if trade is None or (trade.broker_source or "").strip().lower() != "robinhood":
+            return data
+        if (interval or "").lower() not in {"1m", "2m", "5m", "15m", "30m", "1h", "60m", "4h"}:
+            return data
+        from ..services.trading.tradingview_blue_ocean import fetch_boats_ohlcv
+
+        boats = fetch_boats_ohlcv(ticker, interval=interval, bars=300)
+        if not boats:
+            return data
+        by_time: dict[int, dict[str, Any]] = {}
+        for row in data or []:
+            try:
+                ts = int(row.get("time"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            by_time[ts] = row
+        for row in boats:
+            try:
+                ts = int(row.get("time"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            by_time[ts] = {
+                "time": ts,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row.get("volume") or 0.0),
+                "source": "robinhood_legend_blue_ocean",
+            }
+        return [by_time[k] for k in sorted(by_time)]
+    except Exception:
+        logger.debug("[trading] broker overnight OHLCV overlay failed", exc_info=True)
+        return data
+
+
 @router.get("/api/trading/ohlcv")
 def api_ohlcv(
+    request: Request,
     ticker: str = Query(...),
     interval: str = Query("1d"),
     period: str = Query("6mo"),
+    db: Session = Depends(get_db),
 ):
     _is_crypto = ticker.strip().upper().endswith("-USD")
     fb = True if _is_crypto else _TRADING_UI_ALLOW_PROVIDER_FALLBACK
@@ -437,11 +496,30 @@ def api_ohlcv(
         )
     except Exception:
         data = []
+    user_id = _identity_user_id(request, db)
+    data = _overlay_broker_overnight_ohlcv(
+        db, user_id=user_id, ticker=ticker, interval=interval, data=data
+    )
     return JSONResponse({"ok": True, "ticker": ticker.upper(), "data": data})
 
 
 @router.get("/api/trading/quote")
-def api_quote(ticker: str = Query(...)):
+def api_quote(
+    request: Request,
+    ticker: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    user_id = _identity_user_id(request, db)
+    try:
+        from ..services.trading.broker_quotes import broker_quote_for_user_ticker
+
+        broker_quote = broker_quote_for_user_ticker(
+            db, user_id=user_id, ticker=ticker, purpose="display"
+        )
+        if broker_quote is not None:
+            return JSONResponse({"ok": True, **broker_quote})
+    except Exception:
+        logger.debug("[trading] broker-aware quote failed", exc_info=True)
     quote = ts.fetch_quote(
         ticker, allow_provider_fallback=None,
     )
@@ -451,11 +529,27 @@ def api_quote(ticker: str = Query(...)):
 
 
 @router.get("/api/trading/quotes/batch")
-def api_quotes_batch(tickers: str = Query(..., description="Comma-separated ticker list")):
+def api_quotes_batch(
+    request: Request,
+    tickers: str = Query(..., description="Comma-separated ticker list"),
+    db: Session = Depends(get_db),
+):
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()][:50]
     results = ts.fetch_quotes_batch(
         ticker_list, allow_provider_fallback=None,
     )
+    user_id = _identity_user_id(request, db)
+    try:
+        from ..services.trading.broker_quotes import broker_quote_for_user_ticker
+
+        for symbol in ticker_list:
+            broker_quote = broker_quote_for_user_ticker(
+                db, user_id=user_id, ticker=symbol, purpose="display"
+            )
+            if broker_quote is not None:
+                results[symbol] = broker_quote
+    except Exception:
+        logger.debug("[trading] broker-aware batch quote overlay failed", exc_info=True)
     return JSONResponse({"ok": True, "quotes": results})
 
 
@@ -1458,8 +1552,13 @@ def api_stop_positions(
         hwm = t.high_watermark or entry
 
         try:
-            from ..services.trading.market_data import fetch_quote
-            q = fetch_quote(t.ticker)
+            q = None
+            if (t.broker_source or "").strip():
+                from ..services.trading.broker_quotes import broker_quote_for_trade
+                q = broker_quote_for_trade(t, purpose="display")
+            if not q or q.get("price") is None:
+                from ..services.trading.market_data import fetch_quote
+                q = fetch_quote(t.ticker)
             price = q.get("price", 0) if q else 0
         except Exception:
             price = 0
@@ -1663,9 +1762,24 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL", interval: int = 0
 
     tick_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
     massive_available = False
+    broker_stream_only = False
     m_ticker = ""
     _on_tick = None
     _on_candle = None
+
+    try:
+        from ..db import SessionLocal
+        from ..services.trading.broker_quotes import open_broker_trade_for_ticker
+
+        sdb = SessionLocal()
+        try:
+            broker_stream_only = open_broker_trade_for_ticker(
+                sdb, ticker, user_id=None
+            ) is not None
+        finally:
+            sdb.close()
+    except Exception:
+        broker_stream_only = False
 
     try:
         from ..services.massive_client import (
@@ -1710,7 +1824,12 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL", interval: int = 0
 
         _on_tick = _on_tick_cb
         ws_client = get_ws_client()
-        if ws_client.running:
+        if broker_stream_only:
+            logger.info(
+                "[live-ws] Broker-held symbol %s: using broker quote poll, not Massive WS",
+                ticker,
+            )
+        elif ws_client.running:
             ws_client.subscribe([m_ticker])
             register_tick_listener(m_ticker, _on_tick)
             if _on_candle and interval > 0:
@@ -1727,19 +1846,31 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL", interval: int = 0
         """Periodic REST poll — always runs as heartbeat, faster when Massive WS is off."""
         import time as _time
         interval = 5 if massive_available else 1
+
+        def _broker_or_public_quote() -> dict[str, Any] | None:
+            from ..db import SessionLocal
+            from ..services.trading.broker_quotes import broker_quote_for_user_ticker
+
+            sdb = SessionLocal()
+            try:
+                broker_quote = broker_quote_for_user_ticker(
+                    sdb, user_id=None, ticker=ticker, purpose="display"
+                )
+            finally:
+                sdb.close()
+            if broker_quote is not None:
+                return broker_quote
+            return ts.fetch_quote(ticker, allow_provider_fallback=None)
         while True:
             try:
-                quote = await asyncio.to_thread(
-                    ts.fetch_quote,
-                    ticker,
-                    allow_provider_fallback=None,
-                )
+                quote = await asyncio.to_thread(_broker_or_public_quote)
                 if quote and quote.get("price") is not None:
                     await tick_queue.put({
                         "type": "tick",
                         "price": float(quote["price"]),
                         "size": 0,
                         "time": _time.time(),
+                        "source": quote.get("source"),
                     })
             except Exception:
                 pass

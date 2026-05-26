@@ -53,9 +53,21 @@
     }
   }
 
+  function brokerLabel(src) {
+    var s = String(src || '').replace(/_(stale|unavailable)$/i, '');
+    if (s === 'robinhood') return 'Robinhood';
+    if (s === 'coinbase') return 'Coinbase';
+    if (!s) return 'Broker';
+    return s.replace(/_/g, ' ').replace(/\b\w/g, function(ch) { return ch.toUpperCase(); });
+  }
+
   function quoteSourceLabel(src) {
-    if (src === 'robinhood') return 'via Robinhood (live feed)';
-    if (src === 'market_data') return 'via Massive/Polygon';
+    var s = String(src || '').toLowerCase();
+    if (s === 'market_data') return 'via market data';
+    if (s === 'robinhood_legend_blue_ocean') return 'via Robinhood Legend / Blue Ocean';
+    if (s.indexOf('_stale') > -1) return brokerLabel(s) + ' quote stale';
+    if (s.indexOf('_unavailable') > -1) return brokerLabel(s) + ' quote unavailable';
+    if (s === 'robinhood' || s === 'coinbase') return 'via ' + brokerLabel(s) + ' broker feed';
     return 'quote unavailable';
   }
 
@@ -180,7 +192,12 @@
     if (r.opened_today_et && (r.direction || 'long') === 'long' && r.kind === 'trade') {
       parts.push('Closing today may count as a day trade (PDT soft-warn).');
     }
-    if (r.quote_source === 'unavailable') parts.push('No live quote available — metrics may be stale.');
+    var quoteSource = String(r.quote_source || '').toLowerCase();
+    if (quoteSource.indexOf('_stale') > -1) {
+      parts.push(brokerLabel(quoteSource) + ' quote timestamp is stale; current price and P/L are hidden.');
+    } else if (quoteSource === 'unavailable' || quoteSource.indexOf('_unavailable') > -1) {
+      parts.push('No fresh live quote available; current price and P/L are hidden.');
+    }
     if (!parts.length) return '';
     return '<div class="ap-callout"><strong>Watchouts</strong>' + esc(parts.join(' · ')) + '</div>';
   }

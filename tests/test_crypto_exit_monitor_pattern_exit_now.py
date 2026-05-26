@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -39,6 +40,34 @@ def test_crypto_local_alias_resolves_to_shared_callable():
 
     assert crypto_exit._latest_monitor_decisions_by_trade is common.latest_monitor_decisions_by_trade
     assert crypto_exit._fresh_monitor_exit_meta is common.fresh_monitor_exit_meta
+
+
+def test_current_crypto_price_prefers_trade_broker_quote(monkeypatch):
+    from app.services.trading.crypto import exit_monitor as crypto_exit
+    from app.services.trading import market_data
+
+    adapter = SimpleNamespace(
+        is_enabled=lambda: True,
+        get_ticker=lambda _ticker: (
+            SimpleNamespace(bid=14.25, ask=14.40, mid=14.325, last_price=14.30),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.venue.factory.get_adapter",
+        lambda broker_source: adapter if broker_source == "coinbase" else None,
+    )
+    monkeypatch.setattr(
+        market_data,
+        "fetch_quote",
+        lambda _ticker: pytest.fail("market_data fallback should not be used"),
+    )
+
+    assert crypto_exit._current_crypto_price(
+        "ADA-USD",
+        broker_source="coinbase",
+        direction="long",
+    ) == 14.25
 
 
 # ---------------------------------------------------------------------------

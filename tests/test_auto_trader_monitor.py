@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app import models
@@ -235,6 +236,146 @@ def _run_tick_with_adapter(db, adapter, *, execution_window=None):
                     side_effect=_fake_submit,
                 ):
                     return tick_auto_trader_monitor(db)
+
+
+def test_exit_trigger_uses_sell_side_bid_for_long_target():
+    from app.services.trading.auto_trader_monitor import _evaluate_exit_trigger
+
+    ask_only = _evaluate_exit_trigger(
+        {
+            "source": "robinhood",
+            "feed": "robinhood_bbo",
+            "bid": 14.95,
+            "ask": 15.05,
+            "mid": 15.0,
+            "last_price": 14.95,
+        },
+        stop=9.0,
+        target=15.0,
+        is_long=True,
+    )
+    assert ask_only["hit_target"] is False
+
+    executable = _evaluate_exit_trigger(
+        {
+            "source": "robinhood",
+            "feed": "robinhood_bbo",
+            "bid": 15.05,
+            "ask": 15.15,
+            "mid": 15.10,
+            "last_price": 15.04,
+        },
+        stop=9.0,
+        target=15.0,
+        is_long=True,
+    )
+    assert executable["hit_target"] is True
+    assert executable["target_source"] == "bid"
+
+
+def test_monitor_closes_target_on_executable_bid_cross(db):
+    """A real sell-side bid through target should close even if scalar fallback is stale."""
+    u = models.User(name="bbo_target_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="BIDT",
+        direction="long",
+        entry_price=10.0,
+        quantity=4.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=15.0,
+        broker_source="robinhood",
+    )
+    db.add(t)
+    db.commit()
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_best_bid_ask.return_value = (
+        SimpleNamespace(
+            bid=15.05,
+            ask=15.15,
+            mid=15.10,
+            last_price=15.04,
+            spread_bps=66.23,
+            raw={"last_trade_price": "15.04"},
+        ),
+        MagicMock(),
+    )
+    ad.get_quote_price.return_value = 10.0
+    ad.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "bid-target",
+        "raw": {"average_price": 15.05, "cumulative_quantity": 4},
+    }
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("closed") == 1
+    assert out.get("quote_sources", {}).get("BIDT") == "robinhood"
+    assert out.get("quote_snapshots", {}).get("BIDT", {}).get("feed") == "robinhood_bbo"
+    db.refresh(t)
+    assert t.status == "closed"
+    assert t.exit_reason == "target"
+    ad.place_market_order.assert_called_once()
+
+
+def test_monitor_does_not_close_target_on_ask_only_spike(db):
+    """A long cannot sell at the ask; midpoint/ask-only spikes must not trip target."""
+    u = models.User(name="ask_only_target_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="ASKT",
+        direction="long",
+        entry_price=10.0,
+        quantity=4.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=15.0,
+        broker_source="robinhood",
+    )
+    db.add(t)
+    db.commit()
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_best_bid_ask.return_value = (
+        SimpleNamespace(
+            bid=14.95,
+            ask=15.05,
+            mid=15.00,
+            last_price=14.95,
+            spread_bps=66.67,
+            raw={"last_trade_price": "14.95"},
+        ),
+        MagicMock(),
+    )
+    ad.get_quote_price.return_value = 15.00
+    ad.place_market_order.return_value = {"ok": True, "order_id": "ask-target", "raw": {}}
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("checked") == 1
+    assert out.get("closed") == 0
+    assert out.get("quote_snapshots", {}).get("ASKT", {}).get("bid") == 14.95
+    db.refresh(t)
+    assert t.status == "open"
+    ad.place_market_order.assert_not_called()
 
 
 def test_monitor_manages_non_v1_pattern_linked_trade(db):

@@ -34,6 +34,10 @@ from .tick_normalizer import normalize_price as _norm_price
 
 logger = logging.getLogger(__name__)
 
+SECONDS_PER_HOUR = 3600
+DEFAULT_MARKET_CONTEXT_STALENESS_SECS = 300
+DEFAULT_ALERT_COOLDOWN_SECS = SECONDS_PER_HOUR
+
 
 # ── Stop state machine ──────────────────────────────────────────────
 
@@ -178,6 +182,11 @@ class MarketContext:
     volume: float | None = None
     quote_ts: datetime | None = None
     spread_bps: float | None = None
+    recent_high: float | None = None
+    recent_low: float | None = None
+    recent_high_ts: datetime | None = None
+    recent_low_ts: datetime | None = None
+    range_source: str | None = None
     is_stale: bool = False
 
 
@@ -202,6 +211,35 @@ class StopDecisionResult:
 
 def _is_crypto(ticker: str) -> bool:
     return ticker.upper().endswith("-USD")
+
+
+def _now_naive_utc() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _to_naive_utc(value: datetime | str | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        value = datetime.fromisoformat(raw)
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _safe_market_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
 
 
 def _get_policy(stop_model: str | None) -> dict[str, float]:
@@ -453,10 +491,10 @@ def evaluate_trade(
         from .scanner import _MAX_HOLD_HOURS
         _max_h = _MAX_HOLD_HOURS.get(_trade_type)
         if _max_h is not None:
-            _entry_dt = trade.entry_date
-            if isinstance(_entry_dt, str):
-                _entry_dt = datetime.fromisoformat(_entry_dt)
-            _held_hours = (datetime.utcnow() - _entry_dt).total_seconds() / 3600
+            _entry_dt = _to_naive_utc(trade.entry_date)
+            if _entry_dt is None:
+                return result
+            _held_hours = (_now_naive_utc() - _entry_dt).total_seconds() / SECONDS_PER_HOUR
             if _held_hours >= _max_h:
                 result.state = StopState.TRAILING
                 result.alert_event = "TIME_EXIT"
@@ -562,23 +600,53 @@ def evaluate_trade(
 
     # ── Stop breach check ──
     stop_breached = False
+    stop_trigger_price = price
+    stop_trigger_ts: datetime | None = None
+    stop_trigger_basis = "last"
     if is_long and price <= stop:
         stop_breached = True
     elif not is_long and price >= stop:
         stop_breached = True
+    elif is_long and market.recent_low is not None and market.recent_low <= stop:
+        stop_breached = True
+        stop_trigger_price = market.recent_low
+        stop_trigger_ts = market.recent_low_ts
+        stop_trigger_basis = "recent_low"
+    elif (
+        not is_long
+        and market.recent_high is not None
+        and market.recent_high >= stop
+    ):
+        stop_breached = True
+        stop_trigger_price = market.recent_high
+        stop_trigger_ts = market.recent_high_ts
+        stop_trigger_basis = "recent_high"
 
     if stop_breached:
         if is_long:
-            pnl_pct = round((price - entry) / entry * 100, 2)
+            pnl_pct = round((stop_trigger_price - entry) / entry * 100, 2)
         else:
-            pnl_pct = round((entry - price) / entry * 100, 2)
+            pnl_pct = round((entry - stop_trigger_price) / entry * 100, 2)
         result.state = StopState.TRIGGERED
         result.alert_event = "STOP_HIT"
         result.recommended_action = "exit"
-        result.reason = (
-            f"stop breached at ${price:,.4f} (stop=${stop:,.4f}, P&L={pnl_pct:+.1f}%, "
-            f"strategy={brain.pattern_name or trade.stop_model}, regime={brain.regime})"
-        )
+        if stop_trigger_basis == "last":
+            result.reason = (
+                f"stop breached at ${price:,.4f} (stop=${stop:,.4f}, P&L={pnl_pct:+.1f}%, "
+                f"strategy={brain.pattern_name or trade.stop_model}, regime={brain.regime})"
+            )
+        else:
+            ts_txt = f" at {stop_trigger_ts.isoformat()}Z" if stop_trigger_ts else ""
+            result.reason = (
+                f"stop touched by broker bar {stop_trigger_basis}=${stop_trigger_price:,.4f}{ts_txt} "
+                f"(stop=${stop:,.4f}, current=${price:,.4f}, P&L={pnl_pct:+.1f}%, "
+                f"source={market.range_source or 'broker_range'}, "
+                f"strategy={brain.pattern_name or trade.stop_model}, regime={brain.regime})"
+            )
+            result.inputs["trigger_basis"] = stop_trigger_basis
+            result.inputs["trigger_price"] = stop_trigger_price
+            if stop_trigger_ts:
+                result.inputs["trigger_ts"] = stop_trigger_ts.isoformat()
         return result
 
     # ── Proximity warning (brain-adjusted) ──
@@ -599,23 +667,53 @@ def evaluate_trade(
 
     # ── Target hit check ──
     target_hit = False
+    target_trigger_price = price
+    target_trigger_ts: datetime | None = None
+    target_trigger_basis = "last"
     if target:
         if is_long and price >= target:
             target_hit = True
         elif not is_long and price <= target:
             target_hit = True
+        elif is_long and market.recent_high is not None and market.recent_high >= target:
+            target_hit = True
+            target_trigger_price = market.recent_high
+            target_trigger_ts = market.recent_high_ts
+            target_trigger_basis = "recent_high"
+        elif (
+            not is_long
+            and market.recent_low is not None
+            and market.recent_low <= target
+        ):
+            target_hit = True
+            target_trigger_price = market.recent_low
+            target_trigger_ts = market.recent_low_ts
+            target_trigger_basis = "recent_low"
 
     if target_hit:
         if is_long:
-            pnl_pct = round((price - entry) / entry * 100, 2)
+            pnl_pct = round((target_trigger_price - entry) / entry * 100, 2)
         else:
-            pnl_pct = round((entry - price) / entry * 100, 2)
+            pnl_pct = round((entry - target_trigger_price) / entry * 100, 2)
         result.alert_event = "TARGET_HIT"
         result.recommended_action = "reduce"
-        result.reason = (
-            f"target reached at ${price:,.4f} (target=${target:,.4f}, P&L=+{pnl_pct:.1f}%, "
-            f"strategy={brain.pattern_name or trade.stop_model})"
-        )
+        if target_trigger_basis == "last":
+            result.reason = (
+                f"target reached at ${price:,.4f} (target=${target:,.4f}, P&L=+{pnl_pct:.1f}%, "
+                f"strategy={brain.pattern_name or trade.stop_model})"
+            )
+        else:
+            ts_txt = f" at {target_trigger_ts.isoformat()}Z" if target_trigger_ts else ""
+            result.reason = (
+                f"target touched by broker bar {target_trigger_basis}=${target_trigger_price:,.4f}{ts_txt} "
+                f"(target=${target:,.4f}, current=${price:,.4f}, P&L=+{pnl_pct:.1f}%, "
+                f"source={market.range_source or 'broker_range'}, "
+                f"strategy={brain.pattern_name or trade.stop_model})"
+            )
+            result.inputs["trigger_basis"] = target_trigger_basis
+            result.inputs["trigger_price"] = target_trigger_price
+            if target_trigger_ts:
+                result.inputs["trigger_ts"] = target_trigger_ts.isoformat()
 
     return result
 
@@ -778,7 +876,6 @@ def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
             pattern_win_rate=getattr(brain, "pattern_win_rate", None) if brain else None,
             pattern_name=getattr(brain, "pattern_name", None) if brain else None,
         )
-        bracket_result = compute_bracket_intent(bracket_input)
         target_price = getattr(trade, "take_profit", None)
         try:
             target_override = float(target_price) if target_price is not None else None
@@ -791,20 +888,29 @@ def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
         # exists, its current stop/target columns are the source of truth;
         # recomputing from entry ATR would roll trailing stops and pattern
         # monitor target moves back to stale entry-time values every sweep.
-        bracket_result = BracketIntentResult(
-            stop_price=float(stop_price),
-            target_price=(
-                target_override
-                if target_override is not None
-                else bracket_result.target_price
-            ),
-            stop_model_resolved=bracket_result.stop_model_resolved,
-            reasoning=f"{bracket_result.reasoning} source=trade_current_levels",
-            brain_summary={
-                **bracket_result.brain_summary,
-                "source": "trade_current_levels",
-            },
-        )
+        if target_override is not None:
+            bracket_result = BracketIntentResult(
+                stop_price=float(stop_price),
+                target_price=target_override,
+                stop_model_resolved=getattr(trade, "stop_model", None) or "snapshot",
+                reasoning="source=trade_current_levels",
+                brain_summary={
+                    **(brain.summary_dict() if brain else {}),
+                    "source": "trade_current_levels",
+                },
+            )
+        else:
+            bracket_result = compute_bracket_intent(bracket_input)
+            bracket_result = BracketIntentResult(
+                stop_price=float(stop_price),
+                target_price=bracket_result.target_price,
+                stop_model_resolved=bracket_result.stop_model_resolved,
+                reasoning=f"{bracket_result.reasoning} source=trade_current_levels",
+                brain_summary={
+                    **bracket_result.brain_summary,
+                    "source": "trade_current_levels",
+                },
+            )
         upsert_bracket_intent(
             db,
             trade_id=trade.id,
@@ -860,26 +966,158 @@ def _apply_stop_to_trade(db: Session, trade, result: StopDecisionResult) -> None
         db.add(trade)
 
 
-def _fetch_market_context(ticker: str, staleness_secs: int = 300) -> MarketContext:
-    """Build a MarketContext from the market_data service."""
-    from .market_data import fetch_quote
+def _fetch_broker_market_quote(
+    ticker: str,
+    *,
+    broker_source: str | None,
+    direction: str | None = None,
+) -> dict[str, Any] | None:
+    """Best-effort broker quote for live broker-managed positions."""
     try:
-        q = fetch_quote(ticker)
+        from .broker_quotes import broker_quote_for_source
+
+        broker_quote = broker_quote_for_source(
+            ticker,
+            broker_source=broker_source,
+            direction=direction,
+            purpose="exit",
+        )
+        broker_price = _safe_market_float((broker_quote or {}).get("price"))
+        if broker_price is not None:
+            return {
+                "price": broker_price,
+                "bid": broker_quote.get("bid"),
+                "ask": broker_quote.get("ask"),
+                "quote_ts": broker_quote.get("quote_ts"),
+                "spread_bps": broker_quote.get("spread_bps"),
+                "quote_source": broker_quote.get("source"),
+                "volume": broker_quote.get("volume"),
+                "day_high": broker_quote.get("day_high"),
+                "day_low": broker_quote.get("day_low"),
+                "stale": broker_quote.get("stale"),
+                "age_seconds": broker_quote.get("age_seconds"),
+                "max_age_seconds": broker_quote.get("max_age_seconds"),
+            }
     except Exception:
-        return MarketContext(price=0, is_stale=True)
+        logger.debug(
+            "[stop_engine] Broker quote helper failed for %s via %s",
+            ticker,
+            broker_source,
+            exc_info=True,
+        )
+
+    try:
+        from .venue.factory import get_adapter
+
+        adapter = get_adapter(broker_source)
+        if adapter is None:
+            return None
+        is_enabled = getattr(adapter, "is_enabled", None)
+        if callable(is_enabled) and not is_enabled():
+            return None
+        tick = None
+        fresh = None
+        get_ticker = getattr(adapter, "get_ticker", None)
+        if callable(get_ticker):
+            raw_ticker = get_ticker(ticker)
+            if isinstance(raw_ticker, tuple) and len(raw_ticker) == 2:
+                tick, fresh = raw_ticker
+        if tick is None:
+            get_bbo = getattr(adapter, "get_best_bid_ask", None)
+            if callable(get_bbo):
+                raw_bbo = get_bbo(ticker)
+                if isinstance(raw_bbo, tuple) and len(raw_bbo) == 2:
+                    tick, fresh = raw_bbo
+    except Exception:
+        return None
+
+    if tick is None:
+        return None
+    try:
+        age_seconds = fresh.age_seconds() if fresh is not None else None
+        max_age_seconds = getattr(fresh, "max_age_seconds", None) if fresh is not None else None
+        if (
+            age_seconds is not None
+            and max_age_seconds is not None
+            and float(age_seconds) > float(max_age_seconds)
+        ):
+            return None
+    except Exception:
+        return None
+
+    raw = getattr(tick, "raw", None) or {}
+    bid = _safe_market_float(getattr(tick, "bid", None))
+    ask = _safe_market_float(getattr(tick, "ask", None))
+    mid = _safe_market_float(getattr(tick, "mid", None))
+    regular_last = _safe_market_float(raw.get("last_trade_price"))
+    extended_last = _safe_market_float(raw.get("last_extended_hours_trade_price"))
+    last = (
+        _safe_market_float(getattr(tick, "last_price", None))
+        or extended_last
+        or regular_last
+    )
+    side = (direction or "long").strip().lower()
+    if side == "short":
+        price = ask or mid or last or bid
+    elif side == "long":
+        price = bid or mid or last or ask
+    else:
+        price = mid or last or bid or ask
+    if price is None:
+        return None
+
+    quote_ts = getattr(fresh, "retrieved_at_utc", None)
+    return {
+        "price": price,
+        "bid": bid,
+        "ask": ask,
+        "quote_ts": quote_ts,
+        "spread_bps": _safe_market_float(getattr(tick, "spread_bps", None)),
+        "quote_source": f"{(broker_source or 'broker').strip().lower()}_broker_quote",
+        "day_high": _safe_market_float(raw.get("day_high") or raw.get("high")),
+        "day_low": _safe_market_float(raw.get("day_low") or raw.get("low")),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+    }
+
+
+def _fetch_market_context(
+    ticker: str,
+    staleness_secs: int = DEFAULT_MARKET_CONTEXT_STALENESS_SECS,
+    *,
+    broker_source: str | None = None,
+    direction: str | None = None,
+) -> MarketContext:
+    """Build a MarketContext, preferring venue truth for live broker rows."""
+    from .market_data import fetch_quote
+    q: dict[str, Any] | None = None
+    if (broker_source or "").strip():
+        q = _fetch_broker_market_quote(
+            ticker,
+            broker_source=broker_source,
+            direction=direction,
+        )
+    provider_q: dict[str, Any] | None = None
+    if q is None and not (broker_source or "").strip():
+        try:
+            provider_q = fetch_quote(ticker)
+        except Exception:
+            provider_q = None
+    if q is None:
+        q = provider_q
 
     if not q:
         return MarketContext(price=0, is_stale=True)
 
-    price = q.get("price", 0) or 0
+    price = _safe_market_float(q.get("price"))
     if not price or price <= 0:
         return MarketContext(price=0, is_stale=True)
 
-    quote_ts = q.get("quote_ts") or datetime.utcnow()
-    if isinstance(quote_ts, str):
-        quote_ts = datetime.fromisoformat(quote_ts)
-    age_secs = (datetime.utcnow() - quote_ts).total_seconds() if quote_ts else 0
-    is_stale = age_secs > staleness_secs
+    quote_ts = _to_naive_utc(q.get("quote_ts")) or _now_naive_utc()
+    age_secs = (_now_naive_utc() - quote_ts).total_seconds()
+    max_age_seconds = _safe_market_float(q.get("max_age_seconds"))
+    freshness_window = max_age_seconds or staleness_secs
+    is_stale = bool(q.get("stale")) or age_secs > freshness_window
 
     atr = None
     try:
@@ -891,13 +1129,52 @@ def _fetch_market_context(ticker: str, staleness_secs: int = 300) -> MarketConte
     except Exception:
         pass
 
+    recent_range: dict[str, Any] | None = None
+    if (broker_source or "").strip():
+        try:
+            from .broker_quotes import broker_recent_extrema_for_source
+
+            recent_range = broker_recent_extrema_for_source(
+                ticker,
+                broker_source=broker_source,
+            )
+        except Exception:
+            recent_range = None
+
+    recent_high = (
+        _safe_market_float(recent_range.get("high"))
+        if recent_range else None
+    ) or _safe_market_float(q.get("day_high"))
+    recent_low = (
+        _safe_market_float(recent_range.get("low"))
+        if recent_range else None
+    ) or _safe_market_float(q.get("day_low"))
+    recent_high_ts = (
+        _to_naive_utc(recent_range.get("high_ts"))
+        if recent_range else None
+    )
+    recent_low_ts = (
+        _to_naive_utc(recent_range.get("low_ts"))
+        if recent_range else None
+    )
+    range_source = (
+        recent_range.get("source")
+        if recent_range else q.get("quote_source") or q.get("source")
+    )
+
     return MarketContext(
         price=float(price),
         bid=q.get("bid"),
         ask=q.get("ask"),
         atr=float(atr) if atr else None,
-        volume=q.get("volume"),
+        volume=q.get("volume") or (provider_q or {}).get("volume"),
         quote_ts=quote_ts,
+        spread_bps=q.get("spread_bps"),
+        recent_high=recent_high,
+        recent_low=recent_low,
+        recent_high_ts=recent_high_ts,
+        recent_low_ts=recent_low_ts,
+        range_source=range_source,
         is_stale=is_stale,
     )
 
@@ -935,13 +1212,13 @@ def _should_suppress_alert(
 ) -> bool:
     """Check if this alert was already fired within its cooldown window."""
     effective = cooldowns or _ALERT_COOLDOWN_SECS
-    cooldown = effective.get(event, 3600)
+    cooldown = effective.get(event, DEFAULT_ALERT_COOLDOWN_SECS)
     if cooldown <= 0:
         return False
-    last_ts = recent.get((trade_id, event))
+    last_ts = _to_naive_utc(recent.get((trade_id, event)))
     if not last_ts:
         return False
-    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    now_utc = _now_naive_utc()
     elapsed = (now_utc - last_ts).total_seconds()
     return elapsed < cooldown
 
@@ -979,6 +1256,10 @@ def _result_has_trade_state_change(trade, result: StopDecisionResult) -> bool:
 def evaluate_all(
     db: Session,
     user_id: int | None = None,
+    *,
+    staleness_secs: int = DEFAULT_MARKET_CONTEXT_STALENESS_SECS,
+    broker_sources: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None,
+    tickers: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """
     Evaluate all open trades for a user (or all users if None).
@@ -991,6 +1272,23 @@ def evaluate_all(
     filters = [Trade.status == "open"]
     if user_id is not None:
         filters.append(Trade.user_id == user_id)
+    if broker_sources:
+        sources = [
+            str(src).strip().lower()
+            for src in broker_sources
+            if str(src).strip()
+        ]
+        if sources:
+            from sqlalchemy import func as _sa_func
+            filters.append(_sa_func.lower(Trade.broker_source).in_(sources))
+    if tickers:
+        ticker_keys = [
+            str(t).strip().upper()
+            for t in tickers
+            if str(t).strip()
+        ]
+        if ticker_keys:
+            filters.append(Trade.ticker.in_(ticker_keys))
 
     trades = db.query(Trade).filter(*filters).all()
 
@@ -1038,7 +1336,12 @@ def evaluate_all(
             # while the surrounding batch commit still succeeds.
             with db.begin_nested():
                 brain = _build_brain_context(trade, db)
-                market = _fetch_market_context(trade.ticker)
+                market = _fetch_market_context(
+                    trade.ticker,
+                    staleness_secs=staleness_secs,
+                    broker_source=getattr(trade, "broker_source", None),
+                    direction=getattr(trade, "direction", None),
+                )
                 # f-stop-engine-atr-trade-snapshot-fallback (2026-05-19):
                 # When the live market_data ATR fetch returns None (which
                 # is the steady-state for any ticker whose upstream data
@@ -1115,13 +1418,14 @@ def evaluate_all(
                         result.alert_event, trade.ticker, trade.id,
                     )
                 else:
+                    alert_price = result.inputs.get("trigger_price", market.price)
                     summary["alerts"].append({
                         "trade_id": trade.id,
                         "ticker": trade.ticker,
                         "event": result.alert_event,
                         "state": result.state.value,
                         "reason": result.reason,
-                        "price": market.price,
+                        "price": alert_price,
                         "old_stop": result.old_stop,
                         "new_stop": result.new_stop,
                         "action": result.recommended_action,

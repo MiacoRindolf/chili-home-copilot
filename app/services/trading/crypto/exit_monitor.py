@@ -70,8 +70,64 @@ def _to_usd_product_id(ticker: str | None) -> str:
     return t
 
 
-def _current_crypto_price(ticker: str) -> Optional[float]:
-    """Best-effort price fetch for a crypto ticker. Returns None on failure."""
+def _current_crypto_price(
+    ticker: str,
+    *,
+    broker_source: str | None = None,
+    direction: str | None = None,
+) -> Optional[float]:
+    """Best-effort broker-first price fetch for a crypto ticker."""
+    broker_key = (broker_source or "").strip().lower()
+    if broker_key:
+        try:
+            from ..venue.factory import get_adapter
+
+            adapter = get_adapter(broker_key)
+            if adapter is not None:
+                is_enabled = getattr(adapter, "is_enabled", None)
+                if not callable(is_enabled) or is_enabled():
+                    tick = None
+                    fresh = None
+                    get_ticker = getattr(adapter, "get_ticker", None)
+                    if callable(get_ticker):
+                        raw_tick = get_ticker(ticker)
+                        if isinstance(raw_tick, tuple) and len(raw_tick) == 2:
+                            tick, fresh = raw_tick
+                    if tick is None:
+                        get_bbo = getattr(adapter, "get_best_bid_ask", None)
+                        if callable(get_bbo):
+                            raw_bbo = get_bbo(ticker)
+                            if isinstance(raw_bbo, tuple) and len(raw_bbo) == 2:
+                                tick, fresh = raw_bbo
+                    if tick is not None:
+                        try:
+                            if fresh is not None and float(fresh.age_seconds()) > float(fresh.max_age_seconds):
+                                tick = None
+                        except Exception:
+                            tick = None
+                    if tick is not None:
+                        bid = getattr(tick, "bid", None)
+                        ask = getattr(tick, "ask", None)
+                        mid = getattr(tick, "mid", None)
+                        last = getattr(tick, "last_price", None)
+                        side = (direction or "long").strip().lower()
+                        candidates = (
+                            (bid, mid, last, ask)
+                            if side != "short"
+                            else (ask, mid, last, bid)
+                        )
+                        for px in candidates:
+                            if px is not None and float(px) > 0:
+                                return float(px)
+        except Exception as e:
+            logger.debug(
+                "[crypto_exit] broker quote failed for %s via %s: %s",
+                ticker,
+                broker_key,
+                e,
+            )
+        return None
+
     try:
         from ..market_data import fetch_quote
         q = fetch_quote(ticker)
@@ -81,15 +137,15 @@ def _current_crypto_price(ticker: str) -> Optional[float]:
                 return float(p)
     except Exception as e:
         logger.debug("[crypto_exit] fetch_quote failed for %s: %s", ticker, e)
-    # Fallback: try the broker's own quote endpoint.
-    # Phase 3.2 (2026-05-01): broker SDK encapsulated in broker_service.
-    try:
-        from ... import broker_service
-        q = broker_service.get_crypto_quote(ticker)
-        if q and q.get("mark_price"):
-            return float(q["mark_price"])
-    except Exception as e:
-        logger.debug("[crypto_exit] get_crypto_quote failed for %s: %s", ticker, e)
+    # Legacy fallback for older Robinhood crypto rows missing broker_source.
+    if broker_key in ("", "robinhood"):
+        try:
+            from ... import broker_service
+            q = broker_service.get_crypto_quote(ticker)
+            if q and q.get("mark_price"):
+                return float(q["mark_price"])
+        except Exception as e:
+            logger.debug("[crypto_exit] get_crypto_quote failed for %s: %s", ticker, e)
     return None
 
 
@@ -528,7 +584,11 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
         if (stop is None or stop <= 0) and (target is None or target <= 0):
             out["skipped"] += 1
             continue
-        px = _current_crypto_price(t.ticker)
+        px = _current_crypto_price(
+            t.ticker,
+            broker_source=t.broker_source,
+            direction=t.direction,
+        )
         if px is None:
             out["errors"].append(f"no_quote:{t.ticker}")
             continue

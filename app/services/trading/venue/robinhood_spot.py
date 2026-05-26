@@ -20,6 +20,7 @@ from .protocol import (
     NormalizedTicker,
     VenueAdapter,
     VenueAdapterError,
+    is_fresh_enough,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,11 +84,119 @@ def _is_crypto_product(product_id: str) -> bool:
     return bool(base) and not base.isdigit()
 
 
-def _now_freshness(max_age: float = 15.0) -> FreshnessMeta:
+def _now_freshness(
+    max_age: float = 15.0,
+    *,
+    provider_time_utc: datetime | None = None,
+) -> FreshnessMeta:
     return FreshnessMeta(
         retrieved_at_utc=datetime.now(timezone.utc),
+        provider_time_utc=provider_time_utc,
         max_age_seconds=max_age,
     )
+
+
+def _parse_rh_timestamp(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        raw = raw.replace("Z", "+00:00")
+        if "." in raw:
+            head, tail = raw.split(".", 1)
+            if "+" in tail:
+                frac, tz = tail.split("+", 1)
+                raw = f"{head}.{frac[:6]}+{tz}"
+            elif "-" in tail:
+                frac, tz = tail.split("-", 1)
+                raw = f"{head}.{frac[:6]}-{tz}"
+            else:
+                raw = f"{head}.{tail[:6]}"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _latest_quote_timestamp(raw: dict[str, Any]) -> datetime | None:
+    candidates = [
+        _parse_rh_timestamp(raw.get(key))
+        for key in (
+            "venue_bid_time",
+            "venue_ask_time",
+            "venue_last_trade_time",
+            "venue_last_non_reg_trade_time",
+            "updated_at",
+        )
+    ]
+    candidates = [dt for dt in candidates if dt is not None]
+    return max(candidates) if candidates else None
+
+
+def _legend_boats_ticker(
+    ticker: str,
+    anchor_raw: dict[str, Any] | None = None,
+) -> tuple[Optional[NormalizedTicker], FreshnessMeta]:
+    """Fallback to the Blue Ocean feed that Robinhood Legend uses overnight."""
+    from ....config import settings
+
+    max_age = float(getattr(settings, "chili_robinhood_legend_quote_max_age_seconds", 1200.0))
+    fresh = _now_freshness(max_age=max_age)
+    if not bool(getattr(settings, "chili_robinhood_legend_quote_fallback_enabled", True)):
+        return None, fresh
+    try:
+        from ..tradingview_blue_ocean import fetch_boats_quote
+
+        snap = fetch_boats_quote(ticker)
+    except Exception as exc:
+        logger.debug("[rh_adapter] Legend/BOATS quote failed ticker=%s err=%s", ticker, exc)
+        return None, fresh
+    if not snap:
+        return None, fresh
+    provider_dt = snap.get("provider_time_utc")
+    if not isinstance(provider_dt, datetime):
+        provider_dt = _parse_rh_timestamp(snap.get("quote_ts"))
+    fresh = _now_freshness(max_age=max_age, provider_time_utc=provider_dt)
+    if not is_fresh_enough(fresh):
+        logger.debug(
+            "[rh_adapter] Legend/BOATS quote stale ticker=%s age=%.3fs max=%.3fs",
+            ticker,
+            fresh.age_seconds(),
+            fresh.max_age_seconds,
+        )
+        return None, fresh
+    last = _sf(snap.get("price")) or _sf(snap.get("last_price"))
+    if last is None or last <= 0:
+        return None, fresh
+    raw = dict(snap)
+    if isinstance(anchor_raw, dict):
+        for key in ("previous_close", "adjusted_previous_close", "regular_market_previous_close"):
+            if anchor_raw.get(key) is not None and raw.get(key) is None:
+                raw[key] = anchor_raw.get(key)
+    raw["source"] = "tradingview_boats"
+    return NormalizedTicker(
+        product_id=ticker,
+        bid=None,
+        ask=None,
+        mid=last,
+        spread_abs=None,
+        spread_bps=None,
+        last_price=last,
+        last_size=None,
+        bid_size=None,
+        ask_size=None,
+        base_volume_24h=_sf(snap.get("volume")),
+        quote_volume_24h=None,
+        freshness=fresh,
+        raw=raw,
+    ), fresh
 
 
 def _normalize_rh_order(od: dict[str, Any]) -> NormalizedOrder:
@@ -255,6 +364,7 @@ class RobinhoodSpotAdapter(VenueAdapter):
                     base_volume_24h=_sf(q.get("volume")),
                     quote_volume_24h=None,
                     freshness=fresh,
+                    raw=q,
                 ), fresh
             except Exception as e:
                 logger.warning("[rh_adapter] get_best_bid_ask crypto(%s) failed: %s", ticker, e)
@@ -266,11 +376,19 @@ class RobinhoodSpotAdapter(VenueAdapter):
             quotes = rh.stocks.get_quotes([ticker])
             q = quotes[0] if quotes else None
             if not q or not isinstance(q, dict):
-                return None, fresh
+                boats_ticker, boats_fresh = _legend_boats_ticker(ticker)
+                return boats_ticker, boats_fresh
+            fresh = _now_freshness(provider_time_utc=_latest_quote_timestamp(q))
+            if not is_fresh_enough(fresh):
+                boats_ticker, boats_fresh = _legend_boats_ticker(ticker, q)
+                if boats_ticker is not None:
+                    return boats_ticker, boats_fresh
 
             bid = _sf(q.get("bid_price"))
             ask = _sf(q.get("ask_price"))
-            last = _sf(q.get("last_trade_price"))
+            regular_last = _sf(q.get("last_trade_price"))
+            extended_last = _sf(q.get("last_extended_hours_trade_price"))
+            last = extended_last or regular_last
             bid_size = _sf(q.get("bid_size"))
             ask_size = _sf(q.get("ask_size"))
 
@@ -301,6 +419,7 @@ class RobinhoodSpotAdapter(VenueAdapter):
                 base_volume_24h=None,
                 quote_volume_24h=None,
                 freshness=fresh,
+                raw=q,
             ), fresh
         except Exception as e:
             logger.warning("[rh_adapter] get_best_bid_ask(%s) failed: %s", ticker, e)
@@ -318,6 +437,8 @@ class RobinhoodSpotAdapter(VenueAdapter):
         """
         tkr, _ = self.get_best_bid_ask(product_id)
         if tkr is None:
+            return None
+        if tkr.freshness is not None and not is_fresh_enough(tkr.freshness):
             return None
         if tkr.mid and tkr.mid > 0:
             return float(tkr.mid)
@@ -358,6 +479,12 @@ class RobinhoodSpotAdapter(VenueAdapter):
             quotes = rh.stocks.get_quotes(tickers) or []
             for tkr, q in zip(tickers, quotes):
                 if not q or not isinstance(q, dict):
+                    continue
+                fresh = _now_freshness(provider_time_utc=_latest_quote_timestamp(q))
+                if not is_fresh_enough(fresh):
+                    px = self.get_quote_price(tkr)
+                    if px is not None:
+                        out[tkr] = float(px)
                     continue
                 bid = _sf(q.get("bid_price"))
                 ask = _sf(q.get("ask_price"))

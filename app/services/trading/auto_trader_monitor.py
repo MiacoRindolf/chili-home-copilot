@@ -55,6 +55,334 @@ def _quote_price(ticker: str) -> float | None:
         return None
 
 
+_TARGET_TOUCH_MAX_SLIPPAGE_BPS = 25.0
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _freshness_age_seconds(fresh: Any) -> float | None:
+    age_fn = getattr(fresh, "age_seconds", None)
+    if not callable(age_fn):
+        return None
+    try:
+        age = age_fn()
+    except Exception:
+        return None
+    return _safe_float(age)
+
+
+def _compact_quote_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source": snapshot.get("source"),
+        "feed": snapshot.get("feed"),
+    }
+    for key in (
+        "price",
+        "bid",
+        "ask",
+        "mid",
+        "last_price",
+        "regular_last_price",
+        "extended_last_price",
+        "spread_bps",
+        "age_seconds",
+    ):
+        value = _safe_float(snapshot.get(key))
+        if value is not None:
+            out[key] = round(value, 6)
+    if snapshot.get("error"):
+        out["error"] = str(snapshot.get("error"))
+    return out
+
+
+def _quote_snapshot_from_adapter(
+    ticker: str,
+    adapter: Any,
+    *,
+    broker_source: str | None,
+) -> dict[str, Any]:
+    """Return a broker-aware quote snapshot for live exit decisions.
+
+    The monitor used to collapse the broker feed into one scalar midpoint.
+    That is fine for display, but exits need microstructure: a long can sell
+    at bid, not at ask; extended-hours prints matter, but only when the
+    executable side is still close enough to the target. The source is keyed
+    from the trade's ``broker_source`` so a Coinbase-opened position is not
+    evaluated with a Robinhood quote, or vice versa.
+    """
+    broker_key = (broker_source or "broker").strip().lower() or "broker"
+    bbo_candidates: list[tuple[str, Any]] = []
+    get_ticker = getattr(adapter, "get_ticker", None)
+    if callable(get_ticker):
+        bbo_candidates.append(("ticker", get_ticker))
+    get_bbo = getattr(adapter, "get_best_bid_ask", None)
+    if callable(get_bbo):
+        bbo_candidates.append(("bbo", get_bbo))
+    for feed_kind, quote_fn in bbo_candidates:
+        try:
+            raw_bbo = quote_fn(ticker)
+        except Exception as exc:
+            raw_bbo = None
+            bbo_error = f"{type(exc).__name__}:{exc}"
+        else:
+            bbo_error = None
+        if isinstance(raw_bbo, tuple) and len(raw_bbo) == 2:
+            tick, fresh = raw_bbo
+            if tick is not None:
+                age_seconds = _freshness_age_seconds(fresh)
+                max_age_seconds = _safe_float(getattr(fresh, "max_age_seconds", None))
+                if (
+                    age_seconds is not None
+                    and max_age_seconds is not None
+                    and age_seconds > max_age_seconds
+                ):
+                    logger.debug(
+                        "[autotrader_monitor] stale broker quote skipped "
+                        "broker=%s ticker=%s feed=%s age=%.3fs max=%.3fs",
+                        broker_key,
+                        ticker,
+                        feed_kind,
+                        age_seconds,
+                        max_age_seconds,
+                    )
+                    continue
+                raw = getattr(tick, "raw", None) or {}
+                regular_last = _safe_float(raw.get("last_trade_price"))
+                extended_last = _safe_float(raw.get("last_extended_hours_trade_price"))
+                last_price = (
+                    _safe_float(getattr(tick, "last_price", None))
+                    or extended_last
+                    or regular_last
+                )
+                mid = _safe_float(getattr(tick, "mid", None))
+                bid = _safe_float(getattr(tick, "bid", None))
+                ask = _safe_float(getattr(tick, "ask", None))
+                price = mid or last_price or bid or ask
+                if price is not None:
+                    return {
+                        "source": broker_key,
+                        "feed": f"{broker_key}_{feed_kind}",
+                        "price": price,
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": mid,
+                        "last_price": last_price,
+                        "regular_last_price": regular_last,
+                        "extended_last_price": extended_last,
+                        "spread_bps": _safe_float(getattr(tick, "spread_bps", None)),
+                        "age_seconds": age_seconds,
+                    }
+        elif bbo_error:
+            logger.debug(
+                "[autotrader_monitor] BBO quote failed ticker=%s err=%s",
+                ticker,
+                bbo_error,
+            )
+
+    try:
+        px = adapter.get_quote_price(ticker)
+    except Exception as exc:
+        logger.debug(
+            "[autotrader_monitor] scalar broker quote failed "
+            "broker=%s ticker=%s err=%s",
+            broker_key,
+            ticker,
+            exc,
+        )
+        px = None
+    px = _safe_float(px)
+    if px is not None:
+        return {
+            "source": broker_key,
+            "feed": f"{broker_key}_scalar",
+            "price": px,
+            "bid": None,
+            "ask": None,
+            "mid": px,
+            "last_price": None,
+            "regular_last_price": None,
+            "extended_last_price": None,
+            "spread_bps": None,
+            "age_seconds": None,
+        }
+
+    if broker_key in ("", "broker", "manual", "market_data"):
+        px = _quote_price(ticker)
+        px = _safe_float(px)
+        if px is not None:
+            return {
+                "source": "market_data",
+                "feed": "market_data_scalar",
+                "price": px,
+                "bid": None,
+                "ask": None,
+                "mid": px,
+                "last_price": None,
+                "regular_last_price": None,
+                "extended_last_price": None,
+                "spread_bps": None,
+                "age_seconds": None,
+            }
+
+    return {
+        "source": broker_key,
+        "feed": f"{broker_key}_unavailable",
+        "price": None,
+        "error": "no_fresh_broker_quote",
+    }
+
+
+def _latest_trade_print(snapshot: dict[str, Any]) -> tuple[float | None, str | None]:
+    for key, source in (
+        ("extended_last_price", "extended_last"),
+        ("last_price", "last"),
+        ("regular_last_price", "regular_last"),
+    ):
+        value = _safe_float(snapshot.get(key))
+        if value is not None:
+            return value, source
+    return None, None
+
+
+def _target_touch_is_actionable(
+    *,
+    target: float,
+    executable_price: float | None,
+    is_long: bool,
+) -> bool:
+    if target <= 0 or executable_price is None:
+        return False
+    tol = _TARGET_TOUCH_MAX_SLIPPAGE_BPS / 10_000.0
+    if is_long:
+        return executable_price >= target * (1.0 - tol)
+    return executable_price <= target * (1.0 + tol)
+
+
+def _evaluate_exit_trigger(
+    snapshot: dict[str, Any],
+    *,
+    stop: float,
+    target: float,
+    is_long: bool,
+) -> dict[str, Any]:
+    price = _safe_float(snapshot.get("price"))
+    bid = _safe_float(snapshot.get("bid"))
+    ask = _safe_float(snapshot.get("ask"))
+    trade_print, trade_source = _latest_trade_print(snapshot)
+
+    if is_long:
+        executable, executable_source = (bid, "bid") if bid is not None else (None, None)
+        if executable is None:
+            executable, executable_source = (
+                (trade_print, trade_source) if trade_print is not None else (price, "price")
+            )
+        stop_price, stop_source = executable, executable_source
+        target_price, target_source = executable, executable_source
+        hit_stop = stop > 0 and stop_price is not None and stop_price <= stop
+        hit_target = target > 0 and target_price is not None and target_price >= target
+        if (
+            not hit_target
+            and target > 0
+            and trade_print is not None
+            and trade_print >= target
+            and _target_touch_is_actionable(
+                target=target,
+                executable_price=executable,
+                is_long=True,
+            )
+        ):
+            hit_target = True
+            target_price, target_source = trade_print, trade_source
+    else:
+        executable, executable_source = (ask, "ask") if ask is not None else (None, None)
+        if executable is None:
+            executable, executable_source = (
+                (trade_print, trade_source) if trade_print is not None else (price, "price")
+            )
+        stop_price, stop_source = executable, executable_source
+        target_price, target_source = executable, executable_source
+        hit_stop = stop > 0 and stop_price is not None and stop_price >= stop
+        hit_target = target > 0 and target_price is not None and target_price <= target
+        if (
+            not hit_target
+            and target > 0
+            and trade_print is not None
+            and trade_print <= target
+            and _target_touch_is_actionable(
+                target=target,
+                executable_price=executable,
+                is_long=False,
+            )
+        ):
+            hit_target = True
+            target_price, target_source = trade_print, trade_source
+
+    return {
+        "hit_stop": bool(hit_stop),
+        "hit_target": bool(hit_target),
+        "stop_price": stop_price,
+        "stop_source": stop_source,
+        "target_price": target_price,
+        "target_source": target_source,
+        "executable_price": executable,
+        "executable_source": executable_source,
+        "trade_print": trade_print,
+        "trade_print_source": trade_source,
+    }
+
+
+def _exit_quote_meta(
+    snapshot: dict[str, Any],
+    trigger: dict[str, Any],
+    *,
+    reason: str,
+    side: str,
+    stop: float,
+    target: float,
+) -> dict[str, Any]:
+    if reason == "stop":
+        trigger_price = trigger.get("stop_price")
+        trigger_source = trigger.get("stop_source")
+    elif reason == "target":
+        trigger_price = trigger.get("target_price")
+        trigger_source = trigger.get("target_source")
+    else:
+        trigger_price = trigger.get("executable_price")
+        trigger_source = trigger.get("executable_source")
+    return {
+        "decision_source": "venue_quote",
+        "decision_reason": reason,
+        "decision_price": round(float(trigger_price), 6)
+        if _safe_float(trigger_price) is not None
+        else None,
+        "decision_age_hours": 0,
+        "side": side,
+        "stop_loss": stop,
+        "take_profit": target,
+        "trigger_source": trigger_source,
+        "quote": _compact_quote_snapshot(snapshot),
+    }
+
+
+def _merge_exit_quote_meta(
+    monitor_exit_meta: dict[str, Any] | None,
+    quote_meta: dict[str, Any],
+) -> dict[str, Any]:
+    if monitor_exit_meta is None:
+        return quote_meta
+    merged = dict(monitor_exit_meta)
+    merged["venue_quote"] = quote_meta
+    return merged
+
+
 def _seed_missing_levels(db: Session, rows: list[Trade]) -> None:
     """Populate missing ``stop_loss`` / ``take_profit`` in-place from the most
     authoritative source available for each CHILI-tagged row.
@@ -361,15 +689,21 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         # Fall back to generic market_data only if RH momentarily fails (halt,
         # transient auth blip). Crypto rows shouldn't reach here — RH adapter
         # returns None for non-equity tickers.
-        px = adapter.get_quote_price(t.ticker)
-        quote_src = "robinhood"
-        if px is None:
-            px = _quote_price(t.ticker)
-            quote_src = "market_data" if px is not None else "none"
+        quote_broker_source = broker_source or "robinhood"
+        quote_snapshot = _quote_snapshot_from_adapter(
+            t.ticker,
+            adapter,
+            broker_source=quote_broker_source,
+        )
+        px = _safe_float(quote_snapshot.get("price"))
+        quote_src = str(quote_snapshot.get("source") or "none")
         if px is None:
             summary["errors"].append(f"no_quote:{t.ticker}")
             continue
         summary.setdefault("quote_sources", {})[t.ticker] = quote_src
+        summary.setdefault("quote_snapshots", {})[t.ticker] = _compact_quote_snapshot(
+            quote_snapshot
+        )
 
         # f-exit-monitor-quote-guard-unification (2026-05-06): equity
         # had no implausible-quote guard until now. A bogus $0.50 quote
@@ -424,12 +758,14 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
             db.commit()
             summary.setdefault("stranded_cleared", []).append(int(t.id))
 
-        if is_long:
-            hit_stop = stop > 0 and px <= stop
-            hit_target = tgt > 0 and px >= tgt
-        else:
-            hit_stop = stop > 0 and px >= stop
-            hit_target = tgt > 0 and px <= tgt
+        trigger = _evaluate_exit_trigger(
+            quote_snapshot,
+            stop=stop,
+            target=tgt,
+            is_long=is_long,
+        )
+        hit_stop = bool(trigger.get("hit_stop"))
+        hit_target = bool(trigger.get("hit_target"))
         monitor_exit_meta = _fresh_monitor_exit_meta(
             latest_monitor_decisions.get(int(t.id))
         )
@@ -471,6 +807,18 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
             reason = "target"
         else:
             reason = "pattern_exit_now"
+        quote_meta = _exit_quote_meta(
+            quote_snapshot,
+            trigger,
+            reason=reason,
+            side=side,
+            stop=stop,
+            target=tgt,
+        )
+        submit_monitor_exit_meta = _merge_exit_quote_meta(
+            monitor_exit_meta,
+            quote_meta,
+        )
         if has_active_pending_exit(t) and pending_reason == reason:
             summary["working"] += 1
             continue
@@ -508,7 +856,7 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
             audit_decision_prefix="monitor_exit",
             client_order_id=client_oid,
             adapter=adapter,
-            monitor_exit_meta=monitor_exit_meta,
+            monitor_exit_meta=submit_monitor_exit_meta,
         )
 
         if not res.get("ok"):
