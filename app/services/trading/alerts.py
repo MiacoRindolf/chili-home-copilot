@@ -2329,6 +2329,19 @@ def _expire_proposals(db: Session) -> int:
     return count
 
 
+def _proposal_json_value(value: Any, fallback: Any) -> Any:
+    if value is None:
+        return fallback
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return fallback
+    return fallback
+
+
 def _proposal_to_dict(p) -> dict[str, Any]:
     now = datetime.utcnow()
     proposed_at = p.proposed_at
@@ -2355,8 +2368,8 @@ def _proposal_to_dict(p) -> dict[str, Any]:
     # Derive trade_type and duration from signals + indicators stored on the proposal
     trade_type_info = {"type": "swing", "label": "Swing Trade", "duration": ""}
     try:
-        _sigs = json.loads(p.signals_json) if p.signals_json else []
-        _inds = json.loads(p.indicator_json) if p.indicator_json else {}
+        _sigs = _proposal_json_value(p.signals_json, [])
+        _inds = _proposal_json_value(p.indicator_json, {})
         from .scanner import classify_trade_type, _estimate_hold_duration
         _he = {}
         if _inds.get("atr") and p.entry_price and p.take_profit and p.entry_price > 0:
@@ -2392,8 +2405,8 @@ def _proposal_to_dict(p) -> dict[str, Any]:
         "trade_type_label": trade_type_info["label"],
         "duration_estimate": trade_type_info["duration"],
         "thesis": p.thesis,
-        "signals": json.loads(p.signals_json) if p.signals_json else [],
-        "indicators": json.loads(p.indicator_json) if p.indicator_json else {},
+        "signals": _proposal_json_value(p.signals_json, []),
+        "indicators": _proposal_json_value(p.indicator_json, {}),
         "brain_score": p.brain_score,
         "ml_probability": p.ml_probability,
         "scan_score": p.scan_score,
