@@ -189,6 +189,7 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
 )
 _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_alerts_options_skip.py",
+    "test_alpha_portfolio_gate.py",
     "test_auto_trader_synergy.py",
     "test_auto_trader_monitor.py",
     "test_autotrader_desk_api.py",
@@ -196,6 +197,8 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_autotrader_pdt_soft_warn.py",
     "test_autotrader_position_overrides.py",
     "test_broker_sync.py",
+    "test_canonical_outcome_layer.py",
+    "test_composite_reweight.py",
     "test_crypto_exit_monitor_pattern_exit_now.py",
     "test_emergency_liquidation_no_quote.py",
     "test_market_data_dead_cache_fallback.py",
@@ -204,6 +207,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_portfolio_options_close.py",
     "test_portfolio_risk_options_mtm.py",
     "test_pattern_directional_outcome.py",
+    "test_pattern_cohort_promote.py",
     "test_pattern_imminent_alerts.py",
     "test_stop_engine_options_auto_exec.py",
     "test_stuck_order_watchdog.py",

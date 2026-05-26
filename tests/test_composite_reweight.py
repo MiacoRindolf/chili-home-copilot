@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from app.services.trading.pattern_quality_score import (
     compute_quality_composite_score,
+    _load_realized_pnl_map,
     realized_pnl_score,
     realized_evidence_score,
 )
@@ -402,6 +403,31 @@ def test_cohort_eligibility_floor_allows_positive_avg(db):
     assert any(c.id == 9993 for c in cands), (
         "pattern with 6 winning trades should pass through the floor"
     )
+
+
+def test_quality_realized_map_option_uses_contract_multiplier(db):
+    _test_db_or_skip()
+    _seed_trade_user(db)
+    db.execute(text("""
+        INSERT INTO scan_patterns (id, name, active, lifecycle_stage,
+            promotion_gate_passed, cpcv_n_paths, cpcv_median_sharpe,
+            deflated_sharpe, pbo)
+        VALUES (9998, 'TEST_OPTION_REALIZED_MAP', TRUE, 'candidate',
+            TRUE, 8, 2.0, 1.0, 0.0)
+        ON CONFLICT (id) DO NOTHING
+    """))
+    db.execute(text("""
+        INSERT INTO trading_trades (user_id, scan_pattern_id, ticker,
+            direction, entry_price, exit_price, quantity, pnl, status,
+            entry_date, exit_date, asset_kind)
+        VALUES (1, 9998, 'SPY', 'long', 5.0, 6.0, 1.0, 100.0, 'closed',
+            NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days', 'option')
+    """))
+    db.flush()
+
+    realized = _load_realized_pnl_map(db, 90)
+
+    assert realized[9998]["avg_pnl_pct"] == pytest.approx(0.20)
 
 
 # ---------------------------------------------------------------------------

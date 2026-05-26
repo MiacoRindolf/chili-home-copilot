@@ -28,6 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
+from .realized_pnl_sql import trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
 
@@ -571,12 +572,11 @@ def _load_pattern_rows(
     realized_window_days: int = 90,
 ) -> list[dict[str, Any]]:
     rows = db.execute(
-        text(
-            """
+        text(f"""
             WITH realized AS (
                 SELECT scan_pattern_id,
                        COUNT(*) AS n_trades,
-                       AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct,
+                       AVG({trade_return_fraction_sql()}) AS avg_pnl_pct,
                        SUM(pnl) AS total_pnl
                 FROM trading_trades
                 WHERE scan_pattern_id IS NOT NULL

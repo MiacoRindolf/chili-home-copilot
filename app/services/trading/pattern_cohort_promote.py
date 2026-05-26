@@ -55,6 +55,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
+from .realized_pnl_sql import trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
 
@@ -233,12 +234,11 @@ def select_cohort_candidates(
     # Stored promotion_gate_passed is honored, and a separate pool-relative
     # CPCV bootstrap policy can also admit near-misses for shadow-only
     # observation when the stored gate is stale or path-count constrained.
-    sql = text(
-        """
+    sql = text(f"""
         WITH realized AS (
             SELECT scan_pattern_id,
                    COUNT(*) AS n_realized,
-                   AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct
+                   AVG({trade_return_fraction_sql()}) AS avg_pnl_pct
             FROM trading_trades
             WHERE scan_pattern_id IS NOT NULL
               AND scan_pattern_id != -1

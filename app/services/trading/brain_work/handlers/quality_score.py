@@ -31,6 +31,8 @@ import logging
 from datetime import datetime
 from typing import Any, Optional, TYPE_CHECKING
 
+from app.services.trading.realized_pnl_sql import trade_return_fraction_sql
+
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
@@ -252,8 +254,9 @@ def _load_realized_pnl_for_pattern(
     """Per-pattern realized PnL stats over the trailing window.
 
     Returns ``(n_closed_trades, avg_pnl_pct)``. ``avg_pnl_pct`` is
-    equal-weighted: ``avg(pnl / (entry_price * quantity))`` across all
-    ``status='closed'`` trades with non-NULL pnl in the window. Returns
+    equal-weighted as ``avg(pnl / notional)`` across all
+    ``status='closed'`` trades with non-NULL pnl in the window. Options
+    include the 100x contract multiplier in notional. Returns
     ``(0, None)`` when the pattern has no closed trades or on read
     failure (NULL propagation per advisor brief §2.6 — no magic
     fallback).
@@ -262,10 +265,9 @@ def _load_realized_pnl_for_pattern(
 
     try:
         row = sess.execute(
-            _text(
-                """
+            _text(f"""
                 SELECT COUNT(*) AS n,
-                       AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct
+                       AVG({trade_return_fraction_sql()}) AS avg_pnl_pct
                 FROM trading_trades
                 WHERE scan_pattern_id = :pid
                   AND scan_pattern_id != -1

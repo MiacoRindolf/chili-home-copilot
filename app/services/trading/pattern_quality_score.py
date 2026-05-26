@@ -36,8 +36,9 @@ Realized component
 ------------------
 
 ``realized_pnl_score = (clip(avg_pnl_pct / w_norm, -1, 1) + 1) / 2``
-where ``avg_pnl_pct = avg(pnl / (entry_price * quantity))`` over the
-trailing window of CLOSED trades joined on ``scan_pattern_id``. With
+where ``avg_pnl_pct = avg(pnl / notional)`` over the trailing window of
+CLOSED trades joined on ``scan_pattern_id``. For options, notional includes
+the 100x contract multiplier. With
 ``w_norm = 0.01`` (default), +1%/trade saturates to 1.0 and −1%/trade
 floors to 0.0; zero PnL is 0.5.
 
@@ -96,6 +97,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
+from .realized_pnl_sql import (
+    paper_trade_return_fraction_sql,
+    trade_return_fraction_sql,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -374,18 +379,18 @@ def _load_realized_pnl_map(
     before treating ``avg_pnl_pct`` as a realized-component input.
 
     ``avg_pnl_pct`` is equal-weighted across trades:
-    ``avg(pnl / (entry_price * quantity))``. The schema-level guards
+    ``avg(pnl / notional)``. For options, notional includes the 100x
+    contract multiplier. The schema-level guards
     (mig 214 check constraints) ensure ``entry_price > 0`` and
     ``quantity > 0`` on closed trades; the WHERE clause re-asserts
     them for safety. Sentinel ``scan_pattern_id = -1`` is excluded
     (``_NO_PATTERN_SENTINEL`` — see ``app/models/trading.py``).
     """
     rows = db.execute(
-        text(
-            """
+        text(f"""
             SELECT scan_pattern_id,
                    COUNT(*) AS n,
-                   AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct,
+                   AVG({trade_return_fraction_sql()}) AS avg_pnl_pct,
                    SUM(pnl) AS total_pnl
             FROM trading_trades
             WHERE scan_pattern_id IS NOT NULL
@@ -412,11 +417,10 @@ def _load_realized_pnl_map(
         }
     if include_autotrader_paper_dynamic:
         paper_rows = db.execute(
-            text(
-                """
+            text(f"""
                 SELECT scan_pattern_id,
                        COUNT(*) AS n,
-                       AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct,
+                       AVG({paper_trade_return_fraction_sql()}) AS avg_pnl_pct,
                        SUM(pnl) AS total_pnl
                 FROM trading_paper_trades
                 WHERE scan_pattern_id IS NOT NULL
@@ -428,8 +432,8 @@ def _load_realized_pnl_map(
                   AND exit_date > NOW() - make_interval(days => :window_days)
                   AND (
                     paper_shadow_of_alert_id IS NOT NULL
-                    OR COALESCE(signal_json, '{}'::jsonb) @> '{"auto_trader_v1": true}'::jsonb
-                    OR COALESCE(signal_json, '{}'::jsonb) @> '{"paper_shadow": true}'::jsonb
+                    OR COALESCE(signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
+                    OR COALESCE(signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
                   )
                 GROUP BY scan_pattern_id
                 """

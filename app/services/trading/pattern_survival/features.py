@@ -33,6 +33,8 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.trading.realized_pnl_sql import trade_return_fraction_sql
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,18 +130,18 @@ def _collect_lifecycle(db: Session, pattern_id: int) -> tuple[Optional[str], Opt
 def _collect_realized_30d(db: Session, pattern_id: int) -> dict[str, Optional[float]]:
     """Aggregate realized perf over the last 30 days from closed trades.
 
-    PnL pct is derived from (pnl / (entry_price * quantity)) since the
-    table doesn't store realized_pnl_pct directly.
+    PnL pct is derived from ``pnl / notional`` since the table doesn't
+    store realized_pnl_pct directly. Options include the 100x contract
+    multiplier in notional.
     """
     row = db.execute(
-        text(
-            """
+        text(f"""
             WITH t AS (
                 SELECT pnl,
                        CASE WHEN entry_price IS NOT NULL
                                  AND quantity IS NOT NULL
                                  AND entry_price * quantity > 0
-                            THEN pnl / (entry_price * quantity) * 100.0
+                            THEN {trade_return_fraction_sql()} * 100.0
                        END AS pnl_pct
                 FROM trading_trades
                 WHERE scan_pattern_id = :p

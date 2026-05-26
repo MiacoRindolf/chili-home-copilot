@@ -45,6 +45,8 @@ from typing import Iterator
 
 from sqlalchemy import inspect as sa_inspect, text
 
+from app.services.trading.realized_pnl_sql import trade_return_fraction_sql
+
 logger = logging.getLogger(__name__)
 from sqlalchemy.engine import Engine
 
@@ -16112,7 +16114,7 @@ def _migration_244_composite_reweight_demote_losers(conn) -> None:
     Selection criteria. A pattern is demoted iff:
       - lifecycle_stage IN ('promoted', 'shadow_promoted', 'pilot_promoted')
       - has >= 5 closed trades in the trailing 90 days
-      - equal-weighted avg(pnl / (entry_price * quantity)) <= 0
+      - equal-weighted avg(pnl / notional) <= 0
       - scan_pattern_id is not the no-pattern sentinel (-1)
 
     Thresholds (5, 90, 0.0) match the D2 settings defaults at time of
@@ -16132,12 +16134,11 @@ def _migration_244_composite_reweight_demote_losers(conn) -> None:
     a challenged row when regime / evidence shifts. Retire is operator-only.
     """
     try:
-        rows = conn.execute(text(
-            """
+        rows = conn.execute(text(f"""
             WITH realized AS (
                 SELECT scan_pattern_id,
                        COUNT(*) AS n,
-                       AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct,
+                       AVG({trade_return_fraction_sql()}) AS avg_pnl_pct,
                        SUM(pnl) AS total_pnl
                 FROM trading_trades
                 WHERE scan_pattern_id IS NOT NULL
@@ -16179,8 +16180,7 @@ def _migration_244_composite_reweight_demote_losers(conn) -> None:
         )
 
     try:
-        result = conn.execute(text(
-            """
+        result = conn.execute(text(f"""
             UPDATE scan_patterns
                SET lifecycle_stage = 'challenged',
                    lifecycle_changed_at = NOW()
@@ -16190,7 +16190,7 @@ def _migration_244_composite_reweight_demote_losers(conn) -> None:
                  JOIN (
                      SELECT scan_pattern_id,
                             COUNT(*) AS n,
-                            AVG(pnl / (entry_price * quantity)) AS avg_pnl_pct
+                            AVG({trade_return_fraction_sql()}) AS avg_pnl_pct
                      FROM trading_trades
                      WHERE scan_pattern_id IS NOT NULL
                        AND scan_pattern_id != -1
@@ -16306,7 +16306,8 @@ def _migration_246_scan_pattern_payoff_ratio(conn) -> None:
     Schema (IF NOT EXISTS — idempotent):
 
       - ``avg_winner_pct`` double precision NULL: equal-weighted average
-        of ``pnl / (entry_price * quantity)`` across closed trades with
+        of ``pnl / notional`` across closed trades with the option
+        contract multiplier included when applicable.
         ``pnl > 0`` for the pattern.
       - ``avg_loser_pct`` double precision NULL: same for ``pnl < 0``
         (kept negative; downstream code uses ``ABS()`` when forming
@@ -16357,14 +16358,13 @@ def _migration_246_scan_pattern_payoff_ratio(conn) -> None:
 
     # 2. Backfill (and refresh on re-run).
     try:
-        result = conn.execute(text(
-            """
+        result = conn.execute(text(f"""
             WITH agg AS (
                 SELECT scan_pattern_id,
                        COUNT(*) AS n_total,
-                       AVG(CASE WHEN pnl > 0 THEN pnl / (entry_price * quantity) END)
+                       AVG(CASE WHEN pnl > 0 THEN {trade_return_fraction_sql()} END)
                            AS avg_winner_pct,
-                       AVG(CASE WHEN pnl < 0 THEN pnl / (entry_price * quantity) END)
+                       AVG(CASE WHEN pnl < 0 THEN {trade_return_fraction_sql()} END)
                            AS avg_loser_pct
                 FROM trading_trades
                 WHERE scan_pattern_id IS NOT NULL

@@ -34,6 +34,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .realized_pnl_sql import (
+    paper_trade_contract_multiplier_sql,
+    trade_contract_multiplier_sql,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,14 +113,14 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
     # f-evaluation-function-fix Tier A #2 (2026-05-18): also refresh
     # avg_winner_pct / avg_loser_pct / payoff_ratio so the
     # ``_matches_thin_evidence_criteria`` payoff-ratio protection sees
-    # current values. Uses ``pnl / (entry_price * quantity)`` (notional-
-    # normalized) to match mig 246's backfill convention. Note that
+    # current values. Uses ``pnl / notional`` with the option contract
+    # multiplier included to match mig 246's backfill convention. Note that
     # avg_ret_pct (above) uses entry-to-exit price return scaled to
     # percent (×100); the payoff columns use the notional-fractional form
     # (no ×100, no quantity cancellation). Both are correct measurements
     # of different things — preserve the existing avg_ret_pct shape for
     # backwards compat.
-    rows = sess.execute(text("""
+    rows = sess.execute(text(f"""
         WITH realized_source AS (
             SELECT scan_pattern_id,
                    pnl,
@@ -123,6 +128,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                    exit_price,
                    quantity,
                    exit_date,
+                   {trade_contract_multiplier_sql()} AS contract_multiplier,
                    'live' AS source
             FROM trading_trades
             WHERE status = 'closed'
@@ -135,6 +141,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                    exit_price,
                    quantity,
                    exit_date,
+                   {paper_trade_contract_multiplier_sql()} AS contract_multiplier,
                    'autotrader_paper_dynamic' AS source
             FROM trading_paper_trades
             WHERE :include_paper_dynamic
@@ -147,8 +154,8 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
               AND quantity > 0
               AND (
                 paper_shadow_of_alert_id IS NOT NULL
-                OR COALESCE(signal_json, '{}'::jsonb) @> '{"auto_trader_v1": true}'::jsonb
-                OR COALESCE(signal_json, '{}'::jsonb) @> '{"paper_shadow": true}'::jsonb
+                OR COALESCE(signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
+                OR COALESCE(signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
               )
         )
         SELECT scan_pattern_id,
@@ -165,13 +172,13 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                avg(
                  CASE
                    WHEN pnl > 0 AND entry_price > 0 AND quantity > 0
-                   THEN pnl / (entry_price * quantity)
+                   THEN pnl / (entry_price * quantity * contract_multiplier)
                  END
                ) AS avg_winner_pct,
                avg(
                  CASE
                    WHEN pnl < 0 AND entry_price > 0 AND quantity > 0
-                   THEN pnl / (entry_price * quantity)
+                   THEN pnl / (entry_price * quantity * contract_multiplier)
                  END
                ) AS avg_loser_pct,
                count(*) FILTER (

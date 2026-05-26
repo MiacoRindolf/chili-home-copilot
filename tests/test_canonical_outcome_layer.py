@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.models.trading import PaperTrade, ScanPattern, Trade
 from app.services.trading.learning import update_pattern_stats_from_closed_trades
 from app.services.trading.realized_stats_sync import sync_realized_stats
@@ -54,22 +56,28 @@ def _make_closed_trade(
     exit_price: float,
     entry_offset_days: int,
     exit_offset_days: int,
+    quantity: float = 1.0,
+    pnl: float | None = None,
+    indicator_snapshot: dict | None = None,
+    asset_kind: str | None = None,
     ticker: str = "TEST",
 ) -> Trade:
     entry_dt = datetime.utcnow() - timedelta(days=entry_offset_days)
     exit_dt = datetime.utcnow() - timedelta(days=exit_offset_days)
-    pnl = (exit_price - entry_price)
+    pnl_value = pnl if pnl is not None else (exit_price - entry_price) * quantity
     t = Trade(
         ticker=ticker,
         direction="long",
         entry_price=entry_price,
         exit_price=exit_price,
-        quantity=1.0,
+        quantity=quantity,
         entry_date=entry_dt,
         exit_date=exit_dt,
         status="closed",
-        pnl=pnl,
+        pnl=pnl_value,
         scan_pattern_id=pattern_id,
+        indicator_snapshot=indicator_snapshot,
+        asset_kind=asset_kind,
     )
     db.add(t)
     db.flush()
@@ -85,21 +93,23 @@ def _make_closed_paper_trade(
     entry_offset_days: int,
     exit_offset_days: int,
     signal_json: dict | None = None,
+    quantity: float = 1.0,
+    pnl: float | None = None,
     ticker: str = "TEST",
 ) -> PaperTrade:
     entry_dt = datetime.utcnow() - timedelta(days=entry_offset_days)
     exit_dt = datetime.utcnow() - timedelta(days=exit_offset_days)
-    pnl = exit_price - entry_price
+    pnl_value = pnl if pnl is not None else (exit_price - entry_price) * quantity
     pt = PaperTrade(
         ticker=ticker,
         direction="long",
         entry_price=entry_price,
         exit_price=exit_price,
-        quantity=1.0,
+        quantity=quantity,
         entry_date=entry_dt,
         exit_date=exit_dt,
         status="closed",
-        pnl=pnl,
+        pnl=pnl_value,
         pnl_pct=((exit_price - entry_price) / entry_price) * 100.0,
         scan_pattern_id=pattern_id,
         signal_json=signal_json or {},
@@ -268,6 +278,89 @@ def test_raw_writer_includes_qualified_autotrader_paper_outcomes(db):
     assert pat.raw_realized_trade_count == 2
     assert pat.raw_realized_win_rate == 0.5
     assert abs((pat.raw_realized_avg_return_pct or 0.0) - 0.0) < 1e-6
+
+
+def test_raw_writer_option_payoff_uses_contract_multiplier(db):
+    """Option dollar P&L already includes the 100x contract multiplier.
+    Payoff stats must divide by premium * contracts * 100, not just
+    premium * contracts."""
+    pat = _make_pattern(db, name="raw_writer_option_payoff_multiplier")
+    option_snapshot = {"breakout_alert": {"asset_type": "options"}}
+
+    _make_closed_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=5.0,
+        exit_price=6.0,
+        quantity=1.0,
+        pnl=100.0,
+        entry_offset_days=10,
+        exit_offset_days=9,
+        indicator_snapshot=option_snapshot,
+        asset_kind="option",
+        ticker="SPY",
+    )
+    _make_closed_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=5.0,
+        exit_price=4.0,
+        quantity=1.0,
+        pnl=-100.0,
+        entry_offset_days=8,
+        exit_offset_days=7,
+        indicator_snapshot=option_snapshot,
+        asset_kind="option",
+        ticker="SPY",
+    )
+    db.commit()
+
+    sync_realized_stats(db, dry_run=False)
+    db.refresh(pat)
+
+    assert pat.avg_winner_pct == pytest.approx(0.20)
+    assert pat.avg_loser_pct == pytest.approx(-0.20)
+    assert pat.payoff_ratio == pytest.approx(1.0)
+    assert pat.payoff_ratio_n == 2
+
+
+def test_raw_writer_option_paper_payoff_uses_contract_multiplier(db):
+    pat = _make_pattern(db, name="raw_writer_option_paper_payoff_multiplier")
+    option_signal = {"auto_trader_v1": True, "option_meta": {"strike": 500.0}}
+
+    _make_closed_paper_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=5.0,
+        exit_price=6.0,
+        quantity=1.0,
+        pnl=100.0,
+        entry_offset_days=10,
+        exit_offset_days=9,
+        signal_json=option_signal,
+        ticker="SPY",
+    )
+    _make_closed_paper_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=5.0,
+        exit_price=4.0,
+        quantity=1.0,
+        pnl=-100.0,
+        entry_offset_days=8,
+        exit_offset_days=7,
+        signal_json=option_signal,
+        ticker="SPY",
+    )
+    db.commit()
+
+    sync_realized_stats(db, dry_run=False)
+    db.refresh(pat)
+
+    assert pat.avg_winner_pct == pytest.approx(0.20)
+    assert pat.avg_loser_pct == pytest.approx(-0.20)
+    assert pat.payoff_ratio == pytest.approx(1.0)
+    assert pat.payoff_ratio_n == 2
 
 
 def test_race_corrected_then_raw_leaves_legacy_corrected(db):

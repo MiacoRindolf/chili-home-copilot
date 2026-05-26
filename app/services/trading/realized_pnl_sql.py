@@ -1,0 +1,68 @@
+"""SQL snippets for realized P&L return normalization.
+
+Live option ``Trade.pnl`` is recorded in dollars per contract
+(``premium_delta * quantity * 100``). Any learner that divides by
+``entry_price * quantity`` must therefore include the contract multiplier,
+or option returns are overstated by 100x.
+"""
+from __future__ import annotations
+
+OPTION_CONTRACT_MULTIPLIER_SQL = "100.0"
+
+
+def _col(alias: str | None, name: str) -> str:
+    return f"{alias}.{name}" if alias else name
+
+
+def trade_contract_multiplier_sql(alias: str | None = None) -> str:
+    """Return a PostgreSQL expression for a live trade contract multiplier."""
+    asset_kind = _col(alias, "asset_kind")
+    snap = f"COALESCE({_col(alias, 'indicator_snapshot')}, '{{}}'::jsonb)"
+    return f"""
+        CASE
+          WHEN LOWER(COALESCE({asset_kind}, '')) IN ('option', 'options')
+            OR {snap} ? 'option_meta'
+            OR LOWER(COALESCE({snap} ->> 'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({snap} ->> 'options_path', 'false')) = 'true'
+            OR ({snap} -> 'breakout_alert') ? 'option_meta'
+            OR LOWER(COALESCE({snap} -> 'breakout_alert' ->> 'asset_type', ''))
+               IN ('option', 'options')
+          THEN {OPTION_CONTRACT_MULTIPLIER_SQL}
+          ELSE 1.0
+        END
+    """
+
+
+def paper_trade_contract_multiplier_sql(alias: str | None = None) -> str:
+    """Return a PostgreSQL expression for a paper trade contract multiplier."""
+    signal = f"COALESCE({_col(alias, 'signal_json')}, '{{}}'::jsonb)"
+    return f"""
+        CASE
+          WHEN {signal} ? 'option_meta'
+            OR LOWER(COALESCE({signal} ->> 'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({signal} ->> 'options_path', 'false')) = 'true'
+            OR ({signal} -> 'breakout_alert') ? 'option_meta'
+            OR LOWER(COALESCE({signal} -> 'breakout_alert' ->> 'asset_type', ''))
+               IN ('option', 'options')
+          THEN {OPTION_CONTRACT_MULTIPLIER_SQL}
+          ELSE 1.0
+        END
+    """
+
+
+def trade_return_fraction_sql(alias: str | None = None) -> str:
+    """Return ``pnl / notional`` for live trades, option-contract aware."""
+    return (
+        f"{_col(alias, 'pnl')} / "
+        f"({_col(alias, 'entry_price')} * {_col(alias, 'quantity')} * "
+        f"({trade_contract_multiplier_sql(alias)}))"
+    )
+
+
+def paper_trade_return_fraction_sql(alias: str | None = None) -> str:
+    """Return ``pnl / notional`` for paper trades, option-contract aware."""
+    return (
+        f"{_col(alias, 'pnl')} / "
+        f"({_col(alias, 'entry_price')} * {_col(alias, 'quantity')} * "
+        f"({paper_trade_contract_multiplier_sql(alias)}))"
+    )
