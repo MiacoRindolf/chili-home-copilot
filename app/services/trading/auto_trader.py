@@ -1940,7 +1940,10 @@ def _process_one_alert(
         db, alert, settings=settings, ctx=ctx, for_new_entry=for_new, fallback_user_id=uid,
     )
     if not ok:
-        if bool(getattr(alert, "_chili_shadow_observation_only", False)):
+        if (
+            bool(getattr(alert, "_chili_shadow_observation_only", False))
+            or shadow_signal_lane in SHADOW_OBSERVATION_SIGNAL_LANES
+        ):
             shadow_reason = str(
                 getattr(
                     alert,
