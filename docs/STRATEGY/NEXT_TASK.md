@@ -1,61 +1,55 @@
-# NEXT_TASK: f-position-identity-phase-5d-decision-pattern-attribution-repair
+# NEXT_TASK: f-position-identity-phase-5e-reporting-reader-soak
 
 STATUS: PENDING
 
 ## Goal
 
-Repair the small semantic attribution drift surfaced by Phase 5C before any
-physical rename of `trading_trades`.
+Soak the Phase 5B/5C reporting reader after the Phase 5D attribution repair,
+then decide whether the physical rename is safe to plan.
 
-Phase 5C proved hard linkage is green, but the reporting compare found four
-closed envelopes where `trading_decisions.scan_pattern_id` is NULL while the
-linked management envelope has a populated `scan_pattern_id`.
+Do not rename `trading_trades` yet. This task is observation plus one more
+fresh-data parity gate.
 
 ## Current Gate State
 
 - Phase 5B hard linkage issues: 0
 - Open broker trades missing `position_id`: 0
 - Orphan decisions: 0
-- Phase 5C reporting reader: shipped behind
-  `/api/trading/attribution/live-vs-research?phase5b_compare=true`
-- 30d Phase 5C drift:
+- Phase 5C opt-in reporting reader: live
+- Phase 5D attribution repair: live
+- Current 30d Phase 5C compare:
   - 320 closed envelopes
-  - 4 mismatched closed envelopes
-  - 3 envelope pattern groups
-  - net mismatch PnL: $21.2641
-  - absolute group drift: $42.5282
-  - all mismatches have `decision_scan_pattern_id=NULL`
+  - 25 envelope pattern groups
+  - 25 decision pattern groups
+  - 0 mismatched closed envelopes
+  - $0.0000 attribution drift
 
-## Phase 5D Tasks
+## Tasks
 
-1. Add an idempotent migration that backfills
-   `trading_decisions.scan_pattern_id` from the linked envelope only when:
-   - `trading_decisions.scan_pattern_id IS NULL`
-   - `trading_decisions.source_trade_id = trading_trades.id`
-   - `trading_trades.scan_pattern_id IS NOT NULL`
-2. Preserve provenance. Prefer a small metadata marker if an existing decisions
-   JSON/notes field exists; otherwise document the migration and keep the
-   operation tightly scoped.
-3. Rerun the Phase 5C compare. Acceptance target:
-   - `mismatched_closed_envelopes = 0`, or every residual mismatch has a
-     documented reason.
-4. Do not physically rename `trading_trades`.
+1. Wait for fresh entries and at least a few fresh closes after mig 275.
+2. Rerun:
+   `/api/trading/attribution/live-vs-research?phase5b_compare=true`
+3. Verify:
+   - `mismatched_closed_envelopes = 0`
+   - `absolute_group_pnl_delta = 0`
+   - no new hard linkage issues in `trading_phase5b_decision_envelope_position`
+   - default endpoint output is still legacy-compatible when
+     `phase5b_compare=false`
+4. If clean, write the Phase 5E soak report and prepare a rename-design brief.
 
 ## Acceptance
 
-- The Phase 5C compare has no unexplained decision-vs-envelope pattern drift.
-- The live-vs-research endpoint still defaults to legacy output unless
-  `phase5b_compare=true` is passed.
-- Tests pin the backfill predicate so it cannot overwrite non-null decisions.
+- At least one post-mig-275 entry/close cycle is represented in the read model.
+- Reporting compare remains clean with fresh data.
+- No writer path was changed.
 
 ## Rollback
 
-Revert the migration if needed, or manually set the repaired decisions back to
-NULL using the IDs captured in the migration verification report. This task is
-semantic reporting repair only; it must not affect live trading writers.
+No data rollback is expected. If drift reappears, keep the physical rename
+blocked and write a targeted Phase 5F repair brief.
 
 ## References
 
 - `docs/STRATEGY/CC_REPORTS/2026-05-26_f-position-identity-phase-5c-reporting-reader-adoption.md`
-- `docs/STRATEGY/CC_REPORTS/2026-05-26_f-position-identity-phase-5b-coinbase-linkage-repair.md`
-- Migration: 274
+- `docs/STRATEGY/CC_REPORTS/2026-05-26_f-position-identity-phase-5d-decision-pattern-attribution-repair.md`
+- Migrations: 274, 275

@@ -19220,6 +19220,55 @@ def _migration_274_position_identity_phase5c_attribution_columns(conn) -> None:
     logger.info("[mig274] Phase 5C attribution columns added to Phase 5B views")
 
 
+def _migration_275_position_identity_phase5d_decision_pattern_backfill(conn) -> None:
+    """Backfill missing decision pattern attribution from linked envelopes.
+
+    Phase 5C showed a small semantic reporting drift where bridge-created
+    decisions missed scan_pattern_id even though their linked management
+    envelopes retained it. This repair is intentionally narrow: only NULL
+    decision pattern ids are filled, and existing decision attribution is never
+    overwritten.
+    """
+    tables = _tables(conn)
+    if not {"trading_decisions", "trading_trades"}.issubset(tables):
+        return
+
+    result = conn.execute(text("""
+        WITH candidates AS (
+            SELECT
+                d.id AS decision_id,
+                d.source_trade_id,
+                t.scan_pattern_id AS envelope_scan_pattern_id
+              FROM trading_decisions d
+              JOIN trading_trades t ON t.id = d.source_trade_id
+             WHERE d.scan_pattern_id IS NULL
+               AND t.scan_pattern_id IS NOT NULL
+        )
+        UPDATE trading_decisions d
+           SET scan_pattern_id = c.envelope_scan_pattern_id,
+               notes = CASE
+                   WHEN d.notes IS NULL OR btrim(d.notes) = '' THEN
+                       'phase5d_pattern_backfill_from_envelope'
+                       || ' source_trade_id=' || c.source_trade_id::text
+                       || ' scan_pattern_id=' || c.envelope_scan_pattern_id::text
+                   WHEN d.notes NOT LIKE '%phase5d_pattern_backfill_from_envelope%' THEN
+                       d.notes || E'\n'
+                       || 'phase5d_pattern_backfill_from_envelope'
+                       || ' source_trade_id=' || c.source_trade_id::text
+                       || ' scan_pattern_id=' || c.envelope_scan_pattern_id::text
+                   ELSE d.notes
+               END
+          FROM candidates c
+         WHERE d.id = c.decision_id
+    """))
+
+    conn.commit()
+    logger.info(
+        "[mig275] backfilled %d decision scan_pattern_id values from envelopes",
+        int(result.rowcount or 0),
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19550,6 +19599,8 @@ MIGRATIONS = [
      _migration_273_coinbase_envelope_position_backfill),
     ("274_position_identity_phase5c_attribution_columns",
      _migration_274_position_identity_phase5c_attribution_columns),
+    ("275_position_identity_phase5d_decision_pattern_backfill",
+     _migration_275_position_identity_phase5d_decision_pattern_backfill),
 ]
 
 
