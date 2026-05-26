@@ -107,19 +107,14 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
 
     # Realized stats per pattern from closed live trades plus qualified
     # AutoTrader paper/shadow rows. Mean-of-trade-returns IS the EV. We
-    # compute pct return from entry/exit prices (matches what learning.py
-    # does for the EWMA-replacement path).
+    # compute pct return from realized P&L when present so options normalize
+    # by contract notional and short-side trades keep the correct sign.
     #
     # f-evaluation-function-fix Tier A #2 (2026-05-18): also refresh
     # avg_winner_pct / avg_loser_pct / payoff_ratio so the
     # ``_matches_thin_evidence_criteria`` payoff-ratio protection sees
     # current values. Uses ``pnl / notional`` with the option contract
-    # multiplier included to match mig 246's backfill convention. Note that
-    # avg_ret_pct (above) uses entry-to-exit price return scaled to
-    # percent (×100); the payoff columns use the notional-fractional form
-    # (no ×100, no quantity cancellation). Both are correct measurements
-    # of different things — preserve the existing avg_ret_pct shape for
-    # backwards compat.
+    # multiplier included to match mig 246's backfill convention.
     rows = sess.execute(text(f"""
         WITH realized_source AS (
             SELECT scan_pattern_id,
@@ -127,6 +122,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                    entry_price,
                    exit_price,
                    quantity,
+                   direction,
                    exit_date,
                    {trade_contract_multiplier_sql()} AS contract_multiplier,
                    'live' AS source
@@ -140,6 +136,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                    entry_price,
                    exit_price,
                    quantity,
+                   direction,
                    exit_date,
                    {paper_trade_contract_multiplier_sql()} AS contract_multiplier,
                    'autotrader_paper_dynamic' AS source
@@ -163,6 +160,14 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                sum(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
                avg(
                  CASE
+                   WHEN pnl IS NOT NULL
+                        AND entry_price IS NOT NULL AND entry_price > 0
+                        AND quantity IS NOT NULL AND quantity > 0
+                   THEN (pnl / (entry_price * quantity * contract_multiplier)) * 100.0
+                   WHEN entry_price IS NOT NULL AND entry_price > 0
+                        AND exit_price IS NOT NULL
+                        AND LOWER(COALESCE(direction, 'long')) = 'short'
+                   THEN ((entry_price - exit_price) / entry_price) * 100.0
                    WHEN entry_price IS NOT NULL AND entry_price > 0
                         AND exit_price IS NOT NULL
                    THEN ((exit_price - entry_price) / entry_price) * 100.0

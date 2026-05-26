@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import BacktestResult, PaperTrade, ScanPattern, Trade
+from .return_math import paper_trade_return_pct, trade_return_pct
 
 logger = logging.getLogger(__name__)
 
@@ -135,17 +136,12 @@ def check_alpha_decay(
 
     evidence_by_sp: dict[int, list[dict]] = {}
     for t in recent_trades:
-        # Compute pnl_pct from entry/exit since Trade has no pnl_pct column
-        pnl_pct = 0.0
-        if t.entry_price and t.entry_price > 0 and t.exit_price:
-            pnl_pct = ((t.exit_price - t.entry_price) / t.entry_price) * 100
+        pnl_pct = trade_return_pct(t) or 0.0
         evidence_by_sp.setdefault(t.scan_pattern_id, []).append(
             {"pnl": t.pnl or 0, "pnl_pct": pnl_pct, "source": "live"}
         )
     for pt in recent_paper:
-        pnl_pct = 0.0
-        if pt.entry_price and pt.entry_price > 0 and pt.exit_price:
-            pnl_pct = ((pt.exit_price - pt.entry_price) / pt.entry_price) * 100
+        pnl_pct = paper_trade_return_pct(pt) or 0.0
         evidence_by_sp.setdefault(pt.scan_pattern_id, []).append(
             {"pnl": pt.pnl or 0, "pnl_pct": pnl_pct, "source": "paper"}
         )

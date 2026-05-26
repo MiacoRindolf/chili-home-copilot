@@ -13,6 +13,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from ...models.trading import Trade
+from .return_math import price_return_pct
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +73,9 @@ def attribute_trade(trade: Trade) -> dict[str, Any]:
         result["error"] = "missing_entry_price"
         return result
 
-    gross_return_pct = 0.0
-    if trade.exit_price:
-        gross_return_pct = (
-            (trade.exit_price - trade.entry_price) / trade.entry_price * 100
-        )
+    gross_return_pct = (
+        price_return_pct(trade.entry_price, trade.exit_price, trade.direction) or 0.0
+    )
     result["gross_return_pct"] = round(gross_return_pct, 4)
 
     benchmark_ret = _fetch_benchmark_return(trade.entry_date, trade.exit_date)

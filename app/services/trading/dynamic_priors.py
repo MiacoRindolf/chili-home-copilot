@@ -37,6 +37,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .realized_pnl_sql import trade_return_fraction_sql
+
 logger = logging.getLogger(__name__)
 
 
@@ -116,15 +118,17 @@ def population_avg_return_pct(db: Session, *, lookback_days: int = 90) -> float 
         return c
     try:
         row = db.execute(
-            text("""
+            text(f"""
                 SELECT
                   COUNT(*) AS n,
-                  AVG(((exit_price - entry_price) / NULLIF(entry_price, 0)) * 100.0) AS ar
+                  AVG(({trade_return_fraction_sql()} * 100.0)) AS ar
                 FROM trading_trades
                 WHERE status = 'closed'
+                  AND pnl IS NOT NULL
                   AND entry_price IS NOT NULL
                   AND entry_price > 0
-                  AND exit_price IS NOT NULL
+                  AND quantity IS NOT NULL
+                  AND quantity > 0
                   AND exit_date IS NOT NULL
                   AND exit_date > NOW() - make_interval(days => :ld)
             """),

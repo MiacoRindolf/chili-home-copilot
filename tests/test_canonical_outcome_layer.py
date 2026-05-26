@@ -61,13 +61,19 @@ def _make_closed_trade(
     indicator_snapshot: dict | None = None,
     asset_kind: str | None = None,
     ticker: str = "TEST",
+    direction: str = "long",
 ) -> Trade:
     entry_dt = datetime.utcnow() - timedelta(days=entry_offset_days)
     exit_dt = datetime.utcnow() - timedelta(days=exit_offset_days)
-    pnl_value = pnl if pnl is not None else (exit_price - entry_price) * quantity
+    if pnl is not None:
+        pnl_value = pnl
+    elif direction == "short":
+        pnl_value = (entry_price - exit_price) * quantity
+    else:
+        pnl_value = (exit_price - entry_price) * quantity
     t = Trade(
         ticker=ticker,
-        direction="long",
+        direction=direction,
         entry_price=entry_price,
         exit_price=exit_price,
         quantity=quantity,
@@ -322,6 +328,27 @@ def test_raw_writer_option_payoff_uses_contract_multiplier(db):
     assert pat.avg_loser_pct == pytest.approx(-0.20)
     assert pat.payoff_ratio == pytest.approx(1.0)
     assert pat.payoff_ratio_n == 2
+
+
+def test_raw_writer_short_avg_return_uses_realized_pnl_sign(db):
+    pat = _make_pattern(db, name="raw_writer_short_return_sign")
+
+    _make_closed_trade(
+        db,
+        pattern_id=pat.id,
+        entry_price=100.0,
+        exit_price=80.0,
+        quantity=1.0,
+        direction="short",
+        entry_offset_days=10,
+        exit_offset_days=9,
+    )
+    db.commit()
+
+    sync_realized_stats(db, dry_run=False)
+    db.refresh(pat)
+
+    assert pat.raw_realized_avg_return_pct == pytest.approx(20.0)
 
 
 def test_raw_writer_option_paper_payoff_uses_contract_multiplier(db):
