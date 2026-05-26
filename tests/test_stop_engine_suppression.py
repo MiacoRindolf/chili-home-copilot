@@ -159,6 +159,78 @@ def test_evaluate_trade_catches_recent_broker_bar_target_touch():
     assert "current=$80.0200" in result.reason
 
 
+def test_evaluate_trade_keeps_recent_target_touch_when_current_quote_stale():
+    trade = SimpleNamespace(
+        id=2065,
+        ticker="ACMR",
+        direction="long",
+        entry_price=67.40,
+        entry_date=datetime.now(timezone.utc),
+        stop_loss=68.6349,
+        take_profit=81.52,
+        stop_model="snapshot",
+        trade_type=None,
+        high_watermark=None,
+        trail_stop=None,
+    )
+
+    result = evaluate_trade(
+        trade,
+        MarketContext(
+            price=0,
+            recent_high=84.50,
+            recent_high_ts=datetime(2026, 5, 26, 0, 10),
+            range_source="robinhood_legend_blue_ocean",
+            is_stale=True,
+        ),
+        brain=BrainContext(pattern_name="Falling Wedge Breakout"),
+    )
+
+    assert result.alert_event == "TARGET_HIT"
+    assert result.recommended_action == "reduce"
+    assert result.inputs["trigger_basis"] == "recent_high"
+    assert result.inputs["quote_stale"] is True
+    assert "latest quote stale/unavailable" in result.reason
+
+
+def test_fetch_market_context_backfills_stale_broker_range_when_quote_empty(monkeypatch):
+    from app.services.trading import broker_quotes
+
+    monkeypatch.setattr(
+        "app.services.trading.stop_engine._fetch_broker_market_quote",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        broker_quotes,
+        "broker_recent_extrema_for_source",
+        lambda *_args, **_kwargs: {
+            "source": "robinhood_legend_blue_ocean",
+            "high": 84.50,
+            "low": 75.97,
+            "last": 79.84,
+            "high_ts": "2026-05-26T00:10:00+00:00",
+            "low_ts": "2026-05-26T00:00:00+00:00",
+            "last_ts": "2026-05-26T06:25:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        market_data,
+        "get_indicator_snapshot",
+        lambda _ticker, interval="1d": {"atr": {"value": 4.71}},
+    )
+
+    context = _fetch_market_context(
+        "ACMR",
+        broker_source="robinhood",
+        direction="long",
+    )
+
+    assert context.price == 79.84
+    assert context.is_stale is True
+    assert context.recent_high == 84.50
+    assert context.range_source == "robinhood_legend_blue_ocean"
+
+
 def test_repeated_stop_hit_has_no_trade_state_change():
     trade = SimpleNamespace(
         ticker="ABTC",

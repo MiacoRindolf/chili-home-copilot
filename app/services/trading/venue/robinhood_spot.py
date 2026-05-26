@@ -143,6 +143,8 @@ def _latest_quote_timestamp(raw: dict[str, Any]) -> datetime | None:
 def _legend_boats_ticker(
     ticker: str,
     anchor_raw: dict[str, Any] | None = None,
+    *,
+    allow_stale: bool = True,
 ) -> tuple[Optional[NormalizedTicker], FreshnessMeta]:
     """Fallback to the Blue Ocean feed that Robinhood Legend uses overnight."""
     from ....config import settings
@@ -164,16 +166,18 @@ def _legend_boats_ticker(
     if not isinstance(provider_dt, datetime):
         provider_dt = _parse_rh_timestamp(snap.get("quote_ts"))
     fresh = _now_freshness(max_age=max_age, provider_time_utc=provider_dt)
-    if not is_fresh_enough(fresh):
+    stale = not is_fresh_enough(fresh)
+    if stale:
         logger.debug(
             "[rh_adapter] Legend/BOATS quote stale ticker=%s age=%.3fs max=%.3fs",
             ticker,
             fresh.age_seconds(),
             fresh.max_age_seconds,
         )
-        return None, fresh
     last = _sf(snap.get("price")) or _sf(snap.get("last_price"))
     if last is None or last <= 0:
+        return None, fresh
+    if stale and not allow_stale:
         return None, fresh
     raw = dict(snap)
     if isinstance(anchor_raw, dict):
@@ -376,13 +380,18 @@ class RobinhoodSpotAdapter(VenueAdapter):
             quotes = rh.stocks.get_quotes([ticker])
             q = quotes[0] if quotes else None
             if not q or not isinstance(q, dict):
-                boats_ticker, boats_fresh = _legend_boats_ticker(ticker)
+                boats_ticker, boats_fresh = _legend_boats_ticker(ticker, allow_stale=True)
                 return boats_ticker, boats_fresh
             fresh = _now_freshness(provider_time_utc=_latest_quote_timestamp(q))
             if not is_fresh_enough(fresh):
-                boats_ticker, boats_fresh = _legend_boats_ticker(ticker, q)
+                boats_ticker, boats_fresh = _legend_boats_ticker(
+                    ticker,
+                    q,
+                    allow_stale=True,
+                )
                 if boats_ticker is not None:
                     return boats_ticker, boats_fresh
+                return None, fresh
 
             bid = _sf(q.get("bid_price"))
             ask = _sf(q.get("ask_price"))

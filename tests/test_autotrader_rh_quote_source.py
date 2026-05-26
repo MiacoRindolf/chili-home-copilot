@@ -130,7 +130,87 @@ def test_get_quote_price_uses_blue_ocean_when_robinhood_quote_is_stale() -> None
         assert adapter.get_quote_price("ACMR") == 80.0
 
 
-def test_autotrader_desk_hides_stale_broker_quote() -> None:
+def test_robinhood_adapter_returns_stale_blue_ocean_instead_of_regular_quote() -> None:
+    import robin_stocks.robinhood as _rh
+
+    from app.services.trading.venue.protocol import is_fresh_enough
+    from app.services.trading.venue.robinhood_spot import RobinhoodSpotAdapter
+
+    adapter = RobinhoodSpotAdapter()
+    old_rh = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    old_boats = datetime.now(timezone.utc) - timedelta(minutes=30)
+    fake_stocks = MagicMock()
+    fake_stocks.get_quotes.return_value = [
+        {
+            "bid_price": "73.00",
+            "ask_price": "76.00",
+            "last_trade_price": "73.50",
+            "last_extended_hours_trade_price": "73.98",
+            "venue_bid_time": old_rh,
+            "venue_ask_time": old_rh,
+            "updated_at": old_rh,
+        }
+    ]
+    boats = {
+        "price": 79.84,
+        "last_price": 79.84,
+        "provider_time_utc": old_boats,
+        "quote_ts": old_boats.isoformat(),
+        "volume": 174.0,
+    }
+
+    with patch(
+        "app.services.trading.tradingview_blue_ocean.fetch_boats_quote",
+        return_value=boats,
+    ), patch.object(_rh, "stocks", fake_stocks):
+        ticker, fresh = adapter.get_best_bid_ask("ACMR")
+
+    assert ticker is not None
+    assert ticker.last_price == 79.84
+    assert ticker.raw["source"] == "tradingview_boats"
+    assert is_fresh_enough(fresh) is False
+
+
+def test_broker_quote_surfaces_stale_blue_ocean_price_with_metadata() -> None:
+    from app.services.trading.broker_quotes import broker_quote_for_trade
+    from app.services.trading.venue.protocol import FreshnessMeta, NormalizedTicker
+
+    old_boats = datetime.now(timezone.utc) - timedelta(minutes=30)
+    fresh = FreshnessMeta(
+        retrieved_at_utc=datetime.now(timezone.utc),
+        provider_time_utc=old_boats,
+        max_age_seconds=1200.0,
+    )
+    tick = NormalizedTicker(
+        product_id="ACMR",
+        bid=None,
+        ask=None,
+        mid=79.84,
+        last_price=79.84,
+        freshness=fresh,
+        raw={
+            "source": "tradingview_boats",
+            "quote_ts": old_boats.isoformat(),
+            "day_high": 84.50,
+            "day_low": 75.97,
+            "volume": 174.0,
+        },
+    )
+    adapter = MagicMock()
+    adapter.is_enabled.return_value = True
+    adapter.get_ticker.return_value = (tick, fresh)
+    trade = SimpleNamespace(broker_source="robinhood", ticker="ACMR", direction="long")
+
+    with patch("app.services.trading.venue.factory.get_adapter", return_value=adapter):
+        quote = broker_quote_for_trade(trade, purpose="display")
+
+    assert quote["price"] == 79.84
+    assert quote["source"] == "robinhood_legend_blue_ocean_stale"
+    assert quote["stale"] is True
+    assert quote["day_high"] == 84.50
+
+
+def test_autotrader_desk_surfaces_stale_broker_quote_with_source_label() -> None:
     from app.services.trading.autotrader_desk import _broker_quote_price_for_trade
     from app.services.trading.venue.protocol import FreshnessMeta, NormalizedTicker
 
@@ -154,7 +234,7 @@ def test_autotrader_desk_hides_stale_broker_quote() -> None:
     trade = SimpleNamespace(broker_source="robinhood", ticker="ACMR", direction="long")
 
     with patch("app.services.trading.venue.factory.get_adapter", return_value=adapter):
-        assert _broker_quote_price_for_trade(trade) == (None, "robinhood_stale")
+        assert _broker_quote_price_for_trade(trade) == (91.0, "robinhood_stale")
 
 
 def test_get_quote_price_returns_none_when_feed_empty() -> None:

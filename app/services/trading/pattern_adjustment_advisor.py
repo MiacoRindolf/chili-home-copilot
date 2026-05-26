@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -144,6 +145,46 @@ def reset_input_gate_cache() -> None:
         _input_gate_cache.clear()
         _input_gate_stats["hits"] = 0
         _input_gate_stats["misses"] = 0
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
+
+
+def _parse_recommendation_json(raw: Any) -> dict[str, Any]:
+    """Extract the first JSON object from an LLM reply.
+
+    Providers occasionally wrap otherwise valid JSON in prose or markdown
+    fences even when the prompt says not to. This keeps the advisor useful
+    while still rejecting non-object payloads.
+    """
+    if isinstance(raw, dict):
+        return raw
+    text = (raw or "").strip() if isinstance(raw, str) else str(raw or "").strip()
+    if not text:
+        raise ValueError("empty LLM response")
+
+    decoder = json.JSONDecoder()
+    candidates: list[str] = [text]
+    candidates.extend(match.group(1).strip() for match in _JSON_FENCE_RE.finditer(text))
+    candidates.extend(text[idx:].strip() for idx, ch in enumerate(text) if ch == "{")
+
+    last_error: Exception | None = None
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed, _ = decoder.raw_decode(candidate)
+            if isinstance(parsed, str):
+                parsed, _ = decoder.raw_decode(parsed.strip())
+            if isinstance(parsed, dict):
+                return parsed
+            last_error = ValueError(f"expected JSON object, got {type(parsed).__name__}")
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise ValueError(f"no valid JSON object in LLM response: {last_error}")
 
 _SYSTEM_PROMPT = """\
 You are CHILI's pattern-position management engine.  You monitor open
@@ -346,13 +387,20 @@ def get_adjustment(
             trace_id=f"pattern-adjust-{ticker}",
             cacheable=True,
         )
-        raw = (raw or "").strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        parsed = json.loads(raw)
+        parsed = _parse_recommendation_json(raw)
     except Exception as e:
-        logger.warning("[pattern_adjust] LLM call or parse failed for %s: %s", ticker, e)
-        return AdjustmentRecommendation(action="hold", confidence=0.0, reasoning="LLM unavailable")
+        logger.warning(
+            "[pattern_adjust] LLM call or parse failed for %s: %s; using hold fallback",
+            ticker,
+            e,
+        )
+        fallback = AdjustmentRecommendation(
+            action="hold",
+            confidence=0.0,
+            reasoning="LLM unavailable",
+        )
+        _gate_put(gate_key, fallback)
+        return fallback
 
     rec = AdjustmentRecommendation(
         action=parsed.get("action", "hold"),
