@@ -241,6 +241,7 @@ _cache_lock = threading.Lock()
 
 _TTL_HISTORY = 3600    # 1 hour for OHLCV / indicator data (64 GB RAM)
 _TTL_QUOTE = 30        # 30 seconds for live price
+_TTL_QUOTE_MISS = 120  # 2 minutes for transient fast_info failures
 _TTL_SEARCH = 3600     # 1 hour for search results
 _TTL_FUNDAMENTALS = 86400  # 24 hours for fundamental data
 _TTL_TICKER_INFO = 3600   # 1 hour for ticker info strip
@@ -271,6 +272,7 @@ _YF_FAST_INFO_EMPTY_ERROR_MARKERS = (
     "pricehistory",
     "_dividends",
 )
+_QUOTE_MISS_CACHE_PREFIX = "quote_miss:"
 
 
 def _bump_empty(symbol: str) -> int:
@@ -329,6 +331,10 @@ def _is_crypto(symbol: str) -> bool:
     return symbol.upper().endswith("-USD")
 
 
+def _quote_miss_key(symbol: str) -> str:
+    return f"{_QUOTE_MISS_CACHE_PREFIX}{symbol}"
+
+
 def _cache_get(key: str) -> Any | None:
     with _cache_lock:
         entry = _cache.get(key)
@@ -351,7 +357,14 @@ def _cache_set(key: str, val: Any) -> None:
         _cache[key] = (time.time(), val)
 
 
+def _cache_pop(key: str) -> None:
+    with _cache_lock:
+        _cache.pop(key, None)
+
+
 def _get_ttl(key: str) -> float:
+    if key.startswith(_QUOTE_MISS_CACHE_PREFIX):
+        return _TTL_QUOTE_MISS
     if key.startswith("quote:"):
         return _TTL_QUOTE
     if key.startswith("search:"):
@@ -516,9 +529,12 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
     Falls back to CoinGecko for crypto tickers that yfinance can't resolve.
     """
     cache_key = f"quote:{symbol}"
+    miss_key = _quote_miss_key(symbol)
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
+    if _cache_get(miss_key) is not None:
+        return None
 
     is_crypto = _is_crypto(symbol)
 
@@ -526,6 +542,7 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
         result = _coingecko_quote(symbol)
         if result:
             _cache_set(cache_key, result)
+            _cache_pop(miss_key)
         return result
 
     if _is_dead(symbol):
@@ -549,11 +566,13 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
             "year_low": float(info.year_low) if hasattr(info, "year_low") and info.year_low else None,
             "avg_volume": int(info.three_month_average_volume) if hasattr(info, "three_month_average_volume") and info.three_month_average_volume else None,
         }
+        _cache_pop(miss_key)
         _breaker_on_success()
     except Exception as e:
         logger.warning(f"[yf_session] fast_info({symbol}) failed: {e}")
         result = None
-        if _looks_like_yf_no_data_error(e) or (
+        explicit_no_data = _looks_like_yf_no_data_error(e)
+        if explicit_no_data or (
             is_crypto and _looks_like_yf_fast_info_empty_error(e)
         ):
             _record_empty_yf_result(symbol, allow_crypto=is_crypto)
@@ -561,9 +580,13 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
                 result = _coingecko_quote(symbol)
                 if result:
                     _cache_set(cache_key, result)
+                    _cache_pop(miss_key)
+        if result is None and not is_crypto and not explicit_no_data:
+            _cache_set(miss_key, True)
         _breaker_on_failure()
 
-    _cache_set(cache_key, result)
+    if result is not None:
+        _cache_set(cache_key, result)
     return result
 
 

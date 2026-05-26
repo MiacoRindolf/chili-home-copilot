@@ -10,6 +10,9 @@ MISSING_EQUITY = "BADX"
 MISSING_CRYPTO = "MISSING-USD"
 FAST_INFO_EMPTY_ERROR = "'PriceHistory' object has no attribute '_dividends'"
 EXTRA_PROBE_AFTER_THRESHOLD = 1
+CACHE_EXPIRY_MARGIN_S = 1.0
+FIRST_FAST_INFO_PROBE_COUNT = 1
+SECOND_FAST_INFO_PROBE_COUNT = 2
 
 
 class _RaisingFastInfoTicker:
@@ -19,6 +22,16 @@ class _RaisingFastInfoTicker:
     @property
     def fast_info(self):
         raise self._exc
+
+
+def _expire_quote_miss(symbol: str) -> None:
+    key = yf_session._quote_miss_key(symbol)
+    with yf_session._cache_lock:
+        ts, val = yf_session._cache[key]
+        yf_session._cache[key] = (
+            ts - yf_session._TTL_QUOTE_MISS - CACHE_EXPIRY_MARGIN_S,
+            val,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -125,7 +138,7 @@ def test_fast_info_negative_caches_explicit_missing_equity_after_threshold(
     assert len(calls) == calls_before_dead_skip
 
 
-def test_fast_info_internal_empty_error_does_not_dead_cache_equity(
+def test_fast_info_internal_empty_error_short_caches_without_dead_cache(
     monkeypatch,
 ):
     calls: list[str] = []
@@ -140,9 +153,12 @@ def test_fast_info_internal_empty_error_does_not_dead_cache_equity(
         assert yf_session.get_fast_info(GOOD_EQUITY) is None
 
     assert yf_session._is_dead(GOOD_EQUITY) is False
-    assert len(calls) == (
-        yf_session._EMPTY_THRESHOLD + EXTRA_PROBE_AFTER_THRESHOLD
-    )
+    assert len(calls) == FIRST_FAST_INFO_PROBE_COUNT
+
+    _expire_quote_miss(GOOD_EQUITY)
+    assert yf_session.get_fast_info(GOOD_EQUITY) is None
+    assert yf_session._is_dead(GOOD_EQUITY) is False
+    assert len(calls) == SECOND_FAST_INFO_PROBE_COUNT
 
 
 def test_fast_info_negative_caches_crypto_and_uses_fallback_after_threshold(
