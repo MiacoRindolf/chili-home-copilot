@@ -770,6 +770,7 @@ _score_cache: dict[tuple, tuple[float, dict | None]] = {}
 _score_cache_lock = threading.Lock()
 _SCORE_CACHE_TTL = 300  # 5 min
 _SCORE_CACHE_MAX = 1000
+SWING_RESISTANCE_LOOKBACK_BARS = 20
 
 
 def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
@@ -880,6 +881,13 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
         high = df["High"]
         low = df["Low"]
         volume = df["Volume"]
+        swing_resistance: float | None = None
+        try:
+            swing_resistance = float(high.tail(SWING_RESISTANCE_LOOKBACK_BARS).max())
+            if swing_resistance <= 0:
+                swing_resistance = None
+        except (TypeError, ValueError):
+            swing_resistance = None
 
         rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
         macd_obj = MACD(close=close)
@@ -1067,7 +1075,13 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                 _asset_class = "crypto" if is_crypto_ticker else "stocks"
                 _pe_patterns = get_active_patterns(_pe_db, asset_class=_asset_class)
                 if _pe_patterns:
-                    _sw_resistance = float(high.rolling(20).max().iloc[-1])
+                    _sw_resistance = (
+                        swing_resistance
+                        if swing_resistance is not None
+                        else float(
+                            high.rolling(SWING_RESISTANCE_LOOKBACK_BARS).max().iloc[-1]
+                        )
+                    )
                     _pe_conditions: list[dict[str, Any]] = []
                     for _p in _pe_patterns:
                         try:
@@ -1093,6 +1107,8 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                             _res = _series_last.get("resistance")
                             if _res is not None:
                                 _sw_resistance = float(_res)
+                                if _sw_resistance > 0:
+                                    swing_resistance = _sw_resistance
                         except Exception:
                             logger.debug(
                                 "[scanner] _score_ticker_impl: series parity enrich failed",
@@ -1185,6 +1201,7 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
             "signal": signal,
             "price": entry_price,
             "entry_price": entry_price,
+            "resistance": smart_round(swing_resistance, crypto=_cr),
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "risk_level": risk,
@@ -1201,6 +1218,7 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                 "ema_50": smart_round(float(ema_50), crypto=_cr) if pd.notna(ema_50) else None,
                 "ema_100": smart_round(float(ema_100), crypto=_cr) if ema_100 is not None and pd.notna(ema_100) else None,
                 "ema_200": smart_round(float(ema_200), crypto=_cr) if ema_200 is not None and pd.notna(ema_200) else None,
+                "resistance": smart_round(swing_resistance, crypto=_cr),
                 "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
                 "bb_pct": round((price - float(bb_lower)) / (float(bb_upper) - float(bb_lower)) * 100, 1)
                     if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,

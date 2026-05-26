@@ -27,6 +27,7 @@ from ...config import (
     PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS,
     PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES,
     PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES,
+    PATTERN_IMMINENT_OPEN_POSITION_DEFLECTION_DEFAULT_ENABLED,
     PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES,
     PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES,
     PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS,
@@ -41,6 +42,7 @@ from ...models.trading import (
     BreakoutAlert,
     ScanPattern,
     ScanResult,
+    Trade,
 )
 from .alert_formatter import format_pattern_imminent
 from .alerts import PATTERN_BREAKOUT_IMMINENT, dispatch_alert
@@ -77,6 +79,8 @@ _HOURS_PER_BAR = {
 }
 SHADOW_PROMOTED_STAGE = "shadow_promoted"
 PILOT_PROMOTED_STAGE = "pilot_promoted"
+PROMOTED_STAGE = "promoted"
+LIVE_STAGE = "live"
 POOR_EDGE_REJECT_REASON = "non_positive_expected_edge"
 SECONDS_PER_MINUTE = 60.0
 UNBOUNDED_SCORE_BUDGET = 10**9
@@ -89,6 +93,28 @@ PATTERN_ID_ROTATION_FALLBACK = 0
 MIN_POSITIVE_CONFIG_INT = 1
 FRACTION_UPPER_BOUND = 1.0
 PERCENT_TO_FRACTION_DIVISOR = 100.0
+RECENT_SWING_RESISTANCE_LOOKBACK_BARS = 20
+AUTOTRADER_POSITION_DEFLECTION_VERSION = "v1"
+AUTOTRADER_POSITION_DEFLECTION_OPEN_STATUS = "open"
+AUTOTRADER_POSITION_DEFLECTION_WORKING_STATUS = "working"
+AUTOTRADER_POSITION_DEFLECTION_STATUSES = (
+    AUTOTRADER_POSITION_DEFLECTION_OPEN_STATUS,
+    AUTOTRADER_POSITION_DEFLECTION_WORKING_STATUS,
+)
+PATTERN_IMMINENT_SCAN_ELIGIBLE_PRIORITY = 0
+PATTERN_IMMINENT_SCAN_INELIGIBLE_PRIORITY = 1
+PATTERN_IMMINENT_SCAN_PROMOTED_PRIORITY = 0
+PATTERN_IMMINENT_SCAN_PILOT_PRIORITY = 1
+PATTERN_IMMINENT_SCAN_SHADOW_PRIORITY = 2
+PATTERN_IMMINENT_SCAN_DEFAULT_STAGE_PRIORITY = 9
+PATTERN_IMMINENT_SCAN_RECERT_CLEAR_PRIORITY = 0
+PATTERN_IMMINENT_SCAN_RECERT_DEBT_PRIORITY = 1
+PATTERN_IMMINENT_SCAN_STAGE_PRIORITY_BY_NAME = {
+    LIVE_STAGE: PATTERN_IMMINENT_SCAN_PROMOTED_PRIORITY,
+    PROMOTED_STAGE: PATTERN_IMMINENT_SCAN_PROMOTED_PRIORITY,
+    PILOT_PROMOTED_STAGE: PATTERN_IMMINENT_SCAN_PILOT_PRIORITY,
+    SHADOW_PROMOTED_STAGE: PATTERN_IMMINENT_SCAN_SHADOW_PRIORITY,
+}
 _COINBASE_SPOT_TICKER_CACHE: dict[str, Any] = {
     "expires_at": 0.0,
     "tickers": frozenset(),
@@ -129,6 +155,81 @@ def _csv_stage_setting(name: str, default: str) -> frozenset[str]:
         if str(value).strip()
     }
     return frozenset(stages)
+
+
+def _open_autotrader_position_keys(
+    db: Session,
+    user_id: int | None,
+) -> set[tuple[int, str]]:
+    """Exact pattern/ticker live positions the scanner should deflect."""
+    try:
+        q = db.query(Trade.scan_pattern_id, Trade.ticker).filter(
+            Trade.auto_trader_version == AUTOTRADER_POSITION_DEFLECTION_VERSION,
+            Trade.status.in_(AUTOTRADER_POSITION_DEFLECTION_STATUSES),
+            Trade.scan_pattern_id.isnot(None),
+        )
+        if user_id is not None:
+            q = q.filter(Trade.user_id == user_id)
+        out: set[tuple[int, str]] = set()
+        for pattern_id, ticker in q.all():
+            try:
+                pid = int(pattern_id or 0)
+            except (TypeError, ValueError):
+                pid = 0
+            ticker_key = str(ticker or "").strip().upper()
+            if pid > 0 and ticker_key:
+                out.add((pid, ticker_key))
+        return out
+    except Exception:
+        logger.debug("[pattern_imminent] open-position deflection lookup failed", exc_info=True)
+        return set()
+
+
+def _lifecycle_stage(pat: ScanPattern) -> str:
+    return (getattr(pat, "lifecycle_stage", None) or "").strip().lower()
+
+
+def _pattern_priority_quality(pat: ScanPattern) -> float:
+    try:
+        stored = getattr(pat, "quality_composite_score", None)
+        if stored is not None:
+            return float(stored)
+        return float(pattern_quality_score(pat))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _imminent_scan_priority_key(pat: ScanPattern) -> tuple[int, int, int, float, int, int]:
+    stage = _lifecycle_stage(pat)
+    promotion_status = (getattr(pat, "promotion_status", None) or "").strip().lower()
+    eligible_priority = (
+        PATTERN_IMMINENT_SCAN_ELIGIBLE_PRIORITY
+        if scan_pattern_eligible_main_imminent(pat)
+        else PATTERN_IMMINENT_SCAN_INELIGIBLE_PRIORITY
+    )
+    stage_priority = PATTERN_IMMINENT_SCAN_STAGE_PRIORITY_BY_NAME.get(
+        stage,
+        (
+            PATTERN_IMMINENT_SCAN_PROMOTED_PRIORITY
+            if promotion_status == PROMOTED_STAGE
+            else PATTERN_IMMINENT_SCAN_DEFAULT_STAGE_PRIORITY
+        ),
+    )
+    recert_priority = (
+        PATTERN_IMMINENT_SCAN_RECERT_DEBT_PRIORITY
+        if bool(getattr(pat, "recert_required", False))
+        else PATTERN_IMMINENT_SCAN_RECERT_CLEAR_PRIORITY
+    )
+    evidence_count = int(getattr(pat, "evidence_count", 0) or 0)
+    pattern_id = _pattern_id_for_rotation(pat)
+    return (
+        eligible_priority,
+        stage_priority,
+        recert_priority,
+        -_pattern_priority_quality(pat),
+        -evidence_count,
+        pattern_id,
+    )
 
 
 def _pattern_id_for_rotation(pat: ScanPattern) -> int:
@@ -297,11 +398,26 @@ def recent_swing_resistance(ticker: str) -> float | None:
         df = fetch_ohlcv_df(ticker, period="3mo", interval="1d")
         if df is None or df.empty or "High" not in df.columns:
             return None
-        hi = df["High"].tail(20)
+        hi = df["High"].tail(RECENT_SWING_RESISTANCE_LOOKBACK_BARS)
         v = float(hi.max())
         return v if v > 0 else None
     except Exception:
         return None
+
+
+def resistance_from_score(score: dict[str, Any]) -> float | None:
+    for container in (score, score.get("indicators") or {}):
+        try:
+            value = container.get("resistance")
+        except AttributeError:
+            continue
+        try:
+            resistance = float(value)
+        except (TypeError, ValueError):
+            continue
+        if resistance > 0:
+            return resistance
+    return None
 
 
 def flat_indicators_from_score(
@@ -960,8 +1076,22 @@ def gather_imminent_candidate_rows(
         "pattern_imminent_ticker_rotation_explore_tickers",
         PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS,
     )
+    open_position_deflection_enabled = (
+        bool(
+            getattr(
+                settings,
+                "pattern_imminent_open_position_deflection_enabled",
+                PATTERN_IMMINENT_OPEN_POSITION_DEFLECTION_DEFAULT_ENABLED,
+            )
+        )
+        and bool(apply_main_dispatch_filters)
+        and not bool(for_opportunity_board)
+    )
 
-    patterns = db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all()
+    patterns = sorted(
+        db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all(),
+        key=_imminent_scan_priority_key,
+    )
     poor_shadow_ids, poor_shadow_counts = _shadow_poor_edge_pattern_ids(
         db,
         patterns,
@@ -969,6 +1099,11 @@ def gather_imminent_candidate_rows(
     )
     global_uni, uni_counts = build_imminent_ticker_universe(db, user_id, max_tickers)
     coinbase_spot_tickers = _coinbase_spot_ticker_set()
+    open_position_keys = (
+        _open_autotrader_position_keys(db, user_id)
+        if open_position_deflection_enabled
+        else set()
+    )
 
     candidates: list[dict[str, Any]] = []
     patterns_tried = 0
@@ -993,6 +1128,7 @@ def gather_imminent_candidate_rows(
         "shadow_poor_edge_cooldown": 0,
         "crypto_execution_universe_filtered": 0,
         "score_failure_cooldown": 0,
+        "open_position_deflected": 0,
     }
     excluded_lifecycle_by_stage: Counter[str] = Counter()
     suppressed: list[dict[str, Any]] = []
@@ -1002,6 +1138,10 @@ def gather_imminent_candidate_rows(
     ticker_rotation_applied = 0
     ticker_rotation_total_available = 0
     ticker_rotation_samples: list[dict[str, Any]] = []
+    pattern_priority_top_stage_counts: Counter[str] = Counter(
+        _lifecycle_stage(pat) or UNKNOWN_LIFECYCLE_STAGE
+        for pat in patterns[: max(0, suppressed_limit)]
+    )
 
     def _append_suppressed(row: dict[str, Any]) -> None:
         if suppressed_limit <= 0 or len(suppressed) >= suppressed_limit:
@@ -1121,6 +1261,26 @@ def gather_imminent_candidate_rows(
             coinbase_spot_tickers=coinbase_spot_tickers,
         )
         skip["crypto_execution_universe_filtered"] += dropped_crypto
+        if open_position_keys:
+            pat_id = _pattern_id_for_rotation(pat)
+            deflected: list[str] = []
+            kept_tickers: list[str] = []
+            for ticker in tickers:
+                ticker_key = str(ticker or "").strip().upper()
+                if (pat_id, ticker_key) in open_position_keys:
+                    deflected.append(ticker)
+                    continue
+                kept_tickers.append(ticker)
+            if deflected:
+                skip["open_position_deflected"] += len(deflected)
+                if len(suppressed) < suppressed_limit:
+                    _append_suppressed({
+                        "pattern_id": pat.id,
+                        "reason": "open_position_deflected",
+                        "tickers": deflected[:missing_indicator_limit],
+                        "deflected_count": len(deflected),
+                    })
+                tickers = kept_tickers
         if not tickers:
             skip["pattern_no_tickers"] += 1
             continue
@@ -1168,7 +1328,9 @@ def gather_imminent_candidate_rows(
                 continue
             tickers_scored += 1
 
-            res = recent_swing_resistance(ticker)
+            res = resistance_from_score(score)
+            if res is None:
+                res = recent_swing_resistance(ticker)
             flat = flat_indicators_from_score(score, resistance=res)
 
             readiness, all_pass, ratio, missing = evaluate_readiness_with_gates(
@@ -1366,6 +1528,9 @@ def gather_imminent_candidate_rows(
         "ticker_rotation_applied": ticker_rotation_applied,
         "ticker_rotation_total_available": ticker_rotation_total_available,
         "ticker_rotation_samples": ticker_rotation_samples,
+        "open_position_deflection_enabled": open_position_deflection_enabled,
+        "open_position_deflection_keys": len(open_position_keys),
+        "pattern_priority_top_stage_counts": dict(pattern_priority_top_stage_counts),
         "top_suppressed": suppressed,
         "equity_session_open": eq_open,
     }

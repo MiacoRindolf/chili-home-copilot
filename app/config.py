@@ -55,6 +55,7 @@ PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
 PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES = 5
 PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES = 1
 PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS = 3
+PATTERN_IMMINENT_OPEN_POSITION_DEFLECTION_DEFAULT_ENABLED = True
 
 # ── Config profiles ──────────────────────────────────────────────────────
 CONFIG_PROFILES: dict[str, dict[str, Any]] = {
@@ -4077,6 +4078,9 @@ class Settings(BaseSettings):
     )
     pattern_imminent_ticker_rotation_explore_tickers: int = (
         PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS
+    )
+    pattern_imminent_open_position_deflection_enabled: bool = (
+        PATTERN_IMMINENT_OPEN_POSITION_DEFLECTION_DEFAULT_ENABLED
     )
     pattern_imminent_research_mode: bool = False
     pattern_imminent_research_nearmiss_log: bool = False
