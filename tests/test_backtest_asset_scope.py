@@ -3,9 +3,15 @@ from __future__ import annotations
 
 from app.services.trading.backtest_engine import (
     SECTOR_TICKERS,
+    _extract_context,
     _select_tickers,
     effective_backtest_asset_universe,
 )
+
+_MARKET_STRUCTURE_TOKENS = {"BOS", "FVG", "HTF", "LTF", "MSS"}
+_REAL_STOCK_MENTION = "AAPL"
+_REAL_CRYPTO_MENTION = "BTC-USD"
+_TEST_STOCK_TARGET_COUNT = 30
 
 
 def test_effective_universe_pattern_crypto_wins_over_context():
@@ -84,3 +90,37 @@ def test_select_tickers_universal_includes_both_asset_types():
     has_crypto = any(t.endswith("-USD") for t in pool)
     has_stock = any(not t.endswith("-USD") for t in pool)
     assert has_crypto and has_stock
+
+
+def test_extract_context_ignores_market_structure_tokens_as_tickers():
+    ctx = _extract_context(
+        "Stock pullback uses FVG with BOS confirmation across HTF/LTF plus MSS; "
+        f"validate on {_REAL_STOCK_MENTION} and {_REAL_CRYPTO_MENTION}."
+    )
+
+    assert _MARKET_STRUCTURE_TOKENS.isdisjoint(ctx["mentioned_tickers"])
+    assert _REAL_STOCK_MENTION in ctx["mentioned_tickers"]
+    assert _REAL_CRYPTO_MENTION in ctx["mentioned_tickers"]
+
+
+def test_select_tickers_defensively_ignores_context_structure_tokens():
+    ctx = {
+        "mentioned_tickers": [
+            *_MARKET_STRUCTURE_TOKENS,
+            _REAL_STOCK_MENTION,
+        ],
+        "wants_crypto": False,
+        "crypto_only": False,
+        "stock_only": False,
+    }
+
+    pool = _select_tickers(
+        ctx,
+        db=None,
+        insight_id=None,
+        target_count=_TEST_STOCK_TARGET_COUNT,
+        asset_class="stocks",
+    )
+
+    assert _MARKET_STRUCTURE_TOKENS.isdisjoint(pool)
+    assert _REAL_STOCK_MENTION in pool
