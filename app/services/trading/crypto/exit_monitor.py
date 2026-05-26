@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -624,9 +625,16 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
 
         # Place the sell.
         try:
+            trade_id = int(getattr(t, "id", 0) or 0)
+            trade_ticker = str(getattr(t, "ticker", "") or "")
+            trade_user_id = getattr(t, "user_id", None)
+            trade_scan_pattern_id = getattr(t, "scan_pattern_id", None)
+            trade_broker_order_id = getattr(t, "broker_order_id", None)
+            trade_status = getattr(t, "status", None)
+            trade_broker_status = getattr(t, "broker_status", None)
             qty = float(t.quantity or 0.0)
             if qty <= 0:
-                out["errors"].append(f"bad_qty:{t.ticker}")
+                out["errors"].append(f"bad_qty:{trade_ticker}")
                 continue
 
             # Round-13 FIX (2026-04-30): clamp the sell qty to broker
@@ -742,17 +750,25 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
                 _payload: dict[str, Any] = {
                     "side": "sell",
                     "source": "crypto_exit_monitor",
-                    "trade_id": int(getattr(t, "id", 0) or 0),
+                    "trade_id": trade_id,
                     "reason": reason[:50],
                 }
                 if _raw is not None:
                     _payload["raw"] = _raw
+                audit_trade = SimpleNamespace(
+                    id=trade_id,
+                    broker_source=_broker_source,
+                    scan_pattern_id=trade_scan_pattern_id,
+                    broker_order_id=trade_broker_order_id,
+                    status=trade_status,
+                    broker_status=trade_broker_status,
+                )
                 record_execution_event(
                     db,
-                    user_id=t.user_id,
-                    ticker=t.ticker,
-                    trade=t,
-                    scan_pattern_id=getattr(t, "scan_pattern_id", None),
+                    user_id=trade_user_id,
+                    ticker=trade_ticker,
+                    trade=audit_trade,
+                    scan_pattern_id=trade_scan_pattern_id,
                     broker_source=_broker_source,
                     order_id=str(order_id) if order_id else None,
                     event_type="crypto_exit_submitted",
@@ -764,7 +780,7 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
                 logger.debug(
                     "[crypto_exit] record_execution_event failed for trade#%s "
                     "(non-fatal — exit was already submitted to the venue)",
-                    t.id, exc_info=True,
+                    trade_id, exc_info=True,
                 )
 
             out["closed"] += 1
@@ -773,7 +789,7 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
                     "[crypto_exit] CLOSED trade#%s ticker=%s qty=%s reason=%s "
                     "order_id=%s monitor_decision_id=%s monitor_src=%s "
                     "monitor_age_h=%s monitor_price=%s",
-                    t.id, t.ticker, qty, reason, order_id,
+                    trade_id, trade_ticker, qty, reason, order_id,
                     monitor_exit_meta.get("decision_id"),
                     monitor_exit_meta.get("decision_source"),
                     monitor_exit_meta.get("decision_age_hours"),
@@ -782,9 +798,15 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             else:
                 logger.info(
                     "[crypto_exit] CLOSED trade#%s ticker=%s qty=%s reason=%s order_id=%s",
-                    t.id, t.ticker, qty, reason, order_id,
+                    trade_id, trade_ticker, qty, reason, order_id,
                 )
         except Exception as e:
-            logger.exception("[crypto_exit] unexpected failure for trade#%s: %s", t.id, e)
-            out["errors"].append(f"exception:{t.ticker}:{str(e)[:80]}")
+            fallback_trade_id = locals().get("trade_id", "unknown")
+            fallback_ticker = locals().get("trade_ticker", "unknown")
+            logger.exception(
+                "[crypto_exit] unexpected failure for trade#%s: %s",
+                fallback_trade_id,
+                e,
+            )
+            out["errors"].append(f"exception:{fallback_ticker}:{str(e)[:80]}")
     return out
