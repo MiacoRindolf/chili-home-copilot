@@ -78,6 +78,9 @@ PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT = 40
 PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT = 8
 PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT = 12
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP = 0.15
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_ENABLED = True
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN = 2
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MIN_READINESS_FRACTION = 0.50
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
     "shadow_promoted,pilot_promoted"
 )
@@ -4207,6 +4210,15 @@ class Settings(BaseSettings):
     pattern_imminent_shadow_near_miss_enabled: bool = True
     pattern_imminent_shadow_near_miss_max_gap: float = (
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP
+    )
+    pattern_imminent_shadow_near_miss_adaptive_enabled: bool = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_ENABLED
+    )
+    pattern_imminent_shadow_near_miss_adaptive_max_per_run: int = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN
+    )
+    pattern_imminent_shadow_near_miss_adaptive_min_readiness_fraction: float = (
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MIN_READINESS_FRACTION
     )
     pattern_imminent_shadow_near_miss_lifecycle_stages: str = (
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES

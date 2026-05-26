@@ -21,6 +21,9 @@ from ...config import (
     PATTERN_IMMINENT_DEFAULT_MAX_TICKERS_PER_PATTERN,
     PATTERN_IMMINENT_DEFAULT_MISSING_INDICATOR_SAMPLE_LIMIT,
     PATTERN_IMMINENT_DEFAULT_READINESS_NEAR_MISS_LIMIT,
+    PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_ENABLED,
+    PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN,
+    PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MIN_READINESS_FRACTION,
     PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP,
     PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES,
     PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT,
@@ -89,6 +92,8 @@ READINESS_SKIP_BELOW_MIN = "readiness_below_min"
 READINESS_SKIP_AT_OR_ABOVE_CAP = "readiness_at_or_above_cap"
 STANDARD_SIGNAL_LANE = "standard"
 SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
+SHADOW_NEAR_MISS_SOURCE_FIXED_GAP = "fixed_gap"
+SHADOW_NEAR_MISS_SOURCE_ADAPTIVE_BUFFER = "adaptive_priority_buffer"
 IMMINENT_SCORE_SKIP_PATTERN_ENGINE = True
 PATTERN_ID_ROTATION_FALLBACK = 0
 MIN_POSITIVE_CONFIG_INT = 1
@@ -135,6 +140,10 @@ def _non_negative_float_setting(name: str, default: float) -> float:
         return max(0.0, float(getattr(settings, name, default) or 0.0))
     except (TypeError, ValueError):
         return max(0.0, float(default))
+
+
+def _fraction_float_setting(name: str, default: float) -> float:
+    return min(FRACTION_UPPER_BOUND, _non_negative_float_setting(name, default))
 
 
 def _positive_int_setting(name: str, default: int) -> int:
@@ -956,20 +965,27 @@ def _insert_imminent_breakout_alert(
     eta_lo: float,
     eta_hi: float,
     signal_lane: str | None = None,
+    readiness_gap_to_min: float | None = None,
+    shadow_near_miss_source: str | None = None,
 ) -> None:
     price = float(score.get("price") or 0)
+    scorecard = {
+        "composite": composite,
+        "breakdown": score_breakdown,
+        "readiness": readiness,
+        "feature_coverage": coverage_ratio,
+        "eta_hours": [eta_lo, eta_hi],
+        "lifecycle_stage": getattr(pat, "lifecycle_stage", None),
+        "promotion_status": getattr(pat, "promotion_status", None),
+        "signal_lane": signal_lane or STANDARD_SIGNAL_LANE,
+    }
+    if readiness_gap_to_min is not None:
+        scorecard["readiness_gap_to_min"] = readiness_gap_to_min
+    if shadow_near_miss_source:
+        scorecard["shadow_near_miss_source"] = shadow_near_miss_source
     snap = {
         "flat_indicators": {k: v for k, v in flat.items() if v is not None},
-        "imminent_scorecard": {
-            "composite": composite,
-            "breakdown": score_breakdown,
-            "readiness": readiness,
-            "feature_coverage": coverage_ratio,
-            "eta_hours": [eta_lo, eta_hi],
-            "lifecycle_stage": getattr(pat, "lifecycle_stage", None),
-            "promotion_status": getattr(pat, "promotion_status", None),
-            "signal_lane": signal_lane or STANDARD_SIGNAL_LANE,
-        },
+        "imminent_scorecard": scorecard,
     }
     asset = "crypto" if is_crypto(ticker) else "stock"
     row = BreakoutAlert(
@@ -1060,6 +1076,24 @@ def gather_imminent_candidate_rows(
         "pattern_imminent_shadow_near_miss_max_gap",
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP,
     )
+    shadow_near_miss_adaptive_enabled = bool(
+        getattr(
+            settings,
+            "pattern_imminent_shadow_near_miss_adaptive_enabled",
+            PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_ENABLED,
+        )
+    )
+    shadow_near_miss_adaptive_max_per_run = _non_negative_int_setting(
+        "pattern_imminent_shadow_near_miss_adaptive_max_per_run",
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN,
+    )
+    shadow_near_miss_adaptive_min_readiness_fraction = _fraction_float_setting(
+        "pattern_imminent_shadow_near_miss_adaptive_min_readiness_fraction",
+        PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MIN_READINESS_FRACTION,
+    )
+    shadow_near_miss_adaptive_min_readiness = (
+        min_rd * shadow_near_miss_adaptive_min_readiness_fraction
+    )
     shadow_near_miss_lifecycle_stages = _csv_stage_setting(
         "pattern_imminent_shadow_near_miss_lifecycle_stages",
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES,
@@ -1134,8 +1168,15 @@ def gather_imminent_candidate_rows(
     excluded_lifecycle_by_stage: Counter[str] = Counter()
     suppressed: list[dict[str, Any]] = []
     readiness_band_near_misses: list[dict[str, Any]] = []
+    pending_shadow_near_misses: list[dict[str, Any]] = []
     shadow_near_miss_eligible = 0
     shadow_near_miss_admitted = 0
+    shadow_near_miss_gap_eligible = 0
+    shadow_near_miss_gap_admitted = 0
+    shadow_near_miss_adaptive_eligible = 0
+    shadow_near_miss_adaptive_selected = 0
+    shadow_near_miss_adaptive_admitted = 0
+    shadow_near_miss_adaptive_skipped_not_selected = 0
     ticker_rotation_applied = 0
     ticker_rotation_total_available = 0
     ticker_rotation_samples: list[dict[str, Any]] = []
@@ -1230,6 +1271,125 @@ def gather_imminent_candidate_rows(
         else:
             _record_score_failure(cache_key)
         return score_cache[cache_key]
+
+    def _append_candidate_from_score(
+        *,
+        pat: ScanPattern,
+        ticker: str,
+        score: dict[str, Any],
+        flat: dict[str, Any],
+        readiness: float,
+        ratio: float,
+        missing: list[str],
+        signal_lane: str,
+        readiness_gap_to_min: float | None,
+        shadow_near_miss_source: str | None = None,
+    ) -> bool:
+        nonlocal shadow_near_miss_admitted
+        nonlocal shadow_near_miss_gap_admitted
+        nonlocal shadow_near_miss_adaptive_admitted
+
+        eta_lo, eta_hi = estimate_breakout_eta_hours(
+            readiness, pat.timeframe, k=k_eta, max_eta_hours=max_eta,
+        )
+        if eta_hi > max_eta:
+            skip["eta_too_long"] += 1
+            return False
+
+        pq = pattern_quality_score(pat)
+        entry = score.get("entry_price") or score.get("price")
+        stop = score.get("stop_loss")
+        target = score.get("take_profit")
+        rr = risk_reward_score(
+            float(entry) if entry else None,
+            float(stop) if stop else None,
+            float(target) if target else None,
+        )
+        oxp = overextension_penalty(flat)
+        eta_s = eta_timeliness_score(eta_hi, max_eta)
+        comp, breakdown = compute_composite_score(
+            readiness=readiness,
+            coverage_ratio=ratio,
+            pattern_quality=pq,
+            rr_score=rr,
+            eta_score=eta_s,
+            overext_subtract=oxp,
+        )
+        if apply_main_dispatch_filters and comp < min_comp_main:
+            skip["below_composite_main"] += 1
+            _append_suppressed({
+                "ticker": ticker,
+                "pattern_id": pat.id,
+                "reason": "below_composite_main",
+                "composite": round(comp, 4),
+                "coverage": ratio,
+            })
+            return False
+
+        atr_f = (flat.get("atr") or 0) or 0
+        adx_f = flat.get("adx")
+        try:
+            entry_f = float(entry or 0)
+            tgt_f = float(target or 0)
+            atr_use = float(atr_f) if atr_f else (entry_f * 0.02 if entry_f else 0.01)
+            _rvol_f = flat.get("rvol") or flat.get("volume_ratio")
+            hold_est = _estimate_hold_duration(
+                entry_f, tgt_f, atr_use,
+                (pat.timeframe or "1d"), adx_f,
+                rvol=_rvol_f,
+            )
+        except (TypeError, ValueError):
+            hold_est = {"label": "n/a", "hours_low": 0, "hours_high": 0}
+
+        ind_for_class = {
+            "adx": adx_f,
+            "atr": atr_f,
+            "rsi": flat.get("rsi_14"),
+        }
+        tc = classify_trade_type(
+            score.get("signals") or [],
+            hold_est,
+            ind_for_class,
+            is_crypto=is_crypto(ticker),
+        )
+
+        candidate = {
+            "pattern": pat,
+            "ticker": ticker,
+            "signal_lane": signal_lane,
+            "readiness": readiness,
+            "readiness_gap_to_min": readiness_gap_to_min,
+            "eta_lo": eta_lo,
+            "eta_hi": eta_hi,
+            "score": score,
+            "flat": flat,
+            "hold_label": hold_est.get("label") or "",
+            "trade_type": tc.get("type"),
+            "duration_estimate": tc.get("duration") or hold_est.get("label"),
+            "composite": comp,
+            "score_breakdown": breakdown,
+            "coverage_ratio": ratio,
+            "missing_indicators": missing,
+        }
+        if shadow_near_miss_source:
+            candidate["shadow_near_miss_source"] = shadow_near_miss_source
+        candidates.append(candidate)
+        if signal_lane == SHADOW_NEAR_MISS_SIGNAL_LANE:
+            shadow_near_miss_admitted += 1
+            if shadow_near_miss_source == SHADOW_NEAR_MISS_SOURCE_FIXED_GAP:
+                shadow_near_miss_gap_admitted += 1
+            elif shadow_near_miss_source == SHADOW_NEAR_MISS_SOURCE_ADAPTIVE_BUFFER:
+                shadow_near_miss_adaptive_admitted += 1
+        return True
+
+    def _pending_shadow_near_miss_priority(row: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            float(row.get("readiness_gap_to_min") or 0.0),
+            -float(row.get("readiness") or 0.0),
+            -float(row.get("coverage_ratio") or 0.0),
+            _imminent_scan_priority_key(row["pattern"]),
+            str(row.get("ticker") or ""),
+        )
 
     for pat in patterns:
         if not all_active_patterns and not scan_pattern_eligible_main_imminent(pat):
@@ -1372,6 +1532,7 @@ def gather_imminent_candidate_rows(
                 continue
             signal_lane = STANDARD_SIGNAL_LANE
             readiness_gap_to_min: float | None = None
+            shadow_near_miss_source: str | None = None
             if readiness < min_rd:
                 readiness_gap_to_min = min_rd - readiness
                 _append_readiness_band_miss(
@@ -1384,15 +1545,39 @@ def gather_imminent_candidate_rows(
                     gap=readiness_gap_to_min,
                 )
                 pat_stage = (getattr(pat, "lifecycle_stage", "") or "").strip().lower()
-                shadow_near_miss_ok = (
+                shadow_near_miss_base_ok = (
                     shadow_near_miss_enabled
                     and apply_main_dispatch_filters
                     and pat_stage in shadow_near_miss_lifecycle_stages
+                )
+                shadow_near_miss_ok = (
+                    shadow_near_miss_base_ok
                     and readiness_gap_to_min <= shadow_near_miss_max_gap
                 )
                 if shadow_near_miss_ok:
                     signal_lane = SHADOW_NEAR_MISS_SIGNAL_LANE
+                    shadow_near_miss_source = SHADOW_NEAR_MISS_SOURCE_FIXED_GAP
                     shadow_near_miss_eligible += 1
+                    shadow_near_miss_gap_eligible += 1
+                elif (
+                    shadow_near_miss_adaptive_enabled
+                    and shadow_near_miss_adaptive_max_per_run > 0
+                    and shadow_near_miss_base_ok
+                    and readiness >= shadow_near_miss_adaptive_min_readiness
+                ):
+                    pending_shadow_near_misses.append({
+                        "pattern": pat,
+                        "ticker": ticker,
+                        "score": score,
+                        "flat": flat,
+                        "readiness": readiness,
+                        "readiness_gap_to_min": readiness_gap_to_min,
+                        "coverage_ratio": ratio,
+                        "missing_indicators": missing,
+                    })
+                    shadow_near_miss_eligible += 1
+                    shadow_near_miss_adaptive_eligible += 1
+                    continue
                 else:
                     skip["readiness_outside_band"] += 1
                     skip[READINESS_SKIP_BELOW_MIN] += 1
@@ -1411,93 +1596,47 @@ def gather_imminent_candidate_rows(
                 )
                 continue
 
-            eta_lo, eta_hi = estimate_breakout_eta_hours(
-                readiness, pat.timeframe, k=k_eta, max_eta_hours=max_eta,
-            )
-            if eta_hi > max_eta:
-                skip["eta_too_long"] += 1
-                continue
-
-            pq = pattern_quality_score(pat)
-            entry = score.get("entry_price") or score.get("price")
-            stop = score.get("stop_loss")
-            target = score.get("take_profit")
-            rr = risk_reward_score(
-                float(entry) if entry else None,
-                float(stop) if stop else None,
-                float(target) if target else None,
-            )
-            oxp = overextension_penalty(flat)
-            eta_s = eta_timeliness_score(eta_hi, max_eta)
-            comp, breakdown = compute_composite_score(
+            _append_candidate_from_score(
+                pat=pat,
+                ticker=ticker,
+                score=score,
+                flat=flat,
                 readiness=readiness,
-                coverage_ratio=ratio,
-                pattern_quality=pq,
-                rr_score=rr,
-                eta_score=eta_s,
-                overext_subtract=oxp,
+                ratio=ratio,
+                missing=missing,
+                signal_lane=signal_lane,
+                readiness_gap_to_min=readiness_gap_to_min,
+                shadow_near_miss_source=shadow_near_miss_source,
             )
-            if apply_main_dispatch_filters and comp < min_comp_main:
-                skip["below_composite_main"] += 1
-                _append_suppressed({
-                    "ticker": ticker,
-                    "pattern_id": pat.id,
-                    "reason": "below_composite_main",
-                    "composite": round(comp, 4),
-                    "coverage": ratio,
-                })
-                continue
-
-            atr_f = (flat.get("atr") or 0) or 0
-            adx_f = flat.get("adx")
-            try:
-                entry_f = float(entry or 0)
-                tgt_f = float(target or 0)
-                atr_use = float(atr_f) if atr_f else (entry_f * 0.02 if entry_f else 0.01)
-                _rvol_f = flat.get("rvol") or flat.get("volume_ratio")
-                hold_est = _estimate_hold_duration(
-                    entry_f, tgt_f, atr_use,
-                    (pat.timeframe or "1d"), adx_f,
-                    rvol=_rvol_f,
-                )
-            except (TypeError, ValueError):
-                hold_est = {"label": "n/a", "hours_low": 0, "hours_high": 0}
-
-            ind_for_class = {
-                "adx": adx_f,
-                "atr": atr_f,
-                "rsi": flat.get("rsi_14"),
-            }
-            tc = classify_trade_type(
-                score.get("signals") or [],
-                hold_est,
-                ind_for_class,
-                is_crypto=is_crypto(ticker),
-            )
-
-            candidates.append({
-                "pattern": pat,
-                "ticker": ticker,
-                "signal_lane": signal_lane,
-                "readiness": readiness,
-                "readiness_gap_to_min": readiness_gap_to_min,
-                "eta_lo": eta_lo,
-                "eta_hi": eta_hi,
-                "score": score,
-                "flat": flat,
-                "hold_label": hold_est.get("label") or "",
-                "trade_type": tc.get("type"),
-                "duration_estimate": tc.get("duration") or hold_est.get("label"),
-                "composite": comp,
-                "score_breakdown": breakdown,
-                "coverage_ratio": ratio,
-                "missing_indicators": missing,
-            })
-            if signal_lane == SHADOW_NEAR_MISS_SIGNAL_LANE:
-                shadow_near_miss_admitted += 1
 
         if board_budget_hit or score_time_budget_hit:
             break
+
+    pending_shadow_near_misses.sort(key=_pending_shadow_near_miss_priority)
+    selected_shadow_near_misses = pending_shadow_near_misses[
+        :shadow_near_miss_adaptive_max_per_run
+    ]
+    shadow_near_miss_adaptive_selected = len(selected_shadow_near_misses)
+    shadow_near_miss_adaptive_skipped_not_selected = max(
+        0,
+        len(pending_shadow_near_misses) - shadow_near_miss_adaptive_selected,
+    )
+    if shadow_near_miss_adaptive_skipped_not_selected:
+        skip["readiness_outside_band"] += shadow_near_miss_adaptive_skipped_not_selected
+        skip[READINESS_SKIP_BELOW_MIN] += shadow_near_miss_adaptive_skipped_not_selected
+    for row in selected_shadow_near_misses:
+        _append_candidate_from_score(
+            pat=row["pattern"],
+            ticker=row["ticker"],
+            score=row["score"],
+            flat=row["flat"],
+            readiness=float(row["readiness"]),
+            ratio=float(row["coverage_ratio"]),
+            missing=list(row["missing_indicators"]),
+            signal_lane=SHADOW_NEAR_MISS_SIGNAL_LANE,
+            readiness_gap_to_min=float(row["readiness_gap_to_min"]),
+            shadow_near_miss_source=SHADOW_NEAR_MISS_SOURCE_ADAPTIVE_BUFFER,
+        )
 
     candidates.sort(key=lambda x: (-x["composite"], x["eta_hi"]))
     readiness_band_near_misses.sort(key=lambda row: (row["gap"], -row["readiness"]))
@@ -1525,6 +1664,22 @@ def gather_imminent_candidate_rows(
         "shadow_near_miss_lifecycle_stages": sorted(shadow_near_miss_lifecycle_stages),
         "shadow_near_miss_eligible": shadow_near_miss_eligible,
         "shadow_near_miss_admitted": shadow_near_miss_admitted,
+        "shadow_near_miss_gap_eligible": shadow_near_miss_gap_eligible,
+        "shadow_near_miss_gap_admitted": shadow_near_miss_gap_admitted,
+        "shadow_near_miss_adaptive_enabled": shadow_near_miss_adaptive_enabled,
+        "shadow_near_miss_adaptive_max_per_run": shadow_near_miss_adaptive_max_per_run,
+        "shadow_near_miss_adaptive_min_readiness_fraction": (
+            shadow_near_miss_adaptive_min_readiness_fraction
+        ),
+        "shadow_near_miss_adaptive_min_readiness": (
+            shadow_near_miss_adaptive_min_readiness
+        ),
+        "shadow_near_miss_adaptive_eligible": shadow_near_miss_adaptive_eligible,
+        "shadow_near_miss_adaptive_selected": shadow_near_miss_adaptive_selected,
+        "shadow_near_miss_adaptive_admitted": shadow_near_miss_adaptive_admitted,
+        "shadow_near_miss_adaptive_skipped_not_selected": (
+            shadow_near_miss_adaptive_skipped_not_selected
+        ),
         "ticker_rotation_enabled": ticker_rotation_enabled,
         "ticker_rotation_window_minutes": ticker_rotation_window_minutes,
         "ticker_rotation_explore_tickers": min(
@@ -1776,6 +1931,10 @@ def run_pattern_imminent_scan(
                     eta_lo=float(c["eta_lo"]),
                     eta_hi=float(c["eta_hi"]),
                     signal_lane=str(c.get("signal_lane") or STANDARD_SIGNAL_LANE),
+                    readiness_gap_to_min=_float_or_none(c.get("readiness_gap_to_min")),
+                    shadow_near_miss_source=(
+                        str(c.get("shadow_near_miss_source") or "").strip() or None
+                    ),
                 )
             except Exception as e:
                 logger.warning("[pattern_imminent] BreakoutAlert insert failed: %s", e)
