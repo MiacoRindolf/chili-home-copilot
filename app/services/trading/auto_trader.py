@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, aliased
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
@@ -23,7 +24,7 @@ from ...config import (
     AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
     settings,
 )
-from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
+from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_rules import (
     MANAGED_EDGE_GEOMETRY_SOURCE,
@@ -55,6 +56,9 @@ from .ops_log_prefixes import CHILI_MARKET_DATA
 
 logger = logging.getLogger(__name__)
 
+SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
+SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
+
 QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_coinbase_cap",
     "blocked_llm_not_viable",
@@ -68,13 +72,11 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "skipped_duplicate_pattern_already_open",
     "skipped_non_positive_expected_edge",
     "skipped_synergy_disabled_second_signal",
-    "skipped_synergy_not_applicable",
-    "skipped_synergy_retry_not_applicable",
+    f"skipped_{SYNERGY_RETRY_SOURCE_REASON}",
+    f"skipped_{SYNERGY_RETRY_EXHAUSTED_REASON}",
 })
 
 AUTOTRADER_VERSION = "v1"
-SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
-SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
 PROBATION_RECERT_ALLOWANCE = "probation"
 PILOT_BOOTSTRAP_RECERT_ALLOWANCE = "pilot_bootstrap"
 PROBATION_TIMEZONE = "America/New_York"
@@ -93,6 +95,16 @@ PROBATION_NOTIONAL_UNAVAILABLE_REASON = "probation_notional_unavailable"
 PROBATION_NOTIONAL_BELOW_TRADE_UNIT_REASON = "probation_notional_below_trade_unit"
 PAPER_SHADOW_DUPLICATE_POLICY_STRICT = "strict_open_dedupe"
 PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS = "reject_observation_bypass"
+PAPER_SHADOW_DUPLICATE_SKIP_REASON_SAME_ALERT_FAMILY = (
+    "duplicate_same_alert_reason_family"
+)
+PAPER_SHADOW_REASON_FAMILY_SYNERGY_NOT_APPLICABLE = "synergy_not_applicable"
+PAPER_SHADOW_REASON_FAMILY_PREFIXES = ("skipped_", "blocked_")
+PAPER_SHADOW_REASON_FAMILY_SNAPSHOT_KEYS = (
+    "shadow_decision",
+    "paper_shadow_reject_decision",
+    "paper_shadow_reject_reason",
+)
 PAPER_SHADOW_AUDIT_PREFIX = "paper_shadow_"
 MANAGED_EDGE_PRICE_ROUND_DIGITS = 8
 SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
@@ -664,6 +676,62 @@ def _managed_edge_execution_levels(
     return stop_price, target_price, applied
 
 
+def _paper_shadow_reason_family(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for prefix in PAPER_SHADOW_REASON_FAMILY_PREFIXES:
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    if raw in {SYNERGY_RETRY_SOURCE_REASON, SYNERGY_RETRY_EXHAUSTED_REASON}:
+        return PAPER_SHADOW_REASON_FAMILY_SYNERGY_NOT_APPLICABLE
+    return raw or None
+
+
+def _paper_shadow_reason_families(
+    decision: str | None,
+    snap: dict[str, Any] | None,
+) -> frozenset[str]:
+    values: list[Any] = [decision]
+    if isinstance(snap, dict):
+        values.extend(snap.get(key) for key in PAPER_SHADOW_REASON_FAMILY_SNAPSHOT_KEYS)
+    return frozenset(
+        family for family in (_paper_shadow_reason_family(value) for value in values)
+        if family
+    )
+
+
+def _find_same_alert_reason_family_shadow(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    reason_families: frozenset[str],
+) -> tuple[PaperTrade | None, str | None]:
+    if not reason_families:
+        return None, None
+    rows = (
+        db.query(PaperTrade)
+        .filter(
+            PaperTrade.user_id == uid,
+            PaperTrade.paper_shadow_of_alert_id == int(alert.id),
+        )
+        .order_by(PaperTrade.id.desc())
+        .all()
+    )
+    for row in rows:
+        sig = row.signal_json if isinstance(row.signal_json, dict) else {}
+        existing_families = _paper_shadow_reason_families(
+            str(sig.get("shadow_decision") or ""),
+            sig,
+        )
+        matched = reason_families & existing_families
+        if matched:
+            return row, sorted(matched)[0]
+    return None, None
+
+
 def _maybe_open_paper_shadow(
     db: Session,
     *,
@@ -739,6 +807,33 @@ def _maybe_open_paper_shadow(
             for k, v in (snap or {}).items()
             if isinstance(k, str) and k.startswith(PAPER_SHADOW_AUDIT_PREFIX)
         })
+        if bool(
+            getattr(
+                settings,
+                "chili_autotrader_paper_shadow_dedupe_same_alert_reason_family",
+                AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
+            )
+        ):
+            reason_families = _paper_shadow_reason_families(decision, sig)
+            duplicate, duplicate_family = _find_same_alert_reason_family_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                reason_families=reason_families,
+            )
+            if duplicate is not None:
+                logger.info(
+                    "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
+                    "decision=%s skipped reason=%s family=%s existing_paper_trade_id=%s",
+                    alert.id,
+                    alert.scan_pattern_id,
+                    alert.ticker,
+                    decision,
+                    PAPER_SHADOW_DUPLICATE_SKIP_REASON_SAME_ALERT_FAMILY,
+                    duplicate_family,
+                    getattr(duplicate, "id", None),
+                )
+                return
         shadow_max_open = int(
             getattr(
                 settings,

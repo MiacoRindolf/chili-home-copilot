@@ -33,6 +33,8 @@ from app.services.trading import auto_trader as at_mod
 from app.services.trading.auto_trader import (
     PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS,
     PAPER_SHADOW_DUPLICATE_POLICY_STRICT,
+    SYNERGY_RETRY_EXHAUSTED_REASON,
+    SYNERGY_RETRY_SOURCE_REASON,
     _maybe_open_paper_shadow,
     _maybe_open_reject_paper_shadow,
 )
@@ -307,6 +309,73 @@ def test_reject_shadow_can_bypass_duplicate_dedupe_for_learning(
     )
     assert sibling_rows[0].signal_json.get("paper_shadow_duplicate_policy") == (
         PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
+    )
+
+
+def test_reject_shadow_dedupes_same_alert_synergy_retry_family(db, monkeypatch):
+    _pat, alert = _seed_pattern_and_alert(db)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_dedupe_same_alert_reason_family",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_max_open",
+        AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
+    )
+    from app.services.trading import paper_trading as pt_mod
+    monkeypatch.setattr(
+        pt_mod, "_compute_atr_levels",
+        lambda ticker, entry_price, exit_cfg: (
+            entry_price * 0.97, entry_price * 1.10, 1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        pt_mod, "_apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    _maybe_open_reject_paper_shadow(
+        db,
+        uid=alert.user_id,
+        alert=alert,
+        px=float(alert.entry_price),
+        snap={},
+        reason=SYNERGY_RETRY_SOURCE_REASON,
+        existing_qty=TEST_SHADOW_QUANTITY,
+    )
+    _maybe_open_reject_paper_shadow(
+        db,
+        uid=alert.user_id,
+        alert=alert,
+        px=float(alert.entry_price),
+        snap={"synergy_retry": True},
+        reason=SYNERGY_RETRY_EXHAUSTED_REASON,
+        existing_qty=TEST_SHADOW_QUANTITY,
+    )
+    db.commit()
+
+    rows = db.query(PaperTrade).filter(
+        PaperTrade.paper_shadow_of_alert_id == alert.id
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].signal_json.get("shadow_decision") == (
+        f"skipped_{SYNERGY_RETRY_SOURCE_REASON}"
+    )
+    assert rows[0].signal_json.get("paper_shadow_reject_reason") == (
+        SYNERGY_RETRY_SOURCE_REASON
     )
 
 
