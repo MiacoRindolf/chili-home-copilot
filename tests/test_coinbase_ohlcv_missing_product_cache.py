@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import requests
+
+from app.services.trading import coinbase_ohlcv
+
+
+MISSING_PRODUCT = "NOPE-USD"
+CACHE_EXPIRY_MARGIN_S = 1.0
+
+
+class _Response:
+    status_code = coinbase_ohlcv._COINBASE_PRODUCT_NOT_FOUND_STATUS
+
+    def raise_for_status(self) -> None:
+        exc = requests.HTTPError("404 Client Error: Not Found")
+        exc.response = self
+        raise exc
+
+
+def _raise_not_found(*_args, **_kwargs):
+    return _Response()
+
+
+def _expire_missing_product(product_id: str) -> None:
+    with coinbase_ohlcv._MISSING_PRODUCT_LOCK:
+        coinbase_ohlcv._MISSING_PRODUCTS[product_id] = (
+            coinbase_ohlcv.time.time() - CACHE_EXPIRY_MARGIN_S
+        )
+
+
+def setup_function() -> None:
+    coinbase_ohlcv.reset_missing_product_cache_for_tests()
+
+
+def teardown_function() -> None:
+    coinbase_ohlcv.reset_missing_product_cache_for_tests()
+
+
+def test_get_ohlcv_caches_coinbase_product_404(monkeypatch):
+    calls: list[object] = []
+
+    def _get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _raise_not_found(*args, **kwargs)
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.get_ohlcv(MISSING_PRODUCT, interval="1d", period="1d") == []
+    assert calls
+
+    calls_after_first_404 = len(calls)
+    assert coinbase_ohlcv.get_ohlcv(MISSING_PRODUCT, interval="1d", period="1d") == []
+    assert len(calls) == calls_after_first_404
+
+
+def test_get_quote_reuses_coinbase_product_404_cache(monkeypatch):
+    calls: list[object] = []
+
+    def _get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _raise_not_found(*args, **kwargs)
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.get_quote(MISSING_PRODUCT) is None
+    assert calls
+
+    calls_after_first_404 = len(calls)
+    assert coinbase_ohlcv.get_quote(MISSING_PRODUCT) is None
+    assert len(calls) == calls_after_first_404
+
+
+def test_missing_product_cache_expires(monkeypatch):
+    calls: list[object] = []
+
+    def _get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _raise_not_found(*args, **kwargs)
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.get_quote(MISSING_PRODUCT) is None
+    _expire_missing_product(MISSING_PRODUCT)
+
+    assert coinbase_ohlcv.get_quote(MISSING_PRODUCT) is None
+    assert len(calls) == 2

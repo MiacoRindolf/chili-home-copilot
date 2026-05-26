@@ -51,6 +51,9 @@ _COINBASE_PUBLIC_PROVIDER = "coinbase_public"
 _MIN_VALID_QUOTE_PRICE = 0.0
 _COINBASE_HTTP_POOL_CONNECTIONS = DEFAULT_HTTP_POOL_CONNECTIONS
 _COINBASE_HTTP_POOL_MAXSIZE = DEFAULT_HTTP_POOL_MAXSIZE
+_COINBASE_PRODUCT_NOT_FOUND_STATUS = 404
+_COINBASE_MISSING_PRODUCT_TTL_ENV = "CHILI_COINBASE_OHLCV_MISSING_PRODUCT_TTL_SECONDS"
+_COINBASE_DEFAULT_MISSING_PRODUCT_TTL_S = 21600
 
 
 # Coinbase Exchange API granularities (seconds). Anything else returns 400.
@@ -83,6 +86,8 @@ _CIRCUIT_LOCK = threading.Lock()
 _CIRCUIT_FAILS = 0
 _CIRCUIT_OPEN_UNTIL = 0.0
 _CIRCUIT_LAST_LOG = 0.0
+_MISSING_PRODUCT_LOCK = threading.Lock()
+_MISSING_PRODUCTS: dict[str, float] = {}
 _SESSION = requests.Session()
 _SESSION.headers.update({"Accept": "application/json"})
 mount_bounded_http_adapters(
@@ -119,6 +124,50 @@ def _request_timeout_s() -> float:
     return _env_float(_COINBASE_TIMEOUT_ENV, _COINBASE_DEFAULT_TIMEOUT_S)
 
 
+def _missing_product_ttl_s() -> int:
+    return _env_int(
+        _COINBASE_MISSING_PRODUCT_TTL_ENV,
+        _COINBASE_DEFAULT_MISSING_PRODUCT_TTL_S,
+    )
+
+
+def reset_missing_product_cache_for_tests() -> None:
+    """Clear the Coinbase product-not-found cache for focused tests."""
+    with _MISSING_PRODUCT_LOCK:
+        _MISSING_PRODUCTS.clear()
+
+
+def _product_not_found(exc: requests.RequestException) -> bool:
+    if not isinstance(exc, requests.HTTPError):
+        return False
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == _COINBASE_PRODUCT_NOT_FOUND_STATUS
+
+
+def _product_marked_missing(product_id: str) -> bool:
+    now = time.time()
+    with _MISSING_PRODUCT_LOCK:
+        until = _MISSING_PRODUCTS.get(product_id)
+        if until is None:
+            return False
+        if until <= now:
+            del _MISSING_PRODUCTS[product_id]
+            return False
+        return True
+
+
+def _mark_product_missing(product_id: str) -> None:
+    ttl_s = _missing_product_ttl_s()
+    with _MISSING_PRODUCT_LOCK:
+        _MISSING_PRODUCTS[product_id] = time.time() + ttl_s
+    logger.info(
+        "[coinbase_ohlcv] marked %s as unsupported by Coinbase public API "
+        "(skip for %ss)",
+        product_id,
+        ttl_s,
+    )
+
+
 def _circuit_is_open(product_id: str, interval: str) -> bool:
     """Return True while provider/network failures are in backoff."""
     global _CIRCUIT_LAST_LOG
@@ -139,6 +188,8 @@ def _circuit_is_open(product_id: str, interval: str) -> bool:
 
 
 def _request_failure_counts(exc: requests.RequestException) -> bool:
+    if _product_not_found(exc):
+        return False
     if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
         return True
     if is_socket_exhaustion_error(exc):
@@ -260,6 +311,8 @@ def get_ohlcv(
         return []
 
     product_id = _to_product_id(ticker)
+    if _product_marked_missing(product_id):
+        return []
     if _circuit_is_open(product_id, interval):
         return []
     start_dt, end_dt = _resolve_window(start=start, end=end, period=period)
@@ -280,6 +333,8 @@ def get_ohlcv(
             )
             _record_request_success()
         except requests.RequestException as e:
+            if _product_not_found(e):
+                _mark_product_missing(product_id)
             _record_request_failure(e)
             logger.warning(
                 "[coinbase_ohlcv] %s %s [%s..%s] request failed: %s",
@@ -336,6 +391,8 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
     if not is_crypto_usd(ticker):
         return None
     product_id = _to_product_id(ticker)
+    if _product_marked_missing(product_id):
+        return None
     if _circuit_is_open(product_id, "quote"):
         return None
     path = _COINBASE_TICKER_PATH_TEMPLATE.format(product_id=product_id)
@@ -351,6 +408,8 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
             return None
         _record_request_success()
     except requests.RequestException as e:
+        if _product_not_found(e):
+            _mark_product_missing(product_id)
         _record_request_failure(e)
         logger.warning("[coinbase_ohlcv] %s quote request failed: %s", product_id, e)
         return None
