@@ -47,6 +47,7 @@ def emergency_close_all(
     """Close ALL open positions (paper and live) immediately at market price."""
     from .market_data import fetch_quote
     from .governance import activate_kill_switch
+    from .paper_trading import _paper_contract_multiplier, _paper_current_mark_price
 
     activate_kill_switch(reason=f"emergency_liquidation: {reason}")
 
@@ -67,8 +68,7 @@ def emergency_close_all(
             # back to entry_price (which silently wrote a fake $0 P/L into
             # the DB). NULL is honest: we exited but don't have a clean
             # exit price; leave pnl NULL too.
-            q = fetch_quote(pt.ticker)
-            price = float(q["price"]) if q and q.get("price") else None
+            price = _paper_current_mark_price(pt, purpose="exit")
             pt.status = "closed"
             pt.exit_date = datetime.utcnow()
             pt.exit_price = price
@@ -78,11 +78,12 @@ def emergency_close_all(
                 pt.pnl_pct = None
             else:
                 pt.exit_reason = f"emergency_{reason}"
+                multiplier = _paper_contract_multiplier(pt)
                 if pt.direction == "long":
-                    pt.pnl = round((price - pt.entry_price) * pt.quantity, 2)
+                    pt.pnl = round((price - pt.entry_price) * pt.quantity * multiplier, 2)
                     pt.pnl_pct = round((price - pt.entry_price) / pt.entry_price * 100, 2)
                 else:
-                    pt.pnl = round((pt.entry_price - price) * pt.quantity, 2)
+                    pt.pnl = round((pt.entry_price - price) * pt.quantity * multiplier, 2)
                     pt.pnl_pct = round((pt.entry_price - price) / pt.entry_price * 100, 2)
             closed_paper += 1
         except Exception as e:
@@ -189,7 +190,7 @@ def partial_reduce_exposure(
     reason: str = "drawdown_warning",
 ) -> dict[str, Any]:
     """Close a fraction of open positions (most-losing first) as a softer alternative."""
-    from .market_data import fetch_quote
+    from .paper_trading import _paper_contract_multiplier, _paper_current_mark_price
 
     paper_q = db.query(PaperTrade).filter(PaperTrade.status == "open")
     if user_id is not None:
@@ -202,13 +203,13 @@ def partial_reduce_exposure(
     position_pnl = []
     for pos in open_positions:
         try:
-            q = fetch_quote(pos.ticker)
-            if q and q.get("price"):
-                price = float(q["price"])
+            price = _paper_current_mark_price(pos, purpose="exit")
+            if price is not None:
+                multiplier = _paper_contract_multiplier(pos)
                 unrealized = (
-                    (price - pos.entry_price) * pos.quantity
+                    (price - pos.entry_price) * pos.quantity * multiplier
                     if pos.direction == "long"
-                    else (pos.entry_price - price) * pos.quantity
+                    else (pos.entry_price - price) * pos.quantity * multiplier
                 )
                 position_pnl.append((pos, unrealized, price))
         except Exception:
@@ -224,11 +225,12 @@ def partial_reduce_exposure(
         pos.exit_date = datetime.utcnow()
         pos.exit_price = price
         pos.exit_reason = f"partial_reduce_{reason}"
+        multiplier = _paper_contract_multiplier(pos)
         if pos.direction == "long":
-            pos.pnl = round((price - pos.entry_price) * pos.quantity, 2)
+            pos.pnl = round((price - pos.entry_price) * pos.quantity * multiplier, 2)
             pos.pnl_pct = round((price - pos.entry_price) / pos.entry_price * 100, 2)
         else:
-            pos.pnl = round((pos.entry_price - price) * pos.quantity, 2)
+            pos.pnl = round((pos.entry_price - price) * pos.quantity * multiplier, 2)
             pos.pnl_pct = round((pos.entry_price - price) / pos.entry_price * 100, 2)
         closed += 1
 
