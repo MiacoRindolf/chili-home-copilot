@@ -121,3 +121,59 @@ def test_portfolio_summary_option_uses_premium_mark_and_contract_multiplier() ->
     assert summary["total_invested"] == 250.0
     assert summary["total_current"] == 290.0
     assert summary["unrealized_pnl"] == 40.0
+
+
+def test_portfolio_summary_short_option_rollup_uses_signed_pnl() -> None:
+    from app.services.trading.portfolio import get_portfolio_summary
+
+    trade = SimpleNamespace(
+        id=6603,
+        user_id=1,
+        ticker="SPY",
+        direction="short",
+        entry_price=1.45,
+        quantity=2,
+        status="open",
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+        broker_source="robinhood",
+        exit_date=None,
+        pnl=None,
+    )
+
+    open_q = MagicMock()
+    open_q.filter.return_value.all.return_value = [trade]
+    closed_q = MagicMock()
+    closed_q.filter.return_value.order_by.return_value.all.return_value = []
+    db = MagicMock()
+    db.query.side_effect = [open_q, closed_q]
+
+    with patch(
+        "app.services.trading.portfolio.fetch_quote",
+        side_effect=AssertionError("option summary must not use underlying quote"),
+    ), patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 1.25, "source": "robinhood_options"},
+    ), patch(
+        "app.services.trading.portfolio.get_trade_stats",
+        return_value={},
+    ):
+        summary = get_portfolio_summary(db, user_id=1)
+
+    row = summary["positions"][0]
+    assert row["asset_type"] == "options"
+    assert row["unrealized_pnl"] == 40.0
+    assert row["unrealized_pct"] == 13.79
+    assert summary["total_invested"] == 290.0
+    assert summary["total_current"] == 250.0
+    assert summary["unrealized_pnl"] == 40.0
+    assert summary["total_pnl"] == 40.0

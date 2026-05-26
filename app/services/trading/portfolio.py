@@ -1081,6 +1081,7 @@ def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
     positions = []
     total_invested = 0.0
     total_current = 0.0
+    total_unrealized = 0.0
     allocation: dict[str, float] = {}
 
     for t in open_trades:
@@ -1131,6 +1132,7 @@ def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
         })
         total_invested += invested
         total_current += position_value
+        total_unrealized += unrealized
         allocation[t.ticker] = allocation.get(t.ticker, 0) + position_value
 
     realized_pnl = 0.0
@@ -1143,7 +1145,7 @@ def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
                 "value": round(realized_pnl, 2),
             })
 
-    total_unrealized = round(total_current - total_invested, 2) if total_invested > 0 else 0
+    total_unrealized = round(total_unrealized, 2) if total_invested > 0 else 0
 
     alloc_pct = {}
     if total_current > 0:
