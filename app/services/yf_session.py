@@ -275,6 +275,21 @@ def _reset_empty(symbol: str) -> None:
         _empty_counts.pop(symbol, None)
 
 
+def _record_empty_yf_result(symbol: str, *, allow_crypto: bool = False) -> None:
+    """Negative-cache confirmed Yahoo misses after the empty threshold.
+
+    Crypto is opt-in because single-symbol history can be backed by other
+    crypto-specific providers, while batch prewarm is Yahoo-only and should
+    not keep retrying symbols Yahoo cannot resolve.
+    """
+    if _is_crypto(symbol) and not allow_crypto:
+        return
+    streak = _bump_empty(symbol)
+    if streak >= _EMPTY_THRESHOLD:
+        _mark_dead(symbol)
+        _reset_empty(symbol)
+
+
 def _is_crypto(symbol: str) -> bool:
     """Check if a symbol is a crypto ticker."""
     return symbol.upper().endswith("-USD")
@@ -423,10 +438,7 @@ def get_history(symbol: str, **kwargs) -> Any:
         # against. ^VIX was the canonical victim: a transient yfinance empty
         # would land it in the dead cache and short-circuit every subsequent
         # call until TTL expired.
-        _streak = _bump_empty(symbol)
-        if _streak >= _EMPTY_THRESHOLD:
-            _mark_dead(symbol)
-            _reset_empty(symbol)
+        _record_empty_yf_result(symbol)
         # Empty stock response counts as a breaker failure (upstream
         # responded but with no data). Crypto-empty is non-signal and
         # is handled outside this branch, so no breaker tick.
@@ -653,15 +665,20 @@ def batch_download(
     if df.empty:
         # Empty batch on a non-empty input list signals an upstream
         # problem -- count as breaker failure.
+        for sym in uncached:
+            _record_empty_yf_result(sym, allow_crypto=True)
         _breaker_on_failure()
         return result
     _breaker_on_success()
 
+    found_symbols: set[str] = set()
     if len(uncached) == 1:
         sym = uncached[0]
         key = f"hist:{sym}:{period}:{interval}:None"
         _cache_set(key, df)
         result[sym] = df
+        found_symbols.add(sym)
+        _reset_empty(sym)
         # seed quote cache
         if not df.empty:
             try:
@@ -687,6 +704,8 @@ def batch_download(
                         key = f"hist:{sym}:{period}:{interval}:None"
                         _cache_set(key, ticker_df)
                         result[sym] = ticker_df
+                        found_symbols.add(sym)
+                        _reset_empty(sym)
                         try:
                             last = ticker_df.iloc[-1]
                             qk = f"quote:{sym}"
@@ -703,6 +722,10 @@ def batch_download(
                             pass
             except Exception:
                 continue
+
+    for sym in uncached:
+        if sym not in found_symbols:
+            _record_empty_yf_result(sym, allow_crypto=True)
 
     logger.info(f"[yf_session] batch_download: {len(uncached)} requested, {len(result)} returned")
     return result
