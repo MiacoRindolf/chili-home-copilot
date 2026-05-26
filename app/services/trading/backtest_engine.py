@@ -263,7 +263,7 @@ _MAX_CONTEXT_LEARNING_EVENTS = 20
 _INDICATOR_TICKER_STOPWORDS = frozenset(
     {
         "RSI", "MACD", "EMA", "SMA", "ADX", "ATR", "OBV", "MFI", "CCI", "SAR",
-        "VWAP",
+        "VWAP", "IBS",
     }
 )
 _MARKET_STRUCTURE_TICKER_STOPWORDS = frozenset(
