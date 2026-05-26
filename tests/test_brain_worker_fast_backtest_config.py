@@ -69,6 +69,54 @@ def test_worker_locks_are_mode_specific():
     assert backtest_lock != lean_lock
 
 
+def test_lean_cycle_fast_backtest_timer_stays_off_when_batch_is_zero(monkeypatch):
+    monkeypatch.setattr(
+        brain_worker,
+        "_fast_backtest_batch_size",
+        lambda: LEAN_CYCLE_BATCH,
+    )
+
+    assert (
+        brain_worker._should_start_independent_fast_backtest_loop(
+            LEAN_CYCLE_MODE,
+            independent_loop=True,
+        )
+        is False
+    )
+
+
+def test_lean_cycle_fast_backtest_timer_can_run_when_explicitly_enabled(monkeypatch):
+    monkeypatch.setattr(
+        brain_worker,
+        "_fast_backtest_batch_size",
+        lambda: CUSTOM_BACKTEST_BATCH,
+    )
+
+    assert (
+        brain_worker._should_start_independent_fast_backtest_loop(
+            LEAN_CYCLE_MODE,
+            independent_loop=True,
+        )
+        is True
+    )
+
+
+def test_backtest_mode_never_starts_lean_cycle_timer(monkeypatch):
+    monkeypatch.setattr(
+        brain_worker,
+        "_fast_backtest_batch_size",
+        lambda: BACKTEST_BATCH,
+    )
+
+    assert (
+        brain_worker._should_start_independent_fast_backtest_loop(
+            BACKTEST_MODE,
+            independent_loop=True,
+        )
+        is False
+    )
+
+
 def test_fast_backtest_uses_shared_queue_executor(monkeypatch):
     from app.services.trading import learning
 

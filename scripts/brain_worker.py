@@ -150,6 +150,14 @@ def _fast_backtest_batch_size() -> int:
     )
 
 
+def _should_start_independent_fast_backtest_loop(mode: str, independent_loop: bool) -> bool:
+    return (
+        bool(independent_loop)
+        and (mode or "").strip().lower() == FAST_BACKTEST_MODE_LEAN_CYCLE
+        and _fast_backtest_batch_size() > 0
+    )
+
+
 def _fast_backtest_executor_label() -> str:
     try:
         from app.config import settings as _settings
@@ -2109,9 +2117,14 @@ def main():
         independent_loop = bool(getattr(_cfg, "brain_fast_backtest_independent_loop", True))
     except Exception:
         independent_loop = True
-    if independent_loop and args.mode == "lean-cycle":
+    if _should_start_independent_fast_backtest_loop(args.mode, independent_loop):
         fast_backtest_stop_event = _start_fast_backtest_thread(status)
         logger.info("[brain] FIX 34: independent fast_backtest timer thread started")
+    elif args.mode == "lean-cycle" and _fast_backtest_batch_size() <= 0:
+        logger.info(
+            "[brain] fast_backtest loop disabled for lean-cycle mode; "
+            "dedicated backtest-worker owns the queue"
+        )
     elif args.mode == "lean-cycle":
         # Degenerate config: operator disabled the timer; re-inject subtask
         # so the queue still drains after each cycle.
