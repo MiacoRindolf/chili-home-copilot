@@ -13,6 +13,8 @@ EXTRA_PROBE_AFTER_THRESHOLD = 1
 CACHE_EXPIRY_MARGIN_S = 1.0
 FIRST_FAST_INFO_PROBE_COUNT = 1
 SECOND_FAST_INFO_PROBE_COUNT = 2
+BATCH_MISS_FIRST_PROBE_COUNT = 1
+BATCH_MISS_SECOND_PROBE_COUNT = 2
 
 
 class _RaisingFastInfoTicker:
@@ -30,6 +32,16 @@ def _expire_quote_miss(symbol: str) -> None:
         ts, val = yf_session._cache[key]
         yf_session._cache[key] = (
             ts - yf_session._TTL_QUOTE_MISS - CACHE_EXPIRY_MARGIN_S,
+            val,
+        )
+
+
+def _expire_batch_miss(symbol: str) -> None:
+    key = yf_session._batch_miss_key(symbol)
+    with yf_session._cache_lock:
+        ts, val = yf_session._cache[key]
+        yf_session._cache[key] = (
+            ts - yf_session._TTL_BATCH_MISS - CACHE_EXPIRY_MARGIN_S,
             val,
         )
 
@@ -77,6 +89,14 @@ def test_batch_download_does_not_dead_cache_mixed_batch_missing_equity(
 
     assert yf_session._is_dead(MISSING_EQUITY) is False
     assert yf_session._is_dead(GOOD_EQUITY) is False
+    assert len(calls) == BATCH_MISS_FIRST_PROBE_COUNT
+
+    _expire_batch_miss(MISSING_EQUITY)
+    yf_session.batch_download([GOOD_EQUITY, MISSING_EQUITY], period="5d")
+
+    assert yf_session._is_dead(MISSING_EQUITY) is False
+    assert calls[-1] == (MISSING_EQUITY,)
+    assert len(calls) == BATCH_MISS_SECOND_PROBE_COUNT
 
 
 def test_batch_download_negative_caches_single_missing_equity_after_threshold(

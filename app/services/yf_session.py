@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import os
 import threading
 import time
 from typing import Any
@@ -43,6 +44,20 @@ import yfinance as yf
 from .socket_budget import mount_bounded_http_adapters
 
 logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("[yf_session] invalid %s=%r; using default %s", name, raw, default)
+        return default
+    if minimum is not None:
+        return max(minimum, value)
+    return value
 
 # ---------------------------------------------------------------------------
 # Rate limiter — 12 requests per 5 seconds (Yahoo's safe threshold)
@@ -242,6 +257,14 @@ _cache_lock = threading.Lock()
 _TTL_HISTORY = 3600    # 1 hour for OHLCV / indicator data (64 GB RAM)
 _TTL_QUOTE = 30        # 30 seconds for live price
 _TTL_QUOTE_MISS = 120  # 2 minutes for transient fast_info failures
+_YF_BATCH_MISS_COOLDOWN_ENV = "CHILI_YF_BATCH_MISS_COOLDOWN_S"
+_BATCH_MISS_COOLDOWN_DEFAULT_S = float(_TTL_QUOTE_MISS)
+_MIN_BATCH_MISS_COOLDOWN_S = 0.0
+_TTL_BATCH_MISS = _env_float(
+    _YF_BATCH_MISS_COOLDOWN_ENV,
+    _BATCH_MISS_COOLDOWN_DEFAULT_S,
+    minimum=_MIN_BATCH_MISS_COOLDOWN_S,
+)
 _TTL_SEARCH = 3600     # 1 hour for search results
 _TTL_FUNDAMENTALS = 86400  # 24 hours for fundamental data
 _TTL_TICKER_INFO = 3600   # 1 hour for ticker info strip
@@ -273,6 +296,7 @@ _YF_FAST_INFO_EMPTY_ERROR_MARKERS = (
     "_dividends",
 )
 _QUOTE_MISS_CACHE_PREFIX = "quote_miss:"
+_BATCH_MISS_CACHE_PREFIX = "batch_miss:"
 
 
 def _bump_empty(symbol: str) -> int:
@@ -309,6 +333,8 @@ def _record_yf_batch_miss(symbol: str, *, single_symbol_batch: bool) -> None:
     evidence. Crypto misses are still useful because the dead cache is short
     lived and routes quotes toward the crypto fallback path.
     """
+    if not single_symbol_batch:
+        _cache_set(_batch_miss_key(symbol), True)
     if single_symbol_batch or _is_crypto(symbol):
         _record_empty_yf_result(symbol, allow_crypto=True)
 
@@ -333,6 +359,10 @@ def _is_crypto(symbol: str) -> bool:
 
 def _quote_miss_key(symbol: str) -> str:
     return f"{_QUOTE_MISS_CACHE_PREFIX}{symbol}"
+
+
+def _batch_miss_key(symbol: str) -> str:
+    return f"{_BATCH_MISS_CACHE_PREFIX}{symbol}"
 
 
 def _cache_get(key: str) -> Any | None:
@@ -365,6 +395,8 @@ def _cache_pop(key: str) -> None:
 def _get_ttl(key: str) -> float:
     if key.startswith(_QUOTE_MISS_CACHE_PREFIX):
         return _TTL_QUOTE_MISS
+    if key.startswith(_BATCH_MISS_CACHE_PREFIX):
+        return _TTL_BATCH_MISS
     if key.startswith("quote:"):
         return _TTL_QUOTE
     if key.startswith("search:"):
@@ -698,8 +730,13 @@ def batch_download(
 
     uncached: list[str] = []
     result: dict[str, Any] = {}
+    mixed_request = len(symbols) > 1
+    batch_miss_cooldown_skips = 0
     for sym in symbols:
         if _is_dead(sym):
+            continue
+        if mixed_request and _cache_get(_batch_miss_key(sym)) is not None:
+            batch_miss_cooldown_skips += 1
             continue
         key = f"hist:{sym}:{period}:{interval}:None"
         cached = _cache_get(key)
@@ -709,6 +746,13 @@ def batch_download(
             uncached.append(sym)
 
     if not uncached:
+        if batch_miss_cooldown_skips:
+            logger.info(
+                "[yf_session] batch_download: 0 requested, %s returned, "
+                "%s skipped by batch-miss cooldown",
+                len(result),
+                batch_miss_cooldown_skips,
+            )
         return result
 
     if _breaker_should_short_circuit():
@@ -732,7 +776,7 @@ def batch_download(
     if df.empty:
         # Empty batch on a non-empty input list signals an upstream
         # problem -- count as breaker failure.
-        single_symbol_batch = len(uncached) == 1
+        single_symbol_batch = not mixed_request
         for sym in uncached:
             _record_yf_batch_miss(sym, single_symbol_batch=single_symbol_batch)
         _breaker_on_failure()
@@ -747,6 +791,7 @@ def batch_download(
         result[sym] = df
         found_symbols.add(sym)
         _reset_empty(sym)
+        _cache_pop(_batch_miss_key(sym))
         # seed quote cache
         if not df.empty:
             try:
@@ -774,6 +819,7 @@ def batch_download(
                         result[sym] = ticker_df
                         found_symbols.add(sym)
                         _reset_empty(sym)
+                        _cache_pop(_batch_miss_key(sym))
                         try:
                             last = ticker_df.iloc[-1]
                             qk = f"quote:{sym}"
@@ -795,7 +841,20 @@ def batch_download(
         if sym not in found_symbols:
             _record_yf_batch_miss(sym, single_symbol_batch=False)
 
-    logger.info(f"[yf_session] batch_download: {len(uncached)} requested, {len(result)} returned")
+    if batch_miss_cooldown_skips:
+        logger.info(
+            "[yf_session] batch_download: %s requested, %s returned, "
+            "%s skipped by batch-miss cooldown",
+            len(uncached),
+            len(result),
+            batch_miss_cooldown_skips,
+        )
+    else:
+        logger.info(
+            "[yf_session] batch_download: %s requested, %s returned",
+            len(uncached),
+            len(result),
+        )
     return result
 
 
