@@ -14,6 +14,7 @@ BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED = True
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB = 1536
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB = 768
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS = 1
+BRAIN_QUEUE_MARKET_HOURS_STOCK_LANE_DEFAULT = 2
 BACKTEST_PRIORITY_SCORE_MAX = 100
 BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR = BACKTEST_PRIORITY_SCORE_MAX
 RECERT_QUEUE_DEFAULT_DISPATCH_INTERVAL_MINUTES = 60
@@ -1194,12 +1195,19 @@ class Settings(BaseSettings):
     #    pool doesn't blow up on large universes.
     chili_brain_queue_backtest_executor: str = "process"
     chili_brain_queue_process_cap: int = 6
-    # 3. soft pause during US regular session: skip new batches
-    #    9:30-16:00 ET so live trading systems get market-data bandwidth.
-    #    Off-hours throughput already 50/hr; the dead zone during market
-    #    hours is contention, not a deliberate pause. Make it explicit
-    #    so live systems don't fight the queue worker.
+    # 3. soft pause during US regular session: bound stock-only batches
+    #    9:30-16:00 ET so live trading systems get market-data bandwidth,
+    #    while still allowing a small recert/operational stock lane to drain.
+    #    Off-hours throughput already 50/hr; the live-hours issue is
+    #    contention, not research quality.
     chili_brain_queue_market_hours_pause: bool = True
+    chili_brain_queue_market_hours_stock_lane_max_patterns: int = Field(
+        default=BRAIN_QUEUE_MARKET_HOURS_STOCK_LANE_DEFAULT,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_BRAIN_QUEUE_MARKET_HOURS_STOCK_LANE_MAX_PATTERNS"
+        ),
+    )
     # 4. zero-trade pattern demote: after N consecutive 0-trade backtest
     #    runs, demote queue_tier to 'prescreen' so the pattern only runs
     #    when the prescreen tier is enabled (rare). Prevents the queue

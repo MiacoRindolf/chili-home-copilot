@@ -3728,6 +3728,49 @@ CGROUP_MEMORY_LIMIT_PATHS = (
 CGROUP_UNBOUNDED_MEMORY_SENTINELS = {"", "max"}
 CGROUP_UNBOUNDED_MEMORY_BYTES = 1 << 60
 BYTES_PER_MIB = 1024 * 1024
+MARKET_HOURS_STOCK_ONLY_ASSET_CLASSES = frozenset({"stock", "stocks"})
+MIN_MARKET_HOURS_STOCK_LANE_PATTERNS = 0
+US_EQUITY_REGULAR_SESSION_TIMEZONE = "America/New_York"
+US_EQUITY_REGULAR_SESSION_OPEN = (9, 30)
+US_EQUITY_REGULAR_SESSION_CLOSE = (16, 0)
+US_EQUITY_WEEKDAY_COUNT = 5
+MARKET_HOURS_LOG_TIME_FORMAT = "%H:%M"
+
+
+def _market_hours_stock_lane_limit(settings_obj: object) -> int:
+    raw = getattr(
+        settings_obj,
+        "chili_brain_queue_market_hours_stock_lane_max_patterns",
+        MIN_MARKET_HOURS_STOCK_LANE_PATTERNS,
+    )
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        parsed = MIN_MARKET_HOURS_STOCK_LANE_PATTERNS
+    return max(MIN_MARKET_HOURS_STOCK_LANE_PATTERNS, parsed)
+
+
+def _apply_market_hours_stock_lane(
+    pattern_ids: list[int],
+    stock_only_ids: set[int],
+    settings_obj: object,
+) -> tuple[list[int], int, int]:
+    """Keep a bounded stock-only lane during market hours, preserving queue order."""
+    lane_limit = _market_hours_stock_lane_limit(settings_obj)
+    kept_stock = 0
+    filtered: list[int] = []
+    for pid in pattern_ids:
+        pid_int = int(pid)
+        if pid_int in stock_only_ids:
+            if kept_stock >= lane_limit:
+                continue
+            kept_stock += 1
+        filtered.append(pid_int)
+    deferred_stock = max(
+        MIN_MARKET_HOURS_STOCK_LANE_PATTERNS,
+        len(stock_only_ids) - kept_stock,
+    )
+    return filtered, kept_stock, deferred_stock
 
 
 def _read_cgroup_memory_limit_bytes(
@@ -3812,11 +3855,16 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         try:
             from datetime import datetime as _dt, time as _time
             from zoneinfo import ZoneInfo as _ZI
-            _et = _dt.now(_ZI("America/New_York"))
+            _et = _dt.now(_ZI(US_EQUITY_REGULAR_SESSION_TIMEZONE))
             _t = _et.time()
             _wd = _et.weekday()
             # Mon-Fri, 9:30 AM - 4:00 PM ET = US regular session
-            if _wd < 5 and _time(9, 30) <= _t < _time(16, 0):
+            if (
+                _wd < US_EQUITY_WEEKDAY_COUNT
+                and _time(*US_EQUITY_REGULAR_SESSION_OPEN)
+                <= _t
+                < _time(*US_EQUITY_REGULAR_SESSION_CLOSE)
+            ):
                 _market_hours_active = True
         except Exception:
             logger.debug("[learning] market_hours check failed; continuing", exc_info=True)
@@ -3826,33 +3874,45 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
     pattern_ids = list(get_pending_patterns(db, limit=batch_size, ids_only=True))
     exploration_added = 0
 
-    # Round-13: filter out stock-only patterns during market hours so crypto
-    # / 'all' / forex / options keep flowing while live stock systems get
-    # upstream-API bandwidth.
+    # Round-13 originally filtered out every stock-only pattern during market
+    # hours. Keep the API protection, but preserve a bounded stock lane so
+    # promoted recerts and operational refreshes do not stall all afternoon.
     if _market_hours_active and pattern_ids:
         from sqlalchemy import text as _sa_text
         try:
             stock_only_rows = db.execute(_sa_text(
-                "SELECT id FROM scan_patterns "
-                "WHERE id = ANY(:ids) "
-                "  AND LOWER(COALESCE(asset_class, 'all')) IN ('stocks', 'stock')"
+                "SELECT id, asset_class FROM scan_patterns "
+                "WHERE id = ANY(:ids)"
             ), {"ids": pattern_ids}).fetchall()
-            stock_only = {int(r[0]) for r in stock_only_rows}
+            stock_only = {
+                int(r[0])
+                for r in stock_only_rows
+                if str(r[1] or "").strip().lower()
+                in MARKET_HOURS_STOCK_ONLY_ASSET_CLASSES
+            }
             if stock_only:
                 _before = len(pattern_ids)
-                pattern_ids = [p for p in pattern_ids if int(p) not in stock_only]
+                pattern_ids, kept_stock, deferred_stock = _apply_market_hours_stock_lane(
+                    [int(p) for p in pattern_ids],
+                    stock_only,
+                    settings,
+                )
                 logger.info(
-                    "[learning] market_hours filter: dropped %s stock-only patterns "
-                    "from batch (kept %s crypto/all/options); ET=%s",
-                    len(stock_only), len(pattern_ids),
-                    _dt.now(_ZI("America/New_York")).strftime("%H:%M"),
+                    "[learning] market_hours filter: stock_lane_kept=%s "
+                    "stock_deferred=%s from batch_size=%s "
+                    "(kept_total=%s crypto/all/options/stock_lane); ET=%s",
+                    kept_stock, deferred_stock, _before, len(pattern_ids),
+                    _dt.now(_ZI(US_EQUITY_REGULAR_SESSION_TIMEZONE)).strftime(
+                        MARKET_HOURS_LOG_TIME_FORMAT
+                    ),
                 )
         except Exception:
             logger.debug("[learning] market_hours batch filter failed; continuing with full batch", exc_info=True)
         if not pattern_ids:
             logger.info(
                 "[learning] Queue backtest: deferred (market_hours_pause); "
-                "all eligible patterns this cycle were stock-only. "
+                "all eligible patterns this cycle were stock-only and the "
+                "market-hours stock lane is disabled or already exhausted. "
                 "Crypto + 'all' patterns will flow on the next cycle as soon "
                 "as they're queue-eligible.",
             )
