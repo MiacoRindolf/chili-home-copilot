@@ -97,6 +97,8 @@ _MAKER_ATTEMPT_INSUFFICIENT_VERDICT = (
 _SHADOW_EXPLORATION_FORCE_EDGE_EXHAUSTED = "edge_exhausted"
 _SHADOW_EXPLORATION_FORCE_OBSERVED_RANK = "observed_rank"
 _SHADOW_EXPLORATION_FORCE_MARKET_VELOCITY = "market_velocity"
+FAST_EXECUTION_DECISION_PAPER_FILL = "paper_fill"
+FAST_EXECUTION_MODE_PAPER = "paper"
 _MAKER_ATTEMPT_ACTIONABLE_LEARNABLE_VERDICTS = frozenset({
     _MAKER_ATTEMPT_NOT_EXCLUDED_VERDICT,
 })
@@ -2140,6 +2142,11 @@ def get_subscribed_pairs(db) -> list[str]:
     are grace/audit records for transient misses; they stay out of the
     websocket subscription because the current rotation did not prove
     they still meet the learning-universe floor.
+
+    Open paper positions are retained even after a universe rotation
+    demotes their ticker. The exit manager needs a fresh book to hit
+    stop/target/time-stop exits; dropping the subscription strands the
+    position, blocks capacity, and starves realized-learning rows.
     """
     from sqlalchemy import text
 
@@ -2159,12 +2166,53 @@ def get_subscribed_pairs(db) -> list[str]:
         "active_status": UNIVERSE_STATUS_ACTIVE,
         "shadow_status": UNIVERSE_STATUS_SHADOW,
     }).fetchall()
-    return [r.ticker for r in rows]
+    pairs = [str(r.ticker) for r in rows]
+    seen = set(pairs)
+    for ticker in get_open_paper_position_pairs(db):
+        if ticker not in seen:
+            pairs.append(ticker)
+            seen.add(ticker)
+    return pairs
+
+
+def get_open_paper_position_pairs(db) -> list[str]:
+    """Tickers with an unclosed fast-path paper entry.
+
+    Best-effort by design: old test schemas and partial migrations may
+    not have the execution/exit tables yet. In that case the rotator
+    should still return the ranked universe rather than fail closed.
+    """
+    from sqlalchemy import text
+
+    try:
+        rows = db.execute(text("""
+            SELECT e.ticker, MIN(e.decided_at) AS first_opened_at
+            FROM fast_executions e
+            LEFT JOIN fast_exits x
+              ON x.entry_execution_id = e.id
+            WHERE e.decision = :paper_fill_decision
+              AND e.mode = :paper_mode
+              AND x.id IS NULL
+              AND e.ticker IS NOT NULL
+            GROUP BY e.ticker
+            ORDER BY first_opened_at ASC, e.ticker ASC
+        """), {
+            "paper_fill_decision": FAST_EXECUTION_DECISION_PAPER_FILL,
+            "paper_mode": FAST_EXECUTION_MODE_PAPER,
+        }).fetchall()
+    except Exception as exc:
+        logger.debug(
+            "[fast_path] open paper position subscription lookup skipped: %s",
+            exc,
+        )
+        return []
+    return [str(r.ticker) for r in rows if str(r.ticker or "").strip()]
 
 
 __all__ = [
     "run_rotation_pass",
     "get_active_pairs",
+    "get_open_paper_position_pairs",
     "get_subscribed_pairs",
     "passes_admission_gates",
     "passes_shadow_exploration_gates",

@@ -1745,6 +1745,62 @@ def test_get_subscribed_pairs_excludes_unranked_shadow_grace():
     assert pairs == ["RANKED-USD", "ACTIVE-BUFFER-USD"]
 
 
+def test_get_subscribed_pairs_retains_open_paper_position_tickers():
+    from sqlalchemy import create_engine, text
+
+    from app.services.trading.fast_path.universe_rotator import get_subscribed_pairs
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as db:
+        db.execute(text("""
+            CREATE TABLE fast_path_universe (
+                ticker TEXT NOT NULL,
+                status TEXT NOT NULL,
+                rank INTEGER NULL,
+                rotation_at TEXT NOT NULL
+            )
+        """))
+        db.execute(text("""
+            CREATE TABLE fast_executions (
+                id INTEGER PRIMARY KEY,
+                ticker TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                decided_at TEXT NOT NULL
+            )
+        """))
+        db.execute(text("""
+            CREATE TABLE fast_exits (
+                id INTEGER PRIMARY KEY,
+                entry_execution_id INTEGER NOT NULL
+            )
+        """))
+        db.execute(text("""
+            INSERT INTO fast_path_universe (ticker, status, rank, rotation_at)
+            VALUES
+              ('RANKED-USD', 'shadow', 1, '2026-05-23T01:00:00'),
+              ('ACTIVE-USD', 'active', 2, '2026-05-23T01:00:00'),
+              ('GRACE-USD', 'shadow', NULL, '2026-05-23T01:00:00')
+        """))
+        db.execute(text("""
+            INSERT INTO fast_executions (id, ticker, decision, mode, decided_at)
+            VALUES
+              (1, 'OPEN-OLD-USD', 'paper_fill', 'paper', '2026-05-23T00:10:00'),
+              (2, 'RANKED-USD', 'paper_fill', 'paper', '2026-05-23T00:20:00'),
+              (3, 'CLOSED-USD', 'paper_fill', 'paper', '2026-05-23T00:30:00'),
+              (4, 'REJECTED-USD', 'rejected', 'paper', '2026-05-23T00:40:00'),
+              (5, 'LIVE-USD', 'paper_fill', 'live', '2026-05-23T00:50:00')
+        """))
+        db.execute(text("""
+            INSERT INTO fast_exits (id, entry_execution_id)
+            VALUES (10, 3)
+        """))
+
+        pairs = get_subscribed_pairs(db)
+
+    assert pairs == ["RANKED-USD", "ACTIVE-USD", "OPEN-OLD-USD"]
+
+
 # ---------------------------------------------------------------------------
 # Book-gate behaviour (f-fastpath-rotator-coinbase-fixes-bundle, 2026-05-08)
 # ---------------------------------------------------------------------------
