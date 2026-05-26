@@ -46,6 +46,20 @@ AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_SLIPPAGE_MULTIPLE = 5.0
 AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_MAX_PCT = 5.0
 AUTOTRADER_FAVORABLE_ENTRY_DRIFT_CONFIG_LIMIT_PCT = 20.0
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
+PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT = 1.5
+PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS = 24
+PATTERN_DIRECTIONAL_DEFAULT_MAX_LOOKBACK_HOURS = (
+    PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS * 7
+)
+PATTERN_DIRECTIONAL_DEFAULT_MAX_ALERTS_PER_RUN = 200
+PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ENABLED = True
+PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_LOOKBACK_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 6
+)
+PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ASSET_TYPES = "stock"
+PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_MANAGED_REASONS = (
+    "insufficient_directional_samples"
+)
 AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TICKS = 6
 AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS = (
     AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS
@@ -3318,7 +3332,7 @@ class Settings(BaseSettings):
     # standard "real move" floor for intraday/swing breakouts; the
     # snapshot is persisted on each row for audit when this is tuned.
     chili_pattern_directional_threshold_pct: float = Field(
-        default=1.5,
+        default=PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT,
         validation_alias=AliasChoices(
             "CHILI_PATTERN_DIRECTIONAL_THRESHOLD_PCT"
         ),
@@ -3328,7 +3342,7 @@ class Settings(BaseSettings):
     # intraday-to-overnight breakout cycle; operator can shorten for
     # scalp-heavy regimes.
     chili_pattern_directional_default_hold_hours: int = Field(
-        default=24,
+        default=PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS,
         validation_alias=AliasChoices(
             "CHILI_PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS"
         ),
@@ -3338,7 +3352,7 @@ class Settings(BaseSettings):
     # week of lookback is enough to populate the rolling-30 view per
     # active pattern.
     chili_pattern_directional_max_lookback_hours: int = Field(
-        default=168,
+        default=PATTERN_DIRECTIONAL_DEFAULT_MAX_LOOKBACK_HOURS,
         validation_alias=AliasChoices(
             "CHILI_PATTERN_DIRECTIONAL_MAX_LOOKBACK_HOURS"
         ),
@@ -3346,9 +3360,34 @@ class Settings(BaseSettings):
     # Per-cycle cap on alerts evaluated. Bounds OHLC fetch fan-out so
     # a single tick never overwhelms the market-data providers.
     chili_pattern_directional_max_alerts_per_run: int = Field(
-        default=200,
+        default=PATTERN_DIRECTIONAL_DEFAULT_MAX_ALERTS_PER_RUN,
         validation_alias=AliasChoices(
             "CHILI_PATTERN_DIRECTIONAL_MAX_ALERTS_PER_RUN"
+        ),
+    )
+    chili_pattern_directional_edge_debt_priority_enabled: bool = Field(
+        default=PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_ENABLED"
+        ),
+    )
+    chili_pattern_directional_edge_debt_priority_lookback_minutes: int = Field(
+        default=PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_LOOKBACK_MINUTES,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_LOOKBACK_MINUTES"
+        ),
+    )
+    chili_pattern_directional_edge_debt_priority_asset_types: str = Field(
+        default=PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ASSET_TYPES,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_ASSET_TYPES"
+        ),
+    )
+    chili_pattern_directional_edge_debt_priority_managed_reasons: str = Field(
+        default=PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_MANAGED_REASONS,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_MANAGED_REASONS"
         ),
     )
     # f-promotion-pipeline-rebalance Phase 3 (2026-05-10):
