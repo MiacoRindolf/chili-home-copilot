@@ -15,15 +15,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from .db_writer import FastPathDBWriter
 from .decay_miner import FastPathDecayMiner
 from .executor import FastPathExecutor
 from .exit_manager import FastPathExitManager
-from .healthz import HealthzServer
+from .healthz import (
+    FAST_LEARNING_FRESHNESS_KEY,
+    LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY,
+    LEARNING_LATEST_ALERT_AT_KEY,
+    LEARNING_LATEST_EXECUTION_AT_KEY,
+    LEARNING_LATEST_EXIT_AT_KEY,
+    HealthzServer,
+)
 from .settings import FastPathSettings
 from .status_tracker import StatusTracker
 from .ws_client import CoinbaseWSClient
@@ -36,6 +45,15 @@ logger = logging.getLogger(__name__)
 # path. 60s is short enough that operators see a silent failure on the
 # next dashboard refresh, long enough to keep the loop quiet.
 WATCHDOG_INTERVAL_S = 60.0
+
+FAST_LEARNING_FRESHNESS_SQL = text(
+    """
+    SELECT
+      (SELECT MAX(fired_at) FROM fast_alerts) AS latest_alert_at,
+      (SELECT MAX(decided_at) FROM fast_executions) AS latest_execution_at,
+      (SELECT MAX(exited_at) FROM fast_exits) AS latest_exit_at
+    """
+)
 
 
 async def _decay_miner_watchdog(
@@ -410,6 +428,19 @@ class FastPathSupervisor:
                 executor_stats.get("maker_attempts_adverse_cancelled"),
                 executor_stats.get("maker_observe_only_fills"),
             )
+        learning_stats = snap.get(FAST_LEARNING_FRESHNESS_KEY) or {}
+        if learning_stats:
+            logger.info(
+                "[fast_path] learning_freshness ok=%s latest_alert=%s "
+                "latest_execution=%s alert_to_execution_lag_s=%s "
+                "latest_exit=%s error=%s",
+                learning_stats.get("ok"),
+                learning_stats.get(LEARNING_LATEST_ALERT_AT_KEY),
+                learning_stats.get(LEARNING_LATEST_EXECUTION_AT_KEY),
+                learning_stats.get(LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY),
+                learning_stats.get(LEARNING_LATEST_EXIT_AT_KEY),
+                learning_stats.get("error"),
+            )
         scanner_stats = ws_stats.get("scanner") or {}
         if scanner_stats:
             logger.info(
@@ -476,7 +507,62 @@ class FastPathSupervisor:
             "executor": self._executor.stats() if self._executor else {},
             "exit_manager": self._exit_manager.stats() if self._exit_manager else {},
             "decay_miner": self._decay_miner.stats() if self._decay_miner else {},
+            FAST_LEARNING_FRESHNESS_KEY: self._learning_freshness_snapshot(),
         }
+
+    def _learning_freshness_snapshot(self) -> dict[str, Any]:
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(FAST_LEARNING_FRESHNESS_SQL).mappings().one()
+        except Exception as exc:
+            logger.warning(
+                "[fast_path] learning freshness snapshot failed: %s",
+                exc,
+            )
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}"[:240],
+            }
+
+        latest_alert_at = row.get(LEARNING_LATEST_ALERT_AT_KEY)
+        latest_execution_at = row.get(LEARNING_LATEST_EXECUTION_AT_KEY)
+        latest_exit_at = row.get(LEARNING_LATEST_EXIT_AT_KEY)
+        lag_s = None
+        latest_alert_dt = self._naive_utc_datetime(latest_alert_at)
+        latest_execution_dt = self._naive_utc_datetime(latest_execution_at)
+        if latest_alert_dt is not None and latest_execution_dt is not None:
+            lag_s = max(
+                0.0,
+                (latest_alert_dt - latest_execution_dt).total_seconds(),
+            )
+
+        return {
+            "ok": True,
+            LEARNING_LATEST_ALERT_AT_KEY: self._iso_or_none(latest_alert_at),
+            LEARNING_LATEST_EXECUTION_AT_KEY: self._iso_or_none(
+                latest_execution_at
+            ),
+            LEARNING_LATEST_EXIT_AT_KEY: self._iso_or_none(latest_exit_at),
+            LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
+                round(lag_s, 3) if lag_s is not None else None
+            ),
+        }
+
+    @staticmethod
+    def _iso_or_none(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
+
+    @staticmethod
+    def _naive_utc_datetime(value: Any) -> datetime | None:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 __all__ = ["FastPathSupervisor"]

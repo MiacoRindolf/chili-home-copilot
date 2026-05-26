@@ -1,6 +1,6 @@
 """Tiny aiohttp /healthz for compose's health check.
 
-Two orthogonal probes AND'd together for the 200/503 verdict:
+Three orthogonal probes AND'd together for the 200/503 verdict:
 
 * ``ws_connected`` — is the upstream Coinbase WS pipe alive at all?
   Passes if no pair has tripped its error-rate circuit breaker AND
@@ -16,18 +16,23 @@ Two orthogonal probes AND'd together for the 200/503 verdict:
   several minutes; we only care if ALL pairs go silent at once,
   which would indicate a real upstream outage.
 
+* ``executor_learning_freshness`` - when fresh alerts are landing,
+  is the paper/live executor still writing decisions to
+  ``fast_executions``? This catches the dangerous state where scanner
+  learning looks alive upstream, but paper-trade learning has stalled.
+
 Boot grace (30s after start) returns 200 unconditionally so the
 snapshot replay has time to populate the in-memory state.
 
-Why two probes instead of one tighter window: the prior single-probe
+Why split probes instead of one tighter window: the prior single-probe
 implementation used a 90s ``last_bar_at`` threshold and flapped
 during low-volatility periods on Coinbase, even though WS, heartbeats,
 and L2 books were all healthy. Splitting lets us detect a real WS
 outage (books stop flowing) within seconds while tolerating expected
 candle-channel quietness on individual pairs.
 
-Returns 503 when either probe fails; the JSON body always includes
-both probe states plus age fields so an operator can see WHICH check
+Returns 503 when any probe fails; the JSON body always includes
+probe states plus age fields so an operator can see WHICH check
 failed without log diving.
 """
 from __future__ import annotations
@@ -35,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 try:
@@ -63,6 +68,23 @@ CANDLE_FRESHNESS_WINDOW_S = 300.0
 # /healthz purposes; the tracker itself flips it to PAUSED.
 WS_ERROR_CIRCUIT_BREAKER = 5
 HEALTH_REASON_NO_SUBSCRIBED_PAIRS = "no_subscribed_pairs"
+HEALTH_REASON_EXECUTOR_LEARNING_STALE = "executor_learning_stale"
+
+FAST_LEARNING_FRESHNESS_KEY = "fast_learning_freshness"
+LEARNING_LATEST_ALERT_AT_KEY = "latest_alert_at"
+LEARNING_LATEST_EXECUTION_AT_KEY = "latest_execution_at"
+LEARNING_LATEST_EXIT_AT_KEY = "latest_exit_at"
+LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY = "alert_to_execution_lag_s"
+
+# The executor polls fresh alerts once per second. A two-minute lag is
+# deliberately loose: it avoids clock-skew / deploy flaps while still
+# failing fast enough to preserve paper-learning continuity.
+EXECUTOR_LEARNING_MAX_LAG_S = 120.0
+
+# Only enforce executor freshness while the alert stream itself is active.
+# Ten minutes distinguishes "scanner is quiet" from "scanner is producing
+# rows and the executor is not turning them into learning decisions."
+EXECUTOR_LEARNING_ACTIVE_ALERT_WINDOW_S = 600.0
 
 
 class HealthzServer:
@@ -109,6 +131,7 @@ class HealthzServer:
                     "ok": False,
                     "ws_connected": False,
                     "candle_freshness": False,
+                    "executor_learning_freshness": False,
                     "reason": f"snapshot_failed:{exc}",
                 },
                 status=503,
@@ -126,6 +149,7 @@ class HealthzServer:
             return True, {
                 "ws_connected": True,
                 "candle_freshness": True,
+                "executor_learning_freshness": True,
                 "reason": "boot_grace",
             }
 
@@ -133,6 +157,7 @@ class HealthzServer:
             return True, {
                 "ws_connected": True,
                 "candle_freshness": True,
+                "executor_learning_freshness": True,
                 "reason": "disabled",
             }
 
@@ -145,12 +170,14 @@ class HealthzServer:
             return False, {
                 "ws_connected": False,
                 "candle_freshness": False,
+                "executor_learning_freshness": False,
                 "reason": f"queue_full:{queue_depth}/{queue_max}",
             }
         if int(writer.get("consecutive_batch_failures") or 0) >= 3:
             return False, {
                 "ws_connected": False,
                 "candle_freshness": False,
+                "executor_learning_freshness": False,
                 "reason": "db_write_failing",
             }
 
@@ -159,6 +186,7 @@ class HealthzServer:
             return False, {
                 "ws_connected": False,
                 "candle_freshness": False,
+                "executor_learning_freshness": False,
                 "reason": HEALTH_REASON_NO_SUBSCRIBED_PAIRS,
                 "details": {
                     "ws_window_s": WS_FRESHNESS_WINDOW_S,
@@ -169,28 +197,35 @@ class HealthzServer:
 
         ws_ok, ws_detail = self._probe_ws_connected(snap, pairs)
         candle_ok, candle_detail = self._probe_candle_freshness(pairs)
+        learning_ok, learning_detail = self._probe_executor_learning_freshness(snap)
+
+        failed_reasons = [
+            label for label, failed in (
+                ("ws_disconnected", not ws_ok),
+                ("no_candle_freshness", not candle_ok),
+                (HEALTH_REASON_EXECUTOR_LEARNING_STALE, not learning_ok),
+            )
+            if failed
+        ]
 
         body = {
             "ws_connected": ws_ok,
             "candle_freshness": candle_ok,
-            "reason": (
-                "ok"
-                if ws_ok and candle_ok
-                else "+".join(
-                    label for label, passed in
-                    (("ws_disconnected", not ws_ok),
-                     ("no_candle_freshness", not candle_ok))
-                    if passed
-                )
-            ),
+            "executor_learning_freshness": learning_ok,
+            "reason": "ok" if not failed_reasons else "+".join(failed_reasons),
             "details": {
                 "ws_window_s": WS_FRESHNESS_WINDOW_S,
                 "candle_window_s": CANDLE_FRESHNESS_WINDOW_S,
+                "executor_learning_active_alert_window_s": (
+                    EXECUTOR_LEARNING_ACTIVE_ALERT_WINDOW_S
+                ),
+                "executor_learning_max_lag_s": EXECUTOR_LEARNING_MAX_LAG_S,
                 **ws_detail,
                 **candle_detail,
+                **learning_detail,
             },
         }
-        return (ws_ok and candle_ok), body
+        return (ws_ok and candle_ok and learning_ok), body
 
     def _probe_ws_connected(
         self, snap: dict, pairs: dict,
@@ -284,6 +319,93 @@ class HealthzServer:
             "freshest_pair_for_bars": freshest_pair,
         }
 
+    def _probe_executor_learning_freshness(self, snap: dict) -> tuple[bool, dict]:
+        """Pass iff active alert flow is still becoming execution rows.
+
+        A quiet scanner is allowed. A fresh alert stream with no fresh
+        ``fast_executions.decided_at`` is not, because that means paper
+        learning stopped even though upstream alert learning appears alive.
+        """
+        freshness = snap.get(FAST_LEARNING_FRESHNESS_KEY)
+        if not isinstance(freshness, dict):
+            return True, {"executor_learning_phase": "snapshot_missing"}
+
+        latest_alert_at = freshness.get(LEARNING_LATEST_ALERT_AT_KEY)
+        latest_execution_at = freshness.get(LEARNING_LATEST_EXECUTION_AT_KEY)
+        latest_exit_at = freshness.get(LEARNING_LATEST_EXIT_AT_KEY)
+        lag_s = self._coerce_float(
+            freshness.get(LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY)
+        )
+
+        detail = {
+            LEARNING_LATEST_ALERT_AT_KEY: latest_alert_at,
+            LEARNING_LATEST_EXECUTION_AT_KEY: latest_execution_at,
+            LEARNING_LATEST_EXIT_AT_KEY: latest_exit_at,
+            LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
+                round(lag_s, 2) if lag_s is not None else None
+            ),
+        }
+
+        if freshness.get("ok") is False:
+            return False, {
+                **detail,
+                "executor_learning_phase": "snapshot_error",
+                "executor_learning_error": str(
+                    freshness.get("error") or "unknown"
+                )[:240],
+            }
+
+        alert_age_s = self._age_seconds(latest_alert_at)
+        if latest_alert_at and alert_age_s is None:
+            return False, {
+                **detail,
+                "latest_alert_age_s": None,
+                "executor_learning_phase": "unparseable_alert_timestamp",
+            }
+        if alert_age_s is None:
+            return True, {
+                **detail,
+                "latest_alert_age_s": None,
+                "executor_learning_phase": "no_alerts",
+            }
+
+        detail["latest_alert_age_s"] = round(alert_age_s, 2)
+        if alert_age_s > EXECUTOR_LEARNING_ACTIVE_ALERT_WINDOW_S:
+            return True, {
+                **detail,
+                "executor_learning_phase": "alert_stream_quiet",
+            }
+
+        execution_age_s = self._age_seconds(latest_execution_at)
+        if lag_s is None and execution_age_s is not None:
+            lag_s = max(0.0, execution_age_s - alert_age_s)
+            detail[LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY] = round(lag_s, 2)
+        detail["latest_execution_age_s"] = (
+            round(execution_age_s, 2) if execution_age_s is not None else None
+        )
+
+        if not latest_execution_at:
+            return False, {
+                **detail,
+                "executor_learning_phase": "no_execution_decisions",
+            }
+        if execution_age_s is None:
+            return False, {
+                **detail,
+                "executor_learning_phase": "unparseable_execution_timestamp",
+            }
+        if lag_s is None:
+            return False, {
+                **detail,
+                "executor_learning_phase": "unmeasurable_execution_lag",
+            }
+        if lag_s > EXECUTOR_LEARNING_MAX_LAG_S:
+            return False, {
+                **detail,
+                "executor_learning_phase": "stale_execution_decision",
+            }
+        return True, {**detail, "executor_learning_phase": "ok"}
+
     @staticmethod
     def _age_seconds(ts: Any) -> float | None:
         """Convert an ISO8601 string or datetime into "seconds ago",
@@ -297,8 +419,27 @@ class HealthzServer:
             return None
         if t.tzinfo is not None:
             t = t.replace(tzinfo=None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         return (now - t).total_seconds()
 
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
-__all__ = ["HEALTH_REASON_NO_SUBSCRIBED_PAIRS", "HealthzServer"]
+
+__all__ = [
+    "BOOT_GRACE_S",
+    "EXECUTOR_LEARNING_ACTIVE_ALERT_WINDOW_S",
+    "EXECUTOR_LEARNING_MAX_LAG_S",
+    "FAST_LEARNING_FRESHNESS_KEY",
+    "HEALTH_REASON_EXECUTOR_LEARNING_STALE",
+    "HEALTH_REASON_NO_SUBSCRIBED_PAIRS",
+    "HealthzServer",
+    "LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY",
+    "LEARNING_LATEST_ALERT_AT_KEY",
+    "LEARNING_LATEST_EXECUTION_AT_KEY",
+    "LEARNING_LATEST_EXIT_AT_KEY",
+]

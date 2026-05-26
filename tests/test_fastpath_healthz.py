@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from app.services.trading.fast_path.healthz import (
     BOOT_GRACE_S,
+    EXECUTOR_LEARNING_ACTIVE_ALERT_WINDOW_S,
+    EXECUTOR_LEARNING_MAX_LAG_S,
+    FAST_LEARNING_FRESHNESS_KEY,
+    HEALTH_REASON_EXECUTOR_LEARNING_STALE,
     HEALTH_REASON_NO_SUBSCRIBED_PAIRS,
+    LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY,
+    LEARNING_LATEST_ALERT_AT_KEY,
+    LEARNING_LATEST_EXECUTION_AT_KEY,
+    LEARNING_LATEST_EXIT_AT_KEY,
     HealthzServer,
 )
+
+SAMPLE_PAIR = "SUI-USD"
 
 
 def test_healthz_fails_after_boot_when_universe_has_no_pairs():
@@ -26,3 +38,88 @@ def test_healthz_fails_after_boot_when_universe_has_no_pairs():
     assert body["reason"] == HEALTH_REASON_NO_SUBSCRIBED_PAIRS
     assert body["details"]["subscribed_pairs"] == 0
 
+
+def test_healthz_fails_when_fresh_alerts_are_not_becoming_executions():
+    server = HealthzServer(port=8090, snapshot_fn=lambda: {})
+    server._started_at -= BOOT_GRACE_S + 1.0
+
+    now = _utcnow_naive()
+    alert_at = now - timedelta(seconds=5.0)
+    execution_at = alert_at - timedelta(
+        seconds=EXECUTOR_LEARNING_MAX_LAG_S + 1.0
+    )
+
+    ok, body = server._evaluate(_healthy_snapshot(
+        now=now,
+        learning={
+            "ok": True,
+            LEARNING_LATEST_ALERT_AT_KEY: alert_at.isoformat(),
+            LEARNING_LATEST_EXECUTION_AT_KEY: execution_at.isoformat(),
+            LEARNING_LATEST_EXIT_AT_KEY: None,
+            LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
+                EXECUTOR_LEARNING_MAX_LAG_S + 1.0
+            ),
+        },
+    ))
+
+    assert ok is False
+    assert body["executor_learning_freshness"] is False
+    assert body["reason"] == HEALTH_REASON_EXECUTOR_LEARNING_STALE
+    assert body["details"]["executor_learning_phase"] == "stale_execution_decision"
+
+
+def test_healthz_allows_stale_executions_when_alert_stream_is_quiet():
+    server = HealthzServer(port=8090, snapshot_fn=lambda: {})
+    server._started_at -= BOOT_GRACE_S + 1.0
+
+    now = _utcnow_naive()
+    alert_at = now - timedelta(
+        seconds=EXECUTOR_LEARNING_ACTIVE_ALERT_WINDOW_S + 1.0
+    )
+    execution_at = alert_at - timedelta(
+        seconds=EXECUTOR_LEARNING_MAX_LAG_S + 1.0
+    )
+
+    ok, body = server._evaluate(_healthy_snapshot(
+        now=now,
+        learning={
+            "ok": True,
+            LEARNING_LATEST_ALERT_AT_KEY: alert_at.isoformat(),
+            LEARNING_LATEST_EXECUTION_AT_KEY: execution_at.isoformat(),
+            LEARNING_LATEST_EXIT_AT_KEY: None,
+            LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
+                EXECUTOR_LEARNING_MAX_LAG_S + 1.0
+            ),
+        },
+    ))
+
+    assert ok is True
+    assert body["executor_learning_freshness"] is True
+    assert body["details"]["executor_learning_phase"] == "alert_stream_quiet"
+
+
+def _healthy_snapshot(*, now: datetime, learning: dict) -> dict:
+    now_iso = now.isoformat()
+    return {
+        "enabled": True,
+        "writer": {
+            "queue_depth": 0,
+            "queue_max": 100,
+            "consecutive_batch_failures": 0,
+        },
+        "status": {
+            "pairs": {
+                SAMPLE_PAIR: {
+                    "state": "streaming",
+                    "last_bar_at": now_iso,
+                    "error_count_60s": 0,
+                }
+            }
+        },
+        "ws": {"book": {"last_emit_at_wall": now_iso}},
+        FAST_LEARNING_FRESHNESS_KEY: learning,
+    }
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
