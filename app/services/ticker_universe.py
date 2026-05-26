@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from .socket_budget import mount_bounded_http_adapters
+from .symbol_hygiene import clean_equity_universe
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ _BUILTIN_US_TICKERS = [
     "WDAY", "VEEV", "HUBS", "TEAM", "MDB", "ESTC", "CFLT", "PATH", "BILL",
     "ZM", "DOCU", "OKTA", "TWLO", "GTLB", "MNDY", "FROG", "TOST", "CAVA",
 ]
+_BUILTIN_US_TICKERS = clean_equity_universe(_BUILTIN_US_TICKERS)
 
 
 def _fetch_sec_tickers() -> list[dict[str, str]]:
@@ -371,7 +373,7 @@ def get_all_us_stock_tickers(force_refresh: bool = False) -> list[str]:
     if not force_refresh:
         cached = _load_cache(_STOCKS_CACHE)
         if cached:
-            tickers = [t["ticker"] for t in cached]
+            tickers = clean_equity_universe(t["ticker"] for t in cached)
             _memory_cache[cache_key] = tickers
             logger.info(f"[ticker_universe] Loaded {len(tickers)} US stocks from cache")
             return tickers
@@ -379,13 +381,13 @@ def get_all_us_stock_tickers(force_refresh: bool = False) -> list[str]:
     entries = _fetch_sec_tickers()
     if entries:
         _save_cache(_STOCKS_CACHE, entries)
-        tickers = [t["ticker"] for t in entries]
+        tickers = clean_equity_universe(t["ticker"] for t in entries)
         _memory_cache[cache_key] = tickers
         return tickers
 
     # _fetch_sec_tickers always returns the built-in list as last resort,
     # but just in case:
-    return list(_BUILTIN_US_TICKERS)
+    return clean_equity_universe(_BUILTIN_US_TICKERS)
 
 
 def get_all_crypto_tickers(n: int | None = None, force_refresh: bool = False) -> list[str]:

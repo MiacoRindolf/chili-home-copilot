@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..massive_client import is_crypto
+from ..symbol_hygiene import normalize_equity_symbol
 
 _BARE_CRYPTO_MIN_BASE_LEN = 2
 _BARE_CRYPTO_MAX_BASE_LEN = 15
@@ -48,6 +49,8 @@ def normalize_prescreen_ticker(raw: Any) -> str:
             and _BARE_CRYPTO_MIN_BASE_LEN <= len(base) <= _BARE_CRYPTO_MAX_BASE_LEN
         ):
             return f"{base}-USD"
+    if not is_crypto(t):
+        return normalize_equity_symbol(t)
     return t
 
 

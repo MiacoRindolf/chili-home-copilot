@@ -22,6 +22,7 @@ from ..yf_session import (
     get_fast_info as _yf_fast_info,
     acquire as _yf_acquire,
 )
+from ..symbol_hygiene import clean_equity_universe
 
 logger = logging.getLogger(__name__)
 
@@ -1771,6 +1772,7 @@ DEFAULT_SCAN_TICKERS = [
     "RIVN", "LCID", "NIO", "XPEV", "LI", "IONQ", "AFRM", "UPST", "CAVA", "BRK-B",
     "PM", "ACN", "MCO", "SPGI",
 ]
+DEFAULT_SCAN_TICKERS = clean_equity_universe(DEFAULT_SCAN_TICKERS)
 
 DEFAULT_CRYPTO_TICKERS = [
     "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
