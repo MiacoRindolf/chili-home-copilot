@@ -25,6 +25,8 @@ DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
 AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
 AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
+AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD = 50.0
+AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED = True
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
 AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TICKS = 6
 AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS = (
@@ -2584,9 +2586,26 @@ class Settings(BaseSettings):
         ),
     )
     chili_autotrader_max_symbol_price_usd: float = Field(
-        default=50.0,
+        default=AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD,
         ge=0.01,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_SYMBOL_PRICE_USD"),
+        description=(
+            "Legacy whole-share safety cap for stock entries. When "
+            "CHILI_AUTOTRADER_FRACTIONAL_EQUITY_ENABLED is true, stock "
+            "entries are governed by risk notional and fractional quantity "
+            "normalization instead of this share-price cliff."
+        ),
+    )
+    chili_autotrader_fractional_equity_enabled: bool = Field(
+        default=AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_FRACTIONAL_EQUITY_ENABLED"),
+        description=(
+            "Allow stock entries to use fractional-share quantity sizing. "
+            "When enabled, high-priced stocks are not blocked solely by "
+            "CHILI_AUTOTRADER_MAX_SYMBOL_PRICE_USD; they still must pass "
+            "positive expected edge, slippage, drawdown, lifecycle, and "
+            "notional/quantity gates."
+        ),
     )
     chili_autotrader_max_entry_slippage_pct: float = Field(
         default=1.0,

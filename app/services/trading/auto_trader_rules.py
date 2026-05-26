@@ -11,6 +11,8 @@ from typing import Any, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from ...config import (
+    AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED,
+    AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION,
@@ -117,7 +119,8 @@ class RuleGateSettings:
     # Deprecated fallback. Current admission uses expected net edge, so this
     # value should not act as a hidden 8%/9%/12% magic-profit threshold.
     min_projected_profit_pct: float = 0.0
-    max_symbol_price_usd: float = 50.0
+    max_symbol_price_usd: float = AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD
+    fractional_equity_enabled: bool = AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED
     max_entry_slippage_pct: float = 1.0
     options_min_underlying_reward_risk: float = 1.0
     options_min_option_reward_risk: float = 1.0
@@ -163,6 +166,12 @@ class RuleGateSettings:
                 g("chili_autotrader_min_projected_profit_pct", cls.min_projected_profit_pct)
             ),
             max_symbol_price_usd=float(g("chili_autotrader_max_symbol_price_usd", cls.max_symbol_price_usd)),
+            fractional_equity_enabled=bool(
+                g(
+                    "chili_autotrader_fractional_equity_enabled",
+                    cls.fractional_equity_enabled,
+                )
+            ),
             max_entry_slippage_pct=float(
                 g("chili_autotrader_max_entry_slippage_pct", cls.max_entry_slippage_pct)
             ),
@@ -2047,15 +2056,17 @@ def passes_rule_gate(
         return False, "bad_reference_price", snap
 
     max_px = gs.max_symbol_price_usd
-    # Task KK — the equity max-symbol-price cap (default $50) was meant to
-    # avoid sub-1-share fractional rounding traps on stocks like NVDA. It
-    # makes no sense for crypto: BTC is routinely > $50k, and Robinhood
-    # supports fractional crypto natively, so a literal price cap would
-    # block every crypto alert by construction.
-    # Task MM — same reasoning for options. The "symbol price" the gate
-    # sees here is the underlying's price, not the option premium. A
-    # call on AAPL at $180 spot is fine even though 180 > 50.
-    if not crypto_path and not options_path and px > max_px:
+    fractional_equity_enabled = bool(gs.fractional_equity_enabled)
+    snap["max_symbol_price_usd"] = max_px
+    snap["fractional_equity_enabled"] = fractional_equity_enabled
+    # Crypto and options never use the legacy stock share-price cap. Crypto
+    # bases are often high-priced assets, and the option path sees underlying
+    # spot here rather than the option premium.
+    # When fractional equity is enabled, this legacy cap is informational only:
+    # risk notional and fractional quantity normalization own stock sizing.
+    if not crypto_path and not options_path and fractional_equity_enabled and px > max_px:
+        snap["symbol_price_cap_skipped_reason"] = "fractional_equity_enabled"
+    if not crypto_path and not options_path and not fractional_equity_enabled and px > max_px:
         return False, "symbol_price_above_cap", snap
 
     # WW — for options, ``ref`` is the option PREMIUM (e.g. $4.01) but
