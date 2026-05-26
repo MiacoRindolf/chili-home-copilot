@@ -54,7 +54,7 @@ def _fake_adapter(fill_price: float = 9.0) -> MagicMock:
         "order_id": "rh-1",
         "raw": {"average_price": str(fill_price), "state": "filled"},
     }
-    a.get_quote_price.return_value = None
+    a.get_quote_price.return_value = float(fill_price)
     return a
 
 

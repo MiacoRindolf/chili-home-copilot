@@ -1542,9 +1542,15 @@ def api_stop_positions(
     ).order_by(Trade.entry_date.desc()).all()
 
     from ..services.trading.stop_engine import _build_brain_context
+    try:
+        from ..services.trading.autopilot_scope import is_option_trade
+    except Exception:
+        def is_option_trade(_trade: Trade) -> bool:  # type: ignore[no-redef]
+            return False
 
     result = []
     for t in trades:
+        trade_is_option = is_option_trade(t)
         entry = t.entry_price or 0
         stop = t.stop_loss
         target = t.take_profit
@@ -1553,10 +1559,10 @@ def api_stop_positions(
 
         try:
             q = None
-            if (t.broker_source or "").strip():
+            if (t.broker_source or "").strip() or trade_is_option:
                 from ..services.trading.broker_quotes import broker_quote_for_trade
                 q = broker_quote_for_trade(t, purpose="display")
-            if not q or q.get("price") is None:
+            if (not q or q.get("price") is None) and not trade_is_option:
                 from ..services.trading.market_data import fetch_quote
                 q = fetch_quote(t.ticker)
             price = q.get("price", 0) if q else 0
@@ -1602,6 +1608,9 @@ def api_stop_positions(
         result.append({
             "id": t.id,
             "ticker": t.ticker,
+            "asset_type": "options" if trade_is_option else (
+                "crypto" if (t.ticker or "").upper().endswith("-USD") else "stock"
+            ),
             "direction": t.direction,
             "entry_price": entry,
             "current_price": price,

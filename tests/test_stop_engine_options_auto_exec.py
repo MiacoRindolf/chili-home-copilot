@@ -113,3 +113,56 @@ def test_stop_engine_auto_execute_option_uses_sell_to_close(monkeypatch) -> None
         limit_price=1.40,
         position_effect="close",
     )
+
+
+def test_stop_positions_option_uses_premium_quote_not_underlying(paired_client, db) -> None:
+    from app.models.trading import Trade
+
+    client, user = paired_client
+    trade = Trade(
+        user_id=user.id,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=0.80,
+        take_profit=2.50,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+    )
+    db.add(trade)
+    db.commit()
+
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "spy-729c"}
+    fake_options.get_quote.return_value = {"mark_price": "1.45"}
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("stop positions must not fetch underlying spot for options"),
+    ), patch(
+        "app.services.trading.stop_engine._build_brain_context",
+        return_value=SimpleNamespace(summary_dict=lambda: {}),
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ):
+        resp = client.get("/api/trading/stops/positions")
+
+    assert resp.status_code == 200
+    row = next(x for x in resp.json()["positions"] if x["id"] == trade.id)
+    assert row["asset_type"] == "options"
+    assert row["current_price"] == pytest.approx(1.45)
+    assert row["pnl_pct"] == pytest.approx(16.0)

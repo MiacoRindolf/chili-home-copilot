@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import pandas as pd
+import pytest
 
 from app.services.trading.market_data import compute_indicators
 from app.services.trading.pattern_condition_monitor import evaluate_pattern_health
-from app.services.trading.pattern_position_monitor import _effective_monitor_health_score
+from app.services.trading.pattern_position_monitor import (
+    _effective_monitor_health_score,
+    _trade_pnl_pct,
+)
 
 
 def test_pattern_health_omits_missing_inputs_from_ratio() -> None:
@@ -73,6 +80,62 @@ def test_effective_health_prefers_live_thesis_over_entry_filter_retention() -> N
 
     assert score == 0.74
     assert source == "live_plan_vitals_min"
+
+
+def test_option_pattern_monitor_pnl_uses_premium_not_underlying() -> None:
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+    )
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 1.45, "source": "robinhood_options"},
+    ):
+        pnl_pct, source = _trade_pnl_pct(trade, current_price=729.0)
+
+    assert pnl_pct == pytest.approx(16.0)
+    assert source == "robinhood_options"
+
+
+def test_option_pattern_monitor_pnl_does_not_fallback_to_underlying() -> None:
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+    )
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": None, "source": "robinhood_options_unavailable"},
+    ):
+        pnl_pct, source = _trade_pnl_pct(trade, current_price=729.0)
+
+    assert pnl_pct is None
+    assert source == "option_premium_unavailable"
 
 
 def test_compute_indicators_exposes_pattern_canonical_inputs() -> None:

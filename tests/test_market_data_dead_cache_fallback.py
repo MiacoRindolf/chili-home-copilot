@@ -234,7 +234,7 @@ class TestCoinbasePublicQuote:
             str(TEST_COINBASE_TIMEOUT_S),
         )
         monkeypatch.setattr(coinbase_ohlcv, "_CIRCUIT_OPEN_UNTIL", 0.0)
-        monkeypatch.setattr(coinbase_ohlcv.requests, "get", _fake_get)
+        monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _fake_get)
 
         quote = coinbase_ohlcv.get_quote(TEST_CRYPTO_TICKER.lower())
         assert quote == {

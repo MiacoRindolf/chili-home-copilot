@@ -139,8 +139,9 @@ def _run_tick_with_adapter(db, adapter, *, execution_window=None):
     active_window = execution_window or _mock_execution_window()
 
     def _fake_submit(db_sess, trade, *, exit_reason, client_order_id, **_kwargs):
-        if hasattr(adapter, "_submit_side_effect") and adapter._submit_side_effect is not None:
-            return adapter._submit_side_effect(
+        submit_side_effect = getattr(adapter, "__dict__", {}).get("_submit_side_effect")
+        if submit_side_effect is not None:
+            return submit_side_effect(
                 db_sess,
                 trade,
                 exit_reason=exit_reason,
@@ -309,8 +310,9 @@ def test_monitor_closes_target_on_executable_bid_cross(db):
     ad.get_quote_price.return_value = 10.0
     ad.place_market_order.return_value = {
         "ok": True,
+        "state": "filled",
         "order_id": "bid-target",
-        "raw": {"average_price": 15.05, "cumulative_quantity": 4},
+        "raw": {"average_price": 15.05, "cumulative_quantity": 4, "state": "filled"},
     }
 
     _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)

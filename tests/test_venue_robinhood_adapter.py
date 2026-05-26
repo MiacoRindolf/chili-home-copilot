@@ -124,6 +124,12 @@ def test_get_best_bid_ask_returns_none_on_empty(mock_conn, mock_quotes, monkeypa
     from app.config import settings
 
     monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "chili_robinhood_legend_quote_fallback_enabled",
+        False,
+        raising=False,
+    )
     mock_quotes.return_value = [None]
 
     adapter = RobinhoodSpotAdapter()

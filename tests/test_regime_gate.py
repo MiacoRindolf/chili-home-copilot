@@ -43,6 +43,8 @@ def _install_regime_gate_fakes(monkeypatch, means: dict[str, float]) -> None:
             "chili_regime_gate_crypto_anchor_dimensions": (
                 "ticker_regime,cross_asset_regime"
             ),
+            "chili_regime_gate_require_equity_anchor_negative": True,
+            "chili_regime_gate_equity_anchor_dimensions": "ticker_regime",
         }
         return overrides.get(name, default)
 
@@ -98,12 +100,34 @@ def test_crypto_blocks_when_anchor_and_global_dimension_are_negative(monkeypatch
     assert result.reason.startswith("negative_ev_consensus")
 
 
-def test_equity_still_blocks_breadth_and_vol_consensus(monkeypatch):
+def test_equity_global_negative_consensus_needs_ticker_anchor(monkeypatch):
     _install_regime_gate_fakes(
         monkeypatch,
         {
             regime_gate.REGIME_DIM_TICKER: POSITIVE_MEAN_PNL,
             regime_gate.REGIME_DIM_BREADTH: NEGATIVE_MEAN_PNL,
+            regime_gate.REGIME_DIM_CROSS_ASSET: POSITIVE_MEAN_PNL,
+            regime_gate.REGIME_DIM_VOL: NEGATIVE_MEAN_PNL,
+        },
+    )
+
+    result = regime_gate.evaluate_regime_gate(
+        SimpleNamespace(),
+        pattern_id=PATTERN_ID,
+        ticker=EQUITY_TICKER,
+    )
+
+    assert result.blocked is False
+    assert result.n_negative == MIN_NEGATIVES
+    assert result.reason.startswith("insufficient_equity_anchor_negative_consensus")
+
+
+def test_equity_blocks_when_ticker_anchor_and_global_dimension_are_negative(monkeypatch):
+    _install_regime_gate_fakes(
+        monkeypatch,
+        {
+            regime_gate.REGIME_DIM_TICKER: NEGATIVE_MEAN_PNL,
+            regime_gate.REGIME_DIM_BREADTH: POSITIVE_MEAN_PNL,
             regime_gate.REGIME_DIM_CROSS_ASSET: POSITIVE_MEAN_PNL,
             regime_gate.REGIME_DIM_VOL: NEGATIVE_MEAN_PNL,
         },

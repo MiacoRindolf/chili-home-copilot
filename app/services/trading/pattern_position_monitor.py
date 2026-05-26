@@ -95,6 +95,7 @@ def _build_pattern_conditions_snapshot(
     health: ConditionHealth,
     plan_health: TradePlanHealth,
     pnl_pct: float | None,
+    pnl_quote_source: str | None,
     sig_snap: Any,
     flat_indicators: dict[str, Any],
     vitals: Any,
@@ -123,6 +124,7 @@ def _build_pattern_conditions_snapshot(
     conditions_snap["vitals"] = vitals.to_dict()
     conditions_snap["vitals_degradation"] = vitals_degradation
     conditions_snap["quote_source"] = quote_source
+    conditions_snap["pnl_quote_source"] = pnl_quote_source
     return conditions_snap
 
 
@@ -151,6 +153,51 @@ def _trade_quote_price(trade: Trade) -> tuple[float | None, str]:
     except Exception:
         px = 0.0
     return ((px or None), "market_data" if px else "unavailable")
+
+
+def _is_option_trade_safe(trade: Trade) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
+def _trade_pnl_pct(
+    trade: Trade,
+    *,
+    current_price: float | None,
+) -> tuple[float | None, str]:
+    """Return P&L percent in the trade's price domain.
+
+    Pattern health for option substitutions can still use the underlying
+    ticker, but P&L must compare option premium to option premium.
+    """
+    entry = float(trade.entry_price or 0)
+    if entry <= 0:
+        return None, "entry_unavailable"
+
+    if _is_option_trade_safe(trade):
+        try:
+            from .broker_quotes import broker_quote_for_trade
+
+            q = broker_quote_for_trade(trade, purpose="display")
+            premium = q.get("price") if q else None
+            premium = float(premium) if premium is not None else None
+            if premium and premium > 0:
+                if (trade.direction or "long") == "short":
+                    return ((entry - premium) / entry * 100), str(q.get("source") or "option_premium")
+                return ((premium - entry) / entry * 100), str(q.get("source") or "option_premium")
+        except Exception:
+            logger.debug("[pattern_monitor] option P&L quote failed for %s", trade.ticker, exc_info=True)
+        return None, "option_premium_unavailable"
+
+    if not current_price:
+        return None, "price_unavailable"
+    if (trade.direction or "long") == "short":
+        return ((entry - current_price) / entry * 100), "underlying_spot"
+    return ((current_price - entry) / entry * 100), "underlying_spot"
 
 
 def _monitor_alert_dedup_key(ticker: str, scan_pattern_id: int | None, action: str) -> str:
@@ -545,6 +592,9 @@ def _evaluate_plan_levels_trade(
     Logs PatternMonitorDecision rows so the Monitor tab shows health and last check, and
     dispatches Telegram ``pattern_monitor`` alerts when price breaches the plan stop zone.
     """
+    if _is_option_trade_safe(trade):
+        return "skipped"
+
     from .monitor_rules_engine import should_evaluate
     from .pattern_adjustment_advisor import AdjustmentRecommendation
 
@@ -595,7 +645,7 @@ def _evaluate_plan_levels_trade(
     entry = float(trade.entry_price or 0)
     direction = trade.direction or "long"
     is_long = direction == "long"
-    pnl_pct = ((current_price - entry) / entry * 100) if entry else None
+    pnl_pct, pnl_quote_source = _trade_pnl_pct(trade, current_price=current_price)
 
     health_score = 0.5
     health_delta = None
@@ -666,6 +716,7 @@ def _evaluate_plan_levels_trade(
         "take_profit": target,
         "pnl_pct": pnl_pct,
         "quote_source": quote_source,
+        "pnl_quote_source": pnl_quote_source,
     }
 
     health = ConditionHealth(
@@ -817,7 +868,7 @@ def _evaluate_single(
             return "skipped"
         logger.debug("[pattern_monitor] materiality gate passed for %s: %s", trade.ticker, mat_reason)
 
-    pnl_pct = ((current_price - trade.entry_price) / trade.entry_price * 100) if trade.entry_price else None
+    pnl_pct, pnl_quote_source = _trade_pnl_pct(trade, current_price=current_price)
 
     # ── Lazy trade plan generation ──
     _ensure_trade_plan(db, alert, pattern, flat, current_price)
@@ -927,6 +978,7 @@ def _evaluate_single(
                 health=health,
                 plan_health=plan_health,
                 pnl_pct=pnl_pct,
+                pnl_quote_source=pnl_quote_source,
                 sig_snap=sig_snap,
                 flat_indicators=flat,
                 vitals=vitals,
@@ -1075,6 +1127,7 @@ def _evaluate_single(
         health=health,
         plan_health=plan_health,
         pnl_pct=pnl_pct,
+        pnl_quote_source=pnl_quote_source,
         sig_snap=sig_snap,
         flat_indicators=flat,
         vitals=vitals,
