@@ -1940,6 +1940,20 @@ def _process_one_alert(
         db, alert, settings=settings, ctx=ctx, for_new_entry=for_new, fallback_user_id=uid,
     )
     if not ok:
+        if bool(getattr(alert, "_chili_shadow_observation_only", False)):
+            shadow_reason = str(
+                getattr(
+                    alert,
+                    "_chili_shadow_observation_reason",
+                    SHADOW_OBSERVATION_REASON_STAGE,
+                )
+                or SHADOW_OBSERVATION_REASON_STAGE
+            )
+            snap["paper_observation_reason"] = shadow_reason
+            snap["paper_observation_live_orders_effective"] = bool(live)
+            snap["rule_gate_reject_reason"] = str(reason)
+            if shadow_signal_lane:
+                snap["paper_observation_signal_lane"] = shadow_signal_lane
         if reason == "non_positive_expected_edge":
             _log_expected_edge_reject(alert, snap)
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)
