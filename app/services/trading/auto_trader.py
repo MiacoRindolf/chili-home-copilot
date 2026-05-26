@@ -254,6 +254,41 @@ def _entry_fill_price_from_response(
     return float(px)
 
 
+def _entry_tca_reference_price(
+    res: dict[str, Any],
+    alert: BreakoutAlert,
+    *,
+    px: float,
+    snap: dict[str, Any],
+    fill: float | None,
+) -> float | None:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    option_meta = (
+        snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
+    )
+    response_option_meta = (
+        res.get("_chili_option_meta")
+        if isinstance(res.get("_chili_option_meta"), dict)
+        else {}
+    )
+    is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+    if is_option_entry:
+        candidates: tuple[Any, ...] = (
+            res.get("limit_price"),
+            raw.get("limit_price"),
+            response_option_meta.get("limit_price"),
+            option_meta.get("limit_price"),
+            alert.entry_price,
+            fill,
+        )
+        for candidate in candidates:
+            parsed = _float_or_none(candidate)
+            if parsed is not None:
+                return parsed
+        return None
+    return _float_or_none(px)
+
+
 def _filled_qty_from_response(res: dict[str, Any], *, default_qty: float) -> float | None:
     raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
     for key in (
@@ -4485,6 +4520,14 @@ def _execute_new_entry(
         _entry_now = datetime.utcnow()
         _is_coinbase_entry = _broker_source_for_trade == "coinbase"
         _is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+        _tca_ref_entry = _entry_tca_reference_price(
+            res,
+            alert,
+            px=px,
+            snap=snap,
+            fill=fill,
+        )
+        _tca_ref_domain = "option_premium" if _is_option_entry else "underlying_spot"
         (
             _entry_status,
             _entry_broker_status,
@@ -4533,6 +4576,8 @@ def _execute_new_entry(
             "maker_price_increment": res.get("_chili_maker_price_increment"),
             "maker_improved_ticks": res.get("_chili_maker_improved_ticks"),
             "broker_base_size": _broker_qty,
+            "tca_reference_entry_price": _tca_ref_entry,
+            "tca_reference_domain": _tca_ref_domain,
             PROBATION_ENTRY_FLAG: bool(snap.get(PROBATION_ENTRY_FLAG)),
             "probation_recert_policy": snap.get("probation_recert_policy"),
             "probation_recert_notional_multiplier": snap.get(
@@ -4544,16 +4589,11 @@ def _execute_new_entry(
             "cost_gate_tca_cost_bps": snap.get("cost_gate_tca_cost_bps"),
             "managed_exit_execution": _managed_exit_execution,
         }
-        # f-tca-writer-wiring (2026-05-18): capture the AUTOTRADER's decision
-        # price ``px`` as the entry-side TCA reference. ``fill`` (above) is
-        # the broker's actual fill price (or px as fallback); ``px`` is the
-        # autotrader's chosen entry price at signal time. The difference is
-        # the entry slippage that ``apply_tca_on_trade_fill`` will compute
+        # f-tca-writer-wiring (2026-05-18): capture the entry-side TCA
+        # reference in the same price domain as the fill: underlying spot for
+        # equities/crypto, option premium for options. The difference is the
+        # entry slippage that ``apply_tca_on_trade_fill`` will compute
         # downstream when broker_sync runs.
-        try:
-            _tca_ref_entry = float(px) if px is not None else None
-        except (TypeError, ValueError):
-            _tca_ref_entry = None
         tr = Trade(
             user_id=uid,
             ticker=alert.ticker.upper(),
@@ -4589,7 +4629,8 @@ def _execute_new_entry(
         db.commit()
         db.refresh(tr)
         # f-tca-writer-wiring (2026-05-18): compute entry slippage NOW, using
-        # the reference (px) and the broker's actual fill price. Without this,
+        # the same-domain reference and the broker's actual fill price.
+        # Without this,
         # the apply_tca_on_trade_fill call in broker_service is the only
         # writer — and it depends on broker_sync re-touching the trade later.
         # Wrap in try/except per the existing tca pattern in this file.

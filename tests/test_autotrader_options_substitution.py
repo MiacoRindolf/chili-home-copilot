@@ -195,6 +195,51 @@ def test_option_entry_fill_price_never_falls_back_to_underlying_spot():
     assert fill == 4.01
 
 
+def test_option_tca_reference_uses_option_limit_not_underlying_or_fill():
+    alert = _stock_alert()
+    alert.asset_type = "options"
+    alert.entry_price = 1.26
+    snap = {
+        "options_path": True,
+        "option_meta": {
+            "underlying": "SPY",
+            "strike": 729.0,
+            "expiration": "2026-05-15",
+            "option_type": "call",
+            "limit_price": 1.25,
+        },
+    }
+
+    ref = at_mod._entry_tca_reference_price(
+        {
+            "ok": True,
+            "_chili_options_path": True,
+            "price": 1.30,
+            "limit_price": 1.25,
+        },
+        alert,
+        px=715.37,
+        snap=snap,
+        fill=1.30,
+    )
+
+    assert ref == 1.25
+
+
+def test_stock_tca_reference_uses_underlying_decision_price():
+    alert = _stock_alert()
+
+    ref = at_mod._entry_tca_reference_price(
+        {"ok": True, "limit_price": 1.25},
+        alert,
+        px=100.50,
+        snap={},
+        fill=100.55,
+    )
+
+    assert ref == 100.50
+
+
 def test_option_queued_order_stays_working_until_position_truth():
     status, broker_status, filled_qty, remaining_qty = (
         at_mod._entry_lifecycle_from_response(

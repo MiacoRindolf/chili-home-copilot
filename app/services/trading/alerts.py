@@ -1583,6 +1583,13 @@ def _check_open_positions(db: Session, user_id: int | None) -> dict[str, int]:
 
     for trade in open_trades:
         try:
+            try:
+                from .autopilot_scope import is_option_trade
+            except Exception:
+                is_option_trade = None
+            if callable(is_option_trade) and is_option_trade(trade):
+                continue
+
             quote = fetch_quote(trade.ticker)
             price = quote.get("price", 0) if quote else 0
             if not price or price <= 0:

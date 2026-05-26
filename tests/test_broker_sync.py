@@ -18,6 +18,7 @@ integration-level coverage.
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services.broker_service import (
@@ -119,6 +120,121 @@ class TestIsRhTerminal:
 
 
 # ── Order sync ────────────────────────────────────────────────────────
+
+
+class TestRobinhoodOptionOrderRouting:
+    def test_option_order_envelope_is_self_describing(self):
+        from app.services.broker_service import _normalize_option_order_envelope
+
+        out = _normalize_option_order_envelope(
+            {"id": "opt-buy-1", "state": "filled", "average_price": "1.25"},
+            action="buy",
+            underlying="SPY",
+            expiration="2026-06-19",
+            strike=729.0,
+            option_type="call",
+            quantity=2,
+            limit_price=1.25,
+            position_effect="open",
+        )
+
+        assert out["ok"] is True
+        assert out["order_id"] == "opt-buy-1"
+        assert out["state"] == "filled"
+        assert out["status"] == "filled"
+        assert out["side"] == "buy"
+        assert out["position_effect"] == "open"
+        assert out["underlying"] == "SPY"
+        assert out["quantity"] == 2
+        assert out["base_size"] == 2
+        assert out["limit_price"] == 1.25
+        assert out["average_price"] == "1.25"
+
+    @patch("app.services.broker_service.get_order_by_id")
+    @patch("app.services.broker_service.get_option_order_by_id")
+    def test_option_trade_uses_option_order_lookup(self, mock_option_order, mock_stock_order):
+        from app.services.broker_service import _robinhood_order_lookup_for_trade
+
+        trade = SimpleNamespace(
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        mock_option_order.return_value = {"id": "opt-1", "state": "filled"}
+
+        out = _robinhood_order_lookup_for_trade(trade, "opt-1")
+
+        assert out == {"id": "opt-1", "state": "filled"}
+        mock_option_order.assert_called_once_with("opt-1")
+        mock_stock_order.assert_not_called()
+
+    @patch("app.services.broker_service.get_order_by_id")
+    @patch("app.services.broker_service.get_option_order_by_id")
+    def test_stock_trade_uses_stock_order_lookup(self, mock_option_order, mock_stock_order):
+        from app.services.broker_service import _robinhood_order_lookup_for_trade
+
+        trade = SimpleNamespace(indicator_snapshot={})
+        mock_stock_order.return_value = {"id": "stock-1", "state": "filled"}
+
+        out = _robinhood_order_lookup_for_trade(trade, "stock-1")
+
+        assert out == {"id": "stock-1", "state": "filled"}
+        mock_stock_order.assert_called_once_with("stock-1")
+        mock_option_order.assert_not_called()
+
+
+class TestRobinhoodExitFinalizer:
+    def test_option_exit_pnl_uses_contract_multiplier(self):
+        from app.services.trading.robinhood_exit_execution import _finalize_filled_exit
+
+        class _Result:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return []
+
+        class _Db:
+            def add(self, *_args, **_kwargs):
+                return None
+
+            def commit(self):
+                return None
+
+            def execute(self, *_args, **_kwargs):
+                return _Result()
+
+        trade = SimpleNamespace(
+            id=4321,
+            user_id=None,
+            ticker="SPY",
+            direction="long",
+            entry_price=1.25,
+            quantity=1,
+            status="open",
+            broker_source="robinhood",
+            broker_status="submitted",
+            pending_exit_order_id="opt-exit-1",
+            pending_exit_status="submitted",
+            pending_exit_requested_at=datetime.utcnow(),
+            pending_exit_reason="options_premium_take_profit",
+            pending_exit_limit_price=1.45,
+            scan_pattern_id=None,
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+
+        pnl = _finalize_filled_exit(
+            _Db(),
+            trade,
+            raw_order={"id": "opt-exit-1", "state": "filled", "average_price": "1.45"},
+            exit_reason="options_premium_take_profit",
+            fallback_price=None,
+            filled_at=datetime.utcnow(),
+        )
+
+        assert pnl == 20.0
+        assert trade.status == "closed"
+        assert trade.exit_price == 1.45
+        assert trade.pnl == 20.0
+        assert trade.pending_exit_order_id is None
 
 
 class TestSyncOrdersToDb:
@@ -273,7 +389,6 @@ class TestSyncOrdersToDb:
 
 
 # ── Execute proposal status ──────────────────────────────────────────
-
 
 class TestCoinbaseSyncOrdersToDb:
     """Coinbase order sync should also finalize monitor-submitted exits."""

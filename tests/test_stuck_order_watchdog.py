@@ -206,6 +206,7 @@ def test_option_working_order_promotes_to_open_from_position_truth(monkeypatch):
         ticker="ZZTEST",
         broker_order_id="rh-opt-accepted",
         management_scope="auto_trader_v1",
+        direction="long",
         status="working",
         broker_status="accepted",
         quantity=1.0,
@@ -215,6 +216,8 @@ def test_option_working_order_promotes_to_open_from_position_truth(monkeypatch):
         entry_date=now,
         entry_price=1.25,
         avg_fill_price=None,
+        tca_reference_entry_price=715.37,
+        tca_entry_slippage_bps=None,
         last_broker_sync=None,
         filled_at=None,
         first_fill_at=None,
@@ -260,7 +263,12 @@ def test_option_working_order_promotes_to_open_from_position_truth(monkeypatch):
     assert t.filled_quantity == 1.0
     assert t.remaining_quantity == 0.0
     assert t.entry_price == 1.23
-    assert t.indicator_snapshot["entry_execution"]["option_position_verified"] is True
+    assert t.tca_reference_entry_price == 1.25
+    assert t.tca_entry_slippage_bps == -160.0
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["option_position_verified"] is True
+    assert entry["tca_reference_entry_price"] == 1.25
+    assert entry["tca_reference_domain"] == "option_premium"
 
 
 def test_option_working_order_without_position_stays_working(monkeypatch):

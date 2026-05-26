@@ -15,6 +15,7 @@ Exercises:
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -410,6 +411,124 @@ def test_close_position_now_live_plan_levels(paired_client, db: Session) -> None
     assert t.exit_reason == "desk_close_now"
     assert abs(float(t.exit_price) - 9.10) < 1e-6
     fake_adapter.place_market_order.assert_called_once()
+
+
+def _option_trade_stub(**overrides):
+    base = {
+        "id": 8801,
+        "user_id": None,
+        "ticker": "SPY",
+        "direction": "long",
+        "entry_price": 1.25,
+        "quantity": 1.0,
+        "entry_date": datetime.utcnow(),
+        "status": "open",
+        "stop_loss": 1.00,
+        "take_profit": 2.00,
+        "scan_pattern_id": None,
+        "related_alert_id": None,
+        "auto_trader_version": "v1",
+        "tags": "options",
+        "pending_exit_order_id": None,
+        "pending_exit_status": None,
+        "pending_exit_requested_at": None,
+        "pending_exit_reason": None,
+        "pending_exit_limit_price": None,
+        "tca_reference_exit_price": None,
+        "indicator_snapshot": {
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _fake_trade_db(trade):
+    return SimpleNamespace(
+        get=MagicMock(return_value=trade),
+        add=MagicMock(),
+        commit=MagicMock(),
+        refresh=MagicMock(),
+    )
+
+
+def test_close_position_now_live_option_routes_sell_to_close() -> None:
+    t = _option_trade_stub()
+    fake_db = _fake_trade_db(t)
+
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {"bid_price": "1.40", "mark_price": "1.45"}
+    fake_options.place_option_sell.return_value = {
+        "ok": True,
+        "order_id": "opt-close-1",
+        "state": "queued",
+        "raw": {"state": "queued"},
+    }
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ), patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        side_effect=AssertionError("option close-now must not use the spot adapter"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res == {
+        "ok": True,
+        "state": "working",
+        "order_id": "opt-close-1",
+        "pending_exit_status": "queued",
+    }
+    assert t.status == "open"
+    assert t.pending_exit_order_id == "opt-close-1"
+    assert t.pending_exit_status == "queued"
+    assert t.pending_exit_reason == "desk_close_now"
+    assert t.pending_exit_limit_price == pytest.approx(1.40)
+    assert t.tca_reference_exit_price == pytest.approx(1.45)
+    assert t.pending_exit_requested_at is not None
+    fake_options.find_contract.assert_called_once_with("SPY", "2026-06-19", 729.0, "call")
+    fake_options.get_quote.assert_called_once_with("opt-contract-1")
+    fake_options.place_option_sell.assert_called_once_with(
+        underlying="SPY",
+        expiration="2026-06-19",
+        strike=729.0,
+        option_type="call",
+        quantity=1,
+        limit_price=1.40,
+        position_effect="close",
+    )
+
+
+def test_close_position_now_live_option_reuses_active_pending_exit() -> None:
+    t = _option_trade_stub(
+        pending_exit_order_id="opt-close-existing",
+        pending_exit_status="submitted",
+    )
+    fake_db = _fake_trade_db(t)
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        side_effect=AssertionError("active option exit must not be duplicated"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res == {
+        "ok": True,
+        "state": "working",
+        "order_id": "opt-close-existing",
+        "pending_exit_status": "submitted",
+    }
 
 
 def test_close_position_now_live_rh_off(paired_client, db: Session) -> None:

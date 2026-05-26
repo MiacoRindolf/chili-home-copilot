@@ -2713,8 +2713,18 @@ def cleanup_manual_trades(
     )
 
     closed_manual = 0
+    skipped_options = 0
     for trade in manual_open:
         if trade.ticker not in live_tickers:
+            if _is_option_trade_for_order_sync(trade):
+                skipped_options += 1
+                logger.info(
+                    "[broker] Manual cleanup skipped option trade#%s ticker=%s; "
+                    "stock/crypto position lists are option-blind",
+                    getattr(trade, "id", None),
+                    trade.ticker,
+                )
+                continue
             trade.status = "closed"
             trade.exit_date = datetime.utcnow()
             if not trade.exit_reason:
@@ -2753,7 +2763,7 @@ def cleanup_manual_trades(
         db.commit()
         logger.info(f"[broker] Manual cleanup: {closed_manual} manual trade(s) auto-closed")
 
-    return {"closed_manual": closed_manual}
+    return {"closed_manual": closed_manual, "skipped_options": skipped_options}
 
 
 def backfill_closed_trade_pnl(db: Session, user_id: int | None) -> int:
@@ -2776,12 +2786,22 @@ def backfill_closed_trade_pnl(db: Session, user_id: int | None) -> int:
     for trade in missing:
         entry = trade.entry_price or 0.0
         qty = trade.quantity or 0.0
+        is_option = _is_option_trade_for_order_sync(trade)
+        if is_option and not trade.exit_price:
+            logger.info(
+                "[broker] Backfill skipped option trade#%s ticker=%s with no "
+                "premium exit_price; refusing underlying quote fallback",
+                getattr(trade, "id", None),
+                trade.ticker,
+            )
+            continue
         exit_price = trade.exit_price or _get_exit_price(trade.ticker, entry)
         trade.exit_price = exit_price
+        multiplier = 100.0 if is_option else 1.0
         if trade.direction == "short":
-            trade.pnl = round((entry - exit_price) * qty, 2)
+            trade.pnl = round((entry - exit_price) * qty * multiplier, 2)
         else:
-            trade.pnl = round((exit_price - entry) * qty, 2)
+            trade.pnl = round((exit_price - entry) * qty * multiplier, 2)
         patched += 1
 
     if patched:
@@ -4059,6 +4079,41 @@ def get_option_quote(option_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _normalize_option_order_envelope(
+    result: dict[str, Any],
+    *,
+    action: str,
+    underlying: str,
+    expiration: str,
+    strike: float,
+    option_type: str,
+    quantity: int,
+    limit_price: float,
+    position_effect: str,
+) -> dict[str, Any]:
+    state = str(result.get("state") or result.get("status") or "unknown").strip().lower()
+    out: dict[str, Any] = {
+        "ok": True,
+        "order_id": result.get("id") or "",
+        "state": state,
+        "status": state,
+        "raw": result,
+        "side": action,
+        "position_effect": position_effect,
+        "underlying": underlying,
+        "expiration": expiration,
+        "strike": float(strike),
+        "option_type": option_type,
+        "quantity": int(quantity),
+        "base_size": int(quantity),
+        "limit_price": float(limit_price),
+    }
+    for key in ("average_price", "avg_price", "average_fill_price", "price"):
+        if result.get(key) is not None:
+            out[key] = result.get(key)
+    return out
+
+
 def place_option_buy_order(
     underlying: str,
     expiration: str,
@@ -4098,6 +4153,7 @@ def place_option_buy_order(
         return {"ok": False, "error": f"bad inputs: underlying={underlying!r} type={option_type!r}"}
     if quantity <= 0 or limit_price <= 0:
         return {"ok": False, "error": f"bad qty/price: qty={quantity} price={limit_price}"}
+    submitted_limit = normalize_price(limit_price, sym, asset_class="option")
 
     # Pre-flight: confirm the contract exists. Catches typos in
     # expiration / strike before the broker does, gives a clean error
@@ -4118,7 +4174,7 @@ def place_option_buy_order(
                 creditOrDebit="debit",  # buying-to-open is always a debit
                 # Phase 1 (2026-05-01): OPRA tier alignment.
                 # Premium ≥ $3 → penny tick; < $3 → nickel ($0.05) tick.
-                price=normalize_price(limit_price, sym, asset_class="option"),
+                price=submitted_limit,
                 symbol=sym,
                 quantity=int(quantity),
                 expirationDate=expiration,
@@ -4147,9 +4203,19 @@ def place_option_buy_order(
                 return {"ok": False, "error": str(error_msg)[:500], "raw": result}
             logger.info(
                 "[broker] BUY-OPT order placed: %s %s %s%s qty=%d limit=%.2f -> %s",
-                sym, expiration, strike, side, quantity, limit_price, state,
+                sym, expiration, strike, side, quantity, submitted_limit, state,
             )
-            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+            return _normalize_option_order_envelope(
+                result,
+                action="buy",
+                underlying=sym,
+                expiration=expiration,
+                strike=float(strike),
+                option_type=side,
+                quantity=int(quantity),
+                limit_price=float(submitted_limit),
+                position_effect="open",
+            )
 
         error_msg = str(result) if result else "Empty response from Robinhood options"
         logger.error("[broker] BUY-OPT order failed for %s: %s", sym, error_msg)
@@ -4196,6 +4262,7 @@ def place_option_sell_order(
     pe = (position_effect or "close").strip().lower()
     if pe not in ("open", "close"):
         return {"ok": False, "error": f"bad position_effect: {position_effect!r}"}
+    submitted_limit = normalize_price(limit_price, sym, asset_class="option")
 
     # Closing: contract must exist (we should already own it).
     # Opening short: contract must exist + RH approval level handles the
@@ -4219,7 +4286,7 @@ def place_option_sell_order(
                 positionEffect=pe,
                 creditOrDebit=cod,
                 # Phase 1 (2026-05-01): OPRA tier alignment.
-                price=normalize_price(limit_price, sym, asset_class="option"),
+                price=submitted_limit,
                 symbol=sym,
                 quantity=int(quantity),
                 expirationDate=expiration,
@@ -4248,9 +4315,19 @@ def place_option_sell_order(
                 return {"ok": False, "error": str(error_msg)[:500], "raw": result}
             logger.info(
                 "[broker] SELL-OPT order placed: %s %s %s%s qty=%d limit=%.2f effect=%s -> %s",
-                sym, expiration, strike, side, quantity, limit_price, pe, state,
+                sym, expiration, strike, side, quantity, submitted_limit, pe, state,
             )
-            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+            return _normalize_option_order_envelope(
+                result,
+                action="sell",
+                underlying=sym,
+                expiration=expiration,
+                strike=float(strike),
+                option_type=side,
+                quantity=int(quantity),
+                limit_price=float(submitted_limit),
+                position_effect=pe,
+            )
 
         error_msg = str(result) if result else "Empty response from Robinhood options"
         logger.error("[broker] SELL-OPT order failed for %s: %s", sym, error_msg)
@@ -4504,6 +4581,39 @@ def get_order_by_id(order_id: str) -> dict[str, Any] | None:
     return None
 
 
+def get_option_order_by_id(order_id: str) -> dict[str, Any] | None:
+    """Fetch a single option order from Robinhood by ID."""
+    if not is_connected() or not order_id:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+
+        data = rh.orders.get_option_order_info(order_id)
+        if data and isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.debug(f"[broker] get_option_order_by_id({order_id}) failed: {e}")
+    return None
+
+
+def _is_option_trade_for_order_sync(trade: Any) -> bool:
+    try:
+        from .trading.autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
+def _robinhood_order_lookup_for_trade(
+    trade: Any,
+    order_id: str | None,
+) -> dict[str, Any] | None:
+    if _is_option_trade_for_order_sync(trade):
+        return get_option_order_by_id(str(order_id or ""))
+    return get_order_by_id(str(order_id or ""))
+
+
 def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Reconcile local trades (with broker_order_id) against Robinhood.
 
@@ -4556,6 +4666,8 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     for trade in working_trades:
         try:
+            if _is_option_trade_for_order_sync(trade):
+                continue
             rh_order = get_order_by_id(trade.broker_order_id)
             if not rh_order:
                 errors += 1
@@ -4660,7 +4772,10 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     for trade in open_with_pending_exit:
         try:
-            rh_order = get_order_by_id(trade.pending_exit_order_id)
+            rh_order = _robinhood_order_lookup_for_trade(
+                trade,
+                trade.pending_exit_order_id,
+            )
             if not rh_order:
                 errors += 1
                 continue
@@ -4684,6 +4799,8 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     # Reconcile "open" trades that have broker_order_id: if RH says cancelled, fix local
     for trade in open_with_order_id:
         try:
+            if _is_option_trade_for_order_sync(trade):
+                continue
             rh_order = get_order_by_id(trade.broker_order_id)
             if not rh_order:
                 continue

@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+class _FakeQuery:
+    def __init__(self, row):
+        self._row = row
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def one_or_none(self):
+        return self._row
+
+
+class _FakeDb:
+    def __init__(self, trade):
+        self.trade = trade
+        self.add = MagicMock()
+        self.commit = MagicMock()
+        self.refresh = MagicMock()
+
+    def query(self, model):
+        return _FakeQuery(self.trade)
+
+
+def _option_trade_stub():
+    return SimpleNamespace(
+        id=7701,
+        user_id=None,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=1.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        broker_source="robinhood",
+        auto_trader_version="v1",
+        tags="options",
+        pending_exit_order_id=None,
+        pending_exit_status=None,
+        pending_exit_requested_at=None,
+        pending_exit_reason=None,
+        pending_exit_limit_price=None,
+        tca_reference_exit_price=None,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+    )
+
+
+def test_stop_engine_auto_execute_option_uses_sell_to_close(monkeypatch) -> None:
+    from app.config import settings
+    from app.services.trading.stop_engine import _try_auto_execute_stop
+
+    trade = _option_trade_stub()
+    fake_db = _FakeDb(trade)
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {"bid_price": "1.40", "mark_price": "1.45"}
+    fake_options.place_option_sell.return_value = {
+        "ok": True,
+        "order_id": "opt-stop-close",
+        "state": "queued",
+        "raw": {"state": "queued"},
+    }
+
+    monkeypatch.setattr(settings, "chili_auto_execute_stops", True, raising=False)
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ):
+        _try_auto_execute_stop(
+            fake_db,
+            user_id=None,
+            alert={
+                "trade_id": trade.id,
+                "ticker": "SPY",
+                "event": "STOP_HIT",
+                "price": 715.0,
+            },
+        )
+
+    assert trade.status == "open"
+    assert trade.pending_exit_order_id == "opt-stop-close"
+    assert trade.pending_exit_status == "queued"
+    assert trade.pending_exit_reason == "STOP_HIT"
+    assert trade.pending_exit_limit_price == pytest.approx(1.40)
+    assert trade.tca_reference_exit_price == pytest.approx(1.45)
+    fake_options.place_option_sell.assert_called_once_with(
+        underlying="SPY",
+        expiration="2026-06-19",
+        strike=729.0,
+        option_type="call",
+        quantity=1,
+        limit_price=1.40,
+        position_effect="close",
+    )

@@ -20,6 +20,15 @@ from .market_data import fetch_quote, get_indicator_snapshot, is_crypto
 logger = logging.getLogger(__name__)
 
 
+def _is_option_trade_safe(trade: Trade) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
 # ── Watchlist CRUD ────────────────────────────────────────────────────
 
 def get_watchlist(db: Session, user_id: int | None) -> list[WatchlistItem]:
@@ -161,23 +170,30 @@ def close_trade(
     if notes:
         trade.notes = (trade.notes or "") + f"\n{notes}"
 
+    is_option = _is_option_trade_safe(trade)
     try:
         from .tca_service import apply_tca_on_trade_close, resolve_exit_reference_price
 
-        trade.tca_reference_exit_price = resolve_exit_reference_price(
-            trade.ticker,
-            explicit=reference_exit_price,
-            fill_fallback=float(exit_price),
-        )
-        apply_tca_on_trade_close(trade)
+        if is_option:
+            if reference_exit_price is not None and float(reference_exit_price) > 0:
+                trade.tca_reference_exit_price = float(reference_exit_price)
+                apply_tca_on_trade_close(trade)
+        else:
+            trade.tca_reference_exit_price = resolve_exit_reference_price(
+                trade.ticker,
+                explicit=reference_exit_price,
+                fill_fallback=float(exit_price),
+            )
+            apply_tca_on_trade_close(trade)
     except Exception:
         pass
 
-    try:
-        snap = get_indicator_snapshot(trade.ticker)
-        trade.indicator_snapshot = json.dumps(snap)
-    except Exception:
-        pass
+    if not is_option:
+        try:
+            snap = get_indicator_snapshot(trade.ticker)
+            trade.indicator_snapshot = json.dumps(snap)
+        except Exception:
+            pass
 
     try:
         from .brain_work.execution_hooks import on_live_trade_closed
@@ -511,7 +527,8 @@ def _calc_pnl(trade: Trade) -> float:
     diff = trade.exit_price - trade.entry_price
     if trade.direction == "short":
         diff = -diff
-    return round(diff * trade.quantity, 2)
+    multiplier = 100.0 if _is_option_trade_safe(trade) else 1.0
+    return round(diff * trade.quantity * multiplier, 2)
 
 
 # ── P&L Analytics ─────────────────────────────────────────────────────

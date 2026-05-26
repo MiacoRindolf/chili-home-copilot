@@ -43,6 +43,17 @@ logger = logging.getLogger(__name__)
 # Same StrategyParameter family as the synthesis path so the brain's
 # learning loop sees options-related knobs as one unit.
 STRATEGY_FAMILY = "autotrader_options"
+_ACTIVE_PENDING_EXIT_STATES = {
+    "queued",
+    "pending",
+    "confirmed",
+    "unconfirmed",
+    "partially_filled",
+    "open",
+    "working",
+    "submitted",
+}
+_OPTION_EXIT_FILLED_STATES = {"filled", "done", "completed", "complete"}
 
 
 def _register_exit_parameters(db: Session) -> None:
@@ -116,6 +127,74 @@ def _is_option_trade(t: Trade) -> bool:
         return True
     tags = (t.tags or "").lower()
     return "options" in tags
+
+
+def _is_exit_candidate_trade(t: Trade) -> bool:
+    return (
+        str(getattr(t, "status", "") or "").strip().lower() == "open"
+        and _is_option_trade(t)
+    )
+
+
+def _has_active_pending_exit(t: Trade) -> bool:
+    order_id = str(getattr(t, "pending_exit_order_id", "") or "").strip()
+    status = str(getattr(t, "pending_exit_status", "") or "").strip().lower()
+    return bool(order_id) and status in _ACTIVE_PENDING_EXIT_STATES
+
+
+def _option_exit_order_state(res: dict[str, Any]) -> str:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    return str(
+        res.get("state")
+        or res.get("status")
+        or raw.get("state")
+        or raw.get("status")
+        or "submitted"
+    ).strip().lower()
+
+
+def _option_exit_raw_order(
+    res: dict[str, Any],
+    *,
+    order_id: str,
+    state: str,
+) -> dict[str, Any]:
+    raw = dict(res.get("raw") if isinstance(res.get("raw"), dict) else {})
+    raw.setdefault("id", order_id)
+    raw.setdefault("state", state)
+    for key in ("average_price", "avg_price", "average_fill_price", "price"):
+        if key not in raw and res.get(key) is not None:
+            raw[key] = res.get(key)
+    return raw
+
+
+def _parse_option_order_time(raw_order: dict[str, Any]) -> datetime | None:
+    value = (
+        raw_order.get("last_transaction_at")
+        or raw_order.get("updated_at")
+        or raw_order.get("created_at")
+    )
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _configured_autotrader_user_id() -> int | None:
+    uid = getattr(settings, "chili_autotrader_user_id", None) or getattr(
+        settings,
+        "brain_default_user_id",
+        None,
+    )
+    try:
+        return int(uid) if uid is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _opt_meta(t: Trade) -> dict[str, Any]:
@@ -235,12 +314,23 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         "checked": 0,
         "triggered": 0,
         "closed": 0,
+        "working": 0,
         "errors": 0,
         "skipped_no_quote": 0,
         "skipped_adapter_off": 0,
+        "skipped_no_user_scope": 0,
     }
 
     if not bool(getattr(settings, "chili_autotrader_options_exit_monitor_enabled", False)):
+        return summary
+
+    uid = _configured_autotrader_user_id()
+    if uid is None:
+        logger.warning(
+            "[options_exit_monitor] aborted: no chili_autotrader_user_id/"
+            "brain_default_user_id configured; cannot scope live exits"
+        )
+        summary["skipped_no_user_scope"] = 1
         return summary
 
     # Bootstrap StrategyParameter rows on first call (idempotent),
@@ -273,12 +363,18 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
     # Pull open trades that look like options. Filter in Python so we
     # don't have to extend the model's query helpers — the open-trade
     # universe is small enough (typically < 100) that this is cheap.
+    from ..autopilot_scope import live_autopilot_trade_filter
+
     open_trades = (
         db.query(Trade)
-        .filter(Trade.status.in_(("open", "working")))
+        .filter(
+            Trade.user_id == int(uid),
+            Trade.status == "open",
+            live_autopilot_trade_filter(),
+        )
         .all()
     )
-    candidates = [t for t in open_trades if _is_option_trade(t)]
+    candidates = [t for t in open_trades if _is_exit_candidate_trade(t)]
 
     # f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
     # parity with equity + crypto. The pattern-monitor (LLM advisory)
@@ -299,6 +395,9 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
 
     for t in candidates:
         summary["checked"] += 1
+        if _has_active_pending_exit(t):
+            summary["working"] += 1
+            continue
         meta = _opt_meta(t)
         expiration = str(meta.get("expiration") or "")
         strike = meta.get("strike")
@@ -437,27 +536,63 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             continue
 
         # Mark the trade row as 'closing' — pending broker fill. The
-        # broker-sync reconciler picks up the fill and finalizes
-        # status='closed' + exit_price + pnl. We just record the intent
-        # + reason + the new pending order id.
+        # Filled submit responses finalize now; active submit responses leave
+        # broker-sync enough option-order context to finalize later.
+        order_id = str(res.get("order_id") or "").strip()
+        state = _option_exit_order_state(res)
+        if not order_id:
+            summary["errors"] += 1
+            logger.warning(
+                "[options_exit_monitor] trade=%s sell-to-close returned ok with no order_id",
+                t.id,
+            )
+            continue
+
+        now = datetime.now(timezone.utc)
+        raw_order = _option_exit_raw_order(res, order_id=order_id, state=state)
+        reference_price = current_premium or limit_price
         try:
-            db.execute(text(
-                """
-                UPDATE trading_trades
-                SET pending_exit_order_id = :oid,
-                    pending_exit_status = 'submitted',
-                    pending_exit_requested_at = :ts,
-                    pending_exit_reason = :rsn
-                WHERE id = :tid
-                """
-            ), {
-                "oid": res.get("order_id"),
-                "ts": datetime.now(timezone.utc),
-                "rsn": reason,
-                "tid": t.id,
-            })
-            db.commit()
-            summary["closed"] += 1
+            if state in _OPTION_EXIT_FILLED_STATES:
+                from ..robinhood_exit_execution import _finalize_filled_exit
+
+                t.pending_exit_order_id = order_id
+                t.pending_exit_status = state
+                t.pending_exit_requested_at = now.replace(tzinfo=None)
+                t.pending_exit_reason = reason
+                t.pending_exit_limit_price = float(limit_price)
+                t.tca_reference_exit_price = float(reference_price)
+                _finalize_filled_exit(
+                    db,
+                    t,
+                    raw_order=raw_order,
+                    exit_reason=reason,
+                    fallback_price=float(limit_price),
+                    filled_at=_parse_option_order_time(raw_order) or now,
+                )
+                summary["closed"] += 1
+            else:
+                db.execute(text(
+                    """
+                    UPDATE trading_trades
+                    SET pending_exit_order_id = :oid,
+                        pending_exit_status = :state,
+                        pending_exit_requested_at = :ts,
+                        pending_exit_reason = :rsn,
+                        pending_exit_limit_price = :limit,
+                        tca_reference_exit_price = :ref
+                    WHERE id = :tid
+                    """
+                ), {
+                    "oid": order_id,
+                    "state": state or "submitted",
+                    "ts": now,
+                    "rsn": reason,
+                    "limit": float(limit_price),
+                    "ref": float(reference_price),
+                    "tid": t.id,
+                })
+                db.commit()
+                summary["working"] += 1
             if monitor_exit_meta is not None:
                 # f-options-exit-monitor-pattern-exit-now-audit
                 # (2026-05-06): monitor-driven exits log the audit
@@ -466,12 +601,12 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
                 # column stays canonical "pattern_exit_now" -- audit
                 # detail belongs in the log line, not the 50-char field.
                 logger.info(
-                    "[options_exit_monitor] trade=%s closed reason=%s "
+                    "[options_exit_monitor] trade=%s exit_state=%s reason=%s "
                     "premium_now=%s entry=%s order_id=%s "
                     "monitor_decision_id=%s monitor_src=%s "
                     "monitor_age_h=%s monitor_price=%s",
-                    t.id, reason, current_premium, entry_premium,
-                    res.get("order_id"),
+                    t.id, state, reason, current_premium, entry_premium,
+                    order_id,
                     monitor_exit_meta.get("decision_id"),
                     monitor_exit_meta.get("decision_source"),
                     monitor_exit_meta.get("decision_age_hours"),
@@ -479,9 +614,9 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
                 )
             else:
                 logger.info(
-                    "[options_exit_monitor] trade=%s closed reason=%s premium_now=%s "
+                    "[options_exit_monitor] trade=%s exit_state=%s reason=%s premium_now=%s "
                     "entry=%s order_id=%s",
-                    t.id, reason, current_premium, entry_premium, res.get("order_id"),
+                    t.id, state, reason, current_premium, entry_premium, order_id,
                 )
         except Exception:
             summary["errors"] += 1

@@ -173,6 +173,42 @@ def _position_avg_price(pos: dict[str, Any]) -> float | None:
     return None
 
 
+def _option_tca_reference_price(t: Trade, meta: dict[str, Any]) -> float | None:
+    entry = _entry_execution_snapshot(t)
+    if str(entry.get("tca_reference_domain") or "").strip().lower() == "option_premium":
+        tagged_ref = _safe_float(entry.get("tca_reference_entry_price"))
+        if tagged_ref is not None and tagged_ref > 0:
+            return tagged_ref
+
+    for candidate in (meta.get("limit_price"), getattr(t, "entry_price", None)):
+        price = _safe_float(candidate)
+        if price is not None and price > 0:
+            return price
+
+    existing_ref = _safe_float(getattr(t, "tca_reference_entry_price", None))
+    if existing_ref is not None and existing_ref > 0:
+        return existing_ref
+    return None
+
+
+def _apply_option_entry_tca(t: Trade, meta: dict[str, Any]) -> float | None:
+    ref = _option_tca_reference_price(t, meta)
+    if ref is None:
+        return None
+    t.tca_reference_entry_price = ref
+    try:
+        from .tca_service import apply_tca_on_trade_fill
+
+        apply_tca_on_trade_fill(t)
+    except Exception:
+        logger.debug(
+            "[stuck_order_watchdog] option entry TCA failed trade=%s",
+            getattr(t, "id", None),
+            exc_info=True,
+        )
+    return ref
+
+
 def _position_matches_option_meta(
     pos: dict[str, Any],
     *,
@@ -257,11 +293,19 @@ def _process_option_position_truth(db: Session, t: Trade, now: datetime) -> str:
         if avg_price is not None:
             t.avg_fill_price = avg_price
             t.entry_price = avg_price
+        tca_ref = _option_tca_reference_price(t, meta)
+        if tca_ref is not None:
+            t.tca_reference_entry_price = tca_ref
+        if avg_price is not None:
+            tca_ref = _apply_option_entry_tca(t, meta)
         _update_entry_execution(
             t,
             option_position_verified=True,
             option_position_verified_at=now.isoformat(),
             option_position_quantity=held_qty,
+            option_position_avg_price=avg_price,
+            tca_reference_entry_price=tca_ref,
+            tca_reference_domain="option_premium",
         )
         db.commit()
         return "option_position_verified"
