@@ -147,3 +147,65 @@ def test_options_substitute_runs_after_underlying_positive_edge(monkeypatch):
     assert alert.asset_type == "options"
     assert alert.entry_price == 1.23
     assert alert.indicator_snapshot["option_meta"]["strike"] == 105.0
+
+
+def test_options_alert_skips_equity_llm_revalidation(monkeypatch):
+    alert = _stock_alert()
+    alert.asset_type = "options"
+
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_llm_revalidation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_llm_revalidation_skip_options_path",
+        True,
+    )
+
+    should_run, reason = at_mod._should_run_llm_revalidation(alert)
+
+    assert should_run is False
+    assert reason == at_mod.LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH
+
+
+def test_option_entry_fill_price_never_falls_back_to_underlying_spot():
+    alert = _stock_alert()
+    alert.asset_type = "options"
+    alert.entry_price = 4.01
+    snap = {
+        "options_path": True,
+        "option_meta": {
+            "underlying": "SPY",
+            "strike": 729.0,
+            "expiration": "2026-05-15",
+            "option_type": "call",
+            "limit_price": 4.01,
+        },
+    }
+
+    fill = at_mod._entry_fill_price_from_response(
+        {"ok": True, "order_id": "oid", "raw": {"state": "queued"}},
+        alert,
+        px=715.37,
+        snap=snap,
+    )
+
+    assert fill == 4.01
+
+
+def test_option_queued_order_stays_working_until_position_truth():
+    status, broker_status, filled_qty, remaining_qty = (
+        at_mod._entry_lifecycle_from_response(
+            broker_source="robinhood",
+            res={"ok": True, "order_id": "oid", "state": "queued"},
+            snap={"options_path": True},
+            qty=1.0,
+        )
+    )
+
+    assert status == "working"
+    assert broker_status == "queued"
+    assert filled_qty == 0.0
+    assert remaining_qty == 1.0

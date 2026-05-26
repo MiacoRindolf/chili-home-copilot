@@ -128,11 +128,11 @@ def _assert_migration_ids_unique() -> None:
 
 
 def _tables(conn) -> set:
-    return set(sa_inspect(conn.engine).get_table_names())
+    return set(sa_inspect(conn).get_table_names())
 
 
 def _columns(conn, table: str) -> set:
-    return {c["name"] for c in sa_inspect(conn.engine).get_columns(table)}
+    return {c["name"] for c in sa_inspect(conn).get_columns(table)}
 
 
 def _migration_001_add_email(conn) -> None:
@@ -19229,8 +19229,12 @@ def _migration_275_position_identity_phase5d_decision_pattern_backfill(conn) -> 
     decision pattern ids are filled, and existing decision attribution is never
     overwritten.
     """
-    tables = _tables(conn)
-    if not {"trading_decisions", "trading_trades"}.issubset(tables):
+    has_tables = conn.execute(text("""
+        SELECT
+            to_regclass('public.trading_decisions') IS NOT NULL
+            AND to_regclass('public.trading_trades') IS NOT NULL
+    """)).scalar()
+    if not has_tables:
         return
 
     result = conn.execute(text("""

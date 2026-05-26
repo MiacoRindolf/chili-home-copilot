@@ -197,6 +197,196 @@ def test_broker_reports_terminal_mirrors_state_no_cancel(db, monkeypatch):
     assert t.broker_status == "filled"
 
 
+def test_option_working_order_promotes_to_open_from_position_truth(monkeypatch):
+    commits = {"count": 0}
+    fake_db = SimpleNamespace(commit=lambda: commits.__setitem__("count", commits["count"] + 1))
+    now = datetime.utcnow()
+    t = SimpleNamespace(
+        id=90210,
+        ticker="ZZTEST",
+        broker_order_id="rh-opt-accepted",
+        management_scope="auto_trader_v1",
+        status="working",
+        broker_status="accepted",
+        quantity=1.0,
+        filled_quantity=None,
+        remaining_quantity=1.0,
+        submitted_at=now,
+        entry_date=now,
+        entry_price=1.25,
+        avg_fill_price=None,
+        last_broker_sync=None,
+        filled_at=None,
+        first_fill_at=None,
+        last_fill_at=None,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "ZZTEST",
+                    "expiration": "2026-06-19",
+                    "strike": 105.0,
+                    "option_type": "call",
+                    "limit_price": 1.25,
+                },
+            },
+            "entry_execution": {"active_order_type": "option_limit"},
+        },
+    )
+    monkeypatch.setattr(
+        wd,
+        "_get_options_adapter",
+        lambda: SimpleNamespace(
+            is_enabled=lambda: True,
+            get_open_positions=lambda: [
+                {
+                    "chain_symbol": "ZZTEST",
+                    "expiration_date": "2026-06-19",
+                    "strike_price": "105.0",
+                    "type": "call",
+                    "quantity": "1",
+                    "average_price": "1.23",
+                }
+            ],
+        ),
+    )
+
+    outcome = wd._process_option_position_truth(fake_db, t, now)
+
+    assert outcome == "option_position_verified"
+    assert commits["count"] == 1
+    assert t.status == "open"
+    assert t.broker_status == "filled"
+    assert t.filled_quantity == 1.0
+    assert t.remaining_quantity == 0.0
+    assert t.entry_price == 1.23
+    assert t.indicator_snapshot["entry_execution"]["option_position_verified"] is True
+
+
+def test_option_working_order_without_position_stays_working(monkeypatch):
+    commits = {"count": 0}
+    fake_db = SimpleNamespace(commit=lambda: commits.__setitem__("count", commits["count"] + 1))
+    now = datetime.utcnow()
+    t = SimpleNamespace(
+        id=90211,
+        ticker="ZZTEST",
+        broker_order_id="rh-opt-resting",
+        management_scope="auto_trader_v1",
+        status="working",
+        broker_status="accepted",
+        quantity=1.0,
+        filled_quantity=None,
+        remaining_quantity=1.0,
+        submitted_at=now,
+        entry_date=now,
+        entry_price=1.25,
+        avg_fill_price=None,
+        last_broker_sync=None,
+        filled_at=None,
+        first_fill_at=None,
+        last_fill_at=None,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "ZZTEST",
+                    "expiration": "2026-06-19",
+                    "strike": 105.0,
+                    "option_type": "call",
+                    "limit_price": 1.25,
+                },
+            },
+            "entry_execution": {"active_order_type": "option_limit"},
+        },
+    )
+    monkeypatch.setattr(
+        wd,
+        "_get_options_adapter",
+        lambda: SimpleNamespace(
+            is_enabled=lambda: True,
+            cancel=lambda _order_id: (_ for _ in ()).throw(
+                AssertionError("fresh option order should not be cancelled")
+            ),
+            get_open_positions=lambda: [],
+        ),
+    )
+
+    outcome = wd._process_option_position_truth(fake_db, t, now)
+
+    assert outcome == "option_position_not_found"
+    assert commits["count"] == 0
+    assert t.status == "working"
+    assert t.broker_status == "accepted"
+    assert t.filled_quantity is None
+    assert t.remaining_quantity == 1.0
+
+
+def test_option_working_order_times_out_and_cancels_when_no_position(monkeypatch):
+    commits = {"count": 0}
+    fake_db = SimpleNamespace(commit=lambda: commits.__setitem__("count", commits["count"] + 1))
+    now = datetime.utcnow()
+    submitted_at = now - timedelta(seconds=3600)
+    cancelled = {"order_id": None}
+    t = SimpleNamespace(
+        id=90212,
+        ticker="ZZTEST",
+        broker_order_id="rh-opt-timeout",
+        management_scope="auto_trader_v1",
+        status="working",
+        broker_status="accepted",
+        quantity=1.0,
+        filled_quantity=None,
+        remaining_quantity=1.0,
+        submitted_at=submitted_at,
+        entry_date=submitted_at,
+        entry_price=1.25,
+        avg_fill_price=None,
+        last_broker_sync=None,
+        filled_at=None,
+        first_fill_at=None,
+        last_fill_at=None,
+        exit_reason=None,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "ZZTEST",
+                    "expiration": "2026-06-19",
+                    "strike": 105.0,
+                    "option_type": "call",
+                    "limit_price": 1.25,
+                },
+            },
+            "entry_execution": {"active_order_type": "option_limit"},
+        },
+    )
+
+    def _cancel(order_id: str):
+        cancelled["order_id"] = order_id
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        wd,
+        "_get_options_adapter",
+        lambda: SimpleNamespace(
+            is_enabled=lambda: True,
+            get_open_positions=lambda: [],
+            cancel=_cancel,
+        ),
+    )
+
+    outcome = wd._process_option_position_truth(fake_db, t, now)
+
+    assert outcome == "option_entry_timeout_cancelled"
+    assert cancelled["order_id"] == "rh-opt-timeout"
+    assert commits["count"] == 1
+    assert t.status == "cancelled"
+    assert t.broker_status == "cancelled"
+    assert t.exit_reason == "option_entry_timeout_no_position"
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["option_entry_cancel_reason"] == "timeout_no_position"
+
+
 def test_broker_unknown_order_marks_rejected(db, monkeypatch):
     u = models.User(name="stuck_wd_u4")
     db.add(u)

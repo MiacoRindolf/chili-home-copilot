@@ -12,8 +12,11 @@ from sqlalchemy.orm import Session, aliased
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
+    AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
@@ -98,6 +101,9 @@ PROBATION_JSON_FALSE = "false"
 PROBATION_DEFAULT_NOTIONAL_MULTIPLIER = 0.25
 MONEY_ROUND_DIGITS = 2
 MULTIPLIER_ROUND_DIGITS = 6
+QUANTITY_ROUND_DIGITS = 8
+PERCENT_SCALE = 100.0
+DEFAULT_PER_TRADE_RISK_PCT = 1.0
 PROBATION_QUOTA_REASON_PATTERN = "probation_quota_exceeded:pattern"
 PROBATION_QUOTA_REASON_PORTFOLIO = "probation_quota_exceeded:portfolio"
 PROBATION_OPTIONS_PATH_BLOCKED_REASON = "probation_options_path_blocked"
@@ -129,7 +135,25 @@ SHADOW_OBSERVATION_REASON_SIGNAL_LANE = "selector:shadow_observation_signal_lane
 SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED = (
     "selector:shadow_observation_signal_lane_disabled"
 )
+SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK = "base_risk_notional"
+SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS = "full_diagnostics"
+SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING = (
+    "chili_autotrader_shadow_observation_diagnostic_sizing_enabled"
+)
+SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_SETTING = (
+    "chili_autotrader_shadow_observation_evidence_notional_usd"
+)
+SHADOW_OBSERVATION_ADVISORY_SIZING_SKIP_REASON = "shadow_observation_only"
+SHADOW_OBSERVATION_LIGHTWEIGHT_DIAL = 1.0
+SHADOW_OBSERVATION_NOTIONAL_SOURCE_EVIDENCE = "shadow_observation_evidence_notional"
+SHADOW_OBSERVATION_NOTIONAL_SOURCE_ASSUMED = "shadow_observation_assumed_capital_pct"
+SHADOW_OBSERVATION_NOTIONAL_SOURCE_UNAVAILABLE = "shadow_observation_capital_unavailable"
 LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION = "shadow_observation_only"
+LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH = "options_path"
+_OPTION_ENTRY_FILLED_STATES = frozenset({"filled", "done", "completed", "complete"})
+_OPTION_ENTRY_PARTIAL_STATES = frozenset(
+    {"partially_filled", "partial", "partial_filled"}
+)
 
 
 def _alert_signal_lane(alert: BreakoutAlert) -> str:
@@ -158,7 +182,117 @@ def _should_run_llm_revalidation(alert: BreakoutAlert) -> tuple[bool, str | None
         )
     ):
         return False, LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION
+    if (
+        (alert.asset_type or "").strip().lower() == "options"
+        and bool(
+            getattr(
+                settings,
+                "chili_autotrader_llm_revalidation_skip_options_path",
+                AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
+            )
+        )
+    ):
+        return False, LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH
     return True, None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _order_state_from_response(res: dict[str, Any]) -> str:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    return str(
+        res.get("state")
+        or res.get("status")
+        or raw.get("state")
+        or raw.get("status")
+        or ""
+    ).strip().lower()
+
+
+def _entry_fill_price_from_response(
+    res: dict[str, Any],
+    alert: BreakoutAlert,
+    *,
+    px: float,
+    snap: dict[str, Any],
+) -> float:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    option_meta = snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
+    is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+    candidates: list[Any] = [
+        raw.get("average_price"),
+        raw.get("avg_price"),
+        raw.get("price"),
+        res.get("average_price"),
+        res.get("avg_price"),
+        res.get("price"),
+    ]
+    if is_option_entry:
+        candidates.extend(
+            [
+                res.get("limit_price"),
+                option_meta.get("limit_price"),
+                alert.entry_price,
+            ]
+        )
+    else:
+        candidates.append(px)
+    for candidate in candidates:
+        parsed = _float_or_none(candidate)
+        if parsed is not None:
+            return parsed
+    return float(px)
+
+
+def _filled_qty_from_response(res: dict[str, Any], *, default_qty: float) -> float | None:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    for key in (
+        "filled_quantity",
+        "cumulative_filled_quantity",
+        "cumulative_quantity",
+        "filled_size",
+    ):
+        parsed = _float_or_none(res.get(key))
+        if parsed is not None:
+            return min(parsed, default_qty)
+        parsed = _float_or_none(raw.get(key))
+        if parsed is not None:
+            return min(parsed, default_qty)
+    return None
+
+
+def _entry_lifecycle_from_response(
+    *,
+    broker_source: str,
+    res: dict[str, Any],
+    snap: dict[str, Any],
+    qty: float,
+) -> tuple[str, str | None, float | None, float | None]:
+    is_coinbase_entry = broker_source == "coinbase"
+    if is_coinbase_entry:
+        return "working", "accepted", 0.0, qty
+
+    is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+    if is_option_entry:
+        state = _order_state_from_response(res)
+        filled_qty = _filled_qty_from_response(res, default_qty=qty)
+        if state in _OPTION_ENTRY_FILLED_STATES:
+            filled = filled_qty if filled_qty is not None else qty
+            return "open", state or "filled", filled, max(qty - filled, 0.0)
+        if state in _OPTION_ENTRY_PARTIAL_STATES:
+            filled = filled_qty if filled_qty is not None else 0.0
+            return "working", state or "partially_filled", filled, max(qty - filled, 0.0)
+        return "working", state or "accepted", 0.0, qty
+
+    return "open", None, None, None
 
 
 def _autotrader_tick_note(
@@ -610,10 +744,15 @@ def _resolve_entry_risk_notional(
         fallback_notional = 0.0
     try:
         per_trade_pct = float(
-            getattr(settings, "chili_autotrader_per_trade_risk_pct", 1.0) or 0.0
+            getattr(
+                settings,
+                "chili_autotrader_per_trade_risk_pct",
+                DEFAULT_PER_TRADE_RISK_PCT,
+            )
+            or 0.0
         )
     except Exception:
-        per_trade_pct = 1.0
+        per_trade_pct = DEFAULT_PER_TRADE_RISK_PCT
 
     equity, cap_source = resolve_effective_capital(db, settings)
     brain_ctx = resolve_brain_risk_context(
@@ -631,7 +770,7 @@ def _resolve_entry_risk_notional(
     snap["notional_explicit_fallback_usd"] = round(float(fallback_notional), 2)
 
     if equity > 0 and per_trade_pct > 0:
-        return equity * (per_trade_pct / 100.0) * dial, {
+        return equity * (per_trade_pct / PERCENT_SCALE) * dial, {
             **snap,
             "notional_source": "equity_pct_dial",
         }
@@ -641,6 +780,72 @@ def _resolve_entry_risk_notional(
             "notional_source": "explicit_env_notional_dial",
         }
     return 0.0, {**snap, "notional_source": "capital_unavailable"}
+
+
+def _resolve_shadow_observation_lightweight_notional() -> tuple[float, dict[str, Any]]:
+    """Resolve paper evidence size without live broker/account calls."""
+    try:
+        evidence_notional = float(
+            getattr(
+                settings,
+                SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_SETTING,
+                AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD,
+            )
+            or 0.0
+        )
+    except Exception:
+        evidence_notional = AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD
+    try:
+        per_trade_pct = float(
+            getattr(
+                settings,
+                "chili_autotrader_per_trade_risk_pct",
+                DEFAULT_PER_TRADE_RISK_PCT,
+            )
+            or 0.0
+        )
+    except Exception:
+        per_trade_pct = 0.0
+    try:
+        assumed_capital = float(
+            getattr(settings, "chili_autotrader_assumed_capital_usd", 0.0) or 0.0
+        )
+    except Exception:
+        assumed_capital = 0.0
+
+    snap: dict[str, Any] = {
+        "notional_risk_pct": per_trade_pct,
+        "notional_dial": SHADOW_OBSERVATION_LIGHTWEIGHT_DIAL,
+        "notional_capital_source": "shadow_observation_lightweight",
+        "notional_capital_usd": round(float(assumed_capital), MONEY_ROUND_DIGITS),
+        "notional_explicit_fallback_usd": round(
+            float(evidence_notional),
+            MONEY_ROUND_DIGITS,
+        ),
+        "notional_evidence_configured_usd": round(
+            float(evidence_notional),
+            MONEY_ROUND_DIGITS,
+        ),
+        "notional_broker_lookup_skipped": True,
+    }
+    if evidence_notional > 0.0:
+        return evidence_notional * SHADOW_OBSERVATION_LIGHTWEIGHT_DIAL, {
+            **snap,
+            "notional_source": SHADOW_OBSERVATION_NOTIONAL_SOURCE_EVIDENCE,
+        }
+    if assumed_capital > 0.0 and per_trade_pct > 0.0:
+        return (
+            assumed_capital
+            * (per_trade_pct / PERCENT_SCALE)
+            * SHADOW_OBSERVATION_LIGHTWEIGHT_DIAL
+        ), {
+            **snap,
+            "notional_source": SHADOW_OBSERVATION_NOTIONAL_SOURCE_ASSUMED,
+        }
+    return 0.0, {
+        **snap,
+        "notional_source": SHADOW_OBSERVATION_NOTIONAL_SOURCE_UNAVAILABLE,
+    }
 
 
 def _managed_edge_execution_levels(
@@ -2908,6 +3113,12 @@ def _execute_broker_buy(
                 out, kind="blocked", reason=f"broker:{res.get('error')}", alert=alert,
             )
             return None
+        res.setdefault("_chili_broker_source", "robinhood")
+        res["_chili_options_path"] = True
+        res["_chili_option_meta"] = opt_meta
+        res["_chili_option_order_state"] = _order_state_from_response(res)
+        res.setdefault("base_size", int(qty))
+        res.setdefault("limit_price", float(opt_meta.get("limit_price") or alert.entry_price or 0))
         return res
 
     # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
@@ -3515,6 +3726,65 @@ def _execute_scale_in(
     _autotrader_tick_note(out, kind="scaled_in", reason="ok", alert=alert)
 
 
+def _record_shadow_observation_entry(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    qty: float,
+    px: float,
+    snap: dict[str, Any],
+    llm_snap: dict[str, Any] | None,
+    live: bool,
+    out: dict[str, Any],
+) -> None:
+    _reason = str(
+        getattr(
+            alert,
+            "_chili_shadow_observation_reason",
+            SHADOW_OBSERVATION_REASON_STAGE,
+        )
+        or SHADOW_OBSERVATION_REASON_STAGE
+    )
+    snap["paper_observation_reason"] = _reason
+    snap["paper_observation_live_orders_effective"] = bool(live)
+    if getattr(alert, "_chili_shadow_observation_signal_lane", None):
+        snap["paper_observation_signal_lane"] = getattr(
+            alert,
+            "_chili_shadow_observation_signal_lane",
+            None,
+        )
+    _shadow_stock_fastlane = _queue_shadow_stock_fastlane_for_observation(
+        db,
+        alert=alert,
+        pattern=_pattern_row(db, alert.scan_pattern_id),
+        reason=_reason,
+        snap=snap,
+    )
+    if _shadow_stock_fastlane is not None:
+        snap["shadow_stock_fastlane"] = _shadow_stock_fastlane
+    _audit(
+        db,
+        user_id=uid,
+        alert=alert,
+        decision="blocked",
+        reason=_reason,
+        rule_snapshot=snap,
+        llm_snapshot=llm_snap,
+    )
+    out["skipped"] += 1
+    _autotrader_tick_note(out, kind="blocked", reason=_reason, alert=alert)
+    _maybe_open_paper_shadow(
+        db,
+        uid=uid,
+        alert=alert,
+        qty=qty,
+        px=px,
+        snap=snap,
+        decision="blocked_shadow_promoted",
+    )
+
+
 def _execute_new_entry(
     db: Session,
     uid: int,
@@ -3531,9 +3801,29 @@ def _execute_new_entry(
         _autotrader_tick_note(out, kind="skipped", reason="bad_px", alert=alert)
         return
 
+    _shadow_observation_only = bool(
+        getattr(alert, "_chili_shadow_observation_only", False)
+    )
+    _shadow_observation_diagnostic_sizing_enabled = bool(
+        getattr(
+            settings,
+            SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING,
+            AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
+        )
+    )
+    _shadow_observation_lightweight_sizing_supported = not bool(snap.get("options_path"))
+    _skip_shadow_observation_advisory_sizing = (
+        _shadow_observation_only
+        and _shadow_observation_lightweight_sizing_supported
+        and not _shadow_observation_diagnostic_sizing_enabled
+    )
+
     # Entry size starts from risk budget and account equity. A fixed dollar
     # fallback is honored only when explicitly configured above zero.
-    notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)
+    if _skip_shadow_observation_advisory_sizing:
+        notional, _notional_snap = _resolve_shadow_observation_lightweight_notional()
+    else:
+        notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)
     snap.update(_notional_snap)
     if bool(getattr(alert, "_chili_pilot_bootstrap_recert_allowed", False)):
         snap["pilot_bootstrap_recert_allowed"] = True
@@ -3560,36 +3850,90 @@ def _execute_new_entry(
     snap["notional_effective"] = round(notional, 2)
     _risk_pct = float(_notional_snap.get("notional_risk_pct") or 0.0)
     _fallback_equity = (
-        fallback_notional / (_risk_pct / 100.0)
+        fallback_notional / (_risk_pct / PERCENT_SCALE)
         if fallback_notional > 0 and _risk_pct > 0
         else fallback_notional
     )
+    if _shadow_observation_only:
+        snap["shadow_observation_lightweight_sizing_supported"] = (
+            _shadow_observation_lightweight_sizing_supported
+        )
+        snap["shadow_observation_diagnostic_sizing_enabled"] = (
+            _shadow_observation_diagnostic_sizing_enabled
+        )
+        snap["shadow_observation_sizing_mode"] = (
+            SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK
+            if _skip_shadow_observation_advisory_sizing
+            else SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS
+        )
+    if _skip_shadow_observation_advisory_sizing:
+        snap["shadow_observation_advisory_sizing_skipped"] = True
+        snap["shadow_observation_advisory_sizing_skip_reason"] = (
+            SHADOW_OBSERVATION_ADVISORY_SIZING_SKIP_REASON
+        )
+        if not snap.get("options_path"):
+            from .tick_normalizer import normalize_quantity
+
+            qty_raw = notional / px
+            qty = float(normalize_quantity(qty_raw, alert.ticker))
+            snap["qty_source"] = "risk_notional_fractional"
+            if qty <= 0 and px > 0:
+                snap["qty_raw"] = round(qty_raw, QUANTITY_ROUND_DIGITS)
+                _audit(
+                    db, user_id=uid, alert=alert,
+                    decision="skipped",
+                    reason="notional_below_trade_unit",
+                    rule_snapshot=snap,
+                )
+                out["skipped"] += 1
+                _autotrader_tick_note(
+                    out,
+                    kind="skipped",
+                    reason="notional_below_trade_unit",
+                    alert=alert,
+                )
+                return
+            snap["notional_effective"] = round(qty * px, MONEY_ROUND_DIGITS)
+            snap["qty_raw"] = round(qty_raw, QUANTITY_ROUND_DIGITS)
+            _record_shadow_observation_entry(
+                db,
+                uid=uid,
+                alert=alert,
+                qty=qty,
+                px=px,
+                snap=snap,
+                llm_snap=llm_snap,
+                live=live,
+                out=out,
+            )
+            return
 
     # Q1.T5 — HRP shadow sizing (and live override when flag ON).
     # Always logged for shadow comparison; the chosen_sizing field of the
     # decision tells us which to honor. Naive fallback when HRP is
     # unavailable (insufficient history etc.) so flag-flip is safe.
-    try:
-        from .hrp_sizing import decide_position_size as _hrp_decide
-        _hrp_decision = _hrp_decide(
-            db,
-            symbol=(alert.ticker or "").upper(),
-            account_equity_usd=float(equity if equity > 0 else _fallback_equity),
-            user_id=uid,
-        )
-        snap["hrp_naive_size_usd"] = _hrp_decision.naive_size_usd
-        snap["hrp_size_usd"] = _hrp_decision.hrp_size_usd
-        snap["hrp_weight"] = _hrp_decision.hrp_weight
-        snap["hrp_chosen_sizing"] = _hrp_decision.chosen_sizing
-        snap["hrp_n_active_positions"] = _hrp_decision.n_active_positions
-        if _hrp_decision.chosen_sizing == "hrp" and _hrp_decision.hrp_size_usd:
-            # Flag is ON and HRP succeeded: override notional with HRP value.
-            snap["notional_before_hrp"] = round(notional, 2)
-            notional = float(_hrp_decision.hrp_size_usd)
-            snap["notional_effective"] = round(notional, 2)
-            snap["notional_source"] = "hrp_allocated"
-    except Exception as _hrp_e:
-        snap["hrp_error"] = str(_hrp_e)[:200]
+    if not _skip_shadow_observation_advisory_sizing:
+        try:
+            from .hrp_sizing import decide_position_size as _hrp_decide
+            _hrp_decision = _hrp_decide(
+                db,
+                symbol=(alert.ticker or "").upper(),
+                account_equity_usd=float(equity if equity > 0 else _fallback_equity),
+                user_id=uid,
+            )
+            snap["hrp_naive_size_usd"] = _hrp_decision.naive_size_usd
+            snap["hrp_size_usd"] = _hrp_decision.hrp_size_usd
+            snap["hrp_weight"] = _hrp_decision.hrp_weight
+            snap["hrp_chosen_sizing"] = _hrp_decision.chosen_sizing
+            snap["hrp_n_active_positions"] = _hrp_decision.n_active_positions
+            if _hrp_decision.chosen_sizing == "hrp" and _hrp_decision.hrp_size_usd:
+                # Flag is ON and HRP succeeded: override notional with HRP value.
+                snap["notional_before_hrp"] = round(notional, 2)
+                notional = float(_hrp_decision.hrp_size_usd)
+                snap["notional_effective"] = round(notional, 2)
+                snap["notional_source"] = "hrp_allocated"
+        except Exception as _hrp_e:
+            snap["hrp_error"] = str(_hrp_e)[:200]
 
     # K Phase 3 S.4 — survival-classifier sizing multiplier.
     # Composes AFTER HRP (so HRP allocates risk-parity weight, then K
@@ -3925,7 +4269,7 @@ def _execute_new_entry(
                 reason="pilot_promoted_notional_below_trade_unit", alert=alert,
             )
             return
-        snap["qty_raw"] = round(qty_raw, 8)
+        snap["qty_raw"] = round(qty_raw, QUANTITY_ROUND_DIGITS)
         _audit(
             db, user_id=uid, alert=alert,
             decision="skipped",
@@ -3942,53 +4286,19 @@ def _execute_new_entry(
         # Options keep the premium * contract-multiplier notional set above.
         if not snap.get("options_path"):
             snap["notional_effective"] = round(qty * px, 2)
-        snap["qty_raw"] = round(qty_raw, 8)
+        snap["qty_raw"] = round(qty_raw, QUANTITY_ROUND_DIGITS)
 
-    if bool(getattr(alert, "_chili_shadow_observation_only", False)):
-        _reason = str(
-            getattr(
-                alert,
-                "_chili_shadow_observation_reason",
-                SHADOW_OBSERVATION_REASON_STAGE,
-            )
-            or SHADOW_OBSERVATION_REASON_STAGE
-        )
-        snap["paper_observation_reason"] = _reason
-        snap["paper_observation_live_orders_effective"] = bool(live)
-        if getattr(alert, "_chili_shadow_observation_signal_lane", None):
-            snap["paper_observation_signal_lane"] = getattr(
-                alert,
-                "_chili_shadow_observation_signal_lane",
-                None,
-            )
-        _shadow_stock_fastlane = _queue_shadow_stock_fastlane_for_observation(
-            db,
-            alert=alert,
-            pattern=_pattern_row(db, alert.scan_pattern_id),
-            reason=_reason,
-            snap=snap,
-        )
-        if _shadow_stock_fastlane is not None:
-            snap["shadow_stock_fastlane"] = _shadow_stock_fastlane
-        _audit(
-            db,
-            user_id=uid,
-            alert=alert,
-            decision="blocked",
-            reason=_reason,
-            rule_snapshot=snap,
-            llm_snapshot=llm_snap,
-        )
-        out["skipped"] += 1
-        _autotrader_tick_note(out, kind="blocked", reason=_reason, alert=alert)
-        _maybe_open_paper_shadow(
+    if _shadow_observation_only:
+        _record_shadow_observation_entry(
             db,
             uid=uid,
             alert=alert,
             qty=qty,
             px=px,
             snap=snap,
-            decision="blocked_shadow_promoted",
+            llm_snap=llm_snap,
+            live=live,
+            out=out,
         )
         return
 
@@ -4120,11 +4430,8 @@ def _execute_new_entry(
                 snap=snap, decision="blocked_no_order_id",
             )
             return
-        raw = res.get("raw") or {}
-        try:
-            fill = float(raw.get("average_price") or raw.get("price") or px)
-        except (TypeError, ValueError):
-            fill = px
+        raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+        fill = _entry_fill_price_from_response(res, alert, px=px, snap=snap)
 
         # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
         # (2026-05-09): broker_source from the response side-channel.
@@ -4139,27 +4446,48 @@ def _execute_new_entry(
             _broker_qty = float(qty)
         _entry_now = datetime.utcnow()
         _is_coinbase_entry = _broker_source_for_trade == "coinbase"
-        _entry_status = "working" if _is_coinbase_entry else "open"
-        _entry_broker_status = "accepted" if _is_coinbase_entry else None
-        _entry_filled_qty = 0.0 if _is_coinbase_entry else None
-        _entry_remaining_qty = _broker_qty if _is_coinbase_entry else None
+        _is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+        (
+            _entry_status,
+            _entry_broker_status,
+            _entry_filled_qty,
+            _entry_remaining_qty,
+        ) = _entry_lifecycle_from_response(
+            broker_source=_broker_source_for_trade,
+            res=res,
+            snap=snap,
+            qty=float(_broker_qty),
+        )
+        _entry_is_working = _entry_status == "working"
+        _entry_is_async = _is_coinbase_entry or _is_option_entry
         _trade_stop, _trade_target, _managed_exit_execution = (
             _managed_edge_execution_levels(alert, px=px, snap=snap)
         )
         _entry_execution_snapshot = {
             "broker_source": _broker_source_for_trade,
+            "asset_kind": "option" if _is_option_entry else None,
             "client_order_id": res.get("client_order_id"),
             "order_id": str(order_id_raw).strip(),
             "order_type": (
                 "limit_post_only"
                 if _is_coinbase_entry and bool(res.get("_chili_maker_only"))
-                else ("market" if _is_coinbase_entry else None)
+                else (
+                    "option_limit"
+                    if _is_option_entry
+                    else ("market" if _is_coinbase_entry else None)
+                )
             ),
             "active_order_type": (
                 "limit_post_only"
                 if _is_coinbase_entry and bool(res.get("_chili_maker_only"))
-                else ("market" if _is_coinbase_entry else None)
+                else (
+                    "option_limit"
+                    if _is_option_entry
+                    else ("market" if _is_coinbase_entry else None)
+                )
             ),
+            "option_order_state": res.get("_chili_option_order_state"),
+            "option_position_verified": bool(res.get("_chili_option_position_verified")),
             "coinbase_maker_only": bool(res.get("_chili_maker_only")),
             "maker_limit_price": res.get("_chili_maker_limit_price") or res.get("limit_price"),
             "maker_best_bid": res.get("_chili_maker_bid"),
@@ -4199,8 +4527,8 @@ def _execute_new_entry(
             broker_status=_entry_broker_status,
             filled_quantity=_entry_filled_qty,
             remaining_quantity=_entry_remaining_qty,
-            submitted_at=_entry_now if _is_coinbase_entry else None,
-            acknowledged_at=_entry_now if _is_coinbase_entry else None,
+            submitted_at=_entry_now if _entry_is_async else None,
+            acknowledged_at=_entry_now if _entry_is_async else None,
             stop_loss=_trade_stop,
             take_profit=_trade_target,
             scan_pattern_id=alert.scan_pattern_id,
@@ -4208,6 +4536,7 @@ def _execute_new_entry(
             broker_source=_broker_source_for_trade,
             management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
             broker_order_id=str(order_id_raw).strip(),
+            asset_kind="option" if _is_option_entry else None,
             indicator_snapshot={
                 "breakout_alert": alert.indicator_snapshot,
                 "signals": alert.signals_snapshot,
@@ -4272,7 +4601,7 @@ def _execute_new_entry(
             user_id=uid,
             alert=alert,
             decision="placed",
-            reason="submitted" if _is_coinbase_entry else "ok",
+            reason="submitted" if _entry_is_working else "ok",
             rule_snapshot=snap,
             llm_snapshot=llm_snap,
             trade_id=tr.id,
@@ -4283,7 +4612,7 @@ def _execute_new_entry(
             kind="placed",
             reason=(
                 f"live_{_broker_source_for_trade}_submitted"
-                if _is_coinbase_entry else f"live_{_broker_source_for_trade}"
+                if _entry_is_working else f"live_{_broker_source_for_trade}"
             ),
             alert=alert,
         )

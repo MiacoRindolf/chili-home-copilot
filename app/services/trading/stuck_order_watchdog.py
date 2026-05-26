@@ -121,6 +121,179 @@ def _update_entry_execution(t: Trade, **updates: Any) -> None:
     t.indicator_snapshot = snap
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
+def _option_meta_from_trade(t: Trade) -> dict[str, Any]:
+    snap = _snapshot_dict(t)
+    meta = snap.get("option_meta")
+    if isinstance(meta, dict) and meta:
+        return dict(meta)
+    breakout = snap.get("breakout_alert")
+    if isinstance(breakout, str):
+        try:
+            import json as _json
+
+            breakout = _json.loads(breakout)
+        except Exception:
+            breakout = None
+    if isinstance(breakout, dict):
+        meta = breakout.get("option_meta")
+        if isinstance(meta, dict) and meta:
+            return dict(meta)
+    return {}
+
+
+def _get_options_adapter() -> Any:
+    from .venue.robinhood_options import RobinhoodOptionsAdapter
+
+    return RobinhoodOptionsAdapter()
+
+
+def _position_qty(pos: dict[str, Any]) -> float:
+    for key in ("quantity", "long_quantity", "short_quantity"):
+        qty = _safe_float(pos.get(key))
+        if qty is not None:
+            return abs(qty)
+    return 0.0
+
+
+def _position_avg_price(pos: dict[str, Any]) -> float | None:
+    for key in ("average_price", "avg_price", "average_open_price"):
+        price = _safe_float(pos.get(key))
+        if price is not None and price > 0:
+            return price
+    return None
+
+
+def _position_matches_option_meta(
+    pos: dict[str, Any],
+    *,
+    trade: Trade,
+    meta: dict[str, Any],
+) -> bool:
+    underlying = str(meta.get("underlying") or trade.ticker or "").strip().upper()
+    pos_underlying = str(
+        pos.get("chain_symbol")
+        or pos.get("symbol")
+        or pos.get("underlying")
+        or pos.get("underlying_symbol")
+        or ""
+    ).strip().upper()
+    if pos_underlying and underlying and pos_underlying != underlying:
+        return False
+
+    comparable = 0
+    matched = 0
+
+    expected_exp = str(meta.get("expiration") or "").strip()
+    pos_exp = str(pos.get("expiration_date") or pos.get("expiration") or "").strip()
+    if expected_exp and pos_exp:
+        comparable += 1
+        matched += int(expected_exp == pos_exp)
+
+    expected_type = str(meta.get("option_type") or "").strip().lower()
+    pos_type = str(pos.get("type") or pos.get("option_type") or "").strip().lower()
+    if expected_type and pos_type:
+        comparable += 1
+        matched += int(expected_type == pos_type)
+
+    expected_strike = _safe_float(meta.get("strike"))
+    pos_strike = _safe_float(pos.get("strike_price") or pos.get("strike"))
+    if expected_strike is not None and pos_strike is not None:
+        comparable += 1
+        matched += int(abs(expected_strike - pos_strike) < 0.0001)
+
+    meta_option_id = str(meta.get("option_id") or meta.get("contract_id") or "").strip()
+    pos_option_id = str(pos.get("option_id") or pos.get("id") or "").strip()
+    if meta_option_id and pos_option_id and meta_option_id == pos_option_id:
+        return True
+
+    return comparable >= 2 and comparable == matched
+
+
+def _process_option_position_truth(db: Session, t: Trade, now: datetime) -> str:
+    meta = _option_meta_from_trade(t)
+    if not meta:
+        return "skipped_option_trade"
+    try:
+        adapter = _get_options_adapter()
+        if hasattr(adapter, "is_enabled") and not adapter.is_enabled():
+            return "skipped_option_trade"
+        positions = adapter.get_open_positions() or []
+    except Exception:
+        logger.debug(
+            "[stuck_order_watchdog] option position truth failed trade=%s",
+            getattr(t, "id", None),
+            exc_info=True,
+        )
+        return "skipped_option_trade"
+
+    needed_qty = abs(float(t.quantity or 0.0))
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        if not _position_matches_option_meta(pos, trade=t, meta=meta):
+            continue
+        held_qty = _position_qty(pos)
+        if held_qty <= 0 or (needed_qty > 0 and held_qty + 1e-9 < needed_qty):
+            continue
+        avg_price = _position_avg_price(pos)
+        t.status = "open"
+        t.broker_status = "filled"
+        t.filled_quantity = held_qty
+        t.remaining_quantity = 0.0
+        t.last_broker_sync = now
+        t.filled_at = t.filled_at or now
+        t.first_fill_at = t.first_fill_at or now
+        t.last_fill_at = now
+        if avg_price is not None:
+            t.avg_fill_price = avg_price
+            t.entry_price = avg_price
+        _update_entry_execution(
+            t,
+            option_position_verified=True,
+            option_position_verified_at=now.isoformat(),
+            option_position_quantity=held_qty,
+        )
+        db.commit()
+        return "option_position_verified"
+
+    submit_time = _effective_submit_time(t)
+    if submit_time is None:
+        return "option_position_not_found"
+    if submit_time.tzinfo is not None:
+        submit_time = submit_time.astimezone(timezone.utc).replace(tzinfo=None)
+    elapsed = now - submit_time
+    timeout = _timeout_for(t)
+    if elapsed < timeout:
+        return "option_position_not_found"
+
+    cancel_result = _try_cancel_option(adapter, t)
+    if cancel_result.get("ok"):
+        t.status = "cancelled"
+        t.broker_status = "cancelled"
+        t.exit_reason = "option_entry_timeout_no_position"
+        t.last_broker_sync = now
+        _update_entry_execution(
+            t,
+            option_position_verified=False,
+            option_position_last_checked_at=now.isoformat(),
+            option_position_timeout_seconds=int(elapsed.total_seconds()),
+            option_entry_cancel_reason="timeout_no_position",
+        )
+        db.commit()
+        return "option_entry_timeout_cancelled"
+    return "option_entry_timeout_cancel_failed"
+
+
 def _is_coinbase_maker_first_trade(t: Trade) -> bool:
     if (t.broker_source or "").lower() != "coinbase":
         return False
@@ -200,6 +373,13 @@ def _infer_is_market(broker_status: Optional[str], pending_status: Optional[str]
 
 
 def _timeout_for(t: Trade) -> timedelta:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        if is_option_trade(t):
+            return _limit_timeout()
+    except Exception:
+        pass
     scope = (t.management_scope or "").lower()
     if scope == "auto_trader_v1":
         if _is_coinbase_maker_first_trade(t):
@@ -255,6 +435,24 @@ def _try_cancel(adapter: Any, t: Trade) -> dict[str, Any]:
         logger.warning(
             "[stuck_order_watchdog] cancel_order raised for trade=%s order=%s: %s",
             t.id, t.broker_order_id, e, exc_info=True,
+        )
+        return {"ok": False, "error": str(e)}
+
+
+def _try_cancel_option(adapter: Any, t: Trade) -> dict[str, Any]:
+    try:
+        if hasattr(adapter, "cancel"):
+            return adapter.cancel(t.broker_order_id) or {}
+        if hasattr(adapter, "cancel_order"):
+            return adapter.cancel_order(t.broker_order_id) or {}
+        return {"ok": False, "error": "option_adapter_cancel_unavailable"}
+    except Exception as e:
+        logger.warning(
+            "[stuck_order_watchdog] option cancel raised for trade=%s order=%s: %s",
+            t.id,
+            t.broker_order_id,
+            e,
+            exc_info=True,
         )
         return {"ok": False, "error": str(e)}
 
@@ -601,17 +799,14 @@ def _try_maker_first_fallback(
 
 def _process_one(db: Session, t: Trade, now: datetime) -> str:
     """Process one stuck-order candidate. Returns a short outcome string."""
-    # KKK -- skip option trades. The robinhood spot adapter cannot query
-    # option order IDs (those go through rh.options.*, not rh.orders.*),
-    # so adapter.get_order(broker_order_id) returns None for an option
-    # order even when the broker filled it. The watchdog then stamps
-    # the trade rejected/unknown. Phase 5 options exit monitor and
-    # broker_sync (GGG revive + MMM stale-skip) reconcile option
-    # positions correctly; this watchdog should leave them alone.
+    # Option orders cannot be queried through the RH spot adapter, so use
+    # option-position truth instead of order-id truth. If the contract is
+    # visible in open option positions, promote the working trade to open;
+    # otherwise leave it working rather than fabricating a fill.
     try:
         from .autopilot_scope import is_option_trade
         if is_option_trade(t):
-            return "skipped_option_trade"
+            return _process_option_position_truth(db, t, now)
     except Exception:
         pass
     submit_time = _effective_submit_time(t)

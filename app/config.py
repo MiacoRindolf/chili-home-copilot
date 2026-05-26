@@ -81,6 +81,9 @@ AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
 )
 AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION = True
+AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH = True
+AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED = False
+AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD = 0.0
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE = "authoritative"
 AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES = "crypto"
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES = 8
@@ -3638,6 +3641,31 @@ class Settings(BaseSettings):
             "same pattern through repeated backtests."
         ),
     )
+    chili_autotrader_shadow_observation_diagnostic_sizing_enabled: bool = Field(
+        default=AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_ENABLED"
+        ),
+        description=(
+            "When true, shadow-observation-only entries run the full advisory "
+            "sizing diagnostics before opening paper evidence. The default "
+            "uses base risk-notional sizing so shadow learning cannot monopolize "
+            "the live AutoTrader tick."
+        ),
+    )
+    chili_autotrader_shadow_observation_evidence_notional_usd: float = Field(
+        default=AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_USD"
+        ),
+        description=(
+            "Optional fixed paper-only notional for lightweight shadow "
+            "observations. Leave at 0 to derive the evidence notional from "
+            "assumed capital and per-trade risk percent without hitting the "
+            "broker equity path."
+        ),
+    )
     chili_autotrader_live_require_venue_health_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_REQUIRE_VENUE_HEALTH_ENABLED"),
@@ -3664,6 +3692,18 @@ class Settings(BaseSettings):
         default=AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_LLM_REVALIDATION_SKIP_SHADOW_OBSERVATION"
+        ),
+    )
+    chili_autotrader_llm_revalidation_skip_options_path: bool = Field(
+        default=AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_LLM_REVALIDATION_SKIP_OPTIONS_PATH"
+        ),
+        description=(
+            "When true, skip the equities-shaped LLM revalidation gate for "
+            "options alerts. Option viability is handled by the deterministic "
+            "option entry-quality model so premium and underlying prices are "
+            "not mixed in the LLM payload."
         ),
     )
     # Task KK — gate the autotrader's crypto path. Robinhood crypto trades
