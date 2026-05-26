@@ -17,7 +17,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app import models
-from app.models.trading import AutoTraderRun, BreakoutAlert, PatternRecertLog, ScanPattern, Trade
+from app.config import (
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+)
+from app.models.trading import (
+    AutoTraderRun,
+    BreakoutAlert,
+    PatternRecertLog,
+    ScanPattern,
+    Trade,
+)
 from app.services.trading import auto_trader as at_mod
 
 TEST_ENTRY_PRICE = 50.0
@@ -32,6 +43,7 @@ TEST_CPCV_PATHS = 35
 TEST_STRONG_CPCV_SHARPE = 1.4
 TEST_REALIZED_TRADE_COUNT = 20
 TEST_REALIZED_AVG_RETURN_PCT = 1.2
+TEST_POSITIVE_EXPECTED_NET_PCT = 1.25
 
 
 def _minimal_settings(user_id: int) -> SimpleNamespace:
@@ -57,6 +69,16 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_autotrader_live_require_feature_parity=False,
         chili_autotrader_live_require_venue_health_enabled=False,
         chili_autotrader_recert_signal_fastlane_enabled=True,
+        chili_autotrader_shadow_stock_fastlane_enabled=True,
+        chili_autotrader_shadow_stock_fastlane_backtest_priority=(
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+        ),
+        chili_autotrader_shadow_stock_fastlane_min_expected_net_pct=(
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT
+        ),
+        chili_autotrader_shadow_stock_fastlane_lifecycle_stages=(
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES
+        ),
         brain_recert_queue_mode="shadow",
         chili_autotrader_probation_live_enabled=True,
         chili_autotrader_probation_notional_multiplier=TEST_PROBATION_MULTIPLIER,
@@ -523,6 +545,67 @@ def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db
     assert len(recert_logs) == 1
     assert recert_logs[0].source == "scheduler"
     assert recert_logs[0].reason == "autotrader_signal:pattern_recert_required"
+
+
+def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
+    settings = _minimal_settings(1)
+    monkeypatch.setattr(at_mod, "settings", settings)
+    emitted: list[dict] = []
+    invalidated: list[bool] = []
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        lambda db, scan_pattern_id, source: emitted.append({
+            "scan_pattern_id": scan_pattern_id,
+            "source": source,
+        }) or 1,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.backtest_queue.invalidate_queue_status_cache",
+        lambda: invalidated.append(True),
+    )
+    db = MagicMock()
+    pat = ScanPattern(
+        id=123,
+        name="Shadow stock wants evidence",
+        rules_json={},
+        lifecycle_stage="shadow_promoted",
+        active=True,
+        backtest_priority=0,
+    )
+    alert = BreakoutAlert(
+        id=456,
+        ticker="FASTL",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=1,
+        scan_pattern_id=pat.id,
+    )
+    snap = {"entry_edge": {"expected_net_pct": TEST_POSITIVE_EXPECTED_NET_PCT}}
+
+    fastlane = at_mod._queue_shadow_stock_fastlane_for_observation(
+        db,
+        alert=alert,
+        pattern=pat,
+        reason=at_mod.SHADOW_OBSERVATION_REASON_STAGE,
+        snap=snap,
+    )
+
+    assert fastlane is not None
+    assert fastlane["queued"] is True
+    assert fastlane["priority"] == AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+    assert fastlane["expected_net_pct"] == TEST_POSITIVE_EXPECTED_NET_PCT
+    assert pat.backtest_priority == AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+    assert emitted == [{
+        "scan_pattern_id": pat.id,
+        "source": "autotrader_shadow_stock_fastlane",
+    }]
+    assert invalidated == [True]
+    db.flush.assert_called_once()
 
 
 def test_live_recert_block_waives_pilot_bootstrap_cert_debt(monkeypatch):

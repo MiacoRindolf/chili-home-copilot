@@ -197,6 +197,56 @@ def main() -> int:
         ),
     )
     _print_table(
+        f"Shadow stock fastlane boosts, last {params['days']}d",
+        _rows(
+            """
+            SELECT ar.ticker,
+                   COALESCE(sp.lifecycle_stage, 'none') AS lifecycle_stage,
+                   COALESCE(
+                       a.indicator_snapshot->'imminent_scorecard'->>'signal_lane',
+                       'none'
+                   ) AS signal_lane,
+                   COALESCE(
+                       ar.rule_snapshot->'shadow_stock_fastlane'->>'reason',
+                       'none'
+                   ) AS fastlane_reason,
+                   COUNT(*) AS n,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(
+                           ar.rule_snapshot->'shadow_stock_fastlane'->>'queued',
+                           'false'
+                       ) = 'true'
+                   ) AS queued,
+                   MAX(
+                       NULLIF(
+                           ar.rule_snapshot->'shadow_stock_fastlane'->>'priority',
+                           ''
+                       )::numeric
+                   ) AS max_priority,
+                   ROUND(
+                       MAX(
+                           NULLIF(
+                               ar.rule_snapshot->'shadow_stock_fastlane'
+                               ->>'expected_net_pct',
+                               ''
+                           )::numeric
+                       ),
+                       4
+                   ) AS max_expected_net_pct,
+                   MAX(ar.created_at) AS latest_created_at
+            FROM trading_autotrader_runs ar
+            LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+            LEFT JOIN scan_patterns sp ON sp.id = COALESCE(ar.scan_pattern_id, a.scan_pattern_id)
+            WHERE ar.created_at >= NOW() - (:days * INTERVAL '1 day')
+              AND ar.rule_snapshot ? 'shadow_stock_fastlane'
+            GROUP BY 1, 2, 3, 4
+            ORDER BY queued DESC, n DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
         f"Live AutoTrader outcomes by pattern, last {params['trade_days']}d",
         _rows(
             """

@@ -91,8 +91,18 @@ AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_FRACTION = 0.005
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MAX_REWARD_FRACTION = 0.08
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK = 1.25
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT = 0.0
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED = True
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
     "shadow_promoted,pilot_promoted"
+)
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY = (
+    BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR
+)
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT = (
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT
+)
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES = (
+    PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES
 )
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS = 2.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS = 6
@@ -3579,6 +3589,38 @@ class Settings(BaseSettings):
     chili_autotrader_shadow_signal_lane_observation_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_SHADOW_SIGNAL_LANE_OBSERVATION_ENABLED"),
+    )
+    chili_autotrader_shadow_stock_fastlane_enabled: bool = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_ENABLED"
+        ),
+        description=(
+            "When true, stock shadow observations that already passed the "
+            "normal positive-edge rule gate boost their pattern into the "
+            "backtest queue. This accelerates evidence collection only; it "
+            "does not make shadow-promoted patterns live-tradable."
+        ),
+    )
+    chili_autotrader_shadow_stock_fastlane_backtest_priority: int = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_BACKTEST_PRIORITY"
+        ),
+    )
+    chili_autotrader_shadow_stock_fastlane_min_expected_net_pct: float = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_MIN_EXPECTED_NET_PCT"
+        ),
+    )
+    chili_autotrader_shadow_stock_fastlane_lifecycle_stages: str = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_LIFECYCLE_STAGES"
+        ),
     )
     chili_autotrader_live_require_venue_health_enabled: bool = Field(
         default=False,

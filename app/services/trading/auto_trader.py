@@ -14,6 +14,10 @@ from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
@@ -1168,6 +1172,145 @@ def _queue_recert_for_blocked_signal(
             exc_info=True,
         )
         return {"queued": False, "reason": "queue_failed"}
+
+
+def _csv_tokens(raw: Any) -> frozenset[str]:
+    return frozenset(
+        token.strip().lower()
+        for token in str(raw or "").split(",")
+        if token.strip()
+    )
+
+
+def _expected_net_pct_from_snapshot(snap: dict[str, Any] | None) -> float | None:
+    if not isinstance(snap, dict):
+        return None
+    edge = snap.get("entry_edge")
+    raw = None
+    if isinstance(edge, dict):
+        raw = edge.get("expected_net_pct")
+    if raw is None:
+        raw = snap.get("entry_edge_expected_net_pct")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value:
+        return None
+    return value
+
+
+def _queue_shadow_stock_fastlane_for_observation(
+    db: Session,
+    *,
+    alert: BreakoutAlert,
+    pattern: ScanPattern | None,
+    reason: str,
+    snap: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Boost live-quality stock observations toward fresh graduation evidence.
+
+    This does not place a broker order and does not change lifecycle rules. It
+    only makes the backtest queue notice stock shadow observations that already
+    passed the normal positive-edge gate, so their patterns can earn or fail
+    promotion evidence sooner.
+    """
+    if not bool(
+        getattr(
+            settings,
+            "chili_autotrader_shadow_stock_fastlane_enabled",
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED,
+        )
+    ):
+        return None
+    if (getattr(alert, "asset_type", "") or "").strip().lower() != "stock":
+        return None
+    try:
+        pattern_id = int(getattr(alert, "scan_pattern_id", None) or 0)
+    except (TypeError, ValueError):
+        pattern_id = 0
+    if pattern_id <= 0 or pattern is None:
+        return None
+    lifecycle = (getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
+    allowed_lifecycles = _csv_tokens(
+        getattr(
+            settings,
+            "chili_autotrader_shadow_stock_fastlane_lifecycle_stages",
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
+        )
+    )
+    if allowed_lifecycles and lifecycle not in allowed_lifecycles:
+        return None
+
+    expected_net_pct = _expected_net_pct_from_snapshot(snap)
+    min_expected_net_pct = float(
+        getattr(
+            settings,
+            "chili_autotrader_shadow_stock_fastlane_min_expected_net_pct",
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+        )
+        or 0.0
+    )
+    if expected_net_pct is None or expected_net_pct <= min_expected_net_pct:
+        return {
+            "queued": False,
+            "reason": "expected_net_below_fastlane_floor",
+            "expected_net_pct": expected_net_pct,
+            "min_expected_net_pct": min_expected_net_pct,
+            "lifecycle_stage": lifecycle,
+        }
+
+    priority = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "chili_autotrader_shadow_stock_fastlane_backtest_priority",
+                AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+            )
+            or AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+        ),
+    )
+    previous_priority = int(getattr(pattern, "backtest_priority", 0) or 0)
+    if previous_priority >= priority:
+        return {
+            "queued": False,
+            "reason": "already_boosted",
+            "pattern_id": pattern_id,
+            "priority": previous_priority,
+            "target_priority": priority,
+            "expected_net_pct": expected_net_pct,
+            "lifecycle_stage": lifecycle,
+        }
+
+    pattern.backtest_priority = priority
+    try:
+        from .backtest_queue import invalidate_queue_status_cache
+        from .brain_work.emitters import emit_backtest_requested_for_pattern
+
+        emit_backtest_requested_for_pattern(
+            db,
+            pattern_id,
+            source="autotrader_shadow_stock_fastlane",
+        )
+        invalidate_queue_status_cache()
+    except Exception:
+        logger.debug(
+            "[autotrader] shadow stock fastlane emit failed alert_id=%s pattern_id=%s",
+            getattr(alert, "id", None),
+            pattern_id,
+            exc_info=True,
+        )
+    db.flush()
+    return {
+        "queued": True,
+        "pattern_id": pattern_id,
+        "priority": priority,
+        "previous_priority": previous_priority,
+        "expected_net_pct": expected_net_pct,
+        "lifecycle_stage": lifecycle,
+        "reason": reason,
+    }
 
 
 def _audit(
@@ -3786,6 +3929,15 @@ def _execute_new_entry(
                 "_chili_shadow_observation_signal_lane",
                 None,
             )
+        _shadow_stock_fastlane = _queue_shadow_stock_fastlane_for_observation(
+            db,
+            alert=alert,
+            pattern=_pattern_row(db, alert.scan_pattern_id),
+            reason=_reason,
+            snap=snap,
+        )
+        if _shadow_stock_fastlane is not None:
+            snap["shadow_stock_fastlane"] = _shadow_stock_fastlane
         _audit(
             db,
             user_id=uid,
