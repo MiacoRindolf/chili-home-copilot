@@ -9,6 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE = 0
 FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
 REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = "ticker_regime,cross_asset_regime"
+BRAIN_QUEUE_MP_CHILD_TICKER_WORKERS_DEFAULT = 2
+BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED = True
+BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB = 1536
+BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB = 768
+BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS = 1
 DATABASE_DEFAULT_POOL_SIZE = 25
 DATABASE_DEFAULT_MAX_OVERFLOW = 55
 DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
@@ -327,7 +332,26 @@ class Settings(BaseSettings):
     brain_queue_process_cap: int | None = None  # max process pool workers (None = use brain_backtest_parallel)
     brain_mp_child_database_pool_size: int = 1   # SQLAlchemy pool per child process (avoid P * parent pool connections)
     brain_mp_child_database_max_overflow: int = 2
-    brain_smart_bt_max_workers_in_process: int = 8  # cap ticker-thread pool inside each process worker
+    brain_smart_bt_max_workers_in_process: int = BRAIN_QUEUE_MP_CHILD_TICKER_WORKERS_DEFAULT
+    brain_queue_process_memory_guard_enabled: bool = Field(
+        default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED,
+        validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_ENABLED"),
+    )
+    brain_queue_process_memory_guard_reserve_mb: int = Field(
+        default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB,
+        ge=0,
+        validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_RESERVE_MB"),
+    )
+    brain_queue_process_memory_guard_worker_mb: int = Field(
+        default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB,
+        ge=1,
+        validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_WORKER_MB"),
+    )
+    brain_queue_process_memory_guard_min_workers: int = Field(
+        default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS,
+        ge=1,
+        validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_MIN_WORKERS"),
+    )
     brain_queue_batch_size: int = 80      # patterns pulled from queue per learning cycle
     # Durable work ledger (event-first brain; not mesh activations)
     brain_work_ledger_enabled: bool = True
