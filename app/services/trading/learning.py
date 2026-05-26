@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import requests
 import time
 import threading
 import uuid
@@ -39,6 +40,7 @@ from .brain_io_concurrency import (
     io_workers_for_snapshot_batch,
     snapshot_batch_stats,
 )
+from ..socket_budget import mount_bounded_http_adapters
 from .snapshot_bar_ops import (
     dedupe_sample_rows,
     normalize_bar_start_utc,
@@ -69,6 +71,8 @@ def _get_current_predictions_impl(*args, **kwargs):
 
 
 logger = logging.getLogger(__name__)
+_PROVIDER_PREFLIGHT_SESSION = requests.Session()
+mount_bounded_http_adapters(_PROVIDER_PREFLIGHT_SESSION)
 
 _PROVIDER_EGRESS_LOCK = threading.Lock()
 _PROVIDER_EGRESS_CACHE: dict[str, Any] = {"ts": 0.0, "ok": True}
@@ -122,9 +126,7 @@ def provider_egress_available_for_brain_work() -> bool:
     ok = False
     for name, url, params in probes:
         try:
-            import requests
-
-            resp = requests.get(url, params=params, timeout=timeout_s)
+            resp = _PROVIDER_PREFLIGHT_SESSION.get(url, params=params, timeout=timeout_s)
             if resp.status_code < 500 and resp.status_code not in (401, 403, 429):
                 ok = True
                 break
@@ -10667,4 +10669,3 @@ def run_learning_cycle(
             except Exception:
                 logger.debug("[learning] run_learning_cycle: non-critical operation failed", exc_info=True)
     return {"ok": True, **report}
-

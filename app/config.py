@@ -9,6 +9,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE = 0
 FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
 REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = "ticker_regime,cross_asset_regime"
+DATABASE_DEFAULT_POOL_SIZE = 25
+DATABASE_DEFAULT_MAX_OVERFLOW = 55
+DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
+DATABASE_PYTEST_DEFAULT_POOL_SIZE = 1
+DATABASE_PYTEST_DEFAULT_MAX_OVERFLOW = 1
+DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
 AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
@@ -1291,9 +1297,50 @@ class Settings(BaseSettings):
         description="Optional PostgreSQL URL for production-shaped staging (e.g. chili_staging on localhost:5433)",
         validation_alias=AliasChoices("STAGING_DATABASE_URL", "staging_database_url"),
     )
-    # Pool: brain worker + parallel queue backtests can hold many connections; default 30 is too small.
-    database_pool_size: int = 25
-    database_max_overflow: int = 55
+    # Pool: brain worker + parallel queue backtests can hold many connections.
+    # Pytest has its own much smaller cap below to avoid Windows socket exhaustion.
+    database_pool_size: int = Field(
+        default=DATABASE_DEFAULT_POOL_SIZE,
+        ge=1,
+        validation_alias=AliasChoices("DATABASE_POOL_SIZE", "database_pool_size"),
+    )
+    database_max_overflow: int = Field(
+        default=DATABASE_DEFAULT_MAX_OVERFLOW,
+        ge=0,
+        validation_alias=AliasChoices("DATABASE_MAX_OVERFLOW", "database_max_overflow"),
+    )
+    database_pool_timeout_seconds: float = Field(
+        default=DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS,
+        ge=1.0,
+        validation_alias=AliasChoices(
+            "DATABASE_POOL_TIMEOUT_SECONDS",
+            "database_pool_timeout_seconds",
+        ),
+    )
+    database_pytest_pool_size: int = Field(
+        default=DATABASE_PYTEST_DEFAULT_POOL_SIZE,
+        ge=1,
+        validation_alias=AliasChoices(
+            "DATABASE_PYTEST_POOL_SIZE",
+            "database_pytest_pool_size",
+        ),
+    )
+    database_pytest_max_overflow: int = Field(
+        default=DATABASE_PYTEST_DEFAULT_MAX_OVERFLOW,
+        ge=0,
+        validation_alias=AliasChoices(
+            "DATABASE_PYTEST_MAX_OVERFLOW",
+            "database_pytest_max_overflow",
+        ),
+    )
+    database_pytest_pool_timeout_seconds: float = Field(
+        default=DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS,
+        ge=1.0,
+        validation_alias=AliasChoices(
+            "DATABASE_PYTEST_POOL_TIMEOUT_SECONDS",
+            "database_pytest_pool_timeout_seconds",
+        ),
+    )
 
     # Optional shared secret so an external Brain UI (different port / origin) can trigger
     # GET/POST /api/v1/brain-next-cycle without chili_device_token. Set in .env as BRAIN_V1_WAKE_SECRET.

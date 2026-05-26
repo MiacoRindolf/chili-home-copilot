@@ -30,6 +30,13 @@ from typing import Any
 
 import requests
 
+from ..socket_budget import (
+    DEFAULT_HTTP_POOL_CONNECTIONS,
+    DEFAULT_HTTP_POOL_MAXSIZE,
+    is_socket_exhaustion_error,
+    mount_bounded_http_adapters,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +49,8 @@ _COINBASE_DEFAULT_TIMEOUT_S = 8.0
 _COINBASE_MIN_TIMEOUT_S = 0.1
 _COINBASE_PUBLIC_PROVIDER = "coinbase_public"
 _MIN_VALID_QUOTE_PRICE = 0.0
+_COINBASE_HTTP_POOL_CONNECTIONS = DEFAULT_HTTP_POOL_CONNECTIONS
+_COINBASE_HTTP_POOL_MAXSIZE = DEFAULT_HTTP_POOL_MAXSIZE
 
 
 # Coinbase Exchange API granularities (seconds). Anything else returns 400.
@@ -74,6 +83,14 @@ _CIRCUIT_LOCK = threading.Lock()
 _CIRCUIT_FAILS = 0
 _CIRCUIT_OPEN_UNTIL = 0.0
 _CIRCUIT_LAST_LOG = 0.0
+_SESSION = requests.Session()
+_SESSION.headers.update({"Accept": "application/json"})
+mount_bounded_http_adapters(
+    _SESSION,
+    pool_connections=_COINBASE_HTTP_POOL_CONNECTIONS,
+    pool_maxsize=_COINBASE_HTTP_POOL_MAXSIZE,
+    pool_block=True,
+)
 
 # Map a -USD ticker to a Coinbase product ID. For most cases it's identity:
 # "BTC-USD" → "BTC-USD". For aliases we may add overrides here.
@@ -123,6 +140,8 @@ def _circuit_is_open(product_id: str, interval: str) -> bool:
 
 def _request_failure_counts(exc: requests.RequestException) -> bool:
     if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    if is_socket_exhaustion_error(exc):
         return True
     if isinstance(exc, requests.HTTPError):
         status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -203,7 +222,7 @@ def _request_chunk(
         "start": start_dt.isoformat(),
         "end": end_dt.isoformat(),
     }
-    resp = requests.get(url, params=params, timeout=timeout_s)
+    resp = _SESSION.get(url, params=params, timeout=timeout_s)
     resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, list):
@@ -322,7 +341,7 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
     path = _COINBASE_TICKER_PATH_TEMPLATE.format(product_id=product_id)
     url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{path}"
     try:
-        resp = requests.get(url, timeout=_request_timeout_s())
+        resp = _SESSION.get(url, timeout=_request_timeout_s())
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):

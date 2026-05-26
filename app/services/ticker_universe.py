@@ -10,6 +10,8 @@ from typing import Any
 
 import requests
 
+from .socket_budget import mount_bounded_http_adapters
+
 logger = logging.getLogger(__name__)
 
 _CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "ticker_cache"
@@ -20,6 +22,8 @@ _CRYPTO_CACHE = _CACHE_DIR / "crypto_top.json"
 _CACHE_MAX_AGE = timedelta(days=7)
 
 _memory_cache: dict[str, Any] = {}
+_HTTP_SESSION = requests.Session()
+mount_bounded_http_adapters(_HTTP_SESSION)
 
 
 # ── US Stocks from SEC EDGAR ────────────────────────────────────────────
@@ -88,7 +92,7 @@ def _fetch_sec_tickers() -> list[dict[str, str]]:
 
     # Try the exchange-filtered endpoint first
     try:
-        resp = requests.get(_SEC_EXCHANGE_URL, headers=_SEC_HEADERS, timeout=30)
+        resp = _HTTP_SESSION.get(_SEC_EXCHANGE_URL, headers=_SEC_HEADERS, timeout=30)
         if resp.status_code == 200:
             data = resp.json()
             fields = data.get("fields", [])
@@ -128,7 +132,7 @@ def _fetch_sec_tickers() -> list[dict[str, str]]:
 
     # Fallback: basic SEC tickers endpoint
     try:
-        resp = requests.get(_SEC_TICKERS_URL, headers=_SEC_HEADERS, timeout=30)
+        resp = _HTTP_SESSION.get(_SEC_TICKERS_URL, headers=_SEC_HEADERS, timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
@@ -221,7 +225,7 @@ def _fetch_crypto_tickers(
     page = 1
     try:
         while page <= max_pages:
-            resp = requests.get(
+            resp = _HTTP_SESSION.get(
                 _COINGECKO_URL,
                 params={
                     "vs_currency": "usd",
