@@ -59,6 +59,14 @@ def _env_float(name: str, default: float, *, minimum: float | None = None) -> fl
         return max(minimum, value)
     return value
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ---------------------------------------------------------------------------
 # Rate limiter — 12 requests per 5 seconds (Yahoo's safe threshold)
 #
@@ -272,6 +280,8 @@ _TTL_CRYPTO_HISTORY_MISS = _env_float(
     _CRYPTO_HISTORY_MISS_COOLDOWN_DEFAULT_S,
     minimum=_MIN_BATCH_MISS_COOLDOWN_S,
 )
+_YF_ALLOW_CRYPTO_BATCH_ENV = "CHILI_YF_ALLOW_CRYPTO_BATCH"
+_ALLOW_CRYPTO_BATCH = _env_bool(_YF_ALLOW_CRYPTO_BATCH_ENV, False)
 _TTL_SEARCH = 3600     # 1 hour for search results
 _TTL_FUNDAMENTALS = 86400  # 24 hours for fundamental data
 _TTL_TICKER_INFO = 3600   # 1 hour for ticker info strip
@@ -341,6 +351,8 @@ def _record_yf_batch_miss(symbol: str, *, single_symbol_batch: bool) -> None:
     evidence. Crypto misses are still useful because the dead cache is short
     lived and routes quotes toward the crypto fallback path.
     """
+    if _is_crypto(symbol):
+        _cache_set(_crypto_history_miss_key(symbol), True)
     if not single_symbol_batch:
         _cache_set(_batch_miss_key(symbol), True)
     if single_symbol_batch or _is_crypto(symbol):
@@ -795,6 +807,13 @@ def batch_download(
     batch_miss_cooldown_skips = 0
     for sym in symbols:
         if _is_dead(sym):
+            continue
+        if _is_crypto(sym) and not _ALLOW_CRYPTO_BATCH:
+            _cache_set(_crypto_history_miss_key(sym), True)
+            batch_miss_cooldown_skips += 1
+            continue
+        if _is_crypto(sym) and _should_skip_crypto_yahoo_probe(sym):
+            batch_miss_cooldown_skips += 1
             continue
         if mixed_request and _cache_get(_batch_miss_key(sym)) is not None:
             batch_miss_cooldown_skips += 1

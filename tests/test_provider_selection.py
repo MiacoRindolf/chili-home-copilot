@@ -371,6 +371,53 @@ class TestFetchQuotesBatchProviderOrder:
         assert result["AAPL"]["price"] == 155.0
 
     @patch("app.services.trading.market_data._yf_fast_info")
+    @patch("app.services.yf_session.batch_download")
+    @patch("app.services.trading.market_data._use_polygon", return_value=False)
+    @patch("app.services.trading.market_data._use_massive", return_value=False)
+    def test_batch_quotes_crypto_uses_coinbase_and_skips_yfinance(
+        self,
+        _use_m,
+        _use_p,
+        mock_batch_dl,
+        mock_yf,
+        monkeypatch,
+    ):
+        from app.services.trading import market_data as md
+
+        monkeypatch.setattr(
+            md,
+            "_coinbase_quote_fallback",
+            lambda ticker, **_kwargs: {
+                "ticker": ticker,
+                "price": 1.0,
+                "source": "coinbase",
+            },
+        )
+
+        result = md.fetch_quotes_batch(["BTC-USD"])
+
+        assert "BTC-USD" in result
+        mock_batch_dl.assert_not_called()
+        mock_yf.assert_not_called()
+
+    @patch("app.services.trading.market_data._yf_fast_info")
+    @patch("app.services.yf_session.batch_download")
+    @patch("app.services.trading.market_data._use_polygon", return_value=False)
+    @patch("app.services.trading.market_data._use_massive", return_value=False)
+    def test_batch_quotes_drops_unsupported_preferred_before_yfinance(
+        self,
+        _use_m,
+        _use_p,
+        mock_batch_dl,
+        mock_yf,
+    ):
+        from app.services.trading import market_data as md
+
+        assert md.fetch_quotes_batch(["BACPM"]) == {}
+        mock_batch_dl.assert_not_called()
+        mock_yf.assert_not_called()
+
+    @patch("app.services.trading.market_data._yf_fast_info")
     @patch("app.services.trading.market_data._use_polygon", return_value=True)
     @patch("app.services.trading.market_data._use_massive", return_value=True)
     @patch("app.services.trading.market_data._poly")

@@ -1,6 +1,7 @@
 """Corporate-action hygiene for stock symbols used by scanners."""
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 # Verified 2026-05-26 from issuer / acquirer releases:
@@ -18,6 +19,13 @@ _INACTIVE_EQUITY_SYMBOLS = frozenset({
     "HES",
 })
 
+_COMPACT_PREFERRED_SYMBOL_RE = re.compile(r"^[A-Z]{3,5}P[A-Z]$")
+
+
+def _is_unsupported_common_stock_symbol(symbol: str) -> bool:
+    """Return True for non-common equity forms scanners should not trade."""
+    return bool(_COMPACT_PREFERRED_SYMBOL_RE.fullmatch(symbol))
+
 
 def normalize_equity_symbol(symbol: str) -> str:
     """Return an active common-stock symbol or ``""`` for known inactive names."""
@@ -25,7 +33,7 @@ def normalize_equity_symbol(symbol: str) -> str:
     if not t:
         return ""
     t = _EQUITY_SYMBOL_ALIASES.get(t, t)
-    if t in _INACTIVE_EQUITY_SYMBOLS:
+    if t in _INACTIVE_EQUITY_SYMBOLS or _is_unsupported_common_stock_symbol(t):
         return ""
     return t
 

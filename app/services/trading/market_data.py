@@ -22,11 +22,19 @@ from ..yf_session import (
     get_fast_info as _yf_fast_info,
     acquire as _yf_acquire,
 )
-from ..symbol_hygiene import clean_equity_universe
+from ..symbol_hygiene import clean_equity_universe, normalize_equity_symbol
 
 logger = logging.getLogger(__name__)
 
 _MIN_PROVIDER_WORKERS = 1
+
+
+def _is_crypto_ticker(ticker: str) -> bool:
+    return str(ticker or "").upper().endswith("-USD")
+
+
+def _is_unsupported_equity_ticker(ticker: str) -> bool:
+    return bool(ticker) and not _is_crypto_ticker(ticker) and not normalize_equity_symbol(ticker)
 
 
 def _log_ohlcv_outcome(
@@ -675,7 +683,7 @@ def fetch_ohlcv_batch(
             return results
         tickers = missing
 
-    crypto_tickers = [t for t in tickers if t.upper().endswith("-USD")]
+    crypto_tickers = [t for t in tickers if _is_crypto_ticker(t)]
     if crypto_tickers and getattr(settings, "brain_market_data_coinbase_fallback", True):
         try:
             from .coinbase_ohlcv import get_ohlcv as _cb_get_ohlcv
@@ -717,10 +725,12 @@ def fetch_ohlcv_batch(
 
     yahoo_tickers = [
         t for t in tickers
-        if t not in results and not t.upper().endswith("-USD")
+        if t not in results
+        and not _is_crypto_ticker(t)
+        and not _is_unsupported_equity_ticker(t)
     ]
     for t in tickers:
-        if t not in results and t.upper().endswith("-USD"):
+        if t not in results and _is_crypto_ticker(t):
             _log_ohlcv_outcome(
                 t,
                 interval,
@@ -982,6 +992,9 @@ def _fetch_quote_unguarded(
     *allow_provider_fallback* ``None`` uses ``settings.market_data_allow_provider_fallback``.
     ``False`` forces Massive-only (WS + REST).
     """
+    if _is_unsupported_equity_ticker(ticker):
+        return None
+
     fb = _effective_allow_fallback(allow_provider_fallback)
     fi: dict[str, Any] | None = None
 
@@ -1076,6 +1089,8 @@ def _fetch_quote_unguarded(
     cb_quote = _coinbase_quote_fallback(ticker, reason="provider_chain_empty")
     if cb_quote:
         return cb_quote
+    if _is_crypto_ticker(ticker):
+        return None
 
     # --- yfinance / CoinGecko fallback ---
     fi = _yf_fast_info(ticker)
@@ -1222,10 +1237,27 @@ def fetch_quotes_batch(
         logger.debug(f"[market_data] {len(missing)} tickers missing from Polygon, trying yfinance")
         tickers = missing
 
+    crypto_missing = [t for t in tickers if _is_crypto_ticker(t)]
+    for t in crypto_missing:
+        if t in results:
+            continue
+        cb_quote = _coinbase_quote_fallback(t, reason="batch_provider_chain_empty")
+        if cb_quote:
+            results[t] = cb_quote
+
+    yahoo_tickers = [
+        t for t in tickers
+        if t not in results
+        and not _is_crypto_ticker(t)
+        and not _is_unsupported_equity_ticker(t)
+    ]
+    if not yahoo_tickers:
+        return results
+
     # --- yfinance fallback ---
     from ..yf_session import batch_download
-    batch_download(tickers, period="3mo", interval="1d")
-    for t in tickers:
+    batch_download(yahoo_tickers, period="3mo", interval="1d")
+    for t in yahoo_tickers:
         if t in results:
             continue
         q = _yf_fast_info(t)

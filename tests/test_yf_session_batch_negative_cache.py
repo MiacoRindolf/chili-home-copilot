@@ -15,6 +15,7 @@ FIRST_FAST_INFO_PROBE_COUNT = 1
 SECOND_FAST_INFO_PROBE_COUNT = 2
 BATCH_MISS_FIRST_PROBE_COUNT = 1
 BATCH_MISS_SECOND_PROBE_COUNT = 2
+NO_BATCH_DOWNLOAD_PROBE_COUNT = 0
 NO_HISTORY_PROBE_COUNT = 0
 HISTORY_PROBE_COUNT = 1
 NO_FAST_INFO_PROBE_COUNT = 0
@@ -162,19 +163,28 @@ def test_batch_download_negative_caches_single_missing_equity_after_threshold(
     assert len(calls) == calls_before_dead_skip
 
 
-def test_batch_download_negative_caches_missing_crypto_with_short_crypto_ttl(
+def test_batch_download_single_missing_crypto_short_caches_yahoo_miss(
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        yf_session.yf,
-        "download",
-        lambda *_args, **_kwargs: pd.DataFrame(),
+    calls: list[tuple[str, ...]] = []
+
+    def _download(symbols, **_kwargs):
+        calls.append(tuple(symbols))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(yf_session.yf, "download", _download)
+
+    yf_session.batch_download([MISSING_CRYPTO], period="5d")
+    yf_session.batch_download([MISSING_CRYPTO], period="5d")
+
+    assert yf_session._is_dead(MISSING_CRYPTO) is False
+    assert len(calls) == NO_BATCH_DOWNLOAD_PROBE_COUNT
+    assert (
+        yf_session._cache_get(
+            yf_session._crypto_history_miss_key(MISSING_CRYPTO)
+        )
+        is True
     )
-
-    for _ in range(yf_session._EMPTY_THRESHOLD):
-        yf_session.batch_download([MISSING_CRYPTO], period="5d")
-
-    assert yf_session._is_dead(MISSING_CRYPTO) is True
 
 
 def test_crypto_history_skips_yfinance_during_batch_miss_cooldown(
