@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, time as datetime_time, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,7 @@ from ...config import (
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
@@ -98,6 +99,9 @@ PAPER_SHADOW_DUPLICATE_POLICY_STRICT = "strict_open_dedupe"
 PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS = "reject_observation_bypass"
 PAPER_SHADOW_DUPLICATE_SKIP_REASON_SAME_ALERT_FAMILY = (
     "duplicate_same_alert_reason_family"
+)
+PAPER_SHADOW_DUPLICATE_SKIP_REASON_RECENT_CANDIDATE_FAMILY = (
+    "duplicate_recent_candidate_reason_family"
 )
 PAPER_SHADOW_REASON_FAMILY_SYNERGY_NOT_APPLICABLE = "synergy_not_applicable"
 PAPER_SHADOW_REASON_FAMILY_PREFIXES = ("skipped_", "blocked_")
@@ -751,6 +755,48 @@ def _find_same_alert_reason_family_shadow(
     return None, None
 
 
+def _find_recent_candidate_reason_family_shadow(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    reason_families: frozenset[str],
+    window_minutes: int,
+) -> tuple[PaperTrade | None, str | None]:
+    if not reason_families or window_minutes <= 0:
+        return None, None
+    try:
+        now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        cutoff = now_utc_naive - timedelta(minutes=int(window_minutes))
+        pattern_id = int(alert.scan_pattern_id or 0)
+    except (TypeError, ValueError):
+        return None, None
+    if pattern_id <= 0:
+        return None, None
+    rows = (
+        db.query(PaperTrade)
+        .filter(
+            PaperTrade.user_id == uid,
+            PaperTrade.ticker == (alert.ticker or "").upper(),
+            PaperTrade.scan_pattern_id == pattern_id,
+            PaperTrade.paper_shadow_of_alert_id.isnot(None),
+            PaperTrade.entry_date >= cutoff,
+        )
+        .order_by(PaperTrade.id.desc())
+        .all()
+    )
+    for row in rows:
+        sig = row.signal_json if isinstance(row.signal_json, dict) else {}
+        existing_families = _paper_shadow_reason_families(
+            str(sig.get("shadow_decision") or ""),
+            sig,
+        )
+        matched = reason_families & existing_families
+        if matched:
+            return row, sorted(matched)[0]
+    return None, None
+
+
 def _maybe_open_paper_shadow(
     db: Session,
     *,
@@ -851,6 +897,38 @@ def _maybe_open_paper_shadow(
                     PAPER_SHADOW_DUPLICATE_SKIP_REASON_SAME_ALERT_FAMILY,
                     duplicate_family,
                     getattr(duplicate, "id", None),
+                )
+                return
+        if effective_allow_duplicate_open:
+            reason_families = _paper_shadow_reason_families(decision, sig)
+            recent_window_minutes = int(
+                getattr(
+                    settings,
+                    "chili_autotrader_paper_shadow_dedupe_recent_reason_family_minutes",
+                    AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
+                )
+                or 0
+            )
+            duplicate, duplicate_family = _find_recent_candidate_reason_family_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                reason_families=reason_families,
+                window_minutes=recent_window_minutes,
+            )
+            if duplicate is not None:
+                logger.info(
+                    "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
+                    "decision=%s skipped reason=%s family=%s "
+                    "existing_paper_trade_id=%s window_minutes=%s",
+                    alert.id,
+                    alert.scan_pattern_id,
+                    alert.ticker,
+                    decision,
+                    PAPER_SHADOW_DUPLICATE_SKIP_REASON_RECENT_CANDIDATE_FAMILY,
+                    duplicate_family,
+                    getattr(duplicate, "id", None),
+                    recent_window_minutes,
                 )
                 return
         shadow_max_open = int(

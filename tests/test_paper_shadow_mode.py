@@ -24,7 +24,10 @@ from uuid import uuid4
 
 import pytest
 
-from app.config import AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN
+from app.config import (
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
+)
 from app import models
 from app.models.trading import (
     BreakoutAlert, PaperTrade, ScanPattern,
@@ -249,6 +252,11 @@ def test_reject_shadow_can_bypass_duplicate_dedupe_for_learning(
     )
     monkeypatch.setattr(
         at_mod.settings,
+        "chili_autotrader_paper_shadow_dedupe_recent_reason_family_minutes",
+        0,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
         "chili_autotrader_paper_shadow_max_open",
         AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     )
@@ -310,6 +318,78 @@ def test_reject_shadow_can_bypass_duplicate_dedupe_for_learning(
     assert sibling_rows[0].signal_json.get("paper_shadow_duplicate_policy") == (
         PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
     )
+
+
+def test_reject_shadow_dedupes_recent_same_candidate_reason_family(
+    db, monkeypatch,
+):
+    pat, alert = _seed_pattern_and_alert(db)
+    sibling = _seed_sibling_alert(db, alert)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_dedupe_recent_reason_family_minutes",
+        AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_max_open",
+        AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
+    )
+    from app.services.trading import paper_trading as pt_mod
+    monkeypatch.setattr(
+        pt_mod, "_compute_atr_levels",
+        lambda ticker, entry_price, exit_cfg: (
+            entry_price * 0.97, entry_price * 1.10, 1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        pt_mod, "_apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    _maybe_open_reject_paper_shadow(
+        db,
+        uid=alert.user_id,
+        alert=alert,
+        px=float(alert.entry_price),
+        snap={},
+        reason="non_positive_expected_edge",
+        existing_qty=TEST_SHADOW_QUANTITY,
+    )
+    _maybe_open_reject_paper_shadow(
+        db,
+        uid=sibling.user_id,
+        alert=sibling,
+        px=float(sibling.entry_price),
+        snap={},
+        reason="non_positive_expected_edge",
+        existing_qty=TEST_SHADOW_QUANTITY,
+    )
+    db.commit()
+
+    duplicate_scope_rows = db.query(PaperTrade).filter(
+        PaperTrade.user_id == alert.user_id,
+        PaperTrade.ticker == alert.ticker,
+        PaperTrade.scan_pattern_id == pat.id,
+        PaperTrade.status == "open",
+    ).all()
+    sibling_rows = db.query(PaperTrade).filter(
+        PaperTrade.paper_shadow_of_alert_id == sibling.id
+    ).all()
+    assert len(duplicate_scope_rows) == 1
+    assert len(sibling_rows) == 0
+    assert duplicate_scope_rows[0].paper_shadow_of_alert_id == alert.id
 
 
 def test_reject_shadow_dedupes_same_alert_synergy_retry_family(db, monkeypatch):
@@ -394,6 +474,11 @@ def test_qualified_block_shadow_bypasses_duplicate_dedupe_for_recert_debt(
         at_mod.settings,
         "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
         True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_dedupe_recent_reason_family_minutes",
+        0,
     )
     from app.services.trading import paper_trading as pt_mod
     monkeypatch.setattr(
