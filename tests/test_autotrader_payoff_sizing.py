@@ -190,7 +190,7 @@ def test_auto_trader_payoff_composes_after_pilot_before_qty():
     # Get positions of the three anchors
     pilot_pos = text.find("pilot_promoted_risk_multiplier")
     marker_pos = text.find("f-stop-engine-payoff-ratio-gate")
-    qty_pos = text.find("qty_raw = notional / px")
+    qty_pos = text.find("qty_raw = notional / px", marker_pos)
 
     assert pilot_pos > 0, "pilot_promoted_risk_multiplier anchor not found"
     assert marker_pos > 0, "payoff marker not found"

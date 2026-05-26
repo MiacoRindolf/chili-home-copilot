@@ -39,9 +39,9 @@ Tunable::
 
     chili_regime_gate_enabled          = True
     chili_regime_gate_mode             = "shadow"   # or "live"
-    chili_regime_gate_min_trades       = 5          # evidence threshold per dim
-    chili_regime_gate_max_age_days     = 7          # ignore ledger rows older than this
-    chili_regime_gate_min_negatives    = 2          # how many dimensions must agree to block
+    chili_regime_gate_min_trades       = REGIME_GATE_DEFAULT_MIN_TRADES
+    chili_regime_gate_max_age_days     = REGIME_GATE_DEFAULT_MAX_AGE_DAYS
+    chili_regime_gate_min_negatives    = REGIME_GATE_DEFAULT_MIN_NEGATIVES
 """
 from __future__ import annotations
 
@@ -65,10 +65,14 @@ REGIME_GATE_DIMENSIONS = (
     REGIME_DIM_VOL,
 )
 CRYPTO_TICKER_SUFFIX = "-USD"
+REGIME_GATE_DEFAULT_MIN_TRADES = 5
+REGIME_GATE_DEFAULT_MAX_AGE_DAYS = 7
+REGIME_GATE_DEFAULT_MIN_NEGATIVES = 2
 DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = (
     REGIME_DIM_TICKER,
     REGIME_DIM_CROSS_ASSET,
 )
+DEFAULT_EQUITY_ANCHOR_DIMENSIONS = (REGIME_DIM_TICKER,)
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,14 @@ def _crypto_anchor_dimensions() -> set[str]:
         DEFAULT_CRYPTO_ANCHOR_DIMENSIONS,
     )
     return configured or set(DEFAULT_CRYPTO_ANCHOR_DIMENSIONS)
+
+
+def _equity_anchor_dimensions() -> set[str]:
+    configured = _settings_csv_set(
+        "chili_regime_gate_equity_anchor_dimensions",
+        DEFAULT_EQUITY_ANCHOR_DIMENSIONS,
+    )
+    return configured or set(DEFAULT_EQUITY_ANCHOR_DIMENSIONS)
 
 
 # ── 4-dimension regime label feed ──────────────────────────────────────
@@ -245,9 +257,15 @@ def evaluate_regime_gate(
     """
     enabled = bool(_settings_get("chili_regime_gate_enabled", True))
     mode = (str(_settings_get("chili_regime_gate_mode", "shadow") or "shadow")).strip().lower()
-    min_n = int(_settings_get("chili_regime_gate_min_trades", 5))
-    max_age = int(_settings_get("chili_regime_gate_max_age_days", 7))
-    min_negatives = int(_settings_get("chili_regime_gate_min_negatives", 2))
+    min_n = int(
+        _settings_get("chili_regime_gate_min_trades", REGIME_GATE_DEFAULT_MIN_TRADES)
+    )
+    max_age = int(
+        _settings_get("chili_regime_gate_max_age_days", REGIME_GATE_DEFAULT_MAX_AGE_DAYS)
+    )
+    min_negatives = int(
+        _settings_get("chili_regime_gate_min_negatives", REGIME_GATE_DEFAULT_MIN_NEGATIVES)
+    )
 
     if not enabled:
         return RegimeGateResult(
@@ -335,6 +353,34 @@ def evaluate_regime_gate(
                 blocked=False, mode=mode,
                 reason=(
                     f"insufficient_crypto_anchor_negative_consensus:"
+                    f"n_neg={n_negative}/{n_with_evidence}:anchors={anchor_desc}"
+                ),
+                pattern_id=int(pattern_id), ticker=ticker,
+                regime_label=agg_label, n_trades=agg_n,
+                hit_rate=agg_hr, mean_pnl_pct=agg_mp,
+                votes=tuple(votes),
+                n_negative=n_negative,
+                n_dimensions_with_evidence=n_with_evidence,
+            )
+
+    equity_anchor_required = bool(
+        _settings_get("chili_regime_gate_require_equity_anchor_negative", True)
+    )
+    if (
+        not _is_crypto_ticker(ticker)
+        and equity_anchor_required
+        and n_negative >= min_negatives
+    ):
+        anchor_dims = _equity_anchor_dimensions()
+        has_anchor_negative = any(
+            vote.negative and vote.dimension in anchor_dims for vote in votes
+        )
+        if not has_anchor_negative:
+            anchor_desc = ",".join(sorted(anchor_dims))
+            return RegimeGateResult(
+                blocked=False, mode=mode,
+                reason=(
+                    f"insufficient_equity_anchor_negative_consensus:"
                     f"n_neg={n_negative}/{n_with_evidence}:anchors={anchor_desc}"
                 ),
                 pattern_id=int(pattern_id), ticker=ticker,

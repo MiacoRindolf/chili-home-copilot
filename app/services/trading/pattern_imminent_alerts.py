@@ -125,6 +125,7 @@ PATTERN_IMMINENT_SCAN_SHADOW_PRIORITY = 2
 PATTERN_IMMINENT_SCAN_DEFAULT_STAGE_PRIORITY = 9
 PATTERN_IMMINENT_SCAN_RECERT_CLEAR_PRIORITY = 0
 PATTERN_IMMINENT_SCAN_RECERT_DEBT_PRIORITY = 1
+PATTERN_IMMINENT_SCAN_HARD_RECERT_SHADOW_PRIORITY = 3
 PATTERN_IMMINENT_SCAN_STAGE_PRIORITY_BY_NAME = {
     LIVE_STAGE: PATTERN_IMMINENT_SCAN_PROMOTED_PRIORITY,
     PROMOTED_STAGE: PATTERN_IMMINENT_SCAN_PROMOTED_PRIORITY,
@@ -296,6 +297,26 @@ def _imminent_scan_priority_key(pat: ScanPattern) -> tuple[int, int, int, float,
         if bool(getattr(pat, "recert_required", False))
         else PATTERN_IMMINENT_SCAN_RECERT_CLEAR_PRIORITY
     )
+    hard_recert_reasons = _hard_recert_shadow_reasons_for_pattern(
+        pat,
+        enabled=bool(
+            getattr(settings, "pattern_imminent_hard_recert_shadow_enabled", True)
+        ),
+        lifecycle_stages=_csv_stage_setting(
+            "pattern_imminent_hard_recert_shadow_lifecycle_stages",
+            PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_LIFECYCLE_STAGES,
+        ),
+        hard_reasons=_csv_token_setting(
+            "pattern_imminent_hard_recert_shadow_reasons",
+            PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_REASONS,
+        ),
+    )
+    if hard_recert_reasons:
+        stage_priority = max(
+            stage_priority,
+            PATTERN_IMMINENT_SCAN_HARD_RECERT_SHADOW_PRIORITY,
+        )
+        recert_priority = PATTERN_IMMINENT_SCAN_HARD_RECERT_SHADOW_PRIORITY
     evidence_count = int(getattr(pat, "evidence_count", 0) or 0)
     pattern_id = _pattern_id_for_rotation(pat)
     return (

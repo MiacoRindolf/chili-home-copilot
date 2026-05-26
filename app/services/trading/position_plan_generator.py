@@ -134,8 +134,21 @@ def _build_position_context(
     db: Session,
     trades: list[Trade],
     quotes: dict[str, dict[str, Any]],
+    trade_quotes: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build per-position context dicts for the LLM."""
+    try:
+        from .autopilot_scope import is_option_trade
+    except Exception:
+        def is_option_trade(_trade: Trade) -> bool:  # type: ignore[no-redef]
+            return False
+    try:
+        from .options.exit_monitor import _opt_meta
+    except Exception:
+        def _opt_meta(_trade: Trade) -> dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+
+    trade_quotes = trade_quotes or {}
     trade_ids = [t.id for t in trades]
     alert_ids = [t.related_alert_id for t in trades if t.related_alert_id]
     pattern_ids = list({t.scan_pattern_id for t in trades if t.scan_pattern_id})
@@ -163,7 +176,10 @@ def _build_position_context(
 
     positions = []
     for trade in trades:
-        q = quotes.get(trade.ticker.upper()) or quotes.get(trade.ticker) or {}
+        trade_is_option = is_option_trade(trade)
+        q = trade_quotes.get(int(trade.id)) or {}
+        if not q and not trade_is_option:
+            q = quotes.get(trade.ticker.upper()) or quotes.get(trade.ticker) or {}
         cur_price = q.get("price") or q.get("last_price")
         try:
             cur_price = float(cur_price) if cur_price is not None else None
@@ -200,6 +216,9 @@ def _build_position_context(
         pos = {
             "trade_id": trade.id,
             "ticker": trade.ticker,
+            "asset_type": "options" if trade_is_option else (
+                "crypto" if (trade.ticker or "").upper().endswith("-USD") else "stock"
+            ),
             "direction": trade.direction or "long",
             "entry_price": entry,
             "current_price": cur_price,
@@ -213,6 +232,17 @@ def _build_position_context(
             "trade_type": trade.trade_type,
             "notes": (trade.notes or "")[:200],
         }
+
+        if trade_is_option:
+            opt_meta = _opt_meta(trade)
+            pos["contract_multiplier"] = 100
+            pos["price_domain"] = "option_premium"
+            pos["option_meta"] = {
+                "underlying": opt_meta.get("underlying") or trade.ticker,
+                "expiration": opt_meta.get("expiration"),
+                "strike": opt_meta.get("strike"),
+                "option_type": opt_meta.get("option_type"),
+            }
 
         if pat:
             pos["pattern_name"] = pat.name
@@ -307,12 +337,32 @@ def generate_position_plans(
         if cached is not None:
             return cached
 
-    tickers = list({t.ticker.upper() for t in trades})
-    quotes: dict[str, dict[str, Any]] = {}
     try:
-        quotes = fetch_quotes_batch(tickers, allow_provider_fallback=True)
+        from .autopilot_scope import is_option_trade
     except Exception:
-        logger.warning("[position_plan] fetch_quotes_batch failed", exc_info=True)
+        def is_option_trade(_trade: Trade) -> bool:  # type: ignore[no-redef]
+            return False
+
+    tickers = list({t.ticker.upper() for t in trades if not is_option_trade(t)})
+    quotes: dict[str, dict[str, Any]] = {}
+    if tickers:
+        try:
+            quotes = fetch_quotes_batch(tickers, allow_provider_fallback=True)
+        except Exception:
+            logger.warning("[position_plan] fetch_quotes_batch failed", exc_info=True)
+
+    trade_quotes: dict[int, dict[str, Any]] = {}
+    option_trades = [t for t in trades if is_option_trade(t)]
+    if option_trades:
+        try:
+            from .broker_quotes import broker_quote_for_trade
+
+            for trade in option_trades:
+                q = broker_quote_for_trade(trade, purpose="display")
+                if q and q.get("price") is not None:
+                    trade_quotes[int(trade.id)] = q
+        except Exception:
+            logger.warning("[position_plan] option quote lookup failed", exc_info=True)
 
     regime = {}
     try:
@@ -320,7 +370,7 @@ def generate_position_plans(
     except Exception:
         logger.warning("[position_plan] get_market_regime failed", exc_info=True)
 
-    positions = _build_position_context(db, trades, quotes)
+    positions = _build_position_context(db, trades, quotes, trade_quotes)
     portfolio_ctx = _build_portfolio_context(positions, regime)
 
     user_msg = json.dumps({
