@@ -89,6 +89,10 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _truthy_option_marker(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _paper_option_meta_from_signal(signal_json: Any) -> dict[str, Any]:
     sig = _as_dict(signal_json)
     meta = sig.get("option_meta")
@@ -105,12 +109,14 @@ def _is_option_signal(signal_json: Any) -> bool:
     sig = _as_dict(signal_json)
     if _paper_option_meta_from_signal(sig):
         return True
-    if bool(sig.get("options_path")):
+    if _truthy_option_marker(sig.get("options_path")):
         return True
     if str(sig.get("asset_type") or "").strip().lower() in {"option", "options"}:
         return True
     breakout = _as_dict(sig.get("breakout_alert"))
-    return str(breakout.get("asset_type") or "").strip().lower() in {"option", "options"}
+    if str(breakout.get("asset_type") or "").strip().lower() in {"option", "options"}:
+        return True
+    return _truthy_option_marker(breakout.get("options_path"))
 
 
 def _is_option_paper_trade(pt: PaperTrade) -> bool:

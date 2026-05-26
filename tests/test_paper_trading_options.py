@@ -108,6 +108,39 @@ def test_open_paper_trade_option_defaults_to_premium_levels(monkeypatch) -> None
     assert trade.signal_json["_paper_meta"]["contract_multiplier"] == 100.0
 
 
+def test_option_signal_honors_nested_options_path() -> None:
+    from app.services.trading import paper_trading
+
+    assert paper_trading._is_option_signal(
+        {"breakout_alert": {"options_path": True}},
+    )
+    assert paper_trading._is_option_signal(
+        {"breakout_alert": {"options_path": "yes"}},
+    )
+    assert not paper_trading._is_option_signal(
+        {"options_path": "false", "breakout_alert": {"options_path": "false"}},
+    )
+
+
+def test_close_paper_trade_nested_options_path_uses_contract_multiplier(monkeypatch) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_commission", 0.0, raising=False)
+    trade = PaperTrade(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json={"breakout_alert": {"options_path": True}},
+    )
+
+    paper_trading._close_paper_trade(trade, 1.45, "target")
+
+    assert trade.pnl == pytest.approx(40.0)
+    assert trade.pnl_pct == pytest.approx(16.0)
+
+
 def test_close_paper_trade_option_uses_contract_multiplier(monkeypatch) -> None:
     from app.services.trading import paper_trading
 
