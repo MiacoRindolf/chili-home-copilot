@@ -23,8 +23,11 @@ def _make_trade(**overrides):
     t.notes = overrides.get("notes", "")
     t.exit_reason = overrides.get("exit_reason", None)
     t.entry_price = overrides.get("entry_price", 10.0)
+    t.exit_price = overrides.get("exit_price", None)
     t.quantity = overrides.get("quantity", 1.0)
     t.direction = overrides.get("direction", "long")
+    t.pnl = overrides.get("pnl", None)
+    t.indicator_snapshot = overrides.get("indicator_snapshot", {})
     t.exit_date = None
     return t
 
@@ -87,6 +90,79 @@ class TestCleanupManualTrades:
 
 
 # ── sync_positions_to_db returns live_tickers ──────────────────────────
+
+    @patch(
+        "app.services.broker_service._get_exit_price",
+        side_effect=AssertionError("option manual cleanup must not use underlying quote"),
+    )
+    def test_option_manual_trade_not_auto_closed_from_stock_position_list(self, _px):
+        opt = _make_trade(
+            ticker="SPY",
+            broker_source="manual",
+            broker_order_id=None,
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [opt]
+
+        result = cleanup_manual_trades(db, user_id=None, live_tickers=set())
+
+        assert result["closed_manual"] == 0
+        assert result["skipped_options"] == 1
+        assert opt.status == "open"
+        db.commit.assert_not_called()
+
+
+class TestBackfillClosedTradePnl:
+    @patch(
+        "app.services.broker_service._get_exit_price",
+        side_effect=AssertionError("option backfill must not use underlying quote"),
+    )
+    def test_closed_option_without_exit_price_is_skipped(self, _px):
+        from app.services.broker_service import backfill_closed_trade_pnl
+
+        opt = _make_trade(
+            ticker="SPY",
+            status="closed",
+            exit_price=None,
+            pnl=None,
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [opt]
+
+        patched = backfill_closed_trade_pnl(db, user_id=None)
+
+        assert patched == 0
+        assert opt.exit_price is None
+        assert opt.pnl is None
+        db.commit.assert_not_called()
+
+    @patch(
+        "app.services.broker_service._get_exit_price",
+        side_effect=AssertionError("premium exit price is already present"),
+    )
+    def test_closed_option_with_exit_price_uses_contract_multiplier(self, _px):
+        from app.services.broker_service import backfill_closed_trade_pnl
+
+        opt = _make_trade(
+            ticker="SPY",
+            status="closed",
+            entry_price=1.25,
+            exit_price=1.45,
+            quantity=2,
+            pnl=None,
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [opt]
+
+        patched = backfill_closed_trade_pnl(db, user_id=None)
+
+        assert patched == 1
+        assert opt.pnl == 40.0
+        db.commit.assert_called_once()
+
 
 class TestSyncPositionsReturnsLiveTickers:
     """Verify that sync_positions_to_db returns _live_tickers key."""

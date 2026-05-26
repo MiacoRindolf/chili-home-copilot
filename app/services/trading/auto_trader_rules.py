@@ -6,11 +6,25 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from ...config import (
+    AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_MAX_ROWS,
+    AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_Z,
+    AUTOTRADER_DIRECTIONAL_PROBABILITY_MAX_Z,
+    AUTOTRADER_DIRECTIONAL_PROBABILITY_MIN_ROWS,
+    AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ASSET_TYPES,
+    AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ENABLED,
+    AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_MAX_PCT,
+    AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_SLIPPAGE_MULTIPLE,
+    AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_SLIPPAGE_MULTIPLE,
+    AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MIN_SLIPPAGE_MULTIPLE,
+    AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED,
+    AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD,
+    AUTOTRADER_MAX_ENTRY_SLIPPAGE_DEFAULT_PCT,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION,
@@ -117,8 +131,9 @@ class RuleGateSettings:
     # Deprecated fallback. Current admission uses expected net edge, so this
     # value should not act as a hidden 8%/9%/12% magic-profit threshold.
     min_projected_profit_pct: float = 0.0
-    max_symbol_price_usd: float = 50.0
-    max_entry_slippage_pct: float = 1.0
+    max_symbol_price_usd: float = AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD
+    fractional_equity_enabled: bool = AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED
+    max_entry_slippage_pct: float = AUTOTRADER_MAX_ENTRY_SLIPPAGE_DEFAULT_PCT
     options_min_underlying_reward_risk: float = 1.0
     options_min_option_reward_risk: float = 1.0
     options_min_expected_value_pct: float = 0.0
@@ -163,6 +178,12 @@ class RuleGateSettings:
                 g("chili_autotrader_min_projected_profit_pct", cls.min_projected_profit_pct)
             ),
             max_symbol_price_usd=float(g("chili_autotrader_max_symbol_price_usd", cls.max_symbol_price_usd)),
+            fractional_equity_enabled=bool(
+                g(
+                    "chili_autotrader_fractional_equity_enabled",
+                    cls.fractional_equity_enabled,
+                )
+            ),
             max_entry_slippage_pct=float(
                 g("chili_autotrader_max_entry_slippage_pct", cls.max_entry_slippage_pct)
             ),
@@ -738,8 +759,11 @@ def _probability_sample_count(
 
 
 def _settings_int(settings: Any, name: str, default: int, *, minimum: int = 0) -> int:
+    raw = getattr(settings, name, default)
+    if _looks_like_mock_setting(raw):
+        raw = default
     try:
-        value = int(getattr(settings, name, default))
+        value = int(raw)
     except Exception:
         value = default
     return max(minimum, value)
@@ -753,8 +777,11 @@ def _settings_float(
     minimum: float | None = None,
     maximum: float | None = None,
 ) -> float:
+    raw = getattr(settings, name, default)
+    if _looks_like_mock_setting(raw):
+        raw = default
     try:
-        value = float(getattr(settings, name, default))
+        value = float(raw)
     except Exception:
         value = default
     if not math.isfinite(value):
@@ -766,8 +793,32 @@ def _settings_float(
     return value
 
 
+_TRUE_SETTING_TOKENS = frozenset({"1", "true", "yes", "on"})
+_FALSE_SETTING_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _looks_like_mock_setting(value: Any) -> bool:
+    return value.__class__.__module__.startswith("unittest.mock")
+
+
+def _settings_bool(settings: Any, name: str, default: bool) -> bool:
+    raw = getattr(settings, name, default)
+    if _looks_like_mock_setting(raw):
+        raw = default
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _TRUE_SETTING_TOKENS:
+            return True
+        if token in _FALSE_SETTING_TOKENS:
+            return False
+        return bool(default)
+    return bool(raw)
+
+
 def _settings_csv_set(settings: Any, name: str, default: str) -> set[str]:
     raw = getattr(settings, name, default)
+    if _looks_like_mock_setting(raw):
+        raw = default
     if isinstance(raw, (set, tuple, list)):
         values = raw
     else:
@@ -957,15 +1008,15 @@ def _directional_edge_probability(
     z = _settings_float(
         settings,
         "chili_autotrader_directional_probability_z",
-        1.0,
+        AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_Z,
         minimum=0.0,
-        maximum=3.0,
+        maximum=AUTOTRADER_DIRECTIONAL_PROBABILITY_MAX_Z,
     )
     limit = _settings_int(
         settings,
         "chili_autotrader_directional_probability_max_rows",
-        30,
-        minimum=1,
+        AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_MAX_ROWS,
+        minimum=AUTOTRADER_DIRECTIONAL_PROBABILITY_MIN_ROWS,
     )
     ticker_rows = _load_directional_outcome_rows(
         db,
@@ -1579,6 +1630,61 @@ def _empirical_entry_cost_fraction(
     }
 
 
+def _entry_price_adjusted_alert(alert: BreakoutAlert, entry_price: float) -> Any:
+    """Lightweight alert view for re-checking edge at the actual entry quote."""
+    return SimpleNamespace(
+        id=getattr(alert, "id", None),
+        ticker=getattr(alert, "ticker", None),
+        asset_type=getattr(alert, "asset_type", None),
+        alert_tier=getattr(alert, "alert_tier", None),
+        scan_pattern_id=getattr(alert, "scan_pattern_id", None),
+        score_at_alert=getattr(alert, "score_at_alert", None),
+        price_at_alert=getattr(alert, "price_at_alert", None),
+        entry_price=entry_price,
+        stop_loss=getattr(alert, "stop_loss", None),
+        target_price=getattr(alert, "target_price", None),
+        user_id=getattr(alert, "user_id", None),
+    )
+
+
+def _favorable_entry_drift_limit_pct(settings: Any, base_slippage_pct: float) -> float:
+    multiple = _settings_float(
+        settings,
+        "chili_autotrader_favorable_entry_drift_slippage_multiple",
+        AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_SLIPPAGE_MULTIPLE,
+        minimum=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MIN_SLIPPAGE_MULTIPLE,
+        maximum=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_SLIPPAGE_MULTIPLE,
+    )
+    cap_pct = _settings_float(
+        settings,
+        "chili_autotrader_favorable_entry_drift_max_pct",
+        AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_MAX_PCT,
+        minimum=0.0,
+    )
+    if cap_pct <= 0.0:
+        return float(base_slippage_pct)
+    return max(
+        float(base_slippage_pct),
+        min(cap_pct, float(base_slippage_pct) * multiple),
+    )
+
+
+def _favorable_entry_drift_enabled_for(settings: Any, asset_type: str) -> bool:
+    if not _settings_bool(
+        settings,
+        "chili_autotrader_favorable_entry_drift_enabled",
+        AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ENABLED,
+    ):
+        return False
+    allowed_assets = _settings_csv_set(
+        settings,
+        "chili_autotrader_favorable_entry_drift_asset_types",
+        AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ASSET_TYPES,
+    )
+    asset = str(asset_type or "stock").strip().lower()
+    return "all" in allowed_assets or asset in allowed_assets
+
+
 def evaluate_entry_edge(
     db: Session,
     alert: BreakoutAlert,
@@ -2047,15 +2153,17 @@ def passes_rule_gate(
         return False, "bad_reference_price", snap
 
     max_px = gs.max_symbol_price_usd
-    # Task KK — the equity max-symbol-price cap (default $50) was meant to
-    # avoid sub-1-share fractional rounding traps on stocks like NVDA. It
-    # makes no sense for crypto: BTC is routinely > $50k, and Robinhood
-    # supports fractional crypto natively, so a literal price cap would
-    # block every crypto alert by construction.
-    # Task MM — same reasoning for options. The "symbol price" the gate
-    # sees here is the underlying's price, not the option premium. A
-    # call on AAPL at $180 spot is fine even though 180 > 50.
-    if not crypto_path and not options_path and px > max_px:
+    fractional_equity_enabled = bool(gs.fractional_equity_enabled)
+    snap["max_symbol_price_usd"] = max_px
+    snap["fractional_equity_enabled"] = fractional_equity_enabled
+    # Crypto and options never use the legacy stock share-price cap. Crypto
+    # bases are often high-priced assets, and the option path sees underlying
+    # spot here rather than the option premium.
+    # When fractional equity is enabled, this legacy cap is informational only:
+    # risk notional and fractional quantity normalization own stock sizing.
+    if not crypto_path and not options_path and fractional_equity_enabled and px > max_px:
+        snap["symbol_price_cap_skipped_reason"] = "fractional_equity_enabled"
+    if not crypto_path and not options_path and not fractional_equity_enabled and px > max_px:
         return False, "symbol_price_above_cap", snap
 
     # WW — for options, ``ref`` is the option PREMIUM (e.g. $4.01) but
@@ -2073,10 +2181,53 @@ def passes_rule_gate(
     snap["slippage_tolerance_pct"] = round(slip_pct, 4)
     snap["slippage_source"] = slip_source
     if not options_path:
-        slip = abs(px - ref) / ref * 100.0
+        signed_slip = (px - ref) / ref * 100.0
+        slip = abs(signed_slip)
         snap["entry_slippage_pct"] = round(slip, 4)
+        snap["entry_slippage_signed_pct"] = round(signed_slip, 4)
+        if signed_slip < 0.0:
+            snap["entry_slippage_direction"] = "favorable"
+        elif signed_slip > 0.0:
+            snap["entry_slippage_direction"] = "adverse"
+        else:
+            snap["entry_slippage_direction"] = "flat"
         if slip > slip_pct:
-            return False, "missed_entry_slippage", snap
+            favorable_limit = _favorable_entry_drift_limit_pct(settings, slip_pct)
+            favorable_enabled = (
+                signed_slip < 0.0
+                and not crypto_path
+                and _favorable_entry_drift_enabled_for(
+                    settings,
+                    alert.asset_type or "stock",
+                )
+            )
+            snap["favorable_entry_drift_enabled"] = favorable_enabled
+            snap["favorable_entry_drift_max_pct"] = round(favorable_limit, 4)
+            if favorable_enabled and slip <= favorable_limit:
+                adjusted_alert = _entry_price_adjusted_alert(alert, px)
+                adjusted_edge = evaluate_entry_edge(
+                    db,
+                    adjusted_alert,
+                    settings=settings,
+                    pat_ctx=pat_ctx,
+                    confidence=conf,
+                )
+                snap["favorable_entry_drift_edge"] = adjusted_edge.snapshot
+                snap["favorable_entry_drift_edge_reason"] = adjusted_edge.reason
+                snap["favorable_entry_drift_original_entry_price"] = round(ref, 8)
+                snap["favorable_entry_drift_rechecked_entry_price"] = round(px, 8)
+                if adjusted_edge.allowed:
+                    snap["entry_edge"] = adjusted_edge.snapshot
+                    snap["entry_edge_reason"] = adjusted_edge.reason
+                    snap["entry_edge_expected_net_pct"] = adjusted_edge.snapshot.get(
+                        "expected_net_pct"
+                    )
+                    snap["entry_reference_price_adjusted"] = True
+                    ref = px
+                else:
+                    return False, "missed_entry_slippage", snap
+            else:
+                return False, "missed_entry_slippage", snap
     else:
         snap["entry_slippage_pct"] = None
         snap["slippage_skipped_reason"] = "options_path"
@@ -2232,7 +2383,7 @@ def count_autotrader_v1_open(db: Session, user_id: Optional[int], *, paper_mode:
         return n
     q = db.query(Trade).filter(
         Trade.auto_trader_version == "v1",
-        Trade.status == "open",
+        Trade.status.in_(("open", "working")),
     )
     if user_id is not None:
         q = q.filter(Trade.user_id == user_id)
@@ -2251,9 +2402,9 @@ def count_autotrader_v1_open_by_lane(
 ) -> dict:
     """Return ``{'equity': int, 'crypto': int, 'options': int}``.
 
-    Counts open AutoTrader-v1 trades per asset-class lane. Used by the rule
-    gate to enforce per-lane concurrency caps. Best-effort: any failure
-    returns zeros (the gate's outer global cap still protects the system).
+    Counts active AutoTrader-v1 trades per asset-class lane. Live rows include
+    both filled positions (open) and acknowledged-but-not-yet-filled entries
+    (working), because a resting entry order still consumes exposure budget.
     """
     out = {"equity": 0, "crypto": 0, "options": 0}
     try:
@@ -2279,12 +2430,13 @@ def count_autotrader_v1_open_by_lane(
         from sqlalchemy import text as _text
         params = {}
         sql = (
-            "SELECT COALESCE(LOWER(NULLIF(a.asset_type, '')), 'stock') AS at, "
+            "SELECT COALESCE(LOWER(NULLIF(a.asset_type, '')), "
+            "              LOWER(NULLIF(t.asset_kind, '')), 'stock') AS at, "
             "       COUNT(*) AS n "
             "FROM trading_trades t "
             "LEFT JOIN trading_breakout_alerts a ON a.id = t.related_alert_id "
             "WHERE t.auto_trader_version = 'v1' "
-            "  AND t.status = 'open' "
+            "  AND t.status IN ('open', 'working') "
         )
         if user_id is not None:
             sql += " AND t.user_id = :uid"
@@ -2295,7 +2447,7 @@ def count_autotrader_v1_open_by_lane(
             at_l = (at or "stock").lower()
             if at_l == "crypto":
                 out["crypto"] += int(n)
-            elif at_l == "options":
+            elif at_l in ("option", "options"):
                 out["options"] += int(n)
             else:
                 # 'stock', NULL/empty, forex, anything unrecognized → equity bucket

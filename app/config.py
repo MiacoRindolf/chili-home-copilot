@@ -16,6 +16,15 @@ BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB = 768
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS = 1
 BACKTEST_PRIORITY_SCORE_MAX = 100
 BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR = BACKTEST_PRIORITY_SCORE_MAX
+RECERT_QUEUE_DEFAULT_DISPATCH_INTERVAL_MINUTES = 60
+RECERT_QUEUE_DEFAULT_DISPATCH_LIMIT = 5
+RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY = 250
+RECERT_QUEUE_DEFAULT_PRIORITY_PATTERN_IDS = "585"
+RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ENABLED = True
+RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ORIGINS = "autotrader_signal_fastlane"
+RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_PRIORITY = (
+    RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY
+)
 DATABASE_DEFAULT_POOL_SIZE = 25
 DATABASE_DEFAULT_MAX_OVERFLOW = 55
 DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
@@ -25,7 +34,32 @@ DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
 AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
 AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
+AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD = 50.0
+AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED = True
+AUTOTRADER_MAX_ENTRY_SLIPPAGE_DEFAULT_PCT = 1.0
+AUTOTRADER_MAX_ENTRY_SLIPPAGE_CONFIG_LIMIT_PCT = 50.0
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ENABLED = True
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ASSET_TYPES = "stock"
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_SLIPPAGE_MULTIPLE = 2.5
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MIN_SLIPPAGE_MULTIPLE = 1.0
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_SLIPPAGE_MULTIPLE = 5.0
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_MAX_PCT = 5.0
+AUTOTRADER_FAVORABLE_ENTRY_DRIFT_CONFIG_LIMIT_PCT = 20.0
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
+PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT = 1.5
+PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS = 24
+PATTERN_DIRECTIONAL_DEFAULT_MAX_LOOKBACK_HOURS = (
+    PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS * 7
+)
+PATTERN_DIRECTIONAL_DEFAULT_MAX_ALERTS_PER_RUN = 200
+PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ENABLED = True
+PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_LOOKBACK_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 6
+)
+PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ASSET_TYPES = "stock"
+PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_MANAGED_REASONS = (
+    "insufficient_directional_samples"
+)
 AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TICKS = 6
 AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS = (
     AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS
@@ -79,8 +113,11 @@ AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
 )
 AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION = True
+AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH = True
+AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED = False
+AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD = 0.0
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE = "authoritative"
-AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES = "crypto"
+AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES = "crypto,stock"
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_DIRECTIONAL_SAMPLES = 8
 AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION = 0.60
 AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER = 1.50
@@ -89,6 +126,26 @@ AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_FRACTION = 0.005
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MAX_REWARD_FRACTION = 0.08
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK = 1.25
 AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT = 0.0
+AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_Z = 1.0
+AUTOTRADER_DIRECTIONAL_PROBABILITY_MAX_Z = 3.0
+AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_MAX_ROWS = 30
+AUTOTRADER_DIRECTIONAL_PROBABILITY_MIN_ROWS = 1
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED = True
+PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
+    "shadow_promoted,pilot_promoted"
+)
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY = (
+    BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR
+)
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT = (
+    AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT
+)
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES = (
+    PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES
+)
+AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
+)
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS = 2.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS = 6
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT = 0.0
@@ -104,9 +161,6 @@ PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_MAX_GAP = 0.15
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_ENABLED = True
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MAX_PER_RUN = 2
 PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_ADAPTIVE_MIN_READINESS_FRACTION = 0.50
-PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
-    "shadow_promoted,pilot_promoted"
-)
 PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES = 5
 PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES = 1
 PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS = 3
@@ -649,10 +703,23 @@ class Settings(BaseSettings):
     brain_recert_queue_mode: str = "shadow"
     brain_recert_queue_ops_log_enabled: bool = True
     brain_recert_queue_include_yellow: bool = False
-    brain_recert_queue_dispatch_interval_minutes: int = 60
-    brain_recert_queue_dispatch_limit: int = 5
-    brain_recert_queue_backtest_priority: int = 250
-    brain_recert_queue_priority_pattern_ids: str = "585"
+    brain_recert_queue_dispatch_interval_minutes: int = (
+        RECERT_QUEUE_DEFAULT_DISPATCH_INTERVAL_MINUTES
+    )
+    brain_recert_queue_dispatch_limit: int = RECERT_QUEUE_DEFAULT_DISPATCH_LIMIT
+    brain_recert_queue_backtest_priority: int = RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY
+    brain_recert_queue_priority_pattern_ids: str = (
+        RECERT_QUEUE_DEFAULT_PRIORITY_PATTERN_IDS
+    )
+    brain_recert_queue_immediate_dispatch_enabled: bool = (
+        RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ENABLED
+    )
+    brain_recert_queue_immediate_dispatch_origins: str = (
+        RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ORIGINS
+    )
+    brain_recert_queue_immediate_dispatch_priority: int = (
+        RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_PRIORITY
+    )
 
     # Phase K - Divergence panel + ops health endpoint (shadow rollout).
     brain_divergence_scorer_mode: str = "shadow"
@@ -2418,6 +2485,19 @@ class Settings(BaseSettings):
         default=AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_EXPECTED_NET_PCT,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MANAGED_EDGE_MIN_EXPECTED_NET_PCT"),
     )
+    chili_autotrader_directional_probability_z: float = Field(
+        default=AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_Z,
+        ge=0.0,
+        le=AUTOTRADER_DIRECTIONAL_PROBABILITY_MAX_Z,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_DIRECTIONAL_PROBABILITY_Z"),
+    )
+    chili_autotrader_directional_probability_max_rows: int = Field(
+        default=AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_MAX_ROWS,
+        ge=AUTOTRADER_DIRECTIONAL_PROBABILITY_MIN_ROWS,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_DIRECTIONAL_PROBABILITY_MAX_ROWS"
+        ),
+    )
     # f-handler-live-drift + f-handler-execution-robustness (Phase 2
     # #8/#9, 2026-05-06): trade-close-driven observability. Both share
     # the trade-close batch size with demote/regime_ledger via
@@ -2584,15 +2664,66 @@ class Settings(BaseSettings):
         ),
     )
     chili_autotrader_max_symbol_price_usd: float = Field(
-        default=50.0,
+        default=AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD,
         ge=0.01,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_SYMBOL_PRICE_USD"),
+        description=(
+            "Legacy whole-share safety cap for stock entries. When "
+            "CHILI_AUTOTRADER_FRACTIONAL_EQUITY_ENABLED is true, stock "
+            "entries are governed by risk notional and fractional quantity "
+            "normalization instead of this share-price cliff."
+        ),
+    )
+    chili_autotrader_fractional_equity_enabled: bool = Field(
+        default=AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_FRACTIONAL_EQUITY_ENABLED"),
+        description=(
+            "Allow stock entries to use fractional-share quantity sizing. "
+            "When enabled, high-priced stocks are not blocked solely by "
+            "CHILI_AUTOTRADER_MAX_SYMBOL_PRICE_USD; they still must pass "
+            "positive expected edge, slippage, drawdown, lifecycle, and "
+            "notional/quantity gates."
+        ),
     )
     chili_autotrader_max_entry_slippage_pct: float = Field(
-        default=1.0,
+        default=AUTOTRADER_MAX_ENTRY_SLIPPAGE_DEFAULT_PCT,
         ge=0.0,
-        le=50.0,
+        le=AUTOTRADER_MAX_ENTRY_SLIPPAGE_CONFIG_LIMIT_PCT,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_ENTRY_SLIPPAGE_PCT"),
+    )
+    chili_autotrader_favorable_entry_drift_enabled: bool = Field(
+        default=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_ENABLED"
+        ),
+        description=(
+            "Allow stock entries to accept a bounded favorable pullback below "
+            "the alert entry only after re-checking expected net edge at the "
+            "current price. Adverse upward drift still uses the normal "
+            "slippage block."
+        ),
+    )
+    chili_autotrader_favorable_entry_drift_asset_types: str = Field(
+        default=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ASSET_TYPES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_ASSET_TYPES"
+        ),
+    )
+    chili_autotrader_favorable_entry_drift_slippage_multiple: float = Field(
+        default=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_SLIPPAGE_MULTIPLE,
+        ge=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MIN_SLIPPAGE_MULTIPLE,
+        le=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_SLIPPAGE_MULTIPLE,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_SLIPPAGE_MULTIPLE"
+        ),
+    )
+    chili_autotrader_favorable_entry_drift_max_pct: float = Field(
+        default=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_MAX_PCT,
+        ge=0.0,
+        le=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_CONFIG_LIMIT_PCT,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_PCT"
+        ),
     )
     chili_autotrader_monitor_interval_seconds: int = Field(
         default=30,
@@ -3201,7 +3332,7 @@ class Settings(BaseSettings):
     # standard "real move" floor for intraday/swing breakouts; the
     # snapshot is persisted on each row for audit when this is tuned.
     chili_pattern_directional_threshold_pct: float = Field(
-        default=1.5,
+        default=PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT,
         validation_alias=AliasChoices(
             "CHILI_PATTERN_DIRECTIONAL_THRESHOLD_PCT"
         ),
@@ -3211,7 +3342,7 @@ class Settings(BaseSettings):
     # intraday-to-overnight breakout cycle; operator can shorten for
     # scalp-heavy regimes.
     chili_pattern_directional_default_hold_hours: int = Field(
-        default=24,
+        default=PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS,
         validation_alias=AliasChoices(
             "CHILI_PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS"
         ),
@@ -3221,7 +3352,7 @@ class Settings(BaseSettings):
     # week of lookback is enough to populate the rolling-30 view per
     # active pattern.
     chili_pattern_directional_max_lookback_hours: int = Field(
-        default=168,
+        default=PATTERN_DIRECTIONAL_DEFAULT_MAX_LOOKBACK_HOURS,
         validation_alias=AliasChoices(
             "CHILI_PATTERN_DIRECTIONAL_MAX_LOOKBACK_HOURS"
         ),
@@ -3229,9 +3360,34 @@ class Settings(BaseSettings):
     # Per-cycle cap on alerts evaluated. Bounds OHLC fetch fan-out so
     # a single tick never overwhelms the market-data providers.
     chili_pattern_directional_max_alerts_per_run: int = Field(
-        default=200,
+        default=PATTERN_DIRECTIONAL_DEFAULT_MAX_ALERTS_PER_RUN,
         validation_alias=AliasChoices(
             "CHILI_PATTERN_DIRECTIONAL_MAX_ALERTS_PER_RUN"
+        ),
+    )
+    chili_pattern_directional_edge_debt_priority_enabled: bool = Field(
+        default=PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_ENABLED"
+        ),
+    )
+    chili_pattern_directional_edge_debt_priority_lookback_minutes: int = Field(
+        default=PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_LOOKBACK_MINUTES,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_LOOKBACK_MINUTES"
+        ),
+    )
+    chili_pattern_directional_edge_debt_priority_asset_types: str = Field(
+        default=PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ASSET_TYPES,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_ASSET_TYPES"
+        ),
+    )
+    chili_pattern_directional_edge_debt_priority_managed_reasons: str = Field(
+        default=PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_MANAGED_REASONS,
+        validation_alias=AliasChoices(
+            "CHILI_PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_MANAGED_REASONS"
         ),
     )
     # f-promotion-pipeline-rebalance Phase 3 (2026-05-10):
@@ -3561,6 +3717,76 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_SHADOW_SIGNAL_LANE_OBSERVATION_ENABLED"),
     )
+    chili_autotrader_shadow_stock_fastlane_enabled: bool = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_ENABLED"
+        ),
+        description=(
+            "When true, stock shadow observations that already passed the "
+            "normal positive-edge rule gate boost their pattern into the "
+            "backtest queue. This accelerates evidence collection only; it "
+            "does not make shadow-promoted patterns live-tradable."
+        ),
+    )
+    chili_autotrader_shadow_stock_fastlane_backtest_priority: int = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_BACKTEST_PRIORITY"
+        ),
+    )
+    chili_autotrader_shadow_stock_fastlane_min_expected_net_pct: float = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_MIN_EXPECTED_NET_PCT"
+        ),
+    )
+    chili_autotrader_shadow_stock_fastlane_lifecycle_stages: str = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_LIFECYCLE_STAGES"
+        ),
+    )
+    chili_autotrader_shadow_stock_fastlane_reboost_cooldown_minutes: float = Field(
+        default=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_STOCK_FASTLANE_REBOOST_COOLDOWN_MINUTES"
+        ),
+        description=(
+            "Minimum minutes after a pattern backtest before stock shadow "
+            "fastlane may re-boost the same pattern. Default follows the "
+            "imminent scanner cadence so one scanner wave cannot churn the "
+            "same pattern through repeated backtests."
+        ),
+    )
+    chili_autotrader_shadow_observation_diagnostic_sizing_enabled: bool = Field(
+        default=AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_ENABLED"
+        ),
+        description=(
+            "When true, shadow-observation-only entries run the full advisory "
+            "sizing diagnostics before opening paper evidence. The default "
+            "uses base risk-notional sizing so shadow learning cannot monopolize "
+            "the live AutoTrader tick."
+        ),
+    )
+    chili_autotrader_shadow_observation_evidence_notional_usd: float = Field(
+        default=AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_USD"
+        ),
+        description=(
+            "Optional fixed paper-only notional for lightweight shadow "
+            "observations. Leave at 0 to derive the evidence notional from "
+            "assumed capital and per-trade risk percent without hitting the "
+            "broker equity path."
+        ),
+    )
     chili_autotrader_live_require_venue_health_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_REQUIRE_VENUE_HEALTH_ENABLED"),
@@ -3587,6 +3813,18 @@ class Settings(BaseSettings):
         default=AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_LLM_REVALIDATION_SKIP_SHADOW_OBSERVATION"
+        ),
+    )
+    chili_autotrader_llm_revalidation_skip_options_path: bool = Field(
+        default=AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_LLM_REVALIDATION_SKIP_OPTIONS_PATH"
+        ),
+        description=(
+            "When true, skip the equities-shaped LLM revalidation gate for "
+            "options alerts. Option viability is handled by the deterministic "
+            "option entry-quality model so premium and underlying prices are "
+            "not mixed in the LLM payload."
         ),
     )
     # Task KK — gate the autotrader's crypto path. Robinhood crypto trades

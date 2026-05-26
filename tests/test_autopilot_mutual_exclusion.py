@@ -3,7 +3,7 @@
 These tests verify that a live AutoTrader v1 trade and a live momentum_neural
 session cannot both issue orders on the same symbol at the same time. The
 ownership "lease" is schema-based (no new table): we read the existing
-Trade rows (auto_trader_version="v1", status="open") and TradingAutomationSession
+Trade rows (auto_trader_version="v1", status in {"open", "working"}) and TradingAutomationSession
 rows (mode="live", state IN LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY).
 
 Headline guarantees:
@@ -70,7 +70,13 @@ def _make_variant(db) -> MomentumStrategyVariant:
     return v
 
 
-def _open_v1_trade(db, *, user_id: int, ticker: str = "ZZZ") -> Trade:
+def _open_v1_trade(
+    db,
+    *,
+    user_id: int,
+    ticker: str = "ZZZ",
+    status: str = "open",
+) -> Trade:
     t = Trade(
         user_id=user_id,
         ticker=ticker,
@@ -78,7 +84,7 @@ def _open_v1_trade(db, *, user_id: int, ticker: str = "ZZZ") -> Trade:
         entry_price=10.0,
         quantity=5.0,
         entry_date=datetime.utcnow(),
-        status="open",
+        status=status,
         stop_loss=9.0,
         take_profit=15.0,
         auto_trader_version="v1",
@@ -158,6 +164,34 @@ def test_find_symbol_owner_detects_v1_open_trade(db):
     assert result["owner"] == AUTOPILOT_AUTO_TRADER_V1
     assert result["v1_open_trades"] == 1
     assert result["momentum_live_sessions"] == 0
+
+
+def test_v1_owner_status_filter_includes_working():
+    class _FakeQuery:
+        def __init__(self):
+            self.criteria = []
+
+        def filter(self, *criteria):
+            self.criteria.extend(criteria)
+            return self
+
+        def count(self):
+            return 1
+
+    class _FakeDb:
+        def __init__(self):
+            self.query_obj = _FakeQuery()
+
+        def query(self, _model):
+            return self.query_obj
+
+    db = _FakeDb()
+
+    assert autopilot_scope._count_v1_open_trades(db, symbol="WRK", user_id=123) == 1
+    status_filters = [
+        str(c) for c in db.query_obj.criteria if "trading_trades.status" in str(c)
+    ]
+    assert any(" IN " in c for c in status_filters)
 
 
 def test_find_symbol_owner_detects_momentum_live_session(db):

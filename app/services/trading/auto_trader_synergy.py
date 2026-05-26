@@ -63,7 +63,7 @@ def find_open_autotrader_trade(
 ) -> Trade | None:
     q = db.query(Trade).filter(
         Trade.ticker == ticker.upper(),
-        Trade.status == "open",
+        Trade.status.in_(("open", "working")),
         Trade.auto_trader_version == "v1",
     )
     if user_id is not None:

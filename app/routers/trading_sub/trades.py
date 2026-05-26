@@ -430,12 +430,19 @@ def api_attribution_live_vs_research(
     db: Session = Depends(get_db),
     days: int = Query(90, ge=1, le=730),
     limit: int = Query(50, ge=1, le=200),
+    phase5b_compare: bool = Query(False),
 ):
     """Closed trades with ``scan_pattern_id`` vs pattern OOS / research stats."""
     from ...services.trading.public_api import live_vs_research_by_pattern
 
     ctx = get_identity_ctx(request, db)
-    out = live_vs_research_by_pattern(db, ctx["user_id"], days=days, limit=limit)
+    out = live_vs_research_by_pattern(
+        db,
+        ctx["user_id"],
+        days=days,
+        limit=limit,
+        include_phase5b_compare=phase5b_compare,
+    )
     return JSONResponse(json_safe(out))
 
 

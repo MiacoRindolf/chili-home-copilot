@@ -258,11 +258,43 @@ def _parse_conditions_from_description(desc: str) -> list[dict[str, Any]]:
 
 
 _TICKER_RE = re.compile(r"\b([A-Z]{2,5}(?:-USD)?)\b")
-_TICKER_STOPWORDS = {
-    "RSI", "MACD", "EMA", "SMA", "ADX", "ATR", "AND", "THE", "FOR",
-    "OBV", "MFI", "CCI", "SAR", "USD", "AVG", "NET", "LOW", "HIGH",
-    "CHILI", "NR4", "NR7",
-}
+_MAX_CONTEXT_MENTIONED_TICKERS = 10
+_MAX_CONTEXT_LEARNING_EVENTS = 20
+_INDICATOR_TICKER_STOPWORDS = frozenset(
+    {
+        "RSI", "MACD", "EMA", "SMA", "ADX", "ATR", "OBV", "MFI", "CCI", "SAR",
+        "VWAP",
+    }
+)
+_MARKET_STRUCTURE_TICKER_STOPWORDS = frozenset(
+    {
+        "BOS", "FVG", "HTF", "LTF", "MSS",
+    }
+)
+_GENERAL_TICKER_STOPWORDS = frozenset(
+    {
+        "AND", "THE", "FOR", "USD", "AVG", "NET", "LOW", "HIGH", "CHILI",
+        "NR4", "NR7",
+    }
+)
+_TICKER_STOPWORDS = (
+    _INDICATOR_TICKER_STOPWORDS
+    | _MARKET_STRUCTURE_TICKER_STOPWORDS
+    | _GENERAL_TICKER_STOPWORDS
+)
+_DEFAULT_CRYPTO_RATIO = 0.30  # 30 % crypto, 70 % stocks -- always broad
+_SCOPED_BACKTEST_BIAS_RATIO = 0.60
+_MIN_SCOPED_BACKTEST_BIAS_TICKERS = 1
+_BACKTEST_PREVIOUS_WINNER_LIMIT = 5
+_BACKTEST_HOT_CANDIDATE_POOL_LIMIT = 800
+_BACKTEST_HOT_CANDIDATE_SAMPLE_LIMIT = 5
+_DEFAULT_BACKTEST_TARGET_TICKERS = 40
+
+
+def _is_mentioned_ticker_candidate(ticker: Any) -> bool:
+    """Return whether a text-extracted symbol should drive ticker selection."""
+    t = str(ticker or "").strip().upper()
+    return bool(t) and t not in _TICKER_STOPWORDS
 
 # Max workers for parallel backtest execution
 def _bt_workers() -> int:
@@ -313,13 +345,13 @@ def _extract_context(
     detect the original asset class the pattern was discovered from.
 
     When ``learning_event_descriptions`` is not ``None``, use those strings
-    instead of querying the DB (batch callers pre-load up to 20 per insight).
+    instead of querying the DB.
     """
     desc_lower = description.lower()
 
     mentioned_tickers = [
         t for t in _TICKER_RE.findall(description)
-        if t not in _TICKER_STOPWORDS
+        if _is_mentioned_ticker_candidate(t)
     ]
 
     has_crypto_tickers = any(t.endswith("-USD") for t in mentioned_tickers)
@@ -349,7 +381,7 @@ def _extract_context(
             events = (
                 db.query(LearningEvent.description)
                 .filter(LearningEvent.related_insight_id == insight_id)
-                .limit(20)
+                .limit(_MAX_CONTEXT_LEARNING_EVENTS)
                 .all()
             )
             for (det,) in events:
@@ -375,7 +407,7 @@ def _extract_context(
     )
 
     return {
-        "mentioned_tickers": mentioned_tickers[:10],
+        "mentioned_tickers": mentioned_tickers[:_MAX_CONTEXT_MENTIONED_TICKERS],
         "wants_crypto": wants_crypto,
         "crypto_only": crypto_only,
         "stock_only": stock_only,
@@ -421,14 +453,11 @@ def _ticker_allowed_for_universe(ticker: str, universe: str) -> bool:
 # Dynamic ticker selection
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CRYPTO_RATIO = 0.30  # 30 % crypto, 70 % stocks — always broad
-
-
 def _select_tickers(
     ctx: dict[str, Any],
     db: Session | None = None,
     insight_id: int | None = None,
-    target_count: int = 40,
+    target_count: int = _DEFAULT_BACKTEST_TARGET_TICKERS,
     ticker_scope: str = "universal",
     scope_tickers: list[str] | None = None,
     asset_class: str | None = None,
@@ -436,8 +465,8 @@ def _select_tickers(
 ) -> list[str]:
     """Build a ticker pool for backtesting, respecting the pattern's scope.
 
-    * ``ticker_specific`` -- 60 % from scope tickers, 40 % exploration
-    * ``sector`` -- 60 % from scope sectors, 40 % exploration
+    * ``ticker_specific`` -- scoped bias from scope tickers, rest exploration
+    * ``sector`` -- scoped bias from scope sectors, rest exploration
     * ``universal`` -- broad diversification across all sectors + crypto
 
     When ``asset_class`` / context restricts to crypto or stocks only, exploration
@@ -462,7 +491,8 @@ def _select_tickers(
             _add(t)
 
     for t in ctx["mentioned_tickers"]:
-        _add(t)
+        if _is_mentioned_ticker_candidate(t):
+            _add(t)
 
     # ``ticker_specific`` stores tickers; ``sector`` stores sector keys (e.g. mega_tech, crypto).
     scoped_tickers: list[str] | None = None
@@ -481,14 +511,26 @@ def _select_tickers(
     if ticker_scope == "ticker_specific" and scoped_tickers:
         for t in scoped_tickers:
             _add(t)
-        bias_count = max(1, int(target_count * 0.6)) - len(pool)
+        bias_count = (
+            max(
+                _MIN_SCOPED_BACKTEST_BIAS_TICKERS,
+                int(target_count * _SCOPED_BACKTEST_BIAS_RATIO),
+            )
+            - len(pool)
+        )
         if bias_count > 0 and scoped_tickers:
             extras = scoped_tickers * ((bias_count // len(scoped_tickers)) + 1)
             random.shuffle(extras)
             for t in extras[:bias_count]:
                 _add(t)
     elif ticker_scope == "sector" and sector_names:
-        bias_count = max(1, int(target_count * 0.6)) - len(pool)
+        bias_count = (
+            max(
+                _MIN_SCOPED_BACKTEST_BIAS_TICKERS,
+                int(target_count * _SCOPED_BACKTEST_BIAS_RATIO),
+            )
+            - len(pool)
+        )
         for sector_name in sector_names:
             sector_list = SECTOR_TICKERS.get(sector_name, [])
             avail = [
@@ -539,7 +581,7 @@ def _select_tickers(
                     BacktestResult.return_pct > 0,
                 )
                 .distinct()
-                .limit(5)
+                .limit(_BACKTEST_PREVIOUS_WINNER_LIMIT)
                 .all()
             )
             for (t,) in prev_winners:
@@ -553,12 +595,14 @@ def _select_tickers(
         hot = prescreen_candidates_for_universe(
             db,
             include_crypto=(universe != "stocks"),
-            max_total=800,
+            max_total=_BACKTEST_HOT_CANDIDATE_POOL_LIMIT,
         )
         if hot:
             hot_f = [t for t in hot if _ticker_allowed_for_universe(t, universe)]
             if hot_f:
-                for t in random.sample(hot_f, min(5, len(hot_f))):
+                for t in random.sample(
+                    hot_f, min(_BACKTEST_HOT_CANDIDATE_SAMPLE_LIMIT, len(hot_f))
+                ):
                     _add(t)
     except Exception:
         pass

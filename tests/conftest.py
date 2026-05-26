@@ -172,6 +172,33 @@ _PROJECT_DOMAIN_TARGETED_TESTS = (
     "test_projects.py",
     "test_code_agent.py",
 )
+_TRADING_DOMAIN_TARGETED_TABLES = frozenset(
+    {
+        "users",
+        "devices",
+        "broker_credentials",
+        "broker_sessions",
+        "pattern_evidence_corrections",
+        "scan_patterns",
+        *(
+            table.name
+            for table in Base.metadata.sorted_tables
+            if table.name.startswith(("trading_", "fast_path_", "momentum_"))
+        ),
+    }
+)
+_TRADING_DOMAIN_TARGETED_TESTS = (
+    "test_alerts_options_skip.py",
+    "test_autotrader_position_overrides.py",
+    "test_broker_sync.py",
+    "test_emergency_liquidation_no_quote.py",
+    "test_portfolio_options_close.py",
+    "test_portfolio_risk_options_mtm.py",
+    "test_pattern_directional_outcome.py",
+    "test_stop_engine_options_auto_exec.py",
+    "test_stuck_order_watchdog.py",
+    "test_trades_sync.py",
+)
 _TRADING_DEFAULT_USER_TESTS = (
     "test_pattern_imminent_alerts.py",
     "test_signal_to_reconcile_e2e.py",
@@ -364,6 +391,18 @@ def _test_prefers_targeted_cleanup(request) -> bool:
     return any(token in name for token in _PROJECT_DOMAIN_TARGETED_TESTS)
 
 
+def _test_targeted_cleanup_tables(request) -> frozenset[str] | None:
+    try:
+        name = Path(str(request.node.fspath)).name.lower()
+    except Exception:
+        return None
+    if any(token in name for token in _PROJECT_DOMAIN_TARGETED_TESTS):
+        return _PROJECT_DOMAIN_TARGETED_TABLES
+    if name in _TRADING_DOMAIN_TARGETED_TESTS:
+        return _TRADING_DOMAIN_TARGETED_TABLES
+    return None
+
+
 def _test_needs_default_trading_users(request) -> bool:
     try:
         name = Path(str(request.node.fspath)).name.lower()
@@ -417,9 +456,7 @@ def db(request):
     """
     _bootstrap_test_schema()
     _reset_trading_test_process_state()
-    _truncate_app_tables(
-        _PROJECT_DOMAIN_TARGETED_TABLES if _test_prefers_targeted_cleanup(request) else None
-    )
+    _truncate_app_tables(_test_targeted_cleanup_tables(request))
     if _test_needs_default_trading_users(request):
         _seed_default_trading_users()
     SessionTesting = sessionmaker(autocommit=False, autoflush=False, bind=engine)

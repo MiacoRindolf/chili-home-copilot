@@ -128,11 +128,11 @@ def _assert_migration_ids_unique() -> None:
 
 
 def _tables(conn) -> set:
-    return set(sa_inspect(conn.engine).get_table_names())
+    return set(sa_inspect(conn).get_table_names())
 
 
 def _columns(conn, table: str) -> set:
-    return {c["name"] for c in sa_inspect(conn.engine).get_columns(table)}
+    return {c["name"] for c in sa_inspect(conn).get_columns(table)}
 
 
 def _migration_001_add_email(conn) -> None:
@@ -19067,6 +19067,212 @@ def _migration_272_backtest_pattern_oos_indexes(conn) -> None:
     logger.info("[mig272] trading_backtests scan_pattern/OOS indexes installed")
 
 
+def _migration_273_coinbase_envelope_position_backfill(conn) -> None:
+    """Backfill Coinbase envelope position_id from position current_envelope_id.
+
+    Phase 5B exposed a one-sided Coinbase sync write: position rows had
+    ``current_envelope_id`` pointing at the live Trade envelope, but the
+    envelope's inverse ``position_id`` stayed NULL. Keep historical debt
+    separate, but repair currently-open broker envelopes so Phase 5C has a
+    zero-hard-linkage surface.
+    """
+    tables = _tables(conn)
+    if not {"trading_trades", "trading_positions"}.issubset(tables):
+        return
+
+    result = conn.execute(text("""
+        UPDATE trading_trades t
+           SET position_id = p.id
+          FROM trading_positions p
+         WHERE t.position_id IS NULL
+           AND t.status = 'open'
+           AND t.broker_source = 'coinbase'
+           AND p.broker_source = 'coinbase'
+           AND p.current_envelope_id = t.id
+    """))
+
+    bracket_count = 0
+    if "trading_bracket_intents" in tables:
+        bracket_result = conn.execute(text("""
+            UPDATE trading_bracket_intents bi
+               SET position_id = t.position_id,
+                   updated_at = NOW()
+              FROM trading_trades t
+             WHERE bi.trade_id = t.id
+               AND bi.position_id IS NULL
+               AND t.position_id IS NOT NULL
+               AND t.broker_source = 'coinbase'
+        """))
+        bracket_count = int(bracket_result.rowcount or 0)
+
+    conn.commit()
+    logger.info(
+        "[mig273] backfilled %d open Coinbase envelope position links "
+        "and %d bracket intent links",
+        int(result.rowcount or 0),
+        bracket_count,
+    )
+
+
+def _migration_274_position_identity_phase5c_attribution_columns(conn) -> None:
+    """Expose decision-vs-envelope pattern attribution on the Phase 5B view."""
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_phase5b_decision_envelope_position AS
+        SELECT
+            d.id AS decision_id,
+            d.source_trade_id,
+            d.user_id AS decision_user_id,
+            d.ticker AS decision_ticker,
+            d.direction AS decision_direction,
+            d.entry_date AS decision_entry_date,
+            d.scan_pattern_id,
+            d.related_alert_id,
+            d.strategy_proposal_id,
+            d.pattern_tags AS decision_pattern_tags,
+            d.mesh_entry_correlation_id,
+            d.auto_trader_version,
+            d.asset_kind AS decision_asset_kind,
+            e.id AS envelope_id,
+            e.user_id AS envelope_user_id,
+            e.ticker AS envelope_ticker,
+            e.direction AS envelope_direction,
+            e.broker_source,
+            e.asset_kind AS envelope_asset_kind,
+            e.status AS envelope_status,
+            e.entry_price AS envelope_entry_price,
+            e.exit_price AS envelope_exit_price,
+            e.quantity AS envelope_quantity,
+            e.entry_date AS envelope_entry_date,
+            e.exit_date AS envelope_exit_date,
+            e.pnl AS envelope_pnl,
+            e.exit_reason,
+            e.management_scope,
+            e.decision_id AS envelope_decision_id,
+            e.position_id AS envelope_position_id,
+            e.tca_entry_slippage_bps,
+            e.tca_exit_slippage_bps,
+            p.id AS position_id,
+            p.user_id AS position_user_id,
+            p.broker_source AS position_broker_source,
+            p.account_type AS position_account_type,
+            p.ticker AS position_ticker,
+            p.direction AS position_direction,
+            p.state AS position_state,
+            p.current_quantity AS position_current_quantity,
+            p.current_avg_price AS position_current_avg_price,
+            p.current_envelope_id,
+            p.last_observed_at AS position_last_observed_at,
+            CASE
+                WHEN e.id IS NULL THEN 'decision_without_envelope'
+                WHEN e.decision_id IS DISTINCT FROM d.id THEN 'envelope_decision_mismatch'
+                WHEN e.broker_source IS NOT NULL
+                     AND btrim(e.broker_source) <> ''
+                     AND e.position_id IS NULL
+                     AND e.status = 'open' THEN 'broker_envelope_missing_position'
+                WHEN e.broker_source IS NOT NULL
+                     AND btrim(e.broker_source) <> ''
+                     AND e.position_id IS NULL THEN 'historical_broker_envelope_missing_position'
+                WHEN e.position_id IS NOT NULL
+                     AND p.id IS NULL THEN 'position_fk_missing'
+                WHEN p.id IS NOT NULL
+                     AND p.current_envelope_id IS NOT NULL
+                     AND p.current_envelope_id <> e.id
+                     AND e.status = 'open'
+                     AND p.state = 'open' THEN 'open_position_envelope_mismatch'
+                ELSE 'linked'
+            END AS linkage_status,
+            d.scan_pattern_id AS decision_scan_pattern_id,
+            e.scan_pattern_id AS envelope_scan_pattern_id
+        FROM trading_decisions d
+        LEFT JOIN trading_trades e ON e.id = d.source_trade_id
+        LEFT JOIN trading_positions p ON p.id = e.position_id
+    """))
+
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_phase5b_pattern_decision_performance AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*)::bigint AS decisions,
+            COUNT(*) FILTER (WHERE envelope_id IS NOT NULL)::bigint AS envelopes,
+            COUNT(*) FILTER (WHERE envelope_status = 'closed')::bigint AS closed_envelopes,
+            COUNT(*) FILTER (WHERE envelope_status = 'open')::bigint AS open_envelopes,
+            ROUND(SUM(COALESCE(envelope_pnl, 0))::numeric, 4) AS total_pnl,
+            ROUND(AVG(envelope_pnl)::numeric, 4) AS avg_pnl_closed_or_marked,
+            ROUND(AVG(tca_entry_slippage_bps)::numeric, 2) AS avg_entry_slippage_bps,
+            ROUND(AVG(tca_exit_slippage_bps)::numeric, 2) AS avg_exit_slippage_bps,
+            COUNT(*) FILTER (
+                WHERE linkage_status NOT IN (
+                    'linked',
+                    'historical_broker_envelope_missing_position'
+                )
+            )::bigint AS linkage_issues,
+            COUNT(*) FILTER (
+                WHERE linkage_status = 'historical_broker_envelope_missing_position'
+            )::bigint AS historical_linkage_debt,
+            COUNT(*) FILTER (
+                WHERE decision_scan_pattern_id IS DISTINCT FROM envelope_scan_pattern_id
+            )::bigint AS pattern_attribution_mismatches
+        FROM trading_phase5b_decision_envelope_position
+        GROUP BY scan_pattern_id
+    """))
+
+    conn.commit()
+    logger.info("[mig274] Phase 5C attribution columns added to Phase 5B views")
+
+
+def _migration_275_position_identity_phase5d_decision_pattern_backfill(conn) -> None:
+    """Backfill missing decision pattern attribution from linked envelopes.
+
+    Phase 5C showed a small semantic reporting drift where bridge-created
+    decisions missed scan_pattern_id even though their linked management
+    envelopes retained it. This repair is intentionally narrow: only NULL
+    decision pattern ids are filled, and existing decision attribution is never
+    overwritten.
+    """
+    has_tables = conn.execute(text("""
+        SELECT
+            to_regclass('public.trading_decisions') IS NOT NULL
+            AND to_regclass('public.trading_trades') IS NOT NULL
+    """)).scalar()
+    if not has_tables:
+        return
+
+    result = conn.execute(text("""
+        WITH candidates AS (
+            SELECT
+                d.id AS decision_id,
+                d.source_trade_id,
+                t.scan_pattern_id AS envelope_scan_pattern_id
+              FROM trading_decisions d
+              JOIN trading_trades t ON t.id = d.source_trade_id
+             WHERE d.scan_pattern_id IS NULL
+               AND t.scan_pattern_id IS NOT NULL
+        )
+        UPDATE trading_decisions d
+           SET scan_pattern_id = c.envelope_scan_pattern_id,
+               notes = CASE
+                   WHEN d.notes IS NULL OR btrim(d.notes) = '' THEN
+                       'phase5d_pattern_backfill_from_envelope'
+                       || ' source_trade_id=' || c.source_trade_id::text
+                       || ' scan_pattern_id=' || c.envelope_scan_pattern_id::text
+                   WHEN d.notes NOT LIKE '%phase5d_pattern_backfill_from_envelope%' THEN
+                       d.notes || E'\n'
+                       || 'phase5d_pattern_backfill_from_envelope'
+                       || ' source_trade_id=' || c.source_trade_id::text
+                       || ' scan_pattern_id=' || c.envelope_scan_pattern_id::text
+                   ELSE d.notes
+               END
+          FROM candidates c
+         WHERE d.id = c.decision_id
+    """))
+
+    conn.commit()
+    logger.info(
+        "[mig275] backfilled %d decision scan_pattern_id values from envelopes",
+        int(result.rowcount or 0),
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19393,6 +19599,12 @@ MIGRATIONS = [
      _migration_271_scan_patterns_default_contract),
     ("272_backtest_pattern_oos_indexes",
      _migration_272_backtest_pattern_oos_indexes),
+    ("273_coinbase_envelope_position_backfill",
+     _migration_273_coinbase_envelope_position_backfill),
+    ("274_position_identity_phase5c_attribution_columns",
+     _migration_274_position_identity_phase5c_attribution_columns),
+    ("275_position_identity_phase5d_decision_pattern_backfill",
+     _migration_275_position_identity_phase5d_decision_pattern_backfill),
 ]
 
 

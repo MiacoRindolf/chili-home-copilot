@@ -18,7 +18,7 @@ Desk wiring calls into these helpers from:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Literal, Optional
 
 from sqlalchemy.orm import Session
@@ -29,7 +29,7 @@ from .management_scope import (
     MANAGEMENT_SCOPE_ADOPTED_POSITION,
     infer_trade_management_scope_from_fields,
 )
-from .autopilot_scope import is_live_autopilot_trade
+from .autopilot_scope import is_live_autopilot_trade, is_option_trade
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +198,8 @@ def _close_trade_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str
     # AutoTrader v1, pattern-linked, or AI/manual plan-level rows.
     if not is_live_autopilot_trade(t):
         return {"ok": False, "error": "not_pattern_linked"}
+    if is_option_trade(t):
+        return _close_option_trade_now(db, t=t, updated_by=updated_by)
 
     from .venue.robinhood_spot import RobinhoodSpotAdapter
     from .robinhood_exit_execution import submit_robinhood_trade_exit
@@ -251,6 +253,119 @@ def _close_trade_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str
             "reason": res.get("execution_reason"),
         }
     return {"ok": True, "state": state or "submitted"}
+
+
+def _close_option_trade_now(
+    db: Session,
+    *,
+    t: Trade,
+    updated_by: str,
+    exit_reason: str = "desk_close_now",
+) -> dict[str, Any]:
+    from .options.exit_monitor import (
+        _has_active_pending_exit,
+        _opt_meta,
+        _option_exit_order_state,
+        _option_exit_raw_order,
+        _parse_option_order_time,
+    )
+    from .robinhood_exit_execution import _finalize_filled_exit
+    from .venue.robinhood_options import RobinhoodOptionsAdapter
+
+    if _has_active_pending_exit(t):
+        return {
+            "ok": True,
+            "state": "working",
+            "order_id": t.pending_exit_order_id,
+            "pending_exit_status": t.pending_exit_status,
+        }
+
+    adapter = RobinhoodOptionsAdapter()
+    if not adapter.is_enabled():
+        return {"ok": False, "error": "rh_options_adapter_off"}
+
+    meta = _opt_meta(t)
+    expiration = str(meta.get("expiration") or "")
+    strike = meta.get("strike")
+    option_type = str(meta.get("option_type") or "").lower()
+    if not (expiration and strike and option_type in ("call", "put")):
+        return {"ok": False, "error": "missing_option_meta"}
+
+    underlying = str(meta.get("underlying") or t.ticker or "").upper()
+    contract = adapter.find_contract(underlying, expiration, float(strike), option_type)
+    if not contract:
+        return {"ok": False, "error": "option_contract_not_found"}
+    quote = adapter.get_quote(str(contract.get("id") or ""))
+    if not quote:
+        return {"ok": False, "error": "no_option_quote"}
+
+    try:
+        bid = float(quote.get("bid_price") or 0.0)
+    except (TypeError, ValueError):
+        bid = 0.0
+    try:
+        mark = float(quote.get("mark_price") or 0.0)
+    except (TypeError, ValueError):
+        mark = 0.0
+    current_premium = mark if mark > 0 else (bid if bid > 0 else None)
+    limit_price = bid if bid > 0 else (mark if mark > 0 else None)
+    if limit_price is None or limit_price <= 0:
+        return {"ok": False, "error": "no_executable_option_price"}
+
+    qty = int(float(t.quantity or 0))
+    if qty <= 0:
+        return {"ok": False, "error": "bad_qty"}
+
+    res = adapter.place_option_sell(
+        underlying=underlying,
+        expiration=expiration,
+        strike=float(strike),
+        option_type=option_type,
+        quantity=qty,
+        limit_price=float(limit_price),
+        position_effect="close",
+    )
+    if not res.get("ok"):
+        return {"ok": False, "error": f"broker:{res.get('error')}"}
+    order_id = str(res.get("order_id") or "").strip()
+    if not order_id:
+        return {"ok": False, "error": "broker:place_no_order_id"}
+
+    state = _option_exit_order_state(res)
+    now = datetime.now(timezone.utc)
+    t.pending_exit_order_id = order_id
+    t.pending_exit_status = state or "submitted"
+    t.pending_exit_requested_at = now.replace(tzinfo=None)
+    t.pending_exit_reason = str(exit_reason or "desk_close_now")[:50]
+    t.pending_exit_limit_price = float(limit_price)
+    t.tca_reference_exit_price = float(current_premium or limit_price)
+
+    if state in {"filled", "done", "completed", "complete"}:
+        raw_order = _option_exit_raw_order(res, order_id=order_id, state=state)
+        _finalize_filled_exit(
+            db,
+            t,
+            raw_order=raw_order,
+            exit_reason=str(exit_reason or "desk_close_now")[:50],
+            fallback_price=float(limit_price),
+            filled_at=_parse_option_order_time(raw_order) or now,
+        )
+        db.refresh(t)
+        return {
+            "ok": True,
+            "state": "filled",
+            "exit_price": float(t.exit_price or 0.0),
+            "pnl": float(t.pnl or 0.0),
+        }
+
+    db.add(t)
+    db.commit()
+    return {
+        "ok": True,
+        "state": "working",
+        "order_id": order_id,
+        "pending_exit_status": t.pending_exit_status,
+    }
 
 
 def _close_paper_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str, Any]:

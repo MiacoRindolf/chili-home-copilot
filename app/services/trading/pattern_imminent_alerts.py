@@ -430,6 +430,26 @@ def resistance_from_score(score: dict[str, Any]) -> float | None:
     return None
 
 
+def _flat_indicator_value_supported(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float) and value != value:
+        return False
+    return isinstance(value, (bool, int, float, str))
+
+
+def _copy_scalar_indicator_fields(
+    flat: dict[str, Any],
+    source: dict[str, Any],
+) -> None:
+    for key, value in source.items():
+        key_s = str(key or "").strip()
+        if not key_s or key_s in flat:
+            continue
+        if _flat_indicator_value_supported(value):
+            flat[key_s] = value
+
+
 def flat_indicators_from_score(
     score: dict[str, Any],
     *,
@@ -438,6 +458,8 @@ def flat_indicators_from_score(
     price = float(score.get("price") or score.get("entry_price") or 0)
     ind = score.get("indicators") or {}
     flat: dict[str, Any] = {"price": price}
+    _copy_scalar_indicator_fields(flat, score)
+    _copy_scalar_indicator_fields(flat, ind)
 
     rsi = ind.get("rsi")
     if rsi is not None:

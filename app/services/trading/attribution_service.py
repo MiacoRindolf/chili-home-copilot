@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
@@ -15,6 +16,7 @@ def live_vs_research_by_pattern(
     *,
     days: int = 90,
     limit: int = 50,
+    include_phase5b_compare: bool = False,
 ) -> dict[str, Any]:
     """Aggregate closed trades with ``scan_pattern_id`` vs ``ScanPattern`` research fields."""
     from ...models.trading import ScanPattern, Trade
@@ -22,9 +24,17 @@ def live_vs_research_by_pattern(
     from .backtest_metrics import backtest_win_rate_db_to_display_pct
 
     if user_id is None:
-        return {"ok": True, "window_days": days, "patterns": []}
+        out: dict[str, Any] = {"ok": True, "window_days": days, "patterns": []}
+        if include_phase5b_compare:
+            out["phase5b_compare"] = {
+                "enabled": False,
+                "reason": "missing_user_id",
+            }
+        return out
 
     since = datetime.utcnow() - timedelta(days=max(1, int(days)))
+    safe_days = max(1, int(days))
+    safe_limit = max(1, min(200, int(limit)))
     trades = (
         db.query(Trade)
         .filter(
@@ -90,9 +100,151 @@ def live_vs_research_by_pattern(
         )
 
     rows.sort(key=lambda r: r["live_closed_trades"], reverse=True)
-    rows = rows[: max(1, min(200, int(limit)))]
+    rows = rows[:safe_limit]
 
-    return {"ok": True, "window_days": days, "patterns": rows}
+    out = {"ok": True, "window_days": days, "patterns": rows}
+    if include_phase5b_compare:
+        out["phase5b_compare"] = _phase5b_pattern_attribution_compare(
+            db,
+            user_id=int(user_id),
+            days=safe_days,
+            limit=safe_limit,
+        )
+    return out
+
+
+def _phase5b_pattern_attribution_compare(
+    db: Session,
+    *,
+    user_id: int,
+    days: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Compare legacy envelope-pattern attribution with Phase 5B decisions."""
+    params = {"user_id": user_id, "days": days, "limit": limit}
+    grouped_rows = db.execute(text("""
+        WITH closed AS (
+            SELECT
+                decision_scan_pattern_id,
+                envelope_scan_pattern_id,
+                COALESCE(envelope_pnl, 0)::double precision AS pnl
+              FROM trading_phase5b_decision_envelope_position
+             WHERE envelope_user_id = :user_id
+               AND envelope_status = 'closed'
+               AND envelope_exit_date IS NOT NULL
+               AND envelope_exit_date >= (NOW() - (:days * INTERVAL '1 day'))
+        ),
+        attributed AS (
+            SELECT
+                'envelope'::text AS attribution_source,
+                envelope_scan_pattern_id AS scan_pattern_id,
+                pnl
+              FROM closed
+            UNION ALL
+            SELECT
+                'decision'::text AS attribution_source,
+                decision_scan_pattern_id AS scan_pattern_id,
+                pnl
+              FROM closed
+        )
+        SELECT
+            attribution_source,
+            scan_pattern_id,
+            COUNT(*)::bigint AS closed_envelopes,
+            ROUND(SUM(pnl)::numeric, 4) AS total_pnl,
+            ROUND(AVG(pnl)::numeric, 4) AS avg_pnl
+          FROM attributed
+         GROUP BY attribution_source, scan_pattern_id
+         ORDER BY attribution_source, closed_envelopes DESC, total_pnl DESC
+    """), params).mappings().all()
+
+    mismatch_rows = db.execute(text("""
+        SELECT
+            decision_scan_pattern_id,
+            envelope_scan_pattern_id,
+            COUNT(*)::bigint AS closed_envelopes,
+            ROUND(SUM(COALESCE(envelope_pnl, 0))::numeric, 4) AS total_pnl
+          FROM trading_phase5b_decision_envelope_position
+         WHERE envelope_user_id = :user_id
+           AND envelope_status = 'closed'
+           AND envelope_exit_date IS NOT NULL
+           AND envelope_exit_date >= (NOW() - (:days * INTERVAL '1 day'))
+           AND decision_scan_pattern_id IS DISTINCT FROM envelope_scan_pattern_id
+         GROUP BY decision_scan_pattern_id, envelope_scan_pattern_id
+         ORDER BY ABS(SUM(COALESCE(envelope_pnl, 0))) DESC, closed_envelopes DESC
+         LIMIT :limit
+    """), params).mappings().all()
+
+    by_source: dict[str, list[dict[str, Any]]] = {"envelope": [], "decision": []}
+    source_totals: dict[str, dict[int | None, float]] = {"envelope": {}, "decision": {}}
+    source_counts: dict[str, int] = {"envelope": 0, "decision": 0}
+    for row in grouped_rows:
+        source = str(row["attribution_source"])
+        pid = row["scan_pattern_id"]
+        pid_key = int(pid) if pid is not None else None
+        closed = int(row["closed_envelopes"] or 0)
+        total_pnl = round(float(row["total_pnl"] or 0.0), 4)
+        payload = {
+            "scan_pattern_id": pid_key,
+            "closed_envelopes": closed,
+            "total_pnl": total_pnl,
+            "avg_pnl": round(float(row["avg_pnl"] or 0.0), 4),
+        }
+        if source in by_source:
+            by_source[source].append(payload)
+            source_totals[source][pid_key] = total_pnl
+            source_counts[source] += closed
+
+    envelope_keys = set(source_totals["envelope"])
+    decision_keys = set(source_totals["decision"])
+    diff_keys = envelope_keys | decision_keys
+    pnl_delta_abs = sum(
+        abs(source_totals["envelope"].get(key, 0.0) - source_totals["decision"].get(key, 0.0))
+        for key in diff_keys
+    )
+
+    mismatches = [
+        {
+            "decision_scan_pattern_id": (
+                int(row["decision_scan_pattern_id"])
+                if row["decision_scan_pattern_id"] is not None
+                else None
+            ),
+            "envelope_scan_pattern_id": (
+                int(row["envelope_scan_pattern_id"])
+                if row["envelope_scan_pattern_id"] is not None
+                else None
+            ),
+            "closed_envelopes": int(row["closed_envelopes"] or 0),
+            "total_pnl": round(float(row["total_pnl"] or 0.0), 4),
+        }
+        for row in mismatch_rows
+    ]
+
+    return {
+        "enabled": True,
+        "source_view": "trading_phase5b_decision_envelope_position",
+        "window_days": days,
+        "legacy_attribution": "envelope_scan_pattern_id",
+        "phase5b_attribution": "decision_scan_pattern_id",
+        "summary": {
+            "envelope_pattern_groups": len(envelope_keys),
+            "decision_pattern_groups": len(decision_keys),
+            "envelope_closed_envelopes": source_counts["envelope"],
+            "decision_closed_envelopes": source_counts["decision"],
+            "mismatched_pattern_groups": len(mismatches),
+            "mismatched_closed_envelopes": sum(m["closed_envelopes"] for m in mismatches),
+            "absolute_group_pnl_delta": round(pnl_delta_abs, 4),
+            "null_decision_pattern_envelopes": sum(
+                m["closed_envelopes"]
+                for m in mismatches
+                if m["decision_scan_pattern_id"] is None
+            ),
+        },
+        "by_envelope_pattern": by_source["envelope"][:limit],
+        "by_decision_pattern": by_source["decision"][:limit],
+        "attribution_mismatches": mismatches,
+    }
 
 
 # ── Post-trade review loop ──────────────────────────────────────────────────

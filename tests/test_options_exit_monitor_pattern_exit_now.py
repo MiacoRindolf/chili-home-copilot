@@ -95,6 +95,117 @@ def _make_decision(
     )
 
 
+def _option_trade(
+    *,
+    status: str = "open",
+    pending_exit_order_id: str | None = None,
+    pending_exit_status: str | None = None,
+):
+    return SimpleNamespace(
+        status=status,
+        tags="",
+        pending_exit_order_id=pending_exit_order_id,
+        pending_exit_status=pending_exit_status,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+    )
+
+
+def test_options_exit_candidates_exclude_working_entries():
+    from app.services.trading.options.exit_monitor import _is_exit_candidate_trade
+
+    assert _is_exit_candidate_trade(_option_trade(status="open")) is True
+    assert _is_exit_candidate_trade(_option_trade(status="working")) is False
+
+
+def test_options_exit_candidates_skip_active_pending_exit():
+    from app.services.trading.options.exit_monitor import _has_active_pending_exit
+
+    assert (
+        _has_active_pending_exit(
+            _option_trade(
+                pending_exit_order_id="rh-opt-exit",
+                pending_exit_status="submitted",
+            )
+        )
+        is True
+    )
+    assert (
+        _has_active_pending_exit(
+            _option_trade(
+                pending_exit_order_id=None,
+                pending_exit_status="submitted",
+            )
+        )
+        is False
+    )
+
+
+def test_options_exit_order_state_and_raw_order_normalization():
+    from app.services.trading.options.exit_monitor import (
+        _option_exit_order_state,
+        _option_exit_raw_order,
+    )
+
+    res = {
+        "ok": True,
+        "order_id": "opt-exit-1",
+        "raw": {"state": "filled", "average_price": "1.45"},
+    }
+
+    state = _option_exit_order_state(res)
+    raw = _option_exit_raw_order(res, order_id="opt-exit-1", state=state)
+
+    assert state == "filled"
+    assert raw["id"] == "opt-exit-1"
+    assert raw["state"] == "filled"
+    assert raw["average_price"] == "1.45"
+
+
+def test_options_exit_submission_persists_pending_context_and_finalizes_filled():
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+
+    assert "_finalize_filled_exit" in options_src
+    assert "pending_exit_status = :state" in options_src
+    assert "pending_exit_limit_price = :limit" in options_src
+    assert "tca_reference_exit_price = :ref" in options_src
+    assert 'summary["working"] += 1' in options_src
+    assert 'summary["closed"] += 1' in options_src
+
+
+def test_options_exit_user_scope_resolves_autotrader_then_brain(monkeypatch):
+    from app.services.trading.options import exit_monitor as mod
+
+    monkeypatch.setattr(mod.settings, "chili_autotrader_user_id", 17, raising=False)
+    monkeypatch.setattr(mod.settings, "brain_default_user_id", 99, raising=False)
+    assert mod._configured_autotrader_user_id() == 17
+
+    monkeypatch.setattr(mod.settings, "chili_autotrader_user_id", None, raising=False)
+    assert mod._configured_autotrader_user_id() == 99
+
+    monkeypatch.setattr(mod.settings, "brain_default_user_id", "bad", raising=False)
+    assert mod._configured_autotrader_user_id() is None
+
+
+def test_options_exit_pass_is_scoped_to_configured_autopilot_user():
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+
+    assert "skipped_no_user_scope" in options_src
+    assert "chili_autotrader_user_id" in options_src
+    assert "brain_default_user_id" in options_src
+    assert "live_autopilot_trade_filter" in options_src
+    assert "Trade.user_id == int(uid)" in options_src
+
+
 def test_case1_fresh_exit_now_meta_returned():
     """Fresh exit_now (1h old) returns audit metadata."""
     from app.services.trading._exit_monitor_common import fresh_monitor_exit_meta

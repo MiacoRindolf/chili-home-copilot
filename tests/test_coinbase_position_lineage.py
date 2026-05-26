@@ -30,6 +30,7 @@ def test_coinbase_sync_writes_position_identity_sidecar() -> None:
     assert "def _ensure_coinbase_position_identity" in src
     assert "_phase1_record_position_observation" in src
     assert "current_envelope_id" in src
+    assert "UPDATE trading_trades" in src
     assert "UPDATE trading_bracket_intents" in src
 
 

@@ -57,16 +57,28 @@ from decimal import Decimal
 from typing import Any, Callable, Optional
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
-from ...config import settings as _module_settings
+from ...config import (
+    PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS,
+    PATTERN_DIRECTIONAL_DEFAULT_MAX_ALERTS_PER_RUN,
+    PATTERN_DIRECTIONAL_DEFAULT_MAX_LOOKBACK_HOURS,
+    PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT,
+    PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ASSET_TYPES,
+    PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ENABLED,
+    PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_LOOKBACK_MINUTES,
+    PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_MANAGED_REASONS,
+    settings as _module_settings,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # Public name kept symmetric with the brief.
 ALERT_TYPE_PATTERN_BREAKOUT_IMMINENT = "pattern_breakout_imminent"
+AUTOTRADER_EDGE_DEBT_SKIP_REASON = "non_positive_expected_edge"
+DEFAULT_PRIORITY_ASSET_TYPE = "stock"
 
 
 def _resolve_predicted_direction(pat: Any) -> str:
@@ -255,6 +267,195 @@ def _default_fetch_ohlcv(
         return pd.DataFrame()
 
 
+def _csv_tokens(value: Any, default: str) -> tuple[str, ...]:
+    raw = value if value not in (None, "") else default
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        values = raw
+    else:
+        values = str(raw).split(",")
+    tokens = tuple(
+        str(v).strip().lower()
+        for v in values
+        if str(v).strip()
+    )
+    return tokens
+
+
+def _positive_int_setting(settings_: Any, name: str, default: int) -> int:
+    try:
+        value = int(getattr(settings_, name, default))
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(0, value)
+
+
+def _edge_debt_priority_pattern_ids(
+    db: Session,
+    *,
+    now: datetime,
+    settings_: Any,
+) -> list[int]:
+    """Patterns whose live edge skips need directional evidence first."""
+    if not bool(
+        getattr(
+            settings_,
+            "chili_pattern_directional_edge_debt_priority_enabled",
+            PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ENABLED,
+        )
+    ):
+        return []
+    lookback_minutes = _positive_int_setting(
+        settings_,
+        "chili_pattern_directional_edge_debt_priority_lookback_minutes",
+        PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_LOOKBACK_MINUTES,
+    )
+    if lookback_minutes <= 0:
+        return []
+    asset_types = _csv_tokens(
+        getattr(
+            settings_,
+            "chili_pattern_directional_edge_debt_priority_asset_types",
+            PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ASSET_TYPES,
+        ),
+        PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_ASSET_TYPES,
+    )
+    managed_reasons = _csv_tokens(
+        getattr(
+            settings_,
+            "chili_pattern_directional_edge_debt_priority_managed_reasons",
+            PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_MANAGED_REASONS,
+        ),
+        PATTERN_DIRECTIONAL_EDGE_DEBT_PRIORITY_DEFAULT_MANAGED_REASONS,
+    )
+    if not asset_types or not managed_reasons:
+        return []
+    cutoff = now - timedelta(minutes=lookback_minutes)
+    query = text(
+        """
+        SELECT DISTINCT COALESCE(ar.scan_pattern_id, a.scan_pattern_id) AS pattern_id
+        FROM trading_autotrader_runs ar
+        LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+        WHERE ar.created_at >= :cutoff
+          AND ar.reason = :edge_debt_reason
+          AND COALESCE(a.asset_type, :default_asset_type) IN :asset_types
+          AND COALESCE(
+              ar.rule_snapshot->'entry_edge'->'managed_exit_edge'
+                  ->'geometry'->>'reason',
+              ar.rule_snapshot->'entry_edge'->'managed_exit_edge'
+                  ->>'selection_reason',
+              ''
+          ) IN :managed_reasons
+          AND COALESCE(ar.scan_pattern_id, a.scan_pattern_id) IS NOT NULL
+        ORDER BY pattern_id
+        """
+    ).bindparams(
+        bindparam("asset_types", expanding=True),
+        bindparam("managed_reasons", expanding=True),
+    )
+    try:
+        rows = db.execute(
+            query,
+            {
+                "cutoff": cutoff,
+                "edge_debt_reason": AUTOTRADER_EDGE_DEBT_SKIP_REASON,
+                "default_asset_type": DEFAULT_PRIORITY_ASSET_TYPE,
+                "asset_types": asset_types,
+                "managed_reasons": managed_reasons,
+            },
+        ).fetchall()
+    except Exception:
+        logger.debug("[pattern_directional] edge-debt priority read failed", exc_info=True)
+        return []
+    out: list[int] = []
+    for row in rows:
+        try:
+            out.append(int(row[0]))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _candidate_query(
+    *,
+    include_priority_filter: bool,
+    exclude_alert_ids: bool,
+):
+    filters = []
+    params = []
+    if include_priority_filter:
+        filters.append("AND a.scan_pattern_id IN :priority_pattern_ids")
+        params.append(bindparam("priority_pattern_ids", expanding=True))
+    if exclude_alert_ids:
+        filters.append("AND a.id NOT IN :exclude_alert_ids")
+        params.append(bindparam("exclude_alert_ids", expanding=True))
+    sql = text(
+        f"""
+        SELECT a.id, a.scan_pattern_id, a.ticker, a.created_at,
+               a.duration_estimate, a.decision_packet_id
+        FROM trading_alerts a
+        LEFT JOIN pattern_alert_directional_outcome p
+          ON p.alert_id = a.id
+        WHERE a.alert_type = :atype
+          AND a.scan_pattern_id IS NOT NULL
+          AND a.ticker IS NOT NULL
+          AND a.created_at >= :lookback_floor
+          AND p.alert_id IS NULL
+          {' '.join(filters)}
+        ORDER BY a.created_at ASC
+        LIMIT :max_per_run
+        """
+    )
+    return sql.bindparams(*params) if params else sql
+
+
+def _load_candidate_rows(
+    db: Session,
+    *,
+    lookback_floor: datetime,
+    max_per_run: int,
+    priority_pattern_ids: list[int],
+) -> tuple[list[Any], int]:
+    rows: list[Any] = []
+    priority_candidates = 0
+    base_params = {
+        "atype": ALERT_TYPE_PATTERN_BREAKOUT_IMMINENT,
+        "lookback_floor": lookback_floor,
+    }
+    if priority_pattern_ids:
+        priority_rows = db.execute(
+            _candidate_query(
+                include_priority_filter=True,
+                exclude_alert_ids=False,
+            ),
+            {
+                **base_params,
+                "priority_pattern_ids": tuple(priority_pattern_ids),
+                "max_per_run": max_per_run,
+            },
+        ).fetchall()
+        rows.extend(priority_rows)
+        priority_candidates = len(priority_rows)
+
+    remaining = max_per_run - len(rows)
+    if remaining <= 0:
+        return rows, priority_candidates
+
+    selected_alert_ids = [int(r[0]) for r in rows]
+    generic_rows = db.execute(
+        _candidate_query(
+            include_priority_filter=False,
+            exclude_alert_ids=bool(selected_alert_ids),
+        ),
+        {
+            **base_params,
+            "exclude_alert_ids": tuple(selected_alert_ids),
+            "max_per_run": remaining,
+        },
+    ).fetchall()
+    rows.extend(generic_rows)
+    return rows, priority_candidates
+
+
 def evaluate_directional_outcomes(
     db: Session,
     *,
@@ -275,15 +476,33 @@ def evaluate_directional_outcomes(
     if not enabled:
         return {"ok": True, "skipped": "flag_disabled", "candidates": 0, "evaluated": 0}
 
-    threshold_pct = float(getattr(s, "chili_pattern_directional_threshold_pct", 1.5))
+    threshold_pct = float(
+        getattr(
+            s,
+            "chili_pattern_directional_threshold_pct",
+            PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT,
+        )
+    )
     default_hold_hours = int(
-        getattr(s, "chili_pattern_directional_default_hold_hours", 24)
+        getattr(
+            s,
+            "chili_pattern_directional_default_hold_hours",
+            PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS,
+        )
     )
     max_lookback_hours = int(
-        getattr(s, "chili_pattern_directional_max_lookback_hours", 168)
+        getattr(
+            s,
+            "chili_pattern_directional_max_lookback_hours",
+            PATTERN_DIRECTIONAL_DEFAULT_MAX_LOOKBACK_HOURS,
+        )
     )
     max_per_run = int(
-        getattr(s, "chili_pattern_directional_max_alerts_per_run", 200)
+        getattr(
+            s,
+            "chili_pattern_directional_max_alerts_per_run",
+            PATTERN_DIRECTIONAL_DEFAULT_MAX_ALERTS_PER_RUN,
+        )
     )
 
     fetcher = fetch_ohlcv or _default_fetch_ohlcv
@@ -292,31 +511,22 @@ def evaluate_directional_outcomes(
     import time as _t
     t0 = _t.monotonic()
 
+    priority_pattern_ids = _edge_debt_priority_pattern_ids(
+        db,
+        now=now,
+        settings_=s,
+    )
     # Candidates not yet evaluated. Hold windows are duration-aware per alert,
     # so SQL cannot safely prefilter by a single default-hold floor: a 15-minute
-    # setup should not wait behind a 24h default.
-    rows = db.execute(
-        text(
-            """
-            SELECT a.id, a.scan_pattern_id, a.ticker, a.created_at, a.duration_estimate, a.decision_packet_id
-            FROM trading_alerts a
-            LEFT JOIN pattern_alert_directional_outcome p
-              ON p.alert_id = a.id
-            WHERE a.alert_type = :atype
-              AND a.scan_pattern_id IS NOT NULL
-              AND a.ticker IS NOT NULL
-              AND a.created_at >= :lookback_floor
-              AND p.alert_id IS NULL
-            ORDER BY a.created_at ASC
-            LIMIT :max_per_run
-            """
-        ),
-        {
-            "atype": ALERT_TYPE_PATTERN_BREAKOUT_IMMINENT,
-            "lookback_floor": lookback_floor,
-            "max_per_run": max_per_run,
-        },
-    ).fetchall()
+    # setup should not wait behind a 24h default. We do, however, front-load
+    # patterns that just hit live edge skips because their managed-edge
+    # directional evidence is thin; those rows are learning-critical.
+    rows, priority_candidates = _load_candidate_rows(
+        db,
+        lookback_floor=lookback_floor,
+        max_per_run=max_per_run,
+        priority_pattern_ids=priority_pattern_ids,
+    )
 
     candidates = len(rows)
     evaluated = 0
@@ -336,6 +546,8 @@ def evaluate_directional_outcomes(
             "skipped_window_empty": 0,
             "skipped_window_open": 0,
             "errors": 0,
+            "priority_patterns": len(priority_pattern_ids),
+            "priority_candidates": priority_candidates,
             "elapsed_ms": int((_t.monotonic() - t0) * 1000),
         }
 
@@ -478,6 +690,8 @@ def evaluate_directional_outcomes(
         "skipped_window_empty": skipped_window_empty,
         "skipped_window_open": skipped_window_open,
         "errors": errors,
+        "priority_patterns": len(priority_pattern_ids),
+        "priority_candidates": priority_candidates,
         "elapsed_ms": int((_t.monotonic() - t0) * 1000),
     }
     logger.info("[pattern_directional] %s", summary)

@@ -458,6 +458,7 @@ def synthesize_option_meta(
 
         meta = {
             "underlying": sym,
+            "option_id": contract.get("id"),
             "strike": strike,
             "expiration": expiration,
             "option_type": "call",

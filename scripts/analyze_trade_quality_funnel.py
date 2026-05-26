@@ -102,6 +102,109 @@ def main() -> int:
         ),
     )
     _print_table(
+        f"AutoTrader decisions by asset/lifecycle/lane, last {params['days']}d",
+        _rows(
+            """
+            SELECT COALESCE(a.asset_type, 'unknown') AS asset_type,
+                   COALESCE(sp.lifecycle_stage, 'none') AS lifecycle_stage,
+                   COALESCE(
+                       a.indicator_snapshot->'imminent_scorecard'->>'signal_lane',
+                       'none'
+                   ) AS signal_lane,
+                   ar.decision,
+                   COALESCE(ar.reason, 'none') AS reason,
+                   COUNT(*) AS n
+            FROM trading_autotrader_runs ar
+            LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+            LEFT JOIN scan_patterns sp ON sp.id = COALESCE(ar.scan_pattern_id, a.scan_pattern_id)
+            WHERE ar.created_at >= NOW() - (:days * INTERVAL '1 day')
+            GROUP BY 1, 2, 3, 4, 5
+            ORDER BY n DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
+        f"Stock managed-exit overlay on edge skips, last {params['days']}d",
+        _rows(
+            """
+            SELECT COALESCE(
+                       ar.rule_snapshot->'entry_edge'->'managed_exit_edge'
+                           ->'geometry'->>'reason',
+                       ar.rule_snapshot->'entry_edge'->'managed_exit_edge'
+                           ->>'selection_reason',
+                       'missing_managed_snapshot'
+                   ) AS managed_reason,
+                   COUNT(*) AS n,
+                   ROUND(MAX(
+                       NULLIF(
+                           ar.rule_snapshot->'entry_edge'->>'expected_net_pct',
+                           ''
+                       )::numeric
+                   ), 4) AS max_full_bracket_expected_net_pct,
+                   ROUND(MAX(
+                       NULLIF(
+                           ar.rule_snapshot->'entry_edge'->'managed_exit_edge'
+                               ->>'expected_net_pct',
+                           ''
+                       )::numeric
+                   ), 4) AS max_managed_expected_net_pct,
+                   MAX(ar.created_at) AS latest_created_at
+            FROM trading_autotrader_runs ar
+            LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+            WHERE ar.created_at >= NOW() - (:days * INTERVAL '1 day')
+              AND ar.reason = 'non_positive_expected_edge'
+              AND COALESCE(a.asset_type, 'stock') = 'stock'
+            GROUP BY 1
+            ORDER BY n DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
+        f"Stock missed-entry slippage direction, last {params['days']}d",
+        _rows(
+            """
+            WITH missed AS (
+                SELECT ar.created_at,
+                       ar.ticker,
+                       a.entry_price,
+                       NULLIF(ar.rule_snapshot->>'current_price', '')::numeric
+                           AS current_price,
+                       NULLIF(
+                           ar.rule_snapshot->'entry_edge'->>'expected_net_pct',
+                           ''
+                       )::numeric AS expected_net_pct,
+                       NULLIF(
+                           ar.rule_snapshot->>'entry_slippage_pct',
+                           ''
+                       )::numeric AS entry_slippage_pct
+                FROM trading_autotrader_runs ar
+                LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+                WHERE ar.created_at >= NOW() - (:days * INTERVAL '1 day')
+                  AND ar.reason = 'missed_entry_slippage'
+                  AND COALESCE(a.asset_type, 'stock') = 'stock'
+            )
+            SELECT CASE
+                       WHEN current_price < entry_price THEN 'favorable_pullback'
+                       WHEN current_price > entry_price THEN 'adverse_chase'
+                       ELSE 'flat_or_unknown'
+                   END AS slippage_direction,
+                   COUNT(*) AS n,
+                   ROUND(MAX(entry_slippage_pct), 4) AS max_entry_slippage_pct,
+                   ROUND(MAX(expected_net_pct), 4) AS max_expected_net_pct,
+                   MAX(created_at) AS latest_created_at
+            FROM missed
+            GROUP BY 1
+            ORDER BY n DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
         f"Pattern-imminent alert supply by lifecycle, last {params['days']}d",
         _rows(
             """
@@ -116,6 +219,107 @@ def main() -> int:
               AND a.alert_tier = 'pattern_imminent'
             GROUP BY 1, 2, 3
             ORDER BY alerts DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
+        f"Positive-edge stock blocks by legacy price cap, last {params['days']}d",
+        _rows(
+            """
+            WITH cap_blocks AS (
+                SELECT ar.ticker,
+                       COALESCE(sp.lifecycle_stage, 'none') AS lifecycle_stage,
+                       COALESCE(
+                           a.indicator_snapshot->'imminent_scorecard'->>'signal_lane',
+                           'none'
+                       ) AS signal_lane,
+                       CASE
+                           WHEN COALESCE(ar.rule_snapshot->>'current_price', '')
+                                ~ '^-?[0-9]+([.][0-9]+)?$'
+                           THEN (ar.rule_snapshot->>'current_price')::numeric
+                       END AS current_price,
+                       CASE
+                           WHEN COALESCE(
+                                   ar.rule_snapshot->'entry_edge'->>'expected_net_pct',
+                                   ar.rule_snapshot->>'entry_edge_expected_net_pct',
+                                   ''
+                                ) ~ '^-?[0-9]+([.][0-9]+)?$'
+                           THEN COALESCE(
+                                   ar.rule_snapshot->'entry_edge'->>'expected_net_pct',
+                                   ar.rule_snapshot->>'entry_edge_expected_net_pct'
+                                )::numeric
+                       END AS expected_net_pct,
+                       ar.created_at
+                FROM trading_autotrader_runs ar
+                LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+                LEFT JOIN scan_patterns sp ON sp.id = COALESCE(ar.scan_pattern_id, a.scan_pattern_id)
+                WHERE ar.created_at >= NOW() - (:days * INTERVAL '1 day')
+                  AND COALESCE(a.asset_type, '') = 'stock'
+                  AND ar.reason = 'symbol_price_above_cap'
+            )
+            SELECT ticker,
+                   lifecycle_stage,
+                   signal_lane,
+                   COUNT(*) AS n,
+                   ROUND(MAX(current_price), 2) AS max_px,
+                   ROUND(MAX(expected_net_pct), 4) AS max_expected_net_pct,
+                   MAX(created_at) AS latest_created_at
+            FROM cap_blocks
+            WHERE expected_net_pct > 0
+            GROUP BY 1, 2, 3
+            ORDER BY n DESC
+            LIMIT :limit
+            """,
+            params,
+        ),
+    )
+    _print_table(
+        f"Shadow stock fastlane boosts, last {params['days']}d",
+        _rows(
+            """
+            SELECT ar.ticker,
+                   COALESCE(sp.lifecycle_stage, 'none') AS lifecycle_stage,
+                   COALESCE(
+                       a.indicator_snapshot->'imminent_scorecard'->>'signal_lane',
+                       'none'
+                   ) AS signal_lane,
+                   COALESCE(
+                       ar.rule_snapshot->'shadow_stock_fastlane'->>'reason',
+                       'none'
+                   ) AS fastlane_reason,
+                   COUNT(*) AS n,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(
+                           ar.rule_snapshot->'shadow_stock_fastlane'->>'queued',
+                           'false'
+                       ) = 'true'
+                   ) AS queued,
+                   MAX(
+                       NULLIF(
+                           ar.rule_snapshot->'shadow_stock_fastlane'->>'priority',
+                           ''
+                       )::numeric
+                   ) AS max_priority,
+                   ROUND(
+                       MAX(
+                           NULLIF(
+                               ar.rule_snapshot->'shadow_stock_fastlane'
+                               ->>'expected_net_pct',
+                               ''
+                           )::numeric
+                       ),
+                       4
+                   ) AS max_expected_net_pct,
+                   MAX(ar.created_at) AS latest_created_at
+            FROM trading_autotrader_runs ar
+            LEFT JOIN trading_breakout_alerts a ON a.id = ar.breakout_alert_id
+            LEFT JOIN scan_patterns sp ON sp.id = COALESCE(ar.scan_pattern_id, a.scan_pattern_id)
+            WHERE ar.created_at >= NOW() - (:days * INTERVAL '1 day')
+              AND ar.rule_snapshot ? 'shadow_stock_fastlane'
+            GROUP BY 1, 2, 3, 4
+            ORDER BY queued DESC, n DESC
             LIMIT :limit
             """,
             params,

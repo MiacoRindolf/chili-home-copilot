@@ -31,7 +31,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ...config import settings
+from ...config import (
+    RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ENABLED,
+    RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ORIGINS,
+    RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_PRIORITY,
+    settings,
+)
 from ...trading_brain.infrastructure.recert_queue_ops_log import (
     format_recert_queue_ops_line,
 )
@@ -46,6 +51,10 @@ from .recert_queue_model import (
 
 logger = logging.getLogger(__name__)
 _ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
+RECERT_STATUS_PROPOSED = "proposed"
+RECERT_STATUS_DISPATCHED = "dispatched"
+RECERT_PAYLOAD_ORIGIN_KEY = "origin"
+RECERT_IMMEDIATE_DISPATCHER = "recert_queue_service.immediate"
 
 
 def _effective_mode(override: str | None = None) -> str:
@@ -72,6 +81,51 @@ def _config_from_settings() -> RecertQueueConfig:
             getattr(settings, "brain_recert_queue_include_yellow", False)
         ),
     )
+
+
+def _csv_tokens(raw: object) -> set[str]:
+    return {
+        token.strip().lower()
+        for token in str(raw or "").split(",")
+        if token.strip()
+    }
+
+
+def _immediate_dispatch_origins() -> set[str]:
+    origins = _csv_tokens(
+        getattr(
+            settings,
+            "brain_recert_queue_immediate_dispatch_origins",
+            RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ORIGINS,
+        )
+    )
+    if origins:
+        return origins
+    return _csv_tokens(RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ORIGINS)
+
+
+def _positive_int_setting(name: str, default: int) -> int:
+    try:
+        parsed = int(getattr(settings, name, default) or default)
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return max(1, parsed)
+
+
+def _immediate_dispatch_enabled_for(prop: RecertProposal) -> bool:
+    if not bool(
+        getattr(
+            settings,
+            "brain_recert_queue_immediate_dispatch_enabled",
+            RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ENABLED,
+        )
+    ):
+        return False
+    payload = prop.payload if isinstance(prop.payload, dict) else {}
+    origin = str(payload.get(RECERT_PAYLOAD_ORIGIN_KEY) or "").strip().lower()
+    if not origin:
+        return False
+    return origin in _immediate_dispatch_origins()
 
 
 @dataclass(frozen=True)
@@ -203,7 +257,12 @@ def _persist(
                     existing_log_id=existing.log_id,
                 )
             )
-        return existing
+        return _maybe_immediate_dispatch(
+            db,
+            result=existing,
+            prop=prop,
+            mode=mode,
+        )
 
     now = datetime.utcnow()
     as_of_str = prop.as_of_date.isoformat()
@@ -251,13 +310,120 @@ def _persist(
             )
         )
 
-    return RecertQueueResult(
+    result = RecertQueueResult(
         log_id=new_id,
         recert_id=prop.recert_id,
         scan_pattern_id=prop.scan_pattern_id,
         mode=mode,
         status=prop.status,
     )
+    return _maybe_immediate_dispatch(
+        db,
+        result=result,
+        prop=prop,
+        mode=mode,
+    )
+
+
+def _maybe_immediate_dispatch(
+    db: Session,
+    *,
+    result: RecertQueueResult,
+    prop: RecertProposal,
+    mode: str,
+) -> RecertQueueResult:
+    """Boost signal-fastlane proposals without waiting for hourly dispatch."""
+    if result.status != RECERT_STATUS_PROPOSED:
+        return result
+    if not _immediate_dispatch_enabled_for(prop):
+        return result
+
+    priority = _positive_int_setting(
+        "brain_recert_queue_immediate_dispatch_priority",
+        RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_PRIORITY,
+    )
+    try:
+        from .backtest_queue import boost_pattern
+
+        if not boost_pattern(db, result.scan_pattern_id, priority=priority):
+            raise RuntimeError("scan_pattern_not_found_or_inactive")
+        dispatch_payload = {
+            "dispatch": {
+                "dispatched_at": datetime.utcnow().isoformat(),
+                "backtest_priority": priority,
+                "dispatcher": RECERT_IMMEDIATE_DISPATCHER,
+                "immediate": True,
+            }
+        }
+        updated = int(db.execute(text("""
+            UPDATE trading_pattern_recert_log
+            SET status = :dispatched,
+                payload_json = COALESCE(payload_json, '{}'::jsonb)
+                    || CAST(:payload AS JSONB)
+            WHERE id = :id
+              AND status = :proposed
+        """), {
+            "id": result.log_id,
+            "dispatched": RECERT_STATUS_DISPATCHED,
+            "proposed": RECERT_STATUS_PROPOSED,
+            "payload": json.dumps(dispatch_payload, default=str),
+        }).rowcount or 0)
+        db.commit()
+        if updated <= 0:
+            return result
+        if _ops_log_enabled():
+            logger.info(
+                format_recert_queue_ops_line(
+                    event="recert_immediate_dispatched",
+                    mode=mode,
+                    recert_id=result.recert_id,
+                    scan_pattern_id=result.scan_pattern_id,
+                    pattern_name=prop.pattern_name,
+                    severity=prop.severity,
+                    source=prop.source,
+                    status=RECERT_STATUS_DISPATCHED,
+                    reason=prop.reason,
+                    backtest_priority=priority,
+                )
+            )
+        return RecertQueueResult(
+            log_id=result.log_id,
+            recert_id=result.recert_id,
+            scan_pattern_id=result.scan_pattern_id,
+            mode=result.mode,
+            status=RECERT_STATUS_DISPATCHED,
+        )
+    except Exception as exc:
+        db.rollback()
+        try:
+            db.execute(text("""
+                UPDATE trading_pattern_recert_log
+                SET payload_json = COALESCE(payload_json, '{}'::jsonb)
+                        || CAST(:payload AS JSONB)
+                WHERE id = :id
+                  AND status = :proposed
+            """), {
+                "id": result.log_id,
+                "proposed": RECERT_STATUS_PROPOSED,
+                "payload": json.dumps({
+                    "immediate_dispatch_error": {
+                        "error": str(exc)[:500],
+                        "failed_at": datetime.utcnow().isoformat(),
+                        "dispatcher": RECERT_IMMEDIATE_DISPATCHER,
+                    },
+                }),
+            })
+            db.commit()
+        except Exception:
+            db.rollback()
+        logger.warning(
+            "[recert_queue] immediate dispatch failed recert_log_id=%s "
+            "pattern_id=%s: %s",
+            result.log_id,
+            result.scan_pattern_id,
+            exc,
+        )
+        return result
 
 
 def _check_mode_or_raise(

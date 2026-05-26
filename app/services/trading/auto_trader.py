@@ -12,8 +12,16 @@ from sqlalchemy.orm import Session, aliased
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
+    AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
@@ -76,6 +84,7 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_shadow_promoted",
     "skipped_duplicate_pattern_already_open",
     "skipped_non_positive_expected_edge",
+    "skipped_pending_entry_already_working",
     "skipped_synergy_disabled_second_signal",
     f"skipped_{SYNERGY_RETRY_SOURCE_REASON}",
     f"skipped_{SYNERGY_RETRY_EXHAUSTED_REASON}",
@@ -93,6 +102,9 @@ PROBATION_JSON_FALSE = "false"
 PROBATION_DEFAULT_NOTIONAL_MULTIPLIER = 0.25
 MONEY_ROUND_DIGITS = 2
 MULTIPLIER_ROUND_DIGITS = 6
+QUANTITY_ROUND_DIGITS = 8
+PERCENT_SCALE = 100.0
+DEFAULT_PER_TRADE_RISK_PCT = 1.0
 PROBATION_QUOTA_REASON_PATTERN = "probation_quota_exceeded:pattern"
 PROBATION_QUOTA_REASON_PORTFOLIO = "probation_quota_exceeded:portfolio"
 PROBATION_OPTIONS_PATH_BLOCKED_REASON = "probation_options_path_blocked"
@@ -124,7 +136,26 @@ SHADOW_OBSERVATION_REASON_SIGNAL_LANE = "selector:shadow_observation_signal_lane
 SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED = (
     "selector:shadow_observation_signal_lane_disabled"
 )
+SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK = "base_risk_notional"
+SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS = "full_diagnostics"
+SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING = (
+    "chili_autotrader_shadow_observation_diagnostic_sizing_enabled"
+)
+SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_SETTING = (
+    "chili_autotrader_shadow_observation_evidence_notional_usd"
+)
+SHADOW_OBSERVATION_ADVISORY_SIZING_SKIP_REASON = "shadow_observation_only"
+SHADOW_OBSERVATION_LIGHTWEIGHT_DIAL = 1.0
+SHADOW_OBSERVATION_NOTIONAL_SOURCE_EVIDENCE = "shadow_observation_evidence_notional"
+SHADOW_OBSERVATION_NOTIONAL_SOURCE_ASSUMED = "shadow_observation_assumed_capital_pct"
+SHADOW_OBSERVATION_NOTIONAL_SOURCE_UNAVAILABLE = "shadow_observation_capital_unavailable"
 LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION = "shadow_observation_only"
+LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH = "options_path"
+PENDING_ENTRY_ALREADY_WORKING_REASON = "pending_entry_already_working"
+_OPTION_ENTRY_FILLED_STATES = frozenset({"filled", "done", "completed", "complete"})
+_OPTION_ENTRY_PARTIAL_STATES = frozenset(
+    {"partially_filled", "partial", "partial_filled"}
+)
 
 
 def _alert_signal_lane(alert: BreakoutAlert) -> str:
@@ -153,7 +184,152 @@ def _should_run_llm_revalidation(alert: BreakoutAlert) -> tuple[bool, str | None
         )
     ):
         return False, LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION
+    if (
+        (alert.asset_type or "").strip().lower() == "options"
+        and bool(
+            getattr(
+                settings,
+                "chili_autotrader_llm_revalidation_skip_options_path",
+                AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
+            )
+        )
+    ):
+        return False, LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH
     return True, None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _order_state_from_response(res: dict[str, Any]) -> str:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    return str(
+        res.get("state")
+        or res.get("status")
+        or raw.get("state")
+        or raw.get("status")
+        or ""
+    ).strip().lower()
+
+
+def _entry_fill_price_from_response(
+    res: dict[str, Any],
+    alert: BreakoutAlert,
+    *,
+    px: float,
+    snap: dict[str, Any],
+) -> float:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    option_meta = snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
+    is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+    candidates: list[Any] = [
+        raw.get("average_price"),
+        raw.get("avg_price"),
+        raw.get("price"),
+        res.get("average_price"),
+        res.get("avg_price"),
+        res.get("price"),
+    ]
+    if is_option_entry:
+        candidates.extend(
+            [
+                res.get("limit_price"),
+                option_meta.get("limit_price"),
+                alert.entry_price,
+            ]
+        )
+    else:
+        candidates.append(px)
+    for candidate in candidates:
+        parsed = _float_or_none(candidate)
+        if parsed is not None:
+            return parsed
+    return float(px)
+
+
+def _entry_tca_reference_price(
+    res: dict[str, Any],
+    alert: BreakoutAlert,
+    *,
+    px: float,
+    snap: dict[str, Any],
+    fill: float | None,
+) -> float | None:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    option_meta = (
+        snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
+    )
+    response_option_meta = (
+        res.get("_chili_option_meta")
+        if isinstance(res.get("_chili_option_meta"), dict)
+        else {}
+    )
+    is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+    if is_option_entry:
+        candidates: tuple[Any, ...] = (
+            res.get("limit_price"),
+            raw.get("limit_price"),
+            response_option_meta.get("limit_price"),
+            option_meta.get("limit_price"),
+            alert.entry_price,
+            fill,
+        )
+        for candidate in candidates:
+            parsed = _float_or_none(candidate)
+            if parsed is not None:
+                return parsed
+        return None
+    return _float_or_none(px)
+
+
+def _filled_qty_from_response(res: dict[str, Any], *, default_qty: float) -> float | None:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    for key in (
+        "filled_quantity",
+        "cumulative_filled_quantity",
+        "cumulative_quantity",
+        "filled_size",
+    ):
+        parsed = _float_or_none(res.get(key))
+        if parsed is not None:
+            return min(parsed, default_qty)
+        parsed = _float_or_none(raw.get(key))
+        if parsed is not None:
+            return min(parsed, default_qty)
+    return None
+
+
+def _entry_lifecycle_from_response(
+    *,
+    broker_source: str,
+    res: dict[str, Any],
+    snap: dict[str, Any],
+    qty: float,
+) -> tuple[str, str | None, float | None, float | None]:
+    is_coinbase_entry = broker_source == "coinbase"
+    if is_coinbase_entry:
+        return "working", "accepted", 0.0, qty
+
+    is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+    if is_option_entry:
+        state = _order_state_from_response(res)
+        filled_qty = _filled_qty_from_response(res, default_qty=qty)
+        if state in _OPTION_ENTRY_FILLED_STATES:
+            filled = filled_qty if filled_qty is not None else qty
+            return "open", state or "filled", filled, max(qty - filled, 0.0)
+        if state in _OPTION_ENTRY_PARTIAL_STATES:
+            filled = filled_qty if filled_qty is not None else 0.0
+            return "working", state or "partially_filled", filled, max(qty - filled, 0.0)
+        return "working", state or "accepted", 0.0, qty
+
+    return "open", None, None, None
 
 
 def _autotrader_tick_note(
@@ -605,10 +781,15 @@ def _resolve_entry_risk_notional(
         fallback_notional = 0.0
     try:
         per_trade_pct = float(
-            getattr(settings, "chili_autotrader_per_trade_risk_pct", 1.0) or 0.0
+            getattr(
+                settings,
+                "chili_autotrader_per_trade_risk_pct",
+                DEFAULT_PER_TRADE_RISK_PCT,
+            )
+            or 0.0
         )
     except Exception:
-        per_trade_pct = 1.0
+        per_trade_pct = DEFAULT_PER_TRADE_RISK_PCT
 
     equity, cap_source = resolve_effective_capital(db, settings)
     brain_ctx = resolve_brain_risk_context(
@@ -626,7 +807,7 @@ def _resolve_entry_risk_notional(
     snap["notional_explicit_fallback_usd"] = round(float(fallback_notional), 2)
 
     if equity > 0 and per_trade_pct > 0:
-        return equity * (per_trade_pct / 100.0) * dial, {
+        return equity * (per_trade_pct / PERCENT_SCALE) * dial, {
             **snap,
             "notional_source": "equity_pct_dial",
         }
@@ -636,6 +817,72 @@ def _resolve_entry_risk_notional(
             "notional_source": "explicit_env_notional_dial",
         }
     return 0.0, {**snap, "notional_source": "capital_unavailable"}
+
+
+def _resolve_shadow_observation_lightweight_notional() -> tuple[float, dict[str, Any]]:
+    """Resolve paper evidence size without live broker/account calls."""
+    try:
+        evidence_notional = float(
+            getattr(
+                settings,
+                SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_SETTING,
+                AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD,
+            )
+            or 0.0
+        )
+    except Exception:
+        evidence_notional = AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD
+    try:
+        per_trade_pct = float(
+            getattr(
+                settings,
+                "chili_autotrader_per_trade_risk_pct",
+                DEFAULT_PER_TRADE_RISK_PCT,
+            )
+            or 0.0
+        )
+    except Exception:
+        per_trade_pct = 0.0
+    try:
+        assumed_capital = float(
+            getattr(settings, "chili_autotrader_assumed_capital_usd", 0.0) or 0.0
+        )
+    except Exception:
+        assumed_capital = 0.0
+
+    snap: dict[str, Any] = {
+        "notional_risk_pct": per_trade_pct,
+        "notional_dial": SHADOW_OBSERVATION_LIGHTWEIGHT_DIAL,
+        "notional_capital_source": "shadow_observation_lightweight",
+        "notional_capital_usd": round(float(assumed_capital), MONEY_ROUND_DIGITS),
+        "notional_explicit_fallback_usd": round(
+            float(evidence_notional),
+            MONEY_ROUND_DIGITS,
+        ),
+        "notional_evidence_configured_usd": round(
+            float(evidence_notional),
+            MONEY_ROUND_DIGITS,
+        ),
+        "notional_broker_lookup_skipped": True,
+    }
+    if evidence_notional > 0.0:
+        return evidence_notional * SHADOW_OBSERVATION_LIGHTWEIGHT_DIAL, {
+            **snap,
+            "notional_source": SHADOW_OBSERVATION_NOTIONAL_SOURCE_EVIDENCE,
+        }
+    if assumed_capital > 0.0 and per_trade_pct > 0.0:
+        return (
+            assumed_capital
+            * (per_trade_pct / PERCENT_SCALE)
+            * SHADOW_OBSERVATION_LIGHTWEIGHT_DIAL
+        ), {
+            **snap,
+            "notional_source": SHADOW_OBSERVATION_NOTIONAL_SOURCE_ASSUMED,
+        }
+    return 0.0, {
+        **snap,
+        "notional_source": SHADOW_OBSERVATION_NOTIONAL_SOURCE_UNAVAILABLE,
+    }
 
 
 def _managed_edge_execution_levels(
@@ -1168,6 +1415,176 @@ def _queue_recert_for_blocked_signal(
             exc_info=True,
         )
         return {"queued": False, "reason": "queue_failed"}
+
+
+def _csv_tokens(raw: Any) -> frozenset[str]:
+    return frozenset(
+        token.strip().lower()
+        for token in str(raw or "").split(",")
+        if token.strip()
+    )
+
+
+def _expected_net_pct_from_snapshot(snap: dict[str, Any] | None) -> float | None:
+    if not isinstance(snap, dict):
+        return None
+    edge = snap.get("entry_edge")
+    raw = None
+    if isinstance(edge, dict):
+        raw = edge.get("expected_net_pct")
+    if raw is None:
+        raw = snap.get("entry_edge_expected_net_pct")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value:
+        return None
+    return value
+
+
+def _queue_shadow_stock_fastlane_for_observation(
+    db: Session,
+    *,
+    alert: BreakoutAlert,
+    pattern: ScanPattern | None,
+    reason: str,
+    snap: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Boost live-quality stock observations toward fresh graduation evidence.
+
+    This does not place a broker order and does not change lifecycle rules. It
+    only makes the backtest queue notice stock shadow observations that already
+    passed the normal positive-edge gate, so their patterns can earn or fail
+    promotion evidence sooner.
+    """
+    if not bool(
+        getattr(
+            settings,
+            "chili_autotrader_shadow_stock_fastlane_enabled",
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_ENABLED,
+        )
+    ):
+        return None
+    if (getattr(alert, "asset_type", "") or "").strip().lower() != "stock":
+        return None
+    try:
+        pattern_id = int(getattr(alert, "scan_pattern_id", None) or 0)
+    except (TypeError, ValueError):
+        pattern_id = 0
+    if pattern_id <= 0 or pattern is None:
+        return None
+    lifecycle = (getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
+    allowed_lifecycles = _csv_tokens(
+        getattr(
+            settings,
+            "chili_autotrader_shadow_stock_fastlane_lifecycle_stages",
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
+        )
+    )
+    if allowed_lifecycles and lifecycle not in allowed_lifecycles:
+        return None
+
+    expected_net_pct = _expected_net_pct_from_snapshot(snap)
+    min_expected_net_pct = float(
+        getattr(
+            settings,
+            "chili_autotrader_shadow_stock_fastlane_min_expected_net_pct",
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+        )
+        or 0.0
+    )
+    if expected_net_pct is None or expected_net_pct <= min_expected_net_pct:
+        return {
+            "queued": False,
+            "reason": "expected_net_below_fastlane_floor",
+            "expected_net_pct": expected_net_pct,
+            "min_expected_net_pct": min_expected_net_pct,
+            "lifecycle_stage": lifecycle,
+        }
+
+    reboost_cooldown_minutes = max(
+        0.0,
+        float(
+            getattr(
+                settings,
+                "chili_autotrader_shadow_stock_fastlane_reboost_cooldown_minutes",
+                AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
+            )
+            or 0.0
+        ),
+    )
+    last_backtest_at = getattr(pattern, "last_backtest_at", None)
+    if reboost_cooldown_minutes > 0.0 and isinstance(last_backtest_at, datetime):
+        last_bt = last_backtest_at
+        if last_bt.tzinfo is not None:
+            last_bt = last_bt.astimezone(timezone.utc).replace(tzinfo=None)
+        cooldown_until = last_bt + timedelta(minutes=reboost_cooldown_minutes)
+        now_utc = datetime.utcnow()
+        if now_utc < cooldown_until:
+            return {
+                "queued": False,
+                "reason": "recent_backtest_cooldown",
+                "pattern_id": pattern_id,
+                "expected_net_pct": expected_net_pct,
+                "min_expected_net_pct": min_expected_net_pct,
+                "lifecycle_stage": lifecycle,
+                "last_backtest_at": last_bt.isoformat(),
+                "cooldown_until": cooldown_until.isoformat(),
+                "reboost_cooldown_minutes": reboost_cooldown_minutes,
+            }
+
+    priority = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "chili_autotrader_shadow_stock_fastlane_backtest_priority",
+                AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+            )
+            or AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+        ),
+    )
+    previous_priority = int(getattr(pattern, "backtest_priority", 0) or 0)
+    if previous_priority >= priority:
+        return {
+            "queued": False,
+            "reason": "already_boosted",
+            "pattern_id": pattern_id,
+            "priority": previous_priority,
+            "target_priority": priority,
+            "expected_net_pct": expected_net_pct,
+            "lifecycle_stage": lifecycle,
+        }
+
+    pattern.backtest_priority = priority
+    try:
+        from .backtest_queue import invalidate_queue_status_cache
+        from .brain_work.emitters import emit_backtest_requested_for_pattern
+
+        emit_backtest_requested_for_pattern(
+            db,
+            pattern_id,
+            source="autotrader_shadow_stock_fastlane",
+        )
+        invalidate_queue_status_cache()
+    except Exception:
+        logger.debug(
+            "[autotrader] shadow stock fastlane emit failed alert_id=%s pattern_id=%s",
+            getattr(alert, "id", None),
+            pattern_id,
+            exc_info=True,
+        )
+    db.flush()
+    return {
+        "queued": True,
+        "pattern_id": pattern_id,
+        "priority": priority,
+        "previous_priority": previous_priority,
+        "expected_net_pct": expected_net_pct,
+        "lifecycle_stage": lifecycle,
+        "reason": reason,
+    }
 
 
 def _audit(
@@ -2251,6 +2668,42 @@ def _process_one_alert(
         existing_paper = find_open_autotrader_paper(db, user_id=uid, ticker=alert.ticker)
 
     scale_plan = None
+    if live and existing_trade is not None and str(existing_trade.status or "").lower() == "working":
+        pending_snap = {
+            "existing_trade_id": getattr(existing_trade, "id", None),
+            "existing_trade_status": getattr(existing_trade, "status", None),
+            "existing_trade_broker_status": getattr(existing_trade, "broker_status", None),
+            "existing_trade_broker_order_id": getattr(existing_trade, "broker_order_id", None),
+            "existing_trade_entry_date": (
+                existing_trade.entry_date.isoformat()
+                if getattr(existing_trade, "entry_date", None) else None
+            ),
+        }
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="skipped",
+            reason=PENDING_ENTRY_ALREADY_WORKING_REASON,
+            rule_snapshot=pending_snap,
+        )
+        _maybe_open_reject_paper_shadow(
+            db,
+            uid=uid,
+            alert=alert,
+            px=px,
+            snap=pending_snap,
+            reason=PENDING_ENTRY_ALREADY_WORKING_REASON,
+            existing_qty=getattr(existing_trade, "quantity", None),
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(
+            out,
+            kind="skipped",
+            reason=PENDING_ENTRY_ALREADY_WORKING_REASON,
+            alert=alert,
+        )
+        return
     if live and existing_trade is not None:
         scale_plan = maybe_scale_in(
             db,
@@ -2733,6 +3186,12 @@ def _execute_broker_buy(
                 out, kind="blocked", reason=f"broker:{res.get('error')}", alert=alert,
             )
             return None
+        res.setdefault("_chili_broker_source", "robinhood")
+        res["_chili_options_path"] = True
+        res["_chili_option_meta"] = opt_meta
+        res["_chili_option_order_state"] = _order_state_from_response(res)
+        res.setdefault("base_size", int(qty))
+        res.setdefault("limit_price", float(opt_meta.get("limit_price") or alert.entry_price or 0))
         return res
 
     # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
@@ -3340,6 +3799,65 @@ def _execute_scale_in(
     _autotrader_tick_note(out, kind="scaled_in", reason="ok", alert=alert)
 
 
+def _record_shadow_observation_entry(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    qty: float,
+    px: float,
+    snap: dict[str, Any],
+    llm_snap: dict[str, Any] | None,
+    live: bool,
+    out: dict[str, Any],
+) -> None:
+    _reason = str(
+        getattr(
+            alert,
+            "_chili_shadow_observation_reason",
+            SHADOW_OBSERVATION_REASON_STAGE,
+        )
+        or SHADOW_OBSERVATION_REASON_STAGE
+    )
+    snap["paper_observation_reason"] = _reason
+    snap["paper_observation_live_orders_effective"] = bool(live)
+    if getattr(alert, "_chili_shadow_observation_signal_lane", None):
+        snap["paper_observation_signal_lane"] = getattr(
+            alert,
+            "_chili_shadow_observation_signal_lane",
+            None,
+        )
+    _shadow_stock_fastlane = _queue_shadow_stock_fastlane_for_observation(
+        db,
+        alert=alert,
+        pattern=_pattern_row(db, alert.scan_pattern_id),
+        reason=_reason,
+        snap=snap,
+    )
+    if _shadow_stock_fastlane is not None:
+        snap["shadow_stock_fastlane"] = _shadow_stock_fastlane
+    _audit(
+        db,
+        user_id=uid,
+        alert=alert,
+        decision="blocked",
+        reason=_reason,
+        rule_snapshot=snap,
+        llm_snapshot=llm_snap,
+    )
+    out["skipped"] += 1
+    _autotrader_tick_note(out, kind="blocked", reason=_reason, alert=alert)
+    _maybe_open_paper_shadow(
+        db,
+        uid=uid,
+        alert=alert,
+        qty=qty,
+        px=px,
+        snap=snap,
+        decision="blocked_shadow_promoted",
+    )
+
+
 def _execute_new_entry(
     db: Session,
     uid: int,
@@ -3356,9 +3874,29 @@ def _execute_new_entry(
         _autotrader_tick_note(out, kind="skipped", reason="bad_px", alert=alert)
         return
 
+    _shadow_observation_only = bool(
+        getattr(alert, "_chili_shadow_observation_only", False)
+    )
+    _shadow_observation_diagnostic_sizing_enabled = bool(
+        getattr(
+            settings,
+            SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING,
+            AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
+        )
+    )
+    _shadow_observation_lightweight_sizing_supported = not bool(snap.get("options_path"))
+    _skip_shadow_observation_advisory_sizing = (
+        _shadow_observation_only
+        and _shadow_observation_lightweight_sizing_supported
+        and not _shadow_observation_diagnostic_sizing_enabled
+    )
+
     # Entry size starts from risk budget and account equity. A fixed dollar
     # fallback is honored only when explicitly configured above zero.
-    notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)
+    if _skip_shadow_observation_advisory_sizing:
+        notional, _notional_snap = _resolve_shadow_observation_lightweight_notional()
+    else:
+        notional, _notional_snap = _resolve_entry_risk_notional(db, uid=uid)
     snap.update(_notional_snap)
     if bool(getattr(alert, "_chili_pilot_bootstrap_recert_allowed", False)):
         snap["pilot_bootstrap_recert_allowed"] = True
@@ -3385,36 +3923,90 @@ def _execute_new_entry(
     snap["notional_effective"] = round(notional, 2)
     _risk_pct = float(_notional_snap.get("notional_risk_pct") or 0.0)
     _fallback_equity = (
-        fallback_notional / (_risk_pct / 100.0)
+        fallback_notional / (_risk_pct / PERCENT_SCALE)
         if fallback_notional > 0 and _risk_pct > 0
         else fallback_notional
     )
+    if _shadow_observation_only:
+        snap["shadow_observation_lightweight_sizing_supported"] = (
+            _shadow_observation_lightweight_sizing_supported
+        )
+        snap["shadow_observation_diagnostic_sizing_enabled"] = (
+            _shadow_observation_diagnostic_sizing_enabled
+        )
+        snap["shadow_observation_sizing_mode"] = (
+            SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK
+            if _skip_shadow_observation_advisory_sizing
+            else SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS
+        )
+    if _skip_shadow_observation_advisory_sizing:
+        snap["shadow_observation_advisory_sizing_skipped"] = True
+        snap["shadow_observation_advisory_sizing_skip_reason"] = (
+            SHADOW_OBSERVATION_ADVISORY_SIZING_SKIP_REASON
+        )
+        if not snap.get("options_path"):
+            from .tick_normalizer import normalize_quantity
+
+            qty_raw = notional / px
+            qty = float(normalize_quantity(qty_raw, alert.ticker))
+            snap["qty_source"] = "risk_notional_fractional"
+            if qty <= 0 and px > 0:
+                snap["qty_raw"] = round(qty_raw, QUANTITY_ROUND_DIGITS)
+                _audit(
+                    db, user_id=uid, alert=alert,
+                    decision="skipped",
+                    reason="notional_below_trade_unit",
+                    rule_snapshot=snap,
+                )
+                out["skipped"] += 1
+                _autotrader_tick_note(
+                    out,
+                    kind="skipped",
+                    reason="notional_below_trade_unit",
+                    alert=alert,
+                )
+                return
+            snap["notional_effective"] = round(qty * px, MONEY_ROUND_DIGITS)
+            snap["qty_raw"] = round(qty_raw, QUANTITY_ROUND_DIGITS)
+            _record_shadow_observation_entry(
+                db,
+                uid=uid,
+                alert=alert,
+                qty=qty,
+                px=px,
+                snap=snap,
+                llm_snap=llm_snap,
+                live=live,
+                out=out,
+            )
+            return
 
     # Q1.T5 — HRP shadow sizing (and live override when flag ON).
     # Always logged for shadow comparison; the chosen_sizing field of the
     # decision tells us which to honor. Naive fallback when HRP is
     # unavailable (insufficient history etc.) so flag-flip is safe.
-    try:
-        from .hrp_sizing import decide_position_size as _hrp_decide
-        _hrp_decision = _hrp_decide(
-            db,
-            symbol=(alert.ticker or "").upper(),
-            account_equity_usd=float(equity if equity > 0 else _fallback_equity),
-            user_id=uid,
-        )
-        snap["hrp_naive_size_usd"] = _hrp_decision.naive_size_usd
-        snap["hrp_size_usd"] = _hrp_decision.hrp_size_usd
-        snap["hrp_weight"] = _hrp_decision.hrp_weight
-        snap["hrp_chosen_sizing"] = _hrp_decision.chosen_sizing
-        snap["hrp_n_active_positions"] = _hrp_decision.n_active_positions
-        if _hrp_decision.chosen_sizing == "hrp" and _hrp_decision.hrp_size_usd:
-            # Flag is ON and HRP succeeded: override notional with HRP value.
-            snap["notional_before_hrp"] = round(notional, 2)
-            notional = float(_hrp_decision.hrp_size_usd)
-            snap["notional_effective"] = round(notional, 2)
-            snap["notional_source"] = "hrp_allocated"
-    except Exception as _hrp_e:
-        snap["hrp_error"] = str(_hrp_e)[:200]
+    if not _skip_shadow_observation_advisory_sizing:
+        try:
+            from .hrp_sizing import decide_position_size as _hrp_decide
+            _hrp_decision = _hrp_decide(
+                db,
+                symbol=(alert.ticker or "").upper(),
+                account_equity_usd=float(equity if equity > 0 else _fallback_equity),
+                user_id=uid,
+            )
+            snap["hrp_naive_size_usd"] = _hrp_decision.naive_size_usd
+            snap["hrp_size_usd"] = _hrp_decision.hrp_size_usd
+            snap["hrp_weight"] = _hrp_decision.hrp_weight
+            snap["hrp_chosen_sizing"] = _hrp_decision.chosen_sizing
+            snap["hrp_n_active_positions"] = _hrp_decision.n_active_positions
+            if _hrp_decision.chosen_sizing == "hrp" and _hrp_decision.hrp_size_usd:
+                # Flag is ON and HRP succeeded: override notional with HRP value.
+                snap["notional_before_hrp"] = round(notional, 2)
+                notional = float(_hrp_decision.hrp_size_usd)
+                snap["notional_effective"] = round(notional, 2)
+                snap["notional_source"] = "hrp_allocated"
+        except Exception as _hrp_e:
+            snap["hrp_error"] = str(_hrp_e)[:200]
 
     # K Phase 3 S.4 — survival-classifier sizing multiplier.
     # Composes AFTER HRP (so HRP allocates risk-parity weight, then K
@@ -3750,7 +4342,7 @@ def _execute_new_entry(
                 reason="pilot_promoted_notional_below_trade_unit", alert=alert,
             )
             return
-        snap["qty_raw"] = round(qty_raw, 8)
+        snap["qty_raw"] = round(qty_raw, QUANTITY_ROUND_DIGITS)
         _audit(
             db, user_id=uid, alert=alert,
             decision="skipped",
@@ -3767,44 +4359,19 @@ def _execute_new_entry(
         # Options keep the premium * contract-multiplier notional set above.
         if not snap.get("options_path"):
             snap["notional_effective"] = round(qty * px, 2)
-        snap["qty_raw"] = round(qty_raw, 8)
+        snap["qty_raw"] = round(qty_raw, QUANTITY_ROUND_DIGITS)
 
-    if bool(getattr(alert, "_chili_shadow_observation_only", False)):
-        _reason = str(
-            getattr(
-                alert,
-                "_chili_shadow_observation_reason",
-                SHADOW_OBSERVATION_REASON_STAGE,
-            )
-            or SHADOW_OBSERVATION_REASON_STAGE
-        )
-        snap["paper_observation_reason"] = _reason
-        snap["paper_observation_live_orders_effective"] = bool(live)
-        if getattr(alert, "_chili_shadow_observation_signal_lane", None):
-            snap["paper_observation_signal_lane"] = getattr(
-                alert,
-                "_chili_shadow_observation_signal_lane",
-                None,
-            )
-        _audit(
-            db,
-            user_id=uid,
-            alert=alert,
-            decision="blocked",
-            reason=_reason,
-            rule_snapshot=snap,
-            llm_snapshot=llm_snap,
-        )
-        out["skipped"] += 1
-        _autotrader_tick_note(out, kind="blocked", reason=_reason, alert=alert)
-        _maybe_open_paper_shadow(
+    if _shadow_observation_only:
+        _record_shadow_observation_entry(
             db,
             uid=uid,
             alert=alert,
             qty=qty,
             px=px,
             snap=snap,
-            decision="blocked_shadow_promoted",
+            llm_snap=llm_snap,
+            live=live,
+            out=out,
         )
         return
 
@@ -3936,11 +4503,8 @@ def _execute_new_entry(
                 snap=snap, decision="blocked_no_order_id",
             )
             return
-        raw = res.get("raw") or {}
-        try:
-            fill = float(raw.get("average_price") or raw.get("price") or px)
-        except (TypeError, ValueError):
-            fill = px
+        raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+        fill = _entry_fill_price_from_response(res, alert, px=px, snap=snap)
 
         # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
         # (2026-05-09): broker_source from the response side-channel.
@@ -3955,27 +4519,56 @@ def _execute_new_entry(
             _broker_qty = float(qty)
         _entry_now = datetime.utcnow()
         _is_coinbase_entry = _broker_source_for_trade == "coinbase"
-        _entry_status = "working" if _is_coinbase_entry else "open"
-        _entry_broker_status = "accepted" if _is_coinbase_entry else None
-        _entry_filled_qty = 0.0 if _is_coinbase_entry else None
-        _entry_remaining_qty = _broker_qty if _is_coinbase_entry else None
+        _is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
+        _tca_ref_entry = _entry_tca_reference_price(
+            res,
+            alert,
+            px=px,
+            snap=snap,
+            fill=fill,
+        )
+        _tca_ref_domain = "option_premium" if _is_option_entry else "underlying_spot"
+        (
+            _entry_status,
+            _entry_broker_status,
+            _entry_filled_qty,
+            _entry_remaining_qty,
+        ) = _entry_lifecycle_from_response(
+            broker_source=_broker_source_for_trade,
+            res=res,
+            snap=snap,
+            qty=float(_broker_qty),
+        )
+        _entry_is_working = _entry_status == "working"
+        _entry_is_async = _is_coinbase_entry or _is_option_entry
         _trade_stop, _trade_target, _managed_exit_execution = (
             _managed_edge_execution_levels(alert, px=px, snap=snap)
         )
         _entry_execution_snapshot = {
             "broker_source": _broker_source_for_trade,
+            "asset_kind": "option" if _is_option_entry else None,
             "client_order_id": res.get("client_order_id"),
             "order_id": str(order_id_raw).strip(),
             "order_type": (
                 "limit_post_only"
                 if _is_coinbase_entry and bool(res.get("_chili_maker_only"))
-                else ("market" if _is_coinbase_entry else None)
+                else (
+                    "option_limit"
+                    if _is_option_entry
+                    else ("market" if _is_coinbase_entry else None)
+                )
             ),
             "active_order_type": (
                 "limit_post_only"
                 if _is_coinbase_entry and bool(res.get("_chili_maker_only"))
-                else ("market" if _is_coinbase_entry else None)
+                else (
+                    "option_limit"
+                    if _is_option_entry
+                    else ("market" if _is_coinbase_entry else None)
+                )
             ),
+            "option_order_state": res.get("_chili_option_order_state"),
+            "option_position_verified": bool(res.get("_chili_option_position_verified")),
             "coinbase_maker_only": bool(res.get("_chili_maker_only")),
             "maker_limit_price": res.get("_chili_maker_limit_price") or res.get("limit_price"),
             "maker_best_bid": res.get("_chili_maker_bid"),
@@ -3983,6 +4576,8 @@ def _execute_new_entry(
             "maker_price_increment": res.get("_chili_maker_price_increment"),
             "maker_improved_ticks": res.get("_chili_maker_improved_ticks"),
             "broker_base_size": _broker_qty,
+            "tca_reference_entry_price": _tca_ref_entry,
+            "tca_reference_domain": _tca_ref_domain,
             PROBATION_ENTRY_FLAG: bool(snap.get(PROBATION_ENTRY_FLAG)),
             "probation_recert_policy": snap.get("probation_recert_policy"),
             "probation_recert_notional_multiplier": snap.get(
@@ -3994,16 +4589,11 @@ def _execute_new_entry(
             "cost_gate_tca_cost_bps": snap.get("cost_gate_tca_cost_bps"),
             "managed_exit_execution": _managed_exit_execution,
         }
-        # f-tca-writer-wiring (2026-05-18): capture the AUTOTRADER's decision
-        # price ``px`` as the entry-side TCA reference. ``fill`` (above) is
-        # the broker's actual fill price (or px as fallback); ``px`` is the
-        # autotrader's chosen entry price at signal time. The difference is
-        # the entry slippage that ``apply_tca_on_trade_fill`` will compute
+        # f-tca-writer-wiring (2026-05-18): capture the entry-side TCA
+        # reference in the same price domain as the fill: underlying spot for
+        # equities/crypto, option premium for options. The difference is the
+        # entry slippage that ``apply_tca_on_trade_fill`` will compute
         # downstream when broker_sync runs.
-        try:
-            _tca_ref_entry = float(px) if px is not None else None
-        except (TypeError, ValueError):
-            _tca_ref_entry = None
         tr = Trade(
             user_id=uid,
             ticker=alert.ticker.upper(),
@@ -4015,8 +4605,8 @@ def _execute_new_entry(
             broker_status=_entry_broker_status,
             filled_quantity=_entry_filled_qty,
             remaining_quantity=_entry_remaining_qty,
-            submitted_at=_entry_now if _is_coinbase_entry else None,
-            acknowledged_at=_entry_now if _is_coinbase_entry else None,
+            submitted_at=_entry_now if _entry_is_async else None,
+            acknowledged_at=_entry_now if _entry_is_async else None,
             stop_loss=_trade_stop,
             take_profit=_trade_target,
             scan_pattern_id=alert.scan_pattern_id,
@@ -4024,6 +4614,7 @@ def _execute_new_entry(
             broker_source=_broker_source_for_trade,
             management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
             broker_order_id=str(order_id_raw).strip(),
+            asset_kind="option" if _is_option_entry else None,
             indicator_snapshot={
                 "breakout_alert": alert.indicator_snapshot,
                 "signals": alert.signals_snapshot,
@@ -4038,7 +4629,8 @@ def _execute_new_entry(
         db.commit()
         db.refresh(tr)
         # f-tca-writer-wiring (2026-05-18): compute entry slippage NOW, using
-        # the reference (px) and the broker's actual fill price. Without this,
+        # the same-domain reference and the broker's actual fill price.
+        # Without this,
         # the apply_tca_on_trade_fill call in broker_service is the only
         # writer — and it depends on broker_sync re-touching the trade later.
         # Wrap in try/except per the existing tca pattern in this file.
@@ -4088,7 +4680,7 @@ def _execute_new_entry(
             user_id=uid,
             alert=alert,
             decision="placed",
-            reason="submitted" if _is_coinbase_entry else "ok",
+            reason="submitted" if _entry_is_working else "ok",
             rule_snapshot=snap,
             llm_snapshot=llm_snap,
             trade_id=tr.id,
@@ -4099,7 +4691,7 @@ def _execute_new_entry(
             kind="placed",
             reason=(
                 f"live_{_broker_source_for_trade}_submitted"
-                if _is_coinbase_entry else f"live_{_broker_source_for_trade}"
+                if _entry_is_working else f"live_{_broker_source_for_trade}"
             ),
             alert=alert,
         )

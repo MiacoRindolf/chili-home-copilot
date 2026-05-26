@@ -27,6 +27,15 @@ def _is_live_broker_trade(trade: Trade) -> bool:
     return _source(trade) in BROKER_POSITION_TRUTH_SOURCES
 
 
+def _is_option_trade(trade: Trade) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
 def _positive_qty(pos: TradingPosition | None) -> bool:
     if pos is None:
         return False
@@ -135,6 +144,11 @@ def broker_stale_open_trade_snapshot(
         # requires a confirming sell fill before changing Trade.status.
         # Until then, fail open so the monitoring desk and live exit monitor
         # keep visible ownership instead of hiding possible real exposure.
+        return None
+    if _is_option_trade(trade):
+        # Robinhood options are contract positions, but TradingPosition is the
+        # spot/crypto identity table. Judging an option by the underlying's
+        # share row hides real option exposure after the grace window.
         return None
 
     now = now or datetime.utcnow()

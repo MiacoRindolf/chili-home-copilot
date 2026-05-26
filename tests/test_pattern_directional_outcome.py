@@ -32,7 +32,13 @@ import pandas as pd
 import pytest
 from sqlalchemy import text
 
-from app.models.trading import AlertHistory, ScanPattern, TradingDecisionPacket
+from app.models.trading import (
+    AlertHistory,
+    AutoTraderRun,
+    BreakoutAlert,
+    ScanPattern,
+    TradingDecisionPacket,
+)
 from app.services.trading.pattern_directional_outcome import (
     _compute_window_outcome,
     _entry_price_from_df,
@@ -292,6 +298,12 @@ def _settings_stub(**overrides):
         chili_pattern_directional_default_hold_hours=24,
         chili_pattern_directional_max_lookback_hours=168,
         chili_pattern_directional_max_alerts_per_run=200,
+        chili_pattern_directional_edge_debt_priority_enabled=True,
+        chili_pattern_directional_edge_debt_priority_lookback_minutes=90,
+        chili_pattern_directional_edge_debt_priority_asset_types="stock",
+        chili_pattern_directional_edge_debt_priority_managed_reasons=(
+            "insufficient_directional_samples"
+        ),
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -484,6 +496,88 @@ def test_evaluator_dedupes_on_rerun(db):
         text("SELECT COUNT(*) FROM pattern_alert_directional_outcome")
     ).fetchone()
     assert rows[0] == 1
+
+
+def test_evaluator_prioritizes_autotrader_edge_debt_patterns(db):
+    generic = _make_pattern(db, name="generic_oldest", rules={"direction": "up"})
+    hot = _make_pattern(db, name="hot_edge_debt", rules={"direction": "up"})
+    now = datetime.utcnow().replace(microsecond=0)
+    generic_alert_at = now - timedelta(hours=40)
+    hot_alert_at = now - timedelta(hours=30)
+    _make_alert(
+        db,
+        pattern_id=generic.id,
+        ticker="GEN",
+        created_at=generic_alert_at,
+    )
+    hot_alert = _make_alert(
+        db,
+        pattern_id=hot.id,
+        ticker="HOT",
+        created_at=hot_alert_at,
+    )
+    breakout = BreakoutAlert(
+        ticker="HOT",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=hot.id,
+        score_at_alert=0.7,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=95.0,
+        target_price=110.0,
+    )
+    db.add(breakout)
+    db.flush()
+    db.add(
+        AutoTraderRun(
+            breakout_alert_id=breakout.id,
+            scan_pattern_id=hot.id,
+            ticker="HOT",
+            decision="skipped",
+            reason="non_positive_expected_edge",
+            rule_snapshot={
+                "entry_edge": {
+                    "managed_exit_edge": {
+                        "geometry": {
+                            "reason": "insufficient_directional_samples",
+                        },
+                    },
+                },
+            },
+            created_at=now - timedelta(minutes=10),
+        )
+    )
+    db.commit()
+
+    def fake_fetch(ticker, *, start, end):
+        return _build_ohlc_window(
+            start=hot_alert_at - timedelta(hours=1),
+            n_bars=30,
+            entry_price=100.0,
+            high_pct=3.0,
+            low_pct=-0.5,
+        )
+
+    summary = evaluate_directional_outcomes(
+        db,
+        now=now,
+        fetch_ohlcv=fake_fetch,
+        settings_=_settings_stub(chili_pattern_directional_max_alerts_per_run=1),
+    )
+
+    assert summary["priority_patterns"] == 1
+    assert summary["priority_candidates"] == 1
+    assert summary["evaluated"] == 1
+    row = db.execute(
+        text(
+            "SELECT alert_id, scan_pattern_id, ticker "
+            "FROM pattern_alert_directional_outcome"
+        )
+    ).fetchone()
+    assert row[0] == hot_alert.id
+    assert row[1] == hot.id
+    assert row[2] == "HOT"
 
 
 def test_evaluator_skips_when_ohlc_unavailable(db):

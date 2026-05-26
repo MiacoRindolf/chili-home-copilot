@@ -85,6 +85,8 @@ TEST_ALIAS_STOCH_D = 19.5
 TEST_ALIAS_BB_PCT_PERCENT = 12.5
 TEST_ALIAS_BB_PCT_FRACTION = 0.125
 TEST_ALIAS_VOLUME_RATIO = 1.7
+TEST_STRUCTURAL_IBS = 0.1
+TEST_STRUCTURAL_VCP_COUNT = 2
 TEST_USER_ID = 1
 TEST_POSITION_QUANTITY = 1.0
 
@@ -201,6 +203,41 @@ def test_flat_indicators_exposes_pattern_condition_aliases() -> None:
     assert flat["bb_pct_percent"] == TEST_ALIAS_BB_PCT_PERCENT
     assert readiness is not None
     assert all_pass is True
+    assert ratio == 1.0
+
+
+def test_flat_indicators_preserves_structural_pattern_fields() -> None:
+    flat = flat_indicators_from_score(
+        {
+            "price": TEST_SCORE_PRICE,
+            "indicators": {
+                "ibs": TEST_STRUCTURAL_IBS,
+                "pullback_stretch_entry": False,
+                "vcp_count": TEST_STRUCTURAL_VCP_COUNT,
+                "narrow_range": "NR7",
+            },
+        },
+        resistance=None,
+    )
+    conditions = [
+        {"indicator": "ibs", "op": "<", "value": 0.2},
+        {"indicator": "pullback_stretch_entry", "op": "==", "value": True},
+        {"indicator": "vcp_count", "op": ">=", "value": 2},
+        {"indicator": "narrow_range", "op": "any_of", "value": ["NR4", "NR7"]},
+    ]
+
+    readiness, all_pass, ratio = evaluate_imminent_readiness(
+        conditions,
+        flat,
+        evaluable_ratio_floor=1.0,
+    )
+
+    assert flat["ibs"] == TEST_STRUCTURAL_IBS
+    assert flat["pullback_stretch_entry"] is False
+    assert flat["vcp_count"] == TEST_STRUCTURAL_VCP_COUNT
+    assert flat["narrow_range"] == "NR7"
+    assert readiness is not None
+    assert all_pass is False
     assert ratio == 1.0
 
 
@@ -1679,6 +1716,87 @@ def test_gather_imminent_reuses_score_resistance_without_extra_fetch(
     assert meta["score_skip_pattern_engine"] is True
     assert [c["ticker"] for c in candidates] == [TEST_EXECUTABLE_CRYPTO_TICKER]
     assert candidates[0]["flat"]["resistance"] == TEST_SCORE_RESISTANCE
+
+
+def test_gather_imminent_scores_stock_structural_fields(
+    db,
+    monkeypatch,
+) -> None:
+    stock_ticker = "STRUCT"
+    rules = {
+        "conditions": [
+            {"indicator": "ibs", "op": "<", "value": 0.2},
+            {"indicator": "pullback_stretch_entry", "op": "==", "value": True},
+        ]
+    }
+    pattern = ScanPattern(
+        name="Stock structural parity pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="stocks",
+        lifecycle_stage=imminent_mod.PROMOTED_STAGE,
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{stock_ticker}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_composite_main",
+        TEST_MIN_COMPOSITE_DISABLED,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([stock_ticker], {}),
+    )
+
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
+        return {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "ibs": TEST_STRUCTURAL_IBS,
+                "pullback_stretch_entry": False,
+                "atr": TEST_SCORE_ATR,
+            },
+        }
+
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _fake_score_ticker)
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=TEST_USER_ID,
+        equity_session_open=True,
+        apply_main_dispatch_filters=True,
+    )
+
+    assert [c["ticker"] for c in candidates] == [stock_ticker]
+    assert candidates[0]["flat"]["ibs"] == TEST_STRUCTURAL_IBS
+    assert candidates[0]["flat"]["pullback_stretch_entry"] is False
+    assert meta["skip_reasons"]["readiness_unusable"] == 0
 
 
 def test_gather_imminent_caps_tickers_per_pattern(

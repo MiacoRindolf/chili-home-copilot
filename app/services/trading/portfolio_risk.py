@@ -893,6 +893,22 @@ def _compute_unrealized_pnl(db: Session, user_id: int | None) -> float:
 
     for t in open_trades:
         try:
+            try:
+                from .autopilot_scope import is_option_trade
+            except Exception:
+                is_option_trade = None
+            if callable(is_option_trade) and is_option_trade(t):
+                current_premium = _option_unrealized_mark_price(t)
+                if current_premium is None:
+                    continue
+                qty = float(t.quantity or 0)
+                entry = float(t.entry_price or 0)
+                if qty > 0 and entry > 0:
+                    if (getattr(t, "direction", "") or "").lower() == "short":
+                        total_unrealized += (entry - current_premium) * qty * 100.0
+                    else:
+                        total_unrealized += (current_premium - entry) * qty * 100.0
+                continue
             q = fetch_quote(t.ticker)
             if q and q.get("price"):
                 current_price = float(q["price"])
@@ -904,6 +920,47 @@ def _compute_unrealized_pnl(db: Session, user_id: int | None) -> float:
             continue
 
     return total_unrealized
+
+
+def _option_unrealized_mark_price(trade: Trade) -> float | None:
+    """Return the current option premium mark for MTM, never underlying spot."""
+    try:
+        from .options.exit_monitor import _opt_meta
+        from .venue.robinhood_options import RobinhoodOptionsAdapter
+
+        meta = _opt_meta(trade)
+        expiration = str(meta.get("expiration") or "")
+        strike = meta.get("strike")
+        option_type = str(meta.get("option_type") or "").lower()
+        if not (expiration and strike and option_type in ("call", "put")):
+            return None
+        underlying = str(meta.get("underlying") or trade.ticker or "").upper()
+        adapter = RobinhoodOptionsAdapter()
+        if not adapter.is_enabled():
+            return None
+        contract = adapter.find_contract(underlying, expiration, float(strike), option_type)
+        if not contract:
+            return None
+        quote = adapter.get_quote(str(contract.get("id") or ""))
+        if not quote:
+            return None
+        for key in ("mark_price", "adjusted_mark_price", "last_trade_price"):
+            try:
+                value = float(quote.get(key) or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                return value
+        try:
+            bid = float(quote.get("bid_price") or 0.0)
+            ask = float(quote.get("ask_price") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+    except Exception:
+        logger.debug("[portfolio_risk] option MTM mark failed", exc_info=True)
+    return None
 
 
 def _monthly_dd_threshold(

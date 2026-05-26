@@ -4,7 +4,8 @@ The lease is a *schema-based* lease: we don't persist a separate "who owns this 
 row. Instead, the authoritative signals for ownership are the rows we already write:
 
 * AutoTrader v1 owns symbol S for user U iff: exists Trade with
-  ticker=S, user_id=U, auto_trader_version="v1", status="open".
+  ticker=S, user_id=U, auto_trader_version="v1", status in
+  ("open", "working").
 * momentum_neural owns symbol S for user U iff: exists TradingAutomationSession
   with symbol=S, user_id=U, mode="live", state IN LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY.
 
@@ -104,6 +105,7 @@ def is_live_autopilot_trade(trade: Trade) -> bool:
 AUTOPILOT_AUTO_TRADER_V1 = "auto_trader_v1"
 AUTOPILOT_MOMENTUM_NEURAL = "momentum_neural"
 KNOWN_AUTOPILOTS = frozenset({AUTOPILOT_AUTO_TRADER_V1, AUTOPILOT_MOMENTUM_NEURAL})
+ACTIVE_ENTRY_STATUSES = ("open", "working")
 
 
 def _normalize_symbol(symbol: Optional[str]) -> str:
@@ -160,7 +162,7 @@ def _count_v1_open_trades(
     q = db.query(Trade).filter(
         Trade.ticker == symbol,
         Trade.auto_trader_version == "v1",
-        Trade.status == "open",
+        Trade.status.in_(ACTIVE_ENTRY_STATUSES),
     )
     if user_id is not None:
         q = q.filter(Trade.user_id == user_id)

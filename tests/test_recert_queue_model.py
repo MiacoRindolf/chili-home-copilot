@@ -145,11 +145,17 @@ class TestSchedulerProposal:
 
 class TestRecertCompletion:
     def test_zero_trade_backtest_does_not_complete_recert(self):
-        class _Scalar:
+        class _MappingResult:
             rowcount = 0
 
-            def scalar_one(self):
-                return 1
+            def __init__(self, row):
+                self.row = row
+
+            def mappings(self):
+                return self
+
+            def first(self):
+                return self.row
 
         class _Rows:
             rowcount = 1
@@ -161,7 +167,19 @@ class TestRecertCompletion:
 
             def execute(self, stmt, params=None):
                 self.statements.append((str(stmt), params or {}))
-                return _Scalar() if len(self.statements) == 1 else _Rows()
+                if len(self.statements) == 1:
+                    return _MappingResult({
+                        "open_count": 1,
+                        "first_observed_at": None,
+                    })
+                if len(self.statements) == 2:
+                    return _MappingResult({
+                        "total": 0,
+                        "wins_float": 0.0,
+                        "avg_return": None,
+                        "backtests_run": 0,
+                    })
+                return _Rows()
 
             def commit(self):
                 self.commits += 1
@@ -183,7 +201,7 @@ class TestRecertCompletion:
         assert out["completed"] == 0
         assert out["failed"] == 1
         assert out["reason"] == "cert_failed_no_oos_evidence"
-        assert "cert_failed" in db.statements[1][0]
+        assert "cert_failed" in db.statements[2][0]
         assert db.commits == 1
 
 

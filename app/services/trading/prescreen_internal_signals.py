@@ -11,13 +11,32 @@ from sqlalchemy.orm import Session
 from ...config import settings
 from ...models.trading import ScanPattern, TradingInsight, TradingInsightEvidence
 from ...models.trading_brain_phase1 import BrainPredictionLine, BrainPredictionSnapshot
-from .prescreen_normalize import normalize_prescreen_ticker
+from .prescreen_normalize import (
+    iter_normalized_prescreen_tickers,
+    normalize_prescreen_ticker,
+)
 
 logger = logging.getLogger(__name__)
 
+_INTERNAL_MIN_PER_KIND = 5
+_INTERNAL_DEFAULT_MAX_PER_KIND = 40
+_INSIGHT_EVIDENCE_LOOKBACK_DAYS = 14
+_INSIGHT_EVIDENCE_OVERFETCH_MULTIPLIER = 3
+_WARMING_PATTERN_LOOKBACK_HOURS = 48
+_WARMING_PATTERN_QUERY_LIMIT = 80
+
 
 def _max_per_kind() -> int:
-    return max(5, int(getattr(settings, "brain_prescreen_internal_max_per_kind", 40)))
+    return max(
+        _INTERNAL_MIN_PER_KIND,
+        int(
+            getattr(
+                settings,
+                "brain_prescreen_internal_max_per_kind",
+                _INTERNAL_DEFAULT_MAX_PER_KIND,
+            )
+        ),
+    )
 
 
 def tickers_from_latest_predictions(db: Session, limit: int | None = None) -> dict[str, list[dict[str, Any]]]:
@@ -60,14 +79,14 @@ def tickers_from_insight_evidence(db: Session, limit: int | None = None) -> dict
     lim = limit if limit is not None else _max_per_kind()
     out: dict[str, list[dict[str, Any]]] = {}
     try:
-        since = datetime.utcnow() - timedelta(days=14)
+        since = datetime.utcnow() - timedelta(days=_INSIGHT_EVIDENCE_LOOKBACK_DAYS)
         q = (
             db.query(TradingInsightEvidence.ticker, TradingInsightEvidence.insight_id)
             .join(TradingInsight, TradingInsight.id == TradingInsightEvidence.insight_id)
             .filter(TradingInsight.active.is_(True))
             .filter(TradingInsightEvidence.created_at >= since)
             .distinct()
-            .limit(lim * 3)
+            .limit(lim * _INSIGHT_EVIDENCE_OVERFETCH_MULTIPLIER)
         )
         seen: set[str] = set()
         for ticker, iid in q:
@@ -88,7 +107,7 @@ def tickers_from_warming_patterns(db: Session, limit: int | None = None) -> dict
     lim = limit if limit is not None else _max_per_kind()
     out: dict[str, list[dict[str, Any]]] = {}
     try:
-        since = datetime.utcnow() - timedelta(hours=48)
+        since = datetime.utcnow() - timedelta(hours=_WARMING_PATTERN_LOOKBACK_HOURS)
         rows = (
             db.query(ScanPattern)
             .filter(ScanPattern.active.is_(True))
@@ -97,17 +116,15 @@ def tickers_from_warming_patterns(db: Session, limit: int | None = None) -> dict
             .filter(ScanPattern.scope_tickers.isnot(None))
             .filter(ScanPattern.scope_tickers != "")
             .order_by(desc(ScanPattern.updated_at))
-            .limit(80)
+            .limit(_WARMING_PATTERN_QUERY_LIMIT)
             .all()
         )
         seen: set[str] = set()
         for sp in rows:
             if len(seen) >= lim:
                 break
-            raw = (sp.scope_tickers or "").replace("\n", ",")
-            for part in raw.split(","):
-                tn = normalize_prescreen_ticker(part)
-                if not tn or tn in seen:
+            for tn in iter_normalized_prescreen_tickers(sp.scope_tickers):
+                if tn in seen:
                     continue
                 seen.add(tn)
                 out[tn] = [{"kind": "warming_pattern", "scan_pattern_id": int(sp.id)}]

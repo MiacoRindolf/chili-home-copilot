@@ -1817,6 +1817,29 @@ def _try_auto_execute_stop(
             _log.debug("[stop_engine] auto-exec skipped: no broker_source on trade %s", trade_id)
             return
 
+        try:
+            from .autopilot_scope import is_option_trade
+        except Exception:
+            is_option_trade = None
+        if callable(is_option_trade) and is_option_trade(trade):
+            from .auto_trader_position_overrides import _close_option_trade_now
+
+            reason = str(alert.get("event") or "stop_engine_auto_exec")[:50]
+            res = _close_option_trade_now(
+                db,
+                t=trade,
+                updated_by="stop_engine",
+                exit_reason=reason,
+            )
+            if not res.get("ok"):
+                _log.warning(
+                    "[stop_engine] option auto-exec failed trade_id=%s ticker=%s error=%s",
+                    trade_id,
+                    ticker,
+                    res.get("error"),
+                )
+            return
+
         from .broker_service import get_broker_manager
         bm = get_broker_manager(db, user_id)
         if not bm:

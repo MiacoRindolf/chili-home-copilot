@@ -8,12 +8,29 @@ from app.services.trading.prescreen_job import (
     load_active_global_candidate_tickers,
     run_daily_prescreen_job,
 )
-from app.services.trading.prescreen_normalize import normalize_prescreen_ticker
+from app.services.trading.prescreen_normalize import (
+    iter_normalized_prescreen_tickers,
+    normalize_prescreen_ticker,
+)
 
 
 def test_normalize_prescreen_ticker_crypto_bare() -> None:
     assert normalize_prescreen_ticker("btcusd") == "BTC-USD"
     assert normalize_prescreen_ticker("MSFT") == "MSFT"
+
+
+def test_normalize_prescreen_ticker_rejects_scope_fragments() -> None:
+    assert normalize_prescreen_ticker('["ACMR"') == ""
+    assert normalize_prescreen_ticker('"INFQ"]') == ""
+    assert normalize_prescreen_ticker("crypto") == ""
+
+
+def test_iter_normalized_prescreen_tickers_parses_scope_json() -> None:
+    assert iter_normalized_prescreen_tickers('["ACMR", "INFQ", "BTCUSD"]') == [
+        "ACMR",
+        "INFQ",
+        "BTC-USD",
+    ]
 
 
 @patch("app.services.trading.prescreen_job.collect_internal_prescreen_tickers")

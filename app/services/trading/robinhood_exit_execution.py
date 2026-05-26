@@ -452,6 +452,35 @@ def _mark_no_broker_position_closed(
     db.commit()
 
 
+def _trade_pnl_multiplier(trade: Trade) -> float:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        if is_option_trade(trade):
+            return 100.0
+    except Exception:
+        pass
+    return 1.0
+
+
+def _order_exit_price(raw_order: dict[str, Any], *, quantity: float) -> float | None:
+    for key in ("average_price", "avg_price", "average_fill_price", "average_filled_price"):
+        price = _safe_float(raw_order.get(key))
+        if price is not None and price > 0:
+            return price
+
+    processed_premium = _safe_float(
+        raw_order.get("processed_premium") or raw_order.get("premium")
+    )
+    if processed_premium is not None and processed_premium > 0 and quantity > 0:
+        return abs(processed_premium) / (float(quantity) * 100.0)
+
+    price = _safe_float(raw_order.get("price"))
+    if price is not None and price > 0:
+        return price
+    return None
+
+
 def _finalize_filled_exit(
     db: Session,
     trade: Trade,
@@ -462,9 +491,13 @@ def _finalize_filled_exit(
     filled_at: datetime,
 ) -> float:
     qty = float(trade.quantity or 0.0)
-    exit_px = _safe_float(raw_order.get("average_price")) or _safe_float(raw_order.get("price")) or fallback_price or float(trade.entry_price)
+    exit_px = (
+        _order_exit_price(raw_order, quantity=qty)
+        or fallback_price
+        or float(trade.entry_price)
+    )
     entry = float(trade.entry_price or 0.0)
-    pnl = (float(exit_px) - entry) * qty
+    pnl = (float(exit_px) - entry) * qty * _trade_pnl_multiplier(trade)
     trade.status = "closed"
     trade.exit_price = float(exit_px)
     trade.exit_date = filled_at.replace(tzinfo=None)

@@ -8,6 +8,7 @@ from app.config import AUTOTRADER_SYNERGY_DEFAULT_MAX_SCALE_INS_PER_TRADE
 from app.services.trading.auto_trader_synergy import (
     SCALE_IN_ALERT_IDS_SNAPSHOT_KEY,
     SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY,
+    find_open_autotrader_trade,
     maybe_scale_in,
 )
 
@@ -42,6 +43,42 @@ def test_maybe_scale_in_disabled():
         )
         is None
     )
+
+
+def test_find_open_autotrader_trade_treats_working_entry_as_active():
+    found_trade = Trade(id=99, ticker="WRKOPT", status="working")
+
+    class _FakeQuery:
+        def __init__(self):
+            self.criteria = []
+
+        def filter(self, *criteria):
+            self.criteria.extend(criteria)
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def first(self):
+            return found_trade
+
+    class _FakeDb:
+        def __init__(self):
+            self.query_obj = _FakeQuery()
+
+        def query(self, _model):
+            return self.query_obj
+
+    db = _FakeDb()
+
+    found = find_open_autotrader_trade(db, user_id=123, ticker="WRKOPT")
+
+    assert found is not None
+    assert found.id == found_trade.id
+    status_filters = [
+        str(c) for c in db.query_obj.criteria if "trading_trades.status" in str(c)
+    ]
+    assert any(" IN " in c for c in status_filters)
 
 
 @patch("app.services.trading.auto_trader_synergy.find_open_autotrader_trade")

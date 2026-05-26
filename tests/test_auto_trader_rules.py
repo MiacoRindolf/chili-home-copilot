@@ -8,8 +8,11 @@ import pytest
 
 from app.models.trading import BreakoutAlert
 from app.services.trading.auto_trader_rules import (
+    EntryEdgeDecision,
     RuleGateContext,
     alert_confidence_from_score,
+    count_autotrader_v1_open,
+    count_autotrader_v1_open_by_lane,
     evaluate_entry_edge,
     projected_profit_pct,
     passes_rule_gate,
@@ -47,6 +50,59 @@ def test_alert_confidence_from_score():
         price_at_alert=10.0,
     )
     assert abs(alert_confidence_from_score(a) - min(0.95, 0.55 + 0.2)) < 1e-6
+
+
+class _FakeQuery:
+    def __init__(self, result_count: int = 1):
+        self.criteria = []
+        self.result_count = result_count
+
+    def filter(self, *criteria):
+        self.criteria.extend(criteria)
+        return self
+
+    def count(self):
+        return self.result_count
+
+
+class _FakeDb:
+    def __init__(self):
+        self.query_obj = _FakeQuery()
+        self.executed_sql = ""
+        self.executed_params = None
+
+    def query(self, _model):
+        return self.query_obj
+
+    def execute(self, sql, params=None):
+        self.executed_sql = str(sql)
+        self.executed_params = params
+        class _Result:
+            def fetchall(self):
+                return [("option", 1), ("crypto", 2), ("stock", 3)]
+
+        return _Result()
+
+
+def test_count_autotrader_v1_open_treats_working_as_active():
+    db = _FakeDb()
+
+    assert count_autotrader_v1_open(db, 123) == 1
+
+    status_filters = [
+        str(c) for c in db.query_obj.criteria if "trading_trades.status" in str(c)
+    ]
+    assert any(" IN " in c for c in status_filters)
+
+
+def test_count_autotrader_v1_open_by_lane_counts_working_and_asset_kind():
+    db = _FakeDb()
+
+    counts = count_autotrader_v1_open_by_lane(db, 123)
+
+    assert counts == {"equity": 3, "crypto": 2, "options": 1}
+    assert "t.status IN ('open', 'working')" in db.executed_sql
+    assert "t.asset_kind" in db.executed_sql
 
 
 def test_passes_rule_gate_confidence_fail():
@@ -145,6 +201,238 @@ def test_passes_rule_gate_expected_edge_fail(_mock_port, _mock_rth):
     assert snap["entry_edge"]["expected_net_pct"] < 0
     assert snap["entry_edge"]["breakeven_probability"] is not None
     assert snap["entry_edge"]["probability_edge"] < 0
+
+
+def test_passes_rule_gate_skips_legacy_stock_price_cap_when_fractional_equity_enabled():
+    high_price_stock = 250.0
+    legacy_whole_share_cap = 200.0
+    db = MagicMock()
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_allow_extended_hours=False,
+        chili_autotrader_crypto_enabled=False,
+        chili_autotrader_options_enabled=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=0.0,
+        chili_autotrader_max_symbol_price_usd=legacy_whole_share_cap,
+        chili_autotrader_fractional_equity_enabled=True,
+        chili_autotrader_max_entry_slippage_pct=5.0,
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=0.0,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=20,
+        chili_autotrader_max_concurrent_crypto=20,
+        chili_autotrader_max_concurrent_options=20,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+        chili_autotrader_broker_equity_cache_ttl_seconds=300,
+        chili_autotrader_broker_equity_cache_max_stale_seconds=900,
+    )
+    alert = BreakoutAlert(
+        ticker="AAPL",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=high_price_stock,
+        entry_price=high_price_stock,
+        stop_loss=240.0,
+        target_price=280.0,
+        user_id=1,
+    )
+    ctx = RuleGateContext(
+        current_price=high_price_stock,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            return_value=EntryEdgeDecision(
+                True,
+                "positive_expected_edge",
+                {"expected_net_pct": 1.25},
+            ),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_slippage_pct",
+            return_value=(5.0, "test"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_brain_risk_context",
+            return_value={"dial_value": 1.0},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_capital",
+            return_value=(100_000.0, "test"),
+        ),
+        patch(
+            "app.services.trading.portfolio_risk.check_new_trade_allowed",
+            return_value=(True, "ok"),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db, alert, settings=settings, ctx=ctx, for_new_entry=True
+        )
+
+    assert ok
+    assert reason == "ok"
+    assert snap["fractional_equity_enabled"] is True
+    assert snap["max_symbol_price_usd"] == legacy_whole_share_cap
+    assert snap["symbol_price_cap_skipped_reason"] == "fractional_equity_enabled"
+
+
+def test_passes_rule_gate_keeps_stock_price_cap_when_fractional_equity_disabled():
+    high_price_stock = 250.0
+    legacy_whole_share_cap = 200.0
+    db = MagicMock()
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_allow_extended_hours=False,
+        chili_autotrader_crypto_enabled=False,
+        chili_autotrader_options_enabled=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=0.0,
+        chili_autotrader_max_symbol_price_usd=legacy_whole_share_cap,
+        chili_autotrader_fractional_equity_enabled=False,
+        chili_autotrader_max_entry_slippage_pct=5.0,
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=0.0,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=20,
+        chili_autotrader_max_concurrent_crypto=20,
+        chili_autotrader_max_concurrent_options=20,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+        chili_autotrader_broker_equity_cache_ttl_seconds=300,
+        chili_autotrader_broker_equity_cache_max_stale_seconds=900,
+    )
+    alert = BreakoutAlert(
+        ticker="AAPL",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=high_price_stock,
+        entry_price=high_price_stock,
+        stop_loss=240.0,
+        target_price=280.0,
+        user_id=1,
+    )
+    ctx = RuleGateContext(
+        current_price=high_price_stock,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+
+    with patch(
+        "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+        return_value=EntryEdgeDecision(
+            True,
+            "positive_expected_edge",
+            {"expected_net_pct": 1.25},
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db, alert, settings=settings, ctx=ctx, for_new_entry=True
+        )
+
+    assert not ok
+    assert reason == "symbol_price_above_cap"
+    assert snap["fractional_equity_enabled"] is False
+    assert snap["max_symbol_price_usd"] == legacy_whole_share_cap
+    assert "symbol_price_cap_skipped_reason" not in snap
+
+
+def test_passes_rule_gate_accepts_bounded_favorable_stock_drift_after_edge_recheck():
+    db = MagicMock()
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_allow_extended_hours=False,
+        chili_autotrader_crypto_enabled=False,
+        chili_autotrader_options_enabled=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=0.0,
+        chili_autotrader_max_symbol_price_usd=500.0,
+        chili_autotrader_fractional_equity_enabled=True,
+        chili_autotrader_max_entry_slippage_pct=2.0,
+        chili_autotrader_favorable_entry_drift_enabled=True,
+        chili_autotrader_favorable_entry_drift_asset_types="stock",
+        chili_autotrader_favorable_entry_drift_slippage_multiple=2.5,
+        chili_autotrader_favorable_entry_drift_max_pct=5.0,
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=0.0,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=20,
+        chili_autotrader_max_concurrent_crypto=20,
+        chili_autotrader_max_concurrent_options=20,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+        chili_autotrader_broker_equity_cache_ttl_seconds=300,
+        chili_autotrader_broker_equity_cache_max_stale_seconds=900,
+    )
+    alert = BreakoutAlert(
+        ticker="PULLBACK",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=115.0,
+        user_id=1,
+    )
+    ctx = RuleGateContext(
+        current_price=96.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+    initial_edge = EntryEdgeDecision(
+        True,
+        "positive_expected_edge",
+        {"expected_net_pct": 0.75},
+    )
+    rechecked_edge = EntryEdgeDecision(
+        True,
+        "positive_expected_edge",
+        {"expected_net_pct": 1.4, "entry_price": 96.0},
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            side_effect=[initial_edge, rechecked_edge],
+        ) as edge_mock,
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_slippage_pct",
+            return_value=(2.0, "test"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_brain_risk_context",
+            return_value={"dial_value": 1.0},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_capital",
+            return_value=(100_000.0, "test"),
+        ),
+        patch(
+            "app.services.trading.portfolio_risk.check_new_trade_allowed",
+            return_value=(True, "ok"),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db, alert, settings=settings, ctx=ctx, for_new_entry=True
+        )
+
+    assert ok
+    assert reason == "ok"
+    assert edge_mock.call_count == 2
+    assert snap["entry_slippage_direction"] == "favorable"
+    assert snap["entry_reference_price_adjusted"] is True
+    assert snap["entry_edge_expected_net_pct"] == 1.4
+    assert snap["favorable_entry_drift_edge_reason"] == "positive_expected_edge"
 
 
 def test_evaluate_entry_edge_uses_dynamic_exit_payoff_distribution():
@@ -784,6 +1072,102 @@ def test_evaluate_entry_edge_selects_managed_exit_for_overextended_crypto_bracke
     assert decision.snapshot["managed_exit_edge"]["geometry"]["managed_target_price"] < 112.0
     assert decision.snapshot["managed_exit_edge"]["geometry"]["managed_stop_price"] > 90.0
     assert decision.snapshot["expected_net_pct"] > 0
+
+
+def test_evaluate_entry_edge_selects_managed_exit_for_overextended_stock_by_default():
+    class _Result:
+        def __init__(self, rows=None, first=None):
+            self._rows = rows or []
+            self._first = first
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def first(self):
+            return self._first
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Db:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def execute(self, sql, params=None):
+            text = str(sql)
+            if "pattern_alert_directional_outcome" in text:
+                if "UPPER(ticker) = UPPER" in text:
+                    return _Result(rows=[
+                        {
+                            "ticker": "STOCKEDGE",
+                            "window_max_favorable_pct": 2.0,
+                            "window_max_adverse_pct": -0.2,
+                            "directional_correct": True,
+                        }
+                        for _ in range(12)
+                    ])
+                return _Result(rows=[])
+            return _Result(first=None)
+
+    alert = BreakoutAlert(
+        ticker="STOCKEDGE",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=777,
+        score_at_alert=0.9,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=112.0,
+        user_id=1,
+    )
+    default_stock_settings = SimpleNamespace(
+        chili_autotrader_managed_edge_mode="authoritative",
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=default_stock_settings,
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert decision.allowed
+    assert decision.reason == "positive_expected_edge"
+    assert decision.snapshot["edge_geometry_source"] == "managed_directional_exit"
+    assert decision.snapshot["managed_exit_edge"]["selected"] is True
+    assert (
+        "stock"
+        in decision.snapshot["managed_exit_edge"]["geometry"]["allowed_asset_types"]
+    )
+    assert decision.snapshot["full_bracket_edge"]["expected_net_pct"] < 0
+
+    crypto_only_settings = SimpleNamespace(
+        chili_autotrader_managed_edge_mode="authoritative",
+        chili_autotrader_managed_edge_asset_types="crypto",
+    )
+    blocked = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=crypto_only_settings,
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert not blocked.allowed
+    assert blocked.reason == "non_positive_expected_edge"
+    assert (
+        blocked.snapshot["managed_exit_edge"]["geometry"]["reason"]
+        == "asset_type_not_enabled"
+    )
 
 
 def test_evaluate_entry_edge_shrinks_uncalibrated_alert_confidence():

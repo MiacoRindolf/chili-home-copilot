@@ -52,6 +52,7 @@ def emergency_close_all(
 
     closed_paper = 0
     closed_live = 0
+    working_live = 0
     errors = []
 
     paper_q = db.query(PaperTrade).filter(PaperTrade.status == "open")
@@ -94,6 +95,30 @@ def emergency_close_all(
 
     for t in open_live:
         try:
+            try:
+                from .autopilot_scope import is_option_trade
+            except Exception:
+                is_option_trade = None
+            if callable(is_option_trade) and is_option_trade(t):
+                from .auto_trader_position_overrides import _close_option_trade_now
+
+                res = _close_option_trade_now(
+                    db,
+                    t=t,
+                    updated_by=f"emergency_liquidation:{reason}",
+                )
+                if not res.get("ok"):
+                    errors.append(f"Live option {t.ticker}: {res.get('error')}")
+                    continue
+                state = str(res.get("state") or "").lower()
+                if state == "filled":
+                    closed_live += 1
+                elif state == "working":
+                    working_live += 1
+                else:
+                    working_live += 1
+                continue
+
             # broker-truth-self-heal (2026-05-04): same NULL-on-no-quote
             # treatment as the paper branch. The prior fallback to
             # t.entry_price wrote exit_price == entry_price into the DB
@@ -136,14 +161,20 @@ def emergency_close_all(
             )
 
     logger.critical(
-        "[EMERGENCY] Liquidated %d paper + %d live trades. Reason: %s. Errors: %d",
-        closed_paper, closed_live, reason, len(errors),
+        "[EMERGENCY] Liquidated %d paper + %d live trades; %d live exit(s) working. "
+        "Reason: %s. Errors: %d",
+        closed_paper,
+        closed_live,
+        working_live,
+        reason,
+        len(errors),
     )
 
     return {
         "ok": True,
         "closed_paper": closed_paper,
         "closed_live": closed_live,
+        "working_live": working_live,
         "total_closed": closed_paper + closed_live,
         "reason": reason,
         "errors": errors,

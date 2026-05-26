@@ -1215,6 +1215,19 @@ def _ensure_coinbase_position_identity(
         )
         db.execute(
             text(
+                "UPDATE trading_trades "
+                "SET position_id = :pid "
+                "WHERE id = :trade_id "
+                "  AND (position_id IS NULL OR position_id <> :pid)"
+            ),
+            {"pid": int(position_id), "trade_id": int(getattr(trade, "id"))},
+        )
+        try:
+            setattr(trade, "position_id", int(position_id))
+        except Exception:
+            pass
+        db.execute(
+            text(
                 "UPDATE trading_bracket_intents "
                 "SET position_id = :pid, updated_at = NOW() "
                 "WHERE trade_id = :trade_id "

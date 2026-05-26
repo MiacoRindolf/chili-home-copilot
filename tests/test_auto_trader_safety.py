@@ -17,7 +17,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app import models
-from app.models.trading import AutoTraderRun, BreakoutAlert, PatternRecertLog, ScanPattern, Trade
+from app.config import (
+    AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
+    AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
+    AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
+)
+from app.models.trading import (
+    AutoTraderRun,
+    BreakoutAlert,
+    PatternRecertLog,
+    ScanPattern,
+    Trade,
+)
 from app.services.trading import auto_trader as at_mod
 
 TEST_ENTRY_PRICE = 50.0
@@ -32,6 +46,7 @@ TEST_CPCV_PATHS = 35
 TEST_STRONG_CPCV_SHARPE = 1.4
 TEST_REALIZED_TRADE_COUNT = 20
 TEST_REALIZED_AVG_RETURN_PCT = 1.2
+TEST_POSITIVE_EXPECTED_NET_PCT = 1.25
 
 
 def _minimal_settings(user_id: int) -> SimpleNamespace:
@@ -57,6 +72,25 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_autotrader_live_require_feature_parity=False,
         chili_autotrader_live_require_venue_health_enabled=False,
         chili_autotrader_recert_signal_fastlane_enabled=True,
+        chili_autotrader_shadow_stock_fastlane_enabled=True,
+        chili_autotrader_shadow_stock_fastlane_backtest_priority=(
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+        ),
+        chili_autotrader_shadow_stock_fastlane_min_expected_net_pct=(
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT
+        ),
+        chili_autotrader_shadow_stock_fastlane_lifecycle_stages=(
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES
+        ),
+        chili_autotrader_shadow_stock_fastlane_reboost_cooldown_minutes=(
+            AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES
+        ),
+        chili_autotrader_shadow_observation_diagnostic_sizing_enabled=(
+            AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED
+        ),
+        chili_autotrader_shadow_observation_evidence_notional_usd=(
+            AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD
+        ),
         brain_recert_queue_mode="shadow",
         chili_autotrader_probation_live_enabled=True,
         chili_autotrader_probation_notional_multiplier=TEST_PROBATION_MULTIPLIER,
@@ -523,6 +557,237 @@ def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db
     assert len(recert_logs) == 1
     assert recert_logs[0].source == "scheduler"
     assert recert_logs[0].reason == "autotrader_signal:pattern_recert_required"
+
+
+def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
+    settings = _minimal_settings(1)
+    monkeypatch.setattr(at_mod, "settings", settings)
+    emitted: list[dict] = []
+    invalidated: list[bool] = []
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        lambda db, scan_pattern_id, source: emitted.append({
+            "scan_pattern_id": scan_pattern_id,
+            "source": source,
+        }) or 1,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.backtest_queue.invalidate_queue_status_cache",
+        lambda: invalidated.append(True),
+    )
+    db = MagicMock()
+    pat = ScanPattern(
+        id=123,
+        name="Shadow stock wants evidence",
+        rules_json={},
+        lifecycle_stage="shadow_promoted",
+        active=True,
+        backtest_priority=0,
+    )
+    alert = BreakoutAlert(
+        id=456,
+        ticker="FASTL",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=1,
+        scan_pattern_id=pat.id,
+    )
+    snap = {"entry_edge": {"expected_net_pct": TEST_POSITIVE_EXPECTED_NET_PCT}}
+
+    fastlane = at_mod._queue_shadow_stock_fastlane_for_observation(
+        db,
+        alert=alert,
+        pattern=pat,
+        reason=at_mod.SHADOW_OBSERVATION_REASON_STAGE,
+        snap=snap,
+    )
+
+    assert fastlane is not None
+    assert fastlane["queued"] is True
+    assert fastlane["priority"] == AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+    assert fastlane["expected_net_pct"] == TEST_POSITIVE_EXPECTED_NET_PCT
+    assert pat.backtest_priority == AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+    assert emitted == [{
+        "scan_pattern_id": pat.id,
+        "source": "autotrader_shadow_stock_fastlane",
+    }]
+    assert invalidated == [True]
+    db.flush.assert_called_once()
+
+
+def test_shadow_stock_fastlane_respects_recent_backtest_cooldown(monkeypatch):
+    settings = _minimal_settings(1)
+    monkeypatch.setattr(at_mod, "settings", settings)
+    emitted: list[dict] = []
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        lambda db, scan_pattern_id, source: emitted.append({
+            "scan_pattern_id": scan_pattern_id,
+            "source": source,
+        }) or 1,
+    )
+    db = MagicMock()
+    pat = ScanPattern(
+        id=124,
+        name="Recently tested stock shadow",
+        rules_json={},
+        lifecycle_stage="shadow_promoted",
+        active=True,
+        backtest_priority=0,
+        last_backtest_at=datetime.utcnow(),
+    )
+    alert = BreakoutAlert(
+        id=457,
+        ticker="COOLD",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=1,
+        scan_pattern_id=pat.id,
+    )
+    snap = {"entry_edge": {"expected_net_pct": TEST_POSITIVE_EXPECTED_NET_PCT}}
+
+    fastlane = at_mod._queue_shadow_stock_fastlane_for_observation(
+        db,
+        alert=alert,
+        pattern=pat,
+        reason=at_mod.SHADOW_OBSERVATION_REASON_STAGE,
+        snap=snap,
+    )
+
+    assert fastlane is not None
+    assert fastlane["queued"] is False
+    assert fastlane["reason"] == "recent_backtest_cooldown"
+    assert fastlane["reboost_cooldown_minutes"] == (
+        AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES
+    )
+    assert pat.backtest_priority == 0
+    assert emitted == []
+    db.flush.assert_not_called()
+
+
+def test_shadow_observation_uses_lightweight_sizing_path(monkeypatch):
+    settings = _minimal_settings(1)
+    settings.chili_autotrader_shadow_observation_diagnostic_sizing_enabled = False
+    settings.chili_autotrader_shadow_observation_evidence_notional_usd = (
+        TEST_RISK_NOTIONAL
+    )
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_entry_risk_notional",
+        lambda *a, **k: pytest.fail(
+            "shadow observation should skip broker-backed notional resolution"
+        ),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_pattern_row",
+        lambda *a, **k: ScanPattern(
+            id=123,
+            lifecycle_stage="shadow_promoted",
+            active=True,
+        ),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_queue_shadow_stock_fastlane_for_observation",
+        lambda *a, **k: {"queued": False, "reason": "test"},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.hrp_sizing.decide_position_size",
+        lambda *a, **k: pytest.fail("shadow observation should skip HRP sizing"),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_survival.decisions.compute_decision",
+        lambda *a, **k: pytest.fail("shadow observation should skip survival sizing"),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_shadow_vetting.pilot_promoted_risk_multiplier",
+        lambda *a, **k: pytest.fail("shadow observation should skip pilot sizing"),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.position_sizer_emitter.emit_shadow_proposal",
+        lambda *a, **k: pytest.fail("shadow observation should skip position sizing"),
+    )
+    audit_calls: list[dict] = []
+    paper_calls: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "_audit",
+        lambda *a, **k: audit_calls.append(k),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *a, **k: paper_calls.append(k),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_execute_broker_buy",
+        lambda *a, **k: pytest.fail("shadow observation must not reach broker"),
+    )
+
+    alert = BreakoutAlert(
+        id=456,
+        ticker="FASTL",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=1,
+        scan_pattern_id=123,
+    )
+    setattr(alert, "_chili_shadow_observation_only", True)
+    setattr(
+        alert,
+        "_chili_shadow_observation_reason",
+        at_mod.SHADOW_OBSERVATION_REASON_STAGE,
+    )
+    out = {"skipped": 0, "placed": 0}
+
+    at_mod._execute_new_entry(
+        MagicMock(),
+        1,
+        alert,
+        TEST_ENTRY_PRICE,
+        {},
+        None,
+        True,
+        out,
+    )
+
+    assert out["skipped"] == 1
+    assert audit_calls and audit_calls[0]["decision"] == "blocked"
+    snap = audit_calls[0]["rule_snapshot"]
+    assert snap["shadow_observation_sizing_mode"] == (
+        at_mod.SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK
+    )
+    assert snap["shadow_observation_lightweight_sizing_supported"] is True
+    assert snap["shadow_observation_advisory_sizing_skipped"] is True
+    assert snap["shadow_observation_advisory_sizing_skip_reason"] == (
+        at_mod.SHADOW_OBSERVATION_ADVISORY_SIZING_SKIP_REASON
+    )
+    assert snap["notional_broker_lookup_skipped"] is True
+    assert snap["notional_source"] == at_mod.SHADOW_OBSERVATION_NOTIONAL_SOURCE_EVIDENCE
+    assert "position_sizer_proposal_id" not in snap
+    assert "hrp_size_usd" not in snap
+    assert "ps_sizing_decision" not in snap
+    assert "pilot_promoted_risk_multiplier" not in snap
+    assert paper_calls
+    assert paper_calls[0]["qty"] == TEST_RISK_NOTIONAL / TEST_ENTRY_PRICE
 
 
 def test_live_recert_block_waives_pilot_bootstrap_cert_debt(monkeypatch):
