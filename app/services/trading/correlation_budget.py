@@ -17,7 +17,6 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -73,6 +72,27 @@ def _bucket_cap_pct(asset_class: Optional[str]) -> float:
     return float(getattr(settings, "brain_position_sizer_equity_bucket_cap_pct", 15.0))
 
 
+def _is_option_trade_safe(trade: Trade) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
+def _trade_notional_usd(trade: Trade) -> float:
+    try:
+        qty = float(trade.quantity or 0.0)
+        entry = float(trade.entry_price or 0.0)
+    except Exception:
+        return 0.0
+    if qty <= 0 or entry <= 0:
+        return 0.0
+    multiplier = 100.0 if _is_option_trade_safe(trade) else 1.0
+    return abs(qty * entry * multiplier)
+
+
 def compute_correlation_budget(
     db: Session,
     *,
@@ -84,9 +104,10 @@ def compute_correlation_budget(
     """Sum open-trade notional in ``ticker``'s correlation bucket.
 
     Scope: trades where ``status == 'open'`` for the given ``user_id``.
-    Notional is approximated by ``quantity * entry_price``; we
-    intentionally use entry (not mark) so the budget is stable under
-    price fluctuations within a single bar.
+    Notional is approximated by ``quantity * entry_price`` for spot
+    assets and ``contracts * premium * 100`` for options. We intentionally
+    use entry (not mark) so the budget is stable under price fluctuations
+    within a single bar.
     """
     bucket = bucket_for(ticker, asset_class=asset_class)
     cap_pct = _bucket_cap_pct(asset_class or _asset_family(ticker))
@@ -111,11 +132,7 @@ def compute_correlation_budget(
             other_bucket = bucket_for(row.ticker)
             if other_bucket != bucket:
                 continue
-            qty = float(row.quantity or 0.0)
-            entry = float(row.entry_price or 0.0)
-            if qty <= 0 or entry <= 0:
-                continue
-            open_notional += qty * entry
+            open_notional += _trade_notional_usd(row)
         except Exception:
             continue
 
@@ -141,32 +158,23 @@ def compute_portfolio_budget(
     dial). It is included here so the caller can pass a tighter
     limit when testing.
     """
+    rows: list[Trade] = []
     try:
-        q = db.query(
-            func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0),
-        ).filter(Trade.status == "open")
+        q = db.query(Trade).filter(Trade.status == "open")
         if user_id is not None:
             q = q.filter(Trade.user_id == user_id)
-        total_deployed = float(q.scalar() or 0.0)
+        rows = q.all()
+        total_deployed = sum(_trade_notional_usd(row) for row in rows)
     except Exception:
         logger.warning("[correlation_budget] failed to read portfolio notional", exc_info=True)
         total_deployed = 0.0
 
-    ticker_open = 0.0
-    try:
-        q = (
-            db.query(
-                func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0),
-            )
-            .filter(Trade.status == "open")
-            .filter(Trade.ticker == ticker)
-        )
-        if user_id is not None:
-            q = q.filter(Trade.user_id == user_id)
-        ticker_open = float(q.scalar() or 0.0)
-    except Exception:
-        logger.warning("[correlation_budget] failed to read ticker notional", exc_info=True)
-        ticker_open = 0.0
+    wanted_ticker = str(ticker or "").strip().upper()
+    ticker_open = sum(
+        _trade_notional_usd(row)
+        for row in rows
+        if str(row.ticker or "").strip().upper() == wanted_ticker
+    )
 
     cap_total = max(0.0, float(capital or 0.0)) * max(0.0, float(max_total_notional_pct)) / 100.0
     return PortfolioBudget(

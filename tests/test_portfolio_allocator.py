@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 from app.config import Settings
 from app.models import MomentumStrategyVariant, StrategyProposal, Trade, TradingAutomationSession, User
@@ -210,3 +211,19 @@ def test_allocator_live_notional_cap_uses_projected_exposure(db, monkeypatch):
     assert decision["allowed_if_enforced"] is False
     assert decision["blocked_reason"] == "portfolio_live_notional_cap"
     assert decision["portfolio_exposure"]["projected_live_notional_usd"] == 110.0
+
+
+def test_allocator_open_trade_notional_uses_option_contract_multiplier():
+    from app.services.trading.portfolio_allocator import _trade_notional_usd
+
+    notional = _trade_notional_usd(
+        SimpleNamespace(
+            ticker="SPY",
+            entry_price=1.25,
+            quantity=2.0,
+            asset_kind="option",
+            indicator_snapshot={"option_meta": {"strike": 729.0}},
+        )
+    )
+
+    assert notional == 250.0

@@ -21,6 +21,7 @@ Notes
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
 from sqlalchemy import text
 
 from app.models.trading import Trade
@@ -39,8 +40,9 @@ def _make_trade(
     qty: float,
     entry: float,
     status: str = "open",
+    **overrides,
 ) -> Trade:
-    t = Trade(
+    fields = dict(
         user_id=None,
         ticker=ticker,
         direction="long",
@@ -48,6 +50,8 @@ def _make_trade(
         quantity=qty,
         status=status,
     )
+    fields.update(overrides)
+    t = Trade(**fields)
     db.add(t)
     db.commit()
     db.refresh(t)
@@ -58,6 +62,25 @@ def _cleanup_trades(db):
     # Scoped deletion keeps the same session's bucket sums deterministic.
     db.execute(text("DELETE FROM trading_trades WHERE ticker LIKE 'PHHCB%'"))
     db.commit()
+
+
+class _FakeQueryRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _FakeDbRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, *_args, **_kwargs):
+        return _FakeQueryRows(self._rows)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +160,22 @@ class TestComputeCorrelationBudget:
         )
         assert budget.open_notional == pytest.approx(1000.0)
 
+    def test_option_contracts_use_premium_multiplier(self):
+        row = SimpleNamespace(
+            ticker="PHHCB_OPT",
+            quantity=2,
+            entry_price=1.25,
+            asset_kind="option",
+            indicator_snapshot={"option_meta": {"strike": 100.0}},
+        )
+
+        budget = compute_correlation_budget(
+            _FakeDbRows([row]), user_id=None, ticker="PHHCB_NEW", capital=100_000.0,
+            asset_class="equity",
+        )
+
+        assert budget.open_notional == pytest.approx(250.0)
+
     def test_crypto_cap_uses_crypto_bucket_pct(self, db, monkeypatch):
         _cleanup_trades(db)
         monkeypatch.setattr(
@@ -202,6 +241,22 @@ class TestComputePortfolioBudget:
         )
         assert pb.deployed_notional == pytest.approx(2300.0)
         assert pb.ticker_open_notional == pytest.approx(2000.0)
+
+    def test_option_contracts_use_premium_multiplier(self):
+        row = SimpleNamespace(
+            ticker="PHHCB_OPT",
+            quantity=2,
+            entry_price=1.25,
+            asset_kind="option",
+            indicator_snapshot={"option_meta": {"strike": 100.0}},
+        )
+
+        pb = compute_portfolio_budget(
+            _FakeDbRows([row]), user_id=None, ticker="PHHCB_OPT", capital=100_000.0,
+        )
+
+        assert pb.deployed_notional == pytest.approx(250.0)
+        assert pb.ticker_open_notional == pytest.approx(250.0)
 
     def test_max_total_notional_pct_scales_cap(self, db):
         _cleanup_trades(db)

@@ -194,7 +194,15 @@ def _trade_notional_usd(trade: Any) -> float:
     qty = _safe_float(getattr(trade, "filled_quantity", None), 0.0) or _safe_float(
         getattr(trade, "quantity", None), 0.0
     )
-    return max(0.0, abs(px * qty))
+    multiplier = 1.0
+    try:
+        from .autopilot_scope import is_option_trade
+
+        if is_option_trade(trade):
+            multiplier = 100.0
+    except Exception:
+        pass
+    return max(0.0, abs(px * qty * multiplier))
 
 
 def _session_position_notional_usd(session: Any) -> float:
