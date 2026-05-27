@@ -43,7 +43,11 @@ from app.services.trading.auto_trader import (
     _maybe_open_paper_shadow,
     _maybe_open_reject_paper_shadow,
 )
-from app.services.trading.paper_trading import prune_autotrader_paper_shadow_capacity
+from app.services.trading.paper_trading import (
+    PAPER_SHADOW_CAPACITY_EVICTED_REASON,
+    PAPER_SHADOW_CAPACITY_EVICTION_META_KEY,
+    prune_autotrader_paper_shadow_capacity,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 TEST_SHADOW_QUANTITY = 1
@@ -1063,10 +1067,10 @@ def test_shadow_capacity_janitor_evicts_low_value_before_pilot_evidence(
     db.add_all([low_value, high_value, standard])
     db.commit()
 
-    monkeypatch.setattr(
-        "app.services.trading.market_data.fetch_quote",
-        lambda ticker: {"price": 101.0},
-    )
+    def fail_fetch_quote(ticker):
+        raise AssertionError("capacity eviction must not fetch quotes inline")
+
+    monkeypatch.setattr("app.services.trading.market_data.fetch_quote", fail_fetch_quote)
     monkeypatch.setattr(
         "app.services.trading.paper_trading._apply_slippage",
         lambda price, direction, is_entry: price,
@@ -1083,9 +1087,16 @@ def test_shadow_capacity_janitor_evicts_low_value_before_pilot_evidence(
     db.refresh(low_value)
     db.refresh(high_value)
     db.refresh(standard)
-    assert result["capacity_closed"] == 1
+    assert result["capacity_cancelled"] == 1
+    assert result["capacity_removed"] == 1
     assert result["eviction_policy"] == "priority_evidence_buffer"
-    assert low_value.status == "closed"
+    assert low_value.status == "cancelled"
+    assert low_value.exit_reason == PAPER_SHADOW_CAPACITY_EVICTED_REASON
+    assert low_value.pnl is None
+    assert low_value.exit_price is None
+    assert low_value.signal_json[PAPER_SHADOW_CAPACITY_EVICTION_META_KEY][
+        "pnl_recorded"
+    ] is False
     assert high_value.status == "open"
     assert standard.status == "open"
 
@@ -1167,7 +1178,7 @@ def test_reject_shadow_reclaims_buffer_slot_when_capacity_full(db, monkeypatch):
     rows = db.query(PaperTrade).filter(PaperTrade.user_id == alert.user_id).all()
     assert sum(1 for row in rows if row.status == "open") == 2
     assert any(row.paper_shadow_of_alert_id == alert.id for row in rows)
-    assert any(row.exit_reason == "shadow_capacity_janitor" for row in rows)
+    assert any(row.exit_reason == PAPER_SHADOW_CAPACITY_EVICTED_REASON for row in rows)
 
 
 # ---------------------------------------------------------------------------

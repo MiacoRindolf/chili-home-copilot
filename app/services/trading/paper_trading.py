@@ -44,6 +44,10 @@ TRAILING_STOP_ACTIVATION_R = 1.0  # activate trailing after 1R move
 OPTION_CONTRACT_MULTIPLIER = 100.0
 PAPER_TRADE_CAPACITY_SCOPE_ALL = "all"
 PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW = "autotrader_shadow"
+PAPER_TRADE_STATUS_CANCELLED = "cancelled"
+PAPER_SHADOW_CAPACITY_EVICTED_REASON = "shadow_capacity_evicted"
+PAPER_SHADOW_CAPACITY_EVICTION_MODE = "cancelled_without_pnl"
+PAPER_SHADOW_CAPACITY_EVICTION_META_KEY = "_paper_shadow_eviction"
 PAPER_SHADOW_PRIORITY_UNKNOWN = 0
 PAPER_SHADOW_PRIORITY_CANDIDATE = 10
 PAPER_SHADOW_PRIORITY_CHALLENGED = 15
@@ -542,6 +546,35 @@ def _paper_close_ledger_safe(db: Session, pt: PaperTrade) -> None:
         pass
 
 
+def _cancel_paper_shadow_capacity_eviction(pt: PaperTrade) -> None:
+    pt.status = PAPER_TRADE_STATUS_CANCELLED
+    pt.exit_date = datetime.utcnow()
+    pt.exit_reason = PAPER_SHADOW_CAPACITY_EVICTED_REASON
+    pt.exit_price = None
+    pt.pnl = None
+    pt.pnl_pct = None
+
+    meta = dict(_as_dict(pt.signal_json))
+    eviction_meta = dict(_as_dict(meta.get(PAPER_SHADOW_CAPACITY_EVICTION_META_KEY)))
+    eviction_meta.update(
+        {
+            "mode": PAPER_SHADOW_CAPACITY_EVICTION_MODE,
+            "reason": PAPER_SHADOW_CAPACITY_EVICTED_REASON,
+            "cancelled_at": _utc_iso(pt.exit_date),
+            "pnl_recorded": False,
+        }
+    )
+    meta[PAPER_SHADOW_CAPACITY_EVICTION_META_KEY] = eviction_meta
+    pt.signal_json = meta
+
+    logger.info(
+        "[paper] Cancelled shadow evidence %s %s (%s); no P&L recorded",
+        pt.direction,
+        pt.ticker,
+        PAPER_SHADOW_CAPACITY_EVICTED_REASON,
+    )
+
+
 def prune_autotrader_paper_shadow_capacity(
     db: Session,
     user_id: int | None,
@@ -569,8 +602,13 @@ def prune_autotrader_paper_shadow_capacity(
         return {
             "checked": 0,
             "closed": 0,
+            "closed_status_rows": 0,
+            "cancelled": 0,
+            "removed": 0,
             "stale_closed": 0,
             "capacity_closed": 0,
+            "capacity_cancelled": 0,
+            "capacity_removed": 0,
             "max_open": open_limit,
             "target_open": target_open,
             "reserve_new_slot": bool(reserve_new_slot),
@@ -616,8 +654,13 @@ def prune_autotrader_paper_shadow_capacity(
         return {
             "checked": len(rows),
             "closed": 0,
+            "closed_status_rows": 0,
+            "cancelled": 0,
+            "removed": 0,
             "stale_closed": 0,
             "capacity_closed": 0,
+            "capacity_cancelled": 0,
+            "capacity_removed": 0,
             "max_open": open_limit,
             "target_open": target_open,
             "reserve_new_slot": bool(reserve_new_slot),
@@ -625,8 +668,12 @@ def prune_autotrader_paper_shadow_capacity(
         }
 
     stale_closed = 0
-    capacity_closed = 0
+    capacity_cancelled = 0
     for pt, kind in to_close:
+        if kind == "capacity":
+            _cancel_paper_shadow_capacity_eviction(pt)
+            capacity_cancelled += 1
+            continue
         try:
             raw_exit = float(_paper_current_mark_price(pt, purpose="exit") or pt.entry_price)
         except Exception:
@@ -636,15 +683,19 @@ def prune_autotrader_paper_shadow_capacity(
         _paper_close_ledger_safe(db, pt)
         if kind == "stale":
             stale_closed += 1
-        else:
-            capacity_closed += 1
 
     db.commit()
+    removed = stale_closed + capacity_cancelled
     result = {
         "checked": len(rows),
-        "closed": len(to_close),
+        "closed": removed,
+        "closed_status_rows": stale_closed,
+        "cancelled": capacity_cancelled,
+        "removed": removed,
         "stale_closed": stale_closed,
-        "capacity_closed": capacity_closed,
+        "capacity_closed": capacity_cancelled,
+        "capacity_cancelled": capacity_cancelled,
+        "capacity_removed": capacity_cancelled,
         "max_open": open_limit,
         "target_open": target_open,
         "reserve_new_slot": bool(reserve_new_slot),
