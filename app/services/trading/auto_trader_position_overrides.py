@@ -267,6 +267,7 @@ def _close_option_trade_now(
         _opt_meta,
         _option_exit_order_state,
         _option_exit_raw_order,
+        _option_exit_submit_fill_is_complete,
         _parse_option_order_time,
     )
     from .robinhood_exit_execution import _finalize_filled_exit
@@ -340,8 +341,8 @@ def _close_option_trade_now(
     t.pending_exit_limit_price = float(limit_price)
     t.tca_reference_exit_price = float(current_premium or limit_price)
 
-    if state in {"filled", "done", "completed", "complete"}:
-        raw_order = _option_exit_raw_order(res, order_id=order_id, state=state)
+    raw_order = _option_exit_raw_order(res, order_id=order_id, state=state)
+    if _option_exit_submit_fill_is_complete(t, raw_order, state):
         _finalize_filled_exit(
             db,
             t,

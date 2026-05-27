@@ -4003,12 +4003,12 @@ def _option_order_filled_quantity(order: dict[str, Any]) -> float | None:
     return None
 
 
-def verify_option_order_landed(
+def _verify_option_order_landed_detail(
     order_id: str,
     *,
     max_wait_s: float = 3.0,
     poll_interval_s: float = 0.5,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, dict[str, Any] | None]:
     """Option-order equivalent of verify_order_landed.
 
     Robinhood option orders live behind get_option_order_info, not
@@ -4019,21 +4019,37 @@ def verify_option_order_landed(
     import time
 
     if not order_id:
-        return ("unknown", None)
+        return ("unknown", None, None)
     deadline = time.time() + float(max_wait_s)
     observed = None
+    observed_order = None
     while time.time() < deadline:
         info = get_option_order_by_id(order_id) or {}
+        observed_order = info
         observed = (info.get("state") or info.get("status") or "").strip().lower() or None
         if observed in _OPTION_ORDER_REJECTED_STATES:
             filled_qty = _option_order_filled_quantity(info)
             if filled_qty is not None and filled_qty > 0:
-                return ("executed", observed)
-            return ("rejected", observed)
+                return ("executed", observed, info)
+            return ("rejected", observed, info)
         if observed in _OPTION_ORDER_RESTING_STATES:
-            return ("resting", observed)
+            return ("resting", observed, info)
         time.sleep(float(poll_interval_s))
-    return ("unknown", observed)
+    return ("unknown", observed, observed_order)
+
+
+def verify_option_order_landed(
+    order_id: str,
+    *,
+    max_wait_s: float = 3.0,
+    poll_interval_s: float = 0.5,
+) -> tuple[str, str | None]:
+    verdict, observed, _observed_order = _verify_option_order_landed_detail(
+        order_id,
+        max_wait_s=max_wait_s,
+        poll_interval_s=poll_interval_s,
+    )
+    return verdict, observed
 
 
 def _verify_submitted_option_order(
@@ -4057,7 +4073,7 @@ def _verify_submitted_option_order(
     if state not in _OPTION_ORDER_VERIFY_STATES:
         return result, None
 
-    verdict, observed = verify_option_order_landed(order_id)
+    verdict, observed, observed_order = _verify_option_order_landed_detail(order_id)
     if verdict == "rejected":
         logger.error(
             "[broker] %s post-submit rejected order_id=%s observed_state=%s",
@@ -4072,6 +4088,8 @@ def _verify_submitted_option_order(
         }
     if verdict in ("resting", "executed") and observed:
         updated = dict(result)
+        if isinstance(observed_order, dict):
+            updated.update({k: v for k, v in observed_order.items() if v is not None})
         updated["state"] = observed
         return updated, None
     return result, None

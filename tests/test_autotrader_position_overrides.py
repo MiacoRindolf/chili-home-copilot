@@ -593,6 +593,74 @@ def test_close_position_now_live_option_routes_sell_to_close() -> None:
     )
 
 
+def test_close_position_now_live_option_finalizes_terminal_complete_fill() -> None:
+    now = datetime.utcnow()
+    t = _option_trade_stub()
+    fake_db = _fake_trade_db(t)
+
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {"bid_price": "1.40", "mark_price": "1.45"}
+    fake_options.place_option_sell.return_value = {
+        "ok": True,
+        "order_id": "opt-close-filled-cancel",
+        "state": "cancelled",
+        "average_price": "1.45",
+        "raw": {
+            "id": "opt-close-filled-cancel",
+            "state": "cancelled",
+            "quantity": "1",
+            "processed_quantity": "1",
+            "average_price": "1.45",
+            "last_transaction_at": now.isoformat() + "Z",
+        },
+    }
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ), patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        side_effect=AssertionError("option close-now must not use the spot adapter"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res == {
+        "ok": True,
+        "state": "filled",
+        "exit_price": pytest.approx(1.45),
+        "pnl": pytest.approx(20.0),
+    }
+    assert t.status == "closed"
+    assert t.exit_reason == "desk_close_now"
+    assert t.exit_price == pytest.approx(1.45)
+    assert t.pnl == pytest.approx(20.0)
+    assert t.pending_exit_order_id is None
+    assert t.pending_exit_status is None
+    assert t.pending_exit_limit_price is None
+    fake_options.place_option_sell.assert_called_once()
+
+
+def test_option_exit_submit_fill_requires_local_quantity_complete() -> None:
+    from app.services.trading.options.exit_monitor import (
+        _option_exit_submit_fill_is_complete,
+    )
+
+    t = _option_trade_stub(quantity=2.0)
+
+    assert _option_exit_submit_fill_is_complete(
+        t,
+        {"state": "cancelled", "quantity": "1", "processed_quantity": "1"},
+        "cancelled",
+    ) is False
+    assert _option_exit_submit_fill_is_complete(
+        t,
+        {"state": "cancelled", "quantity": "2", "processed_quantity": "2"},
+        "cancelled",
+    ) is True
+
+
 def test_close_position_now_live_option_reuses_active_pending_exit() -> None:
     t = _option_trade_stub(
         pending_exit_order_id="opt-close-existing",

@@ -208,8 +208,8 @@ class TestRobinhoodOptionOrderRouting:
 
         monkeypatch.setattr(
             broker_service,
-            "verify_option_order_landed",
-            lambda _order_id: ("rejected", "cancelled"),
+            "_verify_option_order_landed_detail",
+            lambda _order_id: ("rejected", "cancelled", {"state": "cancelled"}),
         )
 
         updated, rejected = broker_service._verify_submitted_option_order(
@@ -246,8 +246,8 @@ class TestRobinhoodOptionOrderRouting:
 
         monkeypatch.setattr(
             broker_service,
-            "verify_option_order_landed",
-            lambda _order_id: ("resting", "queued"),
+            "_verify_option_order_landed_detail",
+            lambda _order_id: ("resting", "queued", {"state": "queued"}),
         )
 
         updated, rejected = broker_service._verify_submitted_option_order(
@@ -264,8 +264,17 @@ class TestRobinhoodOptionOrderRouting:
 
         monkeypatch.setattr(
             broker_service,
-            "verify_option_order_landed",
-            lambda _order_id: ("executed", "cancelled"),
+            "_verify_option_order_landed_detail",
+            lambda _order_id: (
+                "executed",
+                "cancelled",
+                {
+                    "state": "cancelled",
+                    "quantity": "1",
+                    "processed_quantity": "1",
+                    "average_price": "1.45",
+                },
+            ),
         )
 
         updated, rejected = broker_service._verify_submitted_option_order(
@@ -276,6 +285,8 @@ class TestRobinhoodOptionOrderRouting:
 
         assert rejected is None
         assert updated["state"] == "cancelled"
+        assert updated["processed_quantity"] == "1"
+        assert updated["average_price"] == "1.45"
 
     def test_option_spread_rejects_post_accept_cancel(self, monkeypatch):
         from app.services import broker_service

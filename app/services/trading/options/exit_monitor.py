@@ -54,6 +54,13 @@ _ACTIVE_PENDING_EXIT_STATES = {
     "submitted",
 }
 _OPTION_EXIT_FILLED_STATES = {"filled", "done", "completed", "complete"}
+_OPTION_EXIT_TERMINAL_STATES = {
+    "cancelled",
+    "canceled",
+    "rejected",
+    "failed",
+    "expired",
+}
 
 
 def _register_exit_parameters(db: Session) -> None:
@@ -162,10 +169,74 @@ def _option_exit_raw_order(
     raw = dict(res.get("raw") if isinstance(res.get("raw"), dict) else {})
     raw.setdefault("id", order_id)
     raw.setdefault("state", state)
-    for key in ("average_price", "avg_price", "average_fill_price", "price"):
+    for key in (
+        "average_price",
+        "avg_price",
+        "average_fill_price",
+        "price",
+        "quantity",
+        "requested_quantity",
+        "cumulative_quantity",
+        "cumulative_filled_quantity",
+        "filled_quantity",
+        "processed_quantity",
+        "quantity_filled",
+        "filled_size",
+    ):
         if key not in raw and res.get(key) is not None:
             raw[key] = res.get(key)
     return raw
+
+
+def _option_exit_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _option_exit_filled_quantity(raw_order: dict[str, Any]) -> float | None:
+    for key in (
+        "cumulative_quantity",
+        "cumulative_filled_quantity",
+        "filled_quantity",
+        "processed_quantity",
+        "quantity_filled",
+        "filled_size",
+    ):
+        qty = _option_exit_float(raw_order.get(key))
+        if qty is not None:
+            return max(0.0, qty)
+    return None
+
+
+def _option_exit_requested_quantity(trade: Trade, raw_order: dict[str, Any]) -> float | None:
+    for key in ("quantity", "requested_quantity"):
+        qty = _option_exit_float(raw_order.get(key))
+        if qty is not None and qty > 0:
+            return qty
+    qty = _option_exit_float(getattr(trade, "quantity", None))
+    return qty if qty is not None and qty > 0 else None
+
+
+def _option_exit_submit_fill_is_complete(
+    trade: Trade,
+    raw_order: dict[str, Any],
+    state: str,
+) -> bool:
+    state = str(state or "").strip().lower()
+    if state in _OPTION_EXIT_FILLED_STATES:
+        return True
+    if state not in _OPTION_EXIT_TERMINAL_STATES:
+        return False
+
+    filled_qty = _option_exit_filled_quantity(raw_order)
+    local_qty = _option_exit_float(getattr(trade, "quantity", None))
+    requested_qty = _option_exit_requested_quantity(trade, raw_order)
+    target_qty = local_qty if local_qty is not None and local_qty > 0 else requested_qty
+    if filled_qty is None or target_qty is None or target_qty <= 0:
+        return False
+    return filled_qty + 1e-9 >= target_qty
 
 
 def _parse_option_order_time(raw_order: dict[str, Any]) -> datetime | None:
@@ -552,7 +623,7 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         raw_order = _option_exit_raw_order(res, order_id=order_id, state=state)
         reference_price = current_premium or limit_price
         try:
-            if state in _OPTION_EXIT_FILLED_STATES:
+            if _option_exit_submit_fill_is_complete(t, raw_order, state):
                 from ..robinhood_exit_execution import _finalize_filled_exit
 
                 t.pending_exit_order_id = order_id
