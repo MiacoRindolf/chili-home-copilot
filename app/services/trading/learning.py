@@ -8806,6 +8806,23 @@ def _pick_complementary_condition(
     return picked
 
 
+def _variant_json_value(value: Any) -> Any:
+    """Coerce JSON strings from legacy callers into JSONB-native objects."""
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    return value
+
+
+def _variant_json_dict(value: Any) -> dict[str, Any] | None:
+    parsed = _variant_json_value(value)
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _cross_breed_condition(
     db: "Session",
     existing: list[dict[str, Any]],
@@ -8833,11 +8850,10 @@ def _cross_breed_condition(
         donor = random.choice(top_patterns)
         if donor.id == exclude_pattern_id:
             continue
-        try:
-            rules = json.loads(donor.rules_json)
-            donor_conds = rules.get("conditions", [])
-        except (json.JSONDecodeError, TypeError):
+        rules = _variant_json_dict(getattr(donor, "rules_json", None))
+        if rules is None:
             continue
+        donor_conds = rules.get("conditions", [])
         novel = [c for c in donor_conds if c.get("indicator") not in existing_inds]
         if novel:
             return dict(random.choice(novel))
@@ -9475,8 +9491,8 @@ def _create_variant_child(
     *,
     origin: str,
     variant_label: str,
-    rules_json: str | None = None,
-    exit_config_json: str | None = None,
+    rules_json: Any | None = None,
+    exit_config_json: Any | None = None,
     timeframe: str | None = None,
     ticker_scope: str | None = None,
     scope_tickers_json: str | None = None,
@@ -9501,10 +9517,16 @@ def _create_variant_child(
     from ...models.trading import ScanPattern, TradingInsight
 
     child_name = f"{parent.name} [{variant_label}]"
+    child_rules_json = _variant_json_value(
+        rules_json if rules_json is not None else parent.rules_json
+    )
+    child_exit_config = _variant_json_value(
+        exit_config_json if exit_config_json is not None else parent.exit_config
+    )
     child = ScanPattern(
         name=child_name,
         description=parent.description,
-        rules_json=rules_json or parent.rules_json,
+        rules_json=child_rules_json,
         origin=origin,
         asset_class=parent.asset_class,
         timeframe=timeframe or getattr(parent, "timeframe", "1d") or "1d",
@@ -9515,7 +9537,7 @@ def _create_variant_child(
         min_base_score=parent.min_base_score,
         active=True,
         parent_id=parent.id,
-        exit_config=exit_config_json or parent.exit_config,
+        exit_config=child_exit_config,
         variant_label=variant_label,
         generation=(parent.generation or 0) + 1,
         ticker_scope=ticker_scope or getattr(parent, "ticker_scope", "universal") or "universal",
@@ -9628,11 +9650,10 @@ def fork_entry_variants(
     if existing_children >= _MAX_ACTIVE_VARIANTS:
         return []
 
-    try:
-        rules = json.loads(parent.rules_json)
-        conditions = rules.get("conditions", [])
-    except (json.JSONDecodeError, TypeError):
+    rules = _variant_json_dict(parent.rules_json)
+    if rules is None:
         return []
+    conditions = rules.get("conditions", [])
     if not conditions:
         return []
 
@@ -9693,11 +9714,10 @@ def fork_combo_variants(db: Session, pattern_id: int) -> list[int]:
     if existing_children >= _MAX_ACTIVE_VARIANTS:
         return []
 
-    try:
-        rules = json.loads(parent.rules_json)
-        conditions = rules.get("conditions", [])
-    except (json.JSONDecodeError, TypeError):
+    rules = _variant_json_dict(parent.rules_json)
+    if rules is None:
         return []
+    conditions = rules.get("conditions", [])
 
     donor_cond = _cross_breed_condition(db, conditions, exclude_pattern_id=pattern_id)
     if not donor_cond:

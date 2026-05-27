@@ -15,6 +15,7 @@ from app.services.trading.learning import (
     _learned_exit_config_from_edge_report,
     _parent_eligible_for_variant_spawn,
     fork_edge_learned_exit_variants,
+    fork_entry_variants,
 )
 
 
@@ -172,6 +173,7 @@ def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     assert child.origin == EDGE_EXIT_VARIANT_ORIGIN
     assert child.lifecycle_stage == "challenged"
     assert child.promotion_status == EDGE_EXIT_PROMOTION_STATUS
+    assert isinstance(child.exit_config, dict)
     cfg = child.exit_config if isinstance(child.exit_config, dict) else json.loads(child.exit_config)
     assert cfg["source"] == EDGE_EXIT_CONFIG_SOURCE
     assert cfg["edge_learned_exit_v1"] is True
@@ -197,6 +199,7 @@ def test_edge_learned_exit_allows_mild_negative_with_strong_payoff(db):
 
     assert len(ids) == 1
     child = db.get(ScanPattern, ids[0])
+    assert isinstance(child.exit_config, dict)
     cfg = child.exit_config if isinstance(child.exit_config, dict) else json.loads(child.exit_config)
     assert child.lifecycle_stage == "challenged"
     assert cfg["payoff_rescue_used"] is True
@@ -233,6 +236,27 @@ def test_edge_learned_exit_ignores_legacy_loss_report(db):
     )
 
     assert ids == []
+
+
+def test_entry_variant_accepts_jsonb_rules_and_stores_child_jsonb(db):
+    pat = _make_pattern(
+        db,
+        rules_json={
+            "conditions": [
+                {"indicator": "rsi_14", "op": ">", "value": 50},
+                {"indicator": "adx", "op": ">", "value": 20},
+            ]
+        },
+    )
+    db.commit()
+
+    ids = fork_entry_variants(db, pat.id, max_variants=1)
+
+    assert len(ids) == 1
+    child = db.get(ScanPattern, ids[0])
+    assert child is not None
+    assert isinstance(child.rules_json, dict)
+    assert child.rules_json["conditions"]
 
 
 def test_edge_spawn_gate_blocks_deep_negative_parent():
