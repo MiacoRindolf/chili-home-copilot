@@ -29,18 +29,27 @@ True). When False, no crypto Trade rows are touched.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
-from ....config import settings
+from ....config import (
+    CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_SECONDS,
+    CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_START_STREAK,
+    CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_SECONDS,
+    CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_START_STREAK,
+    CRYPTO_EXIT_MISSING_QTY_BACKOFF_MIN_SECONDS,
+    settings,
+)
 from ....models.trading import PatternMonitorDecision, Trade
 
 logger = logging.getLogger(__name__)
 
 COINBASE_EXIT_SIDE = "sell"
+CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY = "crypto_exit_missing_qty_backoff"
+CRYPTO_EXIT_MISSING_QTY_PENDING_REASON = "missing_broker_qty"
 
 # f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
 # the freshness window + the monitor-decision helpers moved to the
@@ -224,6 +233,125 @@ def _is_crypto_trade(trade: Trade) -> bool:
 def _broker_source_for_trade(trade: Trade) -> str:
     src = (trade.broker_source or "").strip().lower()
     return "coinbase" if src == "coinbase" else "robinhood"
+
+
+def _settings_int_clamped(name: str, default: int, *, lower: int, upper: int) -> int:
+    raw = getattr(settings, name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(int(lower), min(int(upper), value))
+
+
+def _missing_qty_backoff_seconds() -> int:
+    return _settings_int_clamped(
+        "chili_autotrader_crypto_exit_missing_qty_backoff_seconds",
+        CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_SECONDS,
+        lower=CRYPTO_EXIT_MISSING_QTY_BACKOFF_MIN_SECONDS,
+        upper=CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_SECONDS,
+    )
+
+
+def _missing_qty_backoff_start_streak() -> int:
+    return _settings_int_clamped(
+        "chili_autotrader_crypto_exit_missing_qty_backoff_start_streak",
+        CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_START_STREAK,
+        lower=1,
+        upper=CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_START_STREAK,
+    )
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _trade_snapshot_dict(trade: Trade) -> dict[str, Any]:
+    snap = getattr(trade, "indicator_snapshot", None)
+    return dict(snap) if isinstance(snap, dict) else {}
+
+
+def _parse_backoff_until(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", ""))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _missing_qty_backoff_meta(trade: Trade, *, now: datetime) -> dict[str, Any] | None:
+    snap = _trade_snapshot_dict(trade)
+    meta = snap.get(CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY)
+    if not isinstance(meta, dict):
+        return None
+    backoff_until = _parse_backoff_until(meta.get("backoff_until"))
+    if backoff_until is None or now >= backoff_until:
+        return None
+    return {**meta, "backoff_until_dt": backoff_until}
+
+
+def _clear_missing_qty_backoff(trade: Trade) -> bool:
+    changed = False
+    if int(getattr(trade, "crypto_broker_zero_qty_streak", 0) or 0) != 0:
+        trade.crypto_broker_zero_qty_streak = 0
+        changed = True
+    snap = _trade_snapshot_dict(trade)
+    if CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY in snap:
+        snap.pop(CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY, None)
+        trade.indicator_snapshot = snap
+        changed = True
+    if (
+        not getattr(trade, "pending_exit_order_id", None)
+        and (getattr(trade, "pending_exit_reason", None) or "")
+        == CRYPTO_EXIT_MISSING_QTY_PENDING_REASON
+    ):
+        trade.pending_exit_status = None
+        trade.pending_exit_requested_at = None
+        trade.pending_exit_reason = None
+        changed = True
+    return changed
+
+
+def _mark_missing_qty_deferred(
+    db: Session,
+    trade: Trade,
+    *,
+    broker_source: str,
+    local_qty: float,
+    now: datetime,
+) -> dict[str, Any]:
+    streak = int(getattr(trade, "crypto_broker_zero_qty_streak", 0) or 0) + 1
+    start_streak = _missing_qty_backoff_start_streak()
+    backoff_seconds = _missing_qty_backoff_seconds()
+    backoff_until = (
+        now + timedelta(seconds=backoff_seconds)
+        if streak >= start_streak and backoff_seconds > 0
+        else None
+    )
+    meta: dict[str, Any] = {
+        "reason": CRYPTO_EXIT_MISSING_QTY_PENDING_REASON,
+        "broker_source": broker_source,
+        "streak": streak,
+        "start_streak": start_streak,
+        "local_qty": float(local_qty or 0.0),
+        "observed_at": now.isoformat(),
+        "backoff_seconds": backoff_seconds,
+        "backoff_until": backoff_until.isoformat() if backoff_until else None,
+    }
+    snap = _trade_snapshot_dict(trade)
+    snap[CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY] = meta
+    trade.indicator_snapshot = snap
+    trade.crypto_broker_zero_qty_streak = streak
+    trade.pending_exit_status = "deferred"
+    trade.pending_exit_requested_at = now
+    trade.pending_exit_reason = CRYPTO_EXIT_MISSING_QTY_PENDING_REASON
+    db.add(trade)
+    db.commit()
+    return meta
 
 
 def _position_qty_for_trade(trade: Trade) -> tuple[float | None, str]:
@@ -622,6 +750,22 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
                 reason = "pattern_exit_now"
         if not should_exit:
             continue
+        now = _utcnow_naive()
+        backoff_meta = _missing_qty_backoff_meta(t, now=now)
+        if backoff_meta is not None:
+            out["deferred"] += 1
+            out["missing_qty_backoff_skipped"] = int(
+                out.get("missing_qty_backoff_skipped") or 0
+            ) + 1
+            logger.debug(
+                "[crypto_exit] broker qty backoff active for trade#%s %s "
+                "until=%s streak=%s",
+                t.id,
+                t.ticker,
+                backoff_meta.get("backoff_until"),
+                backoff_meta.get("streak"),
+            )
+            continue
 
         # Place the sell.
         try:
@@ -645,12 +789,28 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             _broker_qty, _broker_source = _position_qty_for_trade(t)
 
             if _broker_qty is None:
+                meta = _mark_missing_qty_deferred(
+                    db,
+                    t,
+                    broker_source=_broker_source,
+                    local_qty=qty,
+                    now=now,
+                )
                 logger.warning(
                     "[crypto_exit] cannot resolve %s broker qty for "
-                    "trade#%s %s (local_qty=%s); deferring sell to next pass.",
-                    _broker_source, t.id, t.ticker, qty,
+                    "trade#%s %s (local_qty=%s); deferring sell "
+                    "streak=%s backoff_until=%s.",
+                    _broker_source,
+                    t.id,
+                    t.ticker,
+                    qty,
+                    meta.get("streak"),
+                    meta.get("backoff_until") or "next_pass",
                 )
                 out["deferred"] += 1
+                out["missing_qty_deferred"] = int(
+                    out.get("missing_qty_deferred") or 0
+                ) + 1
                 continue
             if _broker_qty <= 0:
                 logger.warning(
@@ -663,6 +823,8 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
                 out["skipped"] += 1
                 out["errors"].append(f"broker_holds_zero:{t.ticker}")
                 continue
+            if _clear_missing_qty_backoff(t):
+                db.add(t)
             if _broker_qty < qty:
                 logger.warning(
                     "[crypto_exit] clamping sell qty for trade#%s %s via %s "

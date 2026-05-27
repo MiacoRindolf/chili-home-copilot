@@ -24,6 +24,12 @@ from app import models
 from app.models.trading import PatternMonitorDecision, Trade
 
 REPO = Path(__file__).resolve().parent.parent
+TEST_SECONDS_PER_MINUTE = 60
+TEST_MISSING_QTY_BACKOFF_START_STREAK = 1
+TEST_MISSING_QTY_BACKOFF_MINUTES = 10
+TEST_MISSING_QTY_BACKOFF_SECONDS = (
+    TEST_MISSING_QTY_BACKOFF_MINUTES * TEST_SECONDS_PER_MINUTE
+)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +310,75 @@ def test_coinbase_stop_hit_uses_coinbase_position_and_sell(db):
     cb_adapter.place_limit_order_gtc.assert_not_called()
     rh_positions.assert_not_called()
     rh_sell.assert_not_called()
+
+
+def test_coinbase_missing_qty_uses_configured_backoff(db, monkeypatch):
+    """A Coinbase trade whose broker position cannot be resolved should not
+    re-query Coinbase every monitor pass. The first miss records a deferred
+    state; subsequent passes inside the configured window skip broker position
+    fetches while leaving the live sell gate untouched.
+    """
+    t = _seed_open_crypto_trade(
+        db,
+        ticker="DIEM-USD",
+        name_suffix="coinbase_missing_qty_backoff",
+        broker_source="coinbase",
+    )
+    monkeypatch.setattr(
+        "app.config.settings.chili_autotrader_crypto_exit_missing_qty_backoff_start_streak",
+        TEST_MISSING_QTY_BACKOFF_START_STREAK,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.config.settings.chili_autotrader_crypto_exit_missing_qty_backoff_seconds",
+        TEST_MISSING_QTY_BACKOFF_SECONDS,
+        raising=False,
+    )
+
+    positions = MagicMock(return_value=[])
+    with patch(
+        "app.services.trading.crypto.exit_monitor._current_crypto_price",
+        return_value=8.50,
+    ), patch(
+        "app.services.coinbase_service.get_positions",
+        positions,
+    ), patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ):
+        from app.services.trading.crypto import exit_monitor as crypto_exit
+
+        out = crypto_exit.run_crypto_exit_pass(db)
+
+    assert out.get("deferred") == 1
+    assert out.get("missing_qty_deferred") == 1
+    positions.assert_called_once()
+    db.refresh(t)
+    assert t.crypto_broker_zero_qty_streak == 1
+    assert t.pending_exit_status == "deferred"
+    assert t.pending_exit_reason == crypto_exit.CRYPTO_EXIT_MISSING_QTY_PENDING_REASON
+    meta = t.indicator_snapshot[crypto_exit.CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY]
+    assert meta["streak"] == 1
+    assert meta["backoff_until"]
+
+    positions_during_backoff = MagicMock(
+        side_effect=AssertionError("backoff should skip Coinbase position fetch")
+    )
+    with patch(
+        "app.services.trading.crypto.exit_monitor._current_crypto_price",
+        return_value=8.50,
+    ), patch(
+        "app.services.coinbase_service.get_positions",
+        positions_during_backoff,
+    ), patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ):
+        out2 = crypto_exit.run_crypto_exit_pass(db)
+
+    assert out2.get("deferred") == 1
+    assert out2.get("missing_qty_backoff_skipped") == 1
+    positions_during_backoff.assert_not_called()
 
 
 def test_coinbase_stop_hit_cancels_stale_sell_hold_and_retries(db):
