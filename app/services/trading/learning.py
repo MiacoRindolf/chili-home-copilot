@@ -3828,6 +3828,7 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
     Uses BRAIN_BACKTEST_PARALLEL workers and BRAIN_QUEUE_BATCH_SIZE (or batch_size)
     to run multiple pattern backtests concurrently, each with its own DB session.
     """
+    batch_started = time.monotonic()
     from ...config import settings
     from .backtest_queue import (
         get_exploration_pattern_ids,
@@ -4084,11 +4085,18 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
                     patterns_processed += 1
 
     status = get_queue_status(db, use_cache=False)
+    elapsed_s = max(0.001, time.monotonic() - batch_started)
+    patterns_per_min = round((patterns_processed / elapsed_s) * 60.0, 2)
+    backtests_per_min = round((backtests_run / elapsed_s) * 60.0, 2)
     logger.info(
-        "[learning] Queue backtest: done | backtests_run=%s patterns_processed=%s | "
+        "[learning] Queue backtest: done | backtests_run=%s patterns_processed=%s "
+        "elapsed_s=%.2f patterns_per_min=%.2f backtests_per_min=%.2f | "
         "queue_pending=%s queue_empty=%s boosted=%s",
         backtests_run,
         patterns_processed,
+        elapsed_s,
+        patterns_per_min,
+        backtests_per_min,
         status.get("pending"),
         status.get("queue_empty"),
         status.get("boosted"),
@@ -4100,6 +4108,9 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         "queue_exploration_added": exploration_added,
         "queue_batch_summary": batch_summary,
         "queue_executor": "process" if use_process else "threads",
+        "queue_elapsed_s": round(elapsed_s, 3),
+        "queue_patterns_per_min": patterns_per_min,
+        "queue_backtests_per_min": backtests_per_min,
         **status,
     }
 
