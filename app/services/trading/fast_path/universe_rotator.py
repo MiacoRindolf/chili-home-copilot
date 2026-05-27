@@ -107,6 +107,7 @@ _SHADOW_EXPLORATION_FORCE_EDGE_EXHAUSTED = "edge_exhausted"
 _SHADOW_EXPLORATION_FORCE_OBSERVED_RANK = "observed_rank"
 _SHADOW_EXPLORATION_FORCE_MARKET_VELOCITY = "market_velocity"
 _SHADOW_EXPLORATION_FORCE_VELOCITY_DEADLOCK = "market_velocity_deadlock_probe"
+_SHADOW_EXPLORATION_FORCE_LEARNING_RETENTION = "learning_retention"
 FAST_EXECUTION_DECISION_PAPER_FILL = "paper_fill"
 FAST_EXECUTION_MODE_PAPER = "paper"
 _MAKER_ATTEMPT_ACTIONABLE_LEARNABLE_VERDICTS = frozenset({
@@ -242,6 +243,17 @@ class _ObservedOpportunity:
         if self.maker_attempts <= 0:
             return 0.0
         return float(self.maker_fills) / float(self.maker_attempts)
+
+
+@dataclass(frozen=True)
+class _RecentLearningEvent:
+    """Latest alert/probe event that still needs short-horizon books."""
+
+    latest_event_at: datetime
+    latest_alert_at: datetime | None = None
+    latest_maker_attempt_at: datetime | None = None
+    alert_count: int = 0
+    maker_attempt_count: int = 0
 
 
 def _positive_cap_or_none(value: Any) -> float | None:
@@ -1053,6 +1065,103 @@ def _latest_observed_move_to_cost_ratio(db) -> float | None:
     return ratio if math.isfinite(ratio) else None
 
 
+def _learning_retention_horizon_s(settings) -> int:
+    """Configured short-horizon learning retention window."""
+    try:
+        horizon_s = int(
+            getattr(settings, "universe_learning_retention_horizon_s", 0) or 0
+        )
+    except (TypeError, ValueError):
+        horizon_s = 0
+    return max(horizon_s, 0)
+
+
+def _learning_retention_max_n(settings) -> int:
+    """Configured cap for recently-learning shadow prioritization."""
+    try:
+        max_n = int(
+            getattr(settings, "universe_learning_retention_max_n", 0) or 0
+        )
+    except (TypeError, ValueError):
+        max_n = 0
+    return max(max_n, 0)
+
+
+def _recent_learning_events_by_ticker(
+    db,
+    *,
+    lookback_s: int,
+    now: datetime,
+) -> dict[str, _RecentLearningEvent]:
+    """Recent alert/probe events that still need book coverage.
+
+    The decay miner finalizes due observations by querying the first
+    ``fast_orderbook`` row at or after each horizon. If the rotator drops a
+    ticker immediately after an alert, short-horizon evidence can be lost even
+    though the alert itself was correctly recorded. This query supplies a
+    bounded, shadow-only retention priority for those still-learning tickers.
+    """
+    if lookback_s <= 0:
+        return {}
+
+    from sqlalchemy import text
+
+    cutoff = now - timedelta(seconds=int(lookback_s))
+    rows = db.execute(text("""
+        /* recent learning retention events */
+        WITH events AS (
+            SELECT
+                ticker,
+                fired_at AS event_at,
+                fired_at AS alert_at,
+                NULL::timestamp AS maker_attempt_at,
+                1 AS alert_count,
+                0 AS maker_attempt_count
+            FROM fast_alerts
+            WHERE fired_at >= :cutoff
+
+            UNION ALL
+
+            SELECT
+                ticker,
+                placed_at AS event_at,
+                NULL::timestamp AS alert_at,
+                placed_at AS maker_attempt_at,
+                0 AS alert_count,
+                1 AS maker_attempt_count
+            FROM fast_path_maker_attempts
+            WHERE placed_at >= :cutoff
+        )
+        SELECT
+            ticker,
+            MAX(event_at) AS latest_event_at,
+            MAX(alert_at) AS latest_alert_at,
+            MAX(maker_attempt_at) AS latest_maker_attempt_at,
+            SUM(alert_count) AS alert_count,
+            SUM(maker_attempt_count) AS maker_attempt_count
+        FROM events
+        WHERE ticker IS NOT NULL
+        GROUP BY ticker
+    """), {
+        "cutoff": cutoff,
+    }).mappings().all()
+
+    out: dict[str, _RecentLearningEvent] = {}
+    for row in rows:
+        ticker = str(row.get("ticker") or "").strip()
+        latest_event_at = row.get("latest_event_at")
+        if not ticker or not isinstance(latest_event_at, datetime):
+            continue
+        out[ticker] = _RecentLearningEvent(
+            latest_event_at=latest_event_at,
+            latest_alert_at=row.get("latest_alert_at"),
+            latest_maker_attempt_at=row.get("latest_maker_attempt_at"),
+            alert_count=int(row.get("alert_count") or 0),
+            maker_attempt_count=int(row.get("maker_attempt_count") or 0),
+        )
+    return out
+
+
 def _recent_missing_grace_count(db, ticker: str) -> int:
     """Count consecutive latest rows that were kept only for grace."""
     from sqlalchemy import text
@@ -1715,6 +1824,12 @@ def run_rotation_pass(
         "market_velocity_backfill_skips": 0,
         "shadow_exploration_force_velocity_blocked": 0,
         "shadow_exploration_force_velocity_ratio": None,
+        "learning_retention_horizon_s": None,
+        "learning_retention_max_n": None,
+        "learning_retention_event_tickers": 0,
+        "learning_retention_candidates": 0,
+        "learning_retention_already_ranked": 0,
+        "learning_retained_n": 0,
         "rotation_at": rotation_at.isoformat(),
         "snapshot_fetch_concurrency": None,
         "rest_request_pacing_s": None,
@@ -1897,6 +2012,16 @@ def run_rotation_pass(
         db,
         since=observed_since,
     )
+    learning_retention_horizon_s = _learning_retention_horizon_s(settings)
+    learning_retention_max_n = _learning_retention_max_n(settings)
+    learning_events = _recent_learning_events_by_ticker(
+        db,
+        lookback_s=learning_retention_horizon_s,
+        now=rotation_at,
+    )
+    out["learning_retention_horizon_s"] = learning_retention_horizon_s
+    out["learning_retention_max_n"] = learning_retention_max_n
+    out["learning_retention_event_tickers"] = len(learning_events)
     prior_move_to_cost = _latest_observed_move_to_cost_ratio(db)
     out["prior_observed_opportunity_median_realized_move_to_cost"] = (
         prior_move_to_cost
@@ -2085,6 +2210,48 @@ def run_rotation_pass(
     forced_shadow_reason_by_ticker: dict[str, str] = {}
     selected_forced: list[_PairCandidate] = []
     selected_tickers = {cand.ticker for cand in cut_ranked}
+    learning_retention_ranked = {
+        cand.ticker for cand in cut_ranked if cand.ticker in learning_events
+    }
+    out["learning_retention_already_ranked"] = len(learning_retention_ranked)
+    retention_eligible = [
+        cand for cand in [*observed_rank_skips, *velocity_backfill_skips]
+        if cand.ticker in learning_events
+    ]
+    out["learning_retention_candidates"] = len(retention_eligible)
+
+    def _learning_retention_sort_key(cand: _PairCandidate) -> tuple[datetime, float]:
+        event = learning_events.get(cand.ticker)
+        latest_event_at = event.latest_event_at if event else datetime.min
+        rank_score = _candidate_rank_score(
+            cand,
+            fee_bps=promotion_fee_bps,
+            top_of_book_cap_usd=rank_top_of_book_cap_usd,
+        )
+        return latest_event_at, rank_score
+
+    learning_priority_tickers = {
+        cand.ticker
+        for cand in sorted(
+            retention_eligible,
+            key=_learning_retention_sort_key,
+            reverse=True,
+        )[:learning_retention_max_n]
+    }
+    learning_forced_tickers: set[str] = set()
+
+    def _learning_prioritized(
+        pool: list[_PairCandidate],
+    ) -> list[_PairCandidate]:
+        if not learning_priority_tickers:
+            return pool
+        priority = sorted(
+            [cand for cand in pool if cand.ticker in learning_priority_tickers],
+            key=_learning_retention_sort_key,
+            reverse=True,
+        )
+        rest = [cand for cand in pool if cand.ticker not in learning_priority_tickers]
+        return [*priority, *rest]
 
     def _force_shadow_exploration(
         pool: list[_PairCandidate],
@@ -2093,11 +2260,15 @@ def run_rotation_pass(
         slots: int,
     ) -> tuple[list[_PairCandidate], int]:
         remaining: list[_PairCandidate] = []
-        for cand in pool:
+        for cand in _learning_prioritized(pool):
             if slots > 0 and cand.ticker not in selected_tickers:
                 selected_tickers.add(cand.ticker)
                 forced_shadow_tickers.add(cand.ticker)
-                forced_shadow_reason_by_ticker[cand.ticker] = reason
+                forced_reason = reason
+                if cand.ticker in learning_priority_tickers:
+                    forced_reason = _SHADOW_EXPLORATION_FORCE_LEARNING_RETENTION
+                    learning_forced_tickers.add(cand.ticker)
+                forced_shadow_reason_by_ticker[cand.ticker] = forced_reason
                 selected_forced.append(cand)
                 slots -= 1
             else:
@@ -2151,6 +2322,7 @@ def run_rotation_pass(
     cut_ranked.extend(selected_forced)
     if selected_forced:
         out["shadow_exploration_forced"] = len(selected_forced)
+        out["learning_retained_n"] = len(learning_forced_tickers)
         forced_reasons = out["shadow_exploration_forced_reasons"]
         for reason in forced_shadow_reason_by_ticker.values():
             forced_reasons[reason] = forced_reasons.get(reason, 0) + 1

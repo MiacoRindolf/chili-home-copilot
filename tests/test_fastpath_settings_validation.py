@@ -15,6 +15,7 @@ from unittest import mock
 import pytest
 
 from app.services.trading.fast_path.settings import (
+    DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S,
     FastPathSettings,
     load,
 )
@@ -263,6 +264,36 @@ def test_universe_shadow_exploration_floor_env_override_works():
     ):
         loaded = load()
     assert loaded.universe_min_shadow_exploration_n == 0
+
+
+def test_universe_learning_retention_defaults_to_short_horizon_and_floor():
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS": "5",
+        },
+    ):
+        os.environ.pop("CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N", None)
+        os.environ.pop("CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_MAX_N", None)
+        loaded = load()
+    assert loaded.universe_learning_retention_horizon_s == (
+        DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S
+    )
+    assert loaded.universe_min_shadow_exploration_n == 5
+    assert loaded.universe_learning_retention_max_n == 5
+
+
+def test_universe_learning_retention_env_overrides_work():
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_HORIZON_S": "120",
+            "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_MAX_N": "2",
+        },
+    ):
+        loaded = load()
+    assert loaded.universe_learning_retention_horizon_s == 120
+    assert loaded.universe_learning_retention_max_n == 2
 
 
 def test_universe_snapshot_fetch_concurrency_env_override_works():

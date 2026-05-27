@@ -11,6 +11,18 @@ import os
 from dataclasses import dataclass, field
 
 
+DEFAULT_UNIVERSE_HYSTERESIS_RANKS = 3
+"""Default rank buffer used by universe rotation and learning floors."""
+
+DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S = 300
+"""Default short-horizon learning retention window.
+
+This is the largest scalp-decay bucket before the multi-hour observation
+horizons. It lets the rotator collect 1s/5s/30s/60s/300s evidence without
+pinning a symbol for the 30m/1h/4h research horizons.
+"""
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = (os.environ.get(name) or "").strip().lower()
     # Be tolerant of accidentally-inline notes in .env files, e.g.
@@ -152,7 +164,7 @@ class FastPathSettings:
     pass. Mid-tier sweet spot per the 2026-05-07 alpha replay; tighten
     for volatility, loosen for coverage."""
 
-    universe_hysteresis_ranks: int = 3
+    universe_hysteresis_ranks: int = DEFAULT_UNIVERSE_HYSTERESIS_RANKS
     """A pair must drop ≥ this many ranks below the top-N cut to be
     demoted. Avoids subscription churn on rank-edge oscillation."""
 
@@ -228,6 +240,21 @@ class FastPathSettings:
     only candidates blocked by missing fresh velocity evidence, not
     learned negative-edge candidates. Override via
     ``CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED``."""
+
+    universe_learning_retention_horizon_s: int = (
+        DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S
+    )
+    """Seconds to keep a recently alerting/probed shadow ticker eligible
+    for subscription so the decay miner can observe short-horizon outcomes.
+    Set to 0 to disable. Override via
+    ``CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_HORIZON_S``."""
+
+    universe_learning_retention_max_n: int = DEFAULT_UNIVERSE_HYSTERESIS_RANKS
+    """Maximum recently-learning shadow tickers to prioritize per rotation.
+    The loader defaults this to ``universe_min_shadow_exploration_n`` so
+    the retention lane reuses the configured learning budget instead of
+    introducing an independent hard cap. Override via
+    ``CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_MAX_N``."""
 
     universe_snapshot_fetch_concurrency: int = 4
     """Bounded worker count for Coinbase REST snapshot collection during
@@ -449,6 +476,18 @@ def load() -> FastPathSettings:
     """Read settings from the process environment. Called once at
     container boot by ``scripts/fast_data_worker.py``."""
     exec_notional_usd = _env_float("CHILI_FAST_PATH_EXEC_NOTIONAL_USD", 25.0)
+    universe_hysteresis_ranks = _env_int(
+        "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS",
+        DEFAULT_UNIVERSE_HYSTERESIS_RANKS,
+    )
+    universe_min_shadow_exploration_n = _env_int(
+        "CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N",
+        universe_hysteresis_ranks,
+    )
+    universe_learning_retention_max_n = _env_int(
+        "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_MAX_N",
+        universe_min_shadow_exploration_n,
+    )
     return FastPathSettings(
         enabled=_env_bool("CHILI_FAST_PATH_ENABLED", False),
         mode=(os.environ.get("CHILI_FAST_PATH_MODE") or "paper").strip().lower(),
@@ -473,8 +512,7 @@ def load() -> FastPathSettings:
         universe_shadow_capacity_probe_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_CAPACITY_PROBE_ENABLED", False),
         universe_top_n=_env_int("CHILI_FAST_PATH_UNIVERSE_TOP_N", 25),
-        universe_hysteresis_ranks=_env_int(
-            "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", 3),
+        universe_hysteresis_ranks=universe_hysteresis_ranks,
         universe_shadow_window_h=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_WINDOW_H", 24),
         universe_min_volume_24h_usd=_env_float(
@@ -495,10 +533,7 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_ADAPTIVE_RANGE_FLOOR_ENABLED", True),
         universe_missing_grace_passes=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_MISSING_GRACE_PASSES", 2),
-        universe_min_shadow_exploration_n=_env_int(
-            "CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N",
-            _env_int("CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", 3),
-        ),
+        universe_min_shadow_exploration_n=universe_min_shadow_exploration_n,
         universe_market_velocity_cost_parity_ratio=_env_float(
             "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_COST_PARITY_RATIO",
             1.0,
@@ -507,6 +542,11 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED",
             True,
         ),
+        universe_learning_retention_horizon_s=_env_int(
+            "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_HORIZON_S",
+            DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S,
+        ),
+        universe_learning_retention_max_n=universe_learning_retention_max_n,
         universe_snapshot_fetch_concurrency=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_SNAPSHOT_FETCH_CONCURRENCY",
             4,
@@ -587,4 +627,9 @@ def load() -> FastPathSettings:
     )
 
 
-__all__ = ["FastPathSettings", "load"]
+__all__ = [
+    "DEFAULT_UNIVERSE_HYSTERESIS_RANKS",
+    "DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S",
+    "FastPathSettings",
+    "load",
+]

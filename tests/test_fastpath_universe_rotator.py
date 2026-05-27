@@ -294,6 +294,8 @@ class _StubSettings:
     universe_min_shadow_exploration_n: int = 0
     universe_market_velocity_cost_parity_ratio: float = 1.0
     universe_market_velocity_deadlock_probe_enabled: bool = True
+    universe_learning_retention_horizon_s: int = 300
+    universe_learning_retention_max_n: int = 3
     universe_min_trades_24h: int = 1_000
     execution_mode: str = "maker_only"
     cost_aware_maker_fee_bps: float = 0.0
@@ -320,6 +322,7 @@ class _FakeRotationDB:
         observed_rows: list[dict] | None = None,
         prior_market_velocity_ratio: float | None = None,
         grace_history: dict[str, list[dict]] | None = None,
+        learning_rows: list[dict] | None = None,
     ) -> None:
         self.inserted_rows: list[dict] = []
         self.inserted_run: dict | None = None
@@ -333,6 +336,7 @@ class _FakeRotationDB:
         self.observed_rows = observed_rows or []
         self.prior_market_velocity_ratio = prior_market_velocity_ratio
         self.grace_history = grace_history or {}
+        self.learning_rows = learning_rows or []
 
     def execute(self, statement, params=None):
         sql = str(statement)
@@ -360,6 +364,8 @@ class _FakeRotationDB:
             return _FakeRows([
                 _FakeRow(ratio=self.prior_market_velocity_ratio)
             ])
+        if "recent learning retention events" in sql:
+            return _FakeScalarRows(self.learning_rows)
         if "SELECT status, rank, composite_score" in sql:
             ticker = (params or {}).get("ticker")
             rows = [_FakeRow(**row) for row in self.grace_history.get(ticker, [])]
@@ -1229,6 +1235,61 @@ def test_velocity_deadlock_probe_keeps_configured_shadow_floor_alive():
     assert list(statuses.values()).count(UNIVERSE_STATUS_INACTIVE) == (
         len(snapshots) - shadow_floor
     )
+
+
+def test_learning_retention_prioritizes_recent_alert_for_shadow_floor():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+    from app.services.trading.fast_path.universe_status import (
+        UNIVERSE_STATUS_INACTIVE,
+        UNIVERSE_STATUS_SHADOW,
+    )
+
+    db = _FakeRotationDB(
+        prior_market_velocity_ratio=0.2,
+        learning_rows=[{
+            "ticker": "LEARN-USD",
+            "latest_event_at": datetime(2026, 5, 24, 15, 4, 0),
+            "latest_alert_at": datetime(2026, 5, 24, 15, 4, 0),
+            "latest_maker_attempt_at": None,
+            "alert_count": 1,
+            "maker_attempt_count": 0,
+        }],
+    )
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+        universe_min_shadow_exploration_n=1,
+        universe_learning_retention_max_n=1,
+    )
+    snapshots = {
+        "HIGHER-RANK-USD": _make_candidate(
+            ticker="HIGHER-RANK-USD",
+            high_24h=130.0,
+            low_24h=70.0,
+        ),
+        "LEARN-USD": _make_candidate(
+            ticker="LEARN-USD",
+            high_24h=106.0,
+            low_24h=94.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: list(snapshots),
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    statuses = {row["ticker"]: row["status"] for row in db.inserted_rows}
+    assert out["learning_retention_event_tickers"] == 1
+    assert out["learning_retention_candidates"] == 1
+    assert out["learning_retained_n"] == 1
+    assert out["shadow_exploration_forced_reasons"] == {"learning_retention": 1}
+    assert statuses["LEARN-USD"] == UNIVERSE_STATUS_SHADOW
+    assert statuses["HIGHER-RANK-USD"] == UNIVERSE_STATUS_INACTIVE
 
 
 def test_rotation_ranks_shadow_candidates_against_active_depth_candidates():
