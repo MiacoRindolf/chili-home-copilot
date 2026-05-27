@@ -274,23 +274,23 @@ _MAX_CONTEXT_LEARNING_EVENTS = 20
 _INDICATOR_TICKER_STOPWORDS = frozenset(
     {
         "RSI", "MACD", "EMA", "SMA", "ADX", "ATR", "OBV", "MFI", "CCI", "SAR",
-        "VWAP", "IBS",
+        "VWAP", "AVWAP", "IBS", "RVOL",
     }
 )
 _MARKET_STRUCTURE_TICKER_STOPWORDS = frozenset(
     {
-        "BOS", "FVG", "HTF", "LTF", "MSS",
+        "BOS", "CHOCH", "FVG", "HTF", "LTF", "MSS", "POI", "VCP",
     }
 )
 _PRICE_ACTION_TICKER_STOPWORDS = frozenset(
     {
-        "HH", "LL", "HOD", "LOD",
+        "HH", "LL", "HOD", "LOD", "ORB",
     }
 )
 _GENERAL_TICKER_STOPWORDS = frozenset(
     {
         "AND", "THE", "FOR", "USD", "AVG", "NET", "LOW", "HIGH", "CHILI",
-        "NR4", "NR7",
+        "ATM", "DTE", "EV", "ITM", "NR4", "NR7", "OCO", "OTM", "RTH",
     }
 )
 _TICKER_STOPWORDS = (
