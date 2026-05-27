@@ -19,6 +19,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+FVG_CONFIRMATION_BARS = 1
+
 
 # ── Core FVG detection ─────────────────────────────────────────────────
 
@@ -93,7 +95,8 @@ def compute_fvg_series(
         active_fvgs: list[dict] = []
         for rec in records:
             idx = rec["bar_idx"]
-            if idx > i or idx < i - lookback:
+            confirmation_idx = idx + FVG_CONFIRMATION_BARS
+            if confirmation_idx > i or confirmation_idx < i - lookback:
                 continue
             zone_hi = rec["fvg_high"]
             zone_lo = rec["fvg_low"]

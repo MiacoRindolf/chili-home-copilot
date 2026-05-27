@@ -927,9 +927,160 @@ def _compute_atr_series(df: pd.DataFrame, period: int = 14) -> list:
     return [None if pd.isna(v) else float(v) for v in atr]
 
 
+_CROSS_TF_SEPARATOR = ":"
+_CROSS_TF_COMPLETED_BAR_SHIFT = 1
+_CROSS_TF_MINUTES: dict[str, int] = {
+    "1m": 1,
+    "5m": 5,
+    "15m": 15,
+    "1h": 60,
+    "4h": 240,
+    "1d": 1440,
+    "1wk": 10080,
+}
+_CROSS_TF_RESAMPLE_RULES: dict[str, str] = {
+    "5m": "5min",
+    "15m": "15min",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1D",
+    "1wk": "W-FRI",
+}
+_CROSS_TF_OHLCV_AGG: dict[str, str] = {
+    "Open": "first",
+    "High": "max",
+    "Low": "min",
+    "Close": "last",
+    "Volume": "sum",
+}
+_REQUIRED_OHLC_COLUMNS = ("Open", "High", "Low", "Close")
+
+
+def _naive_datetime_index(index: Any) -> pd.DatetimeIndex:
+    idx = pd.to_datetime(index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    return idx
+
+
+def _split_cross_tf_indicator(indicator: object) -> tuple[str, str] | None:
+    raw = str(indicator or "").strip()
+    if _CROSS_TF_SEPARATOR not in raw:
+        return None
+    prefix, _, base_key = raw.partition(_CROSS_TF_SEPARATOR)
+    prefix = prefix.strip().lower()
+    base_key = base_key.strip()
+    if not prefix or not base_key or prefix not in _CROSS_TF_MINUTES:
+        return None
+    return prefix, base_key
+
+
+def _infer_interval_from_index(df: pd.DataFrame) -> str | None:
+    if df is None or len(df.index) < 2:
+        return None
+    try:
+        idx = _naive_datetime_index(df.index)
+        deltas = pd.Series(idx).diff().dropna()
+        if deltas.empty:
+            return None
+        median_minutes = float(deltas.median().total_seconds() / 60.0)
+    except Exception:
+        return None
+    return min(
+        _CROSS_TF_MINUTES,
+        key=lambda tf: abs(float(_CROSS_TF_MINUTES[tf]) - median_minutes),
+    )
+
+
+def _indicator_series_to_list(series: pd.Series) -> list[Any]:
+    out: list[Any] = []
+    for value in series:
+        if pd.isna(value):
+            out.append(None)
+        elif isinstance(value, (bool, np.bool_)):
+            out.append(bool(value))
+        else:
+            try:
+                out.append(float(value))
+            except (TypeError, ValueError):
+                out.append(value)
+    return out
+
+
+def _resample_ohlcv_for_timeframe(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    rule = _CROSS_TF_RESAMPLE_RULES.get(timeframe)
+    if not rule:
+        return pd.DataFrame()
+    missing = [col for col in (*_REQUIRED_OHLC_COLUMNS, "Volume") if col not in df.columns]
+    if missing:
+        logger.debug("[backtest_service] cross-tf resample missing columns=%s", missing)
+        return pd.DataFrame()
+    work = df.copy()
+    work.index = _naive_datetime_index(work.index)
+    out = work.resample(rule, label="left", closed="left").agg(_CROSS_TF_OHLCV_AGG)
+    return out.dropna(subset=list(_REQUIRED_OHLC_COLUMNS))
+
+
+def _add_cross_timeframe_indicator_series(
+    result: dict[str, list],
+    df: pd.DataFrame,
+    needed: set[str],
+    *,
+    source_interval: str | None = None,
+) -> None:
+    prefixed_needed: dict[str, set[str]] = {}
+    for key in needed:
+        split = _split_cross_tf_indicator(key)
+        if split is None:
+            continue
+        timeframe, base_key = split
+        prefixed_needed.setdefault(timeframe, set()).add(base_key)
+
+    if not prefixed_needed:
+        return
+
+    from app.services.trading.indicator_core import compute_all_from_df
+
+    source_tf = (source_interval or _infer_interval_from_index(df) or "").strip().lower()
+    source_minutes = _CROSS_TF_MINUTES.get(source_tf)
+    for timeframe, base_keys in prefixed_needed.items():
+        target_minutes = _CROSS_TF_MINUTES.get(timeframe)
+        if target_minutes is None:
+            continue
+
+        if source_tf == timeframe:
+            tf_df = df
+            use_completed_shift = False
+        elif source_minutes is not None and target_minutes > source_minutes:
+            tf_df = _resample_ohlcv_for_timeframe(df, timeframe)
+            use_completed_shift = True
+        else:
+            logger.debug(
+                "[backtest_service] cross-tf series skipped timeframe=%s source_interval=%s",
+                timeframe,
+                source_tf or None,
+            )
+            continue
+
+        if tf_df is None or tf_df.empty:
+            continue
+        tf_arrays = compute_all_from_df(tf_df, needed=set(base_keys))
+        for base_key in base_keys:
+            arr = tf_arrays.get(base_key)
+            if not arr:
+                continue
+            series = pd.Series(arr, index=_naive_datetime_index(tf_df.index))
+            if use_completed_shift:
+                series = series.shift(_CROSS_TF_COMPLETED_BAR_SHIFT)
+            aligned = series.reindex(_naive_datetime_index(df.index), method="ffill")
+            result[f"{timeframe}:{base_key}"] = _indicator_series_to_list(aligned)
+
+
 def _compute_series_for_conditions(
     df: pd.DataFrame,
     conditions: list[dict[str, Any]],
+    *,
+    interval: str | None = None,
 ) -> dict[str, list]:
     """Pre-compute full-length indicator series required by pattern conditions.
 
@@ -955,6 +1106,12 @@ def _compute_series_for_conditions(
     # Delegate standard indicators to the shared core for parity
     from app.services.trading.indicator_core import compute_all_from_df
     result: dict[str, list] = compute_all_from_df(df, needed=needed)
+    _add_cross_timeframe_indicator_series(
+        result,
+        df,
+        needed,
+        source_interval=interval,
+    )
 
     def _safe(series: pd.Series) -> list:
         return [None if pd.isna(v) else float(v) for v in series]
@@ -1923,7 +2080,7 @@ def _run_dynamic_pattern_slice(
     if work.index.tz is not None:
         work.index = work.index.tz_localize(None)
 
-    indicator_arrays = _compute_series_for_conditions(work, conditions)
+    indicator_arrays = _compute_series_for_conditions(work, conditions, interval=interval)
     atr = _compute_atr_series(work)
     swing_lows = _compute_swing_lows(work) if use_bos else []
 

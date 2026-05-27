@@ -15,6 +15,7 @@ from app.services.trading.research_integrity import (
     promotion_blocked_by_integrity,
     rules_json_fingerprint,
 )
+from app.services.trading.fvg import compute_fvg_series
 
 
 def _sample_ohlcv(n: int = 120) -> pd.DataFrame:
@@ -29,6 +30,24 @@ def _sample_ohlcv(n: int = 120) -> pd.DataFrame:
             "Volume": rng.integers(1_000_000, 5_000_000, n),
         },
         index=pd.date_range("2022-01-01", periods=n, freq="D"),
+    )
+    return df
+
+
+def _sample_hourly_ohlcv(days: int = 80) -> pd.DataFrame:
+    bars_per_day = 24
+    n = days * bars_per_day
+    rng = np.random.default_rng(123)
+    close = 100 + rng.standard_normal(n).cumsum() * 0.25
+    df = pd.DataFrame(
+        {
+            "Open": close + rng.standard_normal(n) * 0.05,
+            "High": close + rng.random(n) * 0.8,
+            "Low": close - rng.random(n) * 0.8,
+            "Close": close,
+            "Volume": rng.integers(100_000, 700_000, n),
+        },
+        index=pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC"),
     )
     return df
 
@@ -74,6 +93,33 @@ def test_check_signal_bar_alignment_passes_clean():
     out = check_signal_bar_alignment(df, conditions, arrays, max_check_bars=24)
     assert out["lookahead_ok"] is True
     assert out["causality_checked_bars"] >= 1
+
+
+def test_fvg_series_waits_for_confirmation_bar():
+    high = pd.Series([10.0, 10.0, 10.0, 10.0, 14.0, 15.0])
+    low = pd.Series([9.0, 9.0, 9.0, 9.0, 11.0, 12.0])
+    close = pd.Series([9.5, 9.6, 9.7, 9.8, 12.0, 13.0])
+
+    out = compute_fvg_series(high, low, close)
+
+    assert out["fvg_present"][3] is False
+    assert out["fvg_present"][4] is True
+
+
+def test_cross_timeframe_prefixed_indicator_is_causal():
+    df = _sample_hourly_ohlcv()
+    conditions = [
+        {"indicator": "1d:rsi_14", "op": ">", "value": 50},
+        {"indicator": "rsi_14", "op": ">", "value": 45},
+    ]
+
+    arrays = _compute_series_for_conditions(df, conditions, interval="1h")
+    out = check_signal_bar_alignment(df, conditions, arrays, max_check_bars=24)
+
+    assert "1d:rsi_14" in arrays
+    assert len(arrays["1d:rsi_14"]) == len(df)
+    assert any(value is not None for value in arrays["1d:rsi_14"])
+    assert out["lookahead_ok"] is True
 
 
 def test_aggregate_promotion_integrity():
