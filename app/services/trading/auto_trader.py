@@ -181,6 +181,9 @@ _OPTION_ENTRY_FILLED_STATES = frozenset({"filled", "done", "completed", "complet
 _OPTION_ENTRY_PARTIAL_STATES = frozenset(
     {"partially_filled", "partial", "partial_filled"}
 )
+_OPTION_ENTRY_TERMINAL_STATES = frozenset(
+    {"cancelled", "canceled", "rejected", "failed", "expired"}
+)
 
 
 def _alert_signal_lane(alert: BreakoutAlert) -> str:
@@ -379,9 +382,32 @@ def _entry_lifecycle_from_response(
         if state in _OPTION_ENTRY_PARTIAL_STATES:
             filled = filled_qty if filled_qty is not None else 0.0
             return "working", state or "partially_filled", filled, max(qty - filled, 0.0)
+        if state in _OPTION_ENTRY_TERMINAL_STATES and filled_qty is not None and filled_qty > 0:
+            filled = min(float(filled_qty), float(qty))
+            if filled + 1e-9 < qty:
+                return "open", "partially_filled_cancelled", filled, 0.0
+            return "open", "filled", filled, 0.0
         return "working", state or "accepted", 0.0, qty
 
     return "open", None, None, None
+
+
+def _entry_quantity_for_trade(
+    *,
+    is_option_entry: bool,
+    requested_qty: float,
+    entry_broker_status: str | None,
+    entry_filled_qty: float | None,
+) -> float:
+    if (
+        is_option_entry
+        and entry_broker_status == "partially_filled_cancelled"
+        and entry_filled_qty is not None
+        and entry_filled_qty > 0
+        and entry_filled_qty + 1e-9 < requested_qty
+    ):
+        return float(entry_filled_qty)
+    return float(requested_qty)
 
 
 def _autotrader_tick_note(
@@ -4758,6 +4784,7 @@ def _execute_new_entry(
             _broker_qty = float(res.get("base_size") or qty)
         except (TypeError, ValueError):
             _broker_qty = float(qty)
+        _requested_broker_qty = float(_broker_qty)
         _entry_now = datetime.utcnow()
         _is_coinbase_entry = _broker_source_for_trade == "coinbase"
         _is_option_entry = bool(res.get("_chili_options_path") or snap.get("options_path"))
@@ -4778,7 +4805,20 @@ def _execute_new_entry(
             broker_source=_broker_source_for_trade,
             res=res,
             snap=snap,
-            qty=float(_broker_qty),
+            qty=float(_requested_broker_qty),
+        )
+        _broker_qty = _entry_quantity_for_trade(
+            is_option_entry=_is_option_entry,
+            requested_qty=float(_requested_broker_qty),
+            entry_broker_status=_entry_broker_status,
+            entry_filled_qty=_entry_filled_qty,
+        )
+        _option_terminal_partial_entry = (
+            _is_option_entry
+            and _entry_broker_status == "partially_filled_cancelled"
+            and _entry_filled_qty is not None
+            and _entry_filled_qty > 0
+            and _requested_broker_qty > _entry_filled_qty + 1e-9
         )
         _entry_is_working = _entry_status == "working"
         _entry_is_async = _is_coinbase_entry or _is_option_entry
@@ -4817,6 +4857,25 @@ def _execute_new_entry(
             "maker_price_increment": res.get("_chili_maker_price_increment"),
             "maker_improved_ticks": res.get("_chili_maker_improved_ticks"),
             "broker_base_size": _broker_qty,
+            "broker_requested_size": _requested_broker_qty,
+            "option_position_partial": bool(_option_terminal_partial_entry),
+            "option_position_requested_quantity": (
+                _requested_broker_qty if _option_terminal_partial_entry else None
+            ),
+            "option_position_quantity": (
+                _broker_qty if _option_terminal_partial_entry else None
+            ),
+            "option_position_remaining_quantity": (
+                0.0 if _option_terminal_partial_entry else None
+            ),
+            "option_position_residual_cancelled": (
+                True if _option_terminal_partial_entry else None
+            ),
+            "option_entry_cancel_reason": (
+                "partial_entry_cancelled_by_broker"
+                if _option_terminal_partial_entry
+                else None
+            ),
             "tca_reference_entry_price": _tca_ref_entry,
             "tca_reference_domain": _tca_ref_domain,
             PROBATION_ENTRY_FLAG: bool(snap.get(PROBATION_ENTRY_FLAG)),

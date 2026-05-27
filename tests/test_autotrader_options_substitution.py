@@ -275,3 +275,59 @@ def test_option_partial_entry_uses_processed_quantity():
     assert broker_status == "partially_filled"
     assert filled_qty == 1.0
     assert remaining_qty == 1.0
+
+
+def test_option_terminal_partial_entry_preserves_filled_contract_only():
+    status, broker_status, filled_qty, remaining_qty = (
+        at_mod._entry_lifecycle_from_response(
+            broker_source="robinhood",
+            res={
+                "ok": True,
+                "order_id": "oid",
+                "state": "cancelled",
+                "processed_quantity": "1",
+            },
+            snap={"options_path": True},
+            qty=2.0,
+        )
+    )
+    trade_qty = at_mod._entry_quantity_for_trade(
+        is_option_entry=True,
+        requested_qty=2.0,
+        entry_broker_status=broker_status,
+        entry_filled_qty=filled_qty,
+    )
+
+    assert status == "open"
+    assert broker_status == "partially_filled_cancelled"
+    assert filled_qty == 1.0
+    assert remaining_qty == 0.0
+    assert trade_qty == 1.0
+
+
+def test_option_terminal_complete_entry_fill_opens_requested_contracts():
+    status, broker_status, filled_qty, remaining_qty = (
+        at_mod._entry_lifecycle_from_response(
+            broker_source="robinhood",
+            res={
+                "ok": True,
+                "order_id": "oid",
+                "state": "cancelled",
+                "processed_quantity": "2",
+            },
+            snap={"options_path": True},
+            qty=2.0,
+        )
+    )
+    trade_qty = at_mod._entry_quantity_for_trade(
+        is_option_entry=True,
+        requested_qty=2.0,
+        entry_broker_status=broker_status,
+        entry_filled_qty=filled_qty,
+    )
+
+    assert status == "open"
+    assert broker_status == "filled"
+    assert filled_qty == 2.0
+    assert remaining_qty == 0.0
+    assert trade_qty == 2.0
