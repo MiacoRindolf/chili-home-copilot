@@ -48,6 +48,9 @@ PAPER_TRADE_STATUS_CANCELLED = "cancelled"
 PAPER_SHADOW_CAPACITY_EVICTED_REASON = "shadow_capacity_evicted"
 PAPER_SHADOW_CAPACITY_EVICTION_MODE = "cancelled_without_pnl"
 PAPER_SHADOW_CAPACITY_EVICTION_META_KEY = "_paper_shadow_eviction"
+PAPER_SHADOW_CAPACITY_EVICT_YOUNGEST_FIRST_DEFAULT = True
+PAPER_SHADOW_CAPACITY_EVICT_YOUNGEST_FIRST_POLICY = "priority_youngest_first"
+PAPER_SHADOW_CAPACITY_EVICT_OLDEST_FIRST_POLICY = "priority_oldest_first"
 PAPER_SHADOW_PRIORITY_UNKNOWN = 0
 PAPER_SHADOW_PRIORITY_CANDIDATE = 10
 PAPER_SHADOW_PRIORITY_CHALLENGED = 15
@@ -221,6 +224,22 @@ PAPER_SHADOW_DECISION_PRIORITY = {
 PAPER_SHADOW_SIGNAL_LANE_PRIORITY = {
     "shadow_near_miss": PAPER_SHADOW_PRIORITY_NEAR_MISS_SIGNAL_LANE,
 }
+
+
+def _paper_shadow_capacity_evict_youngest_first() -> bool:
+    return bool(
+        getattr(
+            settings,
+            "chili_autotrader_paper_shadow_capacity_evict_youngest_first",
+            PAPER_SHADOW_CAPACITY_EVICT_YOUNGEST_FIRST_DEFAULT,
+        )
+    )
+
+
+def _paper_shadow_capacity_age_tiebreaker_policy() -> str:
+    if _paper_shadow_capacity_evict_youngest_first():
+        return PAPER_SHADOW_CAPACITY_EVICT_YOUNGEST_FIRST_POLICY
+    return PAPER_SHADOW_CAPACITY_EVICT_OLDEST_FIRST_POLICY
 
 
 def _utc_iso(ts: datetime | None = None) -> str:
@@ -526,14 +545,18 @@ def _paper_shadow_evict_key(
     pt: PaperTrade,
     *,
     pattern_stage_by_id: dict[int, str],
-) -> tuple[int, datetime]:
+) -> tuple[int, float]:
     evidence = _paper_shadow_evidence_priority(
         pt,
         pattern_stage_by_id=pattern_stage_by_id,
     )
+    youngest_first = _paper_shadow_capacity_evict_youngest_first()
+    entry_age_key = (
+        (pt.entry_date or datetime.min) - datetime.min
+    ).total_seconds()
     return (
         int(evidence["priority"]),
-        pt.entry_date or datetime.min,
+        -entry_age_key if youngest_first else entry_age_key,
     )
 
 
@@ -613,6 +636,9 @@ def prune_autotrader_paper_shadow_capacity(
             "target_open": target_open,
             "reserve_new_slot": bool(reserve_new_slot),
             "eviction_policy": "priority_evidence_buffer",
+            "capacity_age_tiebreaker": (
+                _paper_shadow_capacity_age_tiebreaker_policy()
+            ),
         }
 
     stale: list[PaperTrade] = []
@@ -665,6 +691,9 @@ def prune_autotrader_paper_shadow_capacity(
             "target_open": target_open,
             "reserve_new_slot": bool(reserve_new_slot),
             "eviction_policy": "priority_evidence_buffer",
+            "capacity_age_tiebreaker": (
+                _paper_shadow_capacity_age_tiebreaker_policy()
+            ),
         }
 
     stale_closed = 0
@@ -700,6 +729,7 @@ def prune_autotrader_paper_shadow_capacity(
         "target_open": target_open,
         "reserve_new_slot": bool(reserve_new_slot),
         "eviction_policy": "priority_evidence_buffer",
+        "capacity_age_tiebreaker": _paper_shadow_capacity_age_tiebreaker_policy(),
     }
     logger.info("[paper_shadow_janitor] %s", result)
     return result

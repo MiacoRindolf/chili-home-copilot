@@ -46,6 +46,7 @@ from app.services.trading.auto_trader import (
 from app.services.trading.paper_trading import (
     PAPER_SHADOW_CAPACITY_EVICTED_REASON,
     PAPER_SHADOW_CAPACITY_EVICTION_META_KEY,
+    PAPER_SHADOW_CAPACITY_EVICT_YOUNGEST_FIRST_POLICY,
     prune_autotrader_paper_shadow_capacity,
 )
 
@@ -1099,6 +1100,69 @@ def test_shadow_capacity_janitor_evicts_low_value_before_pilot_evidence(
     ] is False
     assert high_value.status == "open"
     assert standard.status == "open"
+
+
+def test_shadow_capacity_janitor_preserves_mature_same_priority_evidence(
+    db,
+    monkeypatch,
+):
+    pat, alert = _seed_pattern_and_alert(db)
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_capacity_evict_youngest_first",
+        True,
+    )
+    older = PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pat.id,
+        ticker="OLD",
+        direction="long",
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        quantity=1,
+        status="open",
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+        signal_json={"auto_trader_v1": True, "paper_shadow": True},
+    )
+    younger = PaperTrade(
+        user_id=alert.user_id,
+        scan_pattern_id=pat.id,
+        ticker="NEW",
+        direction="long",
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        quantity=1,
+        status="open",
+        entry_date=datetime.utcnow(),
+        signal_json={"auto_trader_v1": True, "paper_shadow": True},
+    )
+    db.add_all([older, younger])
+    db.commit()
+
+    def fail_fetch_quote(ticker):
+        raise AssertionError("capacity eviction must not fetch quotes inline")
+
+    monkeypatch.setattr("app.services.trading.market_data.fetch_quote", fail_fetch_quote)
+
+    result = prune_autotrader_paper_shadow_capacity(
+        db,
+        alert.user_id,
+        max_open=2,
+        max_age_hours=100,
+        buffer=0,
+    )
+
+    db.refresh(older)
+    db.refresh(younger)
+    assert result["capacity_cancelled"] == 1
+    assert result["capacity_age_tiebreaker"] == (
+        PAPER_SHADOW_CAPACITY_EVICT_YOUNGEST_FIRST_POLICY
+    )
+    assert older.status == "open"
+    assert younger.status == "cancelled"
+    assert younger.exit_reason == PAPER_SHADOW_CAPACITY_EVICTED_REASON
 
 
 def test_reject_shadow_reclaims_buffer_slot_when_capacity_full(db, monkeypatch):
