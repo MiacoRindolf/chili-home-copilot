@@ -48,6 +48,19 @@ def _mk_bar(day: int, close: float) -> dict:
     }
 
 
+def _mk_df(closes: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Open": closes,
+            "High": [c * 1.01 for c in closes],
+            "Low": [c * 0.99 for c in closes],
+            "Close": closes,
+            "Volume": [10_000 for _ in closes],
+        },
+        index=pd.date_range("2026-01-02", periods=len(closes), freq="D"),
+    )
+
+
 class TestFetchOhlcvDeadCacheEquity:
     def test_equity_falls_through_to_yfinance(self, monkeypatch):
         """Massive all-variants-dead + equity → yfinance is still tried."""
@@ -160,6 +173,41 @@ class TestFetchOhlcvDfDeadCacheEquity:
 
         df = market_data.fetch_ohlcv_df("ETH-USD", interval="1d", period="5d")
         assert df.empty
+
+    def test_quality_rejected_massive_df_falls_through_to_yfinance(self, monkeypatch):
+        monkeypatch.setattr(market_data, "_use_massive", lambda: True)
+        monkeypatch.setattr(market_data, "_use_polygon", lambda: False)
+        monkeypatch.setattr(market_data, "_effective_allow_fallback", lambda _x: True)
+
+        m = market_data._massive
+        monkeypatch.setattr(m, "get_aggregates_df", lambda *a, **k: _mk_df([100.0, 19.0]))
+        monkeypatch.setattr(m, "massive_aggregate_variants_all_dead", lambda _t: False)
+        monkeypatch.setattr(market_data, "_yf_history", lambda *a, **k: _mk_df([100.0, 101.0]))
+
+        df = market_data.fetch_ohlcv_df("MSFT", interval="1d", period="5d")
+
+        assert not df.empty
+        assert df.attrs["provider"] == "yfinance"
+        assert list(df["Close"]) == [100.0, 101.0]
+
+    def test_final_quality_rejected_empty_df_is_cached(self, monkeypatch):
+        monkeypatch.setattr(market_data, "_use_massive", lambda: False)
+        monkeypatch.setattr(market_data, "_use_polygon", lambda: False)
+        monkeypatch.setattr(market_data, "_effective_allow_fallback", lambda _x: True)
+        calls = {"count": 0}
+
+        def _bad_yf(*_args, **_kwargs):
+            calls["count"] += 1
+            return _mk_df([100.0, 19.0])
+
+        monkeypatch.setattr(market_data, "_yf_history", _bad_yf)
+
+        first = market_data.fetch_ohlcv_df("MSFT", interval="1d", period="5d")
+        second = market_data.fetch_ohlcv_df("MSFT", interval="1d", period="5d")
+
+        assert first.empty
+        assert second.empty
+        assert calls["count"] == 1
 
 
 class TestFetchQuoteDeadCacheCrypto:
