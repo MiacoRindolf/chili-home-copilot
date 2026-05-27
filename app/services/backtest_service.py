@@ -20,12 +20,28 @@ from .trading.research_integrity import (
 )
 from .trading.backtest_provenance import normalize_backtest_storage_metadata
 
-from ..config import settings
+from ..config import (
+    BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT_DEFAULT,
+    BRAIN_EXIT_ENGINE_BACKTEST_INTERESTING_DRIFT_BPS_DEFAULT,
+    BRAIN_EXIT_ENGINE_BACKTEST_OPS_LOG_DEFAULT_ENABLED,
+    BRAIN_EXIT_ENGINE_BACKTEST_PARITY_DEFAULT_SAMPLE_PCT,
+    settings,
+)
 from ..models.trading import BacktestResult, ScanPattern
 from .trading.research_kpis import build_research_kpis
 from .trading.scan_pattern_label_alignment import strategy_label_aligns_scan_pattern_name
 
 logger = logging.getLogger(__name__)
+
+
+def _float_setting(name: str, fallback: float) -> float:
+    raw = getattr(settings, name, fallback)
+    if raw is None:
+        return fallback
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return fallback
 
 
 # ── Helper indicators ───────────────────────────────────────────────────
@@ -1625,7 +1641,7 @@ def _phase_b_bt_shadow_parity(
         # live and backtest paths stay byte-identical on this logic.
         from .trading.exit_parity_metric import (
             compute_parity_v2_fields,
-            should_persist_parity_row,
+            should_persist_backtest_parity_row,
         )
         v2 = compute_parity_v2_fields(
             legacy_action=legacy_action,
@@ -1636,16 +1652,30 @@ def _phase_b_bt_shadow_parity(
             direction=state.direction,
         )
 
-        sample_pct = float(getattr(settings, "brain_exit_engine_parity_sample_pct", 1.0) or 1.0)
-        persist_row = should_persist_parity_row(
-            sample_pct=sample_pct,
+        sample_pct = _float_setting(
+            "brain_exit_engine_backtest_parity_sample_pct",
+            BRAIN_EXIT_ENGINE_BACKTEST_PARITY_DEFAULT_SAMPLE_PCT,
+        )
+        close_agreement_sample_pct = _float_setting(
+            "brain_exit_engine_backtest_close_agreement_sample_pct",
+            BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT_DEFAULT,
+        )
+        interesting_drift_bps = _float_setting(
+            "brain_exit_engine_backtest_interesting_drift_bps",
+            BRAIN_EXIT_ENGINE_BACKTEST_INTERESTING_DRIFT_BPS_DEFAULT,
+        )
+        persist_row = should_persist_backtest_parity_row(
+            hold_sample_pct=sample_pct,
+            close_agreement_sample_pct=close_agreement_sample_pct,
+            interesting_drift_bps=interesting_drift_bps,
             action_class=v2.action_class,
             agree_bool=bool(agree),
+            label_match=v2.label_match,
+            exit_price_drift_bps=v2.exit_price_drift_bps,
+            priority_winner=v2.priority_winner,
             legacy_action=legacy_action,
             canonical_action=canonical_action,
-            source="backtest",
             ticker=getattr(strategy, "_ticker", "") or "",
-            position_id=None,
             scan_pattern_id=getattr(strategy, "_scan_pattern_id", None),
             bar_idx=i,
             config_hash=config_hash,
@@ -1674,7 +1704,14 @@ def _phase_b_bt_shadow_parity(
                 "bar_idx": i,
             })
 
-        if bool(getattr(settings, "brain_exit_engine_ops_log_enabled", True)):
+        ops_log_enabled = bool(
+            getattr(
+                settings,
+                "brain_exit_engine_backtest_ops_log_enabled",
+                BRAIN_EXIT_ENGINE_BACKTEST_OPS_LOG_DEFAULT_ENABLED,
+            )
+        )
+        if ops_log_enabled:
             from ..trading_brain.infrastructure.exit_engine_ops_log import (
                 format_exit_engine_ops_line,
             )

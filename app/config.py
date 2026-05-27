@@ -37,6 +37,13 @@ DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
 DATABASE_PYTEST_DEFAULT_POOL_SIZE = 1
 DATABASE_PYTEST_DEFAULT_MAX_OVERFLOW = 1
 DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
+BRAIN_EXIT_ENGINE_PARITY_DEFAULT_SAMPLE_PCT = 0.05
+BRAIN_EXIT_ENGINE_BACKTEST_PARITY_DEFAULT_SAMPLE_PCT = (
+    BRAIN_EXIT_ENGINE_PARITY_DEFAULT_SAMPLE_PCT
+)
+BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT_DEFAULT = 0.25
+BRAIN_EXIT_ENGINE_BACKTEST_INTERESTING_DRIFT_BPS_DEFAULT = 10.0
+BRAIN_EXIT_ENGINE_BACKTEST_OPS_LOG_DEFAULT_ENABLED = False
 AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
 AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
 AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
@@ -516,7 +523,42 @@ class Settings(BaseSettings):
     brain_exit_engine_ops_log_enabled: bool = True
     # Applies only to boring hold/hold agreement rows; disagreements and
     # actual exits are always persisted for cutover statistics.
-    brain_exit_engine_parity_sample_pct: float = 0.05
+    brain_exit_engine_parity_sample_pct: float = Field(
+        default=BRAIN_EXIT_ENGINE_PARITY_DEFAULT_SAMPLE_PCT,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("BRAIN_EXIT_ENGINE_PARITY_SAMPLE_PCT"),
+    )
+    # Backtest refreshes can evaluate thousands of synthetic bars per worker
+    # tick. Keep live parity sampling independent from backtest telemetry so
+    # an operator can run live parity at full sample without slowing recert.
+    brain_exit_engine_backtest_parity_sample_pct: float = Field(
+        default=BRAIN_EXIT_ENGINE_BACKTEST_PARITY_DEFAULT_SAMPLE_PCT,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "BRAIN_EXIT_ENGINE_BACKTEST_PARITY_SAMPLE_PCT"
+        ),
+    )
+    brain_exit_engine_backtest_close_agreement_sample_pct: float = Field(
+        default=BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT_DEFAULT,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT"
+        ),
+    )
+    brain_exit_engine_backtest_interesting_drift_bps: float = Field(
+        default=BRAIN_EXIT_ENGINE_BACKTEST_INTERESTING_DRIFT_BPS_DEFAULT,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "BRAIN_EXIT_ENGINE_BACKTEST_INTERESTING_DRIFT_BPS"
+        ),
+    )
+    brain_exit_engine_backtest_ops_log_enabled: bool = Field(
+        default=BRAIN_EXIT_ENGINE_BACKTEST_OPS_LOG_DEFAULT_ENABLED,
+        validation_alias=AliasChoices("BRAIN_EXIT_ENGINE_BACKTEST_OPS_LOG_ENABLED"),
+    )
 
     # Economic-truth ledger (Phase A) — canonical append-only ledger of
     # entry/exit fills + fees + cash-delta + realized-PnL-delta. Shadow-only

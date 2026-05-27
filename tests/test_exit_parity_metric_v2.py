@@ -24,6 +24,7 @@ import pytest
 from app.services.trading.exit_parity_metric import (
     ParityV2Fields,
     compute_parity_v2_fields,
+    should_persist_backtest_parity_row,
     should_persist_parity_row,
 )
 
@@ -415,3 +416,71 @@ def test_parity_sampling_can_drop_boring_agreed_holds():
         bar_idx=1,
         config_hash="cfg",
     ) is True
+
+
+def test_backtest_parity_sampling_keeps_high_value_rows():
+    assert should_persist_backtest_parity_row(
+        hold_sample_pct=0.0,
+        close_agreement_sample_pct=0.0,
+        interesting_drift_bps=10.0,
+        action_class="canonical_only_close",
+        agree_bool=True,
+        label_match=None,
+        exit_price_drift_bps=None,
+        priority_winner="trail",
+        legacy_action="hold",
+        canonical_action="exit_trail",
+        ticker="KEEP",
+        bar_idx=1,
+        config_hash="cfg",
+    ) is True
+
+    assert should_persist_backtest_parity_row(
+        hold_sample_pct=0.0,
+        close_agreement_sample_pct=0.0,
+        interesting_drift_bps=10.0,
+        action_class="both_close",
+        agree_bool=True,
+        label_match=True,
+        exit_price_drift_bps=-12.5,
+        priority_winner=None,
+        legacy_action="exit_trail",
+        canonical_action="exit_trail",
+        ticker="KEEP",
+        bar_idx=2,
+        config_hash="cfg",
+    ) is True
+
+
+def test_backtest_parity_sampling_throttles_low_value_rows_by_lane():
+    assert should_persist_backtest_parity_row(
+        hold_sample_pct=0.0,
+        close_agreement_sample_pct=1.0,
+        interesting_drift_bps=10.0,
+        action_class="both_hold",
+        agree_bool=True,
+        label_match=None,
+        exit_price_drift_bps=None,
+        priority_winner=None,
+        legacy_action="hold",
+        canonical_action="hold",
+        ticker="DROP",
+        bar_idx=1,
+        config_hash="cfg",
+    ) is False
+
+    assert should_persist_backtest_parity_row(
+        hold_sample_pct=1.0,
+        close_agreement_sample_pct=0.0,
+        interesting_drift_bps=10.0,
+        action_class="both_close",
+        agree_bool=True,
+        label_match=True,
+        exit_price_drift_bps=1.0,
+        priority_winner=None,
+        legacy_action="exit_trail",
+        canonical_action="exit_trail",
+        ticker="DROP",
+        bar_idx=2,
+        config_hash="cfg",
+    ) is False

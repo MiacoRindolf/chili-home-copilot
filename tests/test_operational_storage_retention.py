@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.config import Settings
+from app.config import (
+    BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT_DEFAULT,
+    BRAIN_EXIT_ENGINE_BACKTEST_INTERESTING_DRIFT_BPS_DEFAULT,
+    BRAIN_EXIT_ENGINE_BACKTEST_OPS_LOG_DEFAULT_ENABLED,
+    BRAIN_EXIT_ENGINE_BACKTEST_PARITY_DEFAULT_SAMPLE_PCT,
+    BRAIN_EXIT_ENGINE_PARITY_DEFAULT_SAMPLE_PCT,
+    Settings,
+)
 
 
 REPO = Path(__file__).parent.parent
@@ -16,12 +23,36 @@ def _read(rel: str) -> str:
 def test_exit_parity_retention_settings_defaults():
     s = Settings(_env_file=None)  # type: ignore[call-arg]
 
-    assert s.brain_exit_engine_parity_sample_pct == 0.05
+    assert s.brain_exit_engine_parity_sample_pct == (
+        BRAIN_EXIT_ENGINE_PARITY_DEFAULT_SAMPLE_PCT
+    )
+    assert s.brain_exit_engine_backtest_parity_sample_pct == (
+        BRAIN_EXIT_ENGINE_BACKTEST_PARITY_DEFAULT_SAMPLE_PCT
+    )
+    assert s.brain_exit_engine_backtest_close_agreement_sample_pct == (
+        BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT_DEFAULT
+    )
+    assert s.brain_exit_engine_backtest_interesting_drift_bps == (
+        BRAIN_EXIT_ENGINE_BACKTEST_INTERESTING_DRIFT_BPS_DEFAULT
+    )
+    assert s.brain_exit_engine_backtest_ops_log_enabled is (
+        BRAIN_EXIT_ENGINE_BACKTEST_OPS_LOG_DEFAULT_ENABLED
+    )
     assert s.brain_retention_exit_parity_backtest_days == 7
     assert s.brain_retention_exit_parity_live_days == 30
     assert s.brain_retention_exit_parity_delete_batch_size == 50_000
     assert s.brain_retention_bracket_reconciliation_days == 30
     assert s.brain_retention_execution_event_days == 180
+
+
+def test_backtest_exit_parity_settings_allow_zero_override(monkeypatch):
+    monkeypatch.setenv("BRAIN_EXIT_ENGINE_BACKTEST_PARITY_SAMPLE_PCT", "0")
+    monkeypatch.setenv("BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT", "0")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.brain_exit_engine_backtest_parity_sample_pct == 0.0
+    assert s.brain_exit_engine_backtest_close_agreement_sample_pct == 0.0
 
 
 def test_retention_sweep_includes_operational_logs():
@@ -47,6 +78,7 @@ def test_storage_maintenance_script_uses_concurrent_indexes_and_dry_run_default(
 
     assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS" in src
     assert "ix_exit_parity_created_retention" in src
+    assert "ix_exit_parity_pattern_created" in src
     assert "ix_bracket_reconciliation_observed_retention" in src
     assert "ix_pattern_trades_created_retention" in src
     assert "ix_execution_events_recorded_retention" in src

@@ -32,7 +32,8 @@ logger = logging.getLogger("trading_storage_maintenance")
 class IndexSpec:
     table: str
     name: str
-    columns: tuple[str, str]
+    columns: tuple[str, ...]
+    where: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,12 @@ INDEX_SPECS = [
         "trading_exit_parity_log",
         "ix_exit_parity_created_retention",
         ("created_at", "id"),
+    ),
+    IndexSpec(
+        "trading_exit_parity_log",
+        "ix_exit_parity_pattern_created",
+        ("scan_pattern_id", "created_at", "id"),
+        "scan_pattern_id IS NOT NULL",
     ),
     IndexSpec(
         "trading_bracket_reconciliation_log",
@@ -178,8 +185,10 @@ def _create_retention_indexes(*, dry_run: bool, targets: list[str]) -> None:
             sql = (
                 f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {_quote_ident(spec.name)} "
                 f"ON {_quote_ident(spec.table)} "
-                f"({_quote_ident(spec.columns[0])}, {_quote_ident(spec.columns[1])})"
+                f"({', '.join(_quote_ident(col) for col in spec.columns)})"
             )
+            if spec.where:
+                sql = f"{sql} WHERE {spec.where}"
             if dry_run:
                 logger.info(
                     "index planned table=%s index=%s size=%s",

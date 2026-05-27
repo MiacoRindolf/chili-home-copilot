@@ -19273,6 +19273,22 @@ def _migration_275_position_identity_phase5d_decision_pattern_backfill(conn) -> 
     )
 
 
+def _migration_276_exit_parity_pattern_created_index(conn) -> None:
+    """Index pattern-scoped exit parity lookups used by recert/scheduler."""
+    if "trading_exit_parity_log" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_exit_parity_log")
+    if not {"scan_pattern_id", "created_at", "id"}.issubset(cols):
+        return
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_exit_parity_pattern_created
+        ON trading_exit_parity_log (scan_pattern_id, created_at DESC, id DESC)
+        WHERE scan_pattern_id IS NOT NULL
+    """))
+    conn.commit()
+    logger.info("[mig276] exit parity pattern/created index installed")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19605,6 +19621,8 @@ MIGRATIONS = [
      _migration_274_position_identity_phase5c_attribution_columns),
     ("275_position_identity_phase5d_decision_pattern_backfill",
      _migration_275_position_identity_phase5d_decision_pattern_backfill),
+    ("276_exit_parity_pattern_created_index",
+     _migration_276_exit_parity_pattern_created_index),
 ]
 
 

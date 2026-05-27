@@ -2016,6 +2016,13 @@ class ExitParityLog(Base):
         # Migration 230 indices for the verdict/cutover-gate query paths.
         Index("ix_exit_parity_action_class_created", "action_class", "created_at"),
         Index("ix_exit_parity_priority_winner_created", "priority_winner", "created_at"),
+        Index(
+            "ix_exit_parity_pattern_created",
+            "scan_pattern_id",
+            "created_at",
+            "id",
+            postgresql_where=text("scan_pattern_id IS NOT NULL"),
+        ),
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)

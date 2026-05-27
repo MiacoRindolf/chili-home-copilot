@@ -19,6 +19,15 @@ from __future__ import annotations
 import hashlib
 from typing import NamedTuple, Optional
 
+PARITY_SAMPLE_HASH_DIGEST_SIZE_BYTES = 8
+PARITY_SAMPLE_BUCKET_DENOMINATOR = float(
+    1 << (PARITY_SAMPLE_HASH_DIGEST_SIZE_BYTES * 8)
+)
+BACKTEST_PARITY_ASYMMETRIC_ACTION_CLASSES = frozenset({
+    "canonical_only_close",
+    "legacy_only_close",
+})
+
 
 class ParityV2Fields(NamedTuple):
     """The four columns added by Migration 230."""
@@ -146,9 +155,9 @@ def should_persist_parity_row(
     if pct <= 0.0:
         return False
 
-    key = "|".join(
-        str(part)
-        for part in (
+    return _sample_pct_allows(
+        sample_pct,
+        (
             source,
             ticker,
             position_id,
@@ -158,15 +167,116 @@ def should_persist_parity_row(
             sample_salt,
             legacy_action,
             canonical_action,
-        )
+        ),
     )
-    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
-    bucket = int.from_bytes(digest, "big") / float(1 << 64)
+
+
+def should_persist_backtest_parity_row(
+    *,
+    hold_sample_pct: float,
+    close_agreement_sample_pct: float,
+    interesting_drift_bps: float,
+    action_class: str | None,
+    agree_bool: bool,
+    label_match: bool | None,
+    exit_price_drift_bps: float | None,
+    priority_winner: str | None,
+    legacy_action: str,
+    canonical_action: str,
+    ticker: str,
+    scan_pattern_id: int | None = None,
+    bar_idx: int | None = None,
+    config_hash: str | None = None,
+) -> bool:
+    """Return whether a backtest parity row is worth persisting.
+
+    Live parity keeps every actual exit row because live volume is naturally
+    bounded. Backtests can emit one row per synthetic bar across hundreds of
+    queued retests, so they need a richer evidence buffer: keep divergences
+    and meaningful drift, sample routine agreements deterministically.
+    """
+    normalized_action_class = (action_class or "").strip()
+    if not bool(agree_bool):
+        return True
+    if normalized_action_class in BACKTEST_PARITY_ASYMMETRIC_ACTION_CLASSES:
+        return True
+    if label_match is False:
+        return True
+    if priority_winner:
+        return True
+
+    if _drift_is_interesting(
+        exit_price_drift_bps=exit_price_drift_bps,
+        interesting_drift_bps=interesting_drift_bps,
+    ):
+        return True
+
+    if normalized_action_class == "both_close":
+        return _sample_pct_allows(
+            close_agreement_sample_pct,
+            (
+                "backtest_close_agreement",
+                ticker,
+                scan_pattern_id,
+                bar_idx,
+                config_hash,
+                legacy_action,
+                canonical_action,
+            ),
+        )
+
+    return should_persist_parity_row(
+        sample_pct=hold_sample_pct,
+        action_class=action_class,
+        agree_bool=agree_bool,
+        legacy_action=legacy_action,
+        canonical_action=canonical_action,
+        source="backtest",
+        ticker=ticker,
+        scan_pattern_id=scan_pattern_id,
+        bar_idx=bar_idx,
+        config_hash=config_hash,
+    )
+
+
+def _drift_is_interesting(
+    *,
+    exit_price_drift_bps: float | None,
+    interesting_drift_bps: float,
+) -> bool:
+    try:
+        threshold = float(interesting_drift_bps)
+        drift = abs(float(exit_price_drift_bps))
+    except (TypeError, ValueError):
+        return False
+    return threshold > 0.0 and drift >= threshold
+
+
+def _sample_pct_allows(sample_pct: float, key_parts: tuple[object, ...]) -> bool:
+    try:
+        pct = float(sample_pct)
+    except (TypeError, ValueError):
+        pct = 1.0
+    if pct >= 1.0:
+        return True
+    if pct <= 0.0:
+        return False
+
+    key = "|".join(
+        str(part)
+        for part in key_parts
+    )
+    digest = hashlib.blake2b(
+        key.encode("utf-8"),
+        digest_size=PARITY_SAMPLE_HASH_DIGEST_SIZE_BYTES,
+    ).digest()
+    bucket = int.from_bytes(digest, "big") / PARITY_SAMPLE_BUCKET_DENOMINATOR
     return bucket < pct
 
 
 __all__ = [
     "compute_parity_v2_fields",
+    "should_persist_backtest_parity_row",
     "should_persist_parity_row",
     "ParityV2Fields",
 ]
