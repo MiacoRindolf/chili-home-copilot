@@ -10,6 +10,7 @@ from app.services.trading.backtest_queue import (
     EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS,
     QUEUE_TIER_FULL,
     QUEUE_TIER_PRESCREEN,
+    get_exploration_pattern_ids,
     get_pending_patterns,
     get_priority_bypass_retest_floor,
     get_queue_status,
@@ -270,6 +271,49 @@ def test_queue_batch_summary_counts_lanes_tiers_and_lineage(db):
     }
     assert summary["tiers"] == {"full": 2, "prescreen": 1}
     assert summary["max_lineage_count"] == 1
+
+
+def test_exploration_refill_respects_existing_lineage_cap(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "brain_queue_max_per_lineage_per_batch", 2)
+    monkeypatch.setattr(settings, "brain_queue_lane_fetch_multiplier", 5)
+    parent = _queued_pattern(
+        db,
+        name="crowded exploration parent",
+        lifecycle_stage="candidate",
+        backtest_priority=0,
+    )
+    parent.active = False
+    already_selected = _queued_pattern(
+        db,
+        name="already selected child",
+        lifecycle_stage="challenged",
+        backtest_priority=0,
+        parent_id=parent.id,
+    )
+    crowded_children = [
+        _queued_pattern(
+            db,
+            name=f"exploration crowded child {idx}",
+            lifecycle_stage="challenged",
+            backtest_priority=0,
+            parent_id=parent.id,
+        )
+        for idx in range(4)
+    ]
+    other = _queued_pattern(
+        db,
+        name="different lineage",
+        lifecycle_stage="challenged",
+        backtest_priority=0,
+    )
+    db.commit()
+
+    refill = get_exploration_pattern_ids(db, {int(already_selected.id)}, 2)
+
+    crowded_ids = {int(p.id) for p in crowded_children}
+    assert len(crowded_ids.intersection(refill)) == 1
+    assert int(other.id) in refill
 
 
 def test_sparse_promotion_path_debt_cooldown_defers_recent_zero_trade_shadow(

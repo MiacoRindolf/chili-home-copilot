@@ -993,7 +993,27 @@ def get_exploration_pattern_ids(
     """
     if limit <= 0:
         return []
-    q = db.query(ScanPattern.id).filter(ScanPattern.active.is_(True))
+
+    lineage_cap = _settings_int(
+        "brain_queue_max_per_lineage_per_batch",
+        3,
+        minimum=0,
+    )
+    fetch_multiplier = _settings_int(
+        "brain_queue_lane_fetch_multiplier",
+        4,
+        minimum=1,
+    )
+    lineage_counts: dict[int, int] = {}
+    if lineage_cap > 0 and exclude_ids:
+        existing_rows = (
+            db.query(ScanPattern)
+            .filter(ScanPattern.id.in_(exclude_ids))
+            .all()
+        )
+        lineage_counts = dict(Counter(_lineage_key(row) for row in existing_rows))
+
+    q = db.query(ScanPattern).filter(ScanPattern.active.is_(True))
     if exclude_ids:
         q = q.filter(~ScanPattern.id.in_(exclude_ids))
     # Variants first (non-null parent_id), then stalest last_backtest
@@ -1004,7 +1024,17 @@ def get_exploration_pattern_ids(
             ScanPattern.last_backtest_at.asc().nullsfirst(),
             ScanPattern.id.asc(),
         )
-        .limit(limit)
+        .limit(max(limit, limit * fetch_multiplier))
         .all()
     )
-    return [r[0] for r in rows]
+    out: list[int] = []
+    for pattern in rows:
+        if len(out) >= limit:
+            break
+        pattern_id = int(pattern.id)
+        lineage = _lineage_key(pattern)
+        if lineage_cap > 0 and lineage_counts.get(lineage, 0) >= lineage_cap:
+            continue
+        out.append(pattern_id)
+        lineage_counts[lineage] = lineage_counts.get(lineage, 0) + 1
+    return out
