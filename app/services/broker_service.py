@@ -4523,6 +4523,14 @@ def place_option_spread(
                 )
                 logger.error("[broker] %s rejected (no order_id): response=%s", label, result)
                 return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            result, post_submit_reject = _verify_submitted_option_order(
+                result,
+                order_id=str(order_id),
+                label=label,
+            )
+            if post_submit_reject is not None:
+                return post_submit_reject
+            state = result.get("state", state)
             logger.info("[broker] %s placed: qty=%d limit=%.2f -> %s", label, quantity, limit_price, state)
             return {"ok": True, "order_id": order_id, "state": state, "raw": result}
 

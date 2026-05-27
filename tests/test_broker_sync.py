@@ -123,6 +123,22 @@ class TestIsRhTerminal:
 
 
 class TestRobinhoodOptionOrderRouting:
+    @staticmethod
+    def _fake_robinhood_options_module(monkeypatch, *, state: str = "unconfirmed"):
+        import sys
+        import types
+
+        root = types.ModuleType("robin_stocks")
+        root.__path__ = []
+        rh = types.ModuleType("robin_stocks.robinhood")
+        rh.orders = SimpleNamespace(
+            order_option_debit_spread=lambda **_kwargs: {"id": "opt-spread-1", "state": state},
+            order_option_credit_spread=lambda **_kwargs: {"id": "opt-spread-1", "state": state},
+        )
+        root.robinhood = rh
+        monkeypatch.setitem(sys.modules, "robin_stocks", root)
+        monkeypatch.setitem(sys.modules, "robin_stocks.robinhood", rh)
+
     def test_option_order_envelope_is_self_describing(self):
         from app.services.broker_service import _normalize_option_order_envelope
 
@@ -208,6 +224,102 @@ class TestRobinhoodOptionOrderRouting:
 
         assert rejected is None
         assert updated["state"] == "queued"
+
+    def test_option_spread_rejects_post_accept_cancel(self, monkeypatch):
+        from app.services import broker_service
+
+        self._fake_robinhood_options_module(monkeypatch)
+        monkeypatch.setattr(broker_service, "_rh_available", True)
+        monkeypatch.setattr(broker_service, "is_connected", lambda: True)
+        monkeypatch.setattr(
+            broker_service,
+            "_retry_api_call",
+            lambda fn, *, label: fn(),
+        )
+        monkeypatch.setattr(
+            broker_service,
+            "_verify_submitted_option_order",
+            lambda result, *, order_id, label: (
+                result,
+                {
+                    "ok": False,
+                    "error": "option_order_cancelled",
+                    "order_id": order_id,
+                    "state": "cancelled",
+                    "raw": result,
+                },
+            ),
+        )
+
+        out = broker_service.place_option_spread(
+            legs=[
+                {
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                    "action": "buy",
+                },
+                {
+                    "expiration": "2026-06-19",
+                    "strike": 735.0,
+                    "option_type": "call",
+                    "action": "sell",
+                },
+            ],
+            underlying="SPY",
+            quantity=1,
+            limit_price=1.25,
+            direction="debit",
+        )
+
+        assert out["ok"] is False
+        assert out["error"] == "option_order_cancelled"
+        assert out["order_id"] == "opt-spread-1"
+
+    def test_option_spread_promotes_verified_resting_state(self, monkeypatch):
+        from app.services import broker_service
+
+        self._fake_robinhood_options_module(monkeypatch)
+        monkeypatch.setattr(broker_service, "_rh_available", True)
+        monkeypatch.setattr(broker_service, "is_connected", lambda: True)
+        monkeypatch.setattr(
+            broker_service,
+            "_retry_api_call",
+            lambda fn, *, label: fn(),
+        )
+
+        def _verify(result, *, order_id, label):
+            updated = dict(result)
+            updated["state"] = "queued"
+            return updated, None
+
+        monkeypatch.setattr(broker_service, "_verify_submitted_option_order", _verify)
+
+        out = broker_service.place_option_spread(
+            legs=[
+                {
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                    "action": "buy",
+                },
+                {
+                    "expiration": "2026-06-19",
+                    "strike": 735.0,
+                    "option_type": "call",
+                    "action": "sell",
+                },
+            ],
+            underlying="SPY",
+            quantity=1,
+            limit_price=1.25,
+            direction="debit",
+        )
+
+        assert out["ok"] is True
+        assert out["order_id"] == "opt-spread-1"
+        assert out["state"] == "queued"
+        assert out["raw"]["state"] == "queued"
 
     @patch("app.services.broker_service.get_order_by_id")
     @patch("app.services.broker_service.get_option_order_by_id")
