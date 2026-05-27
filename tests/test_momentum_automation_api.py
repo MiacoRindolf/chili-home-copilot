@@ -119,6 +119,7 @@ def test_list_sessions_shape_and_event_count(db: Session) -> None:
     append_trading_automation_event(db, sess.id, "test_evt", {"a": 1})
     db.commit()
     out = list_automation_sessions(db, user_id=uid, limit=50)
+    assert not db.in_transaction()
     assert "sessions" in out
     row = next(x for x in out["sessions"] if x["id"] == sess.id)
     assert row["event_count"] >= 1
@@ -142,6 +143,7 @@ def test_session_detail_joins_variant(db: Session) -> None:
     append_trading_automation_event(db, sess.id, "arm", {})
     db.commit()
     d = get_automation_session_detail(db, user_id=uid, session_id=sess.id)
+    assert not db.in_transaction()
     assert d is not None
     assert d["session"]["symbol"] == "T3-USD"
     assert d["session"]["variant"]["family"] == "impulse_breakout"

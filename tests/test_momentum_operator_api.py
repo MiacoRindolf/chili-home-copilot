@@ -81,6 +81,7 @@ def test_viable_payload_ignores_aggregate_only_rows(db: Session) -> None:
 def test_viable_payload_after_persist(db: Session) -> None:
     vid, _ = _seed_live_eligible_row(db, symbol="SOL-USD")
     p = build_viable_strategies_payload(db, symbol="SOL-USD", user_id=1, enrich_coinbase=False)
+    assert not db.in_transaction()
     assert len(p["strategies"]) >= 1
     s0 = next(s for s in p["strategies"] if s["variant_id"] == vid)
     assert "viability_score" in s0

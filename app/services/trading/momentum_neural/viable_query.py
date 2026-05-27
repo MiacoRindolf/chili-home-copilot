@@ -14,6 +14,7 @@ from ....models.trading import BrainNodeState, MomentumStrategyVariant, Momentum
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import is_momentum_automation_implemented, momentum_execution_seam_meta
 from .market_profile import asset_class_for_symbol, is_coinbase_spot_symbol, market_open_now
+from .db_read_hygiene import detach_loaded_instances, end_read_only_transaction
 from .operator_readiness import build_momentum_operator_readiness
 from .pipeline import VIABILITY_NODE_ID
 from .persistence import _variant_id_for_family, active_variant_for_family
@@ -217,6 +218,7 @@ def _session_summary(
             "queued_live",
         )
     )
+    end_read_only_transaction(db, context="viable_session_summary")
     return {
         "sessions_7d_paper": paper_n,
         "sessions_7d_live": live_n,
@@ -322,6 +324,7 @@ def build_viable_strategies_payload(
 
     if not _momentum_tables_present(db):
         warnings.append("momentum_tables_missing")
+        end_read_only_transaction(db, context="viable_tables_missing")
         return {
             "symbol": sym,
             "refreshed_at": refreshed_at,
@@ -334,6 +337,7 @@ def build_viable_strategies_payload(
         }
 
     hot_rows, hot_ts = _hot_rows_for_symbol(db, sym)
+    end_read_only_transaction(db, context="viable_hot_rows")
     hot_idx = _hot_index(hot_rows)
 
     q = (
@@ -345,6 +349,8 @@ def build_viable_strategies_payload(
         .order_by(MomentumSymbolViability.viability_score.desc())
     )
     pairs = q.all()
+    detach_loaded_instances(db, pairs)
+    end_read_only_transaction(db, context="viable_pairs")
     if not pairs and hot_rows:
         # Hot path only (persistence lag or truncate in tests): synthesize rows from variants registry.
         warnings.append("db_rows_missing_using_hot_only")
@@ -365,7 +371,10 @@ def build_viable_strategies_payload(
                 continue
             vrow = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == vid).one_or_none()
             if not vrow:
+                end_read_only_transaction(db, context="viable_hot_variant_missing")
                 continue
+            detach_loaded_instances(db, vrow)
+            end_read_only_transaction(db, context="viable_hot_variant")
             fake = MomentumSymbolViability(
                 symbol=sym,
                 scope=VIABILITY_SCOPE_SYMBOL,

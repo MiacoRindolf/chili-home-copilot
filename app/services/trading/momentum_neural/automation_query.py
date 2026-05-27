@@ -37,6 +37,7 @@ from .operator_actions import (
     STATE_LIVE_ARM_PENDING,
     STATE_QUEUED,
 )
+from .db_read_hygiene import detach_loaded_instances, end_read_only_transaction
 from .paper_fsm import (
     PAPER_RUNNER_RUNNABLE_STATES,
     PAPER_RUNNER_TERMINAL_STATES,
@@ -593,6 +594,7 @@ def list_automation_sessions(
     limit: int = 100,
 ) -> dict[str, Any]:
     if not _tables_present(db):
+        end_read_only_transaction(db, context="automation_sessions_tables_missing")
         return {
             "sessions": [],
             "neural": neural_config_strip(),
@@ -678,6 +680,14 @@ def list_automation_sessions(
             .all()
         ):
             viability_map[(str(via.symbol), int(via.variant_id))] = via
+    detach_loaded_instances(
+        db,
+        rows,
+        runtime_map.values(),
+        binding_map.values(),
+        viability_map.values(),
+    )
+    end_read_only_transaction(db, context="automation_sessions_bulk_reads")
 
     sessions_out: list[dict[str, Any]] = []
     for sess, var in rows:
@@ -686,10 +696,12 @@ def list_automation_sessions(
         rd = merge_repeatable_edge_robustness_into_readiness(
             rd, db, scan_pattern_id=getattr(var, "scan_pattern_id", None)
         )
+        end_read_only_transaction(db, context="automation_sessions_repeatable_edge")
         op_fields = operator_fields_for_session(sess, rd)
         paused = is_operator_paused(sess.risk_snapshot_json)
         pause_info = operator_pause_info(sess.risk_snapshot_json)
         runner_health = _runner_health_for_mode(db, mode=sess.mode, sess=sess)
+        end_read_only_transaction(db, context="automation_sessions_runner_health")
         via = viability_map.get((str(sess.symbol), int(sess.variant_id)))
         runtime_values = build_runtime_snapshot_values(
             sess,
@@ -787,6 +799,7 @@ def list_automation_sessions(
 
 def get_automation_session_detail(db: Session, *, user_id: int, session_id: int) -> Optional[dict[str, Any]]:
     if not _tables_present(db):
+        end_read_only_transaction(db, context="automation_session_detail_tables_missing")
         return None
 
     expire_stale_live_arm_sessions(db, user_id=user_id)
@@ -903,6 +916,18 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
                 "state": src.state,
                 "updated_at": src.updated_at.isoformat() if src.updated_at else None,
             }
+
+    detach_loaded_instances(
+        db,
+        sess,
+        var,
+        events,
+        via,
+        via_full,
+        fill_rows,
+        binding_row,
+    )
+    end_read_only_transaction(db, context="automation_session_detail_reads")
 
     session_dict = {
         "id": sess.id,
