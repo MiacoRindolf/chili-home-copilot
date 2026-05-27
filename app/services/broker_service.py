@@ -4063,6 +4063,13 @@ def _verify_submitted_option_order(
         filled_qty = _option_order_filled_quantity(result)
         if filled_qty is not None and filled_qty > 0:
             return result, None
+        verdict, observed, observed_order = _verify_option_order_landed_detail(order_id)
+        if verdict == "executed" and observed:
+            updated = dict(result)
+            if isinstance(observed_order, dict):
+                updated.update({k: v for k, v in observed_order.items() if v is not None})
+            updated["state"] = observed
+            return updated, None
         return result, {
             "ok": False,
             "error": f"option_order_{state}",

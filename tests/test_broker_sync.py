@@ -249,6 +249,35 @@ class TestRobinhoodOptionOrderRouting:
         assert updated["state"] == "cancelled"
         assert updated["processed_quantity"] == "1"
 
+    def test_option_submit_verifier_polls_terminal_submit_for_fill(self, monkeypatch):
+        from app.services import broker_service
+
+        monkeypatch.setattr(
+            broker_service,
+            "_verify_option_order_landed_detail",
+            lambda _order_id: (
+                "executed",
+                "cancelled",
+                {
+                    "state": "cancelled",
+                    "quantity": "1",
+                    "processed_quantity": "1",
+                    "average_price": "1.45",
+                },
+            ),
+        )
+
+        updated, rejected = broker_service._verify_submitted_option_order(
+            {"id": "opt-buy-1", "state": "cancelled"},
+            order_id="opt-buy-1",
+            label="BUY-OPT SPY",
+        )
+
+        assert rejected is None
+        assert updated["state"] == "cancelled"
+        assert updated["processed_quantity"] == "1"
+        assert updated["average_price"] == "1.45"
+
     def test_option_submit_verifier_promotes_resting_state(self, monkeypatch):
         from app.services import broker_service
 
