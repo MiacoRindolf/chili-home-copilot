@@ -636,6 +636,35 @@ def test_paper_maker_sweep_resolves_crossed_book_before_timeout():
     decay.record_maker_outcome.assert_called_once()
 
 
+def test_paper_maker_book_crossed_fills_on_executable_quote_touch():
+    """L1 paper maker fills use the quote that can execute the resting order."""
+    buy_touch = _make_ctx(best_bid=100.00, best_ask=100.005)
+    buy_not_touch = _make_ctx(best_bid=100.00, best_ask=100.006)
+    sell_touch = _make_ctx(best_bid=100.005, best_ask=100.10)
+    sell_not_touch = _make_ctx(best_bid=100.004, best_ask=100.10)
+
+    assert FastPathExecutor._paper_maker_book_crossed(
+        "buy",
+        100.005,
+        buy_touch,
+    )
+    assert not FastPathExecutor._paper_maker_book_crossed(
+        "buy",
+        100.005,
+        buy_not_touch,
+    )
+    assert FastPathExecutor._paper_maker_book_crossed(
+        "sell",
+        100.005,
+        sell_touch,
+    )
+    assert not FastPathExecutor._paper_maker_book_crossed(
+        "sell",
+        100.005,
+        sell_not_touch,
+    )
+
+
 def test_maker_adverse_cancel_threshold_is_quote_distance():
     """The early-cancel threshold comes from the order's own quote distance."""
     ctx_place = _make_ctx(best_bid=100.0, best_ask=100.10)

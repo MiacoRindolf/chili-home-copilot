@@ -1437,15 +1437,9 @@ class FastPathExecutor:
         if limit_price <= 0:
             return False
         if side == "buy":
-            return (
-                ctx.best_bid > 0 and ctx.best_bid <= limit_price
-                and ctx.best_ask > 0 and ctx.best_ask <= limit_price
-            )
+            return ctx.best_ask > 0 and ctx.best_ask <= limit_price
         if side == "sell":
-            return (
-                ctx.best_ask > 0 and ctx.best_ask >= limit_price
-                and ctx.best_bid > 0 and ctx.best_bid >= limit_price
-            )
+            return ctx.best_bid > 0 and ctx.best_bid >= limit_price
         return False
 
     async def _taker_fallback_after_maker_replaced(
