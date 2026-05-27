@@ -1176,16 +1176,15 @@ def smart_backtest_insight(
                         pass
                     continue
                 persisted_results += 1
-                denominator = attempted_count if runtime_budget is not None else jobs_count
                 if (
                     persisted_results % _SMART_BACKTEST_PROGRESS_LOG_INTERVAL_RESULTS == 0
-                    or persisted_results == denominator
+                    or persisted_results == jobs_count
                 ):
                     logger.info(
                         "[backtest_engine] Persisted %d/%d ticker backtests for "
                         "insight=%s scan_pattern_id=%s",
                         persisted_results,
-                        denominator,
+                        jobs_count,
                         getattr(insight, "id", None),
                         linked_scan_pattern_id,
                     )
