@@ -1305,6 +1305,13 @@ class Settings(BaseSettings):
             "CHILI_BRAIN_QUEUE_MARKET_HOURS_STOCK_LANE_MAX_PATTERNS"
         ),
     )
+    chili_brain_queue_market_hours_exploration_max: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_BRAIN_QUEUE_MARKET_HOURS_EXPLORATION_MAX"
+        ),
+    )
     # 4. zero-trade pattern demote: after N consecutive 0-trade backtest
     #    runs, demote queue_tier to 'prescreen' so the pattern only runs
     #    when the prescreen tier is enabled (rare). Prevents the queue

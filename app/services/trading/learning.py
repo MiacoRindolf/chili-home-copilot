@@ -3773,6 +3773,27 @@ def _apply_market_hours_stock_lane(
     return filtered, kept_stock, deferred_stock
 
 
+def _queue_exploration_cap(settings_obj: object, *, market_hours_active: bool) -> int:
+    try:
+        cap = int(getattr(settings_obj, "brain_queue_exploration_max", 40))
+    except (TypeError, ValueError):
+        cap = 40
+    cap = max(0, cap)
+    if not market_hours_active:
+        return cap
+    try:
+        raw_market_cap = int(
+            getattr(settings_obj, "chili_brain_queue_market_hours_exploration_max", 0)
+        )
+    except (TypeError, ValueError):
+        raw_market_cap = 0
+    market_cap = max(
+        0,
+        raw_market_cap,
+    )
+    return min(cap, market_cap)
+
+
 def _read_cgroup_memory_limit_bytes(
     paths: tuple[str, ...] = CGROUP_MEMORY_LIMIT_PATHS,
 ) -> int | None:
@@ -3927,7 +3948,10 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
             }
 
     if getattr(settings, "brain_queue_exploration_enabled", True):
-        explore_cap = max(0, int(getattr(settings, "brain_queue_exploration_max", 40)))
+        explore_cap = _queue_exploration_cap(
+            settings,
+            market_hours_active=bool(_market_hours_active),
+        )
         slots = min(batch_size - len(pattern_ids), explore_cap)
         if slots > 0:
             extra = get_exploration_pattern_ids(db, set(pattern_ids), slots)
