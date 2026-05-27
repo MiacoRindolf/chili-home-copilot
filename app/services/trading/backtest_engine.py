@@ -20,7 +20,7 @@ import os
 import random
 import re
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -306,6 +306,17 @@ _BACKTEST_PREVIOUS_WINNER_LIMIT = 5
 _BACKTEST_HOT_CANDIDATE_POOL_LIMIT = 800
 _BACKTEST_HOT_CANDIDATE_SAMPLE_LIMIT = 5
 _DEFAULT_BACKTEST_TARGET_TICKERS = 40
+_SMART_BACKTEST_DEFAULT_OOS_HOLDOUT_FRACTION = 0.25
+_SMART_BACKTEST_DEFAULT_SPREAD = 0.001
+_SMART_BACKTEST_DEFAULT_COMMISSION = 0.001
+_SMART_BACKTEST_PROGRESS_LOG_INTERVAL_RESULTS = 10
+_SMART_BACKTEST_CONFIDENCE_MIN_EVIDENCE_RESULTS = 3
+_SMART_BACKTEST_CONFIDENCE_PRIOR_WEIGHT = 0.7
+_SMART_BACKTEST_CONFIDENCE_EVIDENCE_WEIGHT = 0.3
+_SMART_BACKTEST_CONFIDENCE_MIN = 0.1
+_SMART_BACKTEST_CONFIDENCE_MAX = 0.95
+_SMART_BACKTEST_CONFIDENCE_DECIMAL_PLACES = 3
+_PERCENT_TO_FRACTION_DIVISOR = 100.0
 
 
 def _normalize_backtest_ticker(ticker: Any) -> str:
@@ -1054,9 +1065,19 @@ def smart_backtest_insight(
     jobs_count = len(tickers)
 
     from ...config import settings as _bt_settings
-    _oos_frac = float(getattr(_bt_settings, "brain_oos_holdout_fraction", 0.25))
-    _bt_spread = float(getattr(_bt_settings, "backtest_spread", 0.001))
-    _bt_comm = float(getattr(_bt_settings, "backtest_commission", 0.001))
+    _oos_frac = float(
+        getattr(
+            _bt_settings,
+            "brain_oos_holdout_fraction",
+            _SMART_BACKTEST_DEFAULT_OOS_HOLDOUT_FRACTION,
+        )
+    )
+    _bt_spread = float(
+        getattr(_bt_settings, "backtest_spread", _SMART_BACKTEST_DEFAULT_SPREAD)
+    )
+    _bt_comm = float(
+        getattr(_bt_settings, "backtest_commission", _SMART_BACKTEST_DEFAULT_COMMISSION)
+    )
 
     def _run_one_pattern(ticker: str) -> dict[str, Any] | None:
         if shutdown.is_set():
@@ -1077,11 +1098,22 @@ def smart_backtest_insight(
         return None
 
     wins, losses, total = 0, 0, 0
+    persisted_results = 0
 
     with ThreadPoolExecutor(max_workers=_bt_workers()) as pool:
-        futures = pool.map(_run_one_pattern, tickers)
+        futures = {pool.submit(_run_one_pattern, ticker): ticker for ticker in tickers}
 
-        for result in futures:
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                logger.debug(
+                    "[backtest_engine] ticker backtest failed ticker=%s",
+                    ticker,
+                    exc_info=True,
+                )
+                continue
             if result is None:
                 continue
             try:
@@ -1098,6 +1130,19 @@ def smart_backtest_insight(
                 except Exception:
                     pass
                 continue
+            persisted_results += 1
+            if (
+                persisted_results % _SMART_BACKTEST_PROGRESS_LOG_INTERVAL_RESULTS == 0
+                or persisted_results == jobs_count
+            ):
+                logger.info(
+                    "[backtest_engine] Persisted %d/%d ticker backtests for "
+                    "insight=%s scan_pattern_id=%s",
+                    persisted_results,
+                    jobs_count,
+                    getattr(insight, "id", None),
+                    linked_scan_pattern_id,
+                )
             trade_count = result.get("trade_count", 0)
             if trade_count > 0:
                 total += 1
@@ -1120,16 +1165,25 @@ def smart_backtest_insight(
             panel = {"bt_win_rate": None}
         insight.evidence_count = (insight.evidence_count or 0) + total
 
-        if update_confidence and total >= 3:
+        if update_confidence and total >= _SMART_BACKTEST_CONFIDENCE_MIN_EVIDENCE_RESULTS:
             p_wr = panel.get("bt_win_rate") if isinstance(panel, dict) else None
             bt_win_rate = (
-                float(p_wr) / 100.0
+                float(p_wr) / _PERCENT_TO_FRACTION_DIVISOR
                 if p_wr is not None
                 else wins / max(1, total)
             )
             old_conf = insight.confidence
-            new_conf = old_conf * 0.7 + bt_win_rate * 0.3
-            insight.confidence = round(min(0.95, max(0.1, new_conf)), 3)
+            new_conf = (
+                old_conf * _SMART_BACKTEST_CONFIDENCE_PRIOR_WEIGHT
+                + bt_win_rate * _SMART_BACKTEST_CONFIDENCE_EVIDENCE_WEIGHT
+            )
+            insight.confidence = round(
+                min(
+                    _SMART_BACKTEST_CONFIDENCE_MAX,
+                    max(_SMART_BACKTEST_CONFIDENCE_MIN, new_conf),
+                ),
+                _SMART_BACKTEST_CONFIDENCE_DECIMAL_PLACES,
+            )
 
         db.commit()
     elif jobs_count > 0:
