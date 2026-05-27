@@ -4614,6 +4614,62 @@ def _robinhood_order_lookup_for_trade(
     return get_order_by_id(str(order_id or ""))
 
 
+def _first_present_float(mapping: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _robinhood_order_event_payload_for_trade(
+    trade: Any,
+    order: dict[str, Any],
+    order_id: str | None,
+) -> dict[str, Any]:
+    """Normalize stock/option order fields for execution-event ingestion."""
+    payload = dict(order or {})
+    payload.setdefault("id", order_id)
+    if not _is_option_trade_for_order_sync(trade):
+        return payload
+
+    state = str(payload.get("state") or payload.get("status") or "").strip().lower()
+    requested = _first_present_float(payload, ("quantity", "requested_quantity"))
+    if requested is None:
+        requested = _safe_float(getattr(trade, "quantity", None))
+    if requested > 0 and payload.get("quantity") is None:
+        payload["quantity"] = requested
+
+    cumulative = _first_present_float(
+        payload,
+        (
+            "cumulative_quantity",
+            "cumulative_filled_quantity",
+            "filled_quantity",
+            "processed_quantity",
+            "quantity_filled",
+            "filled_size",
+        ),
+    )
+    if cumulative is None:
+        cumulative = requested if state == "filled" and requested > 0 else 0.0
+    payload["cumulative_quantity"] = cumulative
+
+    average = _first_present_float(
+        payload,
+        ("average_price", "avg_price", "average_fill_price", "price", "limit_price"),
+    )
+    if average is None:
+        average = _safe_float(getattr(trade, "entry_price", None)) or None
+    if average is not None and payload.get("average_price") is None:
+        payload["average_price"] = average
+    return payload
+
+
 def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Reconcile local trades (with broker_order_id) against Robinhood.
 
@@ -4666,17 +4722,22 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     for trade in working_trades:
         try:
-            if _is_option_trade_for_order_sync(trade):
-                continue
-            rh_order = get_order_by_id(trade.broker_order_id)
+            rh_order = _robinhood_order_lookup_for_trade(trade, trade.broker_order_id)
             if not rh_order:
                 errors += 1
                 continue
 
-            rh_state = (rh_order.get("state") or "").lower()
+            order_payload = _robinhood_order_event_payload_for_trade(
+                trade,
+                rh_order,
+                trade.broker_order_id,
+            )
+            rh_state = (
+                order_payload.get("state") or order_payload.get("status") or ""
+            ).lower()
             now = datetime.utcnow()
             normalized = normalize_robinhood_order_event(
-                order={**rh_order, "id": trade.broker_order_id},
+                order=order_payload,
                 trade=trade,
                 event_type="status",
             )
@@ -4727,7 +4788,7 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 # the real positions as fresh broker_sync rows.
                 cum = 0.0
                 try:
-                    cum = float(rh_order.get("cumulative_quantity") or 0)
+                    cum = float(order_payload.get("cumulative_quantity") or 0)
                 except (TypeError, ValueError):
                     cum = 0.0
                 if cum > 0:

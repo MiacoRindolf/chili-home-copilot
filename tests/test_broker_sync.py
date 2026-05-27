@@ -304,6 +304,58 @@ class TestSyncOrdersToDb:
 
     @patch("app.services.broker_service.is_connected", return_value=True)
     @patch("app.services.broker_service.get_order_by_id")
+    @patch("app.services.broker_service.get_option_order_by_id")
+    def test_option_working_entry_syncs_from_option_order(
+        self,
+        mock_option_order,
+        mock_stock_order,
+        mock_connected,
+        db,
+    ):
+        from app.services.broker_service import sync_orders_to_db
+
+        trade = self._seed_working_trade(
+            db,
+            ticker="SPY",
+            entry_price=1.25,
+            quantity=2,
+            broker_order_id="opt-entry-1",
+            asset_kind="option",
+            indicator_snapshot={
+                "breakout_alert": {
+                    "asset_type": "options",
+                    "option_meta": {
+                        "underlying": "SPY",
+                        "expiration": "2026-06-19",
+                        "strike": 729.0,
+                        "option_type": "call",
+                    },
+                }
+            },
+        )
+        mock_option_order.return_value = {
+            "id": "opt-entry-1",
+            "state": "filled",
+            "quantity": "2",
+            "processed_quantity": "2",
+            "average_price": "1.30",
+        }
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        db.refresh(trade)
+        assert result["filled"] == 1
+        assert trade.status == "open"
+        assert trade.broker_status == "filled"
+        assert trade.entry_price == 1.30
+        assert trade.avg_fill_price == 1.30
+        assert trade.filled_quantity == 2
+        assert trade.remaining_quantity == 0
+        mock_option_order.assert_called_once_with("opt-entry-1")
+        mock_stock_order.assert_not_called()
+
+    @patch("app.services.broker_service.is_connected", return_value=True)
+    @patch("app.services.broker_service.get_order_by_id")
     def test_cancelled_order_updates_trade(self, mock_get_order, mock_connected, db):
         from app.services.broker_service import sync_orders_to_db
 
