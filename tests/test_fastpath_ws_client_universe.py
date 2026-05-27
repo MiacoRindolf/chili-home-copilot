@@ -186,7 +186,11 @@ def test_rotation_disabled_uses_configured_pairs():
     client = _client(settings)
 
     assert client._resolve_active_pairs() == ["BTC-USD", "ETH-USD"]
-    assert client.stats()["entry_pairs"] == ["BTC-USD", "ETH-USD"]
+    stats = client.stats()
+    assert stats["entry_pairs"] == ["BTC-USD", "ETH-USD"]
+    assert stats["entry_pairs_count"] == 2
+    assert stats["exit_only_subscription_pairs"] == []
+    assert stats["exit_only_subscription_pairs_count"] == 0
 
 
 def test_rotation_tracks_entry_pairs_separately_from_exit_subscriptions():
@@ -208,7 +212,12 @@ def test_rotation_tracks_entry_pairs_separately_from_exit_subscriptions():
         tickers = client._resolve_active_pairs()
 
     assert tickers == ["RANKED-USD", "OPEN-ONLY-USD"]
-    assert client.stats()["entry_pairs"] == ["RANKED-USD"]
+    client._active_pairs = tickers
+    stats = client.stats()
+    assert stats["entry_pairs"] == ["RANKED-USD"]
+    assert stats["entry_pairs_count"] == 1
+    assert stats["exit_only_subscription_pairs"] == ["OPEN-ONLY-USD"]
+    assert stats["exit_only_subscription_pairs_count"] == 1
     assert fake_db.closed is True
 
 
@@ -365,8 +374,13 @@ def test_exit_only_subscription_bars_warm_without_entry_alerts():
 
     assert len(writer.bars) == 3
     assert writer.alerts == []
-    assert client.stats()["alerts_suppressed_exit_only_subscription"] == 1
-    scanner_stats = client.stats()["scanner"]
+    stats = client.stats()
+    assert stats["alerts_suppressed_exit_only_subscription"] == 1
+    assert stats["entry_pairs"] == []
+    assert stats["entry_pairs_count"] == 0
+    assert stats["exit_only_subscription_pairs"] == ["TEST-USD"]
+    assert stats["exit_only_subscription_pairs_count"] == 1
+    scanner_stats = stats["scanner"]
     assert scanner_stats["suppressed_bar_close_alerts_disabled"] == 1
     assert scanner_stats["pullback_deferred_scheduled"] == 0
 

@@ -958,6 +958,9 @@ class CoinbaseWSClient:
         "filtered out" (candles_filtered_unclosed climbing) vs "dedup
         thrash" (candles_filtered_dedupe climbing).
         """
+        exit_only_subscription_pairs = sorted(
+            set(self._active_pairs) - self._entry_pairs
+        )
         return {
             "raw_messages_total": self._raw_messages_total,
             "raw_candles_events_total": self._raw_candles_events_total,
@@ -973,6 +976,9 @@ class CoinbaseWSClient:
             "alerts_suppressed_exit_only_subscription":
                 self._alerts_suppressed_exit_only_subscription,
             "entry_pairs": sorted(self._entry_pairs),
+            "entry_pairs_count": len(self._entry_pairs),
+            "exit_only_subscription_pairs": exit_only_subscription_pairs,
+            "exit_only_subscription_pairs_count": len(exit_only_subscription_pairs),
             "negative_edge_cache_size": len(self._negative_edge_cache),
             "cost_barrier_cache_size": len(self._cost_barrier_cache),
             "maker_attempt_adverse_cache_size": len(
