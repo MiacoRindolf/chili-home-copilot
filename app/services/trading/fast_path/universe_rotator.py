@@ -1788,6 +1788,8 @@ def run_rotation_pass(
         ),
         "shadow_exploration_velocity_deadlock_probe": 0,
         "shadow_exploration_velocity_deadlock_floor_excluded": 0,
+        "shadow_exploration_velocity_deadlock_min_surplus_bps": None,
+        "shadow_exploration_velocity_deadlock_max_surplus_bps": None,
         "edge_promotion_blocks": {},
         "edge_exhaustion_blocks": {},
         "edge_exhausted_demotions": 0,
@@ -2293,10 +2295,26 @@ def run_rotation_pass(
                 _market_velocity_deadlock_probe_enabled(settings)
                 and len(selected_tickers) < min_shadow_exploration_n
             ):
-                deadlock_probe_pool = [
-                    cand for cand in velocity_backfill_skips
-                    if cand.range_24h_bps > range_floor_bps
-                ]
+                def _deadlock_probe_sort_key(
+                    cand: _PairCandidate,
+                ) -> tuple[float, float]:
+                    return (
+                        cand.range_24h_bps - range_floor_bps,
+                        _candidate_rank_score(
+                            cand,
+                            fee_bps=promotion_fee_bps,
+                            top_of_book_cap_usd=rank_top_of_book_cap_usd,
+                        ),
+                    )
+
+                deadlock_probe_pool = sorted(
+                    [
+                        cand for cand in velocity_backfill_skips
+                        if cand.range_24h_bps > range_floor_bps
+                    ],
+                    key=_deadlock_probe_sort_key,
+                    reverse=True,
+                )
                 out["shadow_exploration_velocity_deadlock_floor_excluded"] = (
                     len(velocity_backfill_skips) - len(deadlock_probe_pool)
                 )
@@ -2306,13 +2324,33 @@ def run_rotation_pass(
                     reason=_SHADOW_EXPLORATION_FORCE_VELOCITY_DEADLOCK,
                     slots=force_slots,
                 )
-                deadlock_probe_tickers = {
-                    cand.ticker for cand in selected_forced[selected_before_probe:]
+                selected_probe_candidates = selected_forced[selected_before_probe:]
+                selected_probe_tickers = {
+                    cand.ticker for cand in selected_probe_candidates
                 }
-                if deadlock_probe_tickers:
+                deadlock_probe_candidates = [
+                    cand for cand in selected_probe_candidates
+                    if forced_shadow_reason_by_ticker.get(cand.ticker)
+                    == _SHADOW_EXPLORATION_FORCE_VELOCITY_DEADLOCK
+                ]
+                deadlock_probe_tickers = {
+                    cand.ticker for cand in deadlock_probe_candidates
+                }
+                if deadlock_probe_candidates:
+                    deadlock_probe_surpluses = [
+                        cand.range_24h_bps - range_floor_bps
+                        for cand in deadlock_probe_candidates
+                    ]
+                    out[
+                        "shadow_exploration_velocity_deadlock_min_surplus_bps"
+                    ] = min(deadlock_probe_surpluses)
+                    out[
+                        "shadow_exploration_velocity_deadlock_max_surplus_bps"
+                    ] = max(deadlock_probe_surpluses)
+                if selected_probe_tickers:
                     velocity_backfill_skips = [
                         cand for cand in velocity_backfill_skips
-                        if cand.ticker not in deadlock_probe_tickers
+                        if cand.ticker not in selected_probe_tickers
                     ]
                 out["shadow_exploration_velocity_deadlock_probe"] = len(
                     deadlock_probe_tickers
