@@ -8930,6 +8930,13 @@ function _monitorActionClass(act) {
   return 'mon-badge-action-hold';
 }
 
+function _monitorDecisionSourceLabel(src) {
+  var s = String(src || '').toLowerCase();
+  if (s === 'llm_unavailable') return 'rules-only';
+  if (s === 'parse_failed') return 'rules-only';
+  return String(src || '').replace(/_/g, ' ');
+}
+
 function _monitorExecutionClass(state) {
   var s = String(state || '').toLowerCase();
   if (s === 'exit_order_working') return 'mon-badge-exec-working';
@@ -9031,7 +9038,7 @@ function renderMonitorCards(setups) {
     var deltaStr = deltaPts == null ? '' : (deltaPts >= 0 ? '+' + deltaPts.toFixed(1) : deltaPts.toFixed(1));
     var deltaColor = deltaPts == null ? 'var(--text-muted)' : (deltaPts >= 0 ? '#22c55e' : '#ef4444');
     var act = ld ? ld.action : '—';
-    var src = ld && ld.decision_source ? ld.decision_source : '—';
+    var src = ld && ld.decision_source ? _monitorDecisionSourceLabel(ld.decision_source) : '—';
     var when = ld && ld.created_at ? ld.created_at : 'never';
     var healthLabel = ld && ld.health_label ? ld.health_label : 'Pattern health';
     var healthHint = ld && ld.health_hint ? ld.health_hint : 'Share of pattern conditions still satisfied';
@@ -9519,7 +9526,7 @@ function drawMonitorAnnotations(setup, ohlcData) {
 
   if (ld && ld.action) {
     var actLabel = ld.action.replace(/_/g, ' ');
-    var srcLabel = ld.decision_source || '';
+    var srcLabel = ld.decision_source ? _monitorDecisionSourceLabel(ld.decision_source) : '';
     legendItems.push({ color: actionColors[ld.action] || '#6b7280', label: 'Latest: ' + actLabel + (srcLabel ? ' (' + srcLabel + ')' : '') });
   }
 

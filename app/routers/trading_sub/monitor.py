@@ -103,6 +103,17 @@ def _quote_price(q: dict[str, Any] | None) -> float | None:
 def _serialize_decision(d: PatternMonitorDecision) -> dict[str, Any]:
     snap = d.conditions_snapshot if isinstance(d.conditions_snapshot, dict) else {}
     health_source = snap.get("monitor_health_source") if snap else None
+    decision_source = d.decision_source
+    llm_reasoning = d.llm_reasoning
+    llm_unavailable = False
+    if (
+        str(llm_reasoning or "").strip().lower() in {"llm unavailable", "llm unavailable."}
+        and (d.llm_confidence is None or float(d.llm_confidence or 0.0) == 0.0)
+    ):
+        llm_reasoning = None
+        llm_unavailable = True
+        if decision_source == "llm":
+            decision_source = "llm_unavailable"
     if health_source and health_source != "static_conditions":
         health_label = "Setup health"
         health_hint = "Using live trade-plan and setup-vitals health; entry-condition retention is in details"
@@ -128,11 +139,12 @@ def _serialize_decision(d: PatternMonitorDecision) -> dict[str, Any]:
         "old_target": json_safe(d.old_target) if d.old_target is not None else None,
         "new_target": json_safe(d.new_target) if d.new_target is not None else None,
         "llm_confidence": json_safe(d.llm_confidence) if d.llm_confidence is not None else None,
-        "llm_reasoning": d.llm_reasoning,
+        "llm_reasoning": llm_reasoning,
+        "llm_unavailable": llm_unavailable or decision_source == "llm_unavailable",
         "mechanical_action": d.mechanical_action,
         "mechanical_stop": json_safe(d.mechanical_stop) if d.mechanical_stop is not None else None,
         "mechanical_target": json_safe(d.mechanical_target) if d.mechanical_target is not None else None,
-        "decision_source": d.decision_source,
+        "decision_source": decision_source,
         "price_at_decision": json_safe(d.price_at_decision) if d.price_at_decision is not None else None,
         "price_after_1h": json_safe(d.price_after_1h) if d.price_after_1h is not None else None,
         "price_after_4h": json_safe(d.price_after_4h) if d.price_after_4h is not None else None,

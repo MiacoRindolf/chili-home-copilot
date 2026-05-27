@@ -7,6 +7,25 @@ import pytest
 
 from app import models
 from app.models.trading import PatternMonitorDecision, Trade, TradingPosition
+from app.routers.trading_sub.monitor import _serialize_decision
+
+
+def test_serialize_decision_normalizes_legacy_llm_unavailable_reason():
+    decision = PatternMonitorDecision(
+        trade_id=1,
+        health_score=0.61,
+        action="hold",
+        decision_source="llm",
+        llm_confidence=0.0,
+        llm_reasoning="LLM unavailable",
+        created_at=datetime.utcnow(),
+    )
+
+    payload = _serialize_decision(decision)
+
+    assert payload["decision_source"] == "llm_unavailable"
+    assert payload["llm_unavailable"] is True
+    assert payload["llm_reasoning"] is None
 
 
 def test_active_setups_exposes_execution_state(db, paired_client):

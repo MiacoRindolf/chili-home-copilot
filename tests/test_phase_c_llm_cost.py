@@ -190,10 +190,26 @@ def test_pattern_adjustment_caches_hold_fallback_on_unparseable_reply():
         r2 = paa.get_adjustment(**_make_inputs())
 
     assert r1.action == r2.action == "hold"
+    assert r1.advisor_status == r2.advisor_status == "parse_failed"
     assert mock_llm.call_count == 1
     stats = paa.get_input_gate_stats()
     assert stats["hits"] == 1
     assert stats["misses"] == 1
+
+
+def test_pattern_adjustment_does_not_cache_empty_llm_unavailable_reply():
+    mock_llm = MagicMock(return_value="")
+    with patch("app.services.llm_caller.call_llm", mock_llm):
+        r1 = paa.get_adjustment(**_make_inputs())
+        r2 = paa.get_adjustment(**_make_inputs())
+
+    assert r1.action == r2.action == "hold"
+    assert r1.advisor_status == r2.advisor_status == "llm_unavailable"
+    assert r1.reasoning == r2.reasoning == ""
+    assert mock_llm.call_count == 2
+    stats = paa.get_input_gate_stats()
+    assert stats["hits"] == 0
+    assert stats["misses"] == 2
 
 
 def test_agent_shared_prompt_loaded():

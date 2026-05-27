@@ -233,6 +233,7 @@ class AdjustmentRecommendation:
     new_target: float | None = None
     confidence: float = 0.0
     reasoning: str = ""
+    advisor_status: str = "ok"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -241,6 +242,7 @@ class AdjustmentRecommendation:
             "new_target": self.new_target,
             "confidence": self.confidence,
             "reasoning": self.reasoning,
+            "advisor_status": self.advisor_status,
         }
 
 
@@ -351,6 +353,7 @@ def get_adjustment(
                 new_target=cached.new_target,
                 confidence=cached.confidence,
                 reasoning=cached.reasoning,
+                advisor_status=cached.advisor_status,
             ),
             current_price=current_price,
             current_stop=current_stop,
@@ -387,6 +390,18 @@ def get_adjustment(
             trace_id=f"pattern-adjust-{ticker}",
             cacheable=True,
         )
+        raw_text = raw if isinstance(raw, str) else str(raw or "")
+        if not raw_text.strip():
+            logger.warning(
+                "[pattern_adjust] LLM unavailable for %s; using rules-only hold fallback",
+                ticker,
+            )
+            return AdjustmentRecommendation(
+                action="hold",
+                confidence=0.0,
+                reasoning="",
+                advisor_status="llm_unavailable",
+            )
         parsed = _parse_recommendation_json(raw)
     except Exception as e:
         logger.warning(
@@ -397,7 +412,8 @@ def get_adjustment(
         fallback = AdjustmentRecommendation(
             action="hold",
             confidence=0.0,
-            reasoning="LLM unavailable",
+            reasoning="LLM response was not parseable; using rules-only hold fallback.",
+            advisor_status="parse_failed",
         )
         _gate_put(gate_key, fallback)
         return fallback

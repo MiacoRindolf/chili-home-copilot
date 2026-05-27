@@ -1082,6 +1082,8 @@ def _evaluate_single(
             trade_plan_health=plan_health,
             trade_id=getattr(trade, "id", None),
         )
+        if decision_source == "llm" and getattr(rec, "advisor_status", "ok") != "ok":
+            decision_source = str(getattr(rec, "advisor_status", "llm_unavailable"))
 
     # ── Select primary recommendation ──
     if decision_source == "mechanical" and mech:
@@ -1166,8 +1168,18 @@ def _evaluate_single(
         new_stop=primary.new_stop,
         old_target=trade.take_profit,
         new_target=primary.new_target,
-        llm_confidence=rec.confidence if rec else None,
-        llm_reasoning=rec.reasoning if rec else None,
+        llm_confidence=(
+            rec.confidence
+            if rec and getattr(rec, "advisor_status", "ok") == "ok"
+            else None
+        ),
+        llm_reasoning=(
+            rec.reasoning
+            if rec
+            and getattr(rec, "advisor_status", "ok") == "ok"
+            and rec.reasoning
+            else None
+        ),
         mechanical_action=(
             mech.action
             if mech
