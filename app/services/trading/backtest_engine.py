@@ -1135,66 +1135,85 @@ def smart_backtest_insight(
     wins, losses, total = 0, 0, 0
     persisted_results = 0
 
-    worker_count = max(1, _bt_workers())
-    wave_size = worker_count if runtime_budget is not None else max(1, len(tickers))
-    for start_idx in range(0, len(tickers), wave_size):
-        if shutdown.is_set():
-            break
-        if _runtime_budget_elapsed(started, runtime_budget):
-            runtime_budget_hit = True
-            break
-        wave = tickers[start_idx:start_idx + wave_size]
-        attempted_count += len(wave)
-        with ThreadPoolExecutor(max_workers=worker_count) as pool:
-            futures = {pool.submit(_run_one_pattern, ticker): ticker for ticker in wave}
+    def _persist_result(result: dict[str, Any] | None) -> None:
+        nonlocal persisted_results, wins, losses, total
+        if result is None:
+            return
+        try:
+            save_backtest(
+                db,
+                insight.user_id,
+                result,
+                insight_id=insight.id,
+                scan_pattern_id=linked_scan_pattern_id,
+            )
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return
+        persisted_results += 1
+        if (
+            persisted_results % _SMART_BACKTEST_PROGRESS_LOG_INTERVAL_RESULTS == 0
+            or persisted_results == jobs_count
+        ):
+            logger.info(
+                "[backtest_engine] Persisted %d/%d ticker backtests for "
+                "insight=%s scan_pattern_id=%s",
+                persisted_results,
+                jobs_count,
+                getattr(insight, "id", None),
+                linked_scan_pattern_id,
+            )
+        trade_count = result.get("trade_count", 0)
+        if trade_count > 0:
+            total += 1
+            if result.get("return_pct", 0) > 0:
+                wins += 1
+            else:
+                losses += 1
 
-            for future in as_completed(futures):
-                ticker = futures[future]
-                try:
-                    result = future.result()
-                except Exception:
-                    logger.debug(
-                        "[backtest_engine] ticker backtest failed ticker=%s",
-                        ticker,
-                        exc_info=True,
-                    )
-                    continue
-                if result is None:
-                    continue
-                try:
-                    save_backtest(
-                        db,
-                        insight.user_id,
-                        result,
-                        insight_id=insight.id,
-                        scan_pattern_id=linked_scan_pattern_id,
-                    )
-                except Exception:
+    soft_budget_child = (
+        runtime_budget is not None
+        and os.environ.get("CHILI_MP_BACKTEST_CHILD", "").strip().lower()
+        in ("1", "true", "yes")
+    )
+    if soft_budget_child:
+        for ticker in tickers:
+            if shutdown.is_set():
+                break
+            if _runtime_budget_elapsed(started, runtime_budget):
+                runtime_budget_hit = True
+                break
+            attempted_count += 1
+            _persist_result(_run_one_pattern(ticker))
+    else:
+        worker_count = max(1, _bt_workers())
+        wave_size = worker_count if runtime_budget is not None else max(1, len(tickers))
+        for start_idx in range(0, len(tickers), wave_size):
+            if shutdown.is_set():
+                break
+            if _runtime_budget_elapsed(started, runtime_budget):
+                runtime_budget_hit = True
+                break
+            wave = tickers[start_idx:start_idx + wave_size]
+            attempted_count += len(wave)
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                futures = {pool.submit(_run_one_pattern, ticker): ticker for ticker in wave}
+
+                for future in as_completed(futures):
+                    ticker = futures[future]
                     try:
-                        db.rollback()
+                        result = future.result()
                     except Exception:
-                        pass
-                    continue
-                persisted_results += 1
-                if (
-                    persisted_results % _SMART_BACKTEST_PROGRESS_LOG_INTERVAL_RESULTS == 0
-                    or persisted_results == jobs_count
-                ):
-                    logger.info(
-                        "[backtest_engine] Persisted %d/%d ticker backtests for "
-                        "insight=%s scan_pattern_id=%s",
-                        persisted_results,
-                        jobs_count,
-                        getattr(insight, "id", None),
-                        linked_scan_pattern_id,
-                    )
-                trade_count = result.get("trade_count", 0)
-                if trade_count > 0:
-                    total += 1
-                    if result.get("return_pct", 0) > 0:
-                        wins += 1
-                    else:
-                        losses += 1
+                        logger.debug(
+                            "[backtest_engine] ticker backtest failed ticker=%s",
+                            ticker,
+                            exc_info=True,
+                        )
+                        continue
+                    _persist_result(result)
 
     if jobs_count > attempted_count and _runtime_budget_elapsed(started, runtime_budget):
         runtime_budget_hit = True
