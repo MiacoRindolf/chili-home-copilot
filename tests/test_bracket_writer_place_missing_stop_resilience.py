@@ -22,6 +22,7 @@ no DB / no broker.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -64,6 +65,43 @@ def reset_cooldowns():
 
 
 # ── Crypto-path refusal ─────────────────────────────────────────────
+
+
+def test_option_trade_skips_equity_stop_writer_without_broker_call(
+    reset_cooldowns, monkeypatch,
+):
+    """Option contracts are protected by the options exit monitor, not the
+    stock bracket writer's share stop-loss primitive.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chili_bracket_writer_g2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_bracket_writer_g2_place_missing_stop", True, raising=False)
+
+    db = MagicMock()
+    db.get.return_value = SimpleNamespace(
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot={"asset_type": "options"},
+    )
+
+    def _adapter_factory(_src):
+        raise AssertionError("option trade must not build a spot/crypto bracket adapter")
+
+    res = bw.place_missing_stop(
+        db=db,
+        trade_id=701,
+        bracket_intent_id=9701,
+        ticker="SPY",
+        broker_source="robinhood",
+        decision=_decision_missing_stop(),
+        local_quantity=1.0,
+        stop_price=0.75,
+        adapter_factory=_adapter_factory,
+    )
+
+    assert res.ok is False
+    assert res.reason == "option_exit_monitor_owns_contract_protection"
 
 
 def test_ada_usd_crypto_ticker_skipped_without_broker_call(

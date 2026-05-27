@@ -1186,6 +1186,19 @@ def _coinbase_open_stop_orders_for_ticker(adapter: Any, ticker: str) -> list[Any
     return out
 
 
+def _is_option_trade_for_missing_stop_writer(db: Session, trade_id: int | None) -> bool:
+    if trade_id is None:
+        return False
+    try:
+        from .autopilot_scope import is_option_trade
+        from ...models.trading import Trade
+
+        trade = db.get(Trade, int(trade_id))
+        return bool(trade is not None and is_option_trade(trade))
+    except Exception:
+        return False
+
+
 def place_missing_stop(
     db: Session,
     *,
@@ -1287,6 +1300,18 @@ def place_missing_stop(
     if stop_price is None or float(stop_price) <= 0:
         return WriterAction(
             action="place_missing_stop", ok=False, reason="invalid_decision",
+            broker_source=broker_source, ticker=ticker,
+        )
+
+    if _is_option_trade_for_missing_stop_writer(db, trade_id):
+        logger.info(
+            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+            "trade=%s ticker=%s reason=option_exit_monitor_owns_contract_protection",
+            bracket_intent_id, trade_id, ticker,
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False,
+            reason="option_exit_monitor_owns_contract_protection",
             broker_source=broker_source, ticker=ticker,
         )
 
