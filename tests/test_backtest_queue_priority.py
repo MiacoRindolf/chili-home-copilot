@@ -332,8 +332,10 @@ def test_scored_priority_does_not_requeue_fresh_pattern_below_bypass_floor(db):
     assert status["priority_bypass_floor"] == bypass_floor
 
 
-def test_fresh_promoted_recert_stays_pending_without_priority_bypass(db):
+def test_fresh_promoted_recert_cools_down_without_priority_bypass(db, monkeypatch):
     _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "brain_queue_recert_cooldown_enabled", True)
+    monkeypatch.setattr(settings, "brain_queue_recert_cooldown_minutes", 360)
     bypass_floor = get_priority_bypass_retest_floor()
     fresh = datetime.now(timezone.utc).replace(tzinfo=None)
     recert = _queued_pattern(
@@ -349,10 +351,41 @@ def test_fresh_promoted_recert_stays_pending_without_priority_bypass(db):
     pending = get_pending_patterns(db, limit=5)
     status = get_queue_status(db, use_cache=False)
 
-    assert [p.id for p in pending] == [recert.id]
-    assert status["pending"] == 1
-    assert status["recert_pending"] == 1
+    assert [p.id for p in pending] == []
+    assert status["pending"] == 0
+    assert status["recert_pending"] == 0
+    assert status["recert_cooled"] == 1
     assert status["priority_bypass"] == 0
+
+    recert.backtest_priority = bypass_floor
+    db.commit()
+
+    bypass_pending = get_pending_patterns(db, limit=5)
+
+    assert [p.id for p in bypass_pending] == [recert.id]
+
+
+def test_stale_promoted_recert_retries_after_cooldown(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "brain_queue_recert_cooldown_enabled", True)
+    monkeypatch.setattr(settings, "brain_queue_recert_cooldown_minutes", 360)
+    stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=7)
+    recert = _queued_pattern(
+        db,
+        name="stale unresolved recert",
+        lifecycle_stage="promoted",
+        backtest_priority=0,
+        recert_required=True,
+        last_backtest_at=stale,
+    )
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=5)
+    status = get_queue_status(db, use_cache=False)
+
+    assert [p.id for p in pending] == [recert.id]
+    assert status["recert_pending"] == 1
+    assert status["recert_cooled"] == 0
 
 
 def test_zero_trade_demote_uses_trade_bearing_tickers_not_jobs_run(db, monkeypatch):

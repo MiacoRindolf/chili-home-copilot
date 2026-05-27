@@ -177,6 +177,26 @@ def _recert_promoted_expr():
     )
 
 
+def _recert_cooldown_expr(now: datetime | None = None):
+    """Throttle unresolved recert debt after a fresh backtest attempt."""
+    if not _settings_bool("brain_queue_recert_cooldown_enabled", True):
+        return false()
+    cooldown_minutes = _settings_int(
+        "brain_queue_recert_cooldown_minutes",
+        360,
+        minimum=0,
+    )
+    if cooldown_minutes <= 0:
+        return false()
+    cutoff = (now or datetime.utcnow()) - timedelta(minutes=cooldown_minutes)
+    return and_(
+        _recert_promoted_expr(),
+        ScanPattern.last_backtest_at.isnot(None),
+        ScanPattern.last_backtest_at >= cutoff,
+        ScanPattern.backtest_priority < get_priority_bypass_retest_floor(),
+    )
+
+
 def _edge_evidence_variant_expr():
     return and_(
         ScanPattern.parent_id.isnot(None),
@@ -200,6 +220,7 @@ def _full_or_unknown_tier_expr():
 
 def _pending_expr(cutoff: datetime):
     recert_promoted = _recert_promoted_expr()
+    recert_cooldown = _recert_cooldown_expr()
     promotion_path_debt = _promotion_path_debt_expr()
     sparse_promotion_debt_cooldown = _sparse_promotion_debt_cooldown_expr()
     priority_bypass = ScanPattern.backtest_priority >= get_priority_bypass_retest_floor()
@@ -207,7 +228,7 @@ def _pending_expr(cutoff: datetime):
         priority_bypass,
         ScanPattern.last_backtest_at.is_(None),
         ScanPattern.last_backtest_at < cutoff,
-        recert_promoted,
+        and_(recert_promoted, not_(recert_cooldown)),
         and_(promotion_path_debt, not_(sparse_promotion_debt_cooldown)),
     )
 
@@ -748,6 +769,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
 
     base = db.query(ScanPattern).filter(ScanPattern.active.is_(True))
     recert_promoted_expr = _recert_promoted_expr()
+    recert_cooldown_expr = _recert_cooldown_expr()
     promotion_path_debt_expr = _promotion_path_debt_expr()
     sparse_promotion_debt_cooldown_expr = _sparse_promotion_debt_cooldown_expr()
     edge_evidence_expr = _lane_expr(LANE_EDGE_EVIDENCE)
@@ -794,6 +816,14 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
                 )
             )
         ).label("recert_pending"),
+        func.count(
+            case(
+                (
+                    recert_cooldown_expr,
+                    1,
+                )
+            )
+        ).label("recert_cooled"),
         func.count(
             case(
                 (
@@ -844,6 +874,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
     recently_tested = row.recently_tested or 0
     pending = row.pending_queue or 0
     recert_pending = row.recert_pending or 0
+    recert_cooled = row.recert_cooled or 0
     promotion_path_debt_pending = row.promotion_path_debt_pending or 0
     promotion_path_debt_cooled = row.promotion_path_debt_cooled or 0
     edge_evidence_pending = row.edge_evidence_pending or 0
@@ -859,6 +890,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
         "priority_bypass": priority_bypass,
         "recently_tested": recently_tested,
         "recert_pending": recert_pending,
+        "recert_cooled": recert_cooled,
         "promotion_path_debt_pending": promotion_path_debt_pending,
         "promotion_path_debt_cooled": promotion_path_debt_cooled,
         "edge_evidence_pending": edge_evidence_pending,

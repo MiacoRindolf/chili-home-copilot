@@ -1154,6 +1154,11 @@ class Settings(BaseSettings):
     brain_queue_sparse_promotion_debt_cooldown_enabled: bool = True
     brain_queue_sparse_promotion_debt_zero_runs: int = 5
     brain_queue_sparse_promotion_debt_cooldown_minutes: int = 360
+    # Promoted/live recert debt still blocks live trading, but an unresolved
+    # recert should not be retested every batch after a fresh attempt unless
+    # an explicit recert/manual boost bypasses the normal retest floor.
+    brain_queue_recert_cooldown_enabled: bool = True
+    brain_queue_recert_cooldown_minutes: int = 360
     # When the retest queue is thin, add oldest-tested active patterns up to this many per cycle.
     brain_queue_exploration_enabled: bool = True
     brain_queue_exploration_max: int = 40
