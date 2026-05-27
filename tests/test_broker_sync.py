@@ -139,6 +139,14 @@ class TestRobinhoodOptionOrderRouting:
         monkeypatch.setitem(sys.modules, "robin_stocks", root)
         monkeypatch.setitem(sys.modules, "robin_stocks.robinhood", rh)
 
+    def test_pending_exit_audit_prefix_preserves_emergency(self):
+        from app.services.broker_service import _pending_exit_audit_prefix
+
+        assert _pending_exit_audit_prefix("desk_close_now") == "desk_close"
+        assert _pending_exit_audit_prefix("emergency_drawdown_test") == "emergency_exit"
+        assert _pending_exit_audit_prefix("options_premium_take_profit") == "monitor_exit"
+        assert _pending_exit_audit_prefix(None) == "monitor_exit"
+
     def test_option_order_envelope_is_self_describing(self):
         from app.services.broker_service import _normalize_option_order_envelope
 
@@ -781,6 +789,62 @@ class TestSyncOrdersToDb:
         assert trade.pending_exit_order_id is None
         assert trade.pending_exit_status is None
         mock_option_order.assert_called_once_with("opt-exit-full-fill")
+        mock_stock_order.assert_not_called()
+
+    @patch("app.services.broker_service.is_connected", return_value=True)
+    @patch("app.services.broker_service.get_order_by_id")
+    @patch("app.services.broker_service.get_option_order_by_id")
+    def test_emergency_option_pending_exit_sync_preserves_audit_prefix(
+        self,
+        mock_option_order,
+        mock_stock_order,
+        mock_connected,
+        db,
+    ):
+        from app.models.trading import AutoTraderRun
+        from app.services.broker_service import sync_orders_to_db
+
+        now = datetime.utcnow()
+        trade = self._seed_working_trade(
+            db,
+            ticker="SPY",
+            entry_price=1.25,
+            quantity=1,
+            status="open",
+            broker_order_id=None,
+            pending_exit_order_id="opt-exit-emergency-fill",
+            pending_exit_status="working",
+            pending_exit_requested_at=now,
+            pending_exit_reason="emergency_drawdown_test",
+            pending_exit_limit_price=1.40,
+            asset_kind="option",
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        mock_option_order.return_value = {
+            "id": "opt-exit-emergency-fill",
+            "state": "cancelled",
+            "quantity": "1",
+            "processed_quantity": "1",
+            "average_price": "1.45",
+            "last_transaction_at": now.isoformat() + "Z",
+        }
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        db.refresh(trade)
+        assert result["filled"] == 1
+        assert trade.status == "closed"
+        assert trade.exit_reason == "emergency_drawdown_test"
+        audit = (
+            db.query(AutoTraderRun)
+            .filter(
+                AutoTraderRun.trade_id == trade.id,
+                AutoTraderRun.decision == "emergency_exit_filled",
+            )
+            .one()
+        )
+        assert audit.reason == "emergency_drawdown_test"
+        mock_option_order.assert_called_once_with("opt-exit-emergency-fill")
         mock_stock_order.assert_not_called()
 
     @patch("app.services.broker_service.is_connected", return_value=True)

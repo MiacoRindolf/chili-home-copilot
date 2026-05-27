@@ -4853,6 +4853,15 @@ def _preserve_option_partial_entry_fill(
         trade.remaining_quantity = 0.0
 
 
+def _pending_exit_audit_prefix(pending_exit_reason: str | None) -> str:
+    reason = str(pending_exit_reason or "").strip().lower()
+    if reason == "desk_close_now":
+        return "desk_close"
+    if reason.startswith("emergency_"):
+        return "emergency_exit"
+    return "monitor_exit"
+
+
 def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Reconcile local trades (with broker_order_id) against Robinhood.
 
@@ -5024,12 +5033,13 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             if not rh_order:
                 errors += 1
                 continue
-            prefix = "desk_close" if (trade.pending_exit_reason or "").lower() == "desk_close_now" else "monitor_exit"
             sync_out = sync_pending_exit_order(
                 db,
                 trade,
                 order={**rh_order, "id": trade.pending_exit_order_id},
-                audit_decision_prefix=prefix,
+                audit_decision_prefix=_pending_exit_audit_prefix(
+                    trade.pending_exit_reason,
+                ),
             )
             st = str(sync_out.get("state") or "").lower()
             if st == "filled":
