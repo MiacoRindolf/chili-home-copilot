@@ -54,6 +54,17 @@ def min_confidence_ok(edge: BrainGraphEdge, state_confidence: float) -> bool:
     return float(state_confidence) >= float(edge.min_confidence or 0.0)
 
 
+def _elapsed_seconds(now: datetime, then: datetime) -> float:
+    """Elapsed seconds, treating naive datetimes from DB columns as UTC."""
+    left = now
+    right = then
+    if left.tzinfo is not None and right.tzinfo is None:
+        right = right.replace(tzinfo=timezone.utc)
+    elif left.tzinfo is None and right.tzinfo is not None:
+        left = left.replace(tzinfo=timezone.utc)
+    return (left - right).total_seconds()
+
+
 def source_confidence_ok(edge: BrainGraphEdge, source_confidence: float) -> bool:
     """Check source node's confidence against edge's min_source_confidence threshold."""
     min_src = float(getattr(edge, "min_source_confidence", 0.0) or 0.0)
@@ -105,7 +116,7 @@ def should_fire(
         return False
     if state.last_fired_at is None:
         return True
-    elapsed = (now - state.last_fired_at).total_seconds()
+    elapsed = _elapsed_seconds(now, state.last_fired_at)
     return elapsed >= int(node.cooldown_seconds or 0)
 
 

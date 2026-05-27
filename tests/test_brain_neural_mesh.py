@@ -52,6 +52,33 @@ def test_projection_stale_and_cooling_accepts_naive_utc_timestamps() -> None:
     assert _node_cooling(naive_recent, 60, now=now) is True
 
 
+def test_should_fire_accepts_naive_utc_last_fired_with_aware_now() -> None:
+    """DB DateTime columns often return naive UTC; cooldown math stays UTC-safe."""
+    now = datetime.now(timezone.utc)
+    node = SimpleNamespace(enabled=True, fire_threshold=0.50, cooldown_seconds=60)
+    state = BrainNodeState(
+        node_id="n_fire",
+        activation_score=0.80,
+        confidence=0.9,
+        last_fired_at=(now - timedelta(seconds=90)).replace(tzinfo=None),
+    )
+
+    assert prop.should_fire(node, state, now) is True
+
+
+def test_should_fire_respects_cooldown_for_naive_utc_last_fired() -> None:
+    now = datetime.now(timezone.utc)
+    node = SimpleNamespace(enabled=True, fire_threshold=0.50, cooldown_seconds=60)
+    state = BrainNodeState(
+        node_id="n_cooldown",
+        activation_score=0.80,
+        confidence=0.9,
+        last_fired_at=(now - timedelta(seconds=30)).replace(tzinfo=None),
+    )
+
+    assert prop.should_fire(node, state, now) is False
+
+
 @pytest.mark.usefixtures("db")
 def test_enqueue_and_activation_batch(db: Session) -> None:
     src = db.query(BrainGraphNode).filter(BrainGraphNode.id == "nm_snap_daily").one_or_none()
