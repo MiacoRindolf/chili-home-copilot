@@ -15,6 +15,7 @@ from app.services.trading.backtest_queue import (
     get_queue_status,
     mark_pattern_tested,
 )
+from app.services.trading.backtest_queue_priority import run_priority_scoring
 
 
 def _deactivate_existing_patterns(db) -> None:
@@ -448,3 +449,49 @@ def test_zero_trade_counter_keeps_legacy_backtests_run_fallback(db, monkeypatch)
 
     assert pattern.consecutive_zero_trade_runs == 3
     assert pattern.queue_tier == QUEUE_TIER_PRESCREEN
+
+
+def test_priority_scoring_deprioritizes_hard_negative_challenged_patterns(db):
+    _deactivate_existing_patterns(db)
+    stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=8)
+    hard_negative = _queued_pattern(
+        db,
+        name="hard negative challenged",
+        lifecycle_stage="challenged",
+        promotion_status="challenged_cpcv_ev:realized_",
+        backtest_priority=70,
+        last_backtest_at=stale,
+    )
+    hard_negative.backtest_count = 100
+    hard_negative.win_rate = 0.2
+    hard_negative.avg_return_pct = -1.25
+    demoted = _queued_pattern(
+        db,
+        name="demoted evidence gap",
+        lifecycle_stage="challenged",
+        promotion_status="demoted_evidence_gap",
+        backtest_priority=70,
+        last_backtest_at=stale,
+    )
+    demoted.backtest_count = 3
+    uncertain = _queued_pattern(
+        db,
+        name="uncertain challenged",
+        lifecycle_stage="challenged",
+        promotion_status="challenged_cpcv_hypothesis_c",
+        backtest_priority=0,
+        last_backtest_at=stale,
+    )
+    uncertain.backtest_count = 10
+    uncertain.win_rate = 0.55
+    uncertain.avg_return_pct = 0.1
+    db.commit()
+
+    run_priority_scoring(db)
+    db.refresh(hard_negative)
+    db.refresh(demoted)
+    db.refresh(uncertain)
+
+    assert hard_negative.backtest_priority == 20
+    assert demoted.backtest_priority == 0
+    assert uncertain.backtest_priority == 70
