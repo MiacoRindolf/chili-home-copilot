@@ -1296,6 +1296,54 @@ def test_velocity_deadlock_probe_fills_configured_floor_shortfall():
     assert list(statuses.values()).count(UNIVERSE_STATUS_SHADOW) == shadow_floor
 
 
+def test_velocity_deadlock_probe_excludes_range_floor_boundary_candidate():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+    from app.services.trading.fast_path.universe_status import (
+        UNIVERSE_STATUS_INACTIVE,
+        UNIVERSE_STATUS_SHADOW,
+    )
+
+    db = _FakeRotationDB(prior_market_velocity_ratio=0.2)
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=200.0,
+        universe_adaptive_range_floor_enabled=False,
+        universe_min_shadow_exploration_n=2,
+    )
+    snapshots = {
+        "FLOOR-EDGE-USD": _make_candidate(
+            ticker="FLOOR-EDGE-USD",
+            high_24h=101.0,
+            low_24h=99.0,
+        ),
+        "ABOVE-FLOOR-USD": _make_candidate(
+            ticker="ABOVE-FLOOR-USD",
+            high_24h=120.0,
+            low_24h=80.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: list(snapshots),
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    statuses = {row["ticker"]: row["status"] for row in db.inserted_rows}
+    assert out["shadow_exploration_velocity_deadlock_probe"] == 1
+    assert out["shadow_exploration_velocity_deadlock_floor_excluded"] == 1
+    assert out["shadow_exploration_forced_reasons"] == {
+        "market_velocity_deadlock_probe": 1,
+    }
+    assert out["shadow_exploration_force_velocity_blocked"] == 1
+    assert out["market_velocity_backfill_skips"] == 1
+    assert out["ranked_n"] == 1
+    assert statuses["ABOVE-FLOOR-USD"] == UNIVERSE_STATUS_SHADOW
+    assert statuses["FLOOR-EDGE-USD"] == UNIVERSE_STATUS_INACTIVE
+
+
 def test_learning_retention_prioritizes_recent_alert_for_shadow_floor():
     from app.services.trading.fast_path.universe_rotator import run_rotation_pass
     from app.services.trading.fast_path.universe_status import (

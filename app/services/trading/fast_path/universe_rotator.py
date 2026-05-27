@@ -1787,6 +1787,7 @@ def run_rotation_pass(
             _market_velocity_deadlock_probe_enabled(settings)
         ),
         "shadow_exploration_velocity_deadlock_probe": 0,
+        "shadow_exploration_velocity_deadlock_floor_excluded": 0,
         "edge_promotion_blocks": {},
         "edge_exhaustion_blocks": {},
         "edge_exhausted_demotions": 0,
@@ -2288,18 +2289,33 @@ def run_rotation_pass(
             force_move_to_cost is not None
             and float(force_move_to_cost) < market_velocity_cost_parity_ratio
         ):
-            blocked_slots = force_slots
             if (
                 _market_velocity_deadlock_probe_enabled(settings)
                 and len(selected_tickers) < min_shadow_exploration_n
             ):
-                velocity_backfill_skips, force_slots = _force_shadow_exploration(
-                    velocity_backfill_skips,
+                deadlock_probe_pool = [
+                    cand for cand in velocity_backfill_skips
+                    if cand.range_24h_bps > range_floor_bps
+                ]
+                out["shadow_exploration_velocity_deadlock_floor_excluded"] = (
+                    len(velocity_backfill_skips) - len(deadlock_probe_pool)
+                )
+                selected_before_probe = len(selected_forced)
+                _deadlock_remaining, force_slots = _force_shadow_exploration(
+                    deadlock_probe_pool,
                     reason=_SHADOW_EXPLORATION_FORCE_VELOCITY_DEADLOCK,
                     slots=force_slots,
                 )
-                out["shadow_exploration_velocity_deadlock_probe"] = (
-                    blocked_slots - force_slots
+                deadlock_probe_tickers = {
+                    cand.ticker for cand in selected_forced[selected_before_probe:]
+                }
+                if deadlock_probe_tickers:
+                    velocity_backfill_skips = [
+                        cand for cand in velocity_backfill_skips
+                        if cand.ticker not in deadlock_probe_tickers
+                    ]
+                out["shadow_exploration_velocity_deadlock_probe"] = len(
+                    deadlock_probe_tickers
                 )
             out["shadow_exploration_force_velocity_blocked"] = force_slots
         else:
