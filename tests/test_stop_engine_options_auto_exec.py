@@ -29,6 +29,27 @@ class _FakeDb:
         return _FakeQuery(self.trade)
 
 
+class _FakeAllQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _FakeAllDb:
+    def __init__(self, rows):
+        self._rows = rows
+        self.commit = MagicMock()
+        self.rollback = MagicMock()
+
+    def query(self, _model):
+        return _FakeAllQuery(self._rows)
+
+
 def _option_trade_stub():
     return SimpleNamespace(
         id=7701,
@@ -60,6 +81,32 @@ def _option_trade_stub():
             }
         },
     )
+
+
+def test_evaluate_all_delegates_option_trades_without_stock_stop_evaluation() -> None:
+    from app.services.trading.stop_engine import evaluate_all
+
+    trade = _option_trade_stub()
+
+    with patch(
+        "app.services.trading.stop_engine._load_recent_decisions",
+        return_value={},
+    ), patch(
+        "app.services.trading.stop_engine.get_adaptive_cooldowns",
+        return_value={},
+    ), patch(
+        "app.services.trading.stop_engine._fetch_market_context",
+        side_effect=AssertionError("option stop engine must not fetch stock market context"),
+    ), patch(
+        "app.services.trading.stop_engine.evaluate_trade",
+        side_effect=AssertionError("option stop engine must not run stock stop evaluation"),
+    ):
+        out = evaluate_all(_FakeAllDb([trade]), user_id=None)
+
+    assert out["total_checked"] == 0
+    assert out["alerts"] == []
+    assert out["skipped_options"] == 1
+    assert out["delegated_to_options_exit_monitor"] == [trade.id]
 
 
 def test_stop_engine_auto_execute_option_uses_sell_to_close(monkeypatch) -> None:

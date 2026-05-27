@@ -1574,6 +1574,15 @@ def _result_has_trade_state_change(trade, result: StopDecisionResult) -> bool:
     return False
 
 
+def _is_option_trade_for_stop_engine(trade: Any) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
 def evaluate_all(
     db: Session,
     user_id: int | None = None,
@@ -1622,6 +1631,8 @@ def evaluate_all(
         "warnings": 0,
         "data_stale": 0,
         "suppressed": 0,
+        "skipped_options": 0,
+        "delegated_to_options_exit_monitor": [],
         "regime": "cautious",
         "alerts": [],
     }
@@ -1647,6 +1658,13 @@ def evaluate_all(
 
     for trade in trades:
         try:
+            if _is_option_trade_for_stop_engine(trade):
+                summary["skipped_options"] += 1
+                try:
+                    summary["delegated_to_options_exit_monitor"].append(int(trade.id))
+                except Exception:
+                    pass
+                continue
             result_suppressed = False
             # Wrap each trade evaluation in a SAVEPOINT so one poisoned
             # update (e.g. a constraint violation on ``_apply_stop_to_trade``
