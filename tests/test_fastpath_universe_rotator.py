@@ -2132,7 +2132,10 @@ def test_get_subscribed_pairs_excludes_unranked_shadow_grace():
 def test_get_subscribed_pairs_retains_open_paper_position_tickers():
     from sqlalchemy import create_engine, text
 
-    from app.services.trading.fast_path.universe_rotator import get_subscribed_pairs
+    from app.services.trading.fast_path.universe_rotator import (
+        get_entry_pairs,
+        get_subscribed_pairs,
+    )
 
     engine = create_engine("sqlite:///:memory:")
     with engine.begin() as db:
@@ -2181,8 +2184,10 @@ def test_get_subscribed_pairs_retains_open_paper_position_tickers():
         """))
 
         pairs = get_subscribed_pairs(db)
+        entry_pairs = get_entry_pairs(db)
 
     assert pairs == ["RANKED-USD", "ACTIVE-USD", "OPEN-OLD-USD"]
+    assert entry_pairs == ["RANKED-USD", "ACTIVE-USD"]
 
 
 # ---------------------------------------------------------------------------

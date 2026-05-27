@@ -175,6 +175,8 @@ class CoinbaseWSClient:
         # universe pauses subscription unless the operator explicitly
         # enables the legacy fallback flag.
         self._active_pairs: list[str] = list(settings.pairs)
+        self._entry_pairs: set[str] = set(settings.pairs)
+        self._alerts_suppressed_exit_only_subscription: int = 0
 
     def _universe_refresh_interval_s(self) -> float:
         if not getattr(self._settings, "universe_rotation_enabled", False):
@@ -219,28 +221,35 @@ class CoinbaseWSClient:
           failure instead of quietly trading stale configured pairs.
         """
         if not getattr(self._settings, "universe_rotation_enabled", False):
-            return list(self._settings.pairs)
+            pairs = list(self._settings.pairs)
+            self._entry_pairs = set(pairs)
+            return pairs
         try:
             from ....db import SessionLocal
-            from .universe_rotator import get_subscribed_pairs
+            from .universe_rotator import get_entry_pairs, get_subscribed_pairs
 
             db = SessionLocal()
             try:
                 tickers = get_subscribed_pairs(db)
+                entry_tickers = get_entry_pairs(db)
             finally:
                 db.close()
             if tickers:
+                self._entry_pairs = set(entry_tickers)
                 return tickers
             if getattr(self._settings, "universe_empty_fallback_enabled", False):
                 logger.warning(
                     "[fast_path] universe rotation returned no pairs; "
                     "using configured pairs because empty fallback is enabled"
                 )
-                return list(self._settings.pairs)
+                pairs = list(self._settings.pairs)
+                self._entry_pairs = set(pairs)
+                return pairs
             logger.warning(
                 "[fast_path] universe rotation returned no pairs; "
                 "WS subscription paused until rotator selects a universe"
             )
+            self._entry_pairs = set()
             return []
         except Exception as exc:
             if getattr(self._settings, "universe_empty_fallback_enabled", False):
@@ -249,12 +258,15 @@ class CoinbaseWSClient:
                     "using configured pairs because empty fallback is enabled: %s",
                     exc,
                 )
-                return list(self._settings.pairs)
+                pairs = list(self._settings.pairs)
+                self._entry_pairs = set(pairs)
+                return pairs
             logger.warning(
                 "[fast_path] universe-rotation read failed; "
                 "WS subscription paused until rotator state is readable: %s",
                 exc,
             )
+            self._entry_pairs = set()
             return []
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -467,6 +479,9 @@ class CoinbaseWSClient:
             # for L2 sampling; a fresher snapshot is always coming.
             self._db_writer.enqueue_book(book)
             # F3: scan the freshly-emitted book for imbalance setups.
+            if not self._entry_alerts_enabled(item["ticker"]):
+                self._alerts_suppressed_exit_only_subscription += 1
+                continue
             for alert_dict in self._scanner.on_book_emit(item["ticker"], item):
                 self._dispatch_alert(alert_dict)
 
@@ -556,6 +571,9 @@ class CoinbaseWSClient:
                     bar_close_ts=end_s,
                     now_ts=now_ts,
                 )
+                if emit_alerts and not self._entry_alerts_enabled(str(ticker)):
+                    self._alerts_suppressed_exit_only_subscription += 1
+                    emit_alerts = False
                 if not emit_alerts:
                     self._candles_scanned_warmup_only += 1
                 for alert_dict in self._scanner.on_bar_close(
@@ -571,6 +589,11 @@ class CoinbaseWSClient:
     @staticmethod
     def _bar_fresh_enough_for_alerts(*, bar_close_ts: float, now_ts: float) -> bool:
         return (now_ts - bar_close_ts) <= ALERT_RECENCY_MAX_AGE_S
+
+    def _entry_alerts_enabled(self, ticker: str) -> bool:
+        if not getattr(self._settings, "universe_rotation_enabled", False):
+            return True
+        return str(ticker) in self._entry_pairs
 
     def _dispatch_alert(self, alert_dict: dict[str, Any]) -> None:
         """Convert scanner-emitted dict into AlertItem and enqueue.
@@ -947,6 +970,9 @@ class CoinbaseWSClient:
             "alerts_suppressed_cost_barrier": self._alerts_suppressed_cost_barrier,
             "alerts_suppressed_maker_attempt_adverse":
                 self._alerts_suppressed_maker_attempt_adverse,
+            "alerts_suppressed_exit_only_subscription":
+                self._alerts_suppressed_exit_only_subscription,
+            "entry_pairs": sorted(self._entry_pairs),
             "negative_edge_cache_size": len(self._negative_edge_cache),
             "cost_barrier_cache_size": len(self._cost_barrier_cache),
             "maker_attempt_adverse_cache_size": len(

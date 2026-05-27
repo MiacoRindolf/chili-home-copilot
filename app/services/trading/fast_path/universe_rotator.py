@@ -2603,16 +2603,30 @@ def get_active_pairs(db) -> list[str]:
 def get_subscribed_pairs(db) -> list[str]:
     """Active + shadow combined -- the full WS subscription set.
 
-    Ranked shadow pairs need to be subscribed so ``decay_miner`` can
-    collect samples during the cold-start window. Unranked shadow rows
-    are grace/audit records for transient misses; they stay out of the
-    websocket subscription because the current rotation did not prove
-    they still meet the learning-universe floor.
+    Entry-eligible pairs come from :func:`get_entry_pairs`.
 
     Open paper positions are retained even after a universe rotation
     demotes their ticker. The exit manager needs a fresh book to hit
     stop/target/time-stop exits; dropping the subscription strands the
     position, blocks capacity, and starves realized-learning rows.
+    """
+    pairs = get_entry_pairs(db)
+    seen = set(pairs)
+    for ticker in get_open_paper_position_pairs(db):
+        if ticker not in seen:
+            pairs.append(ticker)
+            seen.add(ticker)
+    return pairs
+
+
+def get_entry_pairs(db) -> list[str]:
+    """Pairs eligible to emit new entry alerts.
+
+    Ranked shadow pairs need to be subscribed so ``decay_miner`` can
+    collect samples during the cold-start window. Unranked shadow rows
+    are grace/audit records for transient misses; they stay out of entry
+    alert emission because the current rotation did not prove they still
+    meet the learning-universe floor.
     """
     from sqlalchemy import text
 
@@ -2632,13 +2646,7 @@ def get_subscribed_pairs(db) -> list[str]:
         "active_status": UNIVERSE_STATUS_ACTIVE,
         "shadow_status": UNIVERSE_STATUS_SHADOW,
     }).fetchall()
-    pairs = [str(r.ticker) for r in rows]
-    seen = set(pairs)
-    for ticker in get_open_paper_position_pairs(db):
-        if ticker not in seen:
-            pairs.append(ticker)
-            seen.add(ticker)
-    return pairs
+    return [str(r.ticker) for r in rows]
 
 
 def get_open_paper_position_pairs(db) -> list[str]:
@@ -2678,6 +2686,7 @@ def get_open_paper_position_pairs(db) -> list[str]:
 __all__ = [
     "run_rotation_pass",
     "get_active_pairs",
+    "get_entry_pairs",
     "get_open_paper_position_pairs",
     "get_subscribed_pairs",
     "passes_admission_gates",

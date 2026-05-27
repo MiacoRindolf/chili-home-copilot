@@ -133,6 +133,9 @@ def test_rotation_empty_returns_empty_without_legacy_fallback():
     with patch("app.db.SessionLocal", return_value=fake_db), patch(
         "app.services.trading.fast_path.universe_rotator.get_subscribed_pairs",
         return_value=[],
+    ), patch(
+        "app.services.trading.fast_path.universe_rotator.get_entry_pairs",
+        return_value=[],
     ):
         tickers = client._resolve_active_pairs()
 
@@ -151,10 +154,14 @@ def test_rotation_empty_can_use_explicit_legacy_fallback():
     with patch("app.db.SessionLocal", return_value=_FakeSession()), patch(
         "app.services.trading.fast_path.universe_rotator.get_subscribed_pairs",
         return_value=[],
+    ), patch(
+        "app.services.trading.fast_path.universe_rotator.get_entry_pairs",
+        return_value=[],
     ):
         tickers = client._resolve_active_pairs()
 
     assert tickers == ["BTC-USD", "ETH-USD"]
+    assert client.stats()["entry_pairs"] == ["BTC-USD", "ETH-USD"]
 
 
 def test_rotation_read_failure_returns_empty_without_legacy_fallback():
@@ -179,6 +186,30 @@ def test_rotation_disabled_uses_configured_pairs():
     client = _client(settings)
 
     assert client._resolve_active_pairs() == ["BTC-USD", "ETH-USD"]
+    assert client.stats()["entry_pairs"] == ["BTC-USD", "ETH-USD"]
+
+
+def test_rotation_tracks_entry_pairs_separately_from_exit_subscriptions():
+    settings = FastPathSettings(
+        universe_rotation_enabled=True,
+        universe_empty_fallback_enabled=False,
+        pairs=[],
+    )
+    fake_db = _FakeSession()
+    client = _client(settings)
+
+    with patch("app.db.SessionLocal", return_value=fake_db), patch(
+        "app.services.trading.fast_path.universe_rotator.get_subscribed_pairs",
+        return_value=["RANKED-USD", "OPEN-ONLY-USD"],
+    ), patch(
+        "app.services.trading.fast_path.universe_rotator.get_entry_pairs",
+        return_value=["RANKED-USD"],
+    ):
+        tickers = client._resolve_active_pairs()
+
+    assert tickers == ["RANKED-USD", "OPEN-ONLY-USD"]
+    assert client.stats()["entry_pairs"] == ["RANKED-USD"]
+    assert fake_db.closed is True
 
 
 def test_universe_refresh_reconnects_when_rotator_pairs_change():
@@ -195,6 +226,9 @@ def test_universe_refresh_reconnects_when_rotator_pairs_change():
     with patch("app.db.SessionLocal", return_value=fake_db), patch(
         "app.services.trading.fast_path.universe_rotator.get_subscribed_pairs",
         return_value=["KEEP-USD", "NEW-USD"],
+    ), patch(
+        "app.services.trading.fast_path.universe_rotator.get_entry_pairs",
+        return_value=["NEW-USD"],
     ):
         changed = client._refresh_active_pairs_if_changed()
 
@@ -204,6 +238,7 @@ def test_universe_refresh_reconnects_when_rotator_pairs_change():
     assert status.registered == ["KEEP-USD", "NEW-USD"]
     assert status.reconnected == ["KEEP-USD", "NEW-USD"]
     assert fake_db.closed is True
+    assert client.stats()["entry_pairs"] == ["NEW-USD"]
     assert client.stats()["universe_refreshes_total"] == 1
     assert client.stats()["universe_reconnects_total"] == 1
 
@@ -220,11 +255,15 @@ def test_universe_refresh_ignores_unchanged_pairs():
     with patch("app.db.SessionLocal", return_value=_FakeSession()), patch(
         "app.services.trading.fast_path.universe_rotator.get_subscribed_pairs",
         return_value=["KEEP-USD", "NEW-USD"],
+    ), patch(
+        "app.services.trading.fast_path.universe_rotator.get_entry_pairs",
+        return_value=["NEW-USD"],
     ):
         changed = client._refresh_active_pairs_if_changed()
 
     assert changed is False
     assert client._active_pairs == ["KEEP-USD", "NEW-USD"]
+    assert client.stats()["entry_pairs"] == ["NEW-USD"]
     assert client.stats()["universe_refreshes_total"] == 1
     assert client.stats()["universe_reconnects_total"] == 0
 
@@ -295,6 +334,38 @@ def test_stale_replay_bars_warm_scanner_without_emitting_alerts():
     assert writer.alerts == []
     assert len(status.bars) == 21
     assert client.stats()["candles_scanned_warmup_only"] == 21
+    scanner_stats = client.stats()["scanner"]
+    assert scanner_stats["suppressed_bar_close_alerts_disabled"] == 1
+    assert scanner_stats["pullback_deferred_scheduled"] == 0
+
+
+def test_exit_only_subscription_bars_warm_without_entry_alerts():
+    settings = FastPathSettings(
+        universe_rotation_enabled=True,
+        pairs=[],
+        scanner_vol_breakout_lookback=2,
+    )
+    writer = _FakeWriter()
+    client = _client(settings, writer=writer)
+    client._active_pairs = ["TEST-USD"]
+    client._entry_pairs = set()
+
+    now = datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc)
+    now_ts = now.timestamp()
+    first_close = now - timedelta(seconds=150)
+    for i in range(2):
+        close_ts = (first_close + timedelta(minutes=i)).timestamp()
+        client._maybe_emit_bar(_candle(close_ts=close_ts, volume=1.0), now_ts)
+
+    spike_close = first_close + timedelta(minutes=2)
+    client._maybe_emit_bar(
+        _candle(close_ts=spike_close.timestamp(), volume=3.0, close=101.0),
+        now_ts,
+    )
+
+    assert len(writer.bars) == 3
+    assert writer.alerts == []
+    assert client.stats()["alerts_suppressed_exit_only_subscription"] == 1
     scanner_stats = client.stats()["scanner"]
     assert scanner_stats["suppressed_bar_close_alerts_disabled"] == 1
     assert scanner_stats["pullback_deferred_scheduled"] == 0
