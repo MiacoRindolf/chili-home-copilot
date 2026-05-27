@@ -3980,6 +3980,27 @@ def verify_order_landed(
 _OPTION_ORDER_REJECTED_STATES = {"rejected", "cancelled", "canceled", "failed", "expired"}
 _OPTION_ORDER_RESTING_STATES = {"confirmed", "queued", "partially_filled", "filled"}
 _OPTION_ORDER_VERIFY_STATES = {"", "unknown", "unconfirmed", "new", "submitted", "pending"}
+_OPTION_ORDER_FILL_KEYS = (
+    "cumulative_quantity",
+    "cumulative_filled_quantity",
+    "filled_quantity",
+    "processed_quantity",
+    "quantity_filled",
+    "filled_size",
+)
+
+
+def _option_order_filled_quantity(order: dict[str, Any]) -> float | None:
+    for key in _OPTION_ORDER_FILL_KEYS:
+        value = order.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            qty = float(value)
+        except (TypeError, ValueError):
+            continue
+        return max(0.0, qty)
+    return None
 
 
 def verify_option_order_landed(
@@ -3992,7 +4013,8 @@ def verify_option_order_landed(
 
     Robinhood option orders live behind get_option_order_info, not
     get_stock_order_info. Poll the option endpoint until the order is either
-    resting/filled, explicitly rejected, or still ambiguous at timeout.
+    resting/filled, explicitly rejected, terminal-with-fill evidence, or still
+    ambiguous at timeout.
     """
     import time
 
@@ -4004,6 +4026,9 @@ def verify_option_order_landed(
         info = get_option_order_by_id(order_id) or {}
         observed = (info.get("state") or info.get("status") or "").strip().lower() or None
         if observed in _OPTION_ORDER_REJECTED_STATES:
+            filled_qty = _option_order_filled_quantity(info)
+            if filled_qty is not None and filled_qty > 0:
+                return ("executed", observed)
             return ("rejected", observed)
         if observed in _OPTION_ORDER_RESTING_STATES:
             return ("resting", observed)
@@ -4019,6 +4044,9 @@ def _verify_submitted_option_order(
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     state = str(result.get("state") or result.get("status") or "").strip().lower()
     if state in _OPTION_ORDER_REJECTED_STATES:
+        filled_qty = _option_order_filled_quantity(result)
+        if filled_qty is not None and filled_qty > 0:
+            return result, None
         return result, {
             "ok": False,
             "error": f"option_order_{state}",
@@ -4042,7 +4070,7 @@ def _verify_submitted_option_order(
             "state": observed or state or "rejected",
             "raw": result,
         }
-    if verdict == "resting" and observed:
+    if verdict in ("resting", "executed") and observed:
         updated = dict(result)
         updated["state"] = observed
         return updated, None

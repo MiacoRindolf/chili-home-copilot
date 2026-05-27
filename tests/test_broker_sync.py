@@ -186,6 +186,23 @@ class TestRobinhoodOptionOrderRouting:
         assert (verdict, observed) == ("rejected", "cancelled")
         assert calls == ["opt-post-submit"]
 
+    def test_verify_option_order_landed_preserves_terminal_fill(self, monkeypatch):
+        from app.services import broker_service
+
+        monkeypatch.setattr(
+            broker_service,
+            "get_option_order_by_id",
+            lambda _order_id: {"state": "cancelled", "processed_quantity": "1"},
+        )
+
+        verdict, observed = broker_service.verify_option_order_landed(
+            "opt-post-submit",
+            max_wait_s=1.0,
+            poll_interval_s=0.0,
+        )
+
+        assert (verdict, observed) == ("executed", "cancelled")
+
     def test_option_submit_verifier_rejects_post_accept_cancel(self, monkeypatch):
         from app.services import broker_service
 
@@ -207,6 +224,23 @@ class TestRobinhoodOptionOrderRouting:
         assert rejected["error"] == "option_order_cancelled"
         assert rejected["order_id"] == "opt-buy-1"
 
+    def test_option_submit_verifier_preserves_terminal_fill(self, monkeypatch):
+        from app.services import broker_service
+
+        updated, rejected = broker_service._verify_submitted_option_order(
+            {
+                "id": "opt-buy-1",
+                "state": "cancelled",
+                "processed_quantity": "1",
+            },
+            order_id="opt-buy-1",
+            label="BUY-OPT SPY",
+        )
+
+        assert rejected is None
+        assert updated["state"] == "cancelled"
+        assert updated["processed_quantity"] == "1"
+
     def test_option_submit_verifier_promotes_resting_state(self, monkeypatch):
         from app.services import broker_service
 
@@ -224,6 +258,24 @@ class TestRobinhoodOptionOrderRouting:
 
         assert rejected is None
         assert updated["state"] == "queued"
+
+    def test_option_submit_verifier_promotes_verified_terminal_fill(self, monkeypatch):
+        from app.services import broker_service
+
+        monkeypatch.setattr(
+            broker_service,
+            "verify_option_order_landed",
+            lambda _order_id: ("executed", "cancelled"),
+        )
+
+        updated, rejected = broker_service._verify_submitted_option_order(
+            {"id": "opt-buy-1", "state": "unconfirmed"},
+            order_id="opt-buy-1",
+            label="BUY-OPT SPY",
+        )
+
+        assert rejected is None
+        assert updated["state"] == "cancelled"
 
     def test_option_spread_rejects_post_accept_cancel(self, monkeypatch):
         from app.services import broker_service
