@@ -58,6 +58,14 @@ def _non_negative_float(value: object, fallback: float) -> float:
     return max(DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS, parsed)
 
 
+def _non_negative_int(value: object, fallback: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = int(fallback)
+    return max(0, parsed)
+
+
 def _bounded_fraction(value: object, fallback: float) -> float:
     try:
         parsed = float(str(value).strip())
@@ -209,6 +217,15 @@ def queue_target_tickers_for_pattern(settings: object, pattern: object) -> int:
     return min(full_target, operational_target)
 
 
+def queue_backtest_can_certify_result(result: Mapping[str, object]) -> bool:
+    """Return whether a queue result is complete enough to certify gates."""
+    if not bool(result.get("soft_deadline_hit")):
+        return True
+    selected = _non_negative_int(result.get("tickers_selected"))
+    attempted = _non_negative_int(result.get("backtests_run"))
+    return selected <= 0 or attempted >= selected
+
+
 def queue_stored_refresh_max_tickers_for_pattern(settings: object, pattern: object) -> int:
     full_target = _positive_int(
         getattr(settings, "brain_queue_stored_refresh_max_tickers", None),
@@ -312,6 +329,16 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 getattr(pattern, "id", None),
                 exc_info=True,
             )
+
+    def _defer_recert_for_partial_result(result: Mapping[str, object]) -> None:
+        logger.info(
+            "[backtest_queue] recert completion deferred pattern_id=%s "
+            "soft_deadline_hit=%s backtests_run=%s selected_tickers=%s",
+            getattr(pattern, "id", None),
+            bool(result.get("soft_deadline_hit")),
+            result.get("backtests_run"),
+            result.get("tickers_selected"),
+        )
 
     db = SessionLocal()
     lock_acquired = False
@@ -440,6 +467,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             total = result.get("total", 0)
             wins = result.get("wins", 0)
             backtests_run = result.get("backtests_run", 0)
+            certification_complete = queue_backtest_can_certify_result(result)
             wr_pct = (wins / total * 100.0) if total > 0 else 0.0
             min_pre = float(
                 getattr(
@@ -458,15 +486,18 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 backtests_run=backtests_run,
                 trade_bearing_tickers=total,
             )
-            _complete_recert_if_open(
-                total=total,
-                wins=wins,
-                win_rate=win_rate,
-                avg_return=avg_return,
-                backtests_run=backtests_run,
-            )
+            if certification_complete:
+                _complete_recert_if_open(
+                    total=total,
+                    wins=wins,
+                    win_rate=win_rate,
+                    avg_return=avg_return,
+                    backtests_run=backtests_run,
+                )
+            else:
+                _defer_recert_for_partial_result(result)
             pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
-            if pattern and total >= 2 and wr_pct >= min_pre:
+            if certification_complete and pattern and total >= 2 and wr_pct >= min_pre:
                 pattern.queue_tier = "full"
                 pattern.backtest_priority = max(
                     int(pattern.backtest_priority or 0),
@@ -483,7 +514,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     f"Prescreen pass: '{pattern.name}' ({wins}/{total}, {wr_pct:.0f}% wr) → full tier",
                     related_insight_id=insight.id,
                 )
-            elif pattern and total >= 2:
+            elif certification_complete and pattern and total >= 2:
                 _op = (pattern.promotion_status or "").strip()
                 _ol = (pattern.lifecycle_stage or "").strip()
                 pattern.active = False
@@ -515,7 +546,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     f"Prescreen reject: '{pattern.name}' ({wins}/{total}, {wr_pct:.0f}% wr)",
                     related_insight_id=insight.id,
                 )
-            else:
+            elif certification_complete:
                 _complete_recert_if_open(
                     total=total,
                     wins=wins,
@@ -560,6 +591,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         total = result.get("total", 0)
         wins = result.get("wins", 0)
         backtests_run = result.get("backtests_run", 0)
+        certification_complete = queue_backtest_can_certify_result(result)
         win_rate = wins / total if total >= 3 else None
         avg_return = result.get("avg_return")
         mark_pattern_tested(
@@ -570,13 +602,16 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             backtests_run=backtests_run,
             trade_bearing_tickers=total,
         )
-        _complete_recert_if_open(
-            total=total,
-            wins=wins,
-            win_rate=win_rate,
-            avg_return=avg_return,
-            backtests_run=backtests_run,
-        )
+        if certification_complete:
+            _complete_recert_if_open(
+                total=total,
+                wins=wins,
+                win_rate=win_rate,
+                avg_return=avg_return,
+                backtests_run=backtests_run,
+            )
+        else:
+            _defer_recert_for_partial_result(result)
         if total >= 3:
             log_learning_event(
                 db,
@@ -590,26 +625,35 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         # cpcv_gate handler runs the CPCV promotion gate. Pre-fix the
         # FIX 34 loop bypassed the event path entirely. Per-call
         # try/except so a broken emit can't block the backtest return.
-        try:
-            from .brain_work.emitters import emit_backtest_completed_outcome
-            emit_backtest_completed_outcome(
-                db,
-                scan_pattern_id=int(pattern.id),
-                user_id=user_id,
-                backtests_run=int(backtests_run),
-                win_rate=win_rate,
-                avg_return=avg_return,
-            )
-            db.commit()
-        except Exception:
-            logger.warning(
-                "[backtest_queue] emit_backtest_completed failed pattern_id=%s",
-                pattern.id, exc_info=True,
-            )
+        if certification_complete:
             try:
-                db.rollback()
+                from .brain_work.emitters import emit_backtest_completed_outcome
+                emit_backtest_completed_outcome(
+                    db,
+                    scan_pattern_id=int(pattern.id),
+                    user_id=user_id,
+                    backtests_run=int(backtests_run),
+                    win_rate=win_rate,
+                    avg_return=avg_return,
+                )
+                db.commit()
             except Exception:
-                pass
+                logger.warning(
+                    "[backtest_queue] emit_backtest_completed failed pattern_id=%s",
+                    pattern.id, exc_info=True,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        else:
+            logger.info(
+                "[backtest_queue] emit_backtest_completed skipped for partial "
+                "result pattern_id=%s backtests_run=%s selected_tickers=%s",
+                pattern.id,
+                backtests_run,
+                result.get("tickers_selected"),
+            )
         logger.info(
             "[backtest_queue] pattern_done pattern_id=%s tier=full "
             "target_tickers=%s priority_tickers=%s backtests_run=%s "

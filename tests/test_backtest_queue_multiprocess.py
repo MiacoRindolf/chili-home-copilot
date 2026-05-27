@@ -82,6 +82,48 @@ def test_queue_pattern_soft_runtime_disabled_when_walltime_zero(monkeypatch):
     assert queue_pattern_soft_runtime_seconds() is None
 
 
+def test_partial_soft_deadline_result_cannot_certify_recert_or_promotion():
+    from app.services.trading.backtest_queue_worker import (
+        queue_backtest_can_certify_result,
+    )
+
+    assert queue_backtest_can_certify_result(
+        {
+            "soft_deadline_hit": True,
+            "backtests_run": 9,
+            "tickers_selected": 24,
+        }
+    ) is False
+
+
+def test_complete_soft_deadline_result_can_certify_when_all_selected_attempted():
+    from app.services.trading.backtest_queue_worker import (
+        queue_backtest_can_certify_result,
+    )
+
+    assert queue_backtest_can_certify_result(
+        {
+            "soft_deadline_hit": True,
+            "backtests_run": 24,
+            "tickers_selected": 24,
+        }
+    ) is True
+
+
+def test_non_deadline_result_can_certify():
+    from app.services.trading.backtest_queue_worker import (
+        queue_backtest_can_certify_result,
+    )
+
+    assert queue_backtest_can_certify_result(
+        {
+            "soft_deadline_hit": False,
+            "backtests_run": 12,
+            "tickers_selected": 24,
+        }
+    ) is True
+
+
 def test_run_one_pattern_job_keeps_db_child_env_and_delegates(monkeypatch):
     from app.services.trading import backtest_queue_worker as worker
 
