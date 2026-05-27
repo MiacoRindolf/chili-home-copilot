@@ -104,6 +104,15 @@ from .realized_pnl_sql import (
 
 logger = logging.getLogger(__name__)
 
+COMPOSITE_WEIGHT_KEYS = (
+    "cpcv_sharpe",
+    "deflated_sharpe",
+    "pbo_inverse",
+    "directional_wr",
+    "decay_inverse",
+    "realized",
+)
+
 
 def _clip(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     """Numeric clip — numpy-free for the unit-test path."""
@@ -188,12 +197,14 @@ def compute_quality_composite_score(
         means rolling_sample_n < 30 (insufficient evidence to detect
         decay).
     weights : dict
-        Six-weight dict + two normalizer keys:
+        Six-weight dict + supporting config keys:
         ``cpcv_sharpe``, ``deflated_sharpe``, ``pbo_inverse``,
         ``directional_wr``, ``decay_inverse``, ``realized``,
-        ``realized_evidence_tau``. Weights should sum to 1.0; the
-        ``realized`` weight is dormant whenever the caller passes
-        ``realized_pnl_score=None`` or ``realized_n_trades < 5``.
+        ``realized_pnl_normalizer_pct``, ``realized_evidence_tau``,
+        and ``realized_window_days``. The six composite weights should
+        sum to 1.0; the ``realized`` weight is dormant whenever the
+        caller passes ``realized_pnl_score=None`` or
+        ``realized_n_trades < 5``.
     realized_pnl_score : Optional[float]
         Normalized realized-PnL component in ``[0, 1]`` (see
         :func:`realized_pnl_score`). ``None`` means insufficient
@@ -365,6 +376,11 @@ def _resolve_weights(settings_: Any) -> dict:
     }
 
 
+def _composite_weight_sum(weights: dict[str, Any]) -> float:
+    """Sum only the six score weights, excluding non-weight knobs."""
+    return sum(float(weights.get(key, 0.0) or 0.0) for key in COMPOSITE_WEIGHT_KEYS)
+
+
 def _load_realized_pnl_map(
     db: Session,
     window_days: int,
@@ -514,7 +530,7 @@ def compute_and_persist_scores(
         settings_ = _settings
 
     weights = _resolve_weights(settings_)
-    weight_sum = sum(weights.values())
+    weight_sum = _composite_weight_sum(weights)
     if not (0.99 <= weight_sum <= 1.01):
         logger.warning(
             "[pattern_quality_score] weights sum to %.4f (expected ~1.0) — "
@@ -650,7 +666,7 @@ def compute_and_persist_scores_streaming(
         settings_ = _settings
 
     weights = _resolve_weights(settings_)
-    weight_sum = sum(weights.values())
+    weight_sum = _composite_weight_sum(weights)
     if not (0.99 <= weight_sum <= 1.01):
         logger.warning(
             "[pattern_quality_score] streaming weights sum to %.4f "
