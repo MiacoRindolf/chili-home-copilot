@@ -141,6 +141,10 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
                 )
                 OR (
                     lifecycle_stage = 'challenged'
+                    AND COALESCE(promotion_status, '') = 'demoted_evidence_gap'
+                )
+                OR (
+                    lifecycle_stage = 'challenged'
                     AND COALESCE(backtest_count, 0) >= 50
                     AND (
                         COALESCE(promotion_status, '') LIKE 'challenged_cpcv_ev:%'

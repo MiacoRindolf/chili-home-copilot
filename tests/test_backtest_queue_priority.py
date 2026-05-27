@@ -850,6 +850,28 @@ def test_priority_scoring_routes_hard_negative_challenged_to_prescreen(db):
     assert uncertain.queue_tier == QUEUE_TIER_FULL
 
 
+def test_priority_scoring_routes_demoted_evidence_gap_to_prescreen(db):
+    _deactivate_existing_patterns(db)
+    demoted = _queued_pattern(
+        db,
+        name="demoted evidence gap should stay cheap",
+        lifecycle_stage="challenged",
+        promotion_status="demoted_evidence_gap",
+        backtest_priority=70,
+    )
+    demoted.backtest_count = 12
+    demoted.win_rate = 0.45
+    demoted.avg_return_pct = 0.1
+    demoted.queue_tier = QUEUE_TIER_FULL
+    db.commit()
+
+    summary = run_priority_scoring(db)
+    db.refresh(demoted)
+
+    assert summary["prescreened"] == 1
+    assert demoted.queue_tier == QUEUE_TIER_PRESCREEN
+
+
 def test_walltime_timeout_demotes_non_operational_pattern_to_prescreen(db):
     from app.services.trading.backtest_queue_worker import mark_walltime_timeout_pattern
 
