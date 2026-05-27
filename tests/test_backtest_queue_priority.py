@@ -15,6 +15,7 @@ from app.services.trading.backtest_queue import (
     get_priority_bypass_retest_floor,
     get_queue_status,
     get_queue_lineage_cap_policy,
+    get_queue_lineage_status_limit_basis,
     mark_pattern_tested,
     summarize_queue_batch,
 )
@@ -26,6 +27,8 @@ _ADAPTIVE_TWO_OF_FIVE_LINEAGE_SHARE = 0.40
 _ADAPTIVE_LINEAGE_FLOOR = 0
 _ENV_LINEAGE_SHARE = "0.25"
 _ENV_LINEAGE_FLOOR = "2"
+_FAST_BACKTEST_BATCH_BASIS = 30
+_QUEUE_BATCH_BASIS = 80
 
 
 def _deactivate_existing_patterns(db) -> None:
@@ -374,6 +377,21 @@ def test_lineage_cap_settings_accept_env(monkeypatch):
 
     assert cfg.brain_queue_lineage_max_batch_share == float(_ENV_LINEAGE_SHARE)
     assert cfg.brain_queue_lineage_min_per_batch == int(_ENV_LINEAGE_FLOOR)
+
+
+def test_lineage_status_basis_uses_fast_backtest_batch_when_enabled(monkeypatch):
+    monkeypatch.setattr(settings, "brain_fast_backtest_independent_loop", True)
+    monkeypatch.setattr(
+        settings,
+        "brain_fast_backtest_batch_backtest",
+        _FAST_BACKTEST_BATCH_BASIS,
+    )
+    monkeypatch.setattr(settings, "brain_queue_batch_size", _QUEUE_BATCH_BASIS)
+
+    limit, source = get_queue_lineage_status_limit_basis()
+
+    assert limit == _FAST_BACKTEST_BATCH_BASIS
+    assert source == "fast_backtest_batch_backtest"
 
 
 def test_exploration_refill_respects_existing_lineage_cap(db, monkeypatch):

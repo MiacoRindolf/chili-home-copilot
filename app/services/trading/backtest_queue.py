@@ -136,6 +136,21 @@ def _queue_lineage_cap(limit: int) -> int | None:
     return cap if cap > 0 else None
 
 
+def get_queue_lineage_status_limit_basis() -> tuple[int, str]:
+    fast_batch = _settings_int("brain_fast_backtest_batch_backtest", 0, minimum=0)
+    if (
+        _settings_bool("brain_fast_backtest_independent_loop", False)
+        and fast_batch > 0
+    ):
+        return fast_batch, "fast_backtest_batch_backtest"
+    queue_batch = _settings_int(
+        "brain_queue_batch_size",
+        max(1, fast_batch),
+        minimum=1,
+    )
+    return queue_batch, "queue_batch_size"
+
+
 def _settings_bool(name: str, default: bool) -> bool:
     try:
         from ...config import settings
@@ -1014,9 +1029,8 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
     prescreen_pending = row.prescreen_pending or 0
     generic_pending = row.generic_pending or 0
 
-    lineage_policy = get_queue_lineage_cap_policy(
-        _settings_int("brain_queue_batch_size", max(1, int(pending or 1)), minimum=1)
-    )
+    lineage_limit_basis, lineage_limit_source = get_queue_lineage_status_limit_basis()
+    lineage_policy = get_queue_lineage_cap_policy(lineage_limit_basis)
     out = {
         "total": total_active,
         "pending": pending,
@@ -1038,6 +1052,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
         "max_per_lineage_per_batch": lineage_policy["cap"],
         "lineage_cap_policy": lineage_policy["mode"],
         "lineage_cap_limit_basis": lineage_policy["limit"],
+        "lineage_cap_limit_source": lineage_limit_source,
         "lineage_max_batch_share": lineage_policy["max_batch_share"],
         "lineage_min_per_batch": lineage_policy["min_per_batch"],
         "legacy_fixed_lineage_cap": lineage_policy["fixed_override"],
