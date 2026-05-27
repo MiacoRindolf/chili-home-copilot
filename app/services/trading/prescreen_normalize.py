@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..massive_client import is_crypto
-from ..symbol_hygiene import normalize_equity_symbol
+from ..symbol_hygiene import normalize_equity_symbol, strip_ticker_decoration
 
 _BARE_CRYPTO_MIN_BASE_LEN = 2
 _BARE_CRYPTO_MAX_BASE_LEN = 15
@@ -33,7 +33,7 @@ def normalize_prescreen_ticker(raw: Any) -> str:
     fake stock tickers, which wastes scanner budget and creates yfinance
     failures like ``"INFQ"]``.
     """
-    t = str(raw or "").upper().strip()
+    t = strip_ticker_decoration(raw)
     if not t:
         return ""
     if (

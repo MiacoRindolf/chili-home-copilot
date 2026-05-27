@@ -6,6 +6,7 @@ from app.services.trading import market_data
 from app.services.trading.prescreen_normalize import normalize_prescreen_ticker
 
 LEGACY_BLOCK_TICKER = "SQ"
+DECORATED_LEGACY_BLOCK_TICKER = "$SQ"
 ACTIVE_BLOCK_TICKER = "XYZ"
 INACTIVE_DISCOVER_TICKER = "DFS"
 INACTIVE_HESS_TICKER = "HES"
@@ -16,6 +17,7 @@ COMMON_INTERNAL_P_TICKER = "APPS"
 
 def test_equity_symbol_hygiene_aliases_renames_and_drops_inactive() -> None:
     assert normalize_equity_symbol(LEGACY_BLOCK_TICKER) == ACTIVE_BLOCK_TICKER
+    assert normalize_equity_symbol(DECORATED_LEGACY_BLOCK_TICKER) == ACTIVE_BLOCK_TICKER
     assert normalize_equity_symbol(INACTIVE_DISCOVER_TICKER) == ""
     assert normalize_equity_symbol(INACTIVE_HESS_TICKER) == ""
 
@@ -28,8 +30,14 @@ def test_equity_symbol_hygiene_drops_compact_preferred_symbols() -> None:
 
 def test_prescreen_normalization_uses_equity_symbol_hygiene() -> None:
     assert normalize_prescreen_ticker(LEGACY_BLOCK_TICKER) == ACTIVE_BLOCK_TICKER
+    assert normalize_prescreen_ticker(DECORATED_LEGACY_BLOCK_TICKER) == ACTIVE_BLOCK_TICKER
     assert normalize_prescreen_ticker(INACTIVE_DISCOVER_TICKER) == ""
     assert normalize_prescreen_ticker(INACTIVE_HESS_TICKER) == ""
+
+
+def test_prescreen_normalization_accepts_decorated_trade_symbols() -> None:
+    assert normalize_prescreen_ticker("$AAPL") == ACTIVE_CONTROL_TICKER
+    assert normalize_prescreen_ticker("$BTCUSD") == "BTC-USD"
 
 
 def test_clean_equity_universe_preserves_order_after_hygiene() -> None:

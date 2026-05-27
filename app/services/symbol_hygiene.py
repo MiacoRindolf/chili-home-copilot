@@ -20,6 +20,15 @@ _INACTIVE_EQUITY_SYMBOLS = frozenset({
 })
 
 _COMPACT_PREFERRED_SYMBOL_RE = re.compile(r"^[A-Z]{3,5}P[A-Z]$")
+_TICKER_DECORATION_PREFIXES = ("$",)
+
+
+def strip_ticker_decoration(symbol: object) -> str:
+    """Return uppercase ticker text with common chart-prefix decoration removed."""
+    t = str(symbol or "").upper().strip()
+    while t.startswith(_TICKER_DECORATION_PREFIXES):
+        t = t[1:].strip()
+    return t
 
 
 def _is_unsupported_common_stock_symbol(symbol: str) -> bool:
@@ -29,7 +38,7 @@ def _is_unsupported_common_stock_symbol(symbol: str) -> bool:
 
 def normalize_equity_symbol(symbol: str) -> str:
     """Return an active common-stock symbol or ``""`` for known inactive names."""
-    t = str(symbol or "").upper().strip()
+    t = strip_ticker_decoration(symbol)
     if not t:
         return ""
     t = _EQUITY_SYMBOL_ALIASES.get(t, t)

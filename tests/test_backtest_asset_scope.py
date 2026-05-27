@@ -9,10 +9,15 @@ from app.services.trading.backtest_engine import (
 )
 
 _MARKET_STRUCTURE_TOKENS = {"BOS", "FVG", "HTF", "LTF", "MSS"}
+_PRICE_ACTION_TOKENS = {"HOD", "LOD", "HH", "LL"}
 _INDICATOR_ONLY_TOKENS = {"IBS"}
-_NON_TICKER_CONTEXT_TOKENS = _MARKET_STRUCTURE_TOKENS | _INDICATOR_ONLY_TOKENS
+_NON_TICKER_CONTEXT_TOKENS = (
+    _MARKET_STRUCTURE_TOKENS | _PRICE_ACTION_TOKENS | _INDICATOR_ONLY_TOKENS
+)
 _REAL_STOCK_MENTION = "AAPL"
 _REAL_CRYPTO_MENTION = "BTC-USD"
+_LEGACY_STOCK_MENTION = "SQ"
+_ACTIVE_STOCK_MENTION = "XYZ"
 _TEST_STOCK_TARGET_COUNT = 30
 
 
@@ -97,6 +102,7 @@ def test_select_tickers_universal_includes_both_asset_types():
 def test_extract_context_ignores_strategy_abbreviations_as_tickers():
     ctx = _extract_context(
         "Stock pullback uses FVG with BOS confirmation across HTF/LTF plus MSS; "
+        "HOD reclaim forms after HH/LL liquidity language; "
         "IBS mean reversion validates "
         f"on {_REAL_STOCK_MENTION} and {_REAL_CRYPTO_MENTION}."
     )
@@ -106,10 +112,22 @@ def test_extract_context_ignores_strategy_abbreviations_as_tickers():
     assert _REAL_CRYPTO_MENTION in ctx["mentioned_tickers"]
 
 
+def test_extract_context_normalizes_legacy_stock_mentions():
+    ctx = _extract_context(
+        f"Stock setup mentions ${_LEGACY_STOCK_MENTION} beside {_REAL_STOCK_MENTION}."
+    )
+
+    assert _LEGACY_STOCK_MENTION not in ctx["mentioned_tickers"]
+    assert _ACTIVE_STOCK_MENTION in ctx["mentioned_tickers"]
+    assert _REAL_STOCK_MENTION in ctx["mentioned_tickers"]
+
+
 def test_select_tickers_defensively_ignores_context_strategy_tokens():
     ctx = {
         "mentioned_tickers": [
             *_NON_TICKER_CONTEXT_TOKENS,
+            _LEGACY_STOCK_MENTION,
+            f"${_LEGACY_STOCK_MENTION}",
             _REAL_STOCK_MENTION,
         ],
         "wants_crypto": False,
@@ -126,4 +144,13 @@ def test_select_tickers_defensively_ignores_context_strategy_tokens():
     )
 
     assert _NON_TICKER_CONTEXT_TOKENS.isdisjoint(pool)
+    assert _LEGACY_STOCK_MENTION not in pool
+    assert _ACTIVE_STOCK_MENTION in pool
     assert _REAL_STOCK_MENTION in pool
+
+
+def test_sector_tickers_use_active_stock_symbols():
+    cloud_saas = set(SECTOR_TICKERS["cloud_saas"])
+
+    assert _LEGACY_STOCK_MENTION not in cloud_saas
+    assert _ACTIVE_STOCK_MENTION in cloud_saas

@@ -25,6 +25,12 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ..symbol_hygiene import (
+    clean_equity_universe,
+    normalize_equity_symbol,
+    strip_ticker_decoration,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -37,7 +43,7 @@ SECTOR_TICKERS: dict[str, list[str]] = {
         "ORCL", "CRM", "ADBE", "AMD", "INTC", "QCOM", "TXN", "NFLX",
     ],
     "cloud_saas": [
-        "DDOG", "NET", "SNOW", "PLTR", "SHOP", "SQ", "PYPL", "COIN",
+        "DDOG", "NET", "SNOW", "PLTR", "SHOP", "XYZ", "PYPL", "COIN",
         "UBER", "ABNB", "MDB", "HUBS", "TEAM", "WDAY",
     ],
     "finance": [
@@ -81,6 +87,11 @@ SECTOR_TICKERS: dict[str, list[str]] = {
         "ARB-USD", "OP-USD", "FET-USD", "INJ-USD", "RENDER-USD",
     ],
 }
+
+for _sect, _tlist in list(SECTOR_TICKERS.items()):
+    if _sect == "crypto":
+        continue
+    SECTOR_TICKERS[_sect] = clean_equity_universe(_tlist)
 
 _ALL_STOCK_TICKERS: set[str] = set()
 for _sect, _tlist in SECTOR_TICKERS.items():
@@ -271,6 +282,11 @@ _MARKET_STRUCTURE_TICKER_STOPWORDS = frozenset(
         "BOS", "FVG", "HTF", "LTF", "MSS",
     }
 )
+_PRICE_ACTION_TICKER_STOPWORDS = frozenset(
+    {
+        "HH", "LL", "HOD", "LOD",
+    }
+)
 _GENERAL_TICKER_STOPWORDS = frozenset(
     {
         "AND", "THE", "FOR", "USD", "AVG", "NET", "LOW", "HIGH", "CHILI",
@@ -280,6 +296,7 @@ _GENERAL_TICKER_STOPWORDS = frozenset(
 _TICKER_STOPWORDS = (
     _INDICATOR_TICKER_STOPWORDS
     | _MARKET_STRUCTURE_TICKER_STOPWORDS
+    | _PRICE_ACTION_TICKER_STOPWORDS
     | _GENERAL_TICKER_STOPWORDS
 )
 _DEFAULT_CRYPTO_RATIO = 0.30  # 30 % crypto, 70 % stocks -- always broad
@@ -291,10 +308,36 @@ _BACKTEST_HOT_CANDIDATE_SAMPLE_LIMIT = 5
 _DEFAULT_BACKTEST_TARGET_TICKERS = 40
 
 
+def _normalize_backtest_ticker(ticker: Any) -> str:
+    """Return canonical ticker text usable by backtest selection."""
+    t = strip_ticker_decoration(ticker)
+    if not t:
+        return ""
+    if t.endswith("-USD"):
+        return t
+    return normalize_equity_symbol(t)
+
+
+def _looks_like_strategy_token(ticker: str) -> bool:
+    """Return True when a ticker-shaped token is trading jargon, not an equity."""
+    return (
+        bool(ticker)
+        and ticker in _TICKER_STOPWORDS
+        and ticker not in _ALL_STOCK_TICKERS
+    )
+
+
+def _normalize_mentioned_ticker_candidate(ticker: Any) -> str:
+    """Return a canonical text-extracted ticker or ``""`` for strategy tokens."""
+    t = _normalize_backtest_ticker(ticker)
+    if not t or _looks_like_strategy_token(t):
+        return ""
+    return t
+
+
 def _is_mentioned_ticker_candidate(ticker: Any) -> bool:
     """Return whether a text-extracted symbol should drive ticker selection."""
-    t = str(ticker or "").strip().upper()
-    return bool(t) and t not in _TICKER_STOPWORDS
+    return bool(_normalize_mentioned_ticker_candidate(ticker))
 
 # Max workers for parallel backtest execution
 def _bt_workers() -> int:
@@ -349,10 +392,14 @@ def _extract_context(
     """
     desc_lower = description.lower()
 
-    mentioned_tickers = [
-        t for t in _TICKER_RE.findall(description)
-        if _is_mentioned_ticker_candidate(t)
-    ]
+    mentioned_tickers: list[str] = []
+    mentioned_seen: set[str] = set()
+    for raw_ticker in _TICKER_RE.findall(description):
+        ticker = _normalize_mentioned_ticker_candidate(raw_ticker)
+        if not ticker or ticker in mentioned_seen:
+            continue
+        mentioned_seen.add(ticker)
+        mentioned_tickers.append(ticker)
 
     has_crypto_tickers = any(t.endswith("-USD") for t in mentioned_tickers)
     has_stock_tickers = any(
@@ -371,7 +418,10 @@ def _extract_context(
             if any(h in det_lower for h in _CRYPTO_HINTS):
                 event_crypto = True
                 break
-            evt_tickers = _TICKER_RE.findall(det)
+            evt_tickers = [
+                _normalize_mentioned_ticker_candidate(t)
+                for t in _TICKER_RE.findall(det)
+            ]
             if any(t.endswith("-USD") for t in evt_tickers):
                 event_crypto = True
                 break
@@ -391,7 +441,10 @@ def _extract_context(
                 if any(h in det_lower for h in _CRYPTO_HINTS):
                     event_crypto = True
                     break
-                evt_tickers = _TICKER_RE.findall(det)
+                evt_tickers = [
+                    _normalize_mentioned_ticker_candidate(t)
+                    for t in _TICKER_RE.findall(det)
+                ]
                 if any(t.endswith("-USD") for t in evt_tickers):
                     event_crypto = True
                     break
@@ -439,7 +492,7 @@ def effective_backtest_asset_universe(
 def _ticker_allowed_for_universe(ticker: str, universe: str) -> bool:
     from .market_data import is_crypto
 
-    t = (ticker or "").strip().upper()
+    t = _normalize_backtest_ticker(ticker)
     if not t:
         return False
     if universe == "crypto":
@@ -480,19 +533,25 @@ def _select_tickers(
     pool_set: set[str] = set()
 
     def _add(ticker: str) -> None:
-        if not _ticker_allowed_for_universe(ticker, universe):
+        normalized = _normalize_backtest_ticker(ticker)
+        if (
+            not normalized
+            or _looks_like_strategy_token(normalized)
+            or not _ticker_allowed_for_universe(normalized, universe)
+        ):
             return
-        if ticker not in pool_set:
-            pool.append(ticker)
-            pool_set.add(ticker)
+        if normalized not in pool_set:
+            pool.append(normalized)
+            pool_set.add(normalized)
 
     if priority_tickers:
         for t in priority_tickers:
             _add(t)
 
     for t in ctx["mentioned_tickers"]:
-        if _is_mentioned_ticker_candidate(t):
-            _add(t)
+        ticker = _normalize_mentioned_ticker_candidate(t)
+        if ticker:
+            _add(ticker)
 
     # ``ticker_specific`` stores tickers; ``sector`` stores sector keys (e.g. mega_tech, crypto).
     scoped_tickers: list[str] | None = None
@@ -500,7 +559,9 @@ def _select_tickers(
     if scope_tickers:
         if ticker_scope == "ticker_specific":
             scoped_tickers = [
-                t for t in scope_tickers if _ticker_allowed_for_universe(t, universe)
+                t
+                for t in (_normalize_backtest_ticker(raw) for raw in scope_tickers)
+                if t and _ticker_allowed_for_universe(t, universe)
             ]
         elif ticker_scope == "sector":
             sector_names = [
@@ -598,7 +659,11 @@ def _select_tickers(
             max_total=_BACKTEST_HOT_CANDIDATE_POOL_LIMIT,
         )
         if hot:
-            hot_f = [t for t in hot if _ticker_allowed_for_universe(t, universe)]
+            hot_f = [
+                t
+                for t in (_normalize_backtest_ticker(raw) for raw in hot)
+                if t and _ticker_allowed_for_universe(t, universe)
+            ]
             if hot_f:
                 for t in random.sample(
                     hot_f, min(_BACKTEST_HOT_CANDIDATE_SAMPLE_LIMIT, len(hot_f))
@@ -651,8 +716,8 @@ def priority_tickers_from_stored_backtests_for_refresh(
     for bt in rows:
         if pn and not strategy_label_aligns_scan_pattern_name(bt.strategy_name, pn):
             continue
-        t = (bt.ticker or "").strip().upper()
-        if not t:
+        t = _normalize_backtest_ticker(bt.ticker)
+        if not t or _looks_like_strategy_token(t):
             continue
         tc = int(bt.trade_count or 0)
         ra = bt.ran_at
