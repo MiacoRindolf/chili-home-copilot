@@ -651,3 +651,71 @@ def test_priority_scoring_routes_thin_candidates_to_prescreen(db):
     assert summary["prescreened"] == 1
     assert thin.queue_tier == QUEUE_TIER_PRESCREEN
     assert proven.queue_tier == QUEUE_TIER_FULL
+
+
+def test_priority_scoring_routes_hard_negative_challenged_to_prescreen(db):
+    _deactivate_existing_patterns(db)
+    hard_negative = _queued_pattern(
+        db,
+        name="hard negative challenged",
+        lifecycle_stage="challenged",
+        promotion_status="challenged_cpcv_ev:negative",
+        backtest_priority=0,
+    )
+    hard_negative.queue_tier = QUEUE_TIER_FULL
+    hard_negative.backtest_count = 75
+    hard_negative.avg_return_pct = -0.2
+    hard_negative.win_rate = 0.31
+    uncertain = _queued_pattern(
+        db,
+        name="uncertain challenged",
+        lifecycle_stage="challenged",
+        promotion_status="challenged_hypothesis",
+        backtest_priority=0,
+    )
+    uncertain.queue_tier = QUEUE_TIER_FULL
+    uncertain.backtest_count = 75
+    uncertain.avg_return_pct = 0.1
+    uncertain.win_rate = 0.45
+    db.commit()
+
+    summary = run_priority_scoring(db)
+    db.refresh(hard_negative)
+    db.refresh(uncertain)
+
+    assert summary["prescreened"] == 1
+    assert hard_negative.queue_tier == QUEUE_TIER_PRESCREEN
+    assert uncertain.queue_tier == QUEUE_TIER_FULL
+
+
+def test_walltime_timeout_demotes_non_operational_pattern_to_prescreen(db):
+    from app.services.trading.backtest_queue_worker import mark_walltime_timeout_pattern
+
+    _deactivate_existing_patterns(db)
+    challenged = _queued_pattern(
+        db,
+        name="slow challenged",
+        lifecycle_stage="challenged",
+        backtest_priority=70,
+    )
+    challenged.queue_tier = QUEUE_TIER_FULL
+    promoted = _queued_pattern(
+        db,
+        name="slow promoted",
+        lifecycle_stage="promoted",
+        backtest_priority=70,
+    )
+    promoted.queue_tier = QUEUE_TIER_FULL
+    db.commit()
+
+    mark_walltime_timeout_pattern(db, challenged, timeout_seconds=900.0)
+    mark_walltime_timeout_pattern(db, promoted, timeout_seconds=900.0)
+    db.refresh(challenged)
+    db.refresh(promoted)
+
+    assert challenged.queue_tier == QUEUE_TIER_PRESCREEN
+    assert challenged.backtest_priority == 0
+    assert challenged.consecutive_zero_trade_runs == 1
+    assert promoted.queue_tier == QUEUE_TIER_FULL
+    assert promoted.backtest_priority == 0
+    assert promoted.consecutive_zero_trade_runs == 1

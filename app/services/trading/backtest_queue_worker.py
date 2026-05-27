@@ -163,6 +163,48 @@ def queue_stored_refresh_max_tickers_for_pattern(settings: object, pattern: obje
     return min(full_target, operational_target)
 
 
+def mark_walltime_timeout_pattern(db, pattern, *, timeout_seconds: float) -> None:
+    """Record a walltime timeout and move non-operational rows to cheap prescreen."""
+    from datetime import datetime
+
+    from .backtest_queue import (
+        QUEUE_TIER_FULL,
+        QUEUE_TIER_PRESCREEN,
+        ZERO_TRADE_DEMOTE_PROTECTED_LIFECYCLES,
+        invalidate_queue_status_cache,
+    )
+
+    pattern.last_backtest_at = datetime.utcnow()
+    pattern.backtest_priority = 0
+    cur = max(0, int(getattr(pattern, "consecutive_zero_trade_runs", 0) or 0))
+    pattern.consecutive_zero_trade_runs = cur + 1
+    lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
+    protected = lifecycle in ZERO_TRADE_DEMOTE_PROTECTED_LIFECYCLES
+    old_tier = str(getattr(pattern, "queue_tier", None) or QUEUE_TIER_FULL)
+    if not protected and old_tier != QUEUE_TIER_PRESCREEN:
+        pattern.queue_tier = QUEUE_TIER_PRESCREEN
+        logger.warning(
+            "[backtest_queue] walltime_demote pattern_id=%s lifecycle=%s "
+            "timeout_s=%.1f queue_tier %s -> %s",
+            getattr(pattern, "id", None),
+            lifecycle,
+            timeout_seconds,
+            old_tier,
+            QUEUE_TIER_PRESCREEN,
+        )
+    elif protected:
+        logger.info(
+            "[backtest_queue] walltime_protected pattern_id=%s lifecycle=%s "
+            "timeout_s=%.1f consecutive_zero_trade_runs=%s",
+            getattr(pattern, "id", None),
+            lifecycle,
+            timeout_seconds,
+            pattern.consecutive_zero_trade_runs,
+        )
+    db.commit()
+    invalidate_queue_status_cache()
+
+
 def configure_multiprocess_child_db_env(pool_size: int, max_overflow: int) -> None:
     """Run in pool initializer: small SQLAlchemy pool per child process."""
     os.environ[CHILD_ENV_FLAG] = "1"
@@ -515,6 +557,23 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             time.monotonic() - pattern_started,
         )
         return (backtests_run, 1)
+    except QueuePatternWalltimeExceeded as e:
+        logger.warning("[backtest_queue] Failed to backtest pattern %s: %s", pattern_id, e)
+        try:
+            pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
+            if pattern:
+                mark_walltime_timeout_pattern(
+                    db,
+                    pattern,
+                    timeout_seconds=queue_pattern_walltime_seconds(settings),
+                )
+        except Exception:
+            logger.debug(
+                "[backtest_queue] walltime timeout marking failed pattern_id=%s",
+                pattern_id,
+                exc_info=True,
+            )
+        return (0, 1)
     except Exception as e:
         logger.warning("[backtest_queue] Failed to backtest pattern %s: %s", pattern_id, e)
         try:

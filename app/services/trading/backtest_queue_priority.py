@@ -54,7 +54,7 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
 
         {
           "scored": int,            # total patterns updated
-          "prescreened": int,       # thin candidate/backtested rows routed to cheap tier
+          "prescreened": int,       # thin or hard-negative rows routed to cheap tier
           "high_priority":  int,    # final score >= 50
           "med_priority":   int,    # final score in [10, 50)
           "low_priority":   int,    # final score in (0, 10)
@@ -128,13 +128,29 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
         SET queue_tier = 'prescreen',
             updated_at = CURRENT_TIMESTAMP
         WHERE active = TRUE
-          AND lifecycle_stage IN ('candidate', 'backtested')
           AND COALESCE(queue_tier, 'full') <> 'prescreen'
           AND COALESCE(recert_required, FALSE) = FALSE
           AND (
-                COALESCE(backtest_count, 0) = 0
-                OR avg_return_pct IS NULL
-                OR win_rate IS NULL
+                (
+                    lifecycle_stage IN ('candidate', 'backtested')
+                    AND (
+                        COALESCE(backtest_count, 0) = 0
+                        OR avg_return_pct IS NULL
+                        OR win_rate IS NULL
+                    )
+                )
+                OR (
+                    lifecycle_stage = 'challenged'
+                    AND COALESCE(backtest_count, 0) >= 50
+                    AND (
+                        COALESCE(promotion_status, '') LIKE 'challenged_cpcv_ev:%'
+                        OR COALESCE(promotion_status, '') LIKE 'challenged_ev_%'
+                    )
+                    AND (
+                        (avg_return_pct IS NOT NULL AND avg_return_pct < 0.0)
+                        OR (win_rate IS NOT NULL AND win_rate < 0.35)
+                    )
+                )
           )
         RETURNING id
         """
