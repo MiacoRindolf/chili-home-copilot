@@ -817,6 +817,7 @@ def test_edge_exhausted_candidates_do_not_set_adaptive_range_floor():
     assert out["range_floor_dynamic_bps"] == pytest.approx(800.0)
     assert out["edge_exhaustion_floor_excluded"] == 1
     assert out["edge_exhaustion_backfill_skips"] == 1
+    assert out["edge_exhaustion_backfill_skip_tickers"] == ["BAD-USD"]
     assert out["edge_exhausted_demotions"] == 1
     assert out["ranked_n"] == 2
     rows_by_ticker = {r["ticker"]: r for r in db.inserted_rows}
@@ -1025,6 +1026,7 @@ def test_rotation_uses_observed_signal_and_fill_rates_for_shadow_ranking():
     assert out["observed_opportunity_tickers"] == 2
     assert out["observed_opportunity_median_maker_fill_rate"] == pytest.approx(0.5)
     assert out["observed_opportunity_rank_skips"] == 1
+    assert out["observed_opportunity_rank_skip_tickers"] == ["NOFILL-USD"]
     rows_by_ticker = {r["ticker"]: r for r in db.inserted_rows}
     assert rows_by_ticker["NOFILL-USD"]["status"] == "inactive"
     assert rows_by_ticker["NOFILL-USD"]["rank"] is None
@@ -1073,6 +1075,7 @@ def test_rotation_skips_open_paper_positions_for_ranked_slots():
     rows_by_ticker = {row["ticker"]: row for row in db.inserted_rows}
     assert out["open_position_subscription_tickers"] == 1
     assert out["open_position_rank_skips"] == 1
+    assert out["open_position_rank_skip_tickers"] == ["HELD-USD"]
     assert out["ranked_n"] == 1
     assert rows_by_ticker["HELD-USD"]["status"] == UNIVERSE_STATUS_INACTIVE
     assert rows_by_ticker["HELD-USD"]["rank"] is None
@@ -1281,9 +1284,13 @@ def test_velocity_deadlock_probe_keeps_configured_shadow_floor_alive():
     statuses = {row["ticker"]: row["status"] for row in db.inserted_rows}
     assert out["shadow_exploration_velocity_deadlock_probe_enabled"] is True
     assert out["shadow_exploration_velocity_deadlock_probe"] == shadow_floor
+    assert len(out["shadow_exploration_velocity_deadlock_probe_tickers"]) == (
+        shadow_floor
+    )
     assert out["shadow_exploration_forced_reasons"] == {
         "market_velocity_deadlock_probe": shadow_floor,
     }
+    assert len(out["shadow_exploration_forced_tickers"]) == shadow_floor
     assert out["shadow_exploration_force_velocity_blocked"] == 0
     assert out["ranked_n"] == shadow_floor
     assert list(statuses.values()).count(UNIVERSE_STATUS_SHADOW) == shadow_floor
@@ -1389,11 +1396,22 @@ def test_velocity_deadlock_probe_excludes_range_floor_boundary_candidate():
     statuses = {row["ticker"]: row["status"] for row in db.inserted_rows}
     assert out["shadow_exploration_velocity_deadlock_probe"] == 1
     assert out["shadow_exploration_velocity_deadlock_floor_excluded"] == 1
+    assert (
+        out["shadow_exploration_velocity_deadlock_floor_excluded_tickers"]
+        == ["FLOOR-EDGE-USD"]
+    )
+    assert out["shadow_exploration_velocity_deadlock_probe_tickers"] == [
+        "ABOVE-FLOOR-USD"
+    ]
     assert out["shadow_exploration_forced_reasons"] == {
         "market_velocity_deadlock_probe": 1,
     }
     assert out["shadow_exploration_force_velocity_blocked"] == 1
+    assert out["shadow_exploration_force_velocity_blocked_tickers"] == [
+        "FLOOR-EDGE-USD"
+    ]
     assert out["market_velocity_backfill_skips"] == 1
+    assert out["market_velocity_backfill_skip_tickers"] == ["FLOOR-EDGE-USD"]
     assert out["ranked_n"] == 1
     assert statuses["ABOVE-FLOOR-USD"] == UNIVERSE_STATUS_SHADOW
     assert statuses["FLOOR-EDGE-USD"] == UNIVERSE_STATUS_INACTIVE

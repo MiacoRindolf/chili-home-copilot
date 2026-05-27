@@ -864,6 +864,17 @@ def _effective_min_shadow_exploration_n(settings, target_ranked: int) -> int:
     return min(max(floor, 0), max(int(target_ranked or 0), 0))
 
 
+def _candidate_tickers(
+    candidates: list[_PairCandidate],
+    *,
+    limit: int,
+) -> list[str]:
+    """Bound diagnostic ticker samples by the configured rank capacity."""
+    if limit <= 0:
+        return []
+    return [str(cand.ticker) for cand in candidates[:limit]]
+
+
 def _market_velocity_cost_parity_ratio(settings) -> float:
     """Configured recent movement / cost floor for shadow backfill."""
     raw = getattr(
@@ -1788,6 +1799,8 @@ def run_rotation_pass(
         ),
         "shadow_exploration_velocity_deadlock_probe": 0,
         "shadow_exploration_velocity_deadlock_floor_excluded": 0,
+        "shadow_exploration_velocity_deadlock_floor_excluded_tickers": [],
+        "shadow_exploration_velocity_deadlock_probe_tickers": [],
         "shadow_exploration_velocity_deadlock_min_surplus_bps": None,
         "shadow_exploration_velocity_deadlock_max_surplus_bps": None,
         "edge_promotion_blocks": {},
@@ -1795,6 +1808,7 @@ def run_rotation_pass(
         "edge_exhausted_demotions": 0,
         "edge_exhaustion_floor_excluded": 0,
         "edge_exhaustion_backfill_skips": 0,
+        "edge_exhaustion_backfill_skip_tickers": [],
         "promotion_decay_table": None,
         "promotion_fee_bps": None,
         "promotion_min_samples": None,
@@ -1824,17 +1838,23 @@ def run_rotation_pass(
         "prior_observed_opportunity_median_realized_move_to_cost": None,
         "open_position_subscription_tickers": 0,
         "open_position_rank_skips": 0,
+        "open_position_rank_skip_tickers": [],
         "market_velocity_cost_parity_ratio": None,
         "observed_opportunity_rank_skips": 0,
+        "observed_opportunity_rank_skip_tickers": [],
         "market_velocity_backfill_skips": 0,
+        "market_velocity_backfill_skip_tickers": [],
         "shadow_exploration_force_velocity_blocked": 0,
+        "shadow_exploration_force_velocity_blocked_tickers": [],
         "shadow_exploration_force_velocity_ratio": None,
+        "shadow_exploration_forced_tickers": [],
         "learning_retention_horizon_s": None,
         "learning_retention_max_n": None,
         "learning_retention_event_tickers": 0,
         "learning_retention_candidates": 0,
         "learning_retention_already_ranked": 0,
         "learning_retained_n": 0,
+        "learning_retained_tickers": [],
         "rotation_at": rotation_at.isoformat(),
         "snapshot_fetch_concurrency": None,
         "rest_request_pacing_s": None,
@@ -2011,6 +2031,7 @@ def run_rotation_pass(
     min_shadow_exploration_n = _effective_min_shadow_exploration_n(
         settings, target_ranked,
     )
+    diagnostic_ticker_limit = max(target_ranked, min_shadow_exploration_n)
     out["shadow_exploration_floor_n"] = min_shadow_exploration_n
     observed_since = _latest_universe_rotation_at(db)
     observed_opportunity = _observed_opportunity_by_ticker(
@@ -2315,6 +2336,10 @@ def run_rotation_pass(
                         ),
                     )
 
+                deadlock_floor_excluded = [
+                    cand for cand in velocity_backfill_skips
+                    if cand.range_24h_bps <= range_floor_bps
+                ]
                 deadlock_probe_pool = sorted(
                     [
                         cand for cand in velocity_backfill_skips
@@ -2324,7 +2349,13 @@ def run_rotation_pass(
                     reverse=True,
                 )
                 out["shadow_exploration_velocity_deadlock_floor_excluded"] = (
-                    len(velocity_backfill_skips) - len(deadlock_probe_pool)
+                    len(deadlock_floor_excluded)
+                )
+                out[
+                    "shadow_exploration_velocity_deadlock_floor_excluded_tickers"
+                ] = _candidate_tickers(
+                    deadlock_floor_excluded,
+                    limit=diagnostic_ticker_limit,
                 )
                 selected_before_probe = len(selected_forced)
                 _deadlock_remaining, force_slots = _force_shadow_exploration(
@@ -2363,6 +2394,9 @@ def run_rotation_pass(
                 out["shadow_exploration_velocity_deadlock_probe"] = len(
                     deadlock_probe_tickers
                 )
+                out["shadow_exploration_velocity_deadlock_probe_tickers"] = (
+                    sorted(deadlock_probe_tickers)
+                )
             out["shadow_exploration_force_velocity_blocked"] = force_slots
         else:
             exhausted_rank_skips, force_slots = _force_shadow_exploration(
@@ -2385,14 +2419,40 @@ def run_rotation_pass(
     if selected_forced:
         out["shadow_exploration_forced"] = len(selected_forced)
         out["learning_retained_n"] = len(learning_forced_tickers)
+        out["shadow_exploration_forced_tickers"] = _candidate_tickers(
+            selected_forced,
+            limit=diagnostic_ticker_limit,
+        )
+        out["learning_retained_tickers"] = sorted(learning_forced_tickers)
         forced_reasons = out["shadow_exploration_forced_reasons"]
         for reason in forced_shadow_reason_by_ticker.values():
             forced_reasons[reason] = forced_reasons.get(reason, 0) + 1
 
     out["edge_exhaustion_backfill_skips"] = len(exhausted_rank_skips)
+    out["edge_exhaustion_backfill_skip_tickers"] = _candidate_tickers(
+        exhausted_rank_skips,
+        limit=diagnostic_ticker_limit,
+    )
     out["open_position_rank_skips"] = len(open_position_rank_skips)
+    out["open_position_rank_skip_tickers"] = _candidate_tickers(
+        open_position_rank_skips,
+        limit=diagnostic_ticker_limit,
+    )
     out["observed_opportunity_rank_skips"] = len(observed_rank_skips)
+    out["observed_opportunity_rank_skip_tickers"] = _candidate_tickers(
+        observed_rank_skips,
+        limit=diagnostic_ticker_limit,
+    )
     out["market_velocity_backfill_skips"] = len(velocity_backfill_skips)
+    out["market_velocity_backfill_skip_tickers"] = _candidate_tickers(
+        velocity_backfill_skips,
+        limit=diagnostic_ticker_limit,
+    )
+    out["shadow_exploration_force_velocity_blocked_tickers"] = (
+        _candidate_tickers(velocity_backfill_skips, limit=diagnostic_ticker_limit)
+        if int(out["shadow_exploration_force_velocity_blocked"] or 0) > 0
+        else []
+    )
     out["ranked_n"] = len(cut_ranked)
 
     seen_in_this_pass: set[str] = set()
