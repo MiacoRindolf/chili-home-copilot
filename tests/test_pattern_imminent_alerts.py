@@ -430,6 +430,74 @@ def test_shadow_poor_edge_cooldown_requires_negative_stored_return(
     assert counts[int(poor.id)] == TEST_POOR_EDGE_MIN_REJECTS
 
 
+def test_shadow_poor_edge_cooldown_uses_recent_expected_net(
+    db,
+    monkeypatch,
+) -> None:
+    old_positive = ScanPattern(
+        name="Old positive but recent edge debt",
+        rules_json={},
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="shadow_promoted",
+        avg_return_pct=1.25,
+    )
+    db.add(old_positive)
+    db.flush()
+    now = datetime.utcnow()
+    for _ in range(TEST_POOR_EDGE_MIN_REJECTS):
+        db.add(AutoTraderRun(
+            user_id=1,
+            scan_pattern_id=old_positive.id,
+            ticker="EDGE-USD",
+            decision="skipped",
+            reason="non_positive_expected_edge",
+            rule_snapshot={"entry_edge": {"expected_net_pct": -1.1}},
+            created_at=now,
+        ))
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_cooldown_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_expected_net_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_min_rejects",
+        TEST_POOR_EDGE_MIN_REJECTS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_lookback_hours",
+        2.0,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_max_avg_return_pct",
+        0.0,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_shadow_poor_edge_max_avg_expected_net_pct",
+        -0.75,
+    )
+
+    cooldown_ids, counts = _shadow_poor_edge_pattern_ids(
+        db,
+        [old_positive],
+        user_id=1,
+    )
+
+    assert int(old_positive.id) in cooldown_ids
+    assert counts[int(old_positive.id)] == TEST_POOR_EDGE_MIN_REJECTS
+
+
 def test_gather_imminent_skips_poor_shadow_pattern_but_keeps_healthy(
     db,
     monkeypatch,

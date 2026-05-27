@@ -191,6 +191,7 @@ AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES = (
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS = 2.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS = 6
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT = 0.0
+PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_EXPECTED_NET_PCT = -0.75
 PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS = 3600
 PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES = 30.0
 PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES = 1
@@ -4723,6 +4724,10 @@ class Settings(BaseSettings):
     )
     pattern_imminent_shadow_poor_edge_max_avg_return_pct: float = (
         PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT
+    )
+    pattern_imminent_shadow_poor_edge_expected_net_enabled: bool = True
+    pattern_imminent_shadow_poor_edge_max_avg_expected_net_pct: float = (
+        PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_EXPECTED_NET_PCT
     )
     # Activity throughput: for crypto imminent scans, spend latency on symbols
     # that the live Coinbase spot venue can actually execute. If Coinbase
