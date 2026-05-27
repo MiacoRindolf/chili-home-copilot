@@ -3228,6 +3228,29 @@ def _process_one_alert(
     _emit_netedge_shadow_score(db, alert, float(px))
     _maybe_emit_regime_diagnostic(db)
 
+    if scale_plan is not None and bool(
+        getattr(alert, "_chili_shadow_observation_only", False)
+    ):
+        shadow_snap = dict(snap or {})
+        shadow_snap["shadow_scale_in_blocked"] = True
+        shadow_snap["shadow_scale_in_existing_trade_id"] = getattr(
+            getattr(scale_plan, "trade", None), "id", None
+        )
+        shadow_snap["shadow_scale_in_policy"] = "observation_only_no_live_mutation"
+        qty = _normalized_scale_in_quantity(alert, scale_plan, shadow_snap)
+        _record_shadow_observation_entry(
+            db,
+            uid=uid,
+            alert=alert,
+            qty=qty,
+            px=px,
+            snap=shadow_snap,
+            llm_snap=llm_snap,
+            live=live,
+            out=out,
+        )
+        return
+
     if scale_plan is not None:
         _execute_scale_in(db, uid, alert, scale_plan, px, snap, llm_snap, live, out)
         return
@@ -3982,7 +4005,24 @@ def _execute_scale_in(
     out: dict[str, Any],
 ) -> None:
     t = plan.trade
-    add_q = float(plan.added_quantity)
+    add_q = _normalized_scale_in_quantity(alert, plan, snap)
+    if add_q <= 0.0:
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="skipped",
+            reason="scale_in_notional_below_trade_unit",
+            rule_snapshot=snap,
+        )
+        out["skipped"] = out.get("skipped", 0) + 1
+        _autotrader_tick_note(
+            out,
+            kind="skipped",
+            reason="scale_in_notional_below_trade_unit",
+            alert=alert,
+        )
+        return
     if live:
         if bool(getattr(settings, "chili_autotrader_block_live_on_capital_fallback", True)):
             try:
@@ -4066,6 +4106,31 @@ def _execute_scale_in(
     _autotrader_tick_note(out, kind="scaled_in", reason="ok", alert=alert)
 
 
+def _normalized_scale_in_quantity(
+    alert: BreakoutAlert,
+    plan: Any,
+    snap: dict[str, Any],
+) -> float:
+    """Return broker-safe scale-in quantity and persist the normalization audit."""
+    try:
+        raw_add_q = float(getattr(plan, "added_quantity", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        raw_add_q = 0.0
+    try:
+        from .tick_normalizer import normalize_quantity
+
+        normalized = float(normalize_quantity(raw_add_q, alert.ticker))
+        source = "tick_normalizer"
+    except Exception:
+        normalized = raw_add_q
+        source = "raw_fallback"
+        snap["scale_in_qty_normalization_error"] = "tick_normalizer_failed"
+    snap["scale_in_qty_raw"] = round(raw_add_q, QUANTITY_ROUND_DIGITS)
+    snap["scale_in_qty_normalized"] = round(normalized, QUANTITY_ROUND_DIGITS)
+    snap["scale_in_qty_source"] = source
+    return normalized if normalized > 0.0 else 0.0
+
+
 def _record_shadow_observation_entry(
     db: Session,
     *,
@@ -4094,15 +4159,31 @@ def _record_shadow_observation_entry(
             "_chili_shadow_observation_signal_lane",
             None,
         )
+    pattern = _pattern_row(db, alert.scan_pattern_id)
     _shadow_stock_fastlane = _queue_shadow_stock_fastlane_for_observation(
         db,
         alert=alert,
-        pattern=_pattern_row(db, alert.scan_pattern_id),
+        pattern=pattern,
         reason=_reason,
         snap=snap,
     )
     if _shadow_stock_fastlane is not None:
         snap["shadow_stock_fastlane"] = _shadow_stock_fastlane
+    _signal_lane = str(
+        getattr(alert, "_chili_shadow_observation_signal_lane", "") or ""
+    ).strip().lower()
+    if (
+        _signal_lane == HARD_RECERT_SHADOW_SIGNAL_LANE
+        or bool(getattr(pattern, "recert_required", False))
+    ):
+        _recert_fastlane = _queue_recert_for_blocked_signal(
+            db,
+            alert=alert,
+            pattern=pattern,
+            reason=_reason,
+        )
+        if _recert_fastlane is not None:
+            snap["recert_signal_fastlane"] = _recert_fastlane
     _audit(
         db,
         user_id=uid,

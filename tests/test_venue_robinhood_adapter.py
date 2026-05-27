@@ -159,6 +159,32 @@ def test_place_market_order_buy(mock_conn, mock_buy, monkeypatch):
     )
 
 
+@patch("app.services.broker_service.place_buy_order")
+@patch("app.services.broker_service.is_connected", return_value=True)
+def test_place_market_order_normalizes_fractional_equity_quantity(
+    mock_conn, mock_buy, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    mock_buy.return_value = {"ok": True, "order_id": "ord-fx", "state": "filled", "raw": {}}
+
+    adapter = RobinhoodSpotAdapter()
+    result = adapter.place_market_order(
+        product_id="ACMR",
+        side="buy",
+        base_size="0.5595970900951316",
+    )
+
+    assert result["ok"] is True
+    mock_buy.assert_called_once_with(
+        "ACMR", 0.559597,
+        order_type="market",
+        market_hours_override=None,
+        extended_hours_override=None,
+    )
+
+
 @patch("app.services.broker_service.place_sell_order")
 @patch("app.services.broker_service.is_connected", return_value=True)
 def test_place_market_order_sell(mock_conn, mock_sell, monkeypatch):

@@ -655,6 +655,71 @@ def test_autotrader_routes_shadow_signal_lane_to_observation_only(
     assert db.query(Trade).filter(Trade.ticker == "PLANE1").count() == 0
 
 
+def test_shadow_observation_scale_in_never_calls_live_broker(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_shadow_promoted_lifecycle_enabled", True)
+    monkeypatch.setattr(
+        settings,
+        "chili_autotrader_shadow_promoted_paper_observation_enabled",
+        True,
+    )
+
+    u = _make_user(db, name="shadow_scale_user")
+    pat = _make_pattern(
+        db, name="shadow_scale_pat", lifecycle_stage="shadow_promoted"
+    )
+    alert = _make_alert(db, pattern_id=pat.id, ticker="SHSCALE")
+
+    existing_trade = SimpleNamespace(
+        id=91,
+        ticker="SHSCALE",
+        status="open",
+        scan_pattern_id=999,
+        quantity=2.0,
+        scale_in_count=0,
+    )
+    scale_plan = SimpleNamespace(
+        trade=existing_trade,
+        added_quantity=0.3333333333333333,
+        new_avg_entry=10.5,
+        new_stop=9.0,
+        new_target=12.0,
+    )
+    out = {"scaled_in": 0, "skipped": 0, "entered": 0}
+    runtime = {"live_orders_effective": True, "paper_mode_effective": False}
+    observations: list[dict[str, object]] = []
+
+    def _record_observation(*args, **kwargs):
+        observations.append({
+            "qty": kwargs["qty"],
+            "snap": dict(kwargs["snap"]),
+        })
+        kwargs["out"]["skipped"] = kwargs["out"].get("skipped", 0) + 1
+
+    patches = list(_autotrader_scaffold_patches())
+    patches.extend([
+        patch.object(auto_trader, "find_open_autotrader_trade", return_value=existing_trade),
+        patch.object(auto_trader, "maybe_scale_in", return_value=scale_plan),
+        patch.object(auto_trader, "_record_shadow_observation_entry", side_effect=_record_observation),
+        patch.object(
+            auto_trader,
+            "_execute_scale_in",
+            side_effect=AssertionError("shadow scale-in must not reach live scale-in"),
+        ),
+    ])
+    for p in patches:
+        p.start()
+    try:
+        auto_trader._process_one_alert(db, u.id, alert, out, runtime)
+    finally:
+        patch.stopall()
+
+    assert out["skipped"] == 1
+    assert out["scaled_in"] == 0
+    assert observations[0]["qty"] == pytest.approx(0.333333)
+    assert observations[0]["snap"]["shadow_scale_in_blocked"] is True
+    assert existing_trade.quantity == 2.0
+
+
 def test_autotrader_shadow_promoted_with_flag_off_falls_through_to_lifecycle_reject(
     db, monkeypatch
 ):

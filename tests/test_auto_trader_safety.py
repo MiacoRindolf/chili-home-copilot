@@ -1286,6 +1286,91 @@ def test_scale_in_records_confirming_pattern_history(monkeypatch):
     assert trade.indicator_snapshot[at_mod.SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY] == [10, 12]
 
 
+def test_scale_in_normalizes_quantity_before_live_broker(monkeypatch):
+    db = MagicMock()
+    alert = SimpleNamespace(id=78, ticker="ACMR", scan_pattern_id=12)
+    trade = SimpleNamespace(
+        id=6,
+        entry_price=TEST_ENTRY_PRICE,
+        quantity=1.0,
+        stop_loss=TEST_STOP_PRICE,
+        take_profit=TEST_TARGET_PRICE,
+        scale_in_count=0,
+        indicator_snapshot={},
+    )
+    plan = SimpleNamespace(
+        trade=trade,
+        added_quantity=0.5595970900951316,
+        new_avg_entry=51.0,
+        new_stop=TEST_STOP_PRICE,
+        new_target=TEST_TARGET_PRICE,
+        confirming_pattern_id=12,
+    )
+    captured: dict[str, float] = {}
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=False),
+    )
+    monkeypatch.setattr(at_mod, "_audit", lambda *a, **k: None)
+    monkeypatch.setattr(at_mod, "_autotrader_tick_note", lambda *a, **k: None)
+    def _fake_broker_buy(*args, **kwargs):
+        captured["qty"] = kwargs["qty"]
+        return {"ok": True, "order_id": "rh-1"}
+
+    monkeypatch.setattr(at_mod, "_execute_broker_buy", _fake_broker_buy)
+
+    out = {"scaled_in": 0, "skipped": 0}
+    snap: dict[str, object] = {}
+
+    at_mod._execute_scale_in(db, 1, alert, plan, TEST_ENTRY_PRICE, snap, None, True, out)
+
+    assert captured["qty"] == pytest.approx(0.559597)
+    assert trade.quantity == pytest.approx(1.559597)
+    assert snap["scale_in_qty_raw"] == pytest.approx(0.55959709)
+    assert snap["scale_in_qty_normalized"] == pytest.approx(0.559597)
+
+
+def test_scale_in_zero_normalized_quantity_skips_broker(monkeypatch):
+    db = MagicMock()
+    alert = SimpleNamespace(id=79, ticker="ACMR", scan_pattern_id=12)
+    plan = SimpleNamespace(
+        trade=SimpleNamespace(id=7, quantity=1.0, indicator_snapshot={}),
+        added_quantity=0.00000001,
+        new_avg_entry=51.0,
+        new_stop=TEST_STOP_PRICE,
+        new_target=TEST_TARGET_PRICE,
+    )
+    audit_rows: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=False),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_execute_broker_buy",
+        lambda *a, **k: pytest.fail("zero normalized scale-in should not reach broker"),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_audit",
+        lambda *a, **k: audit_rows.append(k),
+    )
+    monkeypatch.setattr(at_mod, "_autotrader_tick_note", lambda *a, **k: None)
+
+    out = {"scaled_in": 0, "skipped": 0}
+    snap: dict[str, object] = {}
+
+    at_mod._execute_scale_in(db, 1, alert, plan, TEST_ENTRY_PRICE, snap, None, True, out)
+
+    assert out["skipped"] == 1
+    assert audit_rows[0]["reason"] == "scale_in_notional_below_trade_unit"
+    assert snap["scale_in_qty_normalized"] == 0.0
+
+
 def test_coinbase_cap_uses_passed_price(monkeypatch):
     from app import config as config_mod
     from app.services.trading import broker_selector, cost_aware_gate, governance
