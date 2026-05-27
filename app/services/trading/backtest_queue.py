@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -263,6 +264,66 @@ def _lane_expr(lane: str):
             not_(edge_evidence),
         )
     return true()
+
+
+def classify_queue_lane(pattern: Any) -> str:
+    """Return the queue lane a selected pattern belongs to."""
+    lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
+    if (
+        bool(getattr(pattern, "recert_required", False))
+        and lifecycle in RECERT_PROMOTED_LIFECYCLES
+    ):
+        return LANE_RECERT
+
+    reasons = getattr(pattern, "promotion_gate_reasons", None) or []
+    if isinstance(reasons, str):
+        reasons = [reasons]
+    reason_set = {str(reason) for reason in reasons if reason}
+    if (
+        lifecycle in PROMOTION_PATH_DEBT_LIFECYCLES
+        and bool(reason_set.intersection(PROMOTION_PATH_DEBT_REASONS))
+    ):
+        return LANE_PROMOTION_PATH_DEBT
+
+    if getattr(pattern, "parent_id", None) is not None:
+        promotion_status = str(getattr(pattern, "promotion_status", "") or "")
+        origin = str(getattr(pattern, "origin", "") or "")
+        if (
+            promotion_status == EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS
+            or origin == EDGE_EVIDENCE_VARIANT_ORIGIN
+        ):
+            return LANE_EDGE_EVIDENCE
+
+    queue_tier = str(getattr(pattern, "queue_tier", "") or "").strip().lower()
+    if queue_tier == QUEUE_TIER_PRESCREEN:
+        return LANE_PRESCREEN
+    return LANE_GENERIC
+
+
+def summarize_queue_batch(patterns: list[Any]) -> dict[str, Any]:
+    """Compact batch-shape summary for queue observability."""
+    lane_counts = Counter(classify_queue_lane(pattern) for pattern in patterns)
+    tier_counts = Counter(
+        str(getattr(pattern, "queue_tier", None) or QUEUE_TIER_FULL).strip().lower()
+        for pattern in patterns
+    )
+    lifecycle_counts = Counter(
+        str(getattr(pattern, "lifecycle_stage", None) or "unknown").strip().lower()
+        for pattern in patterns
+    )
+    lineage_counts = Counter(_lineage_key(pattern) for pattern in patterns)
+    max_lineage_count = max(lineage_counts.values(), default=0)
+    top_lineages = [
+        {"lineage": lineage, "count": count}
+        for lineage, count in lineage_counts.most_common(5)
+    ]
+    return {
+        "lanes": dict(sorted(lane_counts.items())),
+        "tiers": dict(sorted(tier_counts.items())),
+        "lifecycles": dict(sorted(lifecycle_counts.items())),
+        "max_lineage_count": int(max_lineage_count),
+        "top_lineages": top_lineages,
+    }
 
 
 def _pending_order_exprs() -> list[Any]:

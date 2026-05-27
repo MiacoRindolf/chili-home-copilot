@@ -14,6 +14,7 @@ from app.services.trading.backtest_queue import (
     get_priority_bypass_retest_floor,
     get_queue_status,
     mark_pattern_tested,
+    summarize_queue_batch,
 )
 from app.services.trading.backtest_queue_priority import run_priority_scoring
 
@@ -224,6 +225,51 @@ def test_lane_planner_diversifies_generic_variant_families(db, monkeypatch):
     assert family_counts[int(parent.id)] == 2
     assert {diverse_a.id, diverse_b.id}.issubset({p.id for p in pending})
     assert len({p.id for p in pending}.intersection({p.id for p in crowded_children})) == 2
+
+
+def test_queue_batch_summary_counts_lanes_tiers_and_lineage(db):
+    _deactivate_existing_patterns(db)
+    parent = _queued_pattern(
+        db,
+        name="edge parent",
+        lifecycle_stage="promoted",
+        backtest_priority=0,
+    )
+    parent.active = False
+    recert = _queued_pattern(
+        db,
+        name="recert",
+        lifecycle_stage="promoted",
+        backtest_priority=0,
+        recert_required=True,
+    )
+    edge_child = _queued_pattern(
+        db,
+        name="edge child",
+        lifecycle_stage="challenged",
+        backtest_priority=0,
+        promotion_status=EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS,
+        origin=EDGE_EVIDENCE_VARIANT_ORIGIN,
+        parent_id=parent.id,
+    )
+    prescreen = _queued_pattern(
+        db,
+        name="prescreen",
+        lifecycle_stage="candidate",
+        backtest_priority=0,
+    )
+    prescreen.queue_tier = QUEUE_TIER_PRESCREEN
+    db.commit()
+
+    summary = summarize_queue_batch([recert, edge_child, prescreen])
+
+    assert summary["lanes"] == {
+        "edge_evidence": 1,
+        "prescreen": 1,
+        "recert": 1,
+    }
+    assert summary["tiers"] == {"full": 2, "prescreen": 1}
+    assert summary["max_lineage_count"] == 1
 
 
 def test_sparse_promotion_path_debt_cooldown_defers_recent_zero_trade_shadow(

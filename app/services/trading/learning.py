@@ -3834,6 +3834,7 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         get_pending_patterns,
         get_queue_status,
         get_retest_interval_days,
+        summarize_queue_batch,
     )
 
     # Round-12 FIX #3 + Round-13 FIX (2026-04-30): asset-aware soft pause
@@ -3961,6 +3962,27 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         batch_size,
         exploration_added,
     )
+    batch_summary: dict[str, Any] = {}
+    try:
+        from ...models.trading import ScanPattern as _ScanPattern
+
+        batch_patterns = (
+            db.query(_ScanPattern)
+            .filter(_ScanPattern.id.in_(pattern_ids))
+            .all()
+        )
+        batch_summary = summarize_queue_batch(batch_patterns)
+        logger.info(
+            "[learning] Queue backtest: batch_mix lanes=%s tiers=%s lifecycles=%s "
+            "max_lineage_count=%s top_lineages=%s",
+            batch_summary.get("lanes"),
+            batch_summary.get("tiers"),
+            batch_summary.get("lifecycles"),
+            batch_summary.get("max_lineage_count"),
+            batch_summary.get("top_lineages"),
+        )
+    except Exception:
+        logger.debug("[learning] Queue backtest batch summary failed", exc_info=True)
 
     max_workers = settings.brain_backtest_parallel
     if settings.brain_max_cpu_pct is not None and _CPU_COUNT:
@@ -4076,6 +4098,7 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         "patterns_processed": patterns_processed,
         "queue_empty": status["queue_empty"],
         "queue_exploration_added": exploration_added,
+        "queue_batch_summary": batch_summary,
         "queue_executor": "process" if use_process else "threads",
         **status,
     }
