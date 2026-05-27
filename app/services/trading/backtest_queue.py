@@ -31,7 +31,10 @@ QUEUE_TIER_PRESCREEN = "prescreen"
 QUEUE_RANK_PRIORITY_RECERT = 0
 QUEUE_RANK_RECERT = 1
 QUEUE_RANK_PROMOTION_PATH_DEBT = 2
-QUEUE_RANK_GENERIC_BACKLOG = 3
+QUEUE_RANK_EDGE_EVIDENCE_VARIANT = 3
+QUEUE_RANK_GENERIC_BACKLOG = 4
+EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS = "edge_shadow_collecting_ev"
+EDGE_EVIDENCE_VARIANT_ORIGIN = "edge_exit_variant"
 MIN_ZERO_TRADE_DEMOTE_THRESHOLD = 1
 ZERO_TRADE_DEMOTE_DEFAULT_THRESHOLD = 3
 
@@ -127,7 +130,8 @@ def get_pending_patterns(
     1. Explicitly prioritized promoted/live recerts
     2. Other promoted/live recerts
     3. Shadow/pilot promotion-path CPCV path debt
-    4. Generic backlog by backtest_priority, staleness, and age
+    4. Edge-evidence child variants collecting research EV
+    5. Generic backlog by backtest_priority, staleness, and age
 
     Explicit boosts (backtest_priority >= configured bypass floor) are always
     eligible, even if last_backtest_at is within the retest window. Lower
@@ -148,6 +152,13 @@ def get_pending_patterns(
     )
     priority_recert_ids = _priority_recert_pattern_ids()
     promotion_path_debt = _promotion_path_debt_expr()
+    edge_evidence_variant = and_(
+        ScanPattern.parent_id.isnot(None),
+        or_(
+            ScanPattern.promotion_status == EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS,
+            ScanPattern.origin == EDGE_EVIDENCE_VARIANT_ORIGIN,
+        ),
+    )
     priority_bypass = ScanPattern.backtest_priority >= get_priority_bypass_retest_floor()
     needs_backtest = or_(
         priority_bypass,
@@ -166,6 +177,7 @@ def get_pending_patterns(
         ),
         (recert_promoted, QUEUE_RANK_RECERT),
         (promotion_path_debt, QUEUE_RANK_PROMOTION_PATH_DEBT),
+        (edge_evidence_variant, QUEUE_RANK_EDGE_EVIDENCE_VARIANT),
         else_=QUEUE_RANK_GENERIC_BACKLOG,
     )
     q = (

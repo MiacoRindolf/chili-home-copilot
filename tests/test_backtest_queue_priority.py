@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.models.trading import ScanPattern
 from app.services.trading.backtest_queue import (
+    EDGE_EVIDENCE_VARIANT_ORIGIN,
+    EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS,
     QUEUE_TIER_FULL,
     QUEUE_TIER_PRESCREEN,
     get_pending_patterns,
@@ -35,6 +37,9 @@ def _queued_pattern(
     promotion_gate_passed: bool | None = None,
     recert_required: bool = False,
     last_backtest_at: datetime | None = None,
+    promotion_status: str = "test",
+    origin: str = "test",
+    parent_id: int | None = None,
 ) -> ScanPattern:
     pat = ScanPattern(
         name=name,
@@ -44,7 +49,9 @@ def _queued_pattern(
             ],
         },
         lifecycle_stage=lifecycle_stage,
-        promotion_status="test",
+        promotion_status=promotion_status,
+        origin=origin,
+        parent_id=parent_id,
         active=True,
         backtest_priority=backtest_priority,
         promotion_gate_reasons=promotion_gate_reasons,
@@ -116,6 +123,39 @@ def test_promotion_path_debt_priority_can_be_disabled(db, monkeypatch):
     pending = get_pending_patterns(db, limit=2)
 
     assert [p.id for p in pending] == [generic.id, path_debt.id]
+
+
+def test_edge_evidence_variant_priority_before_generic_backlog(db):
+    _deactivate_existing_patterns(db)
+    parent = _queued_pattern(
+        db,
+        name="edge parent",
+        lifecycle_stage="promoted",
+        backtest_priority=0,
+    )
+    parent.active = False
+    edge_child = _queued_pattern(
+        db,
+        name="edge evidence child",
+        lifecycle_stage="challenged",
+        backtest_priority=50,
+        promotion_status=EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS,
+        origin=EDGE_EVIDENCE_VARIANT_ORIGIN,
+        parent_id=parent.id,
+    )
+    generic = _queued_pattern(
+        db,
+        name="generic high priority challenged",
+        lifecycle_stage="challenged",
+        backtest_priority=999,
+        promotion_gate_reasons=["adaptive_dsr_below_pool_threshold"],
+        promotion_gate_passed=False,
+    )
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=2)
+
+    assert [p.id for p in pending] == [edge_child.id, generic.id]
 
 
 def test_scored_priority_does_not_requeue_fresh_pattern_below_bypass_floor(db):
