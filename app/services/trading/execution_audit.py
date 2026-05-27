@@ -89,11 +89,58 @@ def _normalize_event_type(status: str | None) -> str:
     return "status"
 
 
-def _execution_family_for_broker(broker_source: str | None, ticker: str | None = None) -> str:
+def _is_option_trade_for_execution_event(trade: Any | None) -> bool:
+    def _optionish(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"option", "options"}
+
+    if trade is None:
+        return False
+    if _optionish(getattr(trade, "asset_kind", None)):
+        return True
+    if "option" in str(getattr(trade, "tags", "") or "").strip().lower():
+        return True
+
+    snap = getattr(trade, "indicator_snapshot", None)
+    if isinstance(snap, str):
+        try:
+            snap = json.loads(snap)
+        except Exception:
+            snap = {}
+    if not isinstance(snap, dict):
+        return False
+    if snap.get("option_meta") or _optionish(snap.get("asset_type")):
+        return True
+    if str(snap.get("options_path") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    breakout = snap.get("breakout_alert")
+    if isinstance(breakout, str):
+        try:
+            breakout = json.loads(breakout)
+        except Exception:
+            breakout = None
+    if isinstance(breakout, dict):
+        if breakout.get("option_meta") or _optionish(breakout.get("asset_type")):
+            return True
+        return str(breakout.get("options_path") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    return False
+
+
+def _execution_family_for_broker(
+    broker_source: str | None,
+    ticker: str | None = None,
+    trade: Any | None = None,
+) -> str:
     broker = (broker_source or "manual").strip().lower()
     if broker == "coinbase":
         return "coinbase_spot"
     if broker == "robinhood":
+        if _is_option_trade_for_execution_event(trade):
+            return "robinhood_options"
         return "manual_equity" if (ticker or "").endswith("-USD") else "robinhood_equity"
     return "manual_equity"
 
@@ -272,7 +319,11 @@ def record_execution_event(
 
     broker = (broker_source or getattr(trade, "broker_source", None) or "manual").strip().lower()
     venue_name = venue or _venue_for_broker(broker)
-    family = execution_family or _execution_family_for_broker(broker, ticker=ticker)
+    family = execution_family or _execution_family_for_broker(
+        broker,
+        ticker=ticker,
+        trade=trade,
+    )
     # f-position-identity-phase-2 (2026-05-18) — double-write: resolve the
     # trading_positions.id for this event alongside trade_id. NEVER raises
     # (resolver swallows all errors). NO READER consults this column yet —
@@ -376,7 +427,11 @@ def normalize_robinhood_order_event(
     )
     return {
         "venue": "robinhood",
-        "execution_family": _execution_family_for_broker("robinhood", getattr(trade, "ticker", None)),
+        "execution_family": _execution_family_for_broker(
+            "robinhood",
+            getattr(trade, "ticker", None),
+            trade=trade,
+        ),
         "broker_source": "robinhood",
         "order_id": order.get("id") or getattr(trade, "broker_order_id", None),
         "product_id": getattr(trade, "ticker", None),
