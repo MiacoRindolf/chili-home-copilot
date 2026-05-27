@@ -706,6 +706,8 @@ def priority_tickers_from_stored_backtests_for_refresh(
     """
     from datetime import datetime, timedelta
 
+    from sqlalchemy import or_
+
     from ...models.trading import BacktestResult
     from .scan_pattern_label_alignment import strategy_label_aligns_scan_pattern_name
 
@@ -713,6 +715,7 @@ def priority_tickers_from_stored_backtests_for_refresh(
     if max_tickers <= 0:
         return []
     cutoff = datetime.utcnow() - timedelta(days=max(1, int(stale_days)))
+    stale_cap = int(stale_trade_cap)
 
     rows = (
         db.query(BacktestResult)
@@ -720,9 +723,16 @@ def priority_tickers_from_stored_backtests_for_refresh(
             BacktestResult.related_insight_id == int(insight_id),
             BacktestResult.scan_pattern_id == int(scan_pattern_id),
         )
+        .filter(
+            or_(
+                BacktestResult.trade_count.is_(None),
+                BacktestResult.trade_count <= stale_cap,
+                BacktestResult.ran_at.is_(None),
+                BacktestResult.ran_at < cutoff,
+            )
+        )
         .all()
     )
-    stale_cap = int(stale_trade_cap)
     candidates: list[tuple[int, datetime, str]] = []
     for bt in rows:
         if pn and not strategy_label_aligns_scan_pattern_name(bt.strategy_name, pn):
