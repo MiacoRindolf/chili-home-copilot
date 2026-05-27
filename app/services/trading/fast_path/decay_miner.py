@@ -678,9 +678,9 @@ class FastPathDecayMiner:
                     realized_validation_count =
                         {table}.realized_validation_count + 1,
                     realized_validation_residual =
-                        {table}.realized_validation_residual
+                        COALESCE({table}.realized_validation_residual, 0)
                         + (ABS(:realized - {table}.mean_return)
-                           - {table}.realized_validation_residual)
+                           - COALESCE({table}.realized_validation_residual, 0))
                           / ({table}.realized_validation_count + 1),
                     {timestamp_column} = NOW()
             """), {

@@ -275,6 +275,7 @@ def test_exit_validation_updates_maker_filled_table_for_maker_entry():
         "INSERT INTO fast_signal_decay_maker_filled " in sql
         for sql in writes
     )
+    assert all("COALESCE(" in sql for sql in writes)
     select_params = execute_calls[0][1]
     assert select_params["maker_filled_outcomes"] == ["filled", "partial"]
     assert miner._metrics.validations_recorded == 1
