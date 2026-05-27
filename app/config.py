@@ -3029,6 +3029,52 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_VARIANT_SPAWN_GATE_ENABLED"),
     )
+    chili_edge_evolution_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_ENABLED"),
+    )
+    chili_edge_evolution_lookback_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_LOOKBACK_DAYS"),
+    )
+    chili_edge_evolution_min_rejects: int = Field(
+        default=5,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_REJECTS"),
+    )
+    chili_edge_evolution_severe_min_rejects: int = Field(
+        default=20,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_SEVERE_MIN_REJECTS"),
+    )
+    chili_edge_evolution_severe_avg_net_pct: float = Field(
+        default=-1.0,
+        ge=-100.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_SEVERE_AVG_NET_PCT"),
+    )
+    chili_edge_evolution_max_avg_net_for_child_pct: float = Field(
+        default=-0.25,
+        ge=-100.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MAX_AVG_NET_FOR_CHILD_PCT"),
+    )
+    chili_edge_evolution_min_payoff_samples: int = Field(
+        default=5,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_PAYOFF_SAMPLES"),
+    )
+    chili_edge_evolution_min_reward_risk: float = Field(
+        default=1.25,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_REWARD_RISK"),
+    )
 
     chili_pattern_evidence_audit_enabled: bool = Field(
         default=True,

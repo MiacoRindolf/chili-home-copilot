@@ -201,6 +201,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_canonical_outcome_layer.py",
     "test_composite_reweight.py",
     "test_crypto_exit_monitor_pattern_exit_now.py",
+    "test_edge_aware_evolution.py",
     "test_emergency_liquidation_no_quote.py",
     "test_market_data_dead_cache_fallback.py",
     "test_monitor_api_execution_state.py",
