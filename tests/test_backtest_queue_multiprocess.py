@@ -210,13 +210,69 @@ def test_operational_queue_target_caps_promoted_lifecycle():
 
     cfg = SimpleNamespace(
         brain_queue_target_tickers=60,
+        brain_queue_intraday_timeframes="1m,5m,15m",
+        brain_queue_intraday_target_tickers=24,
         brain_queue_operational_refresh_enabled=True,
         brain_queue_operational_refresh_lifecycles="promoted,live,shadow_promoted,pilot_promoted",
         brain_queue_operational_target_tickers=24,
     )
-    pattern = SimpleNamespace(lifecycle_stage="promoted")
+    pattern = SimpleNamespace(lifecycle_stage="promoted", timeframe="1d")
 
     assert queue_target_tickers_for_pattern(cfg, pattern) == 24
+
+
+def test_intraday_queue_target_caps_expensive_full_patterns():
+    from app.services.trading.backtest_queue_worker import (
+        queue_target_tickers_for_pattern,
+    )
+
+    cfg = SimpleNamespace(
+        brain_queue_target_tickers=60,
+        brain_queue_intraday_timeframes="1m,5m,15m",
+        brain_queue_intraday_target_tickers=24,
+        brain_queue_operational_refresh_enabled=True,
+        brain_queue_operational_refresh_lifecycles="promoted,live,shadow_promoted,pilot_promoted",
+        brain_queue_operational_target_tickers=18,
+    )
+    pattern = SimpleNamespace(lifecycle_stage="candidate", timeframe="5m")
+
+    assert queue_target_tickers_for_pattern(cfg, pattern) == 24
+
+
+def test_intraday_queue_target_does_not_raise_lower_full_budget():
+    from app.services.trading.backtest_queue_worker import (
+        queue_target_tickers_for_pattern,
+    )
+
+    cfg = SimpleNamespace(
+        brain_queue_target_tickers=12,
+        brain_queue_intraday_timeframes="1m,5m,15m",
+        brain_queue_intraday_target_tickers=24,
+        brain_queue_operational_refresh_enabled=True,
+        brain_queue_operational_refresh_lifecycles="promoted,live,shadow_promoted,pilot_promoted",
+        brain_queue_operational_target_tickers=18,
+    )
+    pattern = SimpleNamespace(lifecycle_stage="candidate", timeframe="1m")
+
+    assert queue_target_tickers_for_pattern(cfg, pattern) == 12
+
+
+def test_daily_queue_target_keeps_full_budget():
+    from app.services.trading.backtest_queue_worker import (
+        queue_target_tickers_for_pattern,
+    )
+
+    cfg = SimpleNamespace(
+        brain_queue_target_tickers=60,
+        brain_queue_intraday_timeframes="1m,5m,15m",
+        brain_queue_intraday_target_tickers=24,
+        brain_queue_operational_refresh_enabled=True,
+        brain_queue_operational_refresh_lifecycles="promoted,live,shadow_promoted,pilot_promoted",
+        brain_queue_operational_target_tickers=18,
+    )
+    pattern = SimpleNamespace(lifecycle_stage="candidate", timeframe="1d")
+
+    assert queue_target_tickers_for_pattern(cfg, pattern) == 60
 
 
 def test_operational_queue_target_keeps_generic_backlog_full_budget():
@@ -226,11 +282,13 @@ def test_operational_queue_target_keeps_generic_backlog_full_budget():
 
     cfg = SimpleNamespace(
         brain_queue_target_tickers=60,
+        brain_queue_intraday_timeframes="1m,5m,15m",
+        brain_queue_intraday_target_tickers=24,
         brain_queue_operational_refresh_enabled=True,
         brain_queue_operational_refresh_lifecycles="promoted,live,shadow_promoted,pilot_promoted",
         brain_queue_operational_target_tickers=24,
     )
-    pattern = SimpleNamespace(lifecycle_stage="challenged")
+    pattern = SimpleNamespace(lifecycle_stage="challenged", timeframe="1d")
 
     assert queue_target_tickers_for_pattern(cfg, pattern) == 60
 
@@ -243,12 +301,14 @@ def test_operational_stored_refresh_cap_is_separate_from_full_refresh_cap():
     cfg = SimpleNamespace(
         brain_queue_target_tickers=60,
         brain_queue_stored_refresh_max_tickers=40,
+        brain_queue_intraday_timeframes="1m,5m,15m",
+        brain_queue_intraday_target_tickers=24,
         brain_queue_operational_refresh_enabled=True,
         brain_queue_operational_refresh_lifecycles="promoted,live,shadow_promoted,pilot_promoted",
         brain_queue_operational_target_tickers=24,
         brain_queue_operational_stored_refresh_max_tickers=18,
     )
-    pattern = SimpleNamespace(lifecycle_stage="shadow_promoted")
+    pattern = SimpleNamespace(lifecycle_stage="shadow_promoted", timeframe="1d")
 
     assert queue_stored_refresh_max_tickers_for_pattern(cfg, pattern) == 18
 
@@ -260,10 +320,12 @@ def test_operational_queue_budget_can_be_disabled():
 
     cfg = SimpleNamespace(
         brain_queue_target_tickers=60,
+        brain_queue_intraday_timeframes="1m,5m,15m",
+        brain_queue_intraday_target_tickers=24,
         brain_queue_operational_refresh_enabled=False,
         brain_queue_operational_refresh_lifecycles="promoted",
         brain_queue_operational_target_tickers=24,
     )
-    pattern = SimpleNamespace(lifecycle_stage="promoted")
+    pattern = SimpleNamespace(lifecycle_stage="promoted", timeframe="1d")
 
     assert queue_target_tickers_for_pattern(cfg, pattern) == 60

@@ -179,11 +179,27 @@ def _operational_refresh_lane(settings: object, pattern: object) -> bool:
     return lifecycle in allowed
 
 
+def _intraday_queue_lane(settings: object, pattern: object) -> bool:
+    timeframe = str(getattr(pattern, "timeframe", "") or "").strip().lower()
+    if not timeframe:
+        return False
+    intraday_timeframes = _csv_tokens(
+        getattr(settings, "brain_queue_intraday_timeframes", "1m,5m,15m")
+    )
+    return timeframe in intraday_timeframes
+
+
 def queue_target_tickers_for_pattern(settings: object, pattern: object) -> int:
     full_target = _positive_int(
         getattr(settings, "brain_queue_target_tickers", None),
         MIN_QUEUE_TICKER_COUNT,
     )
+    if _intraday_queue_lane(settings, pattern):
+        intraday_target = _positive_int(
+            getattr(settings, "brain_queue_intraday_target_tickers", None),
+            full_target,
+        )
+        full_target = min(full_target, intraday_target)
     if not _operational_refresh_lane(settings, pattern):
         return full_target
     operational_target = _positive_int(

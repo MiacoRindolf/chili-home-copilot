@@ -1128,6 +1128,12 @@ class Settings(BaseSettings):
             return "process"
         return "threads"
     brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
+    # Intraday full-tier patterns are materially more expensive per ticker
+    # than daily patterns. Keep each pass bounded and let evidence accumulate
+    # across queue cycles; promotion/EV/CPCV gates still consume the persisted
+    # evidence count and are not relaxed by this cap.
+    brain_queue_intraday_timeframes: str = "1m,5m,15m"
+    brain_queue_intraday_target_tickers: int = 24
     # Operational recert/debt lane: keep promoted/pilot/shadow evidence fresh
     # without allowing one pattern to monopolize the queue for an hour.
     brain_queue_operational_refresh_enabled: bool = True
