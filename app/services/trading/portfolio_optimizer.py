@@ -173,6 +173,16 @@ def check_portfolio_drawdown(
 ) -> dict[str, Any]:
     """Check portfolio-level drawdown across all open positions."""
     from .market_data import fetch_quote
+    try:
+        from .paper_trading import (
+            _is_option_paper_trade,
+            _paper_contract_multiplier,
+            _paper_current_mark_price,
+        )
+    except Exception:
+        _is_option_paper_trade = None
+        _paper_contract_multiplier = None
+        _paper_current_mark_price = None
 
     open_trades = db.query(PaperTrade).filter(PaperTrade.status == "open")
     if user_id is not None:
@@ -182,13 +192,25 @@ def check_portfolio_drawdown(
     total_unrealized = 0.0
     for pos in positions:
         try:
-            q = fetch_quote(pos.ticker)
-            if q and q.get("price"):
-                price = float(q["price"])
-                if pos.direction == "long":
-                    total_unrealized += (price - pos.entry_price) * pos.quantity
-                else:
-                    total_unrealized += (pos.entry_price - price) * pos.quantity
+            multiplier = 1.0
+            price: float | None = None
+            is_option = callable(_is_option_paper_trade) and _is_option_paper_trade(pos)
+            if is_option:
+                if callable(_paper_contract_multiplier):
+                    multiplier = float(_paper_contract_multiplier(pos))
+                if callable(_paper_current_mark_price):
+                    mark = _paper_current_mark_price(pos, purpose="portfolio_drawdown")
+                    price = float(mark) if mark is not None else None
+            else:
+                q = fetch_quote(pos.ticker)
+                if q and q.get("price"):
+                    price = float(q["price"])
+            if price is None:
+                continue
+            if pos.direction == "long":
+                total_unrealized += (price - pos.entry_price) * pos.quantity * multiplier
+            else:
+                total_unrealized += (pos.entry_price - price) * pos.quantity * multiplier
         except Exception:
             continue
 
