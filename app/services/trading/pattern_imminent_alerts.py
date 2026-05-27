@@ -31,7 +31,9 @@ from ...config import (
     PATTERN_IMMINENT_DEFAULT_SUPPRESSED_DIAGNOSTIC_LIMIT,
     PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_EXPLORE_TICKERS,
     PATTERN_IMMINENT_DEFAULT_TICKER_ROTATION_WINDOW_MINUTES,
+    PATTERN_IMMINENT_EQUITY_SESSION_SHADOW_SIGNAL_LANE,
     PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE,
+    PATTERN_IMMINENT_OFFSESSION_STOCK_SHADOW_DEFAULT_ENABLED,
     PATTERN_IMMINENT_MIN_TICKER_ROTATION_WINDOW_MINUTES,
     PATTERN_IMMINENT_OPEN_POSITION_DEFLECTION_DEFAULT_ENABLED,
     PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES,
@@ -96,9 +98,13 @@ READINESS_SKIP_AT_OR_ABOVE_CAP = "readiness_at_or_above_cap"
 STANDARD_SIGNAL_LANE = "standard"
 SHADOW_NEAR_MISS_SIGNAL_LANE = "shadow_near_miss"
 HARD_RECERT_SHADOW_SIGNAL_LANE = PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE
+EQUITY_SESSION_SHADOW_SIGNAL_LANE = (
+    PATTERN_IMMINENT_EQUITY_SESSION_SHADOW_SIGNAL_LANE
+)
 SHADOW_OBSERVATION_SIGNAL_LANES = frozenset({
     SHADOW_NEAR_MISS_SIGNAL_LANE,
     HARD_RECERT_SHADOW_SIGNAL_LANE,
+    EQUITY_SESSION_SHADOW_SIGNAL_LANE,
 })
 SHADOW_NEAR_MISS_SOURCE_FIXED_GAP = "fixed_gap"
 SHADOW_NEAR_MISS_SOURCE_ADAPTIVE_BUFFER = "adaptive_priority_buffer"
@@ -891,6 +897,7 @@ def _tickers_for_pattern(
     global_universe: list[str],
     *,
     equity_open: bool,
+    allow_offsession_stock_shadow: bool = False,
 ) -> list[str]:
     scope = (getattr(pat, "ticker_scope", None) or "universal").strip().lower()
     ac = (getattr(pat, "asset_class", None) or "all").strip().lower()
@@ -919,10 +926,10 @@ def _tickers_for_pattern(
             continue
         if ac == "stocks" and cr:
             continue
-        if ac == "stocks" and not equity_open:
+        if ac == "stocks" and not equity_open and not allow_offsession_stock_shadow:
             continue
         if ac == "all":
-            if not cr and not equity_open:
+            if not cr and not equity_open and not allow_offsession_stock_shadow:
                 continue
         out.append(t)
     return out
@@ -1223,6 +1230,17 @@ def gather_imminent_candidate_rows(
         "pattern_imminent_hard_recert_shadow_reasons",
         PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_REASONS,
     )
+    offsession_stock_shadow_enabled = (
+        bool(
+            getattr(
+                settings,
+                "pattern_imminent_offsession_stock_shadow_enabled",
+                PATTERN_IMMINENT_OFFSESSION_STOCK_SHADOW_DEFAULT_ENABLED,
+            )
+        )
+        and bool(apply_main_dispatch_filters)
+        and not bool(for_opportunity_board)
+    )
     ticker_rotation_enabled = (
         bool(getattr(settings, "pattern_imminent_ticker_rotation_enabled", True))
         and bool(apply_main_dispatch_filters)
@@ -1306,6 +1324,7 @@ def gather_imminent_candidate_rows(
     hard_recert_shadow_eligible = 0
     hard_recert_shadow_admitted = 0
     hard_recert_shadow_reason_counts: Counter[str] = Counter()
+    offsession_stock_shadow_admitted = 0
     ticker_rotation_applied = 0
     ticker_rotation_total_available = 0
     ticker_rotation_samples: list[dict[str, Any]] = []
@@ -1419,6 +1438,7 @@ def gather_imminent_candidate_rows(
         nonlocal shadow_near_miss_gap_admitted
         nonlocal shadow_near_miss_adaptive_admitted
         nonlocal hard_recert_shadow_admitted
+        nonlocal offsession_stock_shadow_admitted
 
         eta_lo, eta_hi = estimate_breakout_eta_hours(
             readiness, pat.timeframe, k=k_eta, max_eta_hours=max_eta,
@@ -1516,6 +1536,8 @@ def gather_imminent_candidate_rows(
         elif signal_lane == HARD_RECERT_SHADOW_SIGNAL_LANE:
             hard_recert_shadow_admitted += 1
             hard_recert_shadow_reason_counts.update(hard_recert_reasons or [])
+        elif signal_lane == EQUITY_SESSION_SHADOW_SIGNAL_LANE:
+            offsession_stock_shadow_admitted += 1
         return True
 
     def _pending_shadow_near_miss_priority(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -1565,7 +1587,12 @@ def gather_imminent_candidate_rows(
         if hard_recert_reasons_for_pat:
             hard_recert_shadow_patterns += 1
 
-        tickers = _tickers_for_pattern(pat, global_uni, equity_open=eq_open)
+        tickers = _tickers_for_pattern(
+            pat,
+            global_uni,
+            equity_open=eq_open,
+            allow_offsession_stock_shadow=offsession_stock_shadow_enabled,
+        )
         tickers, dropped_crypto, _spot_count = _filter_crypto_to_execution_universe(
             tickers,
             coinbase_spot_tickers=coinbase_spot_tickers,
@@ -1681,6 +1708,13 @@ def gather_imminent_candidate_rows(
                 if hard_recert_reason_list
                 else STANDARD_SIGNAL_LANE
             )
+            if (
+                signal_lane == STANDARD_SIGNAL_LANE
+                and offsession_stock_shadow_enabled
+                and not eq_open
+                and not is_crypto(ticker)
+            ):
+                signal_lane = EQUITY_SESSION_SHADOW_SIGNAL_LANE
             readiness_gap_to_min: float | None = None
             shadow_near_miss_source: str | None = None
             if readiness < min_rd:
@@ -1845,6 +1879,8 @@ def gather_imminent_candidate_rows(
         "hard_recert_shadow_eligible": hard_recert_shadow_eligible,
         "hard_recert_shadow_admitted": hard_recert_shadow_admitted,
         "hard_recert_shadow_reason_counts": dict(hard_recert_shadow_reason_counts),
+        "offsession_stock_shadow_enabled": offsession_stock_shadow_enabled,
+        "offsession_stock_shadow_admitted": offsession_stock_shadow_admitted,
         "ticker_rotation_enabled": ticker_rotation_enabled,
         "ticker_rotation_window_minutes": ticker_rotation_window_minutes,
         "ticker_rotation_explore_tickers": min(

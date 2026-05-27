@@ -140,6 +140,8 @@ PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES = (
     "shadow_promoted,pilot_promoted"
 )
 PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE = "hard_recert_shadow"
+PATTERN_IMMINENT_EQUITY_SESSION_SHADOW_SIGNAL_LANE = "equity_session_shadow"
+PATTERN_IMMINENT_OFFSESSION_STOCK_SHADOW_DEFAULT_ENABLED = True
 PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_LIFECYCLE_STAGES = "promoted,live"
 PATTERN_IMMINENT_DEFAULT_HARD_RECERT_SHADOW_REASONS = (
     "negative_oos_recert,negative_realized_ev,weak_oos_win_rate_recert,"
@@ -4587,6 +4589,12 @@ class Settings(BaseSettings):
     )
     pattern_imminent_shadow_near_miss_lifecycle_stages: str = (
         PATTERN_IMMINENT_DEFAULT_SHADOW_NEAR_MISS_LIFECYCLE_STAGES
+    )
+    # Outside regular US equity hours, promoted/live stock patterns can still
+    # emit paper/shadow observation rows for learning and next-session prep.
+    # The dedicated signal lane keeps them out of live broker entry flow.
+    pattern_imminent_offsession_stock_shadow_enabled: bool = (
+        PATTERN_IMMINENT_OFFSESSION_STOCK_SHADOW_DEFAULT_ENABLED
     )
     # Hard failed recert debt should not spend main live-alert capacity, but
     # can still produce paper/shadow evidence for future requalification.

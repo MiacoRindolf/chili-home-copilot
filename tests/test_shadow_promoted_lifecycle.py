@@ -593,9 +593,17 @@ def test_autotrader_mixed_alerts_route_independently(db, monkeypatch):
     assert live_runs_blocked == []
 
 
+@pytest.mark.parametrize(
+    "signal_lane",
+    [
+        auto_trader.SHADOW_NEAR_MISS_SIGNAL_LANE,
+        auto_trader.EQUITY_SESSION_SHADOW_SIGNAL_LANE,
+    ],
+)
 def test_autotrader_routes_shadow_signal_lane_to_observation_only(
     db,
     monkeypatch,
+    signal_lane,
 ):
     monkeypatch.setattr(
         settings,
@@ -610,7 +618,7 @@ def test_autotrader_routes_shadow_signal_lane_to_observation_only(
     alert = _make_alert(db, pattern_id=pat.id, ticker="PLANE1")
     alert.indicator_snapshot = {
         "imminent_scorecard": {
-            "signal_lane": auto_trader.SHADOW_NEAR_MISS_SIGNAL_LANE,
+            "signal_lane": signal_lane,
         },
     }
     db.add(alert)
