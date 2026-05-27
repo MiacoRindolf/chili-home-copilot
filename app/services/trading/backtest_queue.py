@@ -6,6 +6,7 @@ Patterns are re-tested weekly or when manually boosted by the user.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import Counter
@@ -44,6 +45,9 @@ LANE_PROMOTION_PATH_DEBT = "promotion_path_debt"
 LANE_EDGE_EVIDENCE = "edge_evidence"
 LANE_PRESCREEN = "prescreen"
 LANE_GENERIC = "generic"
+QUEUE_LINEAGE_FIXED_CAP_DISABLED = 0
+QUEUE_LINEAGE_DIVERSIFICATION_SHARE_DEFAULT = 0.10
+QUEUE_LINEAGE_MIN_PER_BATCH_DEFAULT = 1
 
 
 def _settings_int(name: str, default: int, *, minimum: int = 0) -> int:
@@ -58,6 +62,78 @@ def _settings_int(name: str, default: int, *, minimum: int = 0) -> int:
     except (TypeError, ValueError):
         value = default
     return max(minimum, value)
+
+
+def _settings_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    try:
+        from ...config import settings
+
+        raw = getattr(settings, name, default)
+    except Exception:
+        raw = default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def get_queue_lineage_cap_policy(limit: int) -> dict[str, Any]:
+    """Resolve the queue lineage diversification cap for this batch size."""
+    normalized_limit = max(0, int(limit or 0))
+    fixed_override = _settings_int(
+        "brain_queue_max_per_lineage_per_batch",
+        QUEUE_LINEAGE_FIXED_CAP_DISABLED,
+        minimum=0,
+    )
+    if fixed_override > QUEUE_LINEAGE_FIXED_CAP_DISABLED:
+        return {
+            "mode": "fixed_override",
+            "cap": fixed_override,
+            "fixed_override": fixed_override,
+            "max_batch_share": None,
+            "min_per_batch": None,
+            "limit": normalized_limit,
+        }
+
+    max_batch_share = _settings_float(
+        "brain_queue_lineage_max_batch_share",
+        QUEUE_LINEAGE_DIVERSIFICATION_SHARE_DEFAULT,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    min_per_batch = _settings_int(
+        "brain_queue_lineage_min_per_batch",
+        QUEUE_LINEAGE_MIN_PER_BATCH_DEFAULT,
+        minimum=0,
+    )
+    if normalized_limit <= 0 or (max_batch_share <= 0.0 and min_per_batch <= 0):
+        cap = 0
+    else:
+        cap = max(min_per_batch, int(math.ceil(normalized_limit * max_batch_share)))
+    return {
+        "mode": "adaptive_share" if cap > 0 else "disabled",
+        "cap": cap,
+        "fixed_override": fixed_override,
+        "max_batch_share": max_batch_share,
+        "min_per_batch": min_per_batch,
+        "limit": normalized_limit,
+    }
+
+
+def _queue_lineage_cap(limit: int) -> int | None:
+    cap = int(get_queue_lineage_cap_policy(limit).get("cap") or 0)
+    return cap if cap > 0 else None
 
 
 def _settings_bool(name: str, default: bool) -> bool:
@@ -478,11 +554,7 @@ def _planned_pending_patterns(db: Session, *, limit: int) -> list[ScanPattern]:
     selected: list[ScanPattern] = []
     selected_ids: set[int] = set()
     lineage_counts: dict[int, int] = {}
-    lineage_cap = _settings_int(
-        "brain_queue_max_per_lineage_per_batch",
-        3,
-        minimum=0,
-    )
+    lineage_cap = _queue_lineage_cap(limit)
     fetch_multiplier = _settings_int(
         "brain_queue_lane_fetch_multiplier",
         4,
@@ -942,6 +1014,9 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
     prescreen_pending = row.prescreen_pending or 0
     generic_pending = row.generic_pending or 0
 
+    lineage_policy = get_queue_lineage_cap_policy(
+        _settings_int("brain_queue_batch_size", max(1, int(pending or 1)), minimum=1)
+    )
     out = {
         "total": total_active,
         "pending": pending,
@@ -960,11 +1035,12 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
         "lane_planner_enabled": bool(
             _settings_int("brain_queue_lane_planner_enabled", 1, minimum=0)
         ),
-        "max_per_lineage_per_batch": _settings_int(
-            "brain_queue_max_per_lineage_per_batch",
-            3,
-            minimum=0,
-        ),
+        "max_per_lineage_per_batch": lineage_policy["cap"],
+        "lineage_cap_policy": lineage_policy["mode"],
+        "lineage_cap_limit_basis": lineage_policy["limit"],
+        "lineage_max_batch_share": lineage_policy["max_batch_share"],
+        "lineage_min_per_batch": lineage_policy["min_per_batch"],
+        "legacy_fixed_lineage_cap": lineage_policy["fixed_override"],
         "priority_bypass_floor": get_priority_bypass_retest_floor(),
         "queue_empty": pending == 0,
     }
@@ -994,18 +1070,14 @@ def get_exploration_pattern_ids(
     if limit <= 0:
         return []
 
-    lineage_cap = _settings_int(
-        "brain_queue_max_per_lineage_per_batch",
-        3,
-        minimum=0,
-    )
+    lineage_cap = _queue_lineage_cap(limit + len(exclude_ids))
     fetch_multiplier = _settings_int(
         "brain_queue_lane_fetch_multiplier",
         4,
         minimum=1,
     )
     lineage_counts: dict[int, int] = {}
-    if lineage_cap > 0 and exclude_ids:
+    if lineage_cap is not None and lineage_cap > 0 and exclude_ids:
         existing_rows = (
             db.query(ScanPattern)
             .filter(ScanPattern.id.in_(exclude_ids))
@@ -1033,7 +1105,11 @@ def get_exploration_pattern_ids(
             break
         pattern_id = int(pattern.id)
         lineage = _lineage_key(pattern)
-        if lineage_cap > 0 and lineage_counts.get(lineage, 0) >= lineage_cap:
+        if (
+            lineage_cap is not None
+            and lineage_cap > 0
+            and lineage_counts.get(lineage, 0) >= lineage_cap
+        ):
             continue
         out.append(pattern_id)
         lineage_counts[lineage] = lineage_counts.get(lineage, 0) + 1

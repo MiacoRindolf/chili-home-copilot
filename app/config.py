@@ -19,6 +19,9 @@ BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED = True
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB = 1536
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB = 768
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS = 1
+BRAIN_QUEUE_LINEAGE_FIXED_CAP_DISABLED = 0
+BRAIN_QUEUE_LINEAGE_DIVERSIFICATION_SHARE_DEFAULT = 0.10
+BRAIN_QUEUE_LINEAGE_MIN_PER_BATCH_DEFAULT = 1
 BRAIN_QUEUE_MARKET_HOURS_STOCK_LANE_DEFAULT = 2
 BACKTEST_PRIORITY_SCORE_MAX = 100
 BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR = BACKTEST_PRIORITY_SCORE_MAX
@@ -1144,7 +1147,19 @@ class Settings(BaseSettings):
     # edge-evidence variants, and avoid one parent lineage consuming an
     # entire batch of expensive backtests.
     brain_queue_lane_planner_enabled: bool = True
-    brain_queue_max_per_lineage_per_batch: int = 3
+    # Legacy fixed cap override. Keep at 0 for adaptive lineage diversification.
+    brain_queue_max_per_lineage_per_batch: int = BRAIN_QUEUE_LINEAGE_FIXED_CAP_DISABLED
+    brain_queue_lineage_max_batch_share: float = Field(
+        default=BRAIN_QUEUE_LINEAGE_DIVERSIFICATION_SHARE_DEFAULT,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("BRAIN_QUEUE_LINEAGE_MAX_BATCH_SHARE"),
+    )
+    brain_queue_lineage_min_per_batch: int = Field(
+        default=BRAIN_QUEUE_LINEAGE_MIN_PER_BATCH_DEFAULT,
+        ge=0,
+        validation_alias=AliasChoices("BRAIN_QUEUE_LINEAGE_MIN_PER_BATCH"),
+    )
     brain_queue_lane_fetch_multiplier: int = 4
     brain_queue_edge_evidence_max_per_batch: int = 12
     brain_queue_prescreen_max_per_batch: int = 20

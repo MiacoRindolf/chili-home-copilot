@@ -14,10 +14,18 @@ from app.services.trading.backtest_queue import (
     get_pending_patterns,
     get_priority_bypass_retest_floor,
     get_queue_status,
+    get_queue_lineage_cap_policy,
     mark_pattern_tested,
     summarize_queue_batch,
 )
 from app.services.trading.backtest_queue_priority import run_priority_scoring
+
+_FIXED_LINEAGE_CAP_DISABLED = 0
+_ADAPTIVE_HALF_BATCH_LINEAGE_SHARE = 0.50
+_ADAPTIVE_TWO_OF_FIVE_LINEAGE_SHARE = 0.40
+_ADAPTIVE_LINEAGE_FLOOR = 0
+_ENV_LINEAGE_SHARE = "0.25"
+_ENV_LINEAGE_FLOOR = "2"
 
 
 def _deactivate_existing_patterns(db) -> None:
@@ -187,7 +195,21 @@ def test_lane_planner_prioritizes_recert_before_prescreen(db):
 
 def test_lane_planner_diversifies_generic_variant_families(db, monkeypatch):
     _deactivate_existing_patterns(db)
-    monkeypatch.setattr(settings, "brain_queue_max_per_lineage_per_batch", 2)
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_max_per_lineage_per_batch",
+        _FIXED_LINEAGE_CAP_DISABLED,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_max_batch_share",
+        _ADAPTIVE_HALF_BATCH_LINEAGE_SHARE,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_min_per_batch",
+        _ADAPTIVE_LINEAGE_FLOOR,
+    )
     parent = _queued_pattern(
         db,
         name="crowded parent",
@@ -230,7 +252,21 @@ def test_lane_planner_diversifies_generic_variant_families(db, monkeypatch):
 
 def test_lane_planner_final_refill_preserves_lineage_cap(db, monkeypatch):
     _deactivate_existing_patterns(db)
-    monkeypatch.setattr(settings, "brain_queue_max_per_lineage_per_batch", 2)
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_max_per_lineage_per_batch",
+        _FIXED_LINEAGE_CAP_DISABLED,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_max_batch_share",
+        _ADAPTIVE_TWO_OF_FIVE_LINEAGE_SHARE,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_min_per_batch",
+        _ADAPTIVE_LINEAGE_FLOOR,
+    )
     monkeypatch.setattr(settings, "brain_queue_lane_fetch_multiplier", 5)
     parent = _queued_pattern(
         db,
@@ -304,9 +340,59 @@ def test_queue_batch_summary_counts_lanes_tiers_and_lineage(db):
     assert summary["max_lineage_count"] == 1
 
 
+def test_lineage_cap_policy_adapts_to_batch_size(monkeypatch):
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_max_per_lineage_per_batch",
+        _FIXED_LINEAGE_CAP_DISABLED,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_max_batch_share",
+        _ADAPTIVE_TWO_OF_FIVE_LINEAGE_SHARE,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_min_per_batch",
+        _ADAPTIVE_LINEAGE_FLOOR,
+    )
+
+    policy = get_queue_lineage_cap_policy(limit=5)
+
+    assert policy["mode"] == "adaptive_share"
+    assert policy["cap"] == 2
+    assert policy["fixed_override"] == _FIXED_LINEAGE_CAP_DISABLED
+
+
+def test_lineage_cap_settings_accept_env(monkeypatch):
+    monkeypatch.setenv("BRAIN_QUEUE_LINEAGE_MAX_BATCH_SHARE", _ENV_LINEAGE_SHARE)
+    monkeypatch.setenv("BRAIN_QUEUE_LINEAGE_MIN_PER_BATCH", _ENV_LINEAGE_FLOOR)
+
+    from app.config import Settings
+
+    cfg = Settings()
+
+    assert cfg.brain_queue_lineage_max_batch_share == float(_ENV_LINEAGE_SHARE)
+    assert cfg.brain_queue_lineage_min_per_batch == int(_ENV_LINEAGE_FLOOR)
+
+
 def test_exploration_refill_respects_existing_lineage_cap(db, monkeypatch):
     _deactivate_existing_patterns(db)
-    monkeypatch.setattr(settings, "brain_queue_max_per_lineage_per_batch", 2)
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_max_per_lineage_per_batch",
+        _FIXED_LINEAGE_CAP_DISABLED,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_max_batch_share",
+        _ADAPTIVE_HALF_BATCH_LINEAGE_SHARE,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_min_per_batch",
+        _ADAPTIVE_LINEAGE_FLOOR,
+    )
     monkeypatch.setattr(settings, "brain_queue_lane_fetch_multiplier", 5)
     parent = _queued_pattern(
         db,

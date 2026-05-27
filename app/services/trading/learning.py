@@ -3855,6 +3855,7 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         get_exploration_pattern_ids,
         get_pending_patterns,
         get_queue_status,
+        get_queue_lineage_cap_policy,
         get_retest_interval_days,
         summarize_queue_batch,
     )
@@ -3979,13 +3980,16 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
             **status,
         }
 
+    lineage_policy = get_queue_lineage_cap_policy(batch_size)
     logger.info(
-        "[learning] Queue backtest: starting batch | pattern_ids=%s (count=%s) batch_size=%s "
-        "exploration_added=%s",
+        "[learning] Queue backtest: starting batch | pattern_ids=%s (count=%s) "
+        "batch_size=%s exploration_added=%s lineage_policy=%s lineage_cap=%s",
         pattern_ids[:50],
         len(pattern_ids),
         batch_size,
         exploration_added,
+        lineage_policy.get("mode"),
+        lineage_policy.get("cap"),
     )
     batch_summary: dict[str, Any] = {}
     try:
@@ -3999,7 +4003,7 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         batch_summary = summarize_queue_batch(batch_patterns)
         logger.info(
             "[learning] Queue backtest: batch_mix lanes=%s tiers=%s lifecycles=%s "
-            "max_lineage_count=%s top_lineages=%s",
+            "observed_max_lineage_count=%s top_lineages=%s",
             batch_summary.get("lanes"),
             batch_summary.get("tiers"),
             batch_summary.get("lifecycles"),
