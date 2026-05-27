@@ -60,7 +60,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any, Optional
 
@@ -2660,7 +2660,7 @@ def get_active_pairs(db) -> list[str]:
     return [r.ticker for r in rows]
 
 
-def get_subscribed_pairs(db) -> list[str]:
+def get_subscribed_pairs(db, settings=None) -> list[str]:
     """Active + shadow combined -- the full WS subscription set.
 
     Entry-eligible pairs come from :func:`get_entry_pairs`.
@@ -2670,7 +2670,7 @@ def get_subscribed_pairs(db) -> list[str]:
     stop/target/time-stop exits; dropping the subscription strands the
     position, blocks capacity, and starves realized-learning rows.
     """
-    pairs = get_entry_pairs(db)
+    pairs = get_entry_pairs(db, settings=settings)
     seen = set(pairs)
     for ticker in get_open_paper_position_pairs(db):
         if ticker not in seen:
@@ -2679,14 +2679,17 @@ def get_subscribed_pairs(db) -> list[str]:
     return pairs
 
 
-def get_entry_pairs(db) -> list[str]:
+def get_entry_pairs(db, settings=None) -> list[str]:
     """Pairs eligible to emit new entry alerts.
 
     Ranked shadow pairs need to be subscribed so ``decay_miner`` can
-    collect samples during the cold-start window. Unranked shadow rows
-    are grace/audit records for transient misses; they stay out of entry
-    alert emission because the current rotation did not prove they still
-    meet the learning-universe floor.
+    collect samples during the cold-start window. Recent learning-event
+    tickers from the latest rotation are temporarily overlaid as
+    entry-eligible so an alert/probe that arrives just after the rotator
+    snapshot is not dropped before short-horizon evidence matures.
+    Unranked shadow rows are grace/audit records for transient misses;
+    they stay out of entry alert emission because the current rotation
+    did not prove they still meet the learning-universe floor.
     """
     from sqlalchemy import text
 
@@ -2706,6 +2709,88 @@ def get_entry_pairs(db) -> list[str]:
         "active_status": UNIVERSE_STATUS_ACTIVE,
         "shadow_status": UNIVERSE_STATUS_SHADOW,
     }).fetchall()
+    pairs = [str(r.ticker) for r in rows]
+    if settings is None:
+        return pairs
+    seen = set(pairs)
+    for ticker in _recent_learning_retention_entry_pairs(
+        db,
+        settings=settings,
+        existing_count=len(pairs),
+    ):
+        if ticker in seen:
+            continue
+        pairs.append(ticker)
+        seen.add(ticker)
+    return pairs
+
+
+def _recent_learning_retention_entry_pairs(
+    db,
+    *,
+    settings,
+    existing_count: int,
+    now: datetime | None = None,
+) -> list[str]:
+    """Inactive latest-rotation tickers with fresh alert/probe events.
+
+    The rotator runs from a point-in-time Coinbase snapshot, while the
+    websocket subscriber refreshes from the latest stored rotation. A fresh
+    alert may land between those two steps. Without this overlay, that ticker
+    can be unsubscribed before the decay miner observes the short horizons
+    the retention settings were meant to protect.
+    """
+    lookback_s = _learning_retention_horizon_s(settings)
+    max_n = max(_learning_retention_max_n(settings) - max(existing_count, 0), 0)
+    if lookback_s <= 0 or max_n <= 0:
+        return []
+
+    from sqlalchemy import text
+
+    now_utc = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    cutoff = now_utc - timedelta(seconds=lookback_s)
+    try:
+        rows = db.execute(text("""
+            WITH latest_rotation AS (
+                SELECT MAX(rotation_at) AS ts FROM fast_path_universe
+            ),
+            latest_universe AS (
+                SELECT ticker, status, composite_score
+                FROM fast_path_universe
+                WHERE rotation_at = (SELECT ts FROM latest_rotation)
+            ),
+            events AS (
+                SELECT ticker, fired_at AS event_at
+                FROM fast_alerts
+                WHERE fired_at >= :cutoff
+
+                UNION ALL
+
+                SELECT ticker, placed_at AS event_at
+                FROM fast_path_maker_attempts
+                WHERE placed_at >= :cutoff
+            )
+            SELECT e.ticker, MAX(e.event_at) AS latest_event_at
+            FROM events e
+            JOIN latest_universe u ON u.ticker = e.ticker
+            WHERE e.ticker IS NOT NULL
+              AND u.status = :inactive_status
+              AND u.composite_score IS NOT NULL
+            GROUP BY e.ticker
+            ORDER BY latest_event_at DESC
+            LIMIT :max_n
+        """), {
+            "cutoff": cutoff,
+            "inactive_status": UNIVERSE_STATUS_INACTIVE,
+            "max_n": max_n,
+        }).fetchall()
+    except Exception as exc:
+        logger.debug(
+            "[fast_path_rotator] recent learning retention overlay skipped: %s",
+            exc,
+            exc_info=True,
+        )
+        return []
     return [str(r.ticker) for r in rows]
 
 

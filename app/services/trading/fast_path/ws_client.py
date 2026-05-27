@@ -230,8 +230,8 @@ class CoinbaseWSClient:
 
             db = SessionLocal()
             try:
-                tickers = get_subscribed_pairs(db)
-                entry_tickers = get_entry_pairs(db)
+                tickers = get_subscribed_pairs(db, settings=self._settings)
+                entry_tickers = get_entry_pairs(db, settings=self._settings)
             finally:
                 db.close()
             if tickers:

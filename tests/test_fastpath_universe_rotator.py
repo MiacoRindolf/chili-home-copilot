@@ -10,7 +10,7 @@ the chili_test ``db`` fixture.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pytest
@@ -2206,6 +2206,73 @@ def test_get_subscribed_pairs_retains_open_paper_position_tickers():
 
     assert pairs == ["RANKED-USD", "ACTIVE-USD", "OPEN-OLD-USD"]
     assert entry_pairs == ["RANKED-USD", "ACTIVE-USD"]
+
+
+def test_get_entry_pairs_retains_recent_learning_tickers():
+    from sqlalchemy import create_engine, text
+
+    from app.services.trading.fast_path.universe_rotator import (
+        get_entry_pairs,
+        get_subscribed_pairs,
+    )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    settings = _StubSettings(
+        universe_learning_retention_horizon_s=300,
+        universe_learning_retention_max_n=2,
+    )
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as db:
+        db.execute(text("""
+            CREATE TABLE fast_path_universe (
+                ticker TEXT NOT NULL,
+                status TEXT NOT NULL,
+                rank INTEGER NULL,
+                composite_score REAL NULL,
+                rotation_at TEXT NOT NULL
+            )
+        """))
+        db.execute(text("""
+            CREATE TABLE fast_alerts (
+                ticker TEXT NOT NULL,
+                fired_at TIMESTAMP NOT NULL
+            )
+        """))
+        db.execute(text("""
+            CREATE TABLE fast_path_maker_attempts (
+                ticker TEXT NOT NULL,
+                placed_at TIMESTAMP NOT NULL
+            )
+        """))
+        db.execute(text("""
+            INSERT INTO fast_path_universe (
+                ticker, status, rank, composite_score, rotation_at
+            ) VALUES
+              ('OLD-USD', 'shadow', 1, 1.0, '2026-05-27T11:00:00'),
+              ('RANKED-USD', 'shadow', 1, 1.0, '2026-05-27T11:10:00'),
+              ('RECENT-USD', 'inactive', NULL, 2.0, '2026-05-27T11:10:00'),
+              ('STALE-USD', 'inactive', NULL, 3.0, '2026-05-27T11:10:00'),
+              ('AUDIT-USD', 'inactive', NULL, NULL, '2026-05-27T11:10:00')
+        """))
+        db.execute(text("""
+            INSERT INTO fast_alerts (ticker, fired_at)
+            VALUES
+              (:recent_ticker, :recent_at),
+              (:stale_ticker, :stale_at),
+              (:audit_ticker, :recent_at)
+        """), {
+            "recent_ticker": "RECENT-USD",
+            "stale_ticker": "STALE-USD",
+            "audit_ticker": "AUDIT-USD",
+            "recent_at": now - timedelta(seconds=60),
+            "stale_at": now - timedelta(seconds=600),
+        })
+
+        entry_pairs = get_entry_pairs(db, settings=settings)
+        subscribed_pairs = get_subscribed_pairs(db, settings=settings)
+
+    assert entry_pairs == ["RANKED-USD", "RECENT-USD"]
+    assert subscribed_pairs == ["RANKED-USD", "RECENT-USD"]
 
 
 # ---------------------------------------------------------------------------
