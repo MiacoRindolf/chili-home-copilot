@@ -18,6 +18,29 @@ class _Response:
         raise exc
 
 
+class _CatalogResponse:
+    status_code = 200
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return self._rows
+
+
+class _QuoteResponse:
+    status_code = 200
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return {"price": "123.45", "bid": "123.40", "ask": "123.50"}
+
+
 def _raise_not_found(*_args, **_kwargs):
     return _Response()
 
@@ -84,4 +107,41 @@ def test_missing_product_cache_expires(monkeypatch):
     _expire_missing_product(MISSING_PRODUCT)
 
     assert coinbase_ohlcv.get_quote(MISSING_PRODUCT) is None
-    assert len(calls) == 2
+    assert len(calls) == 3
+
+
+def test_public_product_catalog_blocks_known_missing_product(monkeypatch):
+    calls: list[str] = []
+
+    def _get(url, **_kwargs):
+        calls.append(str(url))
+        if str(url).endswith("/products"):
+            return _CatalogResponse([{"id": "BTC-USD", "quote_currency": "USD"}])
+        raise AssertionError(f"unexpected product-specific request: {url}")
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.get_quote(MISSING_PRODUCT) is None
+    assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]
+
+
+def test_public_product_catalog_allows_known_product_quote(monkeypatch):
+    calls: list[str] = []
+
+    def _get(url, **_kwargs):
+        calls.append(str(url))
+        if str(url).endswith("/products"):
+            return _CatalogResponse([{"id": "BTC-USD", "quote_currency": "USD"}])
+        if str(url).endswith("/products/BTC-USD/ticker"):
+            return _QuoteResponse()
+        raise AssertionError(f"unexpected request: {url}")
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    quote = coinbase_ohlcv.get_quote("BTC-USD")
+    assert quote is not None
+    assert quote["last_price"] == 123.45
+    assert calls == [
+        f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products",
+        f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/BTC-USD/ticker",
+    ]

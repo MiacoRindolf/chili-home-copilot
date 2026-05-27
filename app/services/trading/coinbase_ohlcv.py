@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Coinbase Exchange API endpoints and request defaults.
 _COINBASE_EXCHANGE_API_BASE_URL = "https://api.exchange.coinbase.com"
+_COINBASE_PRODUCTS_PATH = "/products"
 _COINBASE_CANDLES_PATH_TEMPLATE = "/products/{product_id}/candles"
 _COINBASE_TICKER_PATH_TEMPLATE = "/products/{product_id}/ticker"
 _COINBASE_TIMEOUT_ENV = "CHILI_COINBASE_MARKET_DATA_TIMEOUT_SECONDS"
@@ -54,6 +55,13 @@ _COINBASE_HTTP_POOL_MAXSIZE = DEFAULT_HTTP_POOL_MAXSIZE
 _COINBASE_PRODUCT_NOT_FOUND_STATUS = 404
 _COINBASE_MISSING_PRODUCT_TTL_ENV = "CHILI_COINBASE_OHLCV_MISSING_PRODUCT_TTL_SECONDS"
 _COINBASE_DEFAULT_MISSING_PRODUCT_TTL_S = 21600
+_COINBASE_PRODUCT_PREFILTER_ENV = "CHILI_COINBASE_OHLCV_PRODUCT_PREFILTER_ENABLED"
+_COINBASE_PRODUCT_LIST_TTL_ENV = "CHILI_COINBASE_OHLCV_PRODUCT_LIST_TTL_SECONDS"
+_COINBASE_PRODUCT_LIST_FAILURE_TTL_ENV = (
+    "CHILI_COINBASE_OHLCV_PRODUCT_LIST_FAILURE_TTL_SECONDS"
+)
+_COINBASE_DEFAULT_PRODUCT_LIST_TTL_S = 3600
+_COINBASE_DEFAULT_PRODUCT_LIST_FAILURE_TTL_S = 300
 
 
 # Coinbase Exchange API granularities (seconds). Anything else returns 400.
@@ -88,6 +96,10 @@ _CIRCUIT_OPEN_UNTIL = 0.0
 _CIRCUIT_LAST_LOG = 0.0
 _MISSING_PRODUCT_LOCK = threading.Lock()
 _MISSING_PRODUCTS: dict[str, float] = {}
+_PRODUCT_CATALOG_LOCK = threading.Lock()
+_PRODUCT_CATALOG_IDS: set[str] | None = None
+_PRODUCT_CATALOG_EXPIRES_AT = 0.0
+_PRODUCT_CATALOG_RETRY_AFTER = 0.0
 _SESSION = requests.Session()
 _SESSION.headers.update({"Accept": "application/json"})
 mount_bounded_http_adapters(
@@ -131,10 +143,40 @@ def _missing_product_ttl_s() -> int:
     )
 
 
+def _product_prefilter_enabled() -> bool:
+    raw = (
+        str(os.environ.get(_COINBASE_PRODUCT_PREFILTER_ENV, "1") or "1")
+        .strip()
+        .lower()
+    )
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _product_list_ttl_s() -> int:
+    return _env_int(
+        _COINBASE_PRODUCT_LIST_TTL_ENV,
+        _COINBASE_DEFAULT_PRODUCT_LIST_TTL_S,
+    )
+
+
+def _product_list_failure_ttl_s() -> int:
+    return _env_int(
+        _COINBASE_PRODUCT_LIST_FAILURE_TTL_ENV,
+        _COINBASE_DEFAULT_PRODUCT_LIST_FAILURE_TTL_S,
+    )
+
+
 def reset_missing_product_cache_for_tests() -> None:
-    """Clear the Coinbase product-not-found cache for focused tests."""
+    """Clear Coinbase product caches for focused tests."""
+    global _PRODUCT_CATALOG_IDS
+    global _PRODUCT_CATALOG_EXPIRES_AT
+    global _PRODUCT_CATALOG_RETRY_AFTER
     with _MISSING_PRODUCT_LOCK:
         _MISSING_PRODUCTS.clear()
+    with _PRODUCT_CATALOG_LOCK:
+        _PRODUCT_CATALOG_IDS = None
+        _PRODUCT_CATALOG_EXPIRES_AT = 0.0
+        _PRODUCT_CATALOG_RETRY_AFTER = 0.0
 
 
 def _product_not_found(exc: requests.RequestException) -> bool:
@@ -166,6 +208,74 @@ def _mark_product_missing(product_id: str) -> None:
         product_id,
         ttl_s,
     )
+
+
+def _catalog_product_id(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    raw = row.get("id") or row.get("product_id") or row.get("productId")
+    pid = str(raw or "").strip().upper()
+    if not pid.endswith("-USD"):
+        return ""
+    quote = (
+        str(row.get("quote_currency") or row.get("quoteCurrency") or "")
+        .strip()
+        .upper()
+    )
+    if quote and quote != "USD":
+        return ""
+    return pid
+
+
+def _fetch_public_product_catalog() -> set[str] | None:
+    url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{_COINBASE_PRODUCTS_PATH}"
+    try:
+        resp = _SESSION.get(url, timeout=_request_timeout_s())
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            return None
+        products = {
+            pid
+            for pid in (_catalog_product_id(row) for row in data)
+            if pid
+        }
+        if not products:
+            return None
+        _record_request_success()
+        return products
+    except requests.RequestException as e:
+        _record_request_failure(e)
+        logger.warning("[coinbase_ohlcv] product catalog request failed: %s", e)
+    except Exception as e:
+        logger.warning("[coinbase_ohlcv] product catalog parse failed: %s", e)
+    return None
+
+
+def _public_product_support(product_id: str) -> bool | None:
+    """Return support from Coinbase's public catalog, or None if unknown."""
+    global _PRODUCT_CATALOG_IDS
+    global _PRODUCT_CATALOG_EXPIRES_AT
+    global _PRODUCT_CATALOG_RETRY_AFTER
+    if not _product_prefilter_enabled():
+        return None
+
+    now = time.time()
+    with _PRODUCT_CATALOG_LOCK:
+        if _PRODUCT_CATALOG_IDS is not None and now < _PRODUCT_CATALOG_EXPIRES_AT:
+            return product_id in _PRODUCT_CATALOG_IDS
+        if now < _PRODUCT_CATALOG_RETRY_AFTER:
+            return None
+
+    products = _fetch_public_product_catalog()
+    with _PRODUCT_CATALOG_LOCK:
+        if products is None:
+            _PRODUCT_CATALOG_RETRY_AFTER = now + _product_list_failure_ttl_s()
+            return None
+        _PRODUCT_CATALOG_IDS = products
+        _PRODUCT_CATALOG_EXPIRES_AT = now + _product_list_ttl_s()
+        _PRODUCT_CATALOG_RETRY_AFTER = 0.0
+        return product_id in products
 
 
 def _circuit_is_open(product_id: str, interval: str) -> bool:
@@ -315,6 +425,10 @@ def get_ohlcv(
         return []
     if _circuit_is_open(product_id, interval):
         return []
+    support = _public_product_support(product_id)
+    if support is False:
+        _mark_product_missing(product_id)
+        return []
     start_dt, end_dt = _resolve_window(start=start, end=end, period=period)
 
     # Chunk: each request can cover at most _COINBASE_MAX_CANDLES * granularity seconds.
@@ -394,6 +508,10 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
     if _product_marked_missing(product_id):
         return None
     if _circuit_is_open(product_id, "quote"):
+        return None
+    support = _public_product_support(product_id)
+    if support is False:
+        _mark_product_missing(product_id)
         return None
     path = _COINBASE_TICKER_PATH_TEMPLATE.format(product_id=product_id)
     url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{path}"
