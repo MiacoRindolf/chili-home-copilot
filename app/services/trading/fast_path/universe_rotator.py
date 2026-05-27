@@ -97,6 +97,7 @@ _MAKER_ATTEMPT_INSUFFICIENT_VERDICT = (
 _SHADOW_EXPLORATION_FORCE_EDGE_EXHAUSTED = "edge_exhausted"
 _SHADOW_EXPLORATION_FORCE_OBSERVED_RANK = "observed_rank"
 _SHADOW_EXPLORATION_FORCE_MARKET_VELOCITY = "market_velocity"
+_SHADOW_EXPLORATION_FORCE_VELOCITY_DEADLOCK = "market_velocity_deadlock_probe"
 FAST_EXECUTION_DECISION_PAPER_FILL = "paper_fill"
 FAST_EXECUTION_MODE_PAPER = "paper"
 _MAKER_ATTEMPT_ACTIONABLE_LEARNABLE_VERDICTS = frozenset({
@@ -113,6 +114,7 @@ _MAKER_ATTEMPT_SPARSE_VERDICTS = frozenset({
 })
 _DEFAULT_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H = 24
 _DEFAULT_MARKET_VELOCITY_COST_PARITY_RATIO = 1.0
+_DEFAULT_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED = True
 
 
 @dataclass
@@ -720,6 +722,15 @@ def _market_velocity_cost_parity_ratio(settings) -> float:
     if not math.isfinite(ratio):
         return _DEFAULT_MARKET_VELOCITY_COST_PARITY_RATIO
     return max(ratio, 0.0)
+
+
+def _market_velocity_deadlock_probe_enabled(settings) -> bool:
+    """Whether an empty universe may keep velocity-only shadow probes alive."""
+    return bool(getattr(
+        settings,
+        "universe_market_velocity_deadlock_probe_enabled",
+        _DEFAULT_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED,
+    ))
 
 
 def _previous_pass_status(db) -> dict[str, tuple[str, Optional[int]]]:
@@ -1519,6 +1530,10 @@ def run_rotation_pass(
         "shadow_exploration_candidates": 0,
         "shadow_exploration_forced": 0,
         "shadow_exploration_forced_reasons": {},
+        "shadow_exploration_velocity_deadlock_probe_enabled": bool(
+            _market_velocity_deadlock_probe_enabled(settings)
+        ),
+        "shadow_exploration_velocity_deadlock_probe": 0,
         "edge_promotion_blocks": {},
         "edge_exhaustion_blocks": {},
         "edge_exhausted_demotions": 0,
@@ -1935,6 +1950,19 @@ def run_rotation_pass(
             force_move_to_cost is not None
             and float(force_move_to_cost) < market_velocity_cost_parity_ratio
         ):
+            blocked_slots = force_slots
+            if (
+                _market_velocity_deadlock_probe_enabled(settings)
+                and not selected_tickers
+            ):
+                velocity_backfill_skips, force_slots = _force_shadow_exploration(
+                    velocity_backfill_skips,
+                    reason=_SHADOW_EXPLORATION_FORCE_VELOCITY_DEADLOCK,
+                    slots=force_slots,
+                )
+                out["shadow_exploration_velocity_deadlock_probe"] = (
+                    blocked_slots - force_slots
+                )
             out["shadow_exploration_force_velocity_blocked"] = force_slots
         else:
             exhausted_rank_skips, force_slots = _force_shadow_exploration(
@@ -1952,8 +1980,8 @@ def run_rotation_pass(
                 reason=_SHADOW_EXPLORATION_FORCE_MARKET_VELOCITY,
                 slots=force_slots,
             )
-            cut_ranked.extend(selected_forced)
 
+    cut_ranked.extend(selected_forced)
     if selected_forced:
         out["shadow_exploration_forced"] = len(selected_forced)
         forced_reasons = out["shadow_exploration_forced_reasons"]

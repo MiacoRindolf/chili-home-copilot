@@ -293,6 +293,7 @@ class _StubSettings:
     universe_missing_grace_passes: int = 2
     universe_min_shadow_exploration_n: int = 0
     universe_market_velocity_cost_parity_ratio: float = 1.0
+    universe_market_velocity_deadlock_probe_enabled: bool = True
     universe_min_trades_24h: int = 1_000
     execution_mode: str = "maker_only"
     cost_aware_maker_fee_bps: float = 0.0
@@ -1178,6 +1179,56 @@ def test_rotation_does_not_backfill_unknown_symbols_when_velocity_below_cost():
     assert out["market_velocity_backfill_skips"] == 2
     assert out["ranked_n"] == 0
     assert {row["status"] for row in db.inserted_rows} == {"inactive"}
+
+
+def test_velocity_deadlock_probe_keeps_configured_shadow_floor_alive():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+    from app.services.trading.fast_path.universe_status import (
+        UNIVERSE_STATUS_INACTIVE,
+        UNIVERSE_STATUS_SHADOW,
+    )
+
+    shadow_floor = 1
+    db = _FakeRotationDB(prior_market_velocity_ratio=0.2)
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+        universe_min_shadow_exploration_n=shadow_floor,
+    )
+    snapshots = {
+        "REPROBE-A-USD": _make_candidate(
+            ticker="REPROBE-A-USD",
+            high_24h=120.0,
+            low_24h=80.0,
+        ),
+        "REPROBE-B-USD": _make_candidate(
+            ticker="REPROBE-B-USD",
+            high_24h=118.0,
+            low_24h=82.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: list(snapshots),
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    statuses = {row["ticker"]: row["status"] for row in db.inserted_rows}
+    assert out["shadow_exploration_velocity_deadlock_probe_enabled"] is True
+    assert out["shadow_exploration_velocity_deadlock_probe"] == shadow_floor
+    assert out["shadow_exploration_forced_reasons"] == {
+        "market_velocity_deadlock_probe": shadow_floor,
+    }
+    assert out["shadow_exploration_force_velocity_blocked"] == 0
+    assert out["ranked_n"] == shadow_floor
+    assert list(statuses.values()).count(UNIVERSE_STATUS_SHADOW) == shadow_floor
+    assert list(statuses.values()).count(UNIVERSE_STATUS_INACTIVE) == (
+        len(snapshots) - shadow_floor
+    )
 
 
 def test_rotation_ranks_shadow_candidates_against_active_depth_candidates():

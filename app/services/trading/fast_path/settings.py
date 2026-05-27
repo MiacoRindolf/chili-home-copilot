@@ -220,6 +220,15 @@ class FastPathSettings:
     estimated fees + spread. Override via
     ``CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_COST_PARITY_RATIO``."""
 
+    universe_market_velocity_deadlock_probe_enabled: bool = True
+    """When True, a below-cost market-velocity regime may still keep the
+    configured shadow exploration floor alive when the alternative is an
+    empty websocket universe. The escape lane is shadow-only, uses
+    ``universe_min_shadow_exploration_n`` for its bound, and can select
+    only candidates blocked by missing fresh velocity evidence, not
+    learned negative-edge candidates. Override via
+    ``CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED``."""
+
     universe_min_trades_24h: int = 1_000
     """Minimum 24h trade count. Below this, the order book is too
     thin / discontinuous for the rotator's price snapshots to be
@@ -480,6 +489,10 @@ def load() -> FastPathSettings:
         universe_market_velocity_cost_parity_ratio=_env_float(
             "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_COST_PARITY_RATIO",
             1.0,
+        ),
+        universe_market_velocity_deadlock_probe_enabled=_env_bool(
+            "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED",
+            True,
         ),
         universe_min_trades_24h=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H", 1_000),
