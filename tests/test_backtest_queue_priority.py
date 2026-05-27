@@ -495,3 +495,36 @@ def test_priority_scoring_deprioritizes_hard_negative_challenged_patterns(db):
     assert hard_negative.backtest_priority == 20
     assert demoted.backtest_priority == 0
     assert uncertain.backtest_priority == 70
+
+
+def test_priority_scoring_routes_thin_candidates_to_prescreen(db):
+    _deactivate_existing_patterns(db)
+    thin = _queued_pattern(
+        db,
+        name="thin candidate",
+        lifecycle_stage="candidate",
+        backtest_priority=0,
+    )
+    thin.queue_tier = QUEUE_TIER_FULL
+    thin.backtest_count = 0
+    thin.avg_return_pct = None
+    thin.win_rate = None
+    proven = _queued_pattern(
+        db,
+        name="proven candidate",
+        lifecycle_stage="candidate",
+        backtest_priority=0,
+    )
+    proven.queue_tier = QUEUE_TIER_FULL
+    proven.backtest_count = 20
+    proven.avg_return_pct = 1.2
+    proven.win_rate = 0.6
+    db.commit()
+
+    summary = run_priority_scoring(db)
+    db.refresh(thin)
+    db.refresh(proven)
+
+    assert summary["prescreened"] == 1
+    assert thin.queue_tier == QUEUE_TIER_PRESCREEN
+    assert proven.queue_tier == QUEUE_TIER_FULL

@@ -54,6 +54,7 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
 
         {
           "scored": int,            # total patterns updated
+          "prescreened": int,       # thin candidate/backtested rows routed to cheap tier
           "high_priority":  int,    # final score >= 50
           "med_priority":   int,    # final score in [10, 50)
           "low_priority":   int,    # final score in (0, 10)
@@ -121,6 +122,24 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
         """
     ))
     rows = res.fetchall()
+    prescreen_res = db.execute(text(
+        """
+        UPDATE scan_patterns
+        SET queue_tier = 'prescreen',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE active = TRUE
+          AND lifecycle_stage IN ('candidate', 'backtested')
+          AND COALESCE(queue_tier, 'full') <> 'prescreen'
+          AND COALESCE(recert_required, FALSE) = FALSE
+          AND (
+                COALESCE(backtest_count, 0) = 0
+                OR avg_return_pct IS NULL
+                OR win_rate IS NULL
+          )
+        RETURNING id
+        """
+    ))
+    prescreen_rows = prescreen_res.fetchall()
     db.commit()
 
     scored = len(rows)
@@ -131,6 +150,7 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
 
     summary = {
         "scored": scored,
+        "prescreened": len(prescreen_rows),
         "high_priority": hi,
         "med_priority": md,
         "low_priority": lo,
