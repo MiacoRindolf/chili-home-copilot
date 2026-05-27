@@ -356,6 +356,65 @@ class TestSyncOrdersToDb:
 
     @patch("app.services.broker_service.is_connected", return_value=True)
     @patch("app.services.broker_service.get_order_by_id")
+    @patch("app.services.broker_service.get_option_order_by_id")
+    def test_option_cancelled_entry_with_fill_keeps_only_filled_contracts(
+        self,
+        mock_option_order,
+        mock_stock_order,
+        mock_connected,
+        db,
+    ):
+        from app.services.broker_service import sync_orders_to_db
+
+        trade = self._seed_working_trade(
+            db,
+            ticker="SPY",
+            entry_price=1.25,
+            quantity=2,
+            broker_order_id="opt-entry-partial",
+            asset_kind="option",
+            indicator_snapshot={
+                "breakout_alert": {
+                    "asset_type": "options",
+                    "option_meta": {
+                        "underlying": "SPY",
+                        "expiration": "2026-06-19",
+                        "strike": 729.0,
+                        "option_type": "call",
+                    },
+                },
+                "entry_execution": {"active_order_type": "option_limit"},
+            },
+        )
+        mock_option_order.return_value = {
+            "id": "opt-entry-partial",
+            "state": "cancelled",
+            "quantity": "2",
+            "processed_quantity": "1",
+            "average_price": "1.30",
+        }
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        db.refresh(trade)
+        assert result["filled"] == 1
+        assert trade.status == "open"
+        assert trade.broker_status == "partially_filled_cancelled"
+        assert trade.quantity == 1
+        assert trade.filled_quantity == 1
+        assert trade.remaining_quantity == 0
+        assert trade.entry_price == 1.30
+        assert trade.avg_fill_price == 1.30
+        entry = trade.indicator_snapshot["entry_execution"]
+        assert entry["option_position_partial"] is True
+        assert entry["option_position_requested_quantity"] == 2.0
+        assert entry["option_position_quantity"] == 1.0
+        assert entry["option_entry_cancel_reason"] == "partial_entry_cancelled_by_broker"
+        mock_option_order.assert_called_once_with("opt-entry-partial")
+        mock_stock_order.assert_not_called()
+
+    @patch("app.services.broker_service.is_connected", return_value=True)
+    @patch("app.services.broker_service.get_order_by_id")
     def test_cancelled_order_updates_trade(self, mock_get_order, mock_connected, db):
         from app.services.broker_service import sync_orders_to_db
 

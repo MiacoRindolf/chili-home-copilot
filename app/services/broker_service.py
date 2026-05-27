@@ -4670,6 +4670,47 @@ def _robinhood_order_event_payload_for_trade(
     return payload
 
 
+def _preserve_option_partial_entry_fill(
+    trade: Any,
+    order_payload: dict[str, Any],
+    cumulative: float,
+) -> None:
+    if not _is_option_trade_for_order_sync(trade) or cumulative <= 0:
+        return
+    requested = _first_present_float(order_payload, ("quantity", "requested_quantity"))
+    if requested is None:
+        requested = _safe_float(getattr(trade, "quantity", None)) or cumulative
+    average = _first_present_float(
+        order_payload,
+        ("average_price", "avg_price", "average_fill_price", "price", "limit_price"),
+    )
+    if average is not None and average > 0:
+        trade.avg_fill_price = average
+        trade.entry_price = average
+    trade.filled_quantity = cumulative
+    if requested > cumulative + 1e-9:
+        trade.quantity = cumulative
+        trade.remaining_quantity = 0.0
+        trade.broker_status = "partially_filled_cancelled"
+        try:
+            snap = dict(trade.indicator_snapshot) if isinstance(trade.indicator_snapshot, dict) else {}
+            entry = dict(snap.get("entry_execution") or {})
+            entry.update({
+                "option_position_partial": True,
+                "option_position_requested_quantity": requested,
+                "option_position_quantity": cumulative,
+                "option_position_remaining_quantity": 0.0,
+                "option_position_residual_cancelled": True,
+                "option_entry_cancel_reason": "partial_entry_cancelled_by_broker",
+            })
+            snap["entry_execution"] = entry
+            trade.indicator_snapshot = snap
+        except Exception:
+            pass
+    else:
+        trade.remaining_quantity = 0.0
+
+
 def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Reconcile local trades (with broker_order_id) against Robinhood.
 
@@ -4799,6 +4840,7 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                     )
                     trade.status = "open"
                     trade.broker_status = "filled"
+                    _preserve_option_partial_entry_fill(trade, order_payload, cum)
                     mark_linked_trade_packets_executed(
                         db,
                         trade_id=int(trade.id),
