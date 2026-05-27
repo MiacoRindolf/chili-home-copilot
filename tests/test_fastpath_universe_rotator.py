@@ -1358,6 +1358,76 @@ def test_velocity_deadlock_probe_fills_configured_floor_shortfall():
     assert list(statuses.values()).count(UNIVERSE_STATUS_SHADOW) == shadow_floor
 
 
+def test_velocity_deadlock_probe_retains_observed_learning_candidate_first():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+    from app.services.trading.fast_path.universe_status import UNIVERSE_STATUS_SHADOW
+
+    shadow_floor = 2
+    db = _FakeRotationDB(
+        latest_rotation_at=datetime(2026, 5, 24, 15, 0, 0),
+        observed_rows=[{
+            "ticker": "LEARN-USD",
+            "bars": 20,
+            "alerts": 4,
+            "maker_attempts": 1,
+            "maker_fills": 0,
+            "realized_move_samples": 20,
+            "mean_realized_bar_move_bps": 1.0,
+        }],
+        learning_rows=[{
+            "ticker": "LEARN-USD",
+            "latest_event_at": datetime(2026, 5, 24, 15, 4, 0),
+            "latest_alert_at": datetime(2026, 5, 24, 15, 4, 0),
+            "latest_maker_attempt_at": None,
+            "alert_count": 1,
+            "maker_attempt_count": 0,
+        }],
+    )
+    s = _StubSettings(
+        universe_top_n=3,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+        universe_min_shadow_exploration_n=shadow_floor,
+        universe_learning_retention_max_n=1,
+    )
+    snapshots = {
+        "LEARN-USD": _make_candidate(
+            ticker="LEARN-USD",
+            high_24h=116.0,
+            low_24h=84.0,
+        ),
+        "BACKFILL-A-USD": _make_candidate(
+            ticker="BACKFILL-A-USD",
+            high_24h=120.0,
+            low_24h=80.0,
+        ),
+        "BACKFILL-B-USD": _make_candidate(
+            ticker="BACKFILL-B-USD",
+            high_24h=118.0,
+            low_24h=82.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: list(snapshots),
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    statuses = {row["ticker"]: row["status"] for row in db.inserted_rows}
+    assert out["learning_retention_candidates"] == 1
+    assert out["learning_retained_n"] == 1
+    assert out["shadow_exploration_velocity_deadlock_probe"] == 1
+    assert out["shadow_exploration_forced_reasons"] == {
+        "learning_retention": 1,
+        "market_velocity_deadlock_probe": 1,
+    }
+    assert statuses["LEARN-USD"] == UNIVERSE_STATUS_SHADOW
+    assert out["ranked_n"] == shadow_floor
+
+
 def test_velocity_deadlock_probe_excludes_range_floor_boundary_candidate():
     from app.services.trading.fast_path.universe_rotator import run_rotation_pass
     from app.services.trading.fast_path.universe_status import (

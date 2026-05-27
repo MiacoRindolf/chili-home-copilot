@@ -2324,6 +2324,26 @@ def run_rotation_pass(
                 _market_velocity_deadlock_probe_enabled(settings)
                 and len(selected_tickers) < min_shadow_exploration_n
             ):
+                selected_before_retention = len(selected_forced)
+                _retention_remaining, force_slots = _force_shadow_exploration(
+                    retention_eligible,
+                    reason=_SHADOW_EXPLORATION_FORCE_VELOCITY_DEADLOCK,
+                    slots=force_slots,
+                )
+                selected_retention_tickers = {
+                    cand.ticker
+                    for cand in selected_forced[selected_before_retention:]
+                }
+                if selected_retention_tickers:
+                    observed_rank_skips = [
+                        cand for cand in observed_rank_skips
+                        if cand.ticker not in selected_retention_tickers
+                    ]
+                    velocity_backfill_skips = [
+                        cand for cand in velocity_backfill_skips
+                        if cand.ticker not in selected_retention_tickers
+                    ]
+
                 def _deadlock_probe_sort_key(
                     cand: _PairCandidate,
                 ) -> tuple[float, float]:
