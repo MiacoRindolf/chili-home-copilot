@@ -210,3 +210,43 @@ def test_success_on_first_attempt_no_retry_calls():
         result = ur._http_get_json("https://example/x")
     assert result == {"first_try": True}
     assert get_mock.call_count == 1
+
+
+def test_http_get_json_uses_custom_request_get_and_global_pacer():
+    from app.services.trading.fast_path import universe_rotator as ur
+
+    get_mock = MagicMock(return_value=_fake_response(
+        status=200, json_payload={"custom": True},
+    ))
+    with patch.object(ur, "_pace_rest_request") as pace_mock:
+        result = ur._http_get_json(
+            "https://example/x",
+            request_get=get_mock,
+            request_pacing_s=0.12,
+        )
+
+    assert result == {"custom": True}
+    assert get_mock.call_count == 1
+    assert pace_mock.call_args.args == (0.12,)
+
+
+def test_fetch_snapshot_batch_parallel_path_preserves_order_and_failures():
+    from app.services.trading.fast_path import universe_rotator as ur
+
+    def fake_fetch(ticker, *, request_get=None, request_pacing_s=0.0):
+        if ticker == "ERR-USD":
+            raise RuntimeError("boom")
+        return {"ticker": ticker}
+
+    with patch.object(ur, "_fetch_pair_snapshot", side_effect=fake_fetch):
+        rows = ur._fetch_snapshot_batch(
+            ["B-USD", "ERR-USD", "A-USD"],
+            fetch_snapshot_fn=ur._fetch_pair_snapshot,
+            snapshot_fetch_concurrency=2,
+            request_pacing_s=0.0,
+        )
+
+    assert [ticker for ticker, _snap in rows] == ["B-USD", "ERR-USD", "A-USD"]
+    assert rows[0][1] == {"ticker": "B-USD"}
+    assert rows[1][1] is None
+    assert rows[2][1] == {"ticker": "A-USD"}

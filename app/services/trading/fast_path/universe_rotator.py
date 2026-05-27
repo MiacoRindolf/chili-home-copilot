@@ -55,7 +55,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import median
@@ -82,6 +85,12 @@ logger = logging.getLogger(__name__)
 _COINBASE_REST = "https://api.exchange.coinbase.com"
 _HTTP_TIMEOUT_S = 8.0
 _PER_REQ_PACING_S = 0.12  # ~8 req/s
+_DEFAULT_SNAPSHOT_FETCH_CONCURRENCY = 4
+_MIN_SNAPSHOT_FETCH_CONCURRENCY = 1
+_MAX_SNAPSHOT_FETCH_CONCURRENCY = 8
+_HTTP_SESSION_POOL_CONNECTIONS = _MAX_SNAPSHOT_FETCH_CONCURRENCY
+_HTTP_SESSION_POOL_MAXSIZE = _MAX_SNAPSHOT_FETCH_CONCURRENCY
+_HTTP_SESSION_POOL_BLOCK = True
 _BPS_PER_UNIT = 10_000.0
 _FAST_PATH_BAR_INTERVAL = "1m"
 RANK_TRADE_COUNT_MULTIPLIER_MODE = "admission_gate_only"
@@ -115,6 +124,10 @@ _MAKER_ATTEMPT_SPARSE_VERDICTS = frozenset({
 _DEFAULT_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H = 24
 _DEFAULT_MARKET_VELOCITY_COST_PARITY_RATIO = 1.0
 _DEFAULT_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED = True
+_HTTP_THREAD_LOCAL = threading.local()
+_HTTP_PACE_LOCK = threading.Lock()
+_HTTP_NEXT_REQUEST_AT = 0.0
+_HTTPGet = Callable[..., requests.Response]
 
 
 @dataclass
@@ -414,7 +427,71 @@ _HTTP_RETRY_BACKOFFS_S = (0.5, 1.0, 2.0)
 _HTTP_RETRYABLE_STATUS = frozenset({429, 503})
 
 
-def _http_get_json(url: str, *, params: Optional[dict] = None) -> Optional[Any]:
+def _bounded_snapshot_fetch_concurrency(settings) -> int:
+    raw = getattr(
+        settings,
+        "universe_snapshot_fetch_concurrency",
+        _DEFAULT_SNAPSHOT_FETCH_CONCURRENCY,
+    )
+    try:
+        workers = int(raw)
+    except (TypeError, ValueError):
+        workers = _DEFAULT_SNAPSHOT_FETCH_CONCURRENCY
+    return min(
+        max(workers, _MIN_SNAPSHOT_FETCH_CONCURRENCY),
+        _MAX_SNAPSHOT_FETCH_CONCURRENCY,
+    )
+
+
+def _rest_request_pacing_s(settings) -> float:
+    raw = getattr(settings, "universe_rest_request_pacing_s", _PER_REQ_PACING_S)
+    try:
+        pacing_s = float(raw)
+    except (TypeError, ValueError):
+        pacing_s = _PER_REQ_PACING_S
+    if not math.isfinite(pacing_s):
+        return _PER_REQ_PACING_S
+    return max(pacing_s, 0.0)
+
+
+def _thread_local_http_session() -> requests.Session:
+    session = getattr(_HTTP_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=_HTTP_SESSION_POOL_CONNECTIONS,
+            pool_maxsize=_HTTP_SESSION_POOL_MAXSIZE,
+            pool_block=_HTTP_SESSION_POOL_BLOCK,
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _HTTP_THREAD_LOCAL.session = session
+    return session
+
+
+def _thread_local_session_get(*args, **kwargs) -> requests.Response:
+    return _thread_local_http_session().get(*args, **kwargs)
+
+
+def _pace_rest_request(request_pacing_s: float) -> None:
+    if request_pacing_s <= 0.0:
+        return
+    global _HTTP_NEXT_REQUEST_AT
+    with _HTTP_PACE_LOCK:
+        now = time.monotonic()
+        sleep_s = max(_HTTP_NEXT_REQUEST_AT - now, 0.0)
+        _HTTP_NEXT_REQUEST_AT = max(now, _HTTP_NEXT_REQUEST_AT) + request_pacing_s
+    if sleep_s > 0.0:
+        time.sleep(sleep_s)
+
+
+def _http_get_json(
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    request_get: Optional[_HTTPGet] = None,
+    request_pacing_s: float = 0.0,
+) -> Optional[Any]:
     """Public-API GET with timeout + 3-attempt retry. Returns None
     only after all retries exhaust.
 
@@ -437,11 +514,13 @@ def _http_get_json(url: str, *, params: Optional[dict] = None) -> Optional[Any]:
       * Backoff: 0.5s, 1.0s, 2.0s between attempts.
     """
     last_err: Optional[str] = None
+    getter = request_get or requests.get
     for attempt, backoff in enumerate((0.0, *_HTTP_RETRY_BACKOFFS_S)):
         if backoff > 0:
             time.sleep(backoff)
+        _pace_rest_request(request_pacing_s)
         try:
-            resp = requests.get(url, params=params, timeout=_HTTP_TIMEOUT_S)
+            resp = getter(url, params=params, timeout=_HTTP_TIMEOUT_S)
         except requests.exceptions.ConnectionError as e:
             last_err = f"ConnectionError: {e}"
             logger.debug(
@@ -528,7 +607,12 @@ def _list_usd_products() -> list[str]:
     return out
 
 
-def _fetch_book(ticker: str) -> Optional[tuple[float, float]]:
+def _fetch_book(
+    ticker: str,
+    *,
+    request_get: Optional[_HTTPGet] = None,
+    request_pacing_s: float = 0.0,
+) -> Optional[tuple[float, float]]:
     """Hit ``/products/{id}/book?level=1`` to get top-of-book sizes.
 
     Returns ``(bid_size_base, ask_size_base)`` in BASE units (caller
@@ -544,7 +628,10 @@ def _fetch_book(ticker: str) -> Optional[tuple[float, float]]:
         }
     """
     book = _http_get_json(
-        f"{_COINBASE_REST}/products/{ticker}/book", params={"level": 1}
+        f"{_COINBASE_REST}/products/{ticker}/book",
+        params={"level": 1},
+        request_get=request_get,
+        request_pacing_s=request_pacing_s,
     )
     if not isinstance(book, dict):
         return None
@@ -566,14 +653,28 @@ def _fetch_book(ticker: str) -> Optional[tuple[float, float]]:
     return bid_size_base, ask_size_base
 
 
-def _fetch_pair_snapshot(ticker: str) -> Optional[_PairCandidate]:
+def _fetch_pair_snapshot(
+    ticker: str,
+    *,
+    request_get: Optional[_HTTPGet] = None,
+    request_pacing_s: float = _PER_REQ_PACING_S,
+) -> Optional[_PairCandidate]:
     """Hit /stats + /ticker + /book for one ticker. Returns None on error."""
-    stats = _http_get_json(f"{_COINBASE_REST}/products/{ticker}/stats")
-    time.sleep(_PER_REQ_PACING_S)
-    tk = _http_get_json(f"{_COINBASE_REST}/products/{ticker}/ticker")
-    time.sleep(_PER_REQ_PACING_S)
-    book_sizes = _fetch_book(ticker)
-    time.sleep(_PER_REQ_PACING_S)
+    stats = _http_get_json(
+        f"{_COINBASE_REST}/products/{ticker}/stats",
+        request_get=request_get,
+        request_pacing_s=request_pacing_s,
+    )
+    tk = _http_get_json(
+        f"{_COINBASE_REST}/products/{ticker}/ticker",
+        request_get=request_get,
+        request_pacing_s=request_pacing_s,
+    )
+    book_sizes = _fetch_book(
+        ticker,
+        request_get=request_get,
+        request_pacing_s=request_pacing_s,
+    )
     if not isinstance(stats, dict) or not isinstance(tk, dict):
         return None
     try:
@@ -601,6 +702,49 @@ def _fetch_pair_snapshot(ticker: str) -> Optional[_PairCandidate]:
         cand._bid_size_usd = bid_size_base * last_price
         cand._ask_size_usd = ask_size_base * last_price
     return cand
+
+
+def _fetch_snapshot_batch(
+    products: list[str],
+    *,
+    fetch_snapshot_fn,
+    snapshot_fetch_concurrency: int,
+    request_pacing_s: float,
+) -> list[tuple[str, Optional[_PairCandidate]]]:
+    if fetch_snapshot_fn is not _fetch_pair_snapshot:
+        return [(tk, fetch_snapshot_fn(tk)) for tk in products]
+
+    def _fetch(ticker: str) -> Optional[_PairCandidate]:
+        return _fetch_pair_snapshot(
+            ticker,
+            request_get=_thread_local_session_get,
+            request_pacing_s=request_pacing_s,
+        )
+
+    if snapshot_fetch_concurrency <= _MIN_SNAPSHOT_FETCH_CONCURRENCY:
+        return [(tk, _fetch(tk)) for tk in products]
+
+    by_ticker: dict[str, Optional[_PairCandidate]] = {}
+    with ThreadPoolExecutor(
+        max_workers=snapshot_fetch_concurrency,
+        thread_name_prefix="fast_path_rotator",
+    ) as executor:
+        future_to_ticker = {
+            executor.submit(_fetch, tk): tk
+            for tk in products
+        }
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                by_ticker[ticker] = future.result()
+            except Exception as exc:
+                logger.debug(
+                    "[fast_path_rotator] snapshot fetch failed ticker=%s: %s",
+                    ticker, exc,
+                    exc_info=True,
+                )
+                by_ticker[ticker] = None
+    return [(tk, by_ticker.get(tk)) for tk in products]
 
 
 def passes_admission_gates(
@@ -1572,6 +1716,9 @@ def run_rotation_pass(
         "shadow_exploration_force_velocity_blocked": 0,
         "shadow_exploration_force_velocity_ratio": None,
         "rotation_at": rotation_at.isoformat(),
+        "snapshot_fetch_concurrency": None,
+        "rest_request_pacing_s": None,
+        "snapshot_fetch_elapsed_s": None,
     }
 
     if not getattr(settings, "universe_rotation_enabled", False):
@@ -1620,13 +1767,33 @@ def run_rotation_pass(
     # custom book shapes without subclassing the snapshot.
     _ = fetch_book_fn
 
+    snapshot_fetch_concurrency = (
+        _bounded_snapshot_fetch_concurrency(settings)
+        if fetch_snapshot_fn is _fetch_pair_snapshot
+        else _MIN_SNAPSHOT_FETCH_CONCURRENCY
+    )
+    request_pacing_s = (
+        _rest_request_pacing_s(settings)
+        if fetch_snapshot_fn is _fetch_pair_snapshot
+        else 0.0
+    )
+    out["snapshot_fetch_concurrency"] = snapshot_fetch_concurrency
+    out["rest_request_pacing_s"] = request_pacing_s
+
     snapshots: list[_PairCandidate] = []
     valid_snapshots: list[_PairCandidate] = []
     base_range_candidates: list[_PairCandidate] = []
     reject_by_ticker: dict[str, str] = {}
     active_eligible_tickers: set[str] = set()
-    for tk in products:
-        snap = fetch_snapshot_fn(tk)
+    fetch_started = time.monotonic()
+    snapshot_batch = _fetch_snapshot_batch(
+        products,
+        fetch_snapshot_fn=fetch_snapshot_fn,
+        snapshot_fetch_concurrency=snapshot_fetch_concurrency,
+        request_pacing_s=request_pacing_s,
+    )
+    out["snapshot_fetch_elapsed_s"] = round(time.monotonic() - fetch_started, 3)
+    for tk, snap in snapshot_batch:
         if snap is None:
             out["snapshot_failures"] += 1
             continue

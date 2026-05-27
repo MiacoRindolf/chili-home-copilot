@@ -265,6 +265,24 @@ def test_universe_shadow_exploration_floor_env_override_works():
     assert loaded.universe_min_shadow_exploration_n == 0
 
 
+def test_universe_snapshot_fetch_concurrency_env_override_works():
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_UNIVERSE_SNAPSHOT_FETCH_CONCURRENCY": "6"},
+    ):
+        loaded = load()
+    assert loaded.universe_snapshot_fetch_concurrency == 6
+
+
+def test_universe_rest_request_pacing_env_override_works():
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_UNIVERSE_REST_REQUEST_PACING_S": "0.2"},
+    ):
+        loaded = load()
+    assert loaded.universe_rest_request_pacing_s == 0.2
+
+
 def test_scanner_threshold_env_overrides_work():
     with mock.patch.dict(
         os.environ,

@@ -229,6 +229,19 @@ class FastPathSettings:
     learned negative-edge candidates. Override via
     ``CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED``."""
 
+    universe_snapshot_fetch_concurrency: int = 4
+    """Bounded worker count for Coinbase REST snapshot collection during
+    universe rotation. Workers share a global request pacer, so increasing
+    this hides network latency without raising aggregate request cadence.
+    Override via
+    ``CHILI_FAST_PATH_UNIVERSE_SNAPSHOT_FETCH_CONCURRENCY``."""
+
+    universe_rest_request_pacing_s: float = 0.12
+    """Minimum spacing between Coinbase REST requests across all rotator
+    snapshot workers. The default is roughly 8 requests/sec, below the
+    documented public limit. Override via
+    ``CHILI_FAST_PATH_UNIVERSE_REST_REQUEST_PACING_S``."""
+
     universe_min_trades_24h: int = 1_000
     """Minimum 24h trade count. Below this, the order book is too
     thin / discontinuous for the rotator's price snapshots to be
@@ -493,6 +506,14 @@ def load() -> FastPathSettings:
         universe_market_velocity_deadlock_probe_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED",
             True,
+        ),
+        universe_snapshot_fetch_concurrency=_env_int(
+            "CHILI_FAST_PATH_UNIVERSE_SNAPSHOT_FETCH_CONCURRENCY",
+            4,
+        ),
+        universe_rest_request_pacing_s=_env_float(
+            "CHILI_FAST_PATH_UNIVERSE_REST_REQUEST_PACING_S",
+            0.12,
         ),
         universe_min_trades_24h=_env_int(
             "CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H", 1_000),
