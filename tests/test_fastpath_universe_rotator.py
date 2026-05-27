@@ -1237,6 +1237,65 @@ def test_velocity_deadlock_probe_keeps_configured_shadow_floor_alive():
     )
 
 
+def test_velocity_deadlock_probe_fills_configured_floor_shortfall():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+    from app.services.trading.fast_path.universe_status import UNIVERSE_STATUS_SHADOW
+
+    shadow_floor = 2
+    db = _FakeRotationDB(
+        latest_rotation_at=datetime(2026, 5, 24, 15, 0, 0),
+        observed_rows=[{
+            "ticker": "OBSERVED-USD",
+            "bars": 20,
+            "alerts": 1,
+            "maker_attempts": 0,
+            "maker_fills": 0,
+            "realized_move_samples": 20,
+            "mean_realized_bar_move_bps": 1.0,
+        }],
+    )
+    s = _StubSettings(
+        universe_top_n=3,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+        universe_min_shadow_exploration_n=shadow_floor,
+    )
+    snapshots = {
+        "OBSERVED-USD": _make_candidate(
+            ticker="OBSERVED-USD",
+            high_24h=110.0,
+            low_24h=90.0,
+        ),
+        "BACKFILL-A-USD": _make_candidate(
+            ticker="BACKFILL-A-USD",
+            high_24h=120.0,
+            low_24h=80.0,
+        ),
+        "BACKFILL-B-USD": _make_candidate(
+            ticker="BACKFILL-B-USD",
+            high_24h=118.0,
+            low_24h=82.0,
+        ),
+    }
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: list(snapshots),
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    statuses = {row["ticker"]: row["status"] for row in db.inserted_rows}
+    assert out["shadow_exploration_velocity_deadlock_probe"] == 1
+    assert out["shadow_exploration_forced_reasons"] == {
+        "market_velocity_deadlock_probe": 1,
+    }
+    assert out["shadow_exploration_force_velocity_blocked"] == 0
+    assert out["ranked_n"] == shadow_floor
+    assert list(statuses.values()).count(UNIVERSE_STATUS_SHADOW) == shadow_floor
+
+
 def test_learning_retention_prioritizes_recent_alert_for_shadow_floor():
     from app.services.trading.fast_path.universe_rotator import run_rotation_pass
     from app.services.trading.fast_path.universe_status import (

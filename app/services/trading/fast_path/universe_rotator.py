@@ -2291,7 +2291,7 @@ def run_rotation_pass(
             blocked_slots = force_slots
             if (
                 _market_velocity_deadlock_probe_enabled(settings)
-                and not selected_tickers
+                and len(selected_tickers) < min_shadow_exploration_n
             ):
                 velocity_backfill_skips, force_slots = _force_shadow_exploration(
                     velocity_backfill_skips,
