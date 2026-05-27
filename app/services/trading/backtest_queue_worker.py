@@ -18,6 +18,12 @@ DEFAULT_OPERATIONAL_REFRESH_LIFECYCLES = (
     "shadow_promoted",
     "pilot_promoted",
 )
+PRESCREEN_MIN_TICKERS_FALLBACK = 2
+PRESCREEN_TICKERS_FALLBACK = 4
+PRESCREEN_MIN_WIN_RATE_PCT_FALLBACK = 45.0
+PRESCREEN_FULL_TIER_PRIORITY_FLOOR = 50
+STORED_REFRESH_STALE_TRADE_CAP_FALLBACK = 2
+STORED_REFRESH_STALE_DAYS_FALLBACK = 14
 
 
 def _positive_int(value: object, fallback: int) -> int:
@@ -191,8 +197,20 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 scan_pattern_id=int(pattern.id),
                 pattern_name=str(pattern.name or ""),
                 max_tickers=stored_refresh_max_tickers,
-                stale_trade_cap=int(getattr(settings, "brain_queue_stored_stale_trade_cap", 2)),
-                stale_days=int(getattr(settings, "brain_queue_stored_stale_days", 14)),
+                stale_trade_cap=int(
+                    getattr(
+                        settings,
+                        "brain_queue_stored_stale_trade_cap",
+                        STORED_REFRESH_STALE_TRADE_CAP_FALLBACK,
+                    )
+                ),
+                stale_days=int(
+                    getattr(
+                        settings,
+                        "brain_queue_stored_stale_days",
+                        STORED_REFRESH_STALE_DAYS_FALLBACK,
+                    )
+                ),
             )
             if prio:
                 logger.info(
@@ -210,7 +228,14 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 db,
                 insight,
                 target_tickers=max(
-                    2, int(getattr(settings, "brain_queue_prescreen_tickers", 4))
+                    PRESCREEN_MIN_TICKERS_FALLBACK,
+                    int(
+                        getattr(
+                            settings,
+                            "brain_queue_prescreen_tickers",
+                            PRESCREEN_TICKERS_FALLBACK,
+                        )
+                    ),
                 ),
                 update_confidence=True,
                 period=getattr(settings, "brain_queue_prescreen_period", "3mo"),
@@ -221,11 +246,22 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             backtests_run = result.get("backtests_run", 0)
             wr_pct = (wins / total * 100.0) if total > 0 else 0.0
             min_pre = float(
-                getattr(settings, "brain_queue_prescreen_min_win_rate_pct", 45.0)
+                getattr(
+                    settings,
+                    "brain_queue_prescreen_min_win_rate_pct",
+                    PRESCREEN_MIN_WIN_RATE_PCT_FALLBACK,
+                )
             )
             win_rate = wins / total if total >= 3 else None
             avg_return = result.get("avg_return")
-            mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
+            mark_pattern_tested(
+                db,
+                pattern,
+                win_rate=win_rate,
+                avg_return=avg_return,
+                backtests_run=backtests_run,
+                trade_bearing_tickers=total,
+            )
             _complete_recert_if_open(
                 total=total,
                 wins=wins,
@@ -236,7 +272,10 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
             if pattern and total >= 2 and wr_pct >= min_pre:
                 pattern.queue_tier = "full"
-                pattern.backtest_priority = max(int(pattern.backtest_priority or 0), 50)
+                pattern.backtest_priority = max(
+                    int(pattern.backtest_priority or 0),
+                    PRESCREEN_FULL_TIER_PRIORITY_FLOOR,
+                )
                 db.commit()
                 from .backtest_queue import invalidate_queue_status_cache
 
@@ -281,7 +320,6 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     related_insight_id=insight.id,
                 )
             else:
-                mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
                 _complete_recert_if_open(
                     total=total,
                     wins=wins,
@@ -303,7 +341,14 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         backtests_run = result.get("backtests_run", 0)
         win_rate = wins / total if total >= 3 else None
         avg_return = result.get("avg_return")
-        mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
+        mark_pattern_tested(
+            db,
+            pattern,
+            win_rate=win_rate,
+            avg_return=avg_return,
+            backtests_run=backtests_run,
+            trade_bearing_tickers=total,
+        )
         _complete_recert_if_open(
             total=total,
             wins=wins,

@@ -19,14 +19,21 @@ from ...models.trading import ScanPattern
 logger = logging.getLogger(__name__)
 RECERT_PROMOTED_LIFECYCLES = ("promoted", "live")
 PROMOTION_PATH_DEBT_LIFECYCLES = ("shadow_promoted", "pilot_promoted")
+ZERO_TRADE_DEMOTE_PROTECTED_LIFECYCLES = (
+    RECERT_PROMOTED_LIFECYCLES + PROMOTION_PATH_DEBT_LIFECYCLES
+)
 PROMOTION_PATH_DEBT_REASONS = (
     "cpcv_n_paths_below_provisional_min",
     "provisional_small_paths",
 )
+QUEUE_TIER_FULL = "full"
+QUEUE_TIER_PRESCREEN = "prescreen"
 QUEUE_RANK_PRIORITY_RECERT = 0
 QUEUE_RANK_RECERT = 1
 QUEUE_RANK_PROMOTION_PATH_DEBT = 2
 QUEUE_RANK_GENERIC_BACKLOG = 3
+MIN_ZERO_TRADE_DEMOTE_THRESHOLD = 1
+ZERO_TRADE_DEMOTE_DEFAULT_THRESHOLD = 3
 
 
 def get_retest_interval_days() -> int:
@@ -245,6 +252,7 @@ def mark_pattern_tested(
     win_rate: float | None = None,
     avg_return: float | None = None,
     backtests_run: int | None = None,
+    trade_bearing_tickers: int | None = None,
 ) -> None:
     """Mark a pattern as tested and update its stats.
 
@@ -263,6 +271,20 @@ def mark_pattern_tested(
     import math as _math
     from sqlalchemy import func as _func
     from ...models.trading import BacktestResult as _TB
+
+    def _non_negative_int(value: int | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _zero_trade_signal_count() -> int | None:
+        trade_count = _non_negative_int(trade_bearing_tickers)
+        if trade_count is not None:
+            return trade_count
+        return _non_negative_int(backtests_run)
 
     pattern.last_backtest_at = datetime.utcnow()
     pattern.backtest_priority = 0  # Reset boost after processing
@@ -303,30 +325,57 @@ def mark_pattern_tested(
             getattr(pattern, "id", None), e,
         )
 
-    # Round-12 FIX #4 (2026-04-30): track consecutive zero-trade runs and
-    # auto-demote to prescreen tier after threshold. Patterns that produce
-    # 0 trades on the test universe are queue-burn -- they get re-tested
-    # every cycle indefinitely without ever yielding signal. After N
-    # consecutive zero-trade runs, demote to queue_tier='prescreen' so
-    # they only run when prescreen tier is enabled (rare).
+    # Track consecutive zero-trade evidence runs using trade-bearing ticker
+    # count, not ticker jobs attempted. Patterns that attempt many ticker
+    # jobs but produce no realized backtest trades are queue-burn; after the
+    # configured threshold they move to prescreen. Promoted/near-promoted
+    # operational lanes keep their tier so recert debt is not starved.
     try:
         from ...config import settings as _s
-        threshold = max(1, int(getattr(_s, "chili_backtest_zero_trade_demote_threshold", 3)))
-        cur = int(getattr(pattern, "consecutive_zero_trade_runs", 0) or 0)
-        if backtests_run is not None and int(backtests_run) == 0:
+        threshold = max(
+            MIN_ZERO_TRADE_DEMOTE_THRESHOLD,
+            int(
+                getattr(
+                    _s,
+                    "chili_backtest_zero_trade_demote_threshold",
+                    ZERO_TRADE_DEMOTE_DEFAULT_THRESHOLD,
+                )
+            ),
+        )
+        cur = max(0, int(getattr(pattern, "consecutive_zero_trade_runs", 0) or 0))
+        trade_signal_count = _zero_trade_signal_count()
+        lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
+        protected_lifecycle = lifecycle in ZERO_TRADE_DEMOTE_PROTECTED_LIFECYCLES
+        if trade_signal_count == 0:
             new_count = cur + 1
             pattern.consecutive_zero_trade_runs = new_count
-            if new_count >= threshold and (pattern.queue_tier or "full") != "prescreen":
+            if (
+                new_count >= threshold
+                and (pattern.queue_tier or QUEUE_TIER_FULL) != QUEUE_TIER_PRESCREEN
+                and not protected_lifecycle
+            ):
                 logger.warning(
-                    "[backtest_queue] FIX C4d: pattern_id=%s '%s' has %s "
-                    "consecutive zero-trade runs (>= %s); demoting "
-                    "queue_tier full -> prescreen to free queue cycles.",
+                    "[backtest_queue] zero_trade_demote pattern_id=%s '%s' has %s "
+                    "consecutive zero-trade evidence runs (>= %s); demoting "
+                    "queue_tier %s -> %s to free queue cycles.",
                     pattern.id, getattr(pattern, "name", "?"),
                     new_count, threshold,
+                    pattern.queue_tier or QUEUE_TIER_FULL,
+                    QUEUE_TIER_PRESCREEN,
                 )
-                pattern.queue_tier = "prescreen"
-        elif backtests_run is not None and int(backtests_run) > 0:
-            # Reset on any non-zero run -- only CONSECUTIVE zeros demote.
+                pattern.queue_tier = QUEUE_TIER_PRESCREEN
+            elif new_count >= threshold and protected_lifecycle:
+                logger.info(
+                    "[backtest_queue] zero_trade_counter protected pattern_id=%s "
+                    "lifecycle=%s consecutive_zero_trade_runs=%s threshold=%s",
+                    pattern.id,
+                    lifecycle,
+                    new_count,
+                    threshold,
+                )
+        elif trade_signal_count is not None and trade_signal_count > 0:
+            # Reset on any trade-bearing evidence run -- only consecutive
+            # zero-trade evidence demotes.
             if cur != 0:
                 pattern.consecutive_zero_trade_runs = 0
     except Exception:

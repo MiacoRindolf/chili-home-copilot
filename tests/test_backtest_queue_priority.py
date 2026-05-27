@@ -5,9 +5,12 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.models.trading import ScanPattern
 from app.services.trading.backtest_queue import (
+    QUEUE_TIER_FULL,
+    QUEUE_TIER_PRESCREEN,
     get_pending_patterns,
     get_priority_bypass_retest_floor,
     get_queue_status,
+    mark_pattern_tested,
 )
 
 
@@ -166,3 +169,99 @@ def test_fresh_promoted_recert_stays_pending_without_priority_bypass(db):
     assert status["pending"] == 1
     assert status["recert_pending"] == 1
     assert status["priority_bypass"] == 0
+
+
+def test_zero_trade_demote_uses_trade_bearing_tickers_not_jobs_run(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "chili_backtest_zero_trade_demote_threshold", 3)
+    pattern = _queued_pattern(
+        db,
+        name="candidate burns ticker jobs without trades",
+        lifecycle_stage="candidate",
+        backtest_priority=10,
+    )
+    pattern.queue_tier = QUEUE_TIER_FULL
+    pattern.consecutive_zero_trade_runs = 2
+    db.commit()
+
+    mark_pattern_tested(
+        db,
+        pattern,
+        backtests_run=24,
+        trade_bearing_tickers=0,
+    )
+    db.refresh(pattern)
+
+    assert pattern.consecutive_zero_trade_runs == 3
+    assert pattern.queue_tier == QUEUE_TIER_PRESCREEN
+
+
+def test_zero_trade_counter_resets_on_trade_bearing_evidence(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "chili_backtest_zero_trade_demote_threshold", 3)
+    pattern = _queued_pattern(
+        db,
+        name="candidate starts producing trades",
+        lifecycle_stage="candidate",
+        backtest_priority=10,
+    )
+    pattern.queue_tier = QUEUE_TIER_FULL
+    pattern.consecutive_zero_trade_runs = 2
+    db.commit()
+
+    mark_pattern_tested(
+        db,
+        pattern,
+        backtests_run=24,
+        trade_bearing_tickers=1,
+    )
+    db.refresh(pattern)
+
+    assert pattern.consecutive_zero_trade_runs == 0
+    assert pattern.queue_tier == QUEUE_TIER_FULL
+
+
+def test_zero_trade_demote_protects_promoted_recert_lane(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "chili_backtest_zero_trade_demote_threshold", 3)
+    pattern = _queued_pattern(
+        db,
+        name="promoted recert can be sparse",
+        lifecycle_stage="promoted",
+        backtest_priority=10,
+        recert_required=True,
+    )
+    pattern.queue_tier = QUEUE_TIER_FULL
+    pattern.consecutive_zero_trade_runs = 2
+    db.commit()
+
+    mark_pattern_tested(
+        db,
+        pattern,
+        backtests_run=24,
+        trade_bearing_tickers=0,
+    )
+    db.refresh(pattern)
+
+    assert pattern.consecutive_zero_trade_runs == 3
+    assert pattern.queue_tier == QUEUE_TIER_FULL
+
+
+def test_zero_trade_counter_keeps_legacy_backtests_run_fallback(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "chili_backtest_zero_trade_demote_threshold", 3)
+    pattern = _queued_pattern(
+        db,
+        name="legacy zero job caller",
+        lifecycle_stage="candidate",
+        backtest_priority=10,
+    )
+    pattern.queue_tier = QUEUE_TIER_FULL
+    pattern.consecutive_zero_trade_runs = 2
+    db.commit()
+
+    mark_pattern_tested(db, pattern, backtests_run=0)
+    db.refresh(pattern)
+
+    assert pattern.consecutive_zero_trade_runs == 3
+    assert pattern.queue_tier == QUEUE_TIER_PRESCREEN

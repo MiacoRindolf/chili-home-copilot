@@ -1003,6 +1003,9 @@ class ScanPattern(Base):
         JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
     )
     queue_tier: str = Column(String(16), nullable=False, default="full", server_default="full")
+    consecutive_zero_trade_runs: int = Column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     paper_book_json: dict = Column(
         JSONB, nullable=False, default=lambda: {}, server_default=text("'{}'::jsonb")
     )
