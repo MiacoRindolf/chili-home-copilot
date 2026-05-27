@@ -77,10 +77,19 @@ LEARNING_LATEST_ALERT_AT_KEY = "latest_alert_at"
 LEARNING_LATEST_EXECUTION_AT_KEY = "latest_execution_at"
 LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY = "latest_maker_attempt_at"
 LEARNING_LATEST_MAKER_FILL_AT_KEY = "latest_maker_fill_at"
+LEARNING_LATEST_MAKER_OUTCOME_AT_KEY = "latest_maker_outcome_at"
+LEARNING_LATEST_MAKER_OUTCOME_KEY = "latest_maker_outcome"
 LEARNING_LATEST_DECISION_AT_KEY = "latest_learning_decision_at"
 LEARNING_LATEST_EXIT_AT_KEY = "latest_exit_at"
 LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY = "alert_to_execution_lag_s"
 LEARNING_ALERT_TO_DECISION_LAG_S_KEY = "alert_to_learning_decision_lag_s"
+LEARNING_MAKER_ATTEMPTS_WINDOW_KEY = "maker_attempts_window"
+LEARNING_MAKER_CANCELS_WINDOW_KEY = "maker_cancels_window"
+LEARNING_MAKER_FILLS_WINDOW_KEY = "maker_fills_window"
+LEARNING_MAKER_OUTCOME_WINDOW_S_KEY = "maker_outcome_window_s"
+LEARNING_MAKER_PENDING_WINDOW_KEY = "maker_pending_window"
+LEARNING_MAKER_REJECTED_WINDOW_KEY = "maker_rejected_window"
+LEARNING_MAKER_REPLACED_WINDOW_KEY = "maker_replaced_window"
 
 # The executor polls fresh alerts once per second. A two-minute lag is
 # deliberately loose: it avoids clock-skew / deploy flaps while still
@@ -374,6 +383,10 @@ class HealthzServer:
             LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY
         )
         latest_maker_fill_at = freshness.get(LEARNING_LATEST_MAKER_FILL_AT_KEY)
+        latest_maker_outcome_at = freshness.get(
+            LEARNING_LATEST_MAKER_OUTCOME_AT_KEY
+        )
+        latest_maker_outcome = freshness.get(LEARNING_LATEST_MAKER_OUTCOME_KEY)
         latest_decision_at = (
             freshness.get(LEARNING_LATEST_DECISION_AT_KEY)
             or latest_execution_at
@@ -393,6 +406,8 @@ class HealthzServer:
             LEARNING_LATEST_EXECUTION_AT_KEY: latest_execution_at,
             LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY: latest_maker_attempt_at,
             LEARNING_LATEST_MAKER_FILL_AT_KEY: latest_maker_fill_at,
+            LEARNING_LATEST_MAKER_OUTCOME_AT_KEY: latest_maker_outcome_at,
+            LEARNING_LATEST_MAKER_OUTCOME_KEY: latest_maker_outcome,
             LEARNING_LATEST_DECISION_AT_KEY: latest_decision_at,
             LEARNING_LATEST_EXIT_AT_KEY: latest_exit_at,
             LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
@@ -401,7 +416,34 @@ class HealthzServer:
             LEARNING_ALERT_TO_DECISION_LAG_S_KEY: (
                 round(lag_s, 2) if lag_s is not None else None
             ),
+            LEARNING_MAKER_OUTCOME_WINDOW_S_KEY: freshness.get(
+                LEARNING_MAKER_OUTCOME_WINDOW_S_KEY
+            ),
+            LEARNING_MAKER_ATTEMPTS_WINDOW_KEY: freshness.get(
+                LEARNING_MAKER_ATTEMPTS_WINDOW_KEY
+            ),
+            LEARNING_MAKER_FILLS_WINDOW_KEY: freshness.get(
+                LEARNING_MAKER_FILLS_WINDOW_KEY
+            ),
+            LEARNING_MAKER_CANCELS_WINDOW_KEY: freshness.get(
+                LEARNING_MAKER_CANCELS_WINDOW_KEY
+            ),
+            LEARNING_MAKER_REPLACED_WINDOW_KEY: freshness.get(
+                LEARNING_MAKER_REPLACED_WINDOW_KEY
+            ),
+            LEARNING_MAKER_REJECTED_WINDOW_KEY: freshness.get(
+                LEARNING_MAKER_REJECTED_WINDOW_KEY
+            ),
+            LEARNING_MAKER_PENDING_WINDOW_KEY: freshness.get(
+                LEARNING_MAKER_PENDING_WINDOW_KEY
+            ),
         }
+        maker_outcome_age_s = self._age_seconds(latest_maker_outcome_at)
+        detail["latest_maker_outcome_age_s"] = (
+            round(maker_outcome_age_s, 2)
+            if maker_outcome_age_s is not None
+            else None
+        )
 
         if freshness.get("ok") is False:
             return False, {
@@ -504,4 +546,13 @@ __all__ = [
     "LEARNING_LATEST_EXIT_AT_KEY",
     "LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY",
     "LEARNING_LATEST_MAKER_FILL_AT_KEY",
+    "LEARNING_LATEST_MAKER_OUTCOME_AT_KEY",
+    "LEARNING_LATEST_MAKER_OUTCOME_KEY",
+    "LEARNING_MAKER_ATTEMPTS_WINDOW_KEY",
+    "LEARNING_MAKER_CANCELS_WINDOW_KEY",
+    "LEARNING_MAKER_FILLS_WINDOW_KEY",
+    "LEARNING_MAKER_OUTCOME_WINDOW_S_KEY",
+    "LEARNING_MAKER_PENDING_WINDOW_KEY",
+    "LEARNING_MAKER_REJECTED_WINDOW_KEY",
+    "LEARNING_MAKER_REPLACED_WINDOW_KEY",
 ]

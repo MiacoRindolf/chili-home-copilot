@@ -26,8 +26,8 @@ from .decay_miner import FastPathDecayMiner
 from .executor import FastPathExecutor
 from .exit_manager import FastPathExitManager
 from .healthz import (
-    LEARNING_ALERT_TO_DECISION_LAG_S_KEY,
     FAST_LEARNING_FRESHNESS_KEY,
+    LEARNING_ALERT_TO_DECISION_LAG_S_KEY,
     LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY,
     LEARNING_LATEST_ALERT_AT_KEY,
     LEARNING_LATEST_DECISION_AT_KEY,
@@ -35,6 +35,15 @@ from .healthz import (
     LEARNING_LATEST_EXIT_AT_KEY,
     LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY,
     LEARNING_LATEST_MAKER_FILL_AT_KEY,
+    LEARNING_LATEST_MAKER_OUTCOME_AT_KEY,
+    LEARNING_LATEST_MAKER_OUTCOME_KEY,
+    LEARNING_MAKER_ATTEMPTS_WINDOW_KEY,
+    LEARNING_MAKER_CANCELS_WINDOW_KEY,
+    LEARNING_MAKER_FILLS_WINDOW_KEY,
+    LEARNING_MAKER_OUTCOME_WINDOW_S_KEY,
+    LEARNING_MAKER_PENDING_WINDOW_KEY,
+    LEARNING_MAKER_REJECTED_WINDOW_KEY,
+    LEARNING_MAKER_REPLACED_WINDOW_KEY,
     HealthzServer,
 )
 from .settings import FastPathSettings
@@ -49,14 +58,58 @@ logger = logging.getLogger(__name__)
 # path. 60s is short enough that operators see a silent failure on the
 # next dashboard refresh, long enough to keep the loop quiet.
 WATCHDOG_INTERVAL_S = 60.0
+MAKER_OUTCOME_HEALTH_WINDOW_S = 3600
+MAKER_OUTCOME_CANCELLED = "cancelled"
+MAKER_OUTCOME_FILLED = "filled"
+MAKER_OUTCOME_PARTIAL = "partial"
+MAKER_OUTCOME_REJECTED = "rejected"
+MAKER_OUTCOME_REPLACED = "replaced"
 
 FAST_LEARNING_FRESHNESS_SQL = text(
     """
+    WITH maker_outcomes AS (
+      SELECT
+        fill_outcome,
+        COALESCE(filled_at, cancelled_at, placed_at) AS outcome_at
+      FROM fast_path_maker_attempts
+      WHERE fill_outcome IS NOT NULL
+    ),
+    maker_window AS (
+      SELECT fill_outcome
+      FROM fast_path_maker_attempts
+      WHERE placed_at >= NOW() - (:maker_outcome_window_s * INTERVAL '1 second')
+    )
     SELECT
       (SELECT MAX(fired_at) FROM fast_alerts) AS latest_alert_at,
       (SELECT MAX(decided_at) FROM fast_executions) AS latest_execution_at,
       (SELECT MAX(placed_at) FROM fast_path_maker_attempts) AS latest_maker_attempt_at,
       (SELECT MAX(filled_at) FROM fast_path_maker_attempts) AS latest_maker_fill_at,
+      (SELECT outcome_at FROM maker_outcomes
+        WHERE outcome_at IS NOT NULL
+        ORDER BY outcome_at DESC
+        LIMIT 1
+      ) AS latest_maker_outcome_at,
+      (SELECT fill_outcome FROM maker_outcomes
+        WHERE outcome_at IS NOT NULL
+        ORDER BY outcome_at DESC
+        LIMIT 1
+      ) AS latest_maker_outcome,
+      (SELECT COUNT(*) FROM maker_window) AS maker_attempts_window,
+      (SELECT COUNT(*) FROM maker_window
+        WHERE fill_outcome IN (:maker_outcome_filled, :maker_outcome_partial)
+      ) AS maker_fills_window,
+      (SELECT COUNT(*) FROM maker_window
+        WHERE fill_outcome = :maker_outcome_cancelled
+      ) AS maker_cancels_window,
+      (SELECT COUNT(*) FROM maker_window
+        WHERE fill_outcome = :maker_outcome_replaced
+      ) AS maker_replaced_window,
+      (SELECT COUNT(*) FROM maker_window
+        WHERE fill_outcome = :maker_outcome_rejected
+      ) AS maker_rejected_window,
+      (SELECT COUNT(*) FROM maker_window
+        WHERE fill_outcome IS NULL
+      ) AS maker_pending_window,
       (SELECT MAX(exited_at) FROM fast_exits) AS latest_exit_at
     """
 )
@@ -443,12 +496,20 @@ class FastPathSupervisor:
             logger.info(
                 "[fast_path] learning_freshness ok=%s latest_alert=%s "
                 "latest_execution=%s latest_maker_attempt=%s "
-                "latest_decision=%s alert_to_decision_lag_s=%s "
+                "latest_maker_outcome=%s latest_maker_outcome_at=%s "
+                "maker_window_s=%s maker_attempts=%s maker_fills=%s "
+                "maker_cancels=%s latest_decision=%s alert_to_decision_lag_s=%s "
                 "latest_exit=%s error=%s",
                 learning_stats.get("ok"),
                 learning_stats.get(LEARNING_LATEST_ALERT_AT_KEY),
                 learning_stats.get(LEARNING_LATEST_EXECUTION_AT_KEY),
                 learning_stats.get(LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY),
+                learning_stats.get(LEARNING_LATEST_MAKER_OUTCOME_KEY),
+                learning_stats.get(LEARNING_LATEST_MAKER_OUTCOME_AT_KEY),
+                learning_stats.get(LEARNING_MAKER_OUTCOME_WINDOW_S_KEY),
+                learning_stats.get(LEARNING_MAKER_ATTEMPTS_WINDOW_KEY),
+                learning_stats.get(LEARNING_MAKER_FILLS_WINDOW_KEY),
+                learning_stats.get(LEARNING_MAKER_CANCELS_WINDOW_KEY),
                 learning_stats.get(LEARNING_LATEST_DECISION_AT_KEY),
                 learning_stats.get(LEARNING_ALERT_TO_DECISION_LAG_S_KEY),
                 learning_stats.get(LEARNING_LATEST_EXIT_AT_KEY),
@@ -526,7 +587,17 @@ class FastPathSupervisor:
     def _learning_freshness_snapshot(self) -> dict[str, Any]:
         try:
             with self._engine.connect() as conn:
-                row = conn.execute(FAST_LEARNING_FRESHNESS_SQL).mappings().one()
+                row = conn.execute(
+                    FAST_LEARNING_FRESHNESS_SQL,
+                    {
+                        "maker_outcome_window_s": MAKER_OUTCOME_HEALTH_WINDOW_S,
+                        "maker_outcome_cancelled": MAKER_OUTCOME_CANCELLED,
+                        "maker_outcome_filled": MAKER_OUTCOME_FILLED,
+                        "maker_outcome_partial": MAKER_OUTCOME_PARTIAL,
+                        "maker_outcome_rejected": MAKER_OUTCOME_REJECTED,
+                        "maker_outcome_replaced": MAKER_OUTCOME_REPLACED,
+                    },
+                ).mappings().one()
         except Exception as exc:
             logger.warning(
                 "[fast_path] learning freshness snapshot failed: %s",
@@ -541,6 +612,8 @@ class FastPathSupervisor:
         latest_execution_at = row.get(LEARNING_LATEST_EXECUTION_AT_KEY)
         latest_maker_attempt_at = row.get(LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY)
         latest_maker_fill_at = row.get(LEARNING_LATEST_MAKER_FILL_AT_KEY)
+        latest_maker_outcome_at = row.get(LEARNING_LATEST_MAKER_OUTCOME_AT_KEY)
+        latest_maker_outcome = row.get(LEARNING_LATEST_MAKER_OUTCOME_KEY)
         latest_exit_at = row.get(LEARNING_LATEST_EXIT_AT_KEY)
         execution_lag_s = None
         decision_lag_s = None
@@ -574,10 +647,33 @@ class FastPathSupervisor:
             LEARNING_LATEST_MAKER_FILL_AT_KEY: self._iso_or_none(
                 latest_maker_fill_at
             ),
+            LEARNING_LATEST_MAKER_OUTCOME_AT_KEY: self._iso_or_none(
+                latest_maker_outcome_at
+            ),
+            LEARNING_LATEST_MAKER_OUTCOME_KEY: latest_maker_outcome,
             LEARNING_LATEST_DECISION_AT_KEY: self._iso_or_none(
                 latest_decision_dt
             ),
             LEARNING_LATEST_EXIT_AT_KEY: self._iso_or_none(latest_exit_at),
+            LEARNING_MAKER_OUTCOME_WINDOW_S_KEY: MAKER_OUTCOME_HEALTH_WINDOW_S,
+            LEARNING_MAKER_ATTEMPTS_WINDOW_KEY: self._int_count(
+                row.get(LEARNING_MAKER_ATTEMPTS_WINDOW_KEY)
+            ),
+            LEARNING_MAKER_FILLS_WINDOW_KEY: self._int_count(
+                row.get(LEARNING_MAKER_FILLS_WINDOW_KEY)
+            ),
+            LEARNING_MAKER_CANCELS_WINDOW_KEY: self._int_count(
+                row.get(LEARNING_MAKER_CANCELS_WINDOW_KEY)
+            ),
+            LEARNING_MAKER_REPLACED_WINDOW_KEY: self._int_count(
+                row.get(LEARNING_MAKER_REPLACED_WINDOW_KEY)
+            ),
+            LEARNING_MAKER_REJECTED_WINDOW_KEY: self._int_count(
+                row.get(LEARNING_MAKER_REJECTED_WINDOW_KEY)
+            ),
+            LEARNING_MAKER_PENDING_WINDOW_KEY: self._int_count(
+                row.get(LEARNING_MAKER_PENDING_WINDOW_KEY)
+            ),
             LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
                 round(execution_lag_s, 3) if execution_lag_s is not None else None
             ),
@@ -593,6 +689,13 @@ class FastPathSupervisor:
         if isinstance(value, datetime):
             return value.isoformat()
         return str(value)
+
+    @staticmethod
+    def _int_count(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _naive_utc_datetime(value: Any) -> datetime | None:

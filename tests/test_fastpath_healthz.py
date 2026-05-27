@@ -16,6 +16,16 @@ from app.services.trading.fast_path.healthz import (
     LEARNING_LATEST_EXECUTION_AT_KEY,
     LEARNING_LATEST_EXIT_AT_KEY,
     LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY,
+    LEARNING_LATEST_MAKER_FILL_AT_KEY,
+    LEARNING_LATEST_MAKER_OUTCOME_AT_KEY,
+    LEARNING_LATEST_MAKER_OUTCOME_KEY,
+    LEARNING_MAKER_ATTEMPTS_WINDOW_KEY,
+    LEARNING_MAKER_CANCELS_WINDOW_KEY,
+    LEARNING_MAKER_FILLS_WINDOW_KEY,
+    LEARNING_MAKER_OUTCOME_WINDOW_S_KEY,
+    LEARNING_MAKER_PENDING_WINDOW_KEY,
+    LEARNING_MAKER_REJECTED_WINDOW_KEY,
+    LEARNING_MAKER_REPLACED_WINDOW_KEY,
     HealthzServer,
 )
 
@@ -79,6 +89,7 @@ def test_healthz_accepts_fresh_maker_attempt_as_learning_decision():
     now = _utcnow_naive()
     alert_at = now - timedelta(seconds=5.0)
     maker_attempt_at = now - timedelta(seconds=4.0)
+    maker_outcome_at = now - timedelta(seconds=2.0)
     execution_at = alert_at - timedelta(
         seconds=EXECUTOR_LEARNING_MAX_LAG_S + 1.0
     )
@@ -90,12 +101,22 @@ def test_healthz_accepts_fresh_maker_attempt_as_learning_decision():
             LEARNING_LATEST_ALERT_AT_KEY: alert_at.isoformat(),
             LEARNING_LATEST_EXECUTION_AT_KEY: execution_at.isoformat(),
             LEARNING_LATEST_MAKER_ATTEMPT_AT_KEY: maker_attempt_at.isoformat(),
+            LEARNING_LATEST_MAKER_FILL_AT_KEY: None,
+            LEARNING_LATEST_MAKER_OUTCOME_AT_KEY: maker_outcome_at.isoformat(),
+            LEARNING_LATEST_MAKER_OUTCOME_KEY: "cancelled",
             LEARNING_LATEST_DECISION_AT_KEY: maker_attempt_at.isoformat(),
             LEARNING_LATEST_EXIT_AT_KEY: None,
             LEARNING_ALERT_TO_EXECUTION_LAG_S_KEY: (
                 EXECUTOR_LEARNING_MAX_LAG_S + 1.0
             ),
             LEARNING_ALERT_TO_DECISION_LAG_S_KEY: 0.0,
+            LEARNING_MAKER_OUTCOME_WINDOW_S_KEY: 900,
+            LEARNING_MAKER_ATTEMPTS_WINDOW_KEY: 3,
+            LEARNING_MAKER_FILLS_WINDOW_KEY: 1,
+            LEARNING_MAKER_CANCELS_WINDOW_KEY: 2,
+            LEARNING_MAKER_REPLACED_WINDOW_KEY: 0,
+            LEARNING_MAKER_REJECTED_WINDOW_KEY: 0,
+            LEARNING_MAKER_PENDING_WINDOW_KEY: 0,
         },
     ))
 
@@ -103,6 +124,15 @@ def test_healthz_accepts_fresh_maker_attempt_as_learning_decision():
     assert body["executor_learning_freshness"] is True
     assert body["details"]["executor_learning_phase"] == "ok"
     assert body["details"]["subscribed_pairs"] == 1
+    assert body["details"][LEARNING_LATEST_MAKER_OUTCOME_KEY] == "cancelled"
+    assert (
+        body["details"][LEARNING_LATEST_MAKER_OUTCOME_AT_KEY]
+        == maker_outcome_at.isoformat()
+    )
+    assert body["details"]["latest_maker_outcome_age_s"] is not None
+    assert body["details"][LEARNING_MAKER_ATTEMPTS_WINDOW_KEY] == 3
+    assert body["details"][LEARNING_MAKER_FILLS_WINDOW_KEY] == 1
+    assert body["details"][LEARNING_MAKER_CANCELS_WINDOW_KEY] == 2
 
 
 def test_healthz_ignores_rotated_paused_pair_errors_when_streaming_pairs_are_fresh():
