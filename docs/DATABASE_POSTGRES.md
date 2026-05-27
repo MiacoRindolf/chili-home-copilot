@@ -110,6 +110,18 @@ This is a **host** limitation: too many sockets in `TIME_WAIT` or ephemeral port
    The repair stops Compose, restarts Docker Desktop, waits for the engine,
    and starts Compose again. It does not remove volumes or images.
 
+   To keep this from silently coming back during long Docker-heavy runs,
+   install the local watchdog once from PowerShell:
+
+   ```powershell
+   .\scripts\install-docker-socket-watchdog.ps1 -RunNow
+   ```
+
+   This registers the Windows scheduled task `CHILI Docker Socket Watchdog`.
+   It checks every 5 minutes and only runs the Docker Desktop/Compose restart
+   path when `com.docker.backend` crosses the critical bound-socket threshold.
+   Logs are written under `scripts\watcher-out\`.
+
 1. If you do not use the repair script, **restart Docker Desktop**, then retry.
 1. **Reboot Windows** if restarts do not clear it.
 1. Use **`127.0.0.1`** instead of **`localhost`** (avoids IPv6 `::1` split-brain). If both still fail with `10055`, the host pool is still exhausted -- go to the next item.

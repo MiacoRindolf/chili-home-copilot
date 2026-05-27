@@ -4242,10 +4242,11 @@ def _brain_worker_liveness(pid: int) -> str:
 def _worker_liveness(pid: int | None) -> str:
     """Prefer Docker Compose ``brain-worker`` container state when that container exists."""
     try:
-        from ...services.brain_worker_docker import find_brain_worker_container, brain_worker_liveness_for_ui
+        from ...services.brain_worker_docker import brain_worker_liveness_for_ui
 
-        if find_brain_worker_container() is not None:
-            return brain_worker_liveness_for_ui()
+        docker_liveness = brain_worker_liveness_for_ui()
+        if docker_liveness != "missing":
+            return docker_liveness
     except Exception:
         pass
     if pid is not None:

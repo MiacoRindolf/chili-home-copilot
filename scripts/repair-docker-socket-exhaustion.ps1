@@ -5,10 +5,34 @@ param(
     [int]$WarnBoundSockets = 2000,
     [int]$CriticalDockerBoundSockets = 8000,
     [int]$DockerReadyTimeoutSeconds = 300,
-    [string]$ComposeDir = ""
+    [string]$ComposeDir = "",
+    [string]$LogPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+$script:TranscriptStarted = $false
+
+function Start-RunLog {
+    if ([string]::IsNullOrWhiteSpace($LogPath)) {
+        return
+    }
+    $parent = Split-Path -Parent $LogPath
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    Start-Transcript -Path $LogPath -Append | Out-Null
+    $script:TranscriptStarted = $true
+}
+
+function Stop-RunLog {
+    if (-not $script:TranscriptStarted) {
+        return
+    }
+    try {
+        Stop-Transcript | Out-Null
+    } catch {}
+    $script:TranscriptStarted = $false
+}
 
 function Get-RepoRoot {
     if ($ComposeDir) {
@@ -159,41 +183,52 @@ function Start-DockerDesktop {
     }
 }
 
-$repoRoot = Get-RepoRoot
-$before = Get-BoundTcpSummary
-Write-BoundTcpSummary $before
+function Invoke-Main {
+    $repoRoot = Get-RepoRoot
+    $before = Get-BoundTcpSummary
+    Write-BoundTcpSummary $before
 
-$critical = $before.DockerBound -ge $CriticalDockerBoundSockets
-$warn = $before.TotalBound -ge $WarnBoundSockets
+    $critical = $before.DockerBound -ge $CriticalDockerBoundSockets
+    $warn = $before.TotalBound -ge $WarnBoundSockets
 
-if (-not $Repair) {
-    if ($critical) {
-        Write-Warning ("Docker Desktop backend owns {0} bound sockets. Run with -Repair to stop Compose, restart Docker Desktop, and restart Compose." -f $before.DockerBound)
-        exit 2
+    if (-not $Repair) {
+        if ($critical) {
+            Write-Warning ("Docker Desktop backend owns {0} bound sockets. Run with -Repair to stop Compose, restart Docker Desktop, and restart Compose." -f $before.DockerBound)
+            return 2
+        }
+        if ($warn) {
+            Write-Warning ("Host has {0} bound sockets. Investigate before running network-heavy jobs." -f $before.TotalBound)
+            return 1
+        }
+        Write-Host "Socket state is healthy."
+        return 0
     }
-    if ($warn) {
-        Write-Warning ("Host has {0} bound sockets. Investigate before running network-heavy jobs." -f $before.TotalBound)
-        exit 1
+
+    if (-not $critical -and -not $Force) {
+        Write-Host "Docker bound-socket count is below critical threshold. Use -Force to repair anyway."
+        return 0
     }
-    Write-Host "Socket state is healthy."
-    exit 0
+
+    Stop-ComposeStack $repoRoot
+    Stop-DockerDesktop
+    Start-DockerDesktop
+    Start-ComposeStack $repoRoot
+
+    $after = Get-BoundTcpSummary
+    Write-BoundTcpSummary $after
+
+    if ($after.DockerBound -ge $CriticalDockerBoundSockets) {
+        throw "Docker backend still owns too many bound sockets after repair."
+    }
+
+    Write-Host "Docker socket exhaustion repair completed."
+    return 0
 }
 
-if (-not $critical -and -not $Force) {
-    Write-Host "Docker bound-socket count is below critical threshold. Use -Force to repair anyway."
-    exit 0
+Start-RunLog
+try {
+    $exitCode = Invoke-Main
+} finally {
+    Stop-RunLog
 }
-
-Stop-ComposeStack $repoRoot
-Stop-DockerDesktop
-Start-DockerDesktop
-Start-ComposeStack $repoRoot
-
-$after = Get-BoundTcpSummary
-Write-BoundTcpSummary $after
-
-if ($after.DockerBound -ge $CriticalDockerBoundSockets) {
-    throw "Docker backend still owns too many bound sockets after repair."
-}
-
-Write-Host "Docker socket exhaustion repair completed."
+exit $exitCode
