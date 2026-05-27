@@ -285,6 +285,17 @@ def _load_exit_config(db: Session, scan_pattern_id: int | None) -> dict:
     return defaults
 
 
+def _is_option_paper_trade_safe(trade: PaperTrade | Trade) -> bool:
+    if not isinstance(trade, PaperTrade):
+        return False
+    try:
+        from .paper_trading import _is_option_paper_trade
+
+        return bool(_is_option_paper_trade(trade))
+    except Exception:
+        return False
+
+
 def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
     """Evaluate all open positions through the exit engine. Returns action recommendations."""
     from .market_data import fetch_quote
@@ -295,8 +306,12 @@ def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
     positions = open_paper.all()
 
     results = []
+    skipped_options = 0
     for pos in positions:
         try:
+            if _is_option_paper_trade_safe(pos):
+                skipped_options += 1
+                continue
             q = fetch_quote(pos.ticker)
             if not q or not q.get("price"):
                 continue
@@ -330,6 +345,7 @@ def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
         "actions": terminal_actions,
         "partial_actions": partial_actions,
         "all": results,
+        "skipped_options": skipped_options,
     }
 
 
