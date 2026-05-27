@@ -638,6 +638,33 @@ def test_zero_trade_demote_uses_trade_bearing_tickers_not_jobs_run(db, monkeypat
     assert pattern.queue_tier == QUEUE_TIER_PRESCREEN
 
 
+def test_zero_trade_run_clears_stale_latest_metrics(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "chili_backtest_zero_trade_demote_threshold", 3)
+    pattern = _queued_pattern(
+        db,
+        name="candidate with stale positive metrics",
+        lifecycle_stage="candidate",
+        backtest_priority=10,
+    )
+    pattern.queue_tier = QUEUE_TIER_FULL
+    pattern.win_rate = 0.9
+    pattern.avg_return_pct = 2.5
+    db.commit()
+
+    mark_pattern_tested(
+        db,
+        pattern,
+        backtests_run=24,
+        trade_bearing_tickers=0,
+    )
+    db.refresh(pattern)
+
+    assert pattern.win_rate is None
+    assert pattern.avg_return_pct is None
+    assert pattern.consecutive_zero_trade_runs == 1
+
+
 def test_zero_trade_counter_resets_on_trade_bearing_evidence(db, monkeypatch):
     _deactivate_existing_patterns(db)
     monkeypatch.setattr(settings, "chili_backtest_zero_trade_demote_threshold", 3)
