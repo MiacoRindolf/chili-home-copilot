@@ -118,6 +118,26 @@ def test_edge_debt_loss_report_groups_autotrader_rejects(db):
     assert report["root_cause"] == "shadow_near_miss_noise"
 
 
+def test_edge_debt_loss_report_severe_negative_trumps_near_miss_noise(db):
+    pat = _make_pattern(db)
+    now = datetime.utcnow().replace(microsecond=0)
+    for i in range(5):
+        _add_edge_reject(
+            db,
+            pattern_id=pat.id,
+            ticker=f"EDGE{i}",
+            expected_net_pct=-9.0,
+            created_at=now - timedelta(minutes=i),
+        )
+    db.commit()
+
+    report = _edge_debt_loss_reports(db, now=now, lookback_days=1)[pat.id]
+
+    assert report["signal_lanes"]["shadow_near_miss"] == 5
+    assert report["avg_expected_net_pct"] == -9.0
+    assert report["root_cause"] == "deep_negative_expected_edge"
+
+
 def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     pat = _make_pattern(db)
     now = datetime.utcnow().replace(microsecond=0)

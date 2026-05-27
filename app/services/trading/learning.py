@@ -9062,13 +9062,13 @@ def _edge_report_root_cause(report: dict[str, Any]) -> str:
     avg_net = float(report.get("avg_expected_net_pct") or 0.0)
     n = int(report.get("total_rejects") or 0)
     near_miss_n = int(lanes.get("shadow_near_miss") or 0)
-    if n > 0 and near_miss_n / n >= 0.6:
-        return "shadow_near_miss_noise"
     if avg_net <= _settings_edge_float(
         "chili_edge_evolution_severe_avg_net_pct",
         _EDGE_EVOLUTION_DEFAULT_SEVERE_AVG_NET_PCT,
     ):
         return "deep_negative_expected_edge"
+    if n > 0 and near_miss_n / n >= 0.6:
+        return "shadow_near_miss_noise"
     if managed_reasons.get("insufficient_directional_samples"):
         return "insufficient_directional_evidence"
     if managed_reasons.get("managed_reward_risk_below_floor"):
