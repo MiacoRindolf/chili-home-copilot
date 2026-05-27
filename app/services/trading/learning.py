@@ -3843,6 +3843,57 @@ def _process_memory_guard_worker_cap(
     return max(min_workers, usable_mb // worker_mb)
 
 
+def _release_queue_parent_session(db: Session, *, reason: str) -> None:
+    """End queue-selection read transactions before long-running backtest work."""
+    try:
+        db.rollback()
+    except Exception as exc:
+        logger.warning(
+            "[learning] Queue backtest: DB rollback failed while %s; closing session: %s",
+            reason,
+            exc,
+        )
+        try:
+            db.close()
+        except Exception:
+            logger.debug(
+                "[learning] Queue backtest: DB close failed after rollback failure",
+                exc_info=True,
+            )
+
+
+def _degraded_queue_status(exc: Exception) -> dict[str, Any]:
+    return {
+        "queue_empty": False,
+        "pending": None,
+        "boosted": None,
+        "queue_status_degraded": True,
+        "queue_status_error": str(exc)[:240],
+    }
+
+
+def _get_queue_status_after_batch(db: Session, get_queue_status_fn: Any) -> dict[str, Any]:
+    """Read queue status after a long batch, recycling the session on stale sockets."""
+    try:
+        return get_queue_status_fn(db, use_cache=False)
+    except Exception as exc:
+        logger.warning(
+            "[learning] Queue backtest: status read failed after batch; "
+            "recycling DB session and retrying once: %s",
+            exc,
+        )
+        _release_queue_parent_session(db, reason="status retry")
+        try:
+            return get_queue_status_fn(db, use_cache=False)
+        except Exception as retry_exc:
+            logger.warning(
+                "[learning] Queue backtest: status retry failed; returning degraded "
+                "status so completed backtests are preserved: %s",
+                retry_exc,
+            )
+            return _degraded_queue_status(retry_exc)
+
+
 def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int | None = None) -> dict[str, Any]:
     """Process ScanPatterns from the priority queue (parallel when configured).
     
@@ -4013,6 +4064,8 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
     except Exception:
         logger.debug("[learning] Queue backtest batch summary failed", exc_info=True)
 
+    _release_queue_parent_session(db, reason="dispatching long-running queue workers")
+
     max_workers = settings.brain_backtest_parallel
     if settings.brain_max_cpu_pct is not None and _CPU_COUNT:
         cap = max(1, int(_CPU_COUNT * settings.brain_max_cpu_pct / 100))
@@ -4112,7 +4165,7 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
                     logger.warning("[backtest_queue] Worker error: %s", e)
                     patterns_processed += 1
 
-    status = get_queue_status(db, use_cache=False)
+    status = _get_queue_status_after_batch(db, get_queue_status)
     elapsed_s = max(0.001, time.monotonic() - batch_started)
     patterns_per_min = round((patterns_processed / elapsed_s) * 60.0, 2)
     backtests_per_min = round((backtests_run / elapsed_s) * 60.0, 2)
