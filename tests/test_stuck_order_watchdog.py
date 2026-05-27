@@ -395,6 +395,90 @@ def test_option_working_order_times_out_and_cancels_when_no_position(monkeypatch
     assert entry["option_entry_cancel_reason"] == "timeout_no_position"
 
 
+def test_option_partial_position_timeout_cancels_residual_and_keeps_held_contract(
+    monkeypatch,
+):
+    commits = {"count": 0}
+    fake_db = SimpleNamespace(commit=lambda: commits.__setitem__("count", commits["count"] + 1))
+    now = datetime.utcnow()
+    submitted_at = now - timedelta(seconds=3600)
+    cancelled = {"order_id": None}
+    t = SimpleNamespace(
+        id=90213,
+        ticker="ZZTEST",
+        broker_order_id="rh-opt-partial-timeout",
+        management_scope="auto_trader_v1",
+        status="working",
+        broker_status="partially_filled",
+        quantity=2.0,
+        filled_quantity=1.0,
+        remaining_quantity=1.0,
+        submitted_at=submitted_at,
+        entry_date=submitted_at,
+        entry_price=1.25,
+        avg_fill_price=None,
+        last_broker_sync=None,
+        filled_at=None,
+        first_fill_at=None,
+        last_fill_at=None,
+        exit_reason=None,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "ZZTEST",
+                    "expiration": "2026-06-19",
+                    "strike": 105.0,
+                    "option_type": "call",
+                    "limit_price": 1.25,
+                },
+            },
+            "entry_execution": {"active_order_type": "option_limit"},
+        },
+    )
+
+    def _cancel(order_id: str):
+        cancelled["order_id"] = order_id
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        wd,
+        "_get_options_adapter",
+        lambda: SimpleNamespace(
+            is_enabled=lambda: True,
+            get_open_positions=lambda: [
+                {
+                    "chain_symbol": "ZZTEST",
+                    "expiration_date": "2026-06-19",
+                    "strike_price": "105.0",
+                    "type": "call",
+                    "quantity": "1",
+                    "average_price": "1.23",
+                }
+            ],
+            cancel=_cancel,
+        ),
+    )
+
+    outcome = wd._process_option_position_truth(fake_db, t, now)
+
+    assert outcome == "option_partial_position_timeout_cancelled_open"
+    assert cancelled["order_id"] == "rh-opt-partial-timeout"
+    assert commits["count"] == 1
+    assert t.status == "open"
+    assert t.broker_status == "partially_filled_cancelled"
+    assert t.quantity == 1.0
+    assert t.filled_quantity == 1.0
+    assert t.remaining_quantity == 0.0
+    assert t.entry_price == 1.23
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["option_position_partial"] is True
+    assert entry["option_position_requested_quantity"] == 2.0
+    assert entry["option_position_quantity"] == 1.0
+    assert entry["option_position_residual_cancelled"] is True
+    assert entry["option_entry_cancel_reason"] == "partial_timeout_no_full_position"
+
+
 def test_broker_unknown_order_marks_rejected(db, monkeypatch):
     u = models.User(name="stuck_wd_u4")
     db.add(u)

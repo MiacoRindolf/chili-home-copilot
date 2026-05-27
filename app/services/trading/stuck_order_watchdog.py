@@ -273,19 +273,42 @@ def _process_option_position_truth(db: Session, t: Trade, now: datetime) -> str:
         return "skipped_option_trade"
 
     needed_qty = abs(float(t.quantity or 0.0))
+    submit_time = _effective_submit_time(t)
+    if submit_time is not None and submit_time.tzinfo is not None:
+        submit_time = submit_time.astimezone(timezone.utc).replace(tzinfo=None)
+    elapsed = (now - submit_time) if submit_time is not None else None
+    timeout = _timeout_for(t)
     for pos in positions:
         if not isinstance(pos, dict):
             continue
         if not _position_matches_option_meta(pos, trade=t, meta=meta):
             continue
         held_qty = _position_qty(pos)
-        if held_qty <= 0 or (needed_qty > 0 and held_qty + 1e-9 < needed_qty):
+        if held_qty <= 0:
             continue
+        is_partial = needed_qty > 0 and held_qty + 1e-9 < needed_qty
+        partial_timed_out = bool(is_partial and elapsed is not None and elapsed >= timeout)
+        residual_cancel_error = None
+        residual_cancelled = False
+        if partial_timed_out:
+            cancel_result = _try_cancel_option(adapter, t)
+            residual_cancelled = bool(cancel_result.get("ok"))
+            if not residual_cancelled:
+                residual_cancel_error = cancel_result.get("error") or "cancel_failed"
+
         avg_price = _position_avg_price(pos)
-        t.status = "open"
-        t.broker_status = "filled"
+        if is_partial and not residual_cancelled:
+            t.status = "working"
+            t.broker_status = "partially_filled"
+            remaining_qty = max(0.0, needed_qty - held_qty) if needed_qty > 0 else None
+        else:
+            t.status = "open"
+            t.broker_status = "partially_filled_cancelled" if is_partial else "filled"
+            remaining_qty = 0.0
+            if is_partial:
+                t.quantity = held_qty
         t.filled_quantity = held_qty
-        t.remaining_quantity = 0.0
+        t.remaining_quantity = remaining_qty
         t.last_broker_sync = now
         t.filled_at = t.filled_at or now
         t.first_fill_at = t.first_fill_at or now
@@ -302,21 +325,32 @@ def _process_option_position_truth(db: Session, t: Trade, now: datetime) -> str:
             t,
             option_position_verified=True,
             option_position_verified_at=now.isoformat(),
+            option_position_partial=is_partial,
+            option_position_requested_quantity=needed_qty,
             option_position_quantity=held_qty,
             option_position_avg_price=avg_price,
+            option_position_remaining_quantity=remaining_qty,
+            option_position_residual_cancelled=residual_cancelled,
+            option_position_residual_cancel_error=residual_cancel_error,
+            option_entry_cancel_reason=(
+                "partial_timeout_no_full_position" if residual_cancelled else None
+            ),
             tca_reference_entry_price=tca_ref,
             tca_reference_domain="option_premium",
         )
         db.commit()
+        if is_partial:
+            if residual_cancelled:
+                return "option_partial_position_timeout_cancelled_open"
+            if residual_cancel_error:
+                return "option_partial_position_cancel_failed"
+            return "option_position_partial"
         return "option_position_verified"
 
-    submit_time = _effective_submit_time(t)
     if submit_time is None:
         return "option_position_not_found"
-    if submit_time.tzinfo is not None:
-        submit_time = submit_time.astimezone(timezone.utc).replace(tzinfo=None)
-    elapsed = now - submit_time
-    timeout = _timeout_for(t)
+    if elapsed is None:
+        return "option_position_not_found"
     if elapsed < timeout:
         return "option_position_not_found"
 
