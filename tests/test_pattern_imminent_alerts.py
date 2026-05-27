@@ -822,6 +822,11 @@ def test_gather_imminent_routes_hard_recert_debt_to_shadow_lane(
     )
     monkeypatch.setattr(
         imminent_mod,
+        "us_stock_extended_session_open",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
         "build_imminent_ticker_universe",
         lambda *args, **kwargs: ([TEST_HARD_RECERT_TICKER], {}),
     )
@@ -1671,6 +1676,11 @@ def test_gather_imminent_prioritizes_promoted_when_score_budget_tight(
     )
     monkeypatch.setattr(
         imminent_mod,
+        "us_stock_extended_session_open",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
         "build_imminent_ticker_universe",
         lambda *args, **kwargs: ([TEST_CACHE_TICKER, TEST_EXECUTABLE_CRYPTO_TICKER], {}),
     )
@@ -2069,6 +2079,11 @@ def test_gather_imminent_routes_offsession_stock_to_shadow_lane(
     )
     monkeypatch.setattr(
         imminent_mod,
+        "us_stock_extended_session_open",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
         "build_imminent_ticker_universe",
         lambda *args, **kwargs: ([TEST_OFFSESSION_STOCK_TICKER], {}),
     )
@@ -2102,6 +2117,8 @@ def test_gather_imminent_routes_offsession_stock_to_shadow_lane(
         imminent_mod.EQUITY_SESSION_SHADOW_SIGNAL_LANE
     )
     assert meta["offsession_stock_shadow_enabled"] is True
+    assert meta["offsession_stock_shadow_active"] is True
+    assert meta["equity_extended_session_open"] is True
     assert meta["offsession_stock_shadow_admitted"] == 1
 
 
@@ -2139,6 +2156,11 @@ def test_gather_imminent_can_keep_offsession_stock_shadow_disabled(
     )
     monkeypatch.setattr(
         imminent_mod,
+        "us_stock_extended_session_open",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
         "build_imminent_ticker_universe",
         lambda *args, **kwargs: ([TEST_OFFSESSION_STOCK_TICKER], {}),
     )
@@ -2159,6 +2181,71 @@ def test_gather_imminent_can_keep_offsession_stock_shadow_disabled(
     assert candidates == []
     assert score_calls == []
     assert meta["offsession_stock_shadow_enabled"] is False
+    assert meta["offsession_stock_shadow_active"] is False
+    assert meta["skip_reasons"]["pattern_no_tickers"] == 1
+
+
+def test_gather_imminent_blocks_offsession_stock_shadow_when_extended_closed(
+    db,
+    monkeypatch,
+) -> None:
+    pattern = ScanPattern(
+        name="Offsession stock shadow fully closed",
+        rules_json={
+            "conditions": [
+                {
+                    "indicator": "rsi_14",
+                    "op": ">",
+                    "value": TEST_DIAGNOSTIC_RSI_TRIGGER,
+                }
+            ]
+        },
+        origin="test",
+        asset_class="stocks",
+        lifecycle_stage=imminent_mod.PROMOTED_STAGE,
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_OFFSESSION_STOCK_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_offsession_stock_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "us_stock_extended_session_open",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_OFFSESSION_STOCK_TICKER], {}),
+    )
+    score_calls: list[str] = []
+    monkeypatch.setattr(
+        imminent_mod,
+        "_score_ticker",
+        lambda ticker, **_kwargs: score_calls.append(ticker) or None,
+    )
+
+    candidates, meta = gather_imminent_candidate_rows(
+        db,
+        user_id=TEST_USER_ID,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+    )
+
+    assert candidates == []
+    assert score_calls == []
+    assert meta["offsession_stock_shadow_enabled"] is True
+    assert meta["offsession_stock_shadow_active"] is False
+    assert meta["equity_extended_session_open"] is False
     assert meta["skip_reasons"]["pattern_no_tickers"] == 1
 
 

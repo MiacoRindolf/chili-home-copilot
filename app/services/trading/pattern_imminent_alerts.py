@@ -1241,6 +1241,10 @@ def gather_imminent_candidate_rows(
         and bool(apply_main_dispatch_filters)
         and not bool(for_opportunity_board)
     )
+    equity_extended_open = us_stock_extended_session_open()
+    offsession_stock_shadow_active = (
+        offsession_stock_shadow_enabled and not eq_open and equity_extended_open
+    )
     ticker_rotation_enabled = (
         bool(getattr(settings, "pattern_imminent_ticker_rotation_enabled", True))
         and bool(apply_main_dispatch_filters)
@@ -1591,7 +1595,7 @@ def gather_imminent_candidate_rows(
             pat,
             global_uni,
             equity_open=eq_open,
-            allow_offsession_stock_shadow=offsession_stock_shadow_enabled,
+            allow_offsession_stock_shadow=offsession_stock_shadow_active,
         )
         tickers, dropped_crypto, _spot_count = _filter_crypto_to_execution_universe(
             tickers,
@@ -1710,7 +1714,7 @@ def gather_imminent_candidate_rows(
             )
             if (
                 signal_lane == STANDARD_SIGNAL_LANE
-                and offsession_stock_shadow_enabled
+                and offsession_stock_shadow_active
                 and not eq_open
                 and not is_crypto(ticker)
             ):
@@ -1880,6 +1884,8 @@ def gather_imminent_candidate_rows(
         "hard_recert_shadow_admitted": hard_recert_shadow_admitted,
         "hard_recert_shadow_reason_counts": dict(hard_recert_shadow_reason_counts),
         "offsession_stock_shadow_enabled": offsession_stock_shadow_enabled,
+        "offsession_stock_shadow_active": offsession_stock_shadow_active,
+        "equity_extended_session_open": equity_extended_open,
         "offsession_stock_shadow_admitted": offsession_stock_shadow_admitted,
         "ticker_rotation_enabled": ticker_rotation_enabled,
         "ticker_rotation_window_minutes": ticker_rotation_window_minutes,
