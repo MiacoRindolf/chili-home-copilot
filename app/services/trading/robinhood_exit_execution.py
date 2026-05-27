@@ -463,6 +463,15 @@ def _trade_pnl_multiplier(trade: Trade) -> float:
     return 1.0
 
 
+def _is_option_trade_for_pending_exit_sync(trade: Trade) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
 def _order_exit_price(raw_order: dict[str, Any], *, quantity: float) -> float | None:
     for key in ("average_price", "avg_price", "average_fill_price", "average_filled_price"):
         price = _safe_float(raw_order.get(key))
@@ -593,6 +602,69 @@ def _finalize_filled_exit(
     except Exception:
         logger.debug("[rh_exit] clear_position_overrides failed for trade=%s", trade.id, exc_info=True)
     return round(pnl, 4)
+
+
+def _apply_partial_pending_exit_fill(
+    db: Session,
+    trade: Trade,
+    *,
+    raw_order: dict[str, Any],
+    exit_reason: str,
+    filled_qty: float,
+    requested_qty: float,
+    fallback_price: float | None,
+    filled_at: datetime,
+) -> tuple[float, float, float]:
+    original_qty = max(0.0, float(trade.quantity or 0.0))
+    applied_qty = min(max(0.0, float(filled_qty)), original_qty)
+    remaining_qty = max(0.0, original_qty - applied_qty)
+    exit_px = (
+        _order_exit_price(raw_order, quantity=applied_qty)
+        or fallback_price
+        or float(trade.entry_price)
+    )
+    entry = float(trade.entry_price or 0.0)
+    pnl = (float(exit_px) - entry) * applied_qty * _trade_pnl_multiplier(trade)
+
+    trade.quantity = remaining_qty
+    trade.filled_quantity = remaining_qty
+    trade.remaining_quantity = 0.0
+    trade.status = "open" if remaining_qty > 1e-9 else "closed"
+    trade.last_broker_sync = filled_at.replace(tzinfo=None)
+    trade.broker_status = "partially_filled_cancelled"
+    if remaining_qty <= 1e-9:
+        trade.exit_price = float(exit_px)
+        trade.exit_date = filled_at.replace(tzinfo=None)
+        trade.pnl = round(pnl, 4)
+        trade.exit_reason = exit_reason
+    clear_pending_exit_fields(trade)
+
+    snapshot = (
+        dict(trade.indicator_snapshot)
+        if isinstance(trade.indicator_snapshot, dict)
+        else {}
+    )
+    exit_execution = dict(snapshot.get("exit_execution") or {})
+    exit_execution.update(
+        {
+            "option_exit_partial": True,
+            "partial_exit_order_id": raw_order.get("id"),
+            "partial_exit_broker_state": raw_order.get("state") or raw_order.get("status"),
+            "partial_exit_reason": exit_reason,
+            "partial_exit_requested_quantity": float(requested_qty),
+            "partial_exit_filled_quantity": float(applied_qty),
+            "partial_exit_remaining_quantity": float(remaining_qty),
+            "partial_exit_price": float(exit_px),
+            "partial_exit_pnl": round(pnl, 4),
+            "partial_exit_filled_at": filled_at.isoformat(),
+            "partial_exit_residual_cancelled": True,
+        }
+    )
+    snapshot["exit_execution"] = exit_execution
+    trade.indicator_snapshot = snapshot
+    db.add(trade)
+    db.commit()
+    return round(pnl, 4), float(exit_px), remaining_qty
 
 
 def _json_safe(obj: Any) -> Any:
@@ -1335,6 +1407,7 @@ def sync_pending_exit_order(
     now = _coerce_utc()
     filled_qty = _order_filled_quantity(order)
     requested_qty = _pending_exit_requested_quantity(trade, order)
+    local_open_qty = _safe_float(getattr(trade, "quantity", None))
     terminal_with_complete_fill = (
         state in ("cancelled", "canceled", "rejected", "failed", "expired")
         and filled_qty is not None
@@ -1342,12 +1415,115 @@ def sync_pending_exit_order(
         and requested_qty > 0
         and filled_qty + 1e-9 >= requested_qty
     )
+    terminal_with_local_complete_fill = (
+        state in _TERMINAL_PENDING_EXIT_STATES
+        and filled_qty is not None
+        and local_open_qty is not None
+        and local_open_qty > 0
+        and filled_qty + 1e-9 >= local_open_qty
+    )
+    terminal_with_partial_fill = (
+        _is_option_trade_for_pending_exit_sync(trade)
+        and state in _TERMINAL_PENDING_EXIT_STATES
+        and filled_qty is not None
+        and requested_qty is not None
+        and filled_qty > 1e-9
+        and (
+            (
+                local_open_qty is not None
+                and local_open_qty > 0
+                and filled_qty + 1e-9 < local_open_qty
+            )
+            or (
+                local_open_qty is None
+                and requested_qty > filled_qty + 1e-9
+            )
+        )
+    )
     trade.pending_exit_status = state or trade.pending_exit_status
     trade.last_broker_sync = now.replace(tzinfo=None)
     db.add(trade)
     db.commit()
 
-    if state == "filled" or terminal_with_complete_fill:
+    if terminal_with_partial_fill:
+        exit_reason = str(trade.pending_exit_reason or "pending_exit")
+        prior_order_id = str(order.get("id") or trade.pending_exit_order_id or "")
+        filled_at = _parse_dt(order.get("last_transaction_at")) or now
+        pnl, exit_px, remaining_qty = _apply_partial_pending_exit_fill(
+            db,
+            trade,
+            raw_order={**order, "id": prior_order_id},
+            exit_reason=exit_reason,
+            filled_qty=float(filled_qty),
+            requested_qty=float(requested_qty),
+            fallback_price=trade.pending_exit_limit_price,
+            filled_at=filled_at,
+        )
+        _record_autotrader_run(
+            db,
+            trade,
+            decision=f"{audit_decision_prefix}_partial",
+            reason=exit_reason,
+            snapshot=_audit_snapshot(
+                trade,
+                exit_reason=exit_reason,
+                extra={
+                    "broker_state": state,
+                    "order_id": prior_order_id,
+                    "pnl": pnl,
+                    "exit_price": exit_px,
+                    "filled_quantity": filled_qty,
+                    "requested_quantity": requested_qty,
+                    "remaining_quantity": remaining_qty,
+                },
+            ),
+        )
+        try:
+            from .execution_audit import record_execution_event
+
+            record_execution_event(
+                db,
+                user_id=trade.user_id,
+                ticker=trade.ticker,
+                trade=trade,
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                broker_source=trade.broker_source,
+                order_id=prior_order_id or None,
+                event_type="partial_fill",
+                status="partially_filled",
+                requested_quantity=float(requested_qty),
+                cumulative_filled_quantity=float(filled_qty),
+                last_fill_quantity=float(filled_qty),
+                average_fill_price=float(exit_px),
+                event_at=filled_at,
+                payload_json={
+                    "side": "sell",
+                    "source": "rh_exit_sync_pending_partial",
+                    "exit_reason": exit_reason,
+                    "broker_state": state,
+                    "remaining_quantity": remaining_qty,
+                },
+                apply_to_trade=False,
+            )
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.debug(
+                "[rh_exit] sync partial sell-side record_execution_event "
+                "failed for trade=%s (non-fatal)",
+                getattr(trade, "id", None), exc_info=True,
+            )
+        return {
+            "state": "partial_filled",
+            "pnl": pnl,
+            "filled_quantity": filled_qty,
+            "remaining_quantity": remaining_qty,
+        }
+
+    if state == "filled" or terminal_with_complete_fill or terminal_with_local_complete_fill:
         exit_reason = str(trade.pending_exit_reason or "pending_exit")
         pnl = _finalize_filled_exit(
             db,

@@ -549,6 +549,81 @@ class TestSyncOrdersToDb:
         mock_option_order.assert_called_once_with("opt-exit-full-fill")
         mock_stock_order.assert_not_called()
 
+    @patch("app.services.broker_service.is_connected", return_value=True)
+    @patch("app.services.broker_service.get_order_by_id")
+    @patch("app.services.broker_service.get_option_order_by_id")
+    def test_option_pending_exit_cancelled_with_partial_fill_reduces_open_contracts(
+        self,
+        mock_option_order,
+        mock_stock_order,
+        mock_connected,
+        db,
+    ):
+        from app.models.trading import TradingExecutionEvent
+        from app.services.broker_service import sync_orders_to_db
+
+        now = datetime.utcnow()
+        trade = self._seed_working_trade(
+            db,
+            ticker="SPY",
+            entry_price=1.25,
+            avg_fill_price=1.25,
+            quantity=2,
+            filled_quantity=2,
+            remaining_quantity=0,
+            status="open",
+            broker_order_id=None,
+            pending_exit_order_id="opt-exit-partial-fill",
+            pending_exit_status="working",
+            pending_exit_requested_at=now,
+            pending_exit_reason="options_premium_take_profit",
+            pending_exit_limit_price=1.40,
+            asset_kind="option",
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        mock_option_order.return_value = {
+            "id": "opt-exit-partial-fill",
+            "state": "cancelled",
+            "quantity": "2",
+            "processed_quantity": "1",
+            "average_price": "1.45",
+            "last_transaction_at": now.isoformat() + "Z",
+        }
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        db.refresh(trade)
+        assert result["synced"] == 1
+        assert result["filled"] == 0
+        assert result["cancelled"] == 0
+        assert trade.status == "open"
+        assert trade.broker_status == "partially_filled_cancelled"
+        assert trade.quantity == 1
+        assert trade.filled_quantity == 1
+        assert trade.remaining_quantity == 0
+        assert trade.entry_price == 1.25
+        assert trade.avg_fill_price == 1.25
+        assert trade.pending_exit_order_id is None
+        assert trade.pending_exit_status is None
+        exit_execution = trade.indicator_snapshot["exit_execution"]
+        assert exit_execution["option_exit_partial"] is True
+        assert exit_execution["partial_exit_requested_quantity"] == 2.0
+        assert exit_execution["partial_exit_filled_quantity"] == 1.0
+        assert exit_execution["partial_exit_remaining_quantity"] == 1.0
+        assert exit_execution["partial_exit_price"] == 1.45
+        assert exit_execution["partial_exit_pnl"] == 20.0
+        event = (
+            db.query(TradingExecutionEvent)
+            .filter(TradingExecutionEvent.trade_id == trade.id)
+            .filter(TradingExecutionEvent.order_id == "opt-exit-partial-fill")
+            .one()
+        )
+        assert event.event_type == "partial_fill"
+        assert event.status == "partially_filled"
+        assert event.average_fill_price == 1.45
+        mock_option_order.assert_called_once_with("opt-exit-partial-fill")
+        mock_stock_order.assert_not_called()
+
 
 # ── Execute proposal status ──────────────────────────────────────────
 

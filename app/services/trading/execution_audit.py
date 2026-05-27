@@ -266,6 +266,7 @@ def record_execution_event(
     expected_slippage_bps: float | None = None,
     realized_slippage_bps: float | None = None,
     payload_json: dict[str, Any] | None = None,
+    apply_to_trade: bool = True,
 ) -> Any:
     from ...models.trading import TradingExecutionEvent
 
@@ -320,7 +321,7 @@ def record_execution_event(
     )
     db.add(event_row)
     db.flush()
-    if trade is not None:
+    if trade is not None and apply_to_trade:
         apply_execution_event_to_trade(trade, event_row)
 
     # P1.1 — project the broker-native status onto a canonical state and
