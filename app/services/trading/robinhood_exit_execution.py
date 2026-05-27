@@ -481,6 +481,30 @@ def _order_exit_price(raw_order: dict[str, Any], *, quantity: float) -> float | 
     return None
 
 
+def _order_filled_quantity(raw_order: dict[str, Any]) -> float | None:
+    for key in (
+        "cumulative_quantity",
+        "cumulative_filled_quantity",
+        "filled_quantity",
+        "processed_quantity",
+        "quantity_filled",
+        "filled_size",
+    ):
+        qty = _safe_float(raw_order.get(key))
+        if qty is not None:
+            return max(0.0, qty)
+    return None
+
+
+def _pending_exit_requested_quantity(trade: Trade, raw_order: dict[str, Any]) -> float | None:
+    for key in ("quantity", "requested_quantity"):
+        qty = _safe_float(raw_order.get(key))
+        if qty is not None and qty > 0:
+            return qty
+    qty = _safe_float(getattr(trade, "quantity", None))
+    return qty if qty is not None and qty > 0 else None
+
+
 def _finalize_filled_exit(
     db: Session,
     trade: Trade,
@@ -1309,12 +1333,21 @@ def sync_pending_exit_order(
 ) -> dict[str, Any]:
     state = str(order.get("state") or "").lower()
     now = _coerce_utc()
+    filled_qty = _order_filled_quantity(order)
+    requested_qty = _pending_exit_requested_quantity(trade, order)
+    terminal_with_complete_fill = (
+        state in ("cancelled", "canceled", "rejected", "failed", "expired")
+        and filled_qty is not None
+        and requested_qty is not None
+        and requested_qty > 0
+        and filled_qty + 1e-9 >= requested_qty
+    )
     trade.pending_exit_status = state or trade.pending_exit_status
     trade.last_broker_sync = now.replace(tzinfo=None)
     db.add(trade)
     db.commit()
 
-    if state == "filled":
+    if state == "filled" or terminal_with_complete_fill:
         exit_reason = str(trade.pending_exit_reason or "pending_exit")
         pnl = _finalize_filled_exit(
             db,
@@ -1332,7 +1365,13 @@ def sync_pending_exit_order(
             snapshot=_audit_snapshot(
                 trade,
                 exit_reason=exit_reason,
-                extra={"broker_state": state, "order_id": order.get("id"), "pnl": pnl},
+                extra={
+                    "broker_state": state,
+                    "order_id": order.get("id"),
+                    "pnl": pnl,
+                    "filled_quantity": filled_qty,
+                    "requested_quantity": requested_qty,
+                },
             ),
         )
         # f-execution-events-sell-side-recording (2026-05-18) — record
@@ -1353,7 +1392,7 @@ def sync_pending_exit_order(
                 event_type="exit_fill",
                 status="filled",
                 average_fill_price=trade.exit_price,
-                cumulative_filled_quantity=float(trade.quantity or 0.0),
+                cumulative_filled_quantity=float(filled_qty or trade.quantity or 0.0),
                 event_at=_parse_dt(order.get("last_transaction_at")) or now,
                 payload_json={
                     "side": "sell",

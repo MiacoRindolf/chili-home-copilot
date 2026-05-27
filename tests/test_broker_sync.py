@@ -499,6 +499,57 @@ class TestSyncOrdersToDb:
         assert trade.pending_exit_status is None
 
 
+    @patch("app.services.broker_service.is_connected", return_value=True)
+    @patch("app.services.broker_service.get_order_by_id")
+    @patch("app.services.broker_service.get_option_order_by_id")
+    def test_option_pending_exit_cancelled_with_full_fill_closes_trade(
+        self,
+        mock_option_order,
+        mock_stock_order,
+        mock_connected,
+        db,
+    ):
+        from app.services.broker_service import sync_orders_to_db
+
+        now = datetime.utcnow()
+        trade = self._seed_working_trade(
+            db,
+            ticker="SPY",
+            entry_price=1.25,
+            quantity=1,
+            status="open",
+            broker_order_id=None,
+            pending_exit_order_id="opt-exit-full-fill",
+            pending_exit_status="working",
+            pending_exit_requested_at=now,
+            pending_exit_reason="options_premium_take_profit",
+            pending_exit_limit_price=1.40,
+            asset_kind="option",
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+        mock_option_order.return_value = {
+            "id": "opt-exit-full-fill",
+            "state": "cancelled",
+            "quantity": "1",
+            "processed_quantity": "1",
+            "average_price": "1.45",
+            "last_transaction_at": now.isoformat() + "Z",
+        }
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        db.refresh(trade)
+        assert result["filled"] == 1
+        assert trade.status == "closed"
+        assert trade.exit_reason == "options_premium_take_profit"
+        assert trade.exit_price == 1.45
+        assert trade.pnl == 20.0
+        assert trade.pending_exit_order_id is None
+        assert trade.pending_exit_status is None
+        mock_option_order.assert_called_once_with("opt-exit-full-fill")
+        mock_stock_order.assert_not_called()
+
+
 # ── Execute proposal status ──────────────────────────────────────────
 
 class TestCoinbaseSyncOrdersToDb:
