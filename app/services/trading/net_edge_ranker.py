@@ -60,6 +60,11 @@ from ...trading_brain.infrastructure.net_edge_ops_log import (
     READ_SHADOW,
     format_net_edge_ops_line,
 )
+from .asset_class import (
+    PATTERN_ASSET_CLASS_CRYPTO,
+    normalize_pattern_asset_class,
+    pattern_asset_class_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +220,7 @@ def mode_is_authoritative() -> bool:
 
 
 def _is_crypto_ctx(asset_class: str) -> bool:
-    return (asset_class or "").strip().lower() == "crypto"
+    return normalize_pattern_asset_class(asset_class) == PATTERN_ASSET_CLASS_CRYPTO
 
 
 def _spread_cost_fraction(db: Session, ctx: NetEdgeSignalContext) -> float:
@@ -333,7 +338,7 @@ def _load_training_pairs(
         raw = _pattern_raw_prob(pat)
         if raw is None:
             continue
-        if asset_class and (pat.asset_class or "").lower() not in (asset_class.lower(), "all"):
+        if asset_class and not pattern_asset_class_matches(pat.asset_class, asset_class):
             continue
         pairs.append((raw, 1 if float(t.pnl) > 0 else 0))
 
@@ -353,7 +358,7 @@ def _load_training_pairs(
         raw = _pattern_raw_prob(pat)
         if raw is None:
             continue
-        if asset_class and (pat.asset_class or "").lower() not in (asset_class.lower(), "all"):
+        if asset_class and not pattern_asset_class_matches(pat.asset_class, asset_class):
             continue
         win = 1 if float(pt.exit_price) > float(pt.entry_price) else 0
         pairs.append((raw, win))

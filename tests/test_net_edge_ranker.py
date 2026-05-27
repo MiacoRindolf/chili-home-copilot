@@ -15,10 +15,13 @@ are explicitly out of scope here.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from app.config import settings
+from app.models.trading import PaperTrade, ScanPattern, Trade
 from app.services.trading import net_edge_ranker as ner
 from app.trading_brain.infrastructure.net_edge_ops_log import (
     CHILI_NET_EDGE_OPS_PREFIX,
@@ -285,6 +288,74 @@ def test_score_composition_matches_formula(db, shadow_mode):
     total_costs = result.costs.total
     expected = p * payoff - (1 - p) * loss - total_costs
     assert result.expected_net_pnl == pytest.approx(expected, rel=1e-9, abs=1e-9)
+
+
+class _NetEdgeQuery:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return list(self.rows)
+
+    def one_or_none(self):
+        return self.rows[0] if self.rows else None
+
+
+class _NetEdgeDb:
+    def __init__(self, *, pattern, papers):
+        self.pattern = pattern
+        self.papers = papers
+
+    def query(self, model):
+        if model is Trade:
+            return _NetEdgeQuery([])
+        if model is PaperTrade:
+            return _NetEdgeQuery(self.papers)
+        if model is ScanPattern:
+            return _NetEdgeQuery([self.pattern])
+        raise AssertionError(f"unexpected model query: {model!r}")
+
+
+def test_training_pairs_match_stock_asset_aliases():
+    pat = SimpleNamespace(
+        id=1,
+        asset_class="stocks",
+        win_rate=0.62,
+        oos_win_rate=None,
+    )
+    db = _NetEdgeDb(
+        pattern=pat,
+        papers=[
+            SimpleNamespace(
+                scan_pattern_id=pat.id,
+                ticker="AAPL",
+                entry_price=100.0,
+                exit_price=103.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(minutes=5),
+                exit_date=datetime.utcnow(),
+            )
+        ],
+    )
+
+    pairs = ner._load_training_pairs(
+        db,
+        asset_class="stock",
+        regime_bucket="risk_on",
+        lookback_days=1,
+    )
+
+    assert any(raw == pytest.approx(0.62) and win == 1 for raw, win in pairs)
 
 
 def test_score_zero_or_bad_stop_returns_none_and_does_not_log_score(db, shadow_mode, caplog):

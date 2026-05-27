@@ -14,6 +14,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern  # noqa: E402
+from .asset_class import pattern_asset_class_matches
 
 logger = logging.getLogger(__name__)
 
@@ -659,7 +660,10 @@ def get_active_patterns(db: Session, asset_class: str = "all") -> list[ScanPatte
     """Fetch all active patterns, optionally filtered by asset class."""
     q = db.query(ScanPattern).filter_by(active=True)
     patterns = q.all()
-    return [p for p in patterns if p.asset_class in ("all", asset_class)]
+    return [
+        p for p in patterns
+        if pattern_asset_class_matches(p.asset_class, asset_class)
+    ]
 
 
 def evaluate_patterns(

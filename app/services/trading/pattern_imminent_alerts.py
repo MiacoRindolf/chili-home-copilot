@@ -54,6 +54,12 @@ from ...models.trading import (
 )
 from .alert_formatter import format_pattern_imminent
 from .alerts import PATTERN_BREAKOUT_IMMINENT, dispatch_alert
+from .asset_class import (
+    PATTERN_ASSET_CLASS_ALL,
+    PATTERN_ASSET_CLASS_CRYPTO,
+    PATTERN_ASSET_CLASS_STOCKS,
+    normalize_pattern_asset_class,
+)
 from .market_data import DEFAULT_CRYPTO_TICKERS, DEFAULT_SCAN_TICKERS, fetch_ohlcv_df, is_crypto
 from .opportunity_scoring import (
     compute_composite_score,
@@ -900,7 +906,7 @@ def _tickers_for_pattern(
     allow_offsession_stock_shadow: bool = False,
 ) -> list[str]:
     scope = (getattr(pat, "ticker_scope", None) or "universal").strip().lower()
-    ac = (getattr(pat, "asset_class", None) or "all").strip().lower()
+    ac = normalize_pattern_asset_class(getattr(pat, "asset_class", None))
 
     # 2026-04-28 audit fix: honor 'explicit_list' the same as 'ticker_specific'.
     # The ticker_scope_autotuner (scripts/brain_worker.py:496) writes
@@ -922,13 +928,13 @@ def _tickers_for_pattern(
     out: list[str] = []
     for t in tickers:
         cr = is_crypto(t)
-        if ac == "crypto" and not cr:
+        if ac == PATTERN_ASSET_CLASS_CRYPTO and not cr:
             continue
-        if ac == "stocks" and cr:
+        if ac == PATTERN_ASSET_CLASS_STOCKS and cr:
             continue
-        if ac == "stocks" and not equity_open and not allow_offsession_stock_shadow:
+        if ac == PATTERN_ASSET_CLASS_STOCKS and not equity_open and not allow_offsession_stock_shadow:
             continue
-        if ac == "all":
+        if ac == PATTERN_ASSET_CLASS_ALL:
             if not cr and not equity_open and not allow_offsession_stock_shadow:
                 continue
         out.append(t)
