@@ -135,6 +135,39 @@ def _option_paper_levels(entry_price: float) -> tuple[float, float]:
     return round(stop_price, 4), round(target_price, 4)
 
 
+def _option_signal_quantity(signal_json: Any) -> int | None:
+    meta = _paper_option_meta_from_signal(signal_json)
+    qty = _positive_float(meta.get("quantity"))
+    if qty is None:
+        return None
+    return max(1, int(qty))
+
+
+def _option_premium_level(value: Any, entry_price: float) -> float | None:
+    level = _positive_float(value)
+    if level is None:
+        return None
+    # Underlying-shaped stops/targets can leak into option signals. Premium
+    # levels should be in the same rough price domain as the option entry.
+    return level if level <= entry_price * 10.0 else None
+
+
+def _size_option_contracts(
+    capital: float,
+    entry_price: float,
+    stop_price: float,
+    *,
+    risk_pct: float,
+) -> int:
+    risk_amount = float(capital or 0.0) * (float(risk_pct) / 100.0)
+    risk_per_contract = abs(float(entry_price) - float(stop_price)) * OPTION_CONTRACT_MULTIPLIER
+    if risk_amount <= 0 or risk_per_contract <= 0 or entry_price <= 0:
+        return 0
+    by_risk = int(risk_amount / risk_per_contract)
+    by_notional = int((float(capital or 0.0) * 0.20) / (entry_price * OPTION_CONTRACT_MULTIPLIER))
+    return max(0, min(by_risk, by_notional))
+
+
 def _paper_current_mark_price(pt: PaperTrade, *, purpose: str = "display") -> float | None:
     if _is_option_paper_trade(pt):
         try:
@@ -1403,18 +1436,48 @@ def auto_enter_from_signals(
         if not entry or entry <= 0:
             continue
 
-        allowed, reason = check_new_trade_allowed(db, user_id, ticker, capital)
+        is_option_sig = _is_option_signal(sig)
+        asset_type = (
+            "options"
+            if is_option_sig
+            else ("crypto" if str(ticker).upper().endswith("-USD") else "stock")
+        )
+        allowed, reason = check_new_trade_allowed(
+            db,
+            user_id,
+            ticker,
+            capital,
+            asset_type=asset_type,
+        )
         if not allowed:
             logger.info("[paper] Trade blocked for %s: %s", ticker, reason)
             blocked += 1
             continue
 
-        if not stop:
-            stop = entry * 0.97
+        if is_option_sig:
+            stop = _option_premium_level(stop, float(entry))
+            target = _option_premium_level(target, float(entry))
+            sizing_stop = stop
+            if sizing_stop is None:
+                sizing_stop, _default_target = _option_paper_levels(float(entry))
+                stop = sizing_stop
+                if target is None:
+                    target = _default_target
+            qty = _option_signal_quantity(sig) or _size_option_contracts(
+                capital,
+                float(entry),
+                float(sizing_stop),
+                risk_pct=0.5,
+            )
+            if qty <= 0:
+                qty = 1
+        else:
+            if not stop:
+                stop = entry * 0.97
 
-        qty = size_position(capital, entry, stop, risk_pct=0.5)
-        if qty <= 0:
-            qty = 10
+            qty = size_position(capital, entry, stop, risk_pct=0.5)
+            if qty <= 0:
+                qty = 10
 
         # SHADOW HOOK: Compute NetEdgeRanker score for measurement only. The
         # qty above is and remains the authoritative sizing decision. The
@@ -1425,7 +1488,7 @@ def auto_enter_from_signals(
             try:
                 _ctx = _net_edge.NetEdgeSignalContext(
                     ticker=ticker,
-                    asset_class="crypto" if str(ticker).upper().endswith("-USD") else "stock",
+                    asset_class=asset_type,
                     scan_pattern_id=sig.get("scan_pattern_id"),
                     raw_prob=float(conf),
                     entry_price=float(entry),
@@ -1447,7 +1510,13 @@ def auto_enter_from_signals(
             from .position_sizer_writer import LegacySizing, mode_is_active
 
             if mode_is_active():
-                _legacy_notional = float(qty) * float(entry) if qty > 0 and entry > 0 else None
+                _legacy_notional = (
+                    float(qty)
+                    * float(entry)
+                    * (OPTION_CONTRACT_MULTIPLIER if is_option_sig else 1.0)
+                    if qty > 0 and entry > 0
+                    else None
+                )
                 emit_shadow_proposal(
                     db,
                     signal=EmitterSignal(
@@ -1458,9 +1527,7 @@ def auto_enter_from_signals(
                         stop_price=float(stop),
                         capital=float(capital or 0.0),
                         target_price=float(target) if target else None,
-                        asset_class=(
-                            "crypto" if str(ticker).upper().endswith("-USD") else "equity"
-                        ),
+                        asset_class=asset_type,
                         user_id=user_id,
                         pattern_id=sig.get("scan_pattern_id"),
                         regime=sig.get("regime"),

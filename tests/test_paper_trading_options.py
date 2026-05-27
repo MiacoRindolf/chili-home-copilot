@@ -53,6 +53,13 @@ class _FakeDb:
         for idx, row in enumerate(self.added, start=1):
             row.id = idx
 
+    def commit(self):
+        return None
+
+
+def _paper_rows(db: _FakeDb) -> list[PaperTrade]:
+    return [row for row in db.added if isinstance(row, PaperTrade)]
+
 
 def test_autotrader_paper_entry_context_uses_option_premium() -> None:
     from app.services.trading.auto_trader import _paper_entry_context_for_alert
@@ -184,3 +191,99 @@ def test_paper_option_mark_uses_option_quote_not_underlying(monkeypatch) -> None
     assert mark == pytest.approx(1.45)
     proxy = quote.call_args.args[0]
     assert proxy.indicator_snapshot["option_meta"]["limit_price"] == pytest.approx(1.25)
+
+
+def test_auto_enter_option_signal_uses_asset_gate_and_meta_contract_quantity(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    monkeypatch.setattr(
+        paper_trading.settings,
+        "chili_autotrader_options_exit_stop_pct",
+        50.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        paper_trading.settings,
+        "chili_autotrader_options_exit_tp_pct",
+        100.0,
+        raising=False,
+    )
+    signal = {
+        **_option_signal(),
+        "ticker": "SPY",
+        "entry_price": 1.25,
+        "confidence": 0.9,
+        "option_meta": {**OPTION_META, "quantity": 2},
+    }
+    db = _FakeDb()
+
+    with patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, "ok"),
+    ) as risk_gate, patch(
+        "app.services.trading.portfolio_risk.size_position",
+        side_effect=AssertionError("option contracts must not use share sizing"),
+    ), patch(
+        "app.services.trading.net_edge_ranker.mode_is_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.position_sizer_writer.mode_is_active",
+        return_value=False,
+    ):
+        entered = paper_trading.auto_enter_from_signals(
+            db,
+            user_id=1,
+            signals=[signal],
+            capital=10_000.0,
+        )
+
+    assert entered == 1
+    risk_gate.assert_called_once()
+    assert risk_gate.call_args.kwargs.get("asset_type") == "options"
+    trade = _paper_rows(db)[0]
+    assert trade.quantity == 2
+    assert trade.entry_price == pytest.approx(1.25)
+    assert trade.stop_price == pytest.approx(0.625)
+    assert trade.target_price == pytest.approx(2.50)
+
+
+def test_auto_enter_option_signal_sizes_contracts_with_multiplier(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    signal = {
+        **_option_signal(),
+        "ticker": "SPY",
+        "entry_price": 1.25,
+        "stop_price": 0.75,
+        "confidence": 0.9,
+        "option_meta": dict(OPTION_META),
+    }
+    db = _FakeDb()
+
+    with patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.net_edge_ranker.mode_is_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.position_sizer_writer.mode_is_active",
+        return_value=False,
+    ):
+        entered = paper_trading.auto_enter_from_signals(
+            db,
+            user_id=1,
+            signals=[signal],
+            capital=10_000.0,
+        )
+
+    assert entered == 1
+    trade = _paper_rows(db)[0]
+    assert trade.quantity == 1
+    assert trade.signal_json["_paper_meta"]["contract_multiplier"] == 100.0
