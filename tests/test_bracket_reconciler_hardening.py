@@ -43,6 +43,8 @@ from app.services.trading.bracket_reconciler import (
     classify_discrepancy,
 )
 from app.services.trading.bracket_reconciliation_service import (
+    _load_local_view,
+    _stage_backfill_missing_intents,
     run_missing_stop_watchdog,
     run_reconciliation_sweep,
 )
@@ -115,10 +117,80 @@ def _intent(db, trade: Trade, *, stop=96.0, target=106.0) -> int:
     return res.intent_id
 
 
+def _mark_option_trade(db, trade: Trade) -> Trade:
+    trade.asset_kind = "option"
+    trade.tags = "autotrader_v1 options"
+    trade.indicator_snapshot = {
+        "asset_type": "options",
+        "option_meta": {
+            "underlying": trade.ticker,
+            "expiration": "2026-06-19",
+            "strike": 105.0,
+            "option_type": "call",
+        },
+    }
+    db.commit()
+    db.refresh(trade)
+    return trade
+
+
 def _broker_fn(*views: BrokerView):
     def fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]:
         return list(views)
     return fn
+
+
+# ── Option contracts are delegated out of stock bracket reconciliation ────────
+
+
+def test_reconciliation_backfill_skips_option_trades(db):
+    t = _mark_option_trade(db, _make_trade(db, ticker="OPTBF", qty=1.0, entry=5.0))
+
+    backfilled = _stage_backfill_missing_intents(
+        db,
+        [
+            {
+                "trade_id": t.id,
+                "bracket_intent_id": None,
+                "broker_source": "robinhood",
+                "trade_status": "open",
+            }
+        ],
+        mode="shadow",
+    )
+
+    assert backfilled == 0
+    count = db.execute(
+        text("SELECT COUNT(*) FROM trading_bracket_intents WHERE trade_id = :tid"),
+        {"tid": t.id},
+    ).scalar()
+    assert count == 0
+
+
+def test_reconciliation_local_view_skips_existing_option_intents(db):
+    t = _mark_option_trade(db, _make_trade(db, ticker="OPTLV", qty=1.0, entry=1.25))
+    _intent(db, t, stop=0.75, target=2.50)
+
+    rows = _load_local_view(db)
+
+    assert all(row["trade_id"] != t.id for row in rows)
+
+
+def test_missing_stop_watchdog_skips_option_intents(db):
+    t = _mark_option_trade(db, _make_trade(db, ticker="OPTWD", qty=1.0, entry=1.25))
+    _intent(db, t, stop=0.75, target=2.50)
+    calls: list[dict[str, Any]] = []
+
+    summary = run_missing_stop_watchdog(
+        db,
+        stale_after_sec=0,
+        enabled_override=True,
+        alert_dispatcher=lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    assert summary.open_trades_scanned == 0
+    assert summary.hits == []
+    assert calls == []
 
 
 # ── 1. Partial-fill sizing in qty_drift delta_payload ────────────────

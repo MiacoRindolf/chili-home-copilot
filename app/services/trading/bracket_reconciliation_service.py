@@ -80,6 +80,30 @@ logger = logging.getLogger(__name__)
 _ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
 
 
+def _option_trade_predicate_sql(alias: str = "t") -> str:
+    """SQL predicate matching the canonical option-trade markers.
+
+    Bracket reconciliation writes stock/crypto stop coverage against broker
+    position views. Option exits and protection live in the dedicated options
+    monitor, so option trades must never enter this reconciler even when they
+    have legacy bracket_intent rows.
+    """
+    snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
+    breakout = f"({snap}->'breakout_alert')"
+    return f"""
+        (
+            LOWER(COALESCE({alias}.asset_kind, '')) IN ('option', 'options')
+            OR LOWER(COALESCE({alias}.tags, '')) LIKE '%option%'
+            OR COALESCE({snap} ? 'option_meta', FALSE)
+            OR LOWER(COALESCE({snap}->>'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({snap}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
+            OR COALESCE({breakout} ? 'option_meta', FALSE)
+            OR LOWER(COALESCE({breakout}->>'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({breakout}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
+        )
+    """
+
+
 def _effective_mode(override: str | None = None) -> str:
     m = (override or getattr(settings, "brain_live_brackets_mode", "off") or "off").lower()
     return m if m in _ALLOWED_MODES else "off"
@@ -618,7 +642,7 @@ def _stage_backfill_missing_intents(
       * Operates on rows from ``_load_local_view`` (legacy loop) OR a
         list of ``LocalView`` (staged loop) — accessor adapts.
       * Skips paper trades (broker_source unset), non-open trades,
-        rows that already have an intent, and trades with no
+        option trades, rows that already have an intent, and trades with no
         ``stop_loss`` (None or <= 0). The no-magic-fallback rule
         applies: a trade without a stop_loss has no information for
         the brain to write, so we do nothing.
@@ -640,6 +664,10 @@ def _stage_backfill_missing_intents(
     from .bracket_intent import BracketIntentInput
     from .bracket_intent_writer import upsert_bracket_intent
     from ...models.trading import Trade as _Trade
+    try:
+        from .autopilot_scope import is_option_trade
+    except Exception:
+        is_option_trade = None
 
     backfilled = 0
     for entry in local_rows_or_views:
@@ -666,6 +694,8 @@ def _stage_backfill_missing_intents(
         try:
             trade = db.get(_Trade, int(trade_id))
             if trade is None:
+                continue
+            if callable(is_option_trade) and is_option_trade(trade):
                 continue
             sl = getattr(trade, "stop_loss", None)
             if sl is None or float(sl) <= 0:
@@ -2484,8 +2514,10 @@ def _load_local_view(
       cancelled entry that left a working stop at the broker (orphan)
       would never be scanned and never classified as ``orphan_stop``.
 
-    Paper trades (``broker_source IS NULL``) are excluded on purpose:
-    paper state is authoritative locally and needs no broker check.
+    Paper trades (``broker_source IS NULL``) and option trades are excluded on
+    purpose: paper state is authoritative locally, while option contracts are
+    protected by the dedicated options exit monitor rather than stock bracket
+    orders on the underlying ticker.
     """
     params: dict[str, Any] = {}
     # Two disjoint scopes joined with OR:
@@ -2506,6 +2538,7 @@ def _load_local_view(
         " )"
     )
     filters = [scope_clause]
+    filters.append(f"NOT {_option_trade_predicate_sql('t')}")
     if user_id is not None:
         filters.append("t.user_id = :uid")
         params["uid"] = int(user_id)
@@ -2810,6 +2843,7 @@ def run_missing_stop_watchdog(
         LEFT JOIN last_rec AS r ON r.trade_id = t.id
         WHERE t.status = 'open'
           AND t.broker_source IS NOT NULL
+          AND NOT {_option_trade_predicate_sql('t')}
           AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed')
           {user_filter}
         ORDER BY t.id
