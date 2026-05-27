@@ -26,6 +26,15 @@ def _safe_float(value: Any) -> float | None:
     return out if out > 0 else None
 
 
+def _is_option_trade_safe(trade: Any) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
 def open_broker_trade_for_ticker(
     db: Session,
     ticker: str,
@@ -46,6 +55,8 @@ def open_broker_trade_for_ticker(
         q = q.filter(Trade.user_id.isnot(None))
     rows = q.order_by(Trade.entry_date.desc(), Trade.id.desc()).limit(10).all()
     for trade in rows:
+        if _is_option_trade_safe(trade):
+            continue
         broker_source = (trade.broker_source or "").strip().lower()
         if broker_source in _LIVE_BROKER_SOURCES:
             return trade
