@@ -10,7 +10,7 @@ Covers:
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +24,7 @@ from app.config import (
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
+    AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
 )
 from app.models.trading import (
     AutoTraderRun,
@@ -47,6 +48,7 @@ TEST_STRONG_CPCV_SHARPE = 1.4
 TEST_REALIZED_TRADE_COUNT = 20
 TEST_REALIZED_AVG_RETURN_PCT = 1.2
 TEST_POSITIVE_EXPECTED_NET_PCT = 1.25
+STALE_ALERT_MARGIN = timedelta(minutes=1)
 
 
 def _minimal_settings(user_id: int) -> SimpleNamespace:
@@ -65,6 +67,10 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_autotrader_max_concurrent=5,
         chili_autotrader_per_trade_notional_usd=0.0,
         chili_autotrader_per_trade_risk_pct=1.0,
+        chili_autotrader_stock_session_defer_enabled=True,
+        chili_autotrader_stock_session_defer_max_age_hours=(
+            AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS
+        ),
         chili_autotrader_synergy_enabled=False,
         chili_autotrader_synergy_scale_notional_usd=0.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
@@ -113,6 +119,176 @@ def _live_runtime() -> dict:
         "monitor_entries_allowed": True,
         "payload": {},
     }
+
+
+def _patch_tick_shell(monkeypatch, user_id: int) -> None:
+    monkeypatch.setattr(at_mod, "settings", _minimal_settings(user_id))
+    monkeypatch.setattr(
+        at_mod,
+        "effective_autotrader_runtime",
+        lambda _db: _live_runtime(),
+    )
+
+    from app.services.trading import governance
+
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+
+
+def _audit_only_process(processed: list[str]):
+    def _process(db_, uid_, alert, out, _runtime):
+        processed.append(alert.ticker)
+        at_mod._audit(
+            db_,
+            user_id=uid_,
+            alert=alert,
+            decision="skipped",
+            reason="test_processed",
+        )
+        out["skipped"] += 1
+        at_mod._autotrader_tick_note(
+            out,
+            kind="skipped",
+            reason="test_processed",
+            alert=alert,
+        )
+
+    return _process
+
+
+def test_closed_stock_session_defers_stock_without_starving_crypto(db, monkeypatch):
+    user = models.User(name="stock_defer_closed")
+    db.add(user)
+    db.flush()
+    now = datetime.utcnow()
+    stock_alert = BreakoutAlert(
+        ticker="AAPL",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=190.0,
+        entry_price=190.0,
+        stop_loss=185.0,
+        target_price=200.0,
+        user_id=user.id,
+        alerted_at=now,
+    )
+    crypto_alert = BreakoutAlert(
+        ticker="BTC-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=100_000.0,
+        entry_price=100_000.0,
+        stop_loss=99_000.0,
+        target_price=103_000.0,
+        user_id=user.id,
+        alerted_at=now,
+    )
+    db.add_all([stock_alert, crypto_alert])
+    db.commit()
+
+    _patch_tick_shell(monkeypatch, user.id)
+    defer_hours = AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS
+    monkeypatch.setattr(
+        at_mod,
+        "_stock_session_defer_state",
+        lambda: {
+            "enabled": True,
+            "active": True,
+            "reason": at_mod.STOCK_SESSION_DEFER_REASON_CLOSED,
+            "max_age_hours": defer_hours,
+            "cutoff": now - timedelta(hours=defer_hours),
+        },
+    )
+    processed: list[str] = []
+    monkeypatch.setattr(at_mod, "_process_one_alert", _audit_only_process(processed))
+
+    out = at_mod.run_auto_trader_tick(db)
+
+    assert out["ok"] is True
+    assert processed == ["BTC-USD"]
+    assert out["stock_session_defer_active"] is True
+    assert out["stock_session_deferred_pool"] == 1
+    assert (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == stock_alert.id)
+        .count()
+        == 0
+    )
+    assert (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == crypto_alert.id)
+        .count()
+        == 1
+    )
+
+
+def test_stale_deferred_stock_alerts_do_not_block_fresh_session_open(db, monkeypatch):
+    user = models.User(name="stock_defer_stale")
+    db.add(user)
+    db.flush()
+    now = datetime.utcnow()
+    defer_hours = AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS
+    stale_alert = BreakoutAlert(
+        ticker="OLD",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=50.0,
+        entry_price=50.0,
+        stop_loss=48.0,
+        target_price=55.0,
+        user_id=user.id,
+        alerted_at=now - timedelta(hours=defer_hours) - STALE_ALERT_MARGIN,
+    )
+    fresh_alert = BreakoutAlert(
+        ticker="FRESH",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=50.0,
+        entry_price=50.0,
+        stop_loss=48.0,
+        target_price=55.0,
+        user_id=user.id,
+        alerted_at=now,
+    )
+    db.add_all([stale_alert, fresh_alert])
+    db.commit()
+
+    _patch_tick_shell(monkeypatch, user.id)
+    monkeypatch.setattr(
+        at_mod,
+        "_stock_session_defer_state",
+        lambda: {
+            "enabled": True,
+            "active": False,
+            "reason": "stock_session_open",
+            "max_age_hours": defer_hours,
+            "cutoff": now - timedelta(hours=defer_hours),
+        },
+    )
+    processed: list[str] = []
+    monkeypatch.setattr(at_mod, "_process_one_alert", _audit_only_process(processed))
+
+    out = at_mod.run_auto_trader_tick(db)
+
+    assert out["ok"] is True
+    assert processed == ["FRESH"]
+    assert out["stock_session_defer_active"] is False
+    assert out["stock_session_stale_unprocessed"] == 1
+    assert (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == stale_alert.id)
+        .count()
+        == 0
+    )
+    assert (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == fresh_alert.id)
+        .count()
+        == 1
+    )
 
 
 def test_try_claim_alert_same_session_releases_cleanly(db):

@@ -15,6 +15,8 @@ from ...config import (
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED,
+    AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
     AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
     AUTOTRADER_SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_DEFAULT_USD,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
@@ -26,6 +28,7 @@ from ...config import (
     AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS,
+    AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_MAX_AGE_HOURS,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
     AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
@@ -162,6 +165,11 @@ SHADOW_OBSERVATION_NOTIONAL_SOURCE_UNAVAILABLE = "shadow_observation_capital_una
 LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION = "shadow_observation_only"
 LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH = "options_path"
 PENDING_ENTRY_ALREADY_WORKING_REASON = "pending_entry_already_working"
+STOCK_ASSET_TYPE = "stock"
+STOCK_SESSION_DEFER_REASON_CLOSED = "stock_session_closed"
+STOCK_SESSION_DEFER_REASON_DISABLED = "stock_session_defer_disabled"
+STOCK_SESSION_DEFER_REASON_RTH_GATE_DISABLED = "stock_session_gate_disabled"
+SECONDS_PER_HOUR = 60.0 * 60.0
 _OPTION_ENTRY_FILLED_STATES = frozenset({"filled", "done", "completed", "complete"})
 _OPTION_ENTRY_PARTIAL_STATES = frozenset(
     {"partially_filled", "partial", "partial_filled"}
@@ -506,6 +514,23 @@ def _settings_int_clamped(name: str, default: int, *, lower: int, upper: int) ->
     return max(int(lower), min(int(upper), value))
 
 
+def _settings_float_clamped(
+    name: str,
+    default: float,
+    *,
+    lower: float,
+    upper: float,
+) -> float:
+    raw = getattr(settings, name, default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float(default)
+    if value != value:
+        value = float(default)
+    return max(float(lower), min(float(upper), value))
+
+
 def _autotrader_candidate_batch_size() -> int:
     return _settings_int_clamped(
         "chili_autotrader_candidate_batch_size",
@@ -513,6 +538,65 @@ def _autotrader_candidate_batch_size() -> int:
         lower=1,
         upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     )
+
+
+def _stock_session_defer_state(now: datetime | None = None) -> dict[str, Any]:
+    """Return candidate-selector state for stock alerts while the venue is shut.
+
+    The rule gate still owns the hard live session block. This pre-filter only
+    prevents fresh stock alerts from being permanently consumed by that block
+    during closed hours, and keeps stale carryover bounded by configuration.
+    """
+    enabled = bool(
+        getattr(
+            settings,
+            "chili_autotrader_stock_session_defer_enabled",
+            AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED,
+        )
+    )
+    max_age_hours = _settings_float_clamped(
+        "chili_autotrader_stock_session_defer_max_age_hours",
+        AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
+        lower=0.0,
+        upper=float(AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_MAX_AGE_HOURS),
+    )
+    now_utc = now or datetime.utcnow()
+    cutoff = now_utc - timedelta(seconds=max_age_hours * SECONDS_PER_HOUR)
+    state: dict[str, Any] = {
+        "enabled": enabled,
+        "active": False,
+        "reason": STOCK_SESSION_DEFER_REASON_DISABLED,
+        "max_age_hours": max_age_hours,
+        "cutoff": cutoff,
+    }
+    if not enabled:
+        return state
+    if not bool(getattr(settings, "chili_autotrader_rth_only", True)):
+        state["enabled"] = False
+        state["reason"] = STOCK_SESSION_DEFER_REASON_RTH_GATE_DISABLED
+        return state
+
+    allow_ext = bool(getattr(settings, "chili_autotrader_allow_extended_hours", False))
+    try:
+        from .pattern_imminent_alerts import (
+            us_stock_extended_session_open,
+            us_stock_session_open,
+        )
+
+        session_open = (
+            us_stock_extended_session_open() if allow_ext else us_stock_session_open()
+        )
+    except Exception:
+        logger.debug("[autotrader] stock session defer probe failed", exc_info=True)
+        state["enabled"] = False
+        state["reason"] = "stock_session_probe_failed"
+        return state
+
+    state["reason"] = (
+        "stock_session_open" if session_open else STOCK_SESSION_DEFER_REASON_CLOSED
+    )
+    state["active"] = not bool(session_open)
+    return state
 
 
 def _synergy_retry_limits(batch_slots_available: int) -> tuple[bool, int, int]:
@@ -1985,8 +2069,47 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             ar.id.is_(None),
         )
     )
+    stock_defer = _stock_session_defer_state()
+    stock_asset_filter = BreakoutAlert.asset_type == STOCK_ASSET_TYPE
+    non_stock_asset_filter = or_(
+        BreakoutAlert.asset_type.is_(None),
+        BreakoutAlert.asset_type != STOCK_ASSET_TYPE,
+    )
+    if stock_defer.get("enabled"):
+        candidate_base = candidate_base.filter(
+            or_(
+                non_stock_asset_filter,
+                BreakoutAlert.alerted_at >= stock_defer["cutoff"],
+            )
+        )
+        if stock_defer.get("active"):
+            candidate_base = candidate_base.filter(non_stock_asset_filter)
     batch_limit = _autotrader_candidate_batch_size()
     fresh_candidate_pool = int(candidate_base.count())
+    stock_deferred_pool = 0
+    stock_stale_unprocessed = 0
+    if stock_defer.get("enabled"):
+        stock_unprocessed_base = (
+            db.query(BreakoutAlert)
+            .outerjoin(ar, ar.breakout_alert_id == BreakoutAlert.id)
+            .filter(
+                BreakoutAlert.alert_tier == "pattern_imminent",
+                or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),
+                ar.id.is_(None),
+                stock_asset_filter,
+            )
+        )
+        if stock_defer.get("active"):
+            stock_deferred_pool = int(
+                stock_unprocessed_base.filter(
+                    BreakoutAlert.alerted_at >= stock_defer["cutoff"]
+                ).count()
+            )
+        stock_stale_unprocessed = int(
+            stock_unprocessed_base.filter(
+                BreakoutAlert.alerted_at < stock_defer["cutoff"]
+            ).count()
+        )
     candidates = (
         candidate_base.order_by(BreakoutAlert.id.asc()).limit(batch_limit).all()
     )
@@ -2008,6 +2131,11 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "scaled_in": 0,
         "skipped": 0,
         "fresh_candidate_pool": fresh_candidate_pool,
+        "stock_session_defer_active": bool(stock_defer.get("active")),
+        "stock_session_defer_reason": stock_defer.get("reason"),
+        "stock_session_defer_max_age_hours": stock_defer.get("max_age_hours"),
+        "stock_session_deferred_pool": stock_deferred_pool,
+        "stock_session_stale_unprocessed": stock_stale_unprocessed,
         "synergy_retry_pool": retry_pool,
         "synergy_retry_batch": len(retry_candidates),
         "tick_last_kind": None,
@@ -2067,7 +2195,9 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     logger.info(
         "[autotrader] tick uid=%s candidate_pool=%d batch=%d processed=%d placed=%d "
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
-        "synergy_retry_batch=%d last_kind=%s last_reason=%s last_alert_id=%s last_ticker=%s",
+        "synergy_retry_batch=%d stock_defer_active=%s stock_deferred_pool=%d "
+        "stock_stale_unprocessed=%d last_kind=%s last_reason=%s last_alert_id=%s "
+        "last_ticker=%s",
         uid,
         candidate_pool,
         len(candidates),
@@ -2078,6 +2208,9 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         fresh_candidate_pool,
         retry_pool,
         len(retry_candidates),
+        out.get("stock_session_defer_active"),
+        out.get("stock_session_deferred_pool"),
+        out.get("stock_session_stale_unprocessed"),
         out.get("tick_last_kind") or "-",
         out.get("tick_last_reason") or "-",
         out.get("tick_last_alert_id") if out.get("tick_last_alert_id") is not None else "-",

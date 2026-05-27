@@ -39,6 +39,7 @@ DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
 AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
 AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
 AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
+AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED = True
 AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD = 50.0
 AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED = True
 AUTOTRADER_MAX_ENTRY_SLIPPAGE_DEFAULT_PCT = 1.0
@@ -53,6 +54,9 @@ AUTOTRADER_FAVORABLE_ENTRY_DRIFT_CONFIG_LIMIT_PCT = 20.0
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
 PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT = 1.5
 PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS = 24
+AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS = (
+    PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS
+)
 PATTERN_DIRECTIONAL_DEFAULT_MAX_LOOKBACK_HOURS = (
     PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS * 7
 )
@@ -2560,6 +2564,30 @@ class Settings(BaseSettings):
         le=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_CANDIDATE_BATCH_SIZE"),
         description="Maximum AutoTrader alerts processed in one tick.",
+    )
+    chili_autotrader_stock_session_defer_enabled: bool = Field(
+        default=AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_STOCK_SESSION_DEFER_ENABLED"),
+        description=(
+            "When true, fresh stock alerts are left unconsumed while the "
+            "configured stock execution session is closed, so they can be "
+            "revalidated when trading reopens instead of being burned by an "
+            "outside-hours skip."
+        ),
+    )
+    chili_autotrader_stock_session_defer_max_age_hours: float = Field(
+        default=AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
+        ge=0.0,
+        le=AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_MAX_AGE_HOURS,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_STOCK_SESSION_DEFER_MAX_AGE_HOURS"
+        ),
+        description=(
+            "Maximum age for an unprocessed deferred stock alert. The default "
+            "tracks the directional-outcome hold horizon; older alerts are "
+            "ignored by the AutoTrader candidate selector and must be refreshed "
+            "by the scanner."
+        ),
     )
     chili_autotrader_synergy_scale_notional_usd: float = Field(
         default=0.0,
