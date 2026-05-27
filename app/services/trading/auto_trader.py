@@ -330,6 +330,8 @@ def _filled_qty_from_response(res: dict[str, Any], *, default_qty: float) -> flo
         "filled_quantity",
         "cumulative_filled_quantity",
         "cumulative_quantity",
+        "processed_quantity",
+        "quantity_filled",
         "filled_size",
     ):
         parsed = _float_or_none(res.get(key))

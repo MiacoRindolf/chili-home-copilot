@@ -254,3 +254,24 @@ def test_option_queued_order_stays_working_until_position_truth():
     assert broker_status == "queued"
     assert filled_qty == 0.0
     assert remaining_qty == 1.0
+
+
+def test_option_partial_entry_uses_processed_quantity():
+    status, broker_status, filled_qty, remaining_qty = (
+        at_mod._entry_lifecycle_from_response(
+            broker_source="robinhood",
+            res={
+                "ok": True,
+                "order_id": "oid",
+                "state": "partially_filled",
+                "processed_quantity": "1",
+            },
+            snap={"options_path": True},
+            qty=2.0,
+        )
+    )
+
+    assert status == "working"
+    assert broker_status == "partially_filled"
+    assert filled_qty == 1.0
+    assert remaining_qty == 1.0
