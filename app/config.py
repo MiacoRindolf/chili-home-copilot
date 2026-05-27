@@ -3087,6 +3087,12 @@ class Settings(BaseSettings):
         le=100.0,
         validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_REWARD_RISK"),
     )
+    chili_edge_evolution_min_directional_sample_n: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=10_000.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_DIRECTIONAL_SAMPLE_N"),
+    )
 
     chili_pattern_evidence_audit_enabled: bool = Field(
         default=True,

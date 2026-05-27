@@ -11,6 +11,7 @@ from app.services.trading.learning import (
     EDGE_EXIT_PROMOTION_STATUS,
     EDGE_EXIT_VARIANT_ORIGIN,
     _edge_debt_loss_reports,
+    _edge_report_root_cause,
     _learned_exit_config_from_edge_report,
     _parent_eligible_for_variant_spawn,
     fork_edge_learned_exit_variants,
@@ -138,6 +139,22 @@ def test_edge_debt_loss_report_severe_negative_trumps_near_miss_noise(db):
     assert report["root_cause"] == "deep_negative_expected_edge"
 
 
+def test_edge_root_cause_requires_material_insufficient_directional_evidence():
+    report = {
+        "total_rejects": 10,
+        "avg_expected_net_pct": -0.35,
+        "avg_probability_sample_n": 18.0,
+        "signal_lanes": {"standard": 10},
+        "managed_geometry_reasons": {
+            "insufficient_directional_samples": 1,
+            "managed_stop_not_tighter_than_base": 6,
+            "managed_reward_risk_below_floor": 3,
+        },
+    }
+
+    assert _edge_report_root_cause(report) == "managed_stop_not_tighter_than_base"
+
+
 def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     pat = _make_pattern(db)
     now = datetime.utcnow().replace(microsecond=0)
@@ -239,6 +256,31 @@ def test_edge_spawn_gate_blocks_deep_negative_parent():
 
     assert ok is False
     assert reason.startswith("edge_debt_deep_negative")
+
+
+def test_edge_spawn_gate_blocks_thin_directional_evidence_parent():
+    parent = SimpleNamespace(
+        lifecycle_stage="pilot_promoted",
+        promotion_status="promoted",
+        backtest_count=0,
+        win_rate=None,
+        corrected_trade_count=6,
+        corrected_avg_return_pct=0.77,
+        corrected_win_rate=1.0,
+    )
+    report = {
+        "source": EDGE_EXIT_CONFIG_SOURCE,
+        "thin_sample": False,
+        "total_rejects": 30,
+        "avg_expected_net_pct": -0.35,
+        "avg_probability_sample_n": 2.0,
+        "root_cause": "insufficient_directional_evidence",
+    }
+
+    ok, reason = _parent_eligible_for_variant_spawn(parent, edge_loss_report=report)
+
+    assert ok is False
+    assert reason == "edge_debt_insufficient_directional_evidence:avg_sample_n=2.000"
 
 
 def test_edge_spawn_gate_ignores_legacy_loss_report():

@@ -8939,6 +8939,7 @@ _EDGE_EVOLUTION_DEFAULT_MAX_AVG_NET_FOR_CHILD_PCT = -0.25
 _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MAX_AVG_NET_PCT = -0.75
 _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MIN_REWARD_RISK = 2.0
 _EDGE_EVOLUTION_DEFAULT_MIN_REWARD_RISK = 1.25
+_EDGE_EVOLUTION_DEFAULT_MIN_DIRECTIONAL_SAMPLE_N = 5.0
 
 _VARIANT_ORIGINS = frozenset({
     "exit_variant",
@@ -9039,6 +9040,12 @@ def _counter_increment(counter: dict[str, int], value: Any, *, fallback: str = "
     counter[key] = counter.get(key, 0) + 1
 
 
+def _counter_share(counter: dict[str, int], key: str, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return float(counter.get(key, 0) or 0) / float(denominator)
+
+
 def _edge_snapshot_from_run(row: Any) -> dict[str, Any]:
     snap = _json_dict(getattr(row, "rule_snapshot", None))
     edge = snap.get("entry_edge")
@@ -9062,6 +9069,11 @@ def _edge_report_root_cause(report: dict[str, Any]) -> str:
     avg_net = float(report.get("avg_expected_net_pct") or 0.0)
     n = int(report.get("total_rejects") or 0)
     near_miss_n = int(lanes.get("shadow_near_miss") or 0)
+    min_directional_n = _settings_edge_float(
+        "chili_edge_evolution_min_directional_sample_n",
+        _EDGE_EVOLUTION_DEFAULT_MIN_DIRECTIONAL_SAMPLE_N,
+    )
+    avg_directional_n = _finite_number(report.get("avg_probability_sample_n"))
     if avg_net <= _settings_edge_float(
         "chili_edge_evolution_severe_avg_net_pct",
         _EDGE_EVOLUTION_DEFAULT_SEVERE_AVG_NET_PCT,
@@ -9069,11 +9081,17 @@ def _edge_report_root_cause(report: dict[str, Any]) -> str:
         return "deep_negative_expected_edge"
     if n > 0 and near_miss_n / n >= 0.6:
         return "shadow_near_miss_noise"
-    if managed_reasons.get("insufficient_directional_samples"):
+    if (
+        managed_reasons.get("insufficient_directional_samples")
+        and (
+            _counter_share(managed_reasons, "insufficient_directional_samples", n) >= 0.6
+            or (avg_directional_n is not None and avg_directional_n < min_directional_n)
+        )
+    ):
         return "insufficient_directional_evidence"
-    if managed_reasons.get("managed_reward_risk_below_floor"):
+    if _counter_share(managed_reasons, "managed_reward_risk_below_floor", n) >= 0.4:
         return "managed_reward_risk_below_floor"
-    if managed_reasons.get("managed_stop_not_tighter_than_base"):
+    if _counter_share(managed_reasons, "managed_stop_not_tighter_than_base", n) >= 0.4:
         return "managed_stop_not_tighter_than_base"
     return "static_geometry_or_probability_mismatch"
 
@@ -9231,6 +9249,17 @@ def _edge_debt_blocks_variant_spawn(parent: "ScanPattern", report: dict[str, Any
     )
     if n >= severe_n and avg_net is not None and avg_net <= severe_avg:
         return True, f"edge_debt_deep_negative:{avg_net:.3f}_on_{n}_rejects"
+    if str(report.get("root_cause") or "").strip().lower() == "insufficient_directional_evidence":
+        avg_directional_n = _finite_number(report.get("avg_probability_sample_n"))
+        min_directional_n = _settings_edge_float(
+            "chili_edge_evolution_min_directional_sample_n",
+            _EDGE_EVOLUTION_DEFAULT_MIN_DIRECTIONAL_SAMPLE_N,
+        )
+        if avg_directional_n is not None and avg_directional_n < min_directional_n:
+            return True, (
+                "edge_debt_insufficient_directional_evidence:"
+                f"avg_sample_n={avg_directional_n:.3f}"
+            )
 
     corrected_n = int(getattr(parent, "corrected_trade_count", None) or getattr(parent, "trade_count", None) or 0)
     corrected_avg = _finite_number(
