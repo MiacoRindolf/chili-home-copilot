@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import logging
 import os
 import signal
+import time
 from collections.abc import Mapping
 from types import FrameType
 
@@ -212,6 +213,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
 
     db = SessionLocal()
     lock_acquired = False
+    pattern_started = time.monotonic()
     try:
         if not try_acquire_pattern_backtest_lock(db, int(pattern_id)):
             logger.info(
@@ -417,6 +419,27 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     avg_return=avg_return,
                     backtests_run=backtests_run,
                 )
+            logger.info(
+                "[backtest_queue] pattern_done pattern_id=%s tier=prescreen "
+                "target_tickers=%s priority_tickers=%s backtests_run=%s "
+                "trade_bearing_tickers=%s wins=%s elapsed_s=%.2f",
+                pattern.id,
+                max(
+                    PRESCREEN_MIN_TICKERS_FALLBACK,
+                    int(
+                        getattr(
+                            settings,
+                            "brain_queue_prescreen_tickers",
+                            PRESCREEN_TICKERS_FALLBACK,
+                        )
+                    ),
+                ),
+                len(prio),
+                backtests_run,
+                total,
+                wins,
+                time.monotonic() - pattern_started,
+            )
             return (backtests_run, 1)
 
         result = smart_backtest_insight(
@@ -479,6 +502,18 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 db.rollback()
             except Exception:
                 pass
+        logger.info(
+            "[backtest_queue] pattern_done pattern_id=%s tier=full "
+            "target_tickers=%s priority_tickers=%s backtests_run=%s "
+            "trade_bearing_tickers=%s wins=%s elapsed_s=%.2f",
+            pattern.id,
+            target_tickers,
+            len(prio),
+            backtests_run,
+            total,
+            wins,
+            time.monotonic() - pattern_started,
+        )
         return (backtests_run, 1)
     except Exception as e:
         logger.warning("[backtest_queue] Failed to backtest pattern %s: %s", pattern_id, e)
