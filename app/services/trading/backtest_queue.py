@@ -552,7 +552,7 @@ def _planned_pending_patterns(db: Session, *, limit: int) -> list[ScanPattern]:
             selected_ids=selected_ids,
             lineage_counts=lineage_counts,
             limit=limit,
-            lineage_cap=None,
+            lineage_cap=lineage_cap,
         )
 
     return selected

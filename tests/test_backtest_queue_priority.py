@@ -228,6 +228,37 @@ def test_lane_planner_diversifies_generic_variant_families(db, monkeypatch):
     assert len({p.id for p in pending}.intersection({p.id for p in crowded_children})) == 2
 
 
+def test_lane_planner_final_refill_preserves_lineage_cap(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "brain_queue_max_per_lineage_per_batch", 2)
+    monkeypatch.setattr(settings, "brain_queue_lane_fetch_multiplier", 5)
+    parent = _queued_pattern(
+        db,
+        name="refill crowded parent",
+        lifecycle_stage="candidate",
+        backtest_priority=0,
+    )
+    parent.active = False
+    crowded_children = [
+        _queued_pattern(
+            db,
+            name=f"refill crowded child {idx}",
+            lifecycle_stage="challenged",
+            backtest_priority=999 - idx,
+            origin="exit_variant",
+            parent_id=parent.id,
+        )
+        for idx in range(5)
+    ]
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=5)
+    family_counts = Counter(int(p.parent_id or p.id) for p in pending)
+
+    assert family_counts[int(parent.id)] == 2
+    assert len({p.id for p in pending}.intersection({p.id for p in crowded_children})) == 2
+
+
 def test_queue_batch_summary_counts_lanes_tiers_and_lineage(db):
     _deactivate_existing_patterns(db)
     parent = _queued_pattern(
