@@ -103,6 +103,7 @@ def test_count_autotrader_v1_open_by_lane_counts_working_and_asset_kind():
     assert counts == {"equity": 3, "crypto": 2, "options": 1}
     assert "t.status IN ('open', 'working')" in db.executed_sql
     assert "t.asset_kind" in db.executed_sql
+    assert db.executed_sql.find("t.asset_kind") < db.executed_sql.find("a.asset_type")
 
 
 def test_passes_rule_gate_confidence_fail():

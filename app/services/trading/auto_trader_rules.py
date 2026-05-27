@@ -2401,9 +2401,9 @@ def count_autotrader_v1_open(db: Session, user_id: Optional[int], *, paper_mode:
 
 
 # VV — per-lane open counts. JOINs trading_trades ↔ trading_breakout_alerts
-# via related_alert_id and buckets by alert.asset_type. Trades whose
-# linked alert is missing or has a NULL/empty asset_type fall into the
-# 'equity' bucket (matches autotrader history pre-asset_type rollout).
+# via related_alert_id. Prefer Trade.asset_kind because option substitution
+# mutates the in-memory alert for execution but can leave the stored alert row
+# as stock; fall back to alert.asset_type for legacy rows without asset_kind.
 def count_autotrader_v1_open_by_lane(
     db: Session,
     user_id: Optional[int],
@@ -2440,8 +2440,8 @@ def count_autotrader_v1_open_by_lane(
         from sqlalchemy import text as _text
         params = {}
         sql = (
-            "SELECT COALESCE(LOWER(NULLIF(a.asset_type, '')), "
-            "              LOWER(NULLIF(t.asset_kind, '')), 'stock') AS at, "
+            "SELECT COALESCE(LOWER(NULLIF(t.asset_kind, '')), "
+            "              LOWER(NULLIF(a.asset_type, '')), 'stock') AS at, "
             "       COUNT(*) AS n "
             "FROM trading_trades t "
             "LEFT JOIN trading_breakout_alerts a ON a.id = t.related_alert_id "
