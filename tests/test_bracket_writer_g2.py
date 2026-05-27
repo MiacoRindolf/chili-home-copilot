@@ -188,6 +188,33 @@ def test_resize_rejects_unsupported_venue(db, monkeypatch):
     factory.assert_not_called()
 
 
+def test_resize_skips_option_trade_without_broker_call(monkeypatch):
+    monkeypatch.setattr(g2, "settings", _on_cfg())
+
+    mock_db = MagicMock()
+    mock_db.get.return_value = SimpleNamespace(
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot={"asset_type": "options"},
+    )
+    factory = MagicMock(
+        side_effect=AssertionError("option resize must not build a bracket adapter")
+    )
+
+    result = g2.resize_stop_for_partial_fill(
+        mock_db, trade_id=701, bracket_intent_id=9701, ticker="SPY",
+        broker_source="robinhood",
+        decision=_partial_fill_decision(1.0),
+        prior_stop_order_id="stop-option", stop_price=0.75,
+        adapter_factory=factory,
+    )
+
+    assert result.ok is False
+    assert result.reason == "option_exit_monitor_owns_contract_protection"
+    assert result.prior_stop_order_id == "stop-option"
+    factory.assert_not_called()
+
+
 def test_place_rejects_wrong_kind(db, monkeypatch):
     monkeypatch.setattr(g2, "settings", _on_cfg())
     factory = MagicMock()

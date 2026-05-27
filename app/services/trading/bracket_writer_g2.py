@@ -710,6 +710,19 @@ def resize_stop_for_partial_fill(
             broker_source=broker_source, ticker=ticker,
         )
 
+    if _is_option_trade_for_bracket_writer(db, trade_id):
+        logger.info(
+            f"{BRACKET_WRITER_G2} resize_stop_for_partial_fill SKIPPED intent=%s "
+            "trade=%s ticker=%s reason=option_exit_monitor_owns_contract_protection",
+            bracket_intent_id, trade_id, ticker,
+        )
+        return WriterAction(
+            action="resize_stop_for_partial_fill", ok=False,
+            reason="option_exit_monitor_owns_contract_protection",
+            broker_source=broker_source, ticker=ticker,
+            prior_stop_order_id=prior_stop_order_id,
+        )
+
     adapter = adapter_factory(broker_source)
 
     _g2_event(
@@ -1186,7 +1199,7 @@ def _coinbase_open_stop_orders_for_ticker(adapter: Any, ticker: str) -> list[Any
     return out
 
 
-def _is_option_trade_for_missing_stop_writer(db: Session, trade_id: int | None) -> bool:
+def _is_option_trade_for_bracket_writer(db: Session, trade_id: int | None) -> bool:
     if trade_id is None:
         return False
     try:
@@ -1303,7 +1316,7 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
-    if _is_option_trade_for_missing_stop_writer(db, trade_id):
+    if _is_option_trade_for_bracket_writer(db, trade_id):
         logger.info(
             f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
             "trade=%s ticker=%s reason=option_exit_monitor_owns_contract_protection",
