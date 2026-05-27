@@ -107,6 +107,7 @@ def emergency_close_all(
                     db,
                     t=t,
                     updated_by=f"emergency_liquidation:{reason}",
+                    exit_reason=f"emergency_{reason}",
                 )
                 if not res.get("ok"):
                     errors.append(f"Live option {t.ticker}: {res.get('error')}")

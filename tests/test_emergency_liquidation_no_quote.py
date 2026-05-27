@@ -212,7 +212,7 @@ def test_emergency_close_all_option_routes_sell_to_close_without_underlying_quot
     assert trade.status == "open"
     assert trade.pending_exit_order_id == "opt-emergency-close"
     assert trade.pending_exit_status == "queued"
-    assert trade.pending_exit_reason == "desk_close_now"
+    assert trade.pending_exit_reason == "emergency_test_option_liquidation"
     assert trade.pending_exit_limit_price == pytest.approx(1.40)
     assert trade.tca_reference_exit_price == pytest.approx(1.45)
     fake_options.place_option_sell.assert_called_once_with(
