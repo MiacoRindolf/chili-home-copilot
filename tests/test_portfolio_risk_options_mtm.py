@@ -96,3 +96,38 @@ def test_unrealized_pnl_for_options_skips_when_no_premium_quote() -> None:
         pnl = _compute_unrealized_pnl(_FakeDb([trade]), user_id=None)
 
     assert pnl == 0.0
+
+
+def test_option_entry_notional_uses_contract_multiplier() -> None:
+    from app.services.trading.portfolio_risk import _trade_entry_notional
+
+    trade = _option_trade_stub()
+
+    assert _trade_entry_notional(trade) == pytest.approx(250.0)
+
+
+def test_portfolio_heat_for_options_uses_premium_risk_and_multiplier(
+    monkeypatch,
+) -> None:
+    from app import config as app_config
+    from app.services.trading.portfolio_risk import get_portfolio_risk_snapshot
+
+    monkeypatch.setattr(
+        app_config.settings,
+        "chili_autotrader_options_exit_stop_pct",
+        50.0,
+        raising=False,
+    )
+    trade = _option_trade_stub(stop_loss=700.0)
+
+    with patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_var",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
+        return_value=None,
+    ):
+        budget = get_portfolio_risk_snapshot(_FakeDb([trade]), user_id=None, capital=10_000.0)
+
+    assert budget.total_heat_pct == pytest.approx(1.25)
+    assert budget.available_heat_pct == pytest.approx(4.75)

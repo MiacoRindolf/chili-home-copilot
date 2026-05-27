@@ -77,6 +77,87 @@ def compute_trade_risk_pct(
     return round(total_risk / capital * 100, 4)
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _is_option_trade_safe(trade: Any) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
+def _trade_contract_multiplier(trade: Any) -> float:
+    return 100.0 if _is_option_trade_safe(trade) else 1.0
+
+
+def _trade_entry_notional(trade: Any) -> float:
+    entry = _float_or_none(getattr(trade, "entry_price", None))
+    qty = _float_or_none(getattr(trade, "quantity", None))
+    if entry is None or qty is None:
+        return 0.0
+    return entry * qty * _trade_contract_multiplier(trade)
+
+
+def _option_premium_risk_dollars(trade: Any) -> float | None:
+    """Dollar heat for option rows whose prices are stored as premiums."""
+    if not _is_option_trade_safe(trade):
+        return None
+    entry = _float_or_none(getattr(trade, "entry_price", None))
+    qty = _float_or_none(getattr(trade, "quantity", None))
+    if entry is None or qty is None:
+        return 0.0
+
+    direction = str(getattr(trade, "direction", "") or "long").strip().lower()
+    explicit_stop = _float_or_none(getattr(trade, "stop_loss", None))
+    risk_per_contract: float | None = None
+    if explicit_stop is not None:
+        if direction == "short" and explicit_stop > entry:
+            risk_per_contract = explicit_stop - entry
+        elif direction != "short" and 0 < explicit_stop < entry:
+            risk_per_contract = entry - explicit_stop
+
+    if risk_per_contract is None:
+        try:
+            from ...config import settings
+
+            stop_pct = float(
+                getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0)
+                or 50.0
+            )
+        except Exception:
+            stop_pct = 50.0
+        stop_fraction = abs(stop_pct) / 100.0
+        if direction == "short":
+            risk_fraction = max(stop_fraction, 1.0)
+        else:
+            risk_fraction = min(max(stop_fraction, 0.0), 1.0) or 1.0
+        risk_per_contract = entry * risk_fraction
+
+    return risk_per_contract * qty * 100.0
+
+
+def _trade_risk_dollars(trade: Any) -> float:
+    option_risk = _option_premium_risk_dollars(trade)
+    if option_risk is not None:
+        return option_risk
+    stop = _infer_stop(trade)
+    entry = _float_or_none(getattr(trade, "entry_price", None))
+    qty = _float_or_none(getattr(trade, "quantity", None))
+    if stop and entry is not None and qty is not None:
+        return abs(entry - stop) * qty
+    return 0.0
+
+
 def get_portfolio_risk_snapshot(
     db: Session,
     user_id: int | None,
@@ -99,9 +180,8 @@ def get_portfolio_risk_snapshot(
 
     total_heat = 0.0
     for t in open_trades:
-        stop = _infer_stop(t)
-        if stop and capital > 0:
-            risk = abs(t.entry_price - stop) * t.quantity
+        if capital > 0:
+            risk = _trade_risk_dollars(t)
             total_heat += risk / capital * 100
     budget.total_heat_pct = round(total_heat, 2)
     budget.available_heat_pct = round(max(0, limits.max_portfolio_heat_pct - total_heat), 2)
@@ -650,8 +730,7 @@ def estimate_portfolio_var(
     tickers = list({t.ticker for t in open_trades})
     weights: dict[str, float] = {}
     for t in open_trades:
-        notional = t.entry_price * t.quantity
-        weights[t.ticker] = weights.get(t.ticker, 0.0) + notional / capital
+        weights[t.ticker] = weights.get(t.ticker, 0.0) + _trade_entry_notional(t) / capital
 
     returns_data: dict[str, list[float]] = {}
     for ticker in tickers:
@@ -705,8 +784,7 @@ def estimate_portfolio_cvar(
     tickers = list({t.ticker for t in open_trades})
     weights: dict[str, float] = {}
     for t in open_trades:
-        notional = t.entry_price * t.quantity
-        weights[t.ticker] = weights.get(t.ticker, 0.0) + notional / capital
+        weights[t.ticker] = weights.get(t.ticker, 0.0) + _trade_entry_notional(t) / capital
 
     returns_data: dict[str, list[float]] = {}
     for ticker in tickers:
