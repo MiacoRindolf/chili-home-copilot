@@ -298,6 +298,65 @@ def test_lane_planner_final_refill_preserves_lineage_cap(db, monkeypatch):
     assert len({p.id for p in pending}.intersection({p.id for p in crowded_children})) == 2
 
 
+def test_lane_planner_final_refill_skips_capped_lineage_to_fill_batch(
+    db,
+    monkeypatch,
+):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_max_per_lineage_per_batch",
+        _FIXED_LINEAGE_CAP_DISABLED,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_max_batch_share",
+        _ADAPTIVE_TWO_OF_FIVE_LINEAGE_SHARE,
+    )
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_lineage_min_per_batch",
+        _ADAPTIVE_LINEAGE_FLOOR,
+    )
+    monkeypatch.setattr(settings, "brain_queue_lane_fetch_multiplier", 1)
+    parent = _queued_pattern(
+        db,
+        name="crowded refill parent",
+        lifecycle_stage="candidate",
+        backtest_priority=0,
+    )
+    parent.active = False
+    crowded_children = [
+        _queued_pattern(
+            db,
+            name=f"crowded refill child {idx}",
+            lifecycle_stage="challenged",
+            backtest_priority=999 - idx,
+            origin="exit_variant",
+            parent_id=parent.id,
+        )
+        for idx in range(8)
+    ]
+    diverse = [
+        _queued_pattern(
+            db,
+            name=f"diverse refill {idx}",
+            lifecycle_stage="challenged",
+            backtest_priority=10 - idx,
+        )
+        for idx in range(3)
+    ]
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=5)
+    family_counts = Counter(int(p.parent_id or p.id) for p in pending)
+
+    assert len(pending) == 5
+    assert family_counts[int(parent.id)] == 2
+    assert len({p.id for p in pending}.intersection({p.id for p in crowded_children})) == 2
+    assert {p.id for p in diverse}.issubset({p.id for p in pending})
+
+
 def test_queue_batch_summary_counts_lanes_tiers_and_lineage(db):
     _deactivate_existing_patterns(db)
     parent = _queued_pattern(

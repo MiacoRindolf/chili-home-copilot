@@ -517,6 +517,23 @@ def _lineage_key(pattern: ScanPattern) -> int:
         return int(getattr(pattern, "id", 0) or 0)
 
 
+def _lineage_expr():
+    return func.coalesce(ScanPattern.parent_id, ScanPattern.id)
+
+
+def _capped_lineage_ids(
+    lineage_counts: dict[int, int],
+    lineage_cap: int | None,
+) -> list[int]:
+    if lineage_cap is None or lineage_cap <= 0:
+        return []
+    return [
+        int(lineage)
+        for lineage, count in lineage_counts.items()
+        if int(count or 0) >= lineage_cap
+    ]
+
+
 def _append_planned_rows(
     selected: list[ScanPattern],
     rows: list[ScanPattern],
@@ -625,10 +642,16 @@ def _planned_pending_patterns(db: Session, *, limit: int) -> list[ScanPattern]:
         )
 
     if len(selected) < limit:
+        capped_lineages = _capped_lineage_ids(lineage_counts, lineage_cap)
         rows = (
             db.query(ScanPattern)
             .filter(ScanPattern.active.is_(True), _pending_expr(cutoff))
             .filter(not_(ScanPattern.id.in_(selected_ids)) if selected_ids else true())
+            .filter(
+                not_(_lineage_expr().in_(capped_lineages))
+                if capped_lineages
+                else true()
+            )
             .order_by(*_pending_order_exprs())
             .limit(limit - len(selected))
             .all()
