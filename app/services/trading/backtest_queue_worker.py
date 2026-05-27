@@ -5,8 +5,12 @@
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 import os
+import signal
+from collections.abc import Mapping
+from types import FrameType
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,13 @@ PRESCREEN_MIN_WIN_RATE_PCT_FALLBACK = 45.0
 PRESCREEN_FULL_TIER_PRIORITY_FLOOR = 50
 STORED_REFRESH_STALE_TRADE_CAP_FALLBACK = 2
 STORED_REFRESH_STALE_DAYS_FALLBACK = 14
+QUEUE_PATTERN_WALLTIME_SECONDS_ENV = "CHILI_BACKTEST_QUEUE_PATTERN_WALLTIME_SECONDS"
+DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS = 900.0
+DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS = 0.0
+
+
+class QueuePatternWalltimeExceeded(TimeoutError):
+    """Raised inside a process-pool child when one pattern monopolizes the worker."""
 
 
 def _positive_int(value: object, fallback: int) -> int:
@@ -32,6 +43,73 @@ def _positive_int(value: object, fallback: int) -> int:
     except (TypeError, ValueError):
         parsed = int(fallback)
     return max(MIN_QUEUE_TICKER_COUNT, parsed)
+
+
+def _non_negative_float(value: object, fallback: float) -> float:
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        parsed = float(fallback)
+    return max(DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS, parsed)
+
+
+def queue_pattern_walltime_seconds(
+    settings_obj: object | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> float:
+    """Configured wall-time budget for one process-pool pattern backtest."""
+    env = environ if environ is not None else os.environ
+    raw_env = env.get(QUEUE_PATTERN_WALLTIME_SECONDS_ENV)
+    if raw_env is not None and str(raw_env).strip():
+        return _non_negative_float(raw_env, DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS)
+    if settings_obj is None:
+        try:
+            from ...config import settings as settings_obj
+        except Exception:
+            settings_obj = None
+    return _non_negative_float(
+        getattr(
+            settings_obj,
+            "brain_queue_pattern_walltime_seconds",
+            DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS,
+        ),
+        DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS,
+    )
+
+
+@contextmanager
+def _queue_pattern_walltime_guard(pattern_id: int, timeout_seconds: float):
+    """Interrupt runaway child work on platforms with SIGALRM support."""
+    timeout = _non_negative_float(timeout_seconds, DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS)
+    if (
+        timeout <= DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+    ):
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _raise_timeout(_signum: int, _frame: FrameType | None) -> None:
+        raise QueuePatternWalltimeExceeded(
+            f"pattern_id={pattern_id} exceeded queue walltime budget {timeout:.1f}s"
+        )
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+    except Exception:
+        signal.signal(signal.SIGALRM, previous_handler)
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS)
+        finally:
+            signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _csv_tokens(raw: object) -> set[str]:
@@ -412,4 +490,10 @@ def run_one_pattern_job(pattern_id: int, user_id: int | None) -> tuple[int, int]
     """Process-pool entry point. Initializer must set DB env; this is a safety net for tests."""
     if "DATABASE_POOL_SIZE" not in os.environ:
         configure_multiprocess_child_db_env(1, 2)
-    return execute_queue_backtest_for_pattern(pattern_id, user_id)
+    timeout_seconds = queue_pattern_walltime_seconds()
+    try:
+        with _queue_pattern_walltime_guard(pattern_id, timeout_seconds):
+            return execute_queue_backtest_for_pattern(pattern_id, user_id)
+    except QueuePatternWalltimeExceeded as exc:
+        logger.warning("[backtest_queue] process child walltime exceeded: %s", exc)
+        return (0, 1)

@@ -2,7 +2,18 @@
 from __future__ import annotations
 
 import os
+import signal
+import time
 from types import SimpleNamespace
+
+import pytest
+
+_TEST_PATTERN_ID = 123
+_TEST_USER_ID = 7
+_TEST_BACKTESTS_RUN = 5
+_TEST_PATTERNS_PROCESSED = 1
+_TEST_WALLTIME_SECONDS = 0.05
+_TEST_SLEEP_SECONDS = 0.2
 
 
 def test_configure_multiprocess_child_db_env_sets_flag_and_pool(monkeypatch):
@@ -19,6 +30,70 @@ def test_configure_multiprocess_child_db_env_sets_flag_and_pool(monkeypatch):
     assert os.environ.get(CHILD_ENV_FLAG) == "1"
     assert os.environ.get("DATABASE_POOL_SIZE") == "1"
     assert os.environ.get("DATABASE_MAX_OVERFLOW") == "2"
+
+
+def test_queue_pattern_walltime_uses_env_override(monkeypatch):
+    from app.services.trading.backtest_queue_worker import (
+        QUEUE_PATTERN_WALLTIME_SECONDS_ENV,
+        queue_pattern_walltime_seconds,
+    )
+
+    monkeypatch.setenv(QUEUE_PATTERN_WALLTIME_SECONDS_ENV, str(_TEST_WALLTIME_SECONDS))
+
+    assert queue_pattern_walltime_seconds() == _TEST_WALLTIME_SECONDS
+
+
+def test_queue_pattern_walltime_allows_explicit_zero_override(monkeypatch):
+    from app.services.trading.backtest_queue_worker import (
+        DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS,
+        QUEUE_PATTERN_WALLTIME_SECONDS_ENV,
+        queue_pattern_walltime_seconds,
+    )
+
+    monkeypatch.setenv(
+        QUEUE_PATTERN_WALLTIME_SECONDS_ENV,
+        str(DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS),
+    )
+
+    assert queue_pattern_walltime_seconds() == DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS
+
+
+def test_run_one_pattern_job_keeps_db_child_env_and_delegates(monkeypatch):
+    from app.services.trading import backtest_queue_worker as worker
+
+    monkeypatch.delenv("DATABASE_POOL_SIZE", raising=False)
+    monkeypatch.delenv("DATABASE_MAX_OVERFLOW", raising=False)
+    monkeypatch.setenv(
+        worker.QUEUE_PATTERN_WALLTIME_SECONDS_ENV,
+        str(worker.DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS),
+    )
+    monkeypatch.setattr(
+        worker,
+        "execute_queue_backtest_for_pattern",
+        lambda pattern_id, user_id: (_TEST_BACKTESTS_RUN, _TEST_PATTERNS_PROCESSED),
+    )
+
+    assert worker.run_one_pattern_job(_TEST_PATTERN_ID, _TEST_USER_ID) == (
+        _TEST_BACKTESTS_RUN,
+        _TEST_PATTERNS_PROCESSED,
+    )
+    assert os.environ.get("DATABASE_POOL_SIZE") == "1"
+    assert os.environ.get("DATABASE_MAX_OVERFLOW") == "2"
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"),
+    reason="SIGALRM walltime guard is Unix-only",
+)
+def test_queue_pattern_walltime_guard_interrupts_runaway_child():
+    from app.services.trading.backtest_queue_worker import (
+        QueuePatternWalltimeExceeded,
+        _queue_pattern_walltime_guard,
+    )
+
+    with pytest.raises(QueuePatternWalltimeExceeded):
+        with _queue_pattern_walltime_guard(_TEST_PATTERN_ID, _TEST_WALLTIME_SECONDS):
+            time.sleep(_TEST_SLEEP_SECONDS)
 
 
 def test_bt_workers_uses_cap_in_mp_child(monkeypatch):
