@@ -13,6 +13,10 @@ INACTIVE_HESS_TICKER = "HES"
 ACTIVE_CONTROL_TICKER = "AAPL"
 COMPACT_PREFERRED_TICKERS = ["BACPM", "COFPJ", "ARESPB"]
 COMMON_INTERNAL_P_TICKER = "APPS"
+WARRANT_TICKERS = ["LVWR.WS", "BKSY.WS", "TE.WS", "NPWR.WS"]
+LISTED_UNIT_TICKER = "SPAC.U"
+LISTED_RIGHT_TICKER = "SPAC.R"
+CLASS_SHARE_CONTROL_TICKER = "BRK.B"
 
 
 def test_equity_symbol_hygiene_aliases_renames_and_drops_inactive() -> None:
@@ -26,6 +30,12 @@ def test_equity_symbol_hygiene_drops_compact_preferred_symbols() -> None:
     for ticker in COMPACT_PREFERRED_TICKERS:
         assert normalize_equity_symbol(ticker) == ""
     assert normalize_equity_symbol(COMMON_INTERNAL_P_TICKER) == COMMON_INTERNAL_P_TICKER
+
+
+def test_equity_symbol_hygiene_drops_warrants_units_and_rights() -> None:
+    for ticker in [*WARRANT_TICKERS, LISTED_UNIT_TICKER, LISTED_RIGHT_TICKER]:
+        assert normalize_equity_symbol(ticker) == ""
+    assert normalize_equity_symbol(CLASS_SHARE_CONTROL_TICKER) == CLASS_SHARE_CONTROL_TICKER
 
 
 def test_prescreen_normalization_uses_equity_symbol_hygiene() -> None:
@@ -68,6 +78,7 @@ def test_ticker_universe_filters_stale_cache_entries(monkeypatch) -> None:
             {"ticker": INACTIVE_DISCOVER_TICKER},
             {"ticker": INACTIVE_HESS_TICKER},
             {"ticker": COMPACT_PREFERRED_TICKERS[1]},
+            {"ticker": WARRANT_TICKERS[0]},
             {"ticker": ACTIVE_CONTROL_TICKER},
         ],
     )

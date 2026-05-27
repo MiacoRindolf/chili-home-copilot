@@ -20,6 +20,20 @@ _INACTIVE_EQUITY_SYMBOLS = frozenset({
 })
 
 _COMPACT_PREFERRED_SYMBOL_RE = re.compile(r"^[A-Z]{3,5}P[A-Z]$")
+_UNSUPPORTED_LISTED_EQUITY_SUFFIXES = (
+    ".WS",
+    ".W",
+    ".WT",
+    ".WTS",
+    ".U",
+    ".R",
+    "-WS",
+    "-W",
+    "-WT",
+    "-WTS",
+    "-U",
+    "-R",
+)
 _TICKER_DECORATION_PREFIXES = ("$",)
 
 
@@ -33,7 +47,10 @@ def strip_ticker_decoration(symbol: object) -> str:
 
 def _is_unsupported_common_stock_symbol(symbol: str) -> bool:
     """Return True for non-common equity forms scanners should not trade."""
-    return bool(_COMPACT_PREFERRED_SYMBOL_RE.fullmatch(symbol))
+    return (
+        bool(_COMPACT_PREFERRED_SYMBOL_RE.fullmatch(symbol))
+        or symbol.endswith(_UNSUPPORTED_LISTED_EQUITY_SUFFIXES)
+    )
 
 
 def normalize_equity_symbol(symbol: str) -> str:
