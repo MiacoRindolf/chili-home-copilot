@@ -117,7 +117,7 @@ def _finalize_ohlcv_df(df: pd.DataFrame, *, ticker: str, interval: str, provider
         # Round-21 FIX (2026-04-30): pass ticker so clean_ohlcv can skip
         # zero-volume rejection for index series (^VIX, ^GSPC, I:VIX).
         out = clean_ohlcv(out, symbol=ticker)
-        integrity = validate_ohlcv_integrity(out)
+        integrity = validate_ohlcv_integrity(out, symbol=ticker, interval=interval)
         if not integrity.get("clean", False):
             _log_ohlcv_integrity_failure(
                 ticker=ticker,

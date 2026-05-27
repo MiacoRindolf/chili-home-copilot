@@ -12,9 +12,44 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+_SPLIT_RATIO_TOLERANCE = 0.06
+_COMMON_SPLIT_RATIOS = (
+    0.10,
+    0.125,
+    0.20,
+    0.25,
+    0.50,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    8.0,
+    10.0,
+)
+
+
+def _is_crypto_symbol(symbol: str | None) -> bool:
+    return str(symbol or "").strip().upper().endswith("-USD")
+
+
+def _split_detection_interval_allowed(interval: str | None) -> bool:
+    if not interval:
+        return True
+    s = str(interval).strip().lower()
+    return s in {"1d", "d", "day", "daily", "1wk", "1w", "wk", "week", "weekly"}
+
+
+def _looks_like_common_split_ratio(ratio: float) -> bool:
+    if ratio <= 0:
+        return False
+    for target in _COMMON_SPLIT_RATIOS:
+        if abs(ratio - target) / target <= _SPLIT_RATIO_TOLERANCE:
+            return True
+    return False
+
 
 def detect_stock_split(df: pd.DataFrame, threshold: float = 0.45) -> list[dict[str, Any]]:
-    """Detect probable stock splits where close changes by >threshold in one bar.
+    """Detect unadjusted stock splits without blocking ordinary large gaps.
 
     Returns list of {index, ratio, close_before, close_after} for flagged bars.
     """
@@ -25,7 +60,10 @@ def detect_stock_split(df: pd.DataFrame, threshold: float = 0.45) -> list[dict[s
     splits = []
     for i in range(1, len(pct)):
         if pct.iloc[i] >= threshold:
-            ratio = round(close.iloc[i] / close.iloc[i - 1], 3)
+            raw_ratio = float(close.iloc[i] / close.iloc[i - 1])
+            ratio = round(raw_ratio, 3)
+            if not _looks_like_common_split_ratio(raw_ratio):
+                continue
             splits.append({
                 "index": i,
                 "date": str(df.index[i])[:10] if hasattr(df.index[i], "strftime") else str(i),
@@ -101,7 +139,12 @@ def filter_zero_volume(df: pd.DataFrame, *, symbol: str | None = None) -> pd.Dat
     return df
 
 
-def validate_ohlcv_integrity(df: pd.DataFrame) -> dict[str, Any]:
+def validate_ohlcv_integrity(
+    df: pd.DataFrame,
+    *,
+    symbol: str | None = None,
+    interval: str | None = None,
+) -> dict[str, Any]:
     """Check OHLCV data for common issues. Returns a report dict."""
     report: dict[str, Any] = {
         "bars": len(df),
@@ -133,7 +176,12 @@ def validate_ohlcv_integrity(df: pd.DataFrame) -> dict[str, Any]:
     if neg_vol > 0:
         report["issues"].append(f"negative_volume_{neg_vol}")
 
-    splits = detect_stock_split(df)
+    splits = []
+    if (
+        not _is_crypto_symbol(symbol)
+        and _split_detection_interval_allowed(interval)
+    ):
+        splits = detect_stock_split(df)
     if splits:
         report["issues"].append(f"probable_splits_{len(splits)}")
         report["splits"] = splits
