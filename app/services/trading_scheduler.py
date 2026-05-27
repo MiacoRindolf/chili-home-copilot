@@ -30,6 +30,78 @@ _lock = threading.Lock()
 _VIABILITY_BRIDGE_MAX_TICKERS = 30
 
 
+def _record_batch_job_failure_resilient(
+    db,
+    *,
+    session_factory: Callable[[], object],
+    finish_fn: Callable[..., None],
+    job_id: str,
+    error: BaseException | str,
+    log_label: str,
+) -> str:
+    """Record batch-job failure after a job may have poisoned its DB session.
+
+    Long scanner jobs can lose their Postgres socket mid-transaction. SQLAlchemy
+    then requires a rollback before any reconnect attempt; if that primary
+    session cannot recover, use a fresh session so ops still gets a failure row.
+    """
+    err_text = str(error)[:2000]
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "[scheduler] %s primary rollback before failure record failed",
+            log_label,
+            exc_info=True,
+        )
+
+    try:
+        finish_fn(db, job_id, ok=False, error=err_text)
+        db.commit()
+        return "primary_session"
+    except Exception:
+        logger.exception(
+            "[scheduler] Failed to record %s batch job failure on primary session",
+            log_label,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug(
+                "[scheduler] %s primary rollback after failure-record miss failed",
+                log_label,
+                exc_info=True,
+            )
+
+    fallback_db = None
+    try:
+        fallback_db = session_factory()
+        finish_fn(fallback_db, job_id, ok=False, error=err_text)
+        fallback_db.commit()
+        return "fresh_session"
+    except Exception:
+        logger.exception(
+            "[scheduler] Failed to record %s batch job failure on fresh session",
+            log_label,
+        )
+        if fallback_db is not None:
+            try:
+                fallback_db.rollback()
+            except Exception:
+                logger.debug(
+                    "[scheduler] %s fresh-session rollback failed",
+                    log_label,
+                    exc_info=True,
+                )
+        return "failed"
+    finally:
+        if fallback_db is not None:
+            try:
+                fallback_db.close()
+            except Exception:
+                pass
+
+
 def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
     """Run a scheduler callback with structured logs + brain_batch_jobs row;
     swallow exceptions after logging.
@@ -193,14 +265,27 @@ def _run_daily_market_scan_job():
             db.commit()
             logger.info("[scheduler] Daily market scan done: %s scored", len(results))
         except Exception as e:
-            logger.error("[scheduler] Daily market scan failed: %s", e)
-            try:
-                brain_batch_job_finish(db, job_id, ok=False, error=str(e))
-                db.commit()
-            except Exception:
-                logger.exception("[scheduler] Failed to record daily_market_scan batch job failure")
+            logger.exception("[scheduler] Daily market scan failed")
+            record_mode = _record_batch_job_failure_resilient(
+                db,
+                session_factory=SessionLocal,
+                finish_fn=brain_batch_job_finish,
+                job_id=job_id,
+                error=e,
+                log_label="daily_market_scan",
+            )
+            logger.info(
+                "[scheduler] Daily market scan failure record mode=%s job_id=%s",
+                record_mode,
+                job_id,
+            )
+            raise
         finally:
             clear_scanner_caches()
+            try:
+                db.rollback()
+            except Exception:
+                pass
             db.close()
 
     run_scheduler_job_guarded("daily_market_scan", _work)
