@@ -20,6 +20,7 @@ import os
 import random
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -380,6 +381,21 @@ def _bt_workers() -> int:
     return base
 
 
+def _positive_runtime_seconds(value: float | int | str | None) -> float | None:
+    """Normalize an optional runtime budget; non-positive means unbounded."""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _runtime_budget_elapsed(started: float, runtime_seconds: float | None) -> bool:
+    return runtime_seconds is not None and (time.monotonic() - started) >= runtime_seconds
 
 
 # ---------------------------------------------------------------------------
@@ -982,6 +998,7 @@ def smart_backtest_insight(
     target_tickers: int = 40,
     update_confidence: bool = True,
     priority_tickers: list[str] | None = None,
+    max_runtime_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Run diversified backtests for a single TradingInsight.
 
@@ -993,6 +1010,10 @@ def smart_backtest_insight(
     ScanPattern's ``timeframe`` field (intraday patterns use shorter
     candles and lookback periods).
 
+    ``max_runtime_seconds`` is a soft budget used by the queue worker. It
+    stops scheduling new ticker waves after the budget, persists finished
+    evidence, and leaves the hard process walltime guard as a final failsafe.
+
     Returns ``{"wins": int, "losses": int, "total": int, "backtests_run": int}``.
     """
     from ..backtest_service import (
@@ -1001,6 +1022,9 @@ def smart_backtest_insight(
     )
 
     shutdown = _get_shutdown_event()
+    started = time.monotonic()
+    runtime_budget = _positive_runtime_seconds(max_runtime_seconds)
+    runtime_budget_hit = False
     desc = insight.pattern_description or ""
     ctx = _extract_context(desc, db=db, insight_id=insight.id)
 
@@ -1073,6 +1097,7 @@ def smart_backtest_insight(
     bt_period = period or bt_params["period"]
 
     jobs_count = len(tickers)
+    attempted_count = 0
 
     from ...config import settings as _bt_settings
     _oos_frac = float(
@@ -1110,56 +1135,80 @@ def smart_backtest_insight(
     wins, losses, total = 0, 0, 0
     persisted_results = 0
 
-    with ThreadPoolExecutor(max_workers=_bt_workers()) as pool:
-        futures = {pool.submit(_run_one_pattern, ticker): ticker for ticker in tickers}
+    worker_count = max(1, _bt_workers())
+    wave_size = worker_count if runtime_budget is not None else max(1, len(tickers))
+    for start_idx in range(0, len(tickers), wave_size):
+        if shutdown.is_set():
+            break
+        if _runtime_budget_elapsed(started, runtime_budget):
+            runtime_budget_hit = True
+            break
+        wave = tickers[start_idx:start_idx + wave_size]
+        attempted_count += len(wave)
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = {pool.submit(_run_one_pattern, ticker): ticker for ticker in wave}
 
-        for future in as_completed(futures):
-            ticker = futures[future]
-            try:
-                result = future.result()
-            except Exception:
-                logger.debug(
-                    "[backtest_engine] ticker backtest failed ticker=%s",
-                    ticker,
-                    exc_info=True,
-                )
-                continue
-            if result is None:
-                continue
-            try:
-                save_backtest(
-                    db,
-                    insight.user_id,
-                    result,
-                    insight_id=insight.id,
-                    scan_pattern_id=linked_scan_pattern_id,
-                )
-            except Exception:
+            for future in as_completed(futures):
+                ticker = futures[future]
                 try:
-                    db.rollback()
+                    result = future.result()
                 except Exception:
-                    pass
-                continue
-            persisted_results += 1
-            if (
-                persisted_results % _SMART_BACKTEST_PROGRESS_LOG_INTERVAL_RESULTS == 0
-                or persisted_results == jobs_count
-            ):
-                logger.info(
-                    "[backtest_engine] Persisted %d/%d ticker backtests for "
-                    "insight=%s scan_pattern_id=%s",
-                    persisted_results,
-                    jobs_count,
-                    getattr(insight, "id", None),
-                    linked_scan_pattern_id,
-                )
-            trade_count = result.get("trade_count", 0)
-            if trade_count > 0:
-                total += 1
-                if result.get("return_pct", 0) > 0:
-                    wins += 1
-                else:
-                    losses += 1
+                    logger.debug(
+                        "[backtest_engine] ticker backtest failed ticker=%s",
+                        ticker,
+                        exc_info=True,
+                    )
+                    continue
+                if result is None:
+                    continue
+                try:
+                    save_backtest(
+                        db,
+                        insight.user_id,
+                        result,
+                        insight_id=insight.id,
+                        scan_pattern_id=linked_scan_pattern_id,
+                    )
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    continue
+                persisted_results += 1
+                denominator = attempted_count if runtime_budget is not None else jobs_count
+                if (
+                    persisted_results % _SMART_BACKTEST_PROGRESS_LOG_INTERVAL_RESULTS == 0
+                    or persisted_results == denominator
+                ):
+                    logger.info(
+                        "[backtest_engine] Persisted %d/%d ticker backtests for "
+                        "insight=%s scan_pattern_id=%s",
+                        persisted_results,
+                        denominator,
+                        getattr(insight, "id", None),
+                        linked_scan_pattern_id,
+                    )
+                trade_count = result.get("trade_count", 0)
+                if trade_count > 0:
+                    total += 1
+                    if result.get("return_pct", 0) > 0:
+                        wins += 1
+                    else:
+                        losses += 1
+
+    if jobs_count > attempted_count and _runtime_budget_elapsed(started, runtime_budget):
+        runtime_budget_hit = True
+        logger.warning(
+            "[backtest_engine] Smart BT soft runtime budget hit insight=%s "
+            "scan_pattern_id=%s attempted=%s selected=%s budget_s=%.1f elapsed_s=%.1f",
+            getattr(insight, "id", None),
+            linked_scan_pattern_id,
+            attempted_count,
+            jobs_count,
+            runtime_budget or 0.0,
+            time.monotonic() - started,
+        )
 
     if total > 0:
         # Deduped trade-weighted tallies — same definition as Brain / evidence panel.
@@ -1196,7 +1245,7 @@ def smart_backtest_insight(
             )
 
         db.commit()
-    elif jobs_count > 0:
+    elif attempted_count > 0 and not runtime_budget_hit:
         try:
             from ..backtest_service import generate_strategy_name as _gsn
             display_name = pattern_name or _gsn(conditions)
@@ -1206,7 +1255,7 @@ def smart_backtest_insight(
                 event_type="review",
                 description=(
                     f"Pattern \"{display_name}\" produced 0 trades across "
-                    f"{len(tickers)} tickers over {period}. Conditions may be "
+                    f"{attempted_count} tickers over {period}. Conditions may be "
                     f"too restrictive — consider relaxing "
                     f"thresholds or testing on lower timeframes."
                 ),
@@ -1219,12 +1268,14 @@ def smart_backtest_insight(
             logger.warning(
                 "[backtest_engine] 0 trades for '%s' across %d tickers — "
                 "logged LearningEvent",
-                display_name, len(tickers),
+                display_name, attempted_count,
             )
         except Exception:
             logger.exception("[backtest_engine] Failed to log zero-trade event")
 
     return {
         "wins": wins, "losses": losses, "total": total,
-        "backtests_run": jobs_count,
+        "backtests_run": attempted_count,
+        "tickers_selected": jobs_count,
+        "soft_deadline_hit": runtime_budget_hit,
     }

@@ -58,6 +58,30 @@ def test_queue_pattern_walltime_allows_explicit_zero_override(monkeypatch):
     assert queue_pattern_walltime_seconds() == DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS
 
 
+def test_queue_pattern_soft_runtime_uses_fraction_env(monkeypatch):
+    from app.services.trading.backtest_queue_worker import (
+        QUEUE_PATTERN_SOFT_DEADLINE_FRACTION_ENV,
+        QUEUE_PATTERN_WALLTIME_SECONDS_ENV,
+        queue_pattern_soft_runtime_seconds,
+    )
+
+    monkeypatch.setenv(QUEUE_PATTERN_WALLTIME_SECONDS_ENV, "100")
+    monkeypatch.setenv(QUEUE_PATTERN_SOFT_DEADLINE_FRACTION_ENV, "0.25")
+
+    assert queue_pattern_soft_runtime_seconds() == 25.0
+
+
+def test_queue_pattern_soft_runtime_disabled_when_walltime_zero(monkeypatch):
+    from app.services.trading.backtest_queue_worker import (
+        QUEUE_PATTERN_WALLTIME_SECONDS_ENV,
+        queue_pattern_soft_runtime_seconds,
+    )
+
+    monkeypatch.setenv(QUEUE_PATTERN_WALLTIME_SECONDS_ENV, "0")
+
+    assert queue_pattern_soft_runtime_seconds() is None
+
+
 def test_run_one_pattern_job_keeps_db_child_env_and_delegates(monkeypatch):
     from app.services.trading import backtest_queue_worker as worker
 

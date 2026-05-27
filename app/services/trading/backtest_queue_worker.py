@@ -30,7 +30,11 @@ PRESCREEN_FULL_TIER_PRIORITY_FLOOR = 50
 STORED_REFRESH_STALE_TRADE_CAP_FALLBACK = 2
 STORED_REFRESH_STALE_DAYS_FALLBACK = 14
 QUEUE_PATTERN_WALLTIME_SECONDS_ENV = "CHILI_BACKTEST_QUEUE_PATTERN_WALLTIME_SECONDS"
+QUEUE_PATTERN_SOFT_DEADLINE_FRACTION_ENV = (
+    "CHILI_BACKTEST_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION"
+)
 DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS = 900.0
+DEFAULT_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION = 0.85
 DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS = 0.0
 
 
@@ -52,6 +56,14 @@ def _non_negative_float(value: object, fallback: float) -> float:
     except (TypeError, ValueError):
         parsed = float(fallback)
     return max(DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS, parsed)
+
+
+def _bounded_fraction(value: object, fallback: float) -> float:
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        parsed = float(fallback)
+    return max(0.10, min(0.98, parsed))
 
 
 def queue_pattern_walltime_seconds(
@@ -76,6 +88,38 @@ def queue_pattern_walltime_seconds(
         ),
         DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS,
     )
+
+
+def queue_pattern_soft_runtime_seconds(
+    settings_obj: object | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> float | None:
+    """Soft queue budget passed into smart backtests before the hard kill."""
+    hard_seconds = queue_pattern_walltime_seconds(settings_obj=settings_obj, environ=environ)
+    if hard_seconds <= DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS:
+        return None
+    env = environ if environ is not None else os.environ
+    raw_env = env.get(QUEUE_PATTERN_SOFT_DEADLINE_FRACTION_ENV)
+    if raw_env is not None and str(raw_env).strip():
+        fraction = _bounded_fraction(
+            raw_env,
+            DEFAULT_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION,
+        )
+    else:
+        if settings_obj is None:
+            try:
+                from ...config import settings as settings_obj
+            except Exception:
+                settings_obj = None
+        fraction = _bounded_fraction(
+            getattr(
+                settings_obj,
+                "brain_queue_pattern_soft_deadline_fraction",
+                DEFAULT_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION,
+            ),
+            DEFAULT_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION,
+        )
+    return hard_seconds * fraction
 
 
 @contextmanager
@@ -320,6 +364,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 target_tickers,
                 stored_refresh_max_tickers,
             )
+        soft_runtime_seconds = queue_pattern_soft_runtime_seconds(settings)
 
         prio: list[str] = []
         if getattr(settings, "brain_queue_priority_stored_refresh", True):
@@ -374,6 +419,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 update_confidence=True,
                 period=getattr(settings, "brain_queue_prescreen_period", "3mo"),
                 priority_tickers=prio if prio else None,
+                max_runtime_seconds=soft_runtime_seconds,
             )
             total = result.get("total", 0)
             wins = result.get("wins", 0)
@@ -464,6 +510,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             logger.info(
                 "[backtest_queue] pattern_done pattern_id=%s tier=prescreen "
                 "target_tickers=%s priority_tickers=%s backtests_run=%s "
+                "selected_tickers=%s soft_deadline_hit=%s "
                 "trade_bearing_tickers=%s wins=%s elapsed_s=%.2f",
                 pattern.id,
                 max(
@@ -478,6 +525,8 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 ),
                 len(prio),
                 backtests_run,
+                result.get("tickers_selected"),
+                bool(result.get("soft_deadline_hit")),
                 total,
                 wins,
                 time.monotonic() - pattern_started,
@@ -490,6 +539,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             target_tickers=target_tickers,
             update_confidence=True,
             priority_tickers=prio if prio else None,
+            max_runtime_seconds=soft_runtime_seconds,
         )
         total = result.get("total", 0)
         wins = result.get("wins", 0)
@@ -547,11 +597,14 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         logger.info(
             "[backtest_queue] pattern_done pattern_id=%s tier=full "
             "target_tickers=%s priority_tickers=%s backtests_run=%s "
+            "selected_tickers=%s soft_deadline_hit=%s "
             "trade_bearing_tickers=%s wins=%s elapsed_s=%.2f",
             pattern.id,
             target_tickers,
             len(prio),
             backtests_run,
+            result.get("tickers_selected"),
+            bool(result.get("soft_deadline_hit")),
             total,
             wins,
             time.monotonic() - pattern_started,
