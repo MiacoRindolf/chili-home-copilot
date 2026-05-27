@@ -74,6 +74,7 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_autotrader_synergy_enabled=False,
         chili_autotrader_synergy_scale_notional_usd=0.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_paper_shadow_reject_lightweight_sizing_enabled=True,
         chili_feature_parity_enabled=False,
         chili_autotrader_live_require_feature_parity=False,
         chili_autotrader_live_require_venue_health_enabled=False,

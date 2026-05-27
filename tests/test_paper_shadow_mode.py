@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -46,6 +47,20 @@ from app.services.trading.paper_trading import prune_autotrader_paper_shadow_cap
 
 REPO = Path(__file__).resolve().parent.parent
 TEST_SHADOW_QUANTITY = 1
+TEST_REJECT_SHADOW_LIGHTWEIGHT_ALERT_ID = 101
+TEST_REJECT_SHADOW_RISK_ALERT_ID = 102
+TEST_REJECT_SHADOW_LIGHTWEIGHT_PATTERN_ID = 202
+TEST_REJECT_SHADOW_RISK_PATTERN_ID = 203
+TEST_REJECT_SHADOW_LIGHTWEIGHT_NOTIONAL = 120.0
+TEST_REJECT_SHADOW_LIGHTWEIGHT_PRICE = 10.0
+TEST_REJECT_SHADOW_LIGHTWEIGHT_QTY = (
+    TEST_REJECT_SHADOW_LIGHTWEIGHT_NOTIONAL / TEST_REJECT_SHADOW_LIGHTWEIGHT_PRICE
+)
+TEST_REJECT_SHADOW_RISK_NOTIONAL = 50.0
+TEST_REJECT_SHADOW_RISK_PRICE = 25.0
+TEST_REJECT_SHADOW_RISK_QTY = (
+    TEST_REJECT_SHADOW_RISK_NOTIONAL / TEST_REJECT_SHADOW_RISK_PRICE
+)
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +137,117 @@ def test_reject_shadow_decision_map():
         "max_concurrent_crypto"
     ) == "blocked_max_concurrent_crypto"
     assert at_mod._qualified_reject_shadow_decision("no_quote") is None
+
+
+def test_reject_shadow_uses_lightweight_sizing_without_broker_lookup(monkeypatch):
+    alert = SimpleNamespace(
+        id=TEST_REJECT_SHADOW_LIGHTWEIGHT_ALERT_ID,
+        ticker="EDGE-USD",
+        scan_pattern_id=TEST_REJECT_SHADOW_LIGHTWEIGHT_PATTERN_ID,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_lightweight_sizing_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_entry_risk_notional",
+        lambda *a, **k: pytest.fail("reject shadow should avoid broker-risk sizing"),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_shadow_observation_lightweight_notional",
+        lambda: (
+            TEST_REJECT_SHADOW_LIGHTWEIGHT_NOTIONAL,
+            {
+                "notional_source": "test_lightweight",
+                "notional_broker_lookup_skipped": True,
+            },
+        ),
+    )
+
+    from app.services.trading import tick_normalizer
+
+    monkeypatch.setattr(tick_normalizer, "normalize_quantity", lambda qty, _ticker: qty)
+    opened: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *a, **k: opened.append(k),
+    )
+
+    _maybe_open_reject_paper_shadow(
+        object(),
+        uid=1,
+        alert=alert,
+        px=TEST_REJECT_SHADOW_LIGHTWEIGHT_PRICE,
+        snap={},
+        reason="non_positive_expected_edge",
+    )
+
+    assert len(opened) == 1
+    assert opened[0]["qty"] == TEST_REJECT_SHADOW_LIGHTWEIGHT_QTY
+    assert opened[0]["decision"] == "skipped_non_positive_expected_edge"
+    assert opened[0]["snap"]["paper_shadow_qty_source"] == (
+        at_mod.PAPER_SHADOW_REJECT_QTY_SOURCE_LIGHTWEIGHT
+    )
+    assert opened[0]["snap"]["paper_shadow_notional_broker_lookup_skipped"] is True
+
+
+def test_reject_shadow_full_risk_sizing_requires_explicit_opt_out(monkeypatch):
+    alert = SimpleNamespace(
+        id=TEST_REJECT_SHADOW_RISK_ALERT_ID,
+        ticker="EDGE-USD",
+        scan_pattern_id=TEST_REJECT_SHADOW_RISK_PATTERN_ID,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_lightweight_sizing_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_shadow_observation_lightweight_notional",
+        lambda: pytest.fail("explicit full-risk mode should skip lightweight sizing"),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_entry_risk_notional",
+        lambda *a, **k: (
+            TEST_REJECT_SHADOW_RISK_NOTIONAL,
+            {
+                "notional_source": "test_risk",
+                "notional_broker_lookup_skipped": False,
+            },
+        ),
+    )
+
+    from app.services.trading import tick_normalizer
+
+    monkeypatch.setattr(tick_normalizer, "normalize_quantity", lambda qty, _ticker: qty)
+    opened: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *a, **k: opened.append(k),
+    )
+
+    _maybe_open_reject_paper_shadow(
+        object(),
+        uid=1,
+        alert=alert,
+        px=TEST_REJECT_SHADOW_RISK_PRICE,
+        snap={},
+        reason="non_positive_expected_edge",
+    )
+
+    assert len(opened) == 1
+    assert opened[0]["qty"] == TEST_REJECT_SHADOW_RISK_QTY
+    assert opened[0]["snap"]["paper_shadow_qty_source"] == (
+        at_mod.PAPER_SHADOW_REJECT_QTY_SOURCE_RISK_NOTIONAL
+    )
+    assert opened[0]["snap"]["paper_shadow_notional_source"] == "test_risk"
 
 
 def test_hard_recert_signal_lane_requests_shadow_observation() -> None:

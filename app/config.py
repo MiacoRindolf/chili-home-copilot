@@ -117,6 +117,7 @@ AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_BUFFER = 100
 AUTOTRADER_PAPER_DYNAMIC_DEFAULT_MONITOR_COOLDOWN_MINUTES = 5
 AUTOTRADER_PAPER_DYNAMIC_MAX_MONITOR_COOLDOWN_MINUTES = 240
 AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN = True
+AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_LIGHTWEIGHT_SIZING_ENABLED = True
 AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY = True
 AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
@@ -2432,6 +2433,17 @@ class Settings(BaseSettings):
         default=AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_PAPER_SHADOW_REJECT_ALLOW_DUPLICATE_OPEN"
+        ),
+    )
+    chili_autotrader_paper_shadow_reject_lightweight_sizing_enabled: bool = Field(
+        default=AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_LIGHTWEIGHT_SIZING_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PAPER_SHADOW_REJECT_LIGHTWEIGHT_SIZING_ENABLED"
+        ),
+        description=(
+            "Use broker-free lightweight sizing for learning-only paper shadows "
+            "created from live rejects. Disable only when reject observations "
+            "must mirror full entry risk sizing."
         ),
     )
     chili_autotrader_paper_shadow_dedupe_same_alert_reason_family: bool = Field(

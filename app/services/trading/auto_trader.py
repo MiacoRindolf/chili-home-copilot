@@ -31,6 +31,7 @@ from ...config import (
     AUTOTRADER_PAPER_SHADOW_MAX_JANITOR_MAX_AGE_HOURS,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
+    AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_LIGHTWEIGHT_SIZING_ENABLED,
     AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
     PATTERN_IMMINENT_EQUITY_SESSION_SHADOW_SIGNAL_LANE,
     PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE,
@@ -125,6 +126,9 @@ PAPER_SHADOW_DUPLICATE_SKIP_REASON_SAME_ALERT_FAMILY = (
 PAPER_SHADOW_DUPLICATE_SKIP_REASON_RECENT_CANDIDATE_FAMILY = (
     "duplicate_recent_candidate_reason_family"
 )
+PAPER_SHADOW_REJECT_QTY_SOURCE_EXISTING_LIVE_POSITION = "existing_live_position"
+PAPER_SHADOW_REJECT_QTY_SOURCE_LIGHTWEIGHT = "lightweight_notional"
+PAPER_SHADOW_REJECT_QTY_SOURCE_RISK_NOTIONAL = "risk_notional"
 PAPER_SHADOW_REASON_FAMILY_SYNERGY_NOT_APPLICABLE = "synergy_not_applicable"
 PAPER_SHADOW_REASON_FAMILY_PREFIXES = ("skipped_", "blocked_")
 PAPER_SHADOW_REASON_FAMILY_SNAPSHOT_KEYS = (
@@ -1448,12 +1452,27 @@ def _maybe_open_reject_paper_shadow(
     if existing_qty is not None:
         try:
             qty = float(existing_qty or 0.0)
-            shadow_snap["paper_shadow_qty_source"] = "existing_live_position"
+            shadow_snap["paper_shadow_qty_source"] = (
+                PAPER_SHADOW_REJECT_QTY_SOURCE_EXISTING_LIVE_POSITION
+            )
         except (TypeError, ValueError):
             qty = 0.0
     if qty <= 0.0:
         try:
-            notional, notional_snap = _resolve_entry_risk_notional(db, uid=uid)
+            if bool(
+                getattr(
+                    settings,
+                    "chili_autotrader_paper_shadow_reject_lightweight_sizing_enabled",
+                    AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_LIGHTWEIGHT_SIZING_ENABLED,
+                )
+            ):
+                notional, notional_snap = (
+                    _resolve_shadow_observation_lightweight_notional()
+                )
+                qty_source = PAPER_SHADOW_REJECT_QTY_SOURCE_LIGHTWEIGHT
+            else:
+                notional, notional_snap = _resolve_entry_risk_notional(db, uid=uid)
+                qty_source = PAPER_SHADOW_REJECT_QTY_SOURCE_RISK_NOTIONAL
             shadow_snap.update({
                 f"paper_shadow_{k}": v
                 for k, v in (notional_snap or {}).items()
@@ -1462,7 +1481,7 @@ def _maybe_open_reject_paper_shadow(
                 from .tick_normalizer import normalize_quantity
 
                 qty = float(normalize_quantity(float(notional) / px_f, alert.ticker))
-                shadow_snap["paper_shadow_qty_source"] = "risk_notional"
+                shadow_snap["paper_shadow_qty_source"] = qty_source
         except Exception:
             logger.debug(
                 "[autotrader_paper_shadow] reject qty resolve failed "
