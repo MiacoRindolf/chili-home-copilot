@@ -93,6 +93,14 @@ CHANNEL_ALERT_INSERTED = "fp_alert_inserted"
 CHANNEL_EXIT_INSERTED = "fp_exit_inserted"
 CHANNEL_BOOK_INSERTED = "fp_book_inserted"
 
+DECAY_TABLE_DEFAULT = "fast_signal_decay"
+DECAY_TABLE_MAKER_FILLED = "fast_signal_decay_maker_filled"
+_REALIZED_VALIDATION_TABLES = {
+    DECAY_TABLE_DEFAULT: "last_updated",
+    DECAY_TABLE_MAKER_FILLED: "updated_at",
+}
+_MAKER_FILLED_OUTCOMES = ("filled", "partial")
+
 
 def score_bucket(score: float) -> str:
     """Map a raw [0,1]-ish signal_score into the canonical bucket."""
@@ -572,7 +580,14 @@ class FastPathDecayMiner:
         # the duplicates are functionally identical (same source bar).
         with self._engine.begin() as conn:
             alert_row = conn.execute(text("""
-                SELECT a.ticker, a.alert_type, a.signal_score
+                SELECT a.ticker, a.alert_type, a.signal_score,
+                       EXISTS (
+                           SELECT 1
+                             FROM fast_path_maker_attempts m
+                            WHERE m.alert_id = a.id
+                              AND m.fill_outcome = ANY(:maker_filled_outcomes)
+                              AND m.filled_at IS NOT NULL
+                       ) AS maker_filled_entry
                 FROM fast_executions e
                 JOIN fast_alerts a
                   ON a.ticker = e.ticker
@@ -581,7 +596,10 @@ class FastPathDecayMiner:
                 WHERE e.id = :eid
                 ORDER BY a.id DESC
                 LIMIT 1
-            """), {"eid": entry_execution_id}).mappings().first()
+            """), {
+                "eid": entry_execution_id,
+                "maker_filled_outcomes": list(_MAKER_FILLED_OUTCOMES),
+            }).mappings().first()
         if alert_row is None:
             return  # entry wasn't from a tracked alert (e.g. inherited)
 
@@ -609,13 +627,45 @@ class FastPathDecayMiner:
         # sample_count=0 and realized_validation_count>0; downstream
         # consumers that read mean_return must already gate on
         # sample_count>0 (verified pre-merge via grep).
+        self._record_realized_validation(
+            table=DECAY_TABLE_DEFAULT,
+            realized_return_frac=realized_return_frac,
+            ticker=ticker,
+            alert_type=alert_type,
+            score_bucket_value=bucket,
+            horizon_s=int(horizon_chosen),
+        )
+        if bool(alert_row.get("maker_filled_entry")):
+            self._record_realized_validation(
+                table=DECAY_TABLE_MAKER_FILLED,
+                realized_return_frac=realized_return_frac,
+                ticker=ticker,
+                alert_type=alert_type,
+                score_bucket_value=bucket,
+                horizon_s=int(horizon_chosen),
+            )
+        self._metrics.validations_recorded += 1
+
+    def _record_realized_validation(
+        self,
+        *,
+        table: str,
+        realized_return_frac: float,
+        ticker: str,
+        alert_type: str,
+        score_bucket_value: str,
+        horizon_s: int,
+    ) -> None:
+        timestamp_column = _REALIZED_VALIDATION_TABLES.get(table)
+        if timestamp_column is None:
+            raise ValueError(f"unsupported decay validation table: {table!r}")
         with self._engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO fast_signal_decay (
+            conn.execute(text(f"""
+                INSERT INTO {table} (
                     ticker, alert_type, score_bucket, horizon_s,
                     sample_count, mean_return, m2_return,
                     realized_validation_count, realized_validation_residual,
-                    last_updated
+                    {timestamp_column}
                 )
                 VALUES (
                     :t, :at, :sb, :h,
@@ -626,19 +676,18 @@ class FastPathDecayMiner:
                 ON CONFLICT (ticker, alert_type, score_bucket, horizon_s)
                 DO UPDATE SET
                     realized_validation_count =
-                        fast_signal_decay.realized_validation_count + 1,
+                        {table}.realized_validation_count + 1,
                     realized_validation_residual =
-                        fast_signal_decay.realized_validation_residual
-                        + (ABS(:realized - fast_signal_decay.mean_return)
-                           - fast_signal_decay.realized_validation_residual)
-                          / (fast_signal_decay.realized_validation_count + 1),
-                    last_updated = NOW()
+                        {table}.realized_validation_residual
+                        + (ABS(:realized - {table}.mean_return)
+                           - {table}.realized_validation_residual)
+                          / ({table}.realized_validation_count + 1),
+                    {timestamp_column} = NOW()
             """), {
                 "realized": realized_return_frac,
-                "t": ticker, "at": alert_type, "sb": bucket,
-                "h": int(horizon_chosen),
+                "t": ticker, "at": alert_type, "sb": score_bucket_value,
+                "h": int(horizon_s),
             })
-        self._metrics.validations_recorded += 1
 
     # ── Finalization (event clock) ────────────────────────────────────
 

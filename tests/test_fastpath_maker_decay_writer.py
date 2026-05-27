@@ -231,6 +231,102 @@ def test_finalize_dispatches_to_default_table_when_flag_unset():
     assert miner._metrics.maker_obs_finalized == 0
 
 
+def test_exit_validation_updates_maker_filled_table_for_maker_entry():
+    miner = _make_miner()
+    execute_calls = []
+    alert_row = {
+        "ticker": "SUI-USD",
+        "alert_type": "volume_breakout_long",
+        "signal_score": 0.35,
+        "maker_filled_entry": True,
+    }
+
+    class _StubResult:
+        def __init__(self, row=None):
+            self._row = row
+        def mappings(self):
+            return self
+        def first(self):
+            return self._row
+
+    class _StubConn:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return None
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            execute_calls.append((sql, params or {}))
+            if "SELECT a.ticker" in sql:
+                return _StubResult(alert_row)
+            return _StubResult()
+
+    miner._engine.begin = MagicMock(return_value=_StubConn())
+
+    miner._handle_exit_inserted({
+        "entry_execution_id": 144392,
+        "realized_return_pct": -0.6637,
+        "holding_period_s": 1217.8,
+    })
+
+    writes = [sql for sql, _params in execute_calls if "INSERT INTO" in sql]
+    assert any("INSERT INTO fast_signal_decay " in sql for sql in writes)
+    assert any(
+        "INSERT INTO fast_signal_decay_maker_filled " in sql
+        for sql in writes
+    )
+    select_params = execute_calls[0][1]
+    assert select_params["maker_filled_outcomes"] == ["filled", "partial"]
+    assert miner._metrics.validations_recorded == 1
+
+
+def test_exit_validation_skips_maker_filled_table_for_non_maker_entry():
+    miner = _make_miner()
+    execute_calls = []
+    alert_row = {
+        "ticker": "DOGE-USD",
+        "alert_type": "spread_squeeze",
+        "signal_score": 0.55,
+        "maker_filled_entry": False,
+    }
+
+    class _StubResult:
+        def __init__(self, row=None):
+            self._row = row
+        def mappings(self):
+            return self
+        def first(self):
+            return self._row
+
+    class _StubConn:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return None
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            execute_calls.append((sql, params or {}))
+            if "SELECT a.ticker" in sql:
+                return _StubResult(alert_row)
+            return _StubResult()
+
+    miner._engine.begin = MagicMock(return_value=_StubConn())
+
+    miner._handle_exit_inserted({
+        "entry_execution_id": 7,
+        "realized_return_pct": 0.25,
+        "holding_period_s": 60.0,
+    })
+
+    writes = [sql for sql, _params in execute_calls if "INSERT INTO" in sql]
+    assert any("INSERT INTO fast_signal_decay " in sql for sql in writes)
+    assert not any(
+        "INSERT INTO fast_signal_decay_maker_filled " in sql
+        for sql in writes
+    )
+    assert miner._metrics.validations_recorded == 1
+
+
 # ---------------------------------------------------------------------------
 # stats() surfaces the new counters
 # ---------------------------------------------------------------------------
