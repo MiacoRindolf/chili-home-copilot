@@ -321,6 +321,7 @@ class FastPathSupervisor:
             "neg_edge_suppressed=%s neg_edge_cache=%s "
             "cost_suppressed=%s cost_cache=%s "
             "maker_adverse_suppressed=%s maker_adverse_cache=%s "
+            "exit_only_suppressed=%s entry_pairs=%s exit_only_pairs=%s "
             "heartbeats=%s subscriptions=%s universe_refreshes=%s "
             "universe_reconnects=%s unknown=%s last_unknown=%s",
             ws_stats.get("raw_messages_total"),
@@ -336,6 +337,9 @@ class FastPathSupervisor:
             ws_stats.get("cost_barrier_cache_size"),
             ws_stats.get("alerts_suppressed_maker_attempt_adverse"),
             ws_stats.get("maker_attempt_adverse_cache_size"),
+            ws_stats.get("alerts_suppressed_exit_only_subscription"),
+            ws_stats.get("entry_pairs"),
+            ws_stats.get("exit_only_subscription_pairs"),
             ws_stats.get("heartbeats_total"),
             ws_stats.get("subscriptions_total"),
             ws_stats.get("universe_refreshes_total"),
