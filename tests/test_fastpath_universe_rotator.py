@@ -440,6 +440,92 @@ def test_run_rotation_pass_disabled_short_circuits():
     assert out["scanned"] == 0
 
 
+def test_run_rotation_pass_retries_empty_product_list_before_skipping():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    calls = 0
+
+    def _list_products():
+        nonlocal calls
+        calls += 1
+        return [] if calls == 1 else ["VOL-USD"]
+
+    db = _FakeRotationDB()
+    s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=_list_products,
+        fetch_snapshot_fn=lambda t: _make_candidate(ticker=t),
+        product_list_empty_retry_delay_s=0.0,
+    )
+
+    assert calls == 2
+    assert out["product_list_attempts"] == 2
+    assert out["product_list_empty_responses"] == 1
+    assert out["product_list_errors"] == 0
+    assert "skipped_reason" not in out
+    assert out["scanned"] == 1
+    assert db.inserted_rows[0]["ticker"] == "VOL-USD"
+
+
+def test_run_rotation_pass_records_empty_product_list_after_retries():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    db = _FakeRotationDB()
+    s = _StubSettings()
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: [],
+        product_list_empty_retry_attempts=3,
+        product_list_empty_retry_delay_s=0.0,
+    )
+
+    assert out["skipped_reason"] == "no_products_returned"
+    assert out["product_list_attempts"] == 3
+    assert out["product_list_empty_responses"] == 3
+    assert out["product_list_errors"] == 0
+    assert out["scanned"] == 0
+    assert db.inserted_rows == []
+    assert db.inserted_run is not None
+    assert db.committed is True
+
+
+def test_run_rotation_pass_retries_product_list_error_before_success():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+
+    calls = 0
+
+    def _list_products():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("coinbase product list unavailable")
+        return ["VOL-USD"]
+
+    db = _FakeRotationDB()
+    s = _StubSettings(universe_top_n=1, universe_hysteresis_ranks=0)
+
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=_list_products,
+        fetch_snapshot_fn=lambda t: _make_candidate(ticker=t),
+        product_list_empty_retry_delay_s=0.0,
+    )
+
+    assert calls == 2
+    assert out["product_list_attempts"] == 2
+    assert out["product_list_errors"] == 1
+    assert out["product_list_last_error"].startswith("RuntimeError:")
+    assert "skipped_reason" not in out
+    assert out["scanned"] == 1
+    assert db.inserted_rows[0]["ticker"] == "VOL-USD"
+
+
 def test_run_rotation_pass_first_pass_writes_shadow():
     """Brand-new entrants land in status='shadow' on first pass."""
     from app.services.trading.fast_path.universe_rotator import run_rotation_pass

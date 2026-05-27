@@ -91,9 +91,13 @@ _MAX_SNAPSHOT_FETCH_CONCURRENCY = 8
 _HTTP_SESSION_POOL_CONNECTIONS = _MAX_SNAPSHOT_FETCH_CONCURRENCY
 _HTTP_SESSION_POOL_MAXSIZE = _MAX_SNAPSHOT_FETCH_CONCURRENCY
 _HTTP_SESSION_POOL_BLOCK = True
+_PRODUCT_LIST_EMPTY_RETRY_ATTEMPTS = 3
+_PRODUCT_LIST_EMPTY_RETRY_DELAY_S = 1.0
+_PRODUCT_LIST_ERROR_DETAIL_MAX_CHARS = 160
 _BPS_PER_UNIT = 10_000.0
 _FAST_PATH_BAR_INTERVAL = "1m"
 RANK_TRADE_COUNT_MULTIPLIER_MODE = "admission_gate_only"
+_SKIPPED_NO_PRODUCTS_RETURNED = "no_products_returned"
 _MAKER_ATTEMPT_ADVERSE_SELECTION_VERDICT = "adverse_selection"
 _MAKER_ATTEMPT_RAW_NOT_EXCLUDED_VERDICT = "not_excluded"
 _MAKER_ATTEMPT_RAW_NO_DATA_VERDICT = "no_data"
@@ -1761,6 +1765,8 @@ def run_rotation_pass(
     list_usd_products_fn=_list_usd_products,
     fetch_snapshot_fn=_fetch_pair_snapshot,
     fetch_book_fn=_fetch_book,
+    product_list_empty_retry_attempts: int = _PRODUCT_LIST_EMPTY_RETRY_ATTEMPTS,
+    product_list_empty_retry_delay_s: float = _PRODUCT_LIST_EMPTY_RETRY_DELAY_S,
 ) -> dict[str, Any]:
     """Single-pass rotator. Returns a counter dict for the audit log.
 
@@ -1859,6 +1865,10 @@ def run_rotation_pass(
         "snapshot_fetch_concurrency": None,
         "rest_request_pacing_s": None,
         "snapshot_fetch_elapsed_s": None,
+        "product_list_attempts": 0,
+        "product_list_empty_responses": 0,
+        "product_list_errors": 0,
+        "product_list_last_error": None,
     }
 
     if not getattr(settings, "universe_rotation_enabled", False):
@@ -1873,10 +1883,37 @@ def run_rotation_pass(
     )
     out["market_velocity_cost_parity_ratio"] = market_velocity_cost_parity_ratio
 
-    products = list_usd_products_fn()
+    product_list_attempts = max(int(product_list_empty_retry_attempts or 1), 1)
+    retry_delay_s = max(float(product_list_empty_retry_delay_s or 0.0), 0.0)
+    products: list[str] = []
+    for attempt_n in range(1, product_list_attempts + 1):
+        out["product_list_attempts"] = attempt_n
+        try:
+            products_raw = list_usd_products_fn()
+        except Exception as exc:
+            out["product_list_errors"] = int(out["product_list_errors"]) + 1
+            out["product_list_last_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )[:_PRODUCT_LIST_ERROR_DETAIL_MAX_CHARS]
+            logger.warning(
+                "[fast_path_rotator] product list fetch failed "
+                "attempt=%d/%d: %s",
+                attempt_n, product_list_attempts, exc, exc_info=True,
+            )
+            products = []
+        else:
+            products = list(products_raw or [])
+            if not products:
+                out["product_list_empty_responses"] = (
+                    int(out["product_list_empty_responses"]) + 1
+                )
+        if products:
+            break
+        if attempt_n < product_list_attempts and retry_delay_s > 0.0:
+            time.sleep(retry_delay_s)
     out["scanned"] = len(products)
     if not products:
-        out["skipped_reason"] = "no_products_returned"
+        out["skipped_reason"] = _SKIPPED_NO_PRODUCTS_RETURNED
         _persist_run_diagnostics(
             db, rotation_at=rotation_at, out=out, rows_to_write=[],
         )
