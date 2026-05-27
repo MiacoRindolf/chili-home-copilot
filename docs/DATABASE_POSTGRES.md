@@ -91,10 +91,29 @@ This is a **host** limitation: too many sockets in `TIME_WAIT` or ephemeral port
 
 **Try in order:**
 
-1. **Restart Docker Desktop**, then retry.
-2. **Reboot Windows** if restarts do not clear it.
-3. Use **`127.0.0.1`** instead of **`localhost`** (avoids IPv6 `::1` split-brain). If both still fail with `10055`, the host pool is still exhausted—go to (4).
-4. **Run the script inside the Compose network** (bypasses the Windows loopback path entirely). Use hostname **`postgres`** and port **`5432`** (in-container), not `localhost:5433`. From the repo root, with the `chili` service up:
+1. Check whether Docker Desktop is holding the ephemeral range:
+
+   ```powershell
+   .\scripts\repair-docker-socket-exhaustion.ps1
+   ```
+
+   The known bad signature is `com.docker.backend` owning thousands of `Bound`
+   TCP sockets, often descending from port `65534`. On 2026-05-27 this repo
+   hit about 14.8k Docker-owned bound sockets, which broke both GitHub pushes
+   and host `localhost:5433` Postgres connections. If the script reports a
+   critical Docker backend count, run:
+
+   ```powershell
+   .\scripts\repair-docker-socket-exhaustion.ps1 -Repair
+   ```
+
+   The repair stops Compose, restarts Docker Desktop, waits for the engine,
+   and starts Compose again. It does not remove volumes or images.
+
+1. If you do not use the repair script, **restart Docker Desktop**, then retry.
+1. **Reboot Windows** if restarts do not clear it.
+1. Use **`127.0.0.1`** instead of **`localhost`** (avoids IPv6 `::1` split-brain). If both still fail with `10055`, the host pool is still exhausted -- go to the next item.
+1. **Run the script inside the Compose network** (bypasses the Windows loopback path entirely). Use hostname **`postgres`** and port **`5432`** (in-container), not `localhost:5433`. From the repo root, with the `chili` service up:
 
    ```powershell
    docker compose exec -w /workspace -e DATABASE_URL=postgresql://chili:chili@postgres:5432/chili_staging chili python scripts/backfill_cpcv_metrics.py --dry-run
