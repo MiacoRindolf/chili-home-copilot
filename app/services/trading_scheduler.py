@@ -605,6 +605,7 @@ def _run_capital_reweight_weekly_job():
 
     def _work() -> None:
         from ..config import settings
+
         mode = (getattr(settings, "brain_capital_reweight_mode", "off") or "off").lower()
         if mode in ("off", "authoritative"):
             if mode == "authoritative":
@@ -2365,7 +2366,11 @@ def _run_auto_trader_tick_job():
         handling + ``max_instances`` still keep the system healthy.
       * The session is guaranteed to close via ``finally``.
     """
-    from ..config import settings as _settings
+    from ..config import (
+        AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
+        AUTOTRADER_MIN_TICK_MAX_SECONDS,
+        settings as _settings,
+    )
     from ..db import SessionLocal
     from .trading.auto_trader import run_auto_trader_tick
 
@@ -2391,7 +2396,16 @@ def _run_auto_trader_tick_job():
         # Keep the slow-tick warning so operator still sees when a
         # tick takes longer than expected; the budget setting is now
         # purely advisory (no abandon).
-        budget_s = max(5, int(getattr(_settings, "chili_autotrader_tick_max_seconds", 45)))
+        budget_s = max(
+            AUTOTRADER_MIN_TICK_MAX_SECONDS,
+            int(
+                getattr(
+                    _settings,
+                    "chili_autotrader_tick_max_seconds",
+                    AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
+                )
+            ),
+        )
         if dur > budget_s:
             logger.warning(
                 "[scheduler] auto_trader tick slow: took %.1fs (advisory budget=%ss); "

@@ -25,6 +25,8 @@ from app.config import (
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
+    AUTOTRADER_MAX_TICK_MAX_SECONDS,
+    AUTOTRADER_MIN_TICK_MAX_SECONDS,
 )
 from app.models.trading import (
     AutoTraderRun,
@@ -71,6 +73,7 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_autotrader_stock_session_defer_max_age_hours=(
             AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS
         ),
+        chili_autotrader_tick_max_seconds=AUTOTRADER_MIN_TICK_MAX_SECONDS,
         chili_autotrader_synergy_enabled=False,
         chili_autotrader_synergy_scale_notional_usd=0.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
@@ -154,6 +157,17 @@ def _audit_only_process(processed: list[str]):
         )
 
     return _process
+
+
+def test_autotrader_tick_soft_budget_clamps_to_config_bounds(monkeypatch):
+    settings = _minimal_settings(user_id=1)
+
+    settings.chili_autotrader_tick_max_seconds = AUTOTRADER_MIN_TICK_MAX_SECONDS - 1
+    monkeypatch.setattr(at_mod, "settings", settings)
+    assert at_mod._autotrader_tick_soft_budget_seconds() == AUTOTRADER_MIN_TICK_MAX_SECONDS
+
+    settings.chili_autotrader_tick_max_seconds = AUTOTRADER_MAX_TICK_MAX_SECONDS + 1
+    assert at_mod._autotrader_tick_soft_budget_seconds() == AUTOTRADER_MAX_TICK_MAX_SECONDS
 
 
 def test_closed_stock_session_defers_stock_without_starving_crypto(db, monkeypatch):

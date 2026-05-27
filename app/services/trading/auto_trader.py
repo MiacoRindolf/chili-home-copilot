@@ -12,9 +12,12 @@ from sqlalchemy.orm import Session, aliased
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_MAX_TICK_MAX_SECONDS,
+    AUTOTRADER_MIN_TICK_MAX_SECONDS,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
     AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
@@ -541,6 +544,15 @@ def _autotrader_candidate_batch_size() -> int:
         AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
         lower=1,
         upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    )
+
+
+def _autotrader_tick_soft_budget_seconds() -> int:
+    return _settings_int_clamped(
+        "chili_autotrader_tick_max_seconds",
+        AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
+        lower=AUTOTRADER_MIN_TICK_MAX_SECONDS,
+        upper=AUTOTRADER_MAX_TICK_MAX_SECONDS,
     )
 
 
@@ -2050,6 +2062,7 @@ def _current_price(ticker: str) -> float | None:
 
 def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     """Process a small batch of unprocessed pattern-imminent BreakoutAlerts."""
+    tick_started = time.monotonic()
     if not getattr(settings, "chili_autotrader_enabled", False):
         return {"ok": True, "skipped": True, "reason": "disabled"}
 
@@ -2104,6 +2117,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         if stock_defer.get("active"):
             candidate_base = candidate_base.filter(non_stock_asset_filter)
     batch_limit = _autotrader_candidate_batch_size()
+    tick_budget_s = _autotrader_tick_soft_budget_seconds()
     fresh_candidate_pool = int(candidate_base.count())
     stock_deferred_pool = 0
     stock_stale_unprocessed = 0
@@ -2157,13 +2171,36 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "stock_session_stale_unprocessed": stock_stale_unprocessed,
         "synergy_retry_pool": retry_pool,
         "synergy_retry_batch": len(retry_candidates),
+        "tick_budget_seconds": tick_budget_s,
+        "tick_budget_deferred": 0,
+        "tick_budget_exhausted": False,
         "tick_last_kind": None,
         "tick_last_reason": None,
         "tick_last_alert_id": None,
         "tick_last_ticker": None,
     }
 
-    for alert in candidates:
+    for idx, alert in enumerate(candidates):
+        if out["processed"] > 0 and (time.monotonic() - tick_started) >= tick_budget_s:
+            deferred = len(candidates) - idx
+            out["tick_budget_deferred"] = deferred
+            out["tick_budget_exhausted"] = True
+            _autotrader_tick_note(
+                out,
+                kind="deferred",
+                reason="tick_budget_exhausted",
+                alert=alert,
+            )
+            logger.warning(
+                "[autotrader] tick budget exhausted uid=%s processed=%d "
+                "deferred=%d budget_s=%s elapsed_s=%.2f",
+                uid,
+                out["processed"],
+                deferred,
+                tick_budget_s,
+                time.monotonic() - tick_started,
+            )
+            break
         # P0.2 — acquire advisory lock before the TOCTOU window. Without
         # this, two ticks (different scheduler replicas) can both pass the
         # audit-row check and both call place_market_order. The lock is
@@ -2210,12 +2247,14 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         diag = _maybe_log_candidate_pool_zero(db, uid=uid)
         if diag is not None:
             out["candidate_pool_zero_diag"] = diag
+    out["tick_elapsed_seconds"] = round(time.monotonic() - tick_started, 3)
 
     logger.info(
         "[autotrader] tick uid=%s candidate_pool=%d batch=%d processed=%d placed=%d "
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
         "synergy_retry_batch=%d stock_defer_active=%s stock_deferred_pool=%d "
-        "stock_stale_unprocessed=%d last_kind=%s last_reason=%s last_alert_id=%s "
+        "stock_stale_unprocessed=%d tick_budget_s=%s tick_deferred=%d "
+        "tick_elapsed_s=%.3f last_kind=%s last_reason=%s last_alert_id=%s "
         "last_ticker=%s",
         uid,
         candidate_pool,
@@ -2230,6 +2269,9 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out.get("stock_session_defer_active"),
         out.get("stock_session_deferred_pool"),
         out.get("stock_session_stale_unprocessed"),
+        out.get("tick_budget_seconds"),
+        out.get("tick_budget_deferred"),
+        out.get("tick_elapsed_seconds"),
         out.get("tick_last_kind") or "-",
         out.get("tick_last_reason") or "-",
         out.get("tick_last_alert_id") if out.get("tick_last_alert_id") is not None else "-",
