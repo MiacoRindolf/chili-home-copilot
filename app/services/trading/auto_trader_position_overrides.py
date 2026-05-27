@@ -369,7 +369,12 @@ def _close_option_trade_now(
 
 
 def _close_paper_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str, Any]:
-    from .paper_trading import _apply_slippage, _close_paper_trade
+    from .paper_trading import (
+        _apply_slippage,
+        _close_paper_trade,
+        _is_option_paper_trade,
+        _paper_current_mark_price,
+    )
 
     pt = db.get(PaperTrade, int(trade_id))
     if pt is None:
@@ -384,9 +389,14 @@ def _close_paper_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str
     if not (is_v1 or is_linked):
         return {"ok": False, "error": "not_pattern_linked"}
 
-    px = _current_quote_price(pt.ticker)
-    if px is None:
-        px = float(pt.entry_price)
+    if _is_option_paper_trade(pt):
+        px = _paper_current_mark_price(pt, purpose="exit")
+        if px is None:
+            return {"ok": False, "error": "no_quote"}
+    else:
+        px = _current_quote_price(pt.ticker)
+        if px is None:
+            px = float(pt.entry_price)
 
     exit_px = _apply_slippage(px, pt.direction or "long", is_entry=False)
     _close_paper_trade(pt, exit_px, "desk_close_now")

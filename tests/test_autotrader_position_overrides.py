@@ -164,6 +164,25 @@ def _mk_autotrader_paper(db: Session, user_id: int, ticker: str = "PPAU") -> Pap
     return pt
 
 
+def _mark_paper_as_option(pt: PaperTrade) -> None:
+    pt.ticker = "SPY"
+    pt.entry_price = 1.25
+    pt.quantity = 2
+    pt.signal_json = {
+        "auto_trader_v1": True,
+        "asset_type": "options",
+        "options_path": True,
+        "option_meta": {
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+            "limit_price": 1.25,
+        },
+        "breakout_alert_id": 0,
+    }
+
+
 def test_paused_paper_trade_ids_for_user(paired_client, db: Session) -> None:
     _c, user = paired_client
     pt1 = _mk_autotrader_paper(db, user.id, "PX1")
@@ -296,6 +315,70 @@ _REGULAR_HOURS_WINDOW = {
     "can_submit_now": True,
     "execution_reason": "Regular session",
 }
+
+
+def test_close_position_now_paper_option_uses_premium_mark(
+    paired_client,
+    db: Session,
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    monkeypatch.setattr(paper_trading.settings, "backtest_commission", 0.0, raising=False)
+
+    _c, user = paired_client
+    pt = _mk_autotrader_paper(db, user.id, "SPY")
+    _mark_paper_as_option(pt)
+    db.commit()
+
+    with patch(
+        "app.services.trading.auto_trader_position_overrides._current_quote_price",
+        side_effect=AssertionError("option paper close must not fetch underlying spot"),
+    ), patch(
+        "app.services.trading.paper_trading._paper_current_mark_price",
+        return_value=1.45,
+    ) as mark:
+        res = close_position_now(db, kind="paper", trade_id=int(pt.id))
+
+    assert res["ok"] is True
+    assert res["exit_price"] == pytest.approx(1.45)
+    assert mark.call_args.kwargs["purpose"] == "exit"
+    db.refresh(pt)
+    assert pt.status == "closed"
+    assert pt.exit_price == pytest.approx(1.45)
+    assert pt.pnl == pytest.approx(40.0)
+    assert pt.pnl_pct == pytest.approx(16.0)
+
+
+def test_close_position_now_paper_option_without_mark_does_not_fake_fill(
+    paired_client,
+    db: Session,
+) -> None:
+    _c, user = paired_client
+    pt = _mk_autotrader_paper(db, user.id, "SPY")
+    _mark_paper_as_option(pt)
+    db.commit()
+
+    with patch(
+        "app.services.trading.auto_trader_position_overrides._current_quote_price",
+        side_effect=AssertionError("option paper close must not fetch underlying spot"),
+    ), patch(
+        "app.services.trading.paper_trading._paper_current_mark_price",
+        return_value=None,
+    ):
+        res = close_position_now(db, kind="paper", trade_id=int(pt.id))
+
+    assert res == {"ok": False, "error": "no_quote"}
+    db.refresh(pt)
+    assert pt.status == "open"
+    assert pt.exit_price is None
+    assert (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.decision == "desk_close_now")
+        .first()
+        is None
+    )
 
 
 def test_close_position_now_live(paired_client, db: Session) -> None:
