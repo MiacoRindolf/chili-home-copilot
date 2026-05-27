@@ -11,6 +11,7 @@ from app.services.trading.learning import (
     EDGE_EXIT_PROMOTION_STATUS,
     EDGE_EXIT_VARIANT_ORIGIN,
     _edge_debt_loss_reports,
+    _learned_exit_config_from_edge_report,
     _parent_eligible_for_variant_spawn,
     fork_edge_learned_exit_variants,
 )
@@ -140,6 +141,48 @@ def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     assert cfg["target_reward_fraction"] == 0.02211
     assert cfg["stop_loss_fraction"] == 0.0053
     assert cfg["total_edge_rejects"] == 5
+
+
+def test_edge_learned_exit_allows_mild_negative_with_strong_payoff(db):
+    pat = _make_pattern(db)
+    now = datetime.utcnow().replace(microsecond=0)
+    for i in range(5):
+        _add_edge_reject(
+            db,
+            pattern_id=pat.id,
+            expected_net_pct=-0.35,
+            created_at=now - timedelta(minutes=i),
+        )
+    db.commit()
+    report = _edge_debt_loss_reports(db, now=now, lookback_days=1)[pat.id]
+
+    ids = fork_edge_learned_exit_variants(db, pat.id, edge_loss_report=report)
+
+    assert len(ids) == 1
+    child = db.get(ScanPattern, ids[0])
+    cfg = child.exit_config if isinstance(child.exit_config, dict) else json.loads(child.exit_config)
+    assert child.lifecycle_stage == "challenged"
+    assert cfg["payoff_rescue_used"] is True
+    assert cfg["avg_rejected_expected_net_pct"] == -0.35
+    assert cfg["reward_risk"] == 4.171698
+
+
+def test_edge_learned_exit_blocks_payoff_rescue_on_insufficient_directional_evidence(db):
+    pat = _make_pattern(db)
+    report = {
+        "source": EDGE_EXIT_CONFIG_SOURCE,
+        "thin_sample": False,
+        "total_rejects": 20,
+        "avg_expected_net_pct": -0.35,
+        "avg_static_reward_fraction": 0.08,
+        "avg_static_stop_loss_fraction": 0.03,
+        "root_cause": "insufficient_directional_evidence",
+    }
+
+    cfg, reason = _learned_exit_config_from_edge_report(pat, report)
+
+    assert cfg is None
+    assert reason == "edge_debt_too_negative_for_exit_child:-0.350"
 
 
 def test_edge_learned_exit_ignores_legacy_loss_report(db):

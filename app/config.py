@@ -3063,6 +3063,18 @@ class Settings(BaseSettings):
         le=0.0,
         validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MAX_AVG_NET_FOR_CHILD_PCT"),
     )
+    chili_edge_evolution_payoff_rescue_max_avg_net_pct: float = Field(
+        default=-0.75,
+        ge=-100.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_PAYOFF_RESCUE_MAX_AVG_NET_PCT"),
+    )
+    chili_edge_evolution_payoff_rescue_min_reward_risk: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_PAYOFF_RESCUE_MIN_REWARD_RISK"),
+    )
     chili_edge_evolution_min_payoff_samples: int = Field(
         default=5,
         ge=1,

@@ -8936,6 +8936,8 @@ _EDGE_EVOLUTION_DEFAULT_MIN_REJECTS = 5
 _EDGE_EVOLUTION_DEFAULT_SEVERE_MIN_REJECTS = 20
 _EDGE_EVOLUTION_DEFAULT_SEVERE_AVG_NET_PCT = -1.0
 _EDGE_EVOLUTION_DEFAULT_MAX_AVG_NET_FOR_CHILD_PCT = -0.25
+_EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MAX_AVG_NET_PCT = -0.75
+_EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MIN_REWARD_RISK = 2.0
 _EDGE_EVOLUTION_DEFAULT_MIN_REWARD_RISK = 1.25
 
 _VARIANT_ORIGINS = frozenset({
@@ -8945,6 +8947,12 @@ _VARIANT_ORIGINS = frozenset({
     "tf_variant",
     "scope_variant",
     EDGE_EXIT_VARIANT_ORIGIN,
+})
+
+_EDGE_PAYOFF_RESCUE_ROOT_CAUSES = frozenset({
+    "shadow_near_miss_noise",
+    "managed_reward_risk_below_floor",
+    "static_geometry_or_probability_mismatch",
 })
 
 
@@ -9255,8 +9263,6 @@ def _learned_exit_config_from_edge_report(
         "chili_edge_evolution_max_avg_net_for_child_pct",
         _EDGE_EVOLUTION_DEFAULT_MAX_AVG_NET_FOR_CHILD_PCT,
     )
-    if avg_net is not None and avg_net < max_avg_net:
-        return None, f"edge_debt_too_negative_for_exit_child:{avg_net:.3f}"
 
     avg_return = _finite_number(
         getattr(parent, "corrected_avg_return_pct", None)
@@ -9294,6 +9300,25 @@ def _learned_exit_config_from_edge_report(
     if reward_risk < min_rr:
         return None, f"reward_risk_below_floor:{reward_risk:.3f}"
 
+    payoff_rescue_used = False
+    if avg_net is not None and avg_net < max_avg_net:
+        rescue_floor = _settings_edge_float(
+            "chili_edge_evolution_payoff_rescue_max_avg_net_pct",
+            _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MAX_AVG_NET_PCT,
+        )
+        rescue_min_rr = _settings_edge_float(
+            "chili_edge_evolution_payoff_rescue_min_reward_risk",
+            _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MIN_REWARD_RISK,
+        )
+        root_cause = str(report.get("root_cause") or "").strip().lower()
+        payoff_rescue_used = (
+            avg_net >= rescue_floor
+            and reward_risk >= rescue_min_rr
+            and root_cause in _EDGE_PAYOFF_RESCUE_ROOT_CAUSES
+        )
+        if not payoff_rescue_used:
+            return None, f"edge_debt_too_negative_for_exit_child:{avg_net:.3f}"
+
     static_reward = _finite_number(report.get("avg_static_reward_fraction"))
     static_loss = _finite_number(report.get("avg_static_stop_loss_fraction"))
     if static_reward is not None and reward >= static_reward * 0.98:
@@ -9317,8 +9342,27 @@ def _learned_exit_config_from_edge_report(
         "avg_rejected_expected_net_pct": report.get("avg_expected_net_pct"),
         "total_edge_rejects": int(report.get("total_rejects") or 0),
         "root_cause": report.get("root_cause"),
+        "avg_net_child_threshold_pct": round(float(max_avg_net), 6),
+        "payoff_rescue_used": bool(payoff_rescue_used),
         "created_at_utc": datetime.utcnow().isoformat(),
     }
+    if payoff_rescue_used:
+        payload.update(
+            payoff_rescue_floor_pct=round(
+                _settings_edge_float(
+                    "chili_edge_evolution_payoff_rescue_max_avg_net_pct",
+                    _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MAX_AVG_NET_PCT,
+                ),
+                6,
+            ),
+            payoff_rescue_min_reward_risk=round(
+                _settings_edge_float(
+                    "chili_edge_evolution_payoff_rescue_min_reward_risk",
+                    _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MIN_REWARD_RISK,
+                ),
+                6,
+            ),
+        )
     return payload, "ok"
 
 
