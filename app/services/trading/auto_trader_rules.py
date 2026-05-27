@@ -2362,8 +2362,18 @@ def passes_rule_gate(
         cap, cap_source = resolve_effective_capital(db, settings)
         snap["capital_usd"] = round(cap, 2)
         snap["capital_source"] = cap_source
-        ok, reason = check_new_trade_allowed(db, uid, alert.ticker.upper(), capital=cap)
+        portfolio_asset_type = (
+            "options" if options_path else ("crypto" if crypto_path else "stock")
+        )
+        ok, reason = check_new_trade_allowed(
+            db,
+            uid,
+            alert.ticker.upper(),
+            capital=cap,
+            asset_type=portfolio_asset_type,
+        )
         snap["portfolio_check"] = {"ok": ok, "reason": reason}
+        snap["portfolio_asset_type"] = portfolio_asset_type
         if not ok:
             return False, f"portfolio_blocked:{reason}", snap
 

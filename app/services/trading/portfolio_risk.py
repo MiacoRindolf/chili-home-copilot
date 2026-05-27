@@ -25,6 +25,7 @@ class RiskBudget:
     open_positions: int = 0
     crypto_positions: int = 0
     stock_positions: int = 0
+    option_positions: int = 0
     total_heat_pct: float = 0.0
     available_heat_pct: float = 0.0
     can_open_new: bool = True
@@ -94,6 +95,45 @@ def _is_option_trade_safe(trade: Any) -> bool:
         return bool(is_option_trade(trade))
     except Exception:
         return False
+
+
+def _canonical_asset_kind(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"option", "options"}:
+        return "option"
+    if raw in {"stock", "stocks", "equity", "equities"}:
+        return "equity"
+    if raw in {"crypto", "cryptocurrency", "coin"}:
+        return "crypto"
+    return None
+
+
+def _ticker_asset_kind(ticker: Any) -> str:
+    symbol = str(ticker or "").strip().upper()
+    if symbol.endswith("-USD") or (
+        len(symbol) > 3
+        and symbol.endswith("USD")
+        and "-" not in symbol
+        and symbol[:-3].isalnum()
+    ):
+        return "crypto"
+    return "equity"
+
+
+def _trade_asset_kind(trade: Any) -> str:
+    if _is_option_trade_safe(trade):
+        return "option"
+    explicit = _canonical_asset_kind(getattr(trade, "asset_kind", None))
+    if explicit:
+        return explicit
+    return _ticker_asset_kind(getattr(trade, "ticker", None))
+
+
+def _new_trade_asset_kind(ticker: str, asset_type: Any = None) -> str:
+    explicit = _canonical_asset_kind(asset_type)
+    if explicit:
+        return explicit
+    return _ticker_asset_kind(ticker)
 
 
 def _trade_contract_multiplier(trade: Any) -> float:
@@ -175,8 +215,13 @@ def get_portfolio_risk_snapshot(
 
     budget = RiskBudget()
     budget.open_positions = len(open_trades)
-    budget.crypto_positions = sum(1 for t in open_trades if t.ticker.endswith("-USD"))
-    budget.stock_positions = budget.open_positions - budget.crypto_positions
+    asset_counts = {"equity": 0, "crypto": 0, "option": 0}
+    for t in open_trades:
+        kind = _trade_asset_kind(t)
+        asset_counts[kind] = asset_counts.get(kind, 0) + 1
+    budget.crypto_positions = asset_counts.get("crypto", 0)
+    budget.stock_positions = asset_counts.get("equity", 0)
+    budget.option_positions = asset_counts.get("option", 0)
 
     total_heat = 0.0
     for t in open_trades:
@@ -219,6 +264,8 @@ def check_new_trade_allowed(
     ticker: str,
     capital: float = 100_000.0,
     limits: RiskLimits | None = None,
+    *,
+    asset_type: str | None = None,
 ) -> tuple[bool, str]:
     """Return (allowed, reason) for opening a new position in *ticker*."""
     try:
@@ -243,10 +290,10 @@ def check_new_trade_allowed(
     if not budget.can_open_new:
         return False, budget.rejection_reason or "Risk limit exceeded"
 
-    is_crypto = ticker.upper().endswith("-USD")
-    if is_crypto and budget.crypto_positions >= limits.max_crypto_positions:
+    asset_kind = _new_trade_asset_kind(ticker, asset_type)
+    if asset_kind == "crypto" and budget.crypto_positions >= limits.max_crypto_positions:
         return False, f"Crypto cap ({limits.max_crypto_positions}) reached"
-    if not is_crypto and budget.stock_positions >= limits.max_stock_positions:
+    if asset_kind == "equity" and budget.stock_positions >= limits.max_stock_positions:
         return False, f"Stock cap ({limits.max_stock_positions}) reached"
 
     same_ticker_count = db.query(Trade).filter(
@@ -1781,6 +1828,7 @@ def unified_risk_check(
     ticker: str,
     *,
     capital: float = 100_000.0,
+    asset_type: str | None = None,
     entry_price: float | None = None,
     stop_price: float | None = None,
     execution_path: str = "unknown",
@@ -1816,10 +1864,11 @@ def unified_risk_check(
         return False, budget.rejection_reason or "Risk limit exceeded", detail
 
     # 4. Asset-class caps
-    is_crypto = ticker.upper().endswith("-USD")
-    if is_crypto and budget.crypto_positions >= limits.max_crypto_positions:
+    asset_kind = _new_trade_asset_kind(ticker, asset_type)
+    detail["asset_kind"] = asset_kind
+    if asset_kind == "crypto" and budget.crypto_positions >= limits.max_crypto_positions:
         return False, f"Crypto cap ({limits.max_crypto_positions}) reached", detail
-    if not is_crypto and budget.stock_positions >= limits.max_stock_positions:
+    if asset_kind == "equity" and budget.stock_positions >= limits.max_stock_positions:
         return False, f"Stock cap ({limits.max_stock_positions}) reached", detail
 
     # 5. Same-ticker limit

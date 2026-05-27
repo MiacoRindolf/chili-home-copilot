@@ -716,6 +716,9 @@ def test_passes_rule_gate_options_skips_underlying_stop_target_validation(
     assert snap.get("projected_profit_pct_source") == "options_entry_quality"
     assert snap["option_entry_quality"]["option_reward_risk"] > 1.0
     assert snap.get("stop_target_validation_skipped_reason") == "options_underlying_levels"
+    _mock_port.assert_called_once()
+    assert _mock_port.call_args.kwargs.get("asset_type") == "options"
+    assert snap.get("portfolio_asset_type") == "options"
 
 
 @patch("app.services.trading.auto_trader_rules.resolve_effective_capital", return_value=(100_000.0, "test"))

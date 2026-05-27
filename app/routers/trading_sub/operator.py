@@ -90,6 +90,7 @@ def operator_risk_budget(request: Request, db: Session = Depends(get_db)):
             "open_positions": budget.open_positions,
             "stock_positions": budget.stock_positions,
             "crypto_positions": budget.crypto_positions,
+            "option_positions": getattr(budget, "option_positions", 0),
             "total_heat_pct": budget.total_heat_pct,
             "available_heat_pct": budget.available_heat_pct,
             "capital": capital,

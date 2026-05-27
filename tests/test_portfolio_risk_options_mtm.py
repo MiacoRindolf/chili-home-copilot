@@ -14,8 +14,17 @@ class _FakeQuery:
     def filter(self, *args, **kwargs):
         return self
 
+    def order_by(self, *args, **kwargs):
+        return self
+
     def all(self):
         return list(self._rows)
+
+    def count(self):
+        return len(self._rows)
+
+    def first(self):
+        return None
 
 
 class _FakeDb:
@@ -36,6 +45,7 @@ def _option_trade_stub(**overrides):
         "quantity": 2.0,
         "entry_date": datetime.utcnow(),
         "status": "open",
+        "tags": None,
         "auto_trader_version": "v1",
         "management_scope": None,
         "indicator_snapshot": {
@@ -49,6 +59,24 @@ def _option_trade_stub(**overrides):
                 },
             }
         },
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _stock_trade_stub(**overrides):
+    base = {
+        "id": 5502,
+        "user_id": None,
+        "ticker": "MSFT",
+        "direction": "long",
+        "entry_price": 100.0,
+        "quantity": 1.0,
+        "entry_date": datetime.utcnow(),
+        "status": "open",
+        "tags": None,
+        "asset_kind": "equity",
+        "indicator_snapshot": {},
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -131,3 +159,89 @@ def test_portfolio_heat_for_options_uses_premium_risk_and_multiplier(
 
     assert budget.total_heat_pct == pytest.approx(1.25)
     assert budget.available_heat_pct == pytest.approx(4.75)
+
+
+def test_portfolio_budget_counts_options_outside_stock_cap() -> None:
+    from app.services.trading.portfolio_risk import get_portfolio_risk_snapshot
+
+    rows = [
+        _stock_trade_stub(ticker="MSFT"),
+        _option_trade_stub(ticker="SPY"),
+        _stock_trade_stub(ticker="BTC-USD", asset_kind="crypto"),
+    ]
+
+    with patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_var",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
+        return_value=None,
+    ):
+        budget = get_portfolio_risk_snapshot(
+            _FakeDb(rows),
+            user_id=None,
+            capital=10_000.0,
+        )
+
+    assert budget.stock_positions == 1
+    assert budget.option_positions == 1
+    assert budget.crypto_positions == 1
+
+
+def test_option_entry_is_not_blocked_by_full_stock_cap() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, check_new_trade_allowed
+
+    limits = RiskLimits(
+        max_open_positions=10,
+        max_crypto_positions=10,
+        max_stock_positions=1,
+        max_portfolio_heat_pct=100.0,
+        max_same_ticker=10,
+        max_sector_pct=100.0,
+        max_avg_correlation=1.0,
+    )
+    db = _FakeDb([_stock_trade_stub()])
+
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.is_breaker_tripped",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.check_drawdown_breaker",
+        return_value=(False, None),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_sector_concentration",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_correlation_risk",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_var",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
+        return_value=None,
+    ):
+        stock_ok, stock_reason = check_new_trade_allowed(
+            db,
+            None,
+            "SPY",
+            capital=10_000.0,
+            limits=limits,
+            asset_type="stock",
+        )
+        option_ok, option_reason = check_new_trade_allowed(
+            db,
+            None,
+            "SPY",
+            capital=10_000.0,
+            limits=limits,
+            asset_type="options",
+        )
+
+    assert not stock_ok
+    assert stock_reason == "Stock cap (1) reached"
+    assert option_ok
+    assert option_reason == "ok"
