@@ -150,6 +150,65 @@ class TestRobinhoodOptionOrderRouting:
         assert out["limit_price"] == 1.25
         assert out["average_price"] == "1.25"
 
+    def test_verify_option_order_landed_uses_option_endpoint(self, monkeypatch):
+        from app.services import broker_service
+
+        calls: list[str] = []
+
+        def _option_order(order_id):
+            calls.append(order_id)
+            return {"state": "cancelled"}
+
+        monkeypatch.setattr(broker_service, "get_option_order_by_id", _option_order)
+
+        verdict, observed = broker_service.verify_option_order_landed(
+            "opt-post-submit",
+            max_wait_s=1.0,
+            poll_interval_s=0.0,
+        )
+
+        assert (verdict, observed) == ("rejected", "cancelled")
+        assert calls == ["opt-post-submit"]
+
+    def test_option_submit_verifier_rejects_post_accept_cancel(self, monkeypatch):
+        from app.services import broker_service
+
+        monkeypatch.setattr(
+            broker_service,
+            "verify_option_order_landed",
+            lambda _order_id: ("rejected", "cancelled"),
+        )
+
+        updated, rejected = broker_service._verify_submitted_option_order(
+            {"id": "opt-buy-1", "state": "unconfirmed"},
+            order_id="opt-buy-1",
+            label="BUY-OPT SPY",
+        )
+
+        assert updated["state"] == "unconfirmed"
+        assert rejected is not None
+        assert rejected["ok"] is False
+        assert rejected["error"] == "option_order_cancelled"
+        assert rejected["order_id"] == "opt-buy-1"
+
+    def test_option_submit_verifier_promotes_resting_state(self, monkeypatch):
+        from app.services import broker_service
+
+        monkeypatch.setattr(
+            broker_service,
+            "verify_option_order_landed",
+            lambda _order_id: ("resting", "queued"),
+        )
+
+        updated, rejected = broker_service._verify_submitted_option_order(
+            {"id": "opt-buy-1", "state": "unconfirmed"},
+            order_id="opt-buy-1",
+            label="BUY-OPT SPY",
+        )
+
+        assert rejected is None
+        assert updated["state"] == "queued"
+
     @patch("app.services.broker_service.get_order_by_id")
     @patch("app.services.broker_service.get_option_order_by_id")
     def test_option_trade_uses_option_order_lookup(self, mock_option_order, mock_stock_order):

@@ -3977,6 +3977,78 @@ def verify_order_landed(
     return ("unknown", observed)
 
 
+_OPTION_ORDER_REJECTED_STATES = {"rejected", "cancelled", "canceled", "failed", "expired"}
+_OPTION_ORDER_RESTING_STATES = {"confirmed", "queued", "partially_filled", "filled"}
+_OPTION_ORDER_VERIFY_STATES = {"", "unknown", "unconfirmed", "new", "submitted", "pending"}
+
+
+def verify_option_order_landed(
+    order_id: str,
+    *,
+    max_wait_s: float = 3.0,
+    poll_interval_s: float = 0.5,
+) -> tuple[str, str | None]:
+    """Option-order equivalent of verify_order_landed.
+
+    Robinhood option orders live behind get_option_order_info, not
+    get_stock_order_info. Poll the option endpoint until the order is either
+    resting/filled, explicitly rejected, or still ambiguous at timeout.
+    """
+    import time
+
+    if not order_id:
+        return ("unknown", None)
+    deadline = time.time() + float(max_wait_s)
+    observed = None
+    while time.time() < deadline:
+        info = get_option_order_by_id(order_id) or {}
+        observed = (info.get("state") or info.get("status") or "").strip().lower() or None
+        if observed in _OPTION_ORDER_REJECTED_STATES:
+            return ("rejected", observed)
+        if observed in _OPTION_ORDER_RESTING_STATES:
+            return ("resting", observed)
+        time.sleep(float(poll_interval_s))
+    return ("unknown", observed)
+
+
+def _verify_submitted_option_order(
+    result: dict[str, Any],
+    *,
+    order_id: str,
+    label: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    state = str(result.get("state") or result.get("status") or "").strip().lower()
+    if state in _OPTION_ORDER_REJECTED_STATES:
+        return result, {
+            "ok": False,
+            "error": f"option_order_{state}",
+            "order_id": order_id,
+            "state": state,
+            "raw": result,
+        }
+    if state not in _OPTION_ORDER_VERIFY_STATES:
+        return result, None
+
+    verdict, observed = verify_option_order_landed(order_id)
+    if verdict == "rejected":
+        logger.error(
+            "[broker] %s post-submit rejected order_id=%s observed_state=%s",
+            label, order_id, observed,
+        )
+        return result, {
+            "ok": False,
+            "error": f"option_order_{observed or 'rejected'}",
+            "order_id": order_id,
+            "state": observed or state or "rejected",
+            "raw": result,
+        }
+    if verdict == "resting" and observed:
+        updated = dict(result)
+        updated["state"] = observed
+        return updated, None
+    return result, None
+
+
 # ── Options order placement (Task MM) ──────────────────────────────────
 #
 # Robinhood options live at api.robinhood.com/options/ — same equity-scope
@@ -4201,6 +4273,14 @@ def place_option_buy_order(
                     sym, expiration, strike, side, quantity, result,
                 )
                 return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            result, post_submit_reject = _verify_submitted_option_order(
+                result,
+                order_id=str(order_id),
+                label=f"BUY-OPT {sym} {expiration} {strike}{side}",
+            )
+            if post_submit_reject is not None:
+                return post_submit_reject
+            state = result.get("state", state)
             logger.info(
                 "[broker] BUY-OPT order placed: %s %s %s%s qty=%d limit=%.2f -> %s",
                 sym, expiration, strike, side, quantity, submitted_limit, state,
@@ -4313,6 +4393,14 @@ def place_option_sell_order(
                     sym, expiration, strike, side, quantity, result,
                 )
                 return {"ok": False, "error": str(error_msg)[:500], "raw": result}
+            result, post_submit_reject = _verify_submitted_option_order(
+                result,
+                order_id=str(order_id),
+                label=f"SELL-OPT {sym} {expiration} {strike}{side}",
+            )
+            if post_submit_reject is not None:
+                return post_submit_reject
+            state = result.get("state", state)
             logger.info(
                 "[broker] SELL-OPT order placed: %s %s %s%s qty=%d limit=%.2f effect=%s -> %s",
                 sym, expiration, strike, side, quantity, submitted_limit, pe, state,
