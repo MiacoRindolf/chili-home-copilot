@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 
 from app.config import settings
@@ -156,6 +157,72 @@ def test_edge_evidence_variant_priority_before_generic_backlog(db):
     pending = get_pending_patterns(db, limit=2)
 
     assert [p.id for p in pending] == [edge_child.id, generic.id]
+
+
+def test_lane_planner_prioritizes_recert_before_prescreen(db):
+    _deactivate_existing_patterns(db)
+    prescreen = _queued_pattern(
+        db,
+        name="cheap prescreen should wait behind recert",
+        lifecycle_stage="candidate",
+        backtest_priority=999,
+    )
+    prescreen.queue_tier = QUEUE_TIER_PRESCREEN
+    recert = _queued_pattern(
+        db,
+        name="recert safety debt",
+        lifecycle_stage="promoted",
+        backtest_priority=0,
+        recert_required=True,
+    )
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=2)
+
+    assert [p.id for p in pending] == [recert.id, prescreen.id]
+
+
+def test_lane_planner_diversifies_generic_variant_families(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "brain_queue_max_per_lineage_per_batch", 2)
+    parent = _queued_pattern(
+        db,
+        name="crowded parent",
+        lifecycle_stage="candidate",
+        backtest_priority=0,
+    )
+    parent.active = False
+    crowded_children = [
+        _queued_pattern(
+            db,
+            name=f"crowded child {idx}",
+            lifecycle_stage="challenged",
+            backtest_priority=999 - idx,
+            origin="exit_variant",
+            parent_id=parent.id,
+        )
+        for idx in range(5)
+    ]
+    diverse_a = _queued_pattern(
+        db,
+        name="diverse generic a",
+        lifecycle_stage="challenged",
+        backtest_priority=10,
+    )
+    diverse_b = _queued_pattern(
+        db,
+        name="diverse generic b",
+        lifecycle_stage="challenged",
+        backtest_priority=9,
+    )
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=4)
+    family_counts = Counter(int(p.parent_id or p.id) for p in pending)
+
+    assert family_counts[int(parent.id)] == 2
+    assert {diverse_a.id, diverse_b.id}.issubset({p.id for p in pending})
+    assert len({p.id for p in pending}.intersection({p.id for p in crowded_children})) == 2
 
 
 def test_scored_priority_does_not_requeue_fresh_pattern_below_bypass_floor(db):

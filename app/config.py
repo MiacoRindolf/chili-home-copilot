@@ -1140,6 +1140,14 @@ class Settings(BaseSettings):
 
     # Pattern backtest queue: how soon a pattern is eligible again (was hardcoded 7).
     brain_retest_interval_days: int = 7
+    # Lane-aware queue planner: preserve safety/recert lanes, fast-track
+    # edge-evidence variants, and avoid one parent lineage consuming an
+    # entire batch of expensive backtests.
+    brain_queue_lane_planner_enabled: bool = True
+    brain_queue_max_per_lineage_per_batch: int = 3
+    brain_queue_lane_fetch_multiplier: int = 4
+    brain_queue_edge_evidence_max_per_batch: int = 12
+    brain_queue_prescreen_max_per_batch: int = 20
     # When the retest queue is thin, add oldest-tested active patterns up to this many per cycle.
     brain_queue_exploration_enabled: bool = True
     brain_queue_exploration_max: int = 40

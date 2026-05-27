@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, false, func, or_
+from sqlalchemy import and_, case, false, func, not_, or_, text, true
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
@@ -35,8 +35,28 @@ QUEUE_RANK_EDGE_EVIDENCE_VARIANT = 3
 QUEUE_RANK_GENERIC_BACKLOG = 4
 EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS = "edge_shadow_collecting_ev"
 EDGE_EVIDENCE_VARIANT_ORIGIN = "edge_exit_variant"
+BACKTEST_QUEUE_LOCK_NAMESPACE = 424242
 MIN_ZERO_TRADE_DEMOTE_THRESHOLD = 1
 ZERO_TRADE_DEMOTE_DEFAULT_THRESHOLD = 3
+LANE_RECERT = "recert"
+LANE_PROMOTION_PATH_DEBT = "promotion_path_debt"
+LANE_EDGE_EVIDENCE = "edge_evidence"
+LANE_PRESCREEN = "prescreen"
+LANE_GENERIC = "generic"
+
+
+def _settings_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        from ...config import settings
+
+        raw = getattr(settings, name, default)
+    except Exception:
+        raw = default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
 
 
 def get_retest_interval_days() -> int:
@@ -107,6 +127,114 @@ def _promotion_path_debt_expr():
     )
 
 
+def _recert_promoted_expr():
+    return and_(
+        ScanPattern.recert_required.is_(True),
+        ScanPattern.lifecycle_stage.in_(RECERT_PROMOTED_LIFECYCLES),
+    )
+
+
+def _edge_evidence_variant_expr():
+    return and_(
+        ScanPattern.parent_id.isnot(None),
+        or_(
+            ScanPattern.promotion_status == EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS,
+            ScanPattern.origin == EDGE_EVIDENCE_VARIANT_ORIGIN,
+        ),
+    )
+
+
+def _prescreen_tier_expr():
+    return ScanPattern.queue_tier == QUEUE_TIER_PRESCREEN
+
+
+def _full_or_unknown_tier_expr():
+    return or_(
+        ScanPattern.queue_tier.is_(None),
+        ScanPattern.queue_tier != QUEUE_TIER_PRESCREEN,
+    )
+
+
+def _pending_expr(cutoff: datetime):
+    recert_promoted = _recert_promoted_expr()
+    promotion_path_debt = _promotion_path_debt_expr()
+    priority_bypass = ScanPattern.backtest_priority >= get_priority_bypass_retest_floor()
+    return or_(
+        priority_bypass,
+        ScanPattern.last_backtest_at.is_(None),
+        ScanPattern.last_backtest_at < cutoff,
+        recert_promoted,
+        promotion_path_debt,
+    )
+
+
+def _lane_expr(lane: str):
+    recert_promoted = _recert_promoted_expr()
+    promotion_path_debt = _promotion_path_debt_expr()
+    edge_evidence = _edge_evidence_variant_expr()
+    prescreen = _prescreen_tier_expr()
+    if lane == LANE_RECERT:
+        return recert_promoted
+    if lane == LANE_PROMOTION_PATH_DEBT:
+        return and_(promotion_path_debt, not_(recert_promoted))
+    if lane == LANE_EDGE_EVIDENCE:
+        return and_(
+            edge_evidence,
+            not_(recert_promoted),
+            not_(promotion_path_debt),
+        )
+    if lane == LANE_PRESCREEN:
+        return and_(
+            prescreen,
+            not_(recert_promoted),
+            not_(promotion_path_debt),
+            not_(edge_evidence),
+        )
+    if lane == LANE_GENERIC:
+        return and_(
+            _full_or_unknown_tier_expr(),
+            not_(recert_promoted),
+            not_(promotion_path_debt),
+            not_(edge_evidence),
+        )
+    return true()
+
+
+def _pending_order_exprs() -> list[Any]:
+    priority_recert_ids = _priority_recert_pattern_ids()
+    recert_promoted = _recert_promoted_expr()
+    promotion_path_debt = _promotion_path_debt_expr()
+    edge_evidence = _edge_evidence_variant_expr()
+    prescreen = _prescreen_tier_expr()
+    priority_recert = and_(
+        recert_promoted,
+        ScanPattern.id.in_(priority_recert_ids),
+    )
+    lane_rank = case(
+        (priority_recert, QUEUE_RANK_PRIORITY_RECERT),
+        (recert_promoted, QUEUE_RANK_RECERT),
+        (promotion_path_debt, QUEUE_RANK_PROMOTION_PATH_DEBT),
+        (edge_evidence, QUEUE_RANK_EDGE_EVIDENCE_VARIANT),
+        (prescreen, QUEUE_RANK_GENERIC_BACKLOG),
+        else_=QUEUE_RANK_GENERIC_BACKLOG,
+    )
+    return [
+        lane_rank.asc(),
+        ScanPattern.backtest_priority.desc(),
+        ScanPattern.last_backtest_at.asc().nullsfirst(),
+        ScanPattern.created_at.asc(),
+        ScanPattern.id.asc(),
+    ]
+
+
+def _legacy_pending_order_exprs() -> list[Any]:
+    tier_rank = case(
+        (ScanPattern.queue_tier == QUEUE_TIER_PRESCREEN, 0),
+        else_=1,
+    )
+    return [tier_rank.asc(), *_pending_order_exprs()]
+
+
 # Dashboard polls this frequently; cache avoids hammering Postgres when the pool is busy.
 _QUEUE_STATUS_LOCK = threading.Lock()
 _QUEUE_STATUS_CACHE: dict[str, Any] | None = None
@@ -124,7 +252,7 @@ def invalidate_queue_status_cache() -> None:
 def get_pending_patterns(
     db: Session, limit: int = 50, ids_only: bool = False
 ) -> list[ScanPattern] | list[int]:
-    """Get patterns needing backtests, ordered by priority.
+    """Get patterns needing backtests using the lane-aware queue planner.
 
     Priority order:
     1. Explicitly prioritized promoted/live recerts
@@ -140,65 +268,168 @@ def get_pending_patterns(
 
     When ids_only=True, returns a list of pattern IDs only (lighter; workers load by id).
     """
+    if limit <= 0:
+        return []
+    if not bool(_settings_int("brain_queue_lane_planner_enabled", 1, minimum=0)):
+        rows = _legacy_pending_patterns(db, limit=limit)
+        return [p.id for p in rows] if ids_only else rows
+
+    rows = _planned_pending_patterns(db, limit=limit)
+    return [p.id for p in rows] if ids_only else rows
+
+
+def _legacy_pending_patterns(db: Session, *, limit: int) -> list[ScanPattern]:
     cutoff = datetime.utcnow() - timedelta(days=get_retest_interval_days())
 
-    tier_rank = case(
-        (ScanPattern.queue_tier == "prescreen", 0),
-        else_=1,
-    )
-    recert_promoted = and_(
-        ScanPattern.recert_required.is_(True),
-        ScanPattern.lifecycle_stage.in_(RECERT_PROMOTED_LIFECYCLES),
-    )
-    priority_recert_ids = _priority_recert_pattern_ids()
-    promotion_path_debt = _promotion_path_debt_expr()
-    edge_evidence_variant = and_(
-        ScanPattern.parent_id.isnot(None),
-        or_(
-            ScanPattern.promotion_status == EDGE_EVIDENCE_VARIANT_PROMOTION_STATUS,
-            ScanPattern.origin == EDGE_EVIDENCE_VARIANT_ORIGIN,
-        ),
-    )
-    priority_bypass = ScanPattern.backtest_priority >= get_priority_bypass_retest_floor()
-    needs_backtest = or_(
-        priority_bypass,
-        ScanPattern.last_backtest_at.is_(None),
-        ScanPattern.last_backtest_at < cutoff,
-        recert_promoted,
-        promotion_path_debt,
-    )
-    recert_rank = case(
-        (
-            and_(
-                recert_promoted,
-                ScanPattern.id.in_(priority_recert_ids),
-            ),
-            QUEUE_RANK_PRIORITY_RECERT,
-        ),
-        (recert_promoted, QUEUE_RANK_RECERT),
-        (promotion_path_debt, QUEUE_RANK_PROMOTION_PATH_DEBT),
-        (edge_evidence_variant, QUEUE_RANK_EDGE_EVIDENCE_VARIANT),
-        else_=QUEUE_RANK_GENERIC_BACKLOG,
-    )
-    q = (
+    return (
         db.query(ScanPattern)
         .filter(
             ScanPattern.active.is_(True),
-            needs_backtest,
+            _pending_expr(cutoff),
         )
-        .order_by(
-            tier_rank.asc(),
-            recert_rank.asc(),
-            ScanPattern.backtest_priority.desc(),
-            ScanPattern.last_backtest_at.asc().nullsfirst(),
-            ScanPattern.created_at.asc(),
-        )
+        .order_by(*_legacy_pending_order_exprs())
         .limit(limit)
+        .all()
     )
-    if ids_only:
-        rows = q.with_entities(ScanPattern.id).all()
-        return [r[0] for r in rows]
-    return q.all()
+
+
+def _lineage_key(pattern: ScanPattern) -> int:
+    try:
+        return int(pattern.parent_id or pattern.id)
+    except (TypeError, ValueError):
+        return int(getattr(pattern, "id", 0) or 0)
+
+
+def _append_planned_rows(
+    selected: list[ScanPattern],
+    rows: list[ScanPattern],
+    *,
+    selected_ids: set[int],
+    lineage_counts: dict[int, int],
+    limit: int,
+    lineage_cap: int | None,
+) -> None:
+    for pattern in rows:
+        if len(selected) >= limit:
+            return
+        try:
+            pattern_id = int(pattern.id)
+        except (TypeError, ValueError):
+            continue
+        if pattern_id in selected_ids:
+            continue
+        lineage = _lineage_key(pattern)
+        if lineage_cap is not None and lineage_cap > 0:
+            if lineage_counts.get(lineage, 0) >= lineage_cap:
+                continue
+        selected.append(pattern)
+        selected_ids.add(pattern_id)
+        lineage_counts[lineage] = lineage_counts.get(lineage, 0) + 1
+
+
+def _query_lane(
+    db: Session,
+    *,
+    cutoff: datetime,
+    lane: str,
+    limit: int,
+    exclude_ids: set[int],
+) -> list[ScanPattern]:
+    if limit <= 0:
+        return []
+    q = db.query(ScanPattern).filter(
+        ScanPattern.active.is_(True),
+        _pending_expr(cutoff),
+        _lane_expr(lane),
+    )
+    if exclude_ids:
+        q = q.filter(not_(ScanPattern.id.in_(exclude_ids)))
+    return q.order_by(*_pending_order_exprs()).limit(limit).all()
+
+
+def _planned_pending_patterns(db: Session, *, limit: int) -> list[ScanPattern]:
+    cutoff = datetime.utcnow() - timedelta(days=get_retest_interval_days())
+    selected: list[ScanPattern] = []
+    selected_ids: set[int] = set()
+    lineage_counts: dict[int, int] = {}
+    lineage_cap = _settings_int(
+        "brain_queue_max_per_lineage_per_batch",
+        3,
+        minimum=0,
+    )
+    fetch_multiplier = _settings_int(
+        "brain_queue_lane_fetch_multiplier",
+        4,
+        minimum=1,
+    )
+    edge_default = max(1, min(12, max(2, limit // 5)))
+    prescreen_default = max(1, min(20, max(2, limit // 4)))
+    lane_plan: list[tuple[str, int, int | None]] = [
+        (LANE_RECERT, limit, None),
+        (LANE_PROMOTION_PATH_DEBT, limit, None),
+        (
+            LANE_EDGE_EVIDENCE,
+            _settings_int(
+                "brain_queue_edge_evidence_max_per_batch",
+                edge_default,
+                minimum=0,
+            ),
+            lineage_cap,
+        ),
+        (
+            LANE_PRESCREEN,
+            _settings_int(
+                "brain_queue_prescreen_max_per_batch",
+                prescreen_default,
+                minimum=0,
+            ),
+            lineage_cap,
+        ),
+        (LANE_GENERIC, limit, lineage_cap),
+    ]
+
+    for lane, quota, cap in lane_plan:
+        remaining = limit - len(selected)
+        if remaining <= 0:
+            break
+        take = min(remaining, max(0, quota))
+        if take <= 0:
+            continue
+        rows = _query_lane(
+            db,
+            cutoff=cutoff,
+            lane=lane,
+            limit=max(take, take * fetch_multiplier),
+            exclude_ids=selected_ids,
+        )
+        _append_planned_rows(
+            selected,
+            rows,
+            selected_ids=selected_ids,
+            lineage_counts=lineage_counts,
+            limit=limit,
+            lineage_cap=cap,
+        )
+
+    if len(selected) < limit:
+        rows = (
+            db.query(ScanPattern)
+            .filter(ScanPattern.active.is_(True), _pending_expr(cutoff))
+            .filter(not_(ScanPattern.id.in_(selected_ids)) if selected_ids else true())
+            .order_by(*_pending_order_exprs())
+            .limit(limit - len(selected))
+            .all()
+        )
+        _append_planned_rows(
+            selected,
+            rows,
+            selected_ids=selected_ids,
+            lineage_counts=lineage_counts,
+            limit=limit,
+            lineage_cap=None,
+        )
+
+    return selected
 
 
 def get_boosted_patterns(db: Session) -> list[ScanPattern]:
@@ -256,6 +487,63 @@ def clear_boost(db: Session, pattern_id: int) -> bool:
     pattern.backtest_priority = 0
     db.commit()
     return True
+
+
+def _postgres_bind(db: Session) -> bool:
+    try:
+        return db.get_bind().dialect.name == "postgresql"
+    except Exception:
+        return False
+
+
+def try_acquire_pattern_backtest_lock(db: Session, pattern_id: int) -> bool:
+    """Best-effort session advisory lock for one expensive pattern job.
+
+    The queue is backed by ``scan_patterns`` rather than a claim table, so
+    overlapping worker ticks can pick the same row. PostgreSQL advisory locks
+    give us a schema-free lease: only one session should compute a given
+    pattern at a time, and other sessions skip it cheaply.
+    """
+    if not _postgres_bind(db):
+        return True
+    try:
+        ok = db.execute(
+            text(
+                "SELECT pg_try_advisory_lock(:namespace, :pattern_id)"
+            ),
+            {
+                "namespace": BACKTEST_QUEUE_LOCK_NAMESPACE,
+                "pattern_id": int(pattern_id),
+            },
+        ).scalar()
+        return bool(ok)
+    except Exception:
+        logger.debug(
+            "[backtest_queue] advisory lock acquire failed pattern_id=%s",
+            pattern_id,
+            exc_info=True,
+        )
+        return True
+
+
+def release_pattern_backtest_lock(db: Session, pattern_id: int) -> None:
+    """Release a pattern advisory lock if this session owns it."""
+    if not _postgres_bind(db):
+        return
+    try:
+        db.execute(
+            text("SELECT pg_advisory_unlock(:namespace, :pattern_id)"),
+            {
+                "namespace": BACKTEST_QUEUE_LOCK_NAMESPACE,
+                "pattern_id": int(pattern_id),
+            },
+        )
+    except Exception:
+        logger.debug(
+            "[backtest_queue] advisory lock release failed pattern_id=%s",
+            pattern_id,
+            exc_info=True,
+        )
 
 
 def mark_pattern_tested(
@@ -415,21 +703,15 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
     cutoff = datetime.utcnow() - timedelta(days=get_retest_interval_days())
 
     base = db.query(ScanPattern).filter(ScanPattern.active.is_(True))
-    recert_promoted_expr = and_(
-        ScanPattern.recert_required.is_(True),
-        ScanPattern.lifecycle_stage.in_(RECERT_PROMOTED_LIFECYCLES),
-    )
+    recert_promoted_expr = _recert_promoted_expr()
     promotion_path_debt_expr = _promotion_path_debt_expr()
+    edge_evidence_expr = _lane_expr(LANE_EDGE_EVIDENCE)
+    prescreen_expr = _lane_expr(LANE_PRESCREEN)
+    generic_expr = _lane_expr(LANE_GENERIC)
     priority_bypass_expr = (
         ScanPattern.backtest_priority >= get_priority_bypass_retest_floor()
     )
-    needs_backtest_expr = or_(
-        priority_bypass_expr,
-        ScanPattern.last_backtest_at.is_(None),
-        ScanPattern.last_backtest_at < cutoff,
-        recert_promoted_expr,
-        promotion_path_debt_expr,
-    )
+    needs_backtest_expr = _pending_expr(cutoff)
 
     row = base.with_entities(
         func.count(ScanPattern.id).label("total_active"),
@@ -475,6 +757,30 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
                 )
             )
         ).label("promotion_path_debt_pending"),
+        func.count(
+            case(
+                (
+                    and_(needs_backtest_expr, edge_evidence_expr),
+                    1,
+                )
+            )
+        ).label("edge_evidence_pending"),
+        func.count(
+            case(
+                (
+                    and_(needs_backtest_expr, prescreen_expr),
+                    1,
+                )
+            )
+        ).label("prescreen_pending"),
+        func.count(
+            case(
+                (
+                    and_(needs_backtest_expr, generic_expr),
+                    1,
+                )
+            )
+        ).label("generic_pending"),
     ).first()
 
     total_active = row.total_active or 0
@@ -486,6 +792,9 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
     pending = row.pending_queue or 0
     recert_pending = row.recert_pending or 0
     promotion_path_debt_pending = row.promotion_path_debt_pending or 0
+    edge_evidence_pending = row.edge_evidence_pending or 0
+    prescreen_pending = row.prescreen_pending or 0
+    generic_pending = row.generic_pending or 0
 
     out = {
         "total": total_active,
@@ -497,6 +806,17 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
         "recently_tested": recently_tested,
         "recert_pending": recert_pending,
         "promotion_path_debt_pending": promotion_path_debt_pending,
+        "edge_evidence_pending": edge_evidence_pending,
+        "prescreen_pending": prescreen_pending,
+        "generic_pending": generic_pending,
+        "lane_planner_enabled": bool(
+            _settings_int("brain_queue_lane_planner_enabled", 1, minimum=0)
+        ),
+        "max_per_lineage_per_batch": _settings_int(
+            "brain_queue_max_per_lineage_per_batch",
+            3,
+            minimum=0,
+        ),
         "priority_bypass_floor": get_priority_bypass_retest_floor(),
         "queue_empty": pending == 0,
     }

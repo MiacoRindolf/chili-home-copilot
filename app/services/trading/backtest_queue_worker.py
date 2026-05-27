@@ -174,7 +174,11 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
     from ...config import settings
     from ...db import SessionLocal
     from ...models.trading import ScanPattern, TradingInsight
-    from .backtest_queue import mark_pattern_tested
+    from .backtest_queue import (
+        mark_pattern_tested,
+        release_pattern_backtest_lock,
+        try_acquire_pattern_backtest_lock,
+    )
     from .backtest_engine import hydrate_scan_pattern_rules_json, smart_backtest_insight
     from .learning_events import log_learning_event
     from datetime import datetime
@@ -207,7 +211,15 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             )
 
     db = SessionLocal()
+    lock_acquired = False
     try:
+        if not try_acquire_pattern_backtest_lock(db, int(pattern_id)):
+            logger.info(
+                "[backtest_queue] pattern_id=%s already leased by another worker; skipping",
+                pattern_id,
+            )
+            return (0, 0)
+        lock_acquired = True
         pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
         if not pattern:
             return (0, 0)
@@ -478,6 +490,12 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             pass
         return (0, 1)
     finally:
+        if lock_acquired:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            release_pattern_backtest_lock(db, int(pattern_id))
         # FIX 46 pattern (rollback before close).
         try:
             db.rollback()
