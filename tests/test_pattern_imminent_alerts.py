@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from app.models.trading import AlertHistory, AutoTraderRun, ScanPattern, Trade
 from app.services.trading import pattern_imminent_alerts as imminent_mod
 from app.services.trading.alerts import PATTERN_BREAKOUT_IMMINENT
@@ -419,7 +421,7 @@ def test_shadow_poor_edge_cooldown_requires_negative_stored_return(
         0.0,
     )
 
-    cooldown_ids, counts = _shadow_poor_edge_pattern_ids(
+    cooldown_ids, counts, details = _shadow_poor_edge_pattern_ids(
         db,
         [poor, healthy],
         user_id=1,
@@ -428,6 +430,8 @@ def test_shadow_poor_edge_cooldown_requires_negative_stored_return(
     assert int(poor.id) in cooldown_ids
     assert int(healthy.id) not in cooldown_ids
     assert counts[int(poor.id)] == TEST_POOR_EDGE_MIN_REJECTS
+    assert details[int(poor.id)]["cooldown_basis"] == "stored_avg_return"
+    assert details[int(poor.id)]["max_avg_return_pct"] == 0.0
 
 
 def test_shadow_poor_edge_cooldown_uses_recent_expected_net(
@@ -488,7 +492,7 @@ def test_shadow_poor_edge_cooldown_uses_recent_expected_net(
         -0.75,
     )
 
-    cooldown_ids, counts = _shadow_poor_edge_pattern_ids(
+    cooldown_ids, counts, details = _shadow_poor_edge_pattern_ids(
         db,
         [old_positive],
         user_id=1,
@@ -496,6 +500,9 @@ def test_shadow_poor_edge_cooldown_uses_recent_expected_net(
 
     assert int(old_positive.id) in cooldown_ids
     assert counts[int(old_positive.id)] == TEST_POOR_EDGE_MIN_REJECTS
+    assert details[int(old_positive.id)]["cooldown_basis"] == "recent_expected_net"
+    assert details[int(old_positive.id)]["avg_expected_net_pct"] == pytest.approx(-1.1)
+    assert details[int(old_positive.id)]["expected_net_sample_n"] == TEST_POOR_EDGE_MIN_REJECTS
 
 
 def test_gather_imminent_skips_poor_shadow_pattern_but_keeps_healthy(
@@ -591,6 +598,7 @@ def test_gather_imminent_skips_poor_shadow_pattern_but_keeps_healthy(
     assert [c["ticker"] for c in candidates] == ["GOOD-USD"]
     assert meta["skip_reasons"]["shadow_poor_edge_cooldown"] == 1
     assert meta["top_suppressed"][0]["reason"] == "shadow_poor_edge_cooldown"
+    assert meta["top_suppressed"][0]["cooldown_basis"] == "stored_avg_return"
 
 
 def test_gather_imminent_reports_readiness_band_and_lifecycle_diagnostics(
