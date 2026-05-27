@@ -23,6 +23,27 @@ PDT_WINDOW_DAYS = 5
 PDT_THRESHOLD_EQUITY = 25_000.0
 
 
+def _is_option_trade_safe(trade: Any) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
+def _trade_notional_usd(trade: Any) -> float:
+    try:
+        entry = float(getattr(trade, "entry_price", None) or 0.0)
+        qty = float(getattr(trade, "quantity", None) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if entry <= 0.0 or qty <= 0.0:
+        return 0.0
+    multiplier = 100.0 if _is_option_trade_safe(trade) else 1.0
+    return abs(entry * qty * multiplier)
+
+
 def check_pdt_status(
     db: Session,
     user_id: int | None,
@@ -95,9 +116,7 @@ def check_concentration_limits(
         Trade.status == "open",
     ).all()
 
-    existing_notional = sum(
-        float(t.entry_price or 0) * float(t.quantity or 0) for t in open_trades
-    )
+    existing_notional = sum(_trade_notional_usd(t) for t in open_trades)
     total_ticker_pct = ((existing_notional + proposed_notional) / total_equity) * 100
     if total_ticker_pct > 25:
         return False, (
