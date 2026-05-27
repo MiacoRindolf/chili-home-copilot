@@ -323,6 +323,7 @@ class _FakeRotationDB:
         prior_market_velocity_ratio: float | None = None,
         grace_history: dict[str, list[dict]] | None = None,
         learning_rows: list[dict] | None = None,
+        open_positions: set[str] | None = None,
     ) -> None:
         self.inserted_rows: list[dict] = []
         self.inserted_run: dict | None = None
@@ -337,6 +338,7 @@ class _FakeRotationDB:
         self.prior_market_velocity_ratio = prior_market_velocity_ratio
         self.grace_history = grace_history or {}
         self.learning_rows = learning_rows or []
+        self.open_positions = open_positions or set()
 
     def execute(self, statement, params=None):
         sql = str(statement)
@@ -366,6 +368,11 @@ class _FakeRotationDB:
             ])
         if "recent learning retention events" in sql:
             return _FakeScalarRows(self.learning_rows)
+        if "FROM fast_executions e" in sql and "x.id IS NULL" in sql:
+            return _FakeRows([
+                _FakeRow(ticker=ticker)
+                for ticker in sorted(self.open_positions)
+            ])
         if "SELECT status, rank, composite_score" in sql:
             ticker = (params or {}).get("ticker")
             rows = [_FakeRow(**row) for row in self.grace_history.get(ticker, [])]
@@ -1023,6 +1030,54 @@ def test_rotation_uses_observed_signal_and_fill_rates_for_shadow_ranking():
     assert rows_by_ticker["NOFILL-USD"]["rank"] is None
     assert rows_by_ticker["FILL-USD"]["rank"] == 1
     assert rows_by_ticker["FRESH-USD"]["rank"] == 2
+
+
+def test_rotation_skips_open_paper_positions_for_ranked_slots():
+    from app.services.trading.fast_path.universe_rotator import run_rotation_pass
+    from app.services.trading.fast_path.universe_status import (
+        UNIVERSE_STATUS_INACTIVE,
+        UNIVERSE_STATUS_SHADOW,
+    )
+
+    db = _FakeRotationDB(open_positions={"HELD-USD"})
+    s = _StubSettings(
+        universe_top_n=2,
+        universe_hysteresis_ranks=0,
+        universe_min_range_24h_bps=0.0,
+        universe_adaptive_range_floor_enabled=False,
+    )
+    snapshots = {
+        "HELD-USD": _make_candidate(
+            ticker="HELD-USD",
+            high_24h=130.0,
+            low_24h=70.0,
+        ),
+        "FRESH-USD": _make_candidate(
+            ticker="FRESH-USD",
+            high_24h=112.0,
+            low_24h=88.0,
+        ),
+    }
+
+    assert (
+        snapshots["HELD-USD"].composite_score
+        > snapshots["FRESH-USD"].composite_score
+    )
+    out = run_rotation_pass(
+        db,
+        settings=s,
+        list_usd_products_fn=lambda: list(snapshots),
+        fetch_snapshot_fn=lambda t: snapshots[t],
+    )
+
+    rows_by_ticker = {row["ticker"]: row for row in db.inserted_rows}
+    assert out["open_position_subscription_tickers"] == 1
+    assert out["open_position_rank_skips"] == 1
+    assert out["ranked_n"] == 1
+    assert rows_by_ticker["HELD-USD"]["status"] == UNIVERSE_STATUS_INACTIVE
+    assert rows_by_ticker["HELD-USD"]["rank"] is None
+    assert rows_by_ticker["FRESH-USD"]["status"] == UNIVERSE_STATUS_SHADOW
+    assert rows_by_ticker["FRESH-USD"]["rank"] == 1
 
 
 def test_rotation_uses_recent_realized_move_for_observed_ranking():

@@ -1822,6 +1822,8 @@ def run_rotation_pass(
         "observed_opportunity_median_round_trip_cost_bps": None,
         "observed_opportunity_median_realized_move_to_cost": None,
         "prior_observed_opportunity_median_realized_move_to_cost": None,
+        "open_position_subscription_tickers": 0,
+        "open_position_rank_skips": 0,
         "market_velocity_cost_parity_ratio": None,
         "observed_opportunity_rank_skips": 0,
         "market_velocity_backfill_skips": 0,
@@ -2032,6 +2034,8 @@ def run_rotation_pass(
     if observed_since is not None:
         out["observed_opportunity_since"] = observed_since.isoformat()
     out["observed_opportunity_tickers"] = len(observed_opportunity)
+    open_position_tickers = set(get_open_paper_position_pairs(db))
+    out["open_position_subscription_tickers"] = len(open_position_tickers)
 
     active_candidate_tickers = {c.ticker for c in candidates}
     shadow_pool = [
@@ -2153,12 +2157,16 @@ def run_rotation_pass(
         return ok
 
     cut_ranked: list[_PairCandidate] = []
+    open_position_rank_skips: list[_PairCandidate] = []
     exhausted_rank_skips: list[_PairCandidate] = []
     observed_rank_skips: list[_PairCandidate] = []
     velocity_backfill_skips: list[_PairCandidate] = []
     for cand in candidates:
         if len(cut_ranked) >= target_ranked:
             break
+        if cand.ticker in open_position_tickers:
+            open_position_rank_skips.append(cand)
+            continue
         if _edge_exhausted(cand, record=True):
             exhausted_rank_skips.append(cand)
             continue
@@ -2382,12 +2390,14 @@ def run_rotation_pass(
             forced_reasons[reason] = forced_reasons.get(reason, 0) + 1
 
     out["edge_exhaustion_backfill_skips"] = len(exhausted_rank_skips)
+    out["open_position_rank_skips"] = len(open_position_rank_skips)
     out["observed_opportunity_rank_skips"] = len(observed_rank_skips)
     out["market_velocity_backfill_skips"] = len(velocity_backfill_skips)
     out["ranked_n"] = len(cut_ranked)
 
     seen_in_this_pass: set[str] = set()
     for cand in [
+        *open_position_rank_skips,
         *exhausted_rank_skips,
         *observed_rank_skips,
         *velocity_backfill_skips,
