@@ -59,6 +59,18 @@ def _settings_int(name: str, default: int, *, minimum: int = 0) -> int:
     return max(minimum, value)
 
 
+def _settings_bool(name: str, default: bool) -> bool:
+    try:
+        from ...config import settings
+
+        raw = getattr(settings, name, default)
+    except Exception:
+        raw = default
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
+
+
 def get_retest_interval_days() -> int:
     """Days after which an active pattern is eligible for routine re-backtest (from Settings)."""
     from ...config import settings
@@ -127,6 +139,37 @@ def _promotion_path_debt_expr():
     )
 
 
+def _sparse_promotion_debt_cooldown_expr(now: datetime | None = None):
+    """Throttle near-promoted rows that just proved sparse again.
+
+    Promotion-path debt is important, but a shadow/pilot pattern with repeated
+    zero-trade queue runs should not burn the high-priority lane every cycle.
+    Manual priority bypass still wins in ``_pending_expr``.
+    """
+    if not _settings_bool("brain_queue_sparse_promotion_debt_cooldown_enabled", True):
+        return false()
+    zero_floor = _settings_int(
+        "brain_queue_sparse_promotion_debt_zero_runs",
+        5,
+        minimum=1,
+    )
+    cooldown_minutes = _settings_int(
+        "brain_queue_sparse_promotion_debt_cooldown_minutes",
+        360,
+        minimum=0,
+    )
+    if cooldown_minutes <= 0:
+        return false()
+    cutoff = (now or datetime.utcnow()) - timedelta(minutes=cooldown_minutes)
+    return and_(
+        _promotion_path_debt_expr(),
+        ScanPattern.consecutive_zero_trade_runs >= zero_floor,
+        ScanPattern.last_backtest_at.isnot(None),
+        ScanPattern.last_backtest_at >= cutoff,
+        ScanPattern.backtest_priority < get_priority_bypass_retest_floor(),
+    )
+
+
 def _recert_promoted_expr():
     return and_(
         ScanPattern.recert_required.is_(True),
@@ -158,13 +201,14 @@ def _full_or_unknown_tier_expr():
 def _pending_expr(cutoff: datetime):
     recert_promoted = _recert_promoted_expr()
     promotion_path_debt = _promotion_path_debt_expr()
+    sparse_promotion_debt_cooldown = _sparse_promotion_debt_cooldown_expr()
     priority_bypass = ScanPattern.backtest_priority >= get_priority_bypass_retest_floor()
     return or_(
         priority_bypass,
         ScanPattern.last_backtest_at.is_(None),
         ScanPattern.last_backtest_at < cutoff,
         recert_promoted,
-        promotion_path_debt,
+        and_(promotion_path_debt, not_(sparse_promotion_debt_cooldown)),
     )
 
 
@@ -705,6 +749,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
     base = db.query(ScanPattern).filter(ScanPattern.active.is_(True))
     recert_promoted_expr = _recert_promoted_expr()
     promotion_path_debt_expr = _promotion_path_debt_expr()
+    sparse_promotion_debt_cooldown_expr = _sparse_promotion_debt_cooldown_expr()
     edge_evidence_expr = _lane_expr(LANE_EDGE_EVIDENCE)
     prescreen_expr = _lane_expr(LANE_PRESCREEN)
     generic_expr = _lane_expr(LANE_GENERIC)
@@ -760,6 +805,14 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
         func.count(
             case(
                 (
+                    sparse_promotion_debt_cooldown_expr,
+                    1,
+                )
+            )
+        ).label("promotion_path_debt_cooled"),
+        func.count(
+            case(
+                (
                     and_(needs_backtest_expr, edge_evidence_expr),
                     1,
                 )
@@ -792,6 +845,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
     pending = row.pending_queue or 0
     recert_pending = row.recert_pending or 0
     promotion_path_debt_pending = row.promotion_path_debt_pending or 0
+    promotion_path_debt_cooled = row.promotion_path_debt_cooled or 0
     edge_evidence_pending = row.edge_evidence_pending or 0
     prescreen_pending = row.prescreen_pending or 0
     generic_pending = row.generic_pending or 0
@@ -806,6 +860,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
         "recently_tested": recently_tested,
         "recert_pending": recert_pending,
         "promotion_path_debt_pending": promotion_path_debt_pending,
+        "promotion_path_debt_cooled": promotion_path_debt_cooled,
         "edge_evidence_pending": edge_evidence_pending,
         "prescreen_pending": prescreen_pending,
         "generic_pending": generic_pending,

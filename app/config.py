@@ -1148,6 +1148,12 @@ class Settings(BaseSettings):
     brain_queue_lane_fetch_multiplier: int = 4
     brain_queue_edge_evidence_max_per_batch: int = 12
     brain_queue_prescreen_max_per_batch: int = 20
+    # Near-promoted shadow/pilot patterns stay protected from demotion, but
+    # repeated zero-trade queue runs should cool down so they do not monopolize
+    # the high-priority lane every cycle.
+    brain_queue_sparse_promotion_debt_cooldown_enabled: bool = True
+    brain_queue_sparse_promotion_debt_zero_runs: int = 5
+    brain_queue_sparse_promotion_debt_cooldown_minutes: int = 360
     # When the retest queue is thin, add oldest-tested active patterns up to this many per cycle.
     brain_queue_exploration_enabled: bool = True
     brain_queue_exploration_max: int = 40

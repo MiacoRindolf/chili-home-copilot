@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.config import settings
 from app.models.trading import ScanPattern
@@ -223,6 +223,82 @@ def test_lane_planner_diversifies_generic_variant_families(db, monkeypatch):
     assert family_counts[int(parent.id)] == 2
     assert {diverse_a.id, diverse_b.id}.issubset({p.id for p in pending})
     assert len({p.id for p in pending}.intersection({p.id for p in crowded_children})) == 2
+
+
+def test_sparse_promotion_path_debt_cooldown_defers_recent_zero_trade_shadow(
+    db,
+    monkeypatch,
+):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_sparse_promotion_debt_cooldown_enabled",
+        True,
+    )
+    monkeypatch.setattr(settings, "brain_queue_sparse_promotion_debt_zero_runs", 5)
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_sparse_promotion_debt_cooldown_minutes",
+        360,
+    )
+    fresh = datetime.now(timezone.utc).replace(tzinfo=None)
+    cooled = _queued_pattern(
+        db,
+        name="sparse shadow path debt",
+        lifecycle_stage="shadow_promoted",
+        backtest_priority=0,
+        promotion_gate_reasons=["cpcv_n_paths_below_provisional_min"],
+        promotion_gate_passed=False,
+        last_backtest_at=fresh,
+    )
+    cooled.consecutive_zero_trade_runs = 5
+    generic = _queued_pattern(
+        db,
+        name="generic candidate",
+        lifecycle_stage="challenged",
+        backtest_priority=60,
+    )
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=5)
+    status = get_queue_status(db, use_cache=False)
+
+    assert [p.id for p in pending] == [generic.id]
+    assert status["promotion_path_debt_pending"] == 0
+    assert status["promotion_path_debt_cooled"] == 1
+
+    cooled.backtest_priority = get_priority_bypass_retest_floor()
+    db.commit()
+
+    bypass_pending = get_pending_patterns(db, limit=5)
+
+    assert cooled.id in [p.id for p in bypass_pending]
+
+
+def test_sparse_promotion_path_debt_cooldown_allows_stale_retry(db, monkeypatch):
+    _deactivate_existing_patterns(db)
+    monkeypatch.setattr(settings, "brain_queue_sparse_promotion_debt_zero_runs", 5)
+    monkeypatch.setattr(
+        settings,
+        "brain_queue_sparse_promotion_debt_cooldown_minutes",
+        360,
+    )
+    stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=7)
+    path_debt = _queued_pattern(
+        db,
+        name="stale sparse shadow path debt",
+        lifecycle_stage="shadow_promoted",
+        backtest_priority=0,
+        promotion_gate_reasons=["cpcv_n_paths_below_provisional_min"],
+        promotion_gate_passed=False,
+        last_backtest_at=stale,
+    )
+    path_debt.consecutive_zero_trade_runs = 9
+    db.commit()
+
+    pending = get_pending_patterns(db, limit=5)
+
+    assert [p.id for p in pending] == [path_debt.id]
 
 
 def test_scored_priority_does_not_requeue_fresh_pattern_below_bypass_floor(db):
