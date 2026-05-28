@@ -24,6 +24,8 @@ from app.config import (
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
+    AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
+    AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
     AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
     AUTOTRADER_MAX_TICK_MAX_SECONDS,
@@ -78,6 +80,12 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_autotrader_stale_candidate_sweep_interval_seconds=(
             AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS
         ),
+        chili_autotrader_non_stock_candidate_max_age_minutes=(
+            AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES
+        ),
+        chili_autotrader_stock_candidate_max_age_minutes=(
+            AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES
+        ),
         chili_autotrader_synergy_enabled=False,
         chili_autotrader_synergy_scale_notional_usd=0.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
@@ -131,6 +139,7 @@ def _live_runtime() -> dict:
 
 def _patch_tick_shell(monkeypatch, user_id: int) -> None:
     monkeypatch.setattr(at_mod, "settings", _minimal_settings(user_id))
+    monkeypatch.setattr(at_mod, "_last_stale_candidate_sweep_at", 0.0)
     monkeypatch.setattr(
         at_mod,
         "effective_autotrader_runtime",
@@ -227,6 +236,7 @@ def test_closed_stock_session_defers_stock_without_starving_crypto(db, monkeypat
     assert out["ok"] is True
     assert processed == ["BTC-USD"]
     assert out["stock_session_defer_active"] is True
+    assert out["stock_session_defer_counts_checked"] is True
     assert out["stock_session_deferred_pool"] == 1
     assert (
         db.query(AutoTraderRun)
@@ -260,6 +270,18 @@ def test_stale_deferred_stock_alerts_do_not_block_fresh_session_open(db, monkeyp
         user_id=user.id,
         alerted_at=now - timedelta(hours=defer_hours) - STALE_ALERT_MARGIN,
     )
+    moderately_stale_alert = BreakoutAlert(
+        ticker="MODERATE",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=50.0,
+        entry_price=50.0,
+        stop_loss=48.0,
+        target_price=55.0,
+        user_id=user.id,
+        alerted_at=now - timedelta(hours=2),
+    )
     fresh_alert = BreakoutAlert(
         ticker="FRESH",
         asset_type="stock",
@@ -272,7 +294,7 @@ def test_stale_deferred_stock_alerts_do_not_block_fresh_session_open(db, monkeyp
         user_id=user.id,
         alerted_at=now,
     )
-    db.add_all([stale_alert, fresh_alert])
+    db.add_all([stale_alert, moderately_stale_alert, fresh_alert])
     db.commit()
 
     _patch_tick_shell(monkeypatch, user.id)
@@ -295,7 +317,14 @@ def test_stale_deferred_stock_alerts_do_not_block_fresh_session_open(db, monkeyp
     assert out["ok"] is True
     assert processed == ["FRESH"]
     assert out["stock_session_defer_active"] is False
-    assert out["stock_session_stale_unprocessed"] == 1
+    assert out["stock_session_defer_counts_checked"] is False
+    assert out["stock_session_stale_unprocessed"] == 0
+    assert (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == moderately_stale_alert.id)
+        .count()
+        == 0
+    )
     assert (
         db.query(AutoTraderRun)
         .filter(AutoTraderRun.breakout_alert_id == stale_alert.id)
@@ -391,7 +420,19 @@ def test_fresh_fastlane_throttles_stale_backlog_sweeps(db, monkeypatch):
         )
         for i in range(2)
     ]
-    db.add_all(stale_alerts)
+    expired_alert = BreakoutAlert(
+        ticker="EXPIRED",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=user.id,
+        alerted_at=now - timedelta(hours=2),
+    )
+    db.add_all([*stale_alerts, expired_alert])
     db.commit()
 
     settings = _minimal_settings(user.id)
@@ -399,6 +440,7 @@ def test_fresh_fastlane_throttles_stale_backlog_sweeps(db, monkeypatch):
     settings.chili_autotrader_fresh_candidate_fastlane_enabled = True
     settings.chili_autotrader_fresh_candidate_fastlane_max_age_seconds = 30
     settings.chili_autotrader_stale_candidate_sweep_interval_seconds = 60
+    settings.chili_autotrader_non_stock_candidate_max_age_minutes = 30
     settings.chili_autotrader_candidate_price_prefetch_enabled = False
     monkeypatch.setattr(at_mod, "settings", settings)
     monkeypatch.setattr(at_mod, "_last_stale_candidate_sweep_at", 0.0)
@@ -428,6 +470,12 @@ def test_fresh_fastlane_throttles_stale_backlog_sweeps(db, monkeypatch):
     assert third["ok"] is True
     assert third["stale_candidate_sweep_checked"] is True
     assert processed == ["STALE1", "STALE0"]
+    assert (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == expired_alert.id)
+        .count()
+        == 0
+    )
 
 
 def test_fresh_candidate_fastlane_bursts_across_one_fresh_window(db, monkeypatch):
@@ -1479,6 +1527,65 @@ def test_required_venue_health_blocks_insufficient_data(monkeypatch):
     reason = at_mod._live_venue_health_block_reason(None, venue="coinbase")
 
     assert reason == "venue_health_insufficient_data:coinbase:lifecycle_samples=0<5"
+
+
+def test_entry_risk_notional_refuses_unproven_fallback_capital(monkeypatch):
+    from app.services.trading import auto_trader_rules as rules_mod
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(
+            chili_autotrader_per_trade_notional_usd=0.0,
+            chili_autotrader_per_trade_risk_pct=1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        rules_mod,
+        "resolve_effective_capital",
+        lambda *a, **k: (100_000.0, "fallback:broker_disconnected"),
+    )
+    monkeypatch.setattr(
+        rules_mod,
+        "resolve_brain_risk_context",
+        lambda *a, **k: {"dial_value": 1.0},
+    )
+
+    notional, snap = at_mod._resolve_entry_risk_notional(MagicMock(), uid=1)
+
+    assert notional == 0.0
+    assert snap["notional_source"] == "capital_unavailable"
+    assert snap["notional_capital_source"] == "fallback:broker_disconnected"
+    assert snap["notional_capital_unproven"] is True
+
+
+def test_entry_risk_notional_keeps_explicit_operator_notional(monkeypatch):
+    from app.services.trading import auto_trader_rules as rules_mod
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(
+            chili_autotrader_per_trade_notional_usd=250.0,
+            chili_autotrader_per_trade_risk_pct=1.0,
+        ),
+    )
+    monkeypatch.setattr(
+        rules_mod,
+        "resolve_effective_capital",
+        lambda *a, **k: (100_000.0, "fallback:broker_disconnected"),
+    )
+    monkeypatch.setattr(
+        rules_mod,
+        "resolve_brain_risk_context",
+        lambda *a, **k: {"dial_value": 0.5},
+    )
+
+    notional, snap = at_mod._resolve_entry_risk_notional(MagicMock(), uid=1)
+
+    assert notional == pytest.approx(125.0)
+    assert snap["notional_source"] == "explicit_env_notional_dial"
+    assert snap["notional_capital_unproven"] is True
 
 
 def test_scale_in_blocks_live_capital_fallback(monkeypatch):

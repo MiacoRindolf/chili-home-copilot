@@ -10,7 +10,7 @@ from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, or_, text
+from sqlalchemy import and_, case, or_, text
 from sqlalchemy.orm import Session
 
 from ...config import (
@@ -19,8 +19,12 @@ from ...config import (
     AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
     AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED,
     AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
+    AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
+    AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_MAX_MINUTES,
     AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS,
     AUTOTRADER_STALE_CANDIDATE_SWEEP_MAX_SECONDS,
+    AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
+    AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_MAX_MINUTES,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
@@ -697,6 +701,53 @@ def _autotrader_tick_soft_budget_seconds() -> int:
     )
 
 
+def _candidate_actionability_state(
+    settings_name: str,
+    default_minutes: int,
+    max_minutes: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    max_age_minutes = _settings_int_clamped(
+        settings_name,
+        default_minutes,
+        lower=0,
+        upper=max_minutes,
+    )
+    now_utc = now or datetime.utcnow()
+    cutoff = (
+        now_utc - timedelta(minutes=max_age_minutes)
+        if max_age_minutes > 0
+        else None
+    )
+    return {
+        "enabled": max_age_minutes > 0,
+        "max_age_minutes": max_age_minutes,
+        "cutoff": cutoff,
+    }
+
+
+def _non_stock_candidate_actionability_state(
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    return _candidate_actionability_state(
+        "chili_autotrader_non_stock_candidate_max_age_minutes",
+        AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
+        AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_MAX_MINUTES,
+        now=now,
+    )
+
+
+def _stock_candidate_actionability_state(
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    return _candidate_actionability_state(
+        "chili_autotrader_stock_candidate_max_age_minutes",
+        AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
+        AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_MAX_MINUTES,
+        now=now,
+    )
+
+
 def _fresh_candidate_fastlane_state(
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -1280,8 +1331,10 @@ def _resolve_entry_risk_notional(
     """Resolve the base entry notional from account risk, not a fixed ticket.
 
     The old path fell back to a hard $300 entry size. This helper prefers live
-    broker equity times the configured risk budget and risk dial. An explicit
-    dollar fallback is honored only when the operator sets it above zero.
+    broker equity times the configured risk budget and risk dial. Capital
+    resolver ``fallback:*`` values are treated as unproven and do not size
+    entries; an explicit dollar fallback is honored only when the operator
+    sets it above zero.
     """
     from .auto_trader_rules import (
         resolve_brain_risk_context,
@@ -1322,7 +1375,12 @@ def _resolve_entry_risk_notional(
     snap["notional_capital_usd"] = round(float(equity or 0.0), 2)
     snap["notional_explicit_fallback_usd"] = round(float(fallback_notional), 2)
 
-    if equity > 0 and per_trade_pct > 0:
+    capital_source_is_fallback = str(cap_source or "").startswith("fallback:")
+    snap["notional_capital_proven"] = not capital_source_is_fallback
+    if capital_source_is_fallback:
+        snap["notional_capital_unproven"] = True
+
+    if equity > 0 and per_trade_pct > 0 and not capital_source_is_fallback:
         return equity * (per_trade_pct / PERCENT_SCALE) * dial, {
             **snap,
             "notional_source": "equity_pct_dial",
@@ -2727,6 +2785,14 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         .filter(AutoTraderRun.breakout_alert_id == BreakoutAlert.id)
         .exists()
     )
+    stock_defer = _stock_session_defer_state()
+    stock_asset_filter = BreakoutAlert.asset_type == STOCK_ASSET_TYPE
+    non_stock_asset_filter = or_(
+        BreakoutAlert.asset_type.is_(None),
+        BreakoutAlert.asset_type != STOCK_ASSET_TYPE,
+    )
+    stock_actionability = _stock_candidate_actionability_state()
+    non_stock_actionability = _non_stock_candidate_actionability_state()
     candidate_base = (
         db.query(BreakoutAlert)
         .filter(
@@ -2735,12 +2801,34 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             ~processed_alert_exists,
         )
     )
-    stock_defer = _stock_session_defer_state()
-    stock_asset_filter = BreakoutAlert.asset_type == STOCK_ASSET_TYPE
-    non_stock_asset_filter = or_(
-        BreakoutAlert.asset_type.is_(None),
-        BreakoutAlert.asset_type != STOCK_ASSET_TYPE,
-    )
+    stock_actionability_cutoff = stock_actionability.get("cutoff")
+    non_stock_actionability_cutoff = non_stock_actionability.get("cutoff")
+    actionability_filters = []
+    if bool(stock_actionability.get("enabled")) and isinstance(
+        stock_actionability_cutoff,
+        datetime,
+    ):
+        actionability_filters.append(
+            and_(
+                stock_asset_filter,
+                BreakoutAlert.alerted_at >= stock_actionability_cutoff,
+            )
+        )
+    else:
+        actionability_filters.append(stock_asset_filter)
+    if bool(non_stock_actionability.get("enabled")) and isinstance(
+        non_stock_actionability_cutoff,
+        datetime,
+    ):
+        actionability_filters.append(
+            and_(
+                non_stock_asset_filter,
+                BreakoutAlert.alerted_at >= non_stock_actionability_cutoff,
+            )
+        )
+    else:
+        actionability_filters.append(non_stock_asset_filter)
+    candidate_base = candidate_base.filter(or_(*actionability_filters))
     if stock_defer.get("enabled"):
         candidate_base = candidate_base.filter(
             or_(
@@ -2760,27 +2848,6 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     )
     stock_deferred_pool = 0
     stock_stale_unprocessed = 0
-    if stock_defer.get("enabled"):
-        stock_unprocessed_base = (
-            db.query(BreakoutAlert)
-            .filter(
-                BreakoutAlert.alert_tier == "pattern_imminent",
-                or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),
-                ~processed_alert_exists,
-                stock_asset_filter,
-            )
-        )
-        if stock_defer.get("active"):
-            stock_deferred_pool = int(
-                stock_unprocessed_base.filter(
-                    BreakoutAlert.alerted_at >= stock_defer["cutoff"]
-                ).count()
-            )
-        stock_stale_unprocessed = int(
-            stock_unprocessed_base.filter(
-                BreakoutAlert.alerted_at < stock_defer["cutoff"]
-            ).count()
-        )
     fresh_cutoff = fresh_fastlane.get("cutoff")
     stale_candidate_sweep_checked = True
     stale_candidate_sweep_interval_s = _stale_candidate_sweep_interval_seconds()
@@ -2828,6 +2895,30 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         )
         fresh_candidate_pool = len(candidate_refs)
         fresh_candidate_pool_exact = len(candidate_refs) < candidate_query_limit
+    stock_session_defer_counts_checked = bool(
+        stock_defer.get("enabled") and stock_defer.get("active")
+    )
+    if stock_session_defer_counts_checked:
+        stock_unprocessed_base = (
+            db.query(BreakoutAlert)
+            .filter(
+                BreakoutAlert.alert_tier == "pattern_imminent",
+                or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),
+                ~processed_alert_exists,
+                stock_asset_filter,
+            )
+        )
+        if stock_defer.get("active"):
+            stock_deferred_pool = int(
+                stock_unprocessed_base.filter(
+                    BreakoutAlert.alerted_at >= stock_defer["cutoff"]
+                ).count()
+            )
+        stock_stale_unprocessed = int(
+            stock_unprocessed_base.filter(
+                BreakoutAlert.alerted_at < stock_defer["cutoff"]
+            ).count()
+        )
     effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
         base_limit=batch_limit,
         fresh_fastlane_state=fresh_fastlane,
@@ -2880,6 +2971,18 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "candidate_pool_exact": bool(candidate_pool_exact),
         "stale_candidate_sweep_checked": bool(stale_candidate_sweep_checked),
         "stale_candidate_sweep_interval_seconds": int(stale_candidate_sweep_interval_s),
+        "stock_candidate_max_age_enabled": bool(
+            stock_actionability.get("enabled")
+        ),
+        "stock_candidate_max_age_minutes": int(
+            stock_actionability.get("max_age_minutes") or 0
+        ),
+        "non_stock_candidate_max_age_enabled": bool(
+            non_stock_actionability.get("enabled")
+        ),
+        "non_stock_candidate_max_age_minutes": int(
+            non_stock_actionability.get("max_age_minutes") or 0
+        ),
         "fresh_candidate_pool": fresh_candidate_pool,
         "fresh_candidate_pool_exact": bool(fresh_candidate_pool_exact),
         "fresh_candidate_fastlane_enabled": bool(fresh_fastlane.get("enabled")),
@@ -2915,6 +3018,9 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "stock_session_defer_active": bool(stock_defer.get("active")),
         "stock_session_defer_reason": stock_defer.get("reason"),
         "stock_session_defer_max_age_hours": stock_defer.get("max_age_hours"),
+        "stock_session_defer_counts_checked": bool(
+            stock_session_defer_counts_checked
+        ),
         "stock_session_deferred_pool": stock_deferred_pool,
         "stock_session_stale_unprocessed": stock_stale_unprocessed,
         "synergy_retry_pool": retry_pool,
@@ -3046,6 +3152,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     logger.info(
         "[autotrader] tick uid=%s candidate_pool=%d pool_exact=%s "
         "query_limit=%d stale_sweep_checked=%s stale_sweep_interval_s=%s "
+        "stock_max_age_min=%s non_stock_max_age_min=%s "
         "batch=%d base_batch=%d "
         "effective_batch=%d processed=%d placed=%d "
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
@@ -3063,6 +3170,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out.get("candidate_query_limit"),
         out.get("stale_candidate_sweep_checked"),
         out.get("stale_candidate_sweep_interval_seconds"),
+        out.get("stock_candidate_max_age_minutes"),
+        out.get("non_stock_candidate_max_age_minutes"),
         len(candidates),
         batch_limit,
         effective_batch_limit,

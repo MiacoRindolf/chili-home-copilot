@@ -7,6 +7,7 @@ from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SECONDS_PER_MINUTE = 60
+MINUTES_PER_HOUR = 60
 FAST_BACKTEST_BATCH_DEFAULT_LEAN_CYCLE = 0
 FAST_BACKTEST_BATCH_DEFAULT_BACKTEST = 30
 REGIME_GATE_DEFAULT_CRYPTO_ANCHOR_DIMENSIONS = "ticker_regime,cross_asset_regime"
@@ -96,6 +97,18 @@ AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_THRESHOLD = 3
 AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ASSET_TYPES = "stock,crypto"
 PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT = 1.5
 PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS = 24
+AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 2
+)
+AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_MAX_MINUTES = (
+    PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS * MINUTES_PER_HOUR
+)
+AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 2
+)
+AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_MAX_MINUTES = (
+    PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS * MINUTES_PER_HOUR
+)
 AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS = (
     PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS
 )
@@ -2815,6 +2828,33 @@ class Settings(BaseSettings):
             "older backlog is sampled on cadence so stale rows do not add "
             "latency to execution-sensitive fresh entries. Set to 0 to probe "
             "older rows every tick."
+        ),
+    )
+    chili_autotrader_non_stock_candidate_max_age_minutes: int = Field(
+        default=AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
+        ge=0,
+        le=AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_MAX_MINUTES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_MINUTES"
+        ),
+        description=(
+            "Maximum age for non-stock pattern-imminent alerts considered by "
+            "AutoTrader. Crypto/options alerts older than this should be "
+            "refreshed by the scanner before any execution decision. Set to 0 "
+            "to preserve the historical unbounded backlog sweep."
+        ),
+    )
+    chili_autotrader_stock_candidate_max_age_minutes: int = Field(
+        default=AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
+        ge=0,
+        le=AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_MAX_MINUTES,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_STOCK_CANDIDATE_MAX_AGE_MINUTES"),
+        description=(
+            "Maximum age for stock pattern-imminent alerts considered by "
+            "AutoTrader while the market is open. Older stock rows remain "
+            "available for monitor/evidence flows, but the scanner should "
+            "refresh them before any broker execution decision. Set to 0 to "
+            "preserve the historical unbounded stock backlog sweep."
         ),
     )
     chili_autotrader_candidate_price_prefetch_enabled: bool = Field(
