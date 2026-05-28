@@ -3597,6 +3597,7 @@ def _run_cash_deployment_work_producer_job() -> None:
                     1,
                     int(getattr(_settings, "brain_work_cash_deployment_producer_limit", 25) or 25),
                 ),
+                use_snapshots=True,
             )
             sess.commit()
             logger.info("[scheduler] cash_deployment_work_producer result=%s", out)
@@ -4227,6 +4228,9 @@ def start_scheduler():
         include_market_snapshots = role in (
             "all", "worker", "cron_only", "market_snapshot_only",
         )
+        include_cash_deployment_work = role in (
+            "all", "web", "cron_only", "market_snapshot_only",
+        )
         # autotrader_only registers ONLY autotrader jobs. 'all'/'worker' still
         # include them (legacy behavior preserved). 'cron_only' excludes them.
         include_autotrader = role in ("all", "worker", "autotrader_only")
@@ -4327,7 +4331,7 @@ def start_scheduler():
         # broker-sync-worker container. Non-broker jobs (weekly_review,
         # price_monitor) stay on include_web_light. The outer disjunction
         # ensures broker_sync_only role still enters this block.
-        if include_web_light or include_broker_sync:
+        if include_web_light or include_broker_sync or include_cash_deployment_work:
             if include_web_light:
                 _scheduler.add_job(
                     _run_weekly_review_job,
@@ -4473,6 +4477,28 @@ def start_scheduler():
                     next_run_time=datetime.now() + timedelta(seconds=30),
                 )
 
+            if include_cash_deployment_work:
+                _cd_interval = max(
+                    15,
+                    int(getattr(
+                        settings,
+                        "brain_work_cash_deployment_producer_interval_minutes",
+                        30,
+                    ) or 30),
+                )
+                _scheduler.add_job(
+                    _run_cash_deployment_work_producer_job,
+                    trigger=IntervalTrigger(minutes=_cd_interval),
+                    id="cash_deployment_work_producer",
+                    name=(
+                        "Cash-deployment profitability work producer "
+                        f"(every {_cd_interval}min)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=90),
+                )
+
             # FIX 45b: remaining non-broker jobs in this block stay gated on
             # include_web_light so they don't fire for broker_sync_only role.
             if include_web_light:
@@ -4557,26 +4583,6 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=85),
-                )
-                _cd_interval = max(
-                    15,
-                    int(getattr(
-                        settings,
-                        "brain_work_cash_deployment_producer_interval_minutes",
-                        30,
-                    ) or 30),
-                )
-                _scheduler.add_job(
-                    _run_cash_deployment_work_producer_job,
-                    trigger=IntervalTrigger(minutes=_cd_interval),
-                    id="cash_deployment_work_producer",
-                    name=(
-                        "Cash-deployment profitability work producer "
-                        f"(every {_cd_interval}min)"
-                    ),
-                    replace_existing=True,
-                    max_instances=1,
-                    next_run_time=datetime.now() + timedelta(seconds=90),
                 )
                 _scheduler.add_job(
                     _run_pattern_cohort_promote_job,

@@ -946,6 +946,7 @@ def enqueue_cash_deployment_work(
     limit: int = DEFAULT_TOP_LIMIT,
     include_null_lineage: bool = True,
     include_snapshot_coverage: bool = True,
+    use_snapshots: bool = False,
 ) -> dict[str, Any]:
     """Turn cash-deployment diagnostics into deduped brain work.
 
@@ -967,7 +968,8 @@ def enqueue_cash_deployment_work(
             "skipped_disabled": True,
         }
     )
-    rows = cash_deployment_rows(
+    row_reader = cash_deployment_snapshot_rows if use_snapshots else cash_deployment_rows
+    rows = row_reader(
         db,
         user_id=user_id,
         window_days=window_days,
@@ -1065,6 +1067,7 @@ def enqueue_cash_deployment_work(
     return {
         "ok": True,
         "window_days": int(window_days),
+        "row_source": "snapshot" if use_snapshots else "fresh",
         "considered": considered,
         "created": len(created) + len(null_created) + int(snapshot_coverage.get("created") or 0),
         "skipped": skipped,
