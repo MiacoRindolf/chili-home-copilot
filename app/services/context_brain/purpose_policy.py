@@ -36,24 +36,38 @@ _FALLBACK = PurposePolicy(
     high_stakes=False,
 )
 
+_PROJECT_AGENT_PURPOSES = frozenset({
+    "project_ai_engineer",
+    "project_architect",
+    "project_backend_engineer",
+    "project_devops_engineer",
+    "project_frontend_engineer",
+    "project_product_owner",
+    "project_project_manager",
+    "project_qa_engineer",
+    "project_security_engineer",
+    "project_ux_designer",
+})
+
+
+def _offline_passthrough_policy(purpose: str) -> PurposePolicy:
+    return PurposePolicy(
+        purpose=purpose,
+        routing_strategy="passthrough",
+        decompose=False,
+        cross_examine=False,
+        use_premium_synthesis=False,
+        high_stakes=False,
+    )
+
 
 _CODE_DEFAULTS: dict[str, PurposePolicy] = {
-    "project_web_research": PurposePolicy(
-        purpose="project_web_research",
-        routing_strategy="passthrough",
-        decompose=False,
-        cross_examine=False,
-        use_premium_synthesis=False,
-        high_stakes=False,
-    ),
-    "reasoning_web_research": PurposePolicy(
-        purpose="reasoning_web_research",
-        routing_strategy="passthrough",
-        decompose=False,
-        cross_examine=False,
-        use_premium_synthesis=False,
-        high_stakes=False,
-    ),
+    "project_web_research": _offline_passthrough_policy("project_web_research"),
+    "reasoning_web_research": _offline_passthrough_policy("reasoning_web_research"),
+    **{
+        purpose: _offline_passthrough_policy(purpose)
+        for purpose in _PROJECT_AGENT_PURPOSES
+    },
 }
 
 

@@ -272,6 +272,45 @@ def test_web_research_purpose_has_offline_code_default_when_db_seed_missing():
     assert db.calls == 1
 
 
+@pytest.mark.parametrize(
+    "purpose",
+    [
+        "project_ai_engineer",
+        "project_architect",
+        "project_backend_engineer",
+        "project_devops_engineer",
+        "project_frontend_engineer",
+        "project_product_owner",
+        "project_project_manager",
+        "project_qa_engineer",
+        "project_security_engineer",
+        "project_ux_designer",
+    ],
+)
+def test_project_agent_purpose_has_offline_code_default_when_db_seed_missing(purpose):
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, *_args, **_kwargs):
+            self.calls += 1
+            return EmptyResult()
+
+    db = EmptyDb()
+
+    policy = policy_mod.get_policy(db, purpose)
+
+    assert policy.purpose == purpose
+    assert policy.routing_strategy == "passthrough"
+    assert policy.use_premium_synthesis is False
+    assert policy.high_stakes is False
+    assert db.calls == 1
+
+
 def test_gateway_exact_cache_uses_web_research_code_default(monkeypatch):
     class EmptyResult:
         def fetchone(self):
@@ -303,6 +342,42 @@ def test_gateway_exact_cache_uses_web_research_code_default(monkeypatch):
     assert chat.call_count == 1
     assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
     assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
+    assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
+
+
+def test_gateway_exact_cache_uses_project_agent_code_default(monkeypatch):
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def execute(self, *_args, **_kwargs):
+            return EmptyResult()
+
+    chat = MagicMock(
+        return_value={
+            "reply": '{"issues_found":0}',
+            "model": "gpt-5.5",
+            "provider": "openai",
+            "tokens_used": 40,
+        }
+    )
+    finalize = MagicMock()
+    log_start = MagicMock(side_effect=[401, 402])
+
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._write_gateway_log_start", log_start)
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "review backend findings"}]
+    gateway_chat(messages, purpose="project_backend_engineer", db=EmptyDb())
+    gateway_chat(messages, purpose="project_backend_engineer", db=EmptyDb())
+
+    assert chat.call_count == 1
+    assert log_start.call_args_list[0].kwargs["purpose"] == "project_backend_engineer"
+    assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
+    assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
+    assert finalize.call_args_list[1].kwargs["provider"] == "cache"
     assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
 
 

@@ -46,6 +46,16 @@ from .tree_types import GatewayCallResult, PurposePolicy
 logger = logging.getLogger(__name__)
 
 _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
+    "project_ai_engineer",
+    "project_architect",
+    "project_backend_engineer",
+    "project_devops_engineer",
+    "project_frontend_engineer",
+    "project_product_owner",
+    "project_project_manager",
+    "project_qa_engineer",
+    "project_security_engineer",
+    "project_ux_designer",
     "project_web_research",
     "reasoning_web_research",
     "trading_pattern_mine",
