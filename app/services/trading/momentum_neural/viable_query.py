@@ -17,7 +17,6 @@ from .market_profile import asset_class_for_symbol, is_coinbase_spot_symbol, mar
 from .db_read_hygiene import detach_loaded_instances, end_read_only_transaction
 from .operator_readiness import build_momentum_operator_readiness
 from .pipeline import VIABILITY_NODE_ID
-from .persistence import _variant_id_for_family, active_variant_for_family
 from .strategy_params import summarize_strategy_params
 from .viability_scope import VIABILITY_SCOPE_SYMBOL
 
@@ -190,6 +189,68 @@ def _hot_index(rows: list[dict[str, Any]]) -> dict[tuple[str, int], dict[str, An
     return idx
 
 
+def _hot_family_version(row: dict[str, Any]) -> tuple[str, int]:
+    family_id = str(row.get("family_id") or "")
+    try:
+        version = int(row.get("family_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    return family_id, version
+
+
+def _hot_variants_by_family_version(
+    db: Session,
+    rows: list[dict[str, Any]],
+) -> dict[tuple[str, int], MomentumStrategyVariant]:
+    keys = {_hot_family_version(row) for row in rows}
+    keys = {(family_id, version) for family_id, version in keys if family_id}
+    if not keys:
+        return {}
+
+    family_ids = sorted({family_id for family_id, _version in keys})
+    versions = sorted({version for _family_id, version in keys})
+    exact_rows = (
+        db.query(MomentumStrategyVariant)
+        .filter(
+            MomentumStrategyVariant.family.in_(family_ids),
+            MomentumStrategyVariant.variant_key.in_(family_ids),
+            MomentumStrategyVariant.version.in_(versions),
+        )
+        .all()
+    )
+    variants: dict[tuple[str, int], MomentumStrategyVariant] = {
+        (str(row.family), int(row.version)): row
+        for row in exact_rows
+        if str(row.variant_key) == str(row.family)
+    }
+
+    missing_families = sorted(
+        {family_id for family_id, version in keys if (family_id, version) not in variants}
+    )
+    if missing_families:
+        active_rows = (
+            db.query(MomentumStrategyVariant)
+            .filter(
+                MomentumStrategyVariant.family.in_(missing_families),
+                MomentumStrategyVariant.is_active.is_(True),
+            )
+            .order_by(
+                MomentumStrategyVariant.family.asc(),
+                MomentumStrategyVariant.version.desc(),
+                MomentumStrategyVariant.id.desc(),
+            )
+            .all()
+        )
+        active_by_family: dict[str, MomentumStrategyVariant] = {}
+        for row in active_rows:
+            active_by_family.setdefault(str(row.family), row)
+        for family_id, version in keys:
+            if (family_id, version) not in variants and family_id in active_by_family:
+                variants[(family_id, version)] = active_by_family[family_id]
+
+    return variants
+
+
 def _session_summary(
     db: Session,
     *,
@@ -357,24 +418,15 @@ def build_viable_strategies_payload(
         from .persistence import ensure_momentum_strategy_variants
 
         ensure_momentum_strategy_variants(db)
+        hot_variants = _hot_variants_by_family_version(db, hot_rows)
+        detach_loaded_instances(db, list({int(v.id): v for v in hot_variants.values()}.values()))
+        end_read_only_transaction(db, context="viable_hot_variants")
         for r in hot_rows:
-            fid = str(r.get("family_id") or "")
-            try:
-                ver = int(r.get("family_version") or 1)
-            except (TypeError, ValueError):
-                ver = 1
-            vid = _variant_id_for_family(db, fid, ver)
-            if vid is None:
-                active = active_variant_for_family(db, fid)
-                vid = int(active.id) if active is not None else None
-            if vid is None:
-                continue
-            vrow = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == vid).one_or_none()
+            fid, ver = _hot_family_version(r)
+            vrow = hot_variants.get((fid, ver))
             if not vrow:
-                end_read_only_transaction(db, context="viable_hot_variant_missing")
                 continue
-            detach_loaded_instances(db, vrow)
-            end_read_only_transaction(db, context="viable_hot_variant")
+            vid = int(vrow.id)
             fake = MomentumSymbolViability(
                 symbol=sym,
                 scope=VIABILITY_SCOPE_SYMBOL,
