@@ -71,7 +71,56 @@ def test_position_plan_option_context_uses_trade_premium_quote() -> None:
     assert pos["contract_multiplier"] == 100
     assert pos["current_price"] == pytest.approx(1.45)
     assert pos["pnl_pct"] == pytest.approx(16.0)
+    assert pos["quantity"] == pytest.approx(2.0)
+    assert pos["entry_value_usd"] == pytest.approx(250.0)
+    assert pos["current_value_usd"] == pytest.approx(290.0)
+    assert pos["unrealized_pnl_usd"] == pytest.approx(40.0)
+    assert pos["max_premium_at_risk_usd"] == pytest.approx(250.0)
+    assert pos["quote_source"] == "robinhood_options"
     assert pos["option_meta"]["strike"] == 729.0
+
+
+def test_position_plan_option_context_separates_underlying_levels_from_premium_quote() -> None:
+    from app.services.trading.position_plan_generator import _build_position_context
+
+    trade = _option_trade_stub(
+        stop_loss=700.0,
+        take_profit=750.0,
+        indicator_snapshot={
+            "asset_type": "options",
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+            },
+            "price_domains": {
+                "entry_price": "option_premium",
+                "current_price": "option_premium",
+                "stop_loss": "underlying_spot",
+                "take_profit": "underlying_spot",
+            },
+        },
+    )
+    positions = _build_position_context(
+        _FakeDb(),
+        [trade],
+        quotes={"SPY": {"price": 729.0}},
+        trade_quotes={trade.id: {"price": 1.45, "source": "robinhood_options"}},
+    )
+
+    pos = positions[0]
+    assert pos["current_price"] == pytest.approx(1.45)
+    assert pos["stop_loss"] is None
+    assert pos["take_profit"] is None
+    assert pos["underlying_stop_loss"] == pytest.approx(700.0)
+    assert pos["underlying_take_profit"] == pytest.approx(750.0)
+    assert pos["price_domains"] == {
+        "entry_price": "option_premium",
+        "current_price": "option_premium",
+        "stop_loss": "underlying_spot",
+        "take_profit": "underlying_spot",
+    }
 
 
 def test_position_plan_option_context_never_falls_back_to_underlying_quote() -> None:
@@ -89,3 +138,22 @@ def test_position_plan_option_context_never_falls_back_to_underlying_quote() -> 
     assert pos["asset_type"] == "options"
     assert pos["current_price"] is None
     assert pos["pnl_pct"] is None
+    assert pos["untrusted_stop_loss"] == pytest.approx(0.80)
+    assert pos["stop_loss"] is None
+
+
+def test_position_plan_option_context_does_not_default_bad_quantity_to_one() -> None:
+    from app.services.trading.position_plan_generator import _build_position_context
+
+    trade = _option_trade_stub(quantity=1.5)
+    positions = _build_position_context(
+        _FakeDb(),
+        [trade],
+        quotes={},
+        trade_quotes={trade.id: {"price": 1.45, "source": "robinhood_options"}},
+    )
+
+    pos = positions[0]
+    assert pos["asset_type"] == "options"
+    assert pos["quantity"] is None
+    assert pos["quantity_error"] == "invalid_option_contract_quantity"
