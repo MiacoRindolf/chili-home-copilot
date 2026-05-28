@@ -101,9 +101,9 @@ def test_smart_backtest_persists_completed_tickers_without_order_blocking(monkey
     )
 
     assert saved_tickers == [_FAST_TICKER, _SLOW_TICKER]
-    assert result == {
-        "wins": _TARGET_TICKERS,
-        "losses": 0,
-        "total": _TARGET_TICKERS,
-        "backtests_run": _TARGET_TICKERS,
-    }
+    assert result["wins"] == _TARGET_TICKERS
+    assert result["losses"] == 0
+    assert result["total"] == _TARGET_TICKERS
+    assert result["backtests_run"] == _TARGET_TICKERS
+    assert result["tickers_selected"] == _TARGET_TICKERS
+    assert result["soft_deadline_hit"] is False

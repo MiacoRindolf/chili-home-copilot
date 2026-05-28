@@ -1867,10 +1867,12 @@ def _broker_reject_action_fingerprint(
 
 
 def _broker_reject_suppression(
-    db: Session,
+    db: Session | None,
     alert: BreakoutAlert,
     fingerprint: str,
 ) -> dict[str, Any] | None:
+    if db is None:
+        return None
     if not bool(
         getattr(
             settings,
@@ -1944,7 +1946,7 @@ def _annotate_broker_reject(
 
 
 def _maybe_block_repeated_broker_reject(
-    db: Session,
+    db: Session | None,
     *,
     uid: int,
     alert: BreakoutAlert,
