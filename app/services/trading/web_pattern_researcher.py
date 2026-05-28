@@ -60,6 +60,7 @@ from sqlalchemy.orm import Session
 from ...config import settings
 from ...models.trading import ScanPattern
 from ..llm_caller import call_llm
+from .mechanical_pattern_parser import mechanical_patterns_from_content
 from .pattern_engine import create_pattern, list_patterns
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -319,6 +320,14 @@ def _extract_patterns_from_content(
     if not _content_has_actionable_pattern_signal(content):
         logger.debug("[web_research] Skipping LLM extract: no actionable pattern signal")
         return []
+
+    mechanical = mechanical_patterns_from_content(content, existing_names)
+    if mechanical:
+        logger.debug(
+            "[web_research] Extracted %d explicit patterns mechanically; skipping LLM",
+            len(mechanical),
+        )
+        return mechanical
 
     existing_list = ", ".join(list(existing_names)[:15]) if existing_names else "(none)"
 

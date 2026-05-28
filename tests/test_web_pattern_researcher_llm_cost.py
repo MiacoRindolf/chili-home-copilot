@@ -15,6 +15,27 @@ def test_extract_patterns_skips_irrelevant_content_without_llm(monkeypatch):
     assert result == []
 
 
+def test_extract_patterns_uses_mechanical_parser_without_llm(monkeypatch):
+    def fail_call_llm(*_args, **_kwargs):
+        raise AssertionError("explicit mechanical patterns should not spend LLM tokens")
+
+    monkeypatch.setattr(researcher, "call_llm", fail_call_llm)
+
+    result = researcher._extract_patterns_from_content(
+        (
+            "A simple momentum breakout can be coded as RSI > 55 and price "
+            "above EMA 20 with relative volume >= 1.5."
+        ),
+        existing_names=set(),
+    )
+
+    assert len(result) == 1
+    assert result[0]["source"] == "mechanical"
+    assert {"indicator": "rsi_14", "op": ">", "value": 55.0} in result[0]["conditions"]
+    assert {"indicator": "price", "op": ">", "ref": "ema_20"} in result[0]["conditions"]
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in result[0]["conditions"]
+
+
 def test_pattern_extract_prompt_keeps_variable_content_last():
     prompt = researcher._build_pattern_extract_prompt(
         "RSI breakout above 55 with price over EMA 20.",
