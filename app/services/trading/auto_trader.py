@@ -2722,17 +2722,10 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     batch_limit = _autotrader_candidate_batch_size()
     tick_budget_s = _autotrader_tick_soft_budget_seconds()
     fresh_fastlane = _fresh_candidate_fastlane_state()
-    candidate_pool_base = int(candidate_base.count())
-    fresh_candidate_pool = candidate_pool_base
-    fresh_cutoff = fresh_fastlane.get("cutoff")
-    if bool(fresh_fastlane.get("enabled")) and isinstance(fresh_cutoff, datetime):
-        fresh_candidate_pool = int(
-            candidate_base.filter(BreakoutAlert.alerted_at >= fresh_cutoff).count()
-        )
-    effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
+    candidate_query_limit, query_limit_meta = _fresh_candidate_burst_batch_size(
         base_limit=batch_limit,
         fresh_fastlane_state=fresh_fastlane,
-        fresh_candidate_count=fresh_candidate_pool,
+        fresh_candidate_count=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     )
     stock_deferred_pool = 0
     stock_stale_unprocessed = 0
@@ -2758,11 +2751,33 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 BreakoutAlert.alerted_at < stock_defer["cutoff"]
             ).count()
         )
-    candidates = (
+    candidate_rows = (
         candidate_base.order_by(
             *_candidate_order_by_clauses(fresh_fastlane)
-        ).limit(effective_batch_limit).all()
+        ).limit(candidate_query_limit).all()
     )
+    fresh_cutoff = fresh_fastlane.get("cutoff")
+    if bool(fresh_fastlane.get("enabled")) and isinstance(fresh_cutoff, datetime):
+        fresh_candidate_pool = sum(
+            1
+            for candidate in candidate_rows
+            if candidate.alerted_at is not None and candidate.alerted_at >= fresh_cutoff
+        )
+        fresh_candidate_pool_exact = (
+            len(candidate_rows) < candidate_query_limit
+            or fresh_candidate_pool < len(candidate_rows)
+        )
+    else:
+        fresh_candidate_pool = len(candidate_rows)
+        fresh_candidate_pool_exact = len(candidate_rows) < candidate_query_limit
+    effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
+        base_limit=batch_limit,
+        fresh_fastlane_state=fresh_fastlane,
+        fresh_candidate_count=fresh_candidate_pool,
+    )
+    candidate_pool_base = len(candidate_rows)
+    candidate_pool_exact = len(candidate_rows) < candidate_query_limit
+    candidates = candidate_rows[:effective_batch_limit]
     retry_pool = 0
     retry_candidates: list[BreakoutAlert] = []
     spare_slots = max(0, batch_limit - len(candidates))
@@ -2786,10 +2801,16 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "candidate_pool": candidate_pool,
         "candidate_batch_base_size": batch_limit,
         "candidate_batch_effective_size": effective_batch_limit,
+        "candidate_query_limit": int(candidate_query_limit),
+        "candidate_pool_exact": bool(candidate_pool_exact),
         "fresh_candidate_pool": fresh_candidate_pool,
+        "fresh_candidate_pool_exact": bool(fresh_candidate_pool_exact),
         "fresh_candidate_fastlane_enabled": bool(fresh_fastlane.get("enabled")),
         "fresh_candidate_fastlane_max_age_seconds": fresh_fastlane.get("max_age_seconds"),
         "fresh_candidate_burst_enabled": bool(fresh_burst_meta.get("enabled")),
+        "fresh_candidate_burst_query_limit": int(
+            query_limit_meta.get("effective_limit") or candidate_query_limit
+        ),
         "fresh_candidate_burst_window_count": int(
             fresh_burst_meta.get("fresh_window_count") or 1
         ),
@@ -2942,7 +2963,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     out["tick_elapsed_seconds"] = round(time.monotonic() - tick_started, 3)
 
     logger.info(
-        "[autotrader] tick uid=%s candidate_pool=%d batch=%d base_batch=%d "
+        "[autotrader] tick uid=%s candidate_pool=%d pool_exact=%s "
+        "query_limit=%d batch=%d base_batch=%d "
         "effective_batch=%d processed=%d placed=%d "
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
         "synergy_retry_batch=%d stock_defer_active=%s stock_deferred_pool=%d "
@@ -2955,6 +2977,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "last_ticker=%s",
         uid,
         candidate_pool,
+        out.get("candidate_pool_exact"),
+        out.get("candidate_query_limit"),
         len(candidates),
         batch_limit,
         effective_batch_limit,
