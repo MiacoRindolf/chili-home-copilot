@@ -9,6 +9,7 @@ import pytest
 from app import models
 from app.models.trading import (
     AutoTraderRun,
+    BrainWorkEvent,
     BreakoutAlert,
     PaperTrade,
     PatternMonitorDecision,
@@ -315,6 +316,88 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
     assert body["summary"]["negative_expected_edge"] >= 1
     assert body["summary"]["missed_entry_slippage"] >= 1
     assert body["summary"]["autotrader_execution_errors"] >= 1
+
+
+def test_imminent_alerts_use_cached_edge_snapshots(db, paired_client):
+    client, user = paired_client
+
+    pat = ScanPattern(
+        name="diag_cached_snapshot",
+        rules_json={},
+        origin="brain",
+        asset_class="stock",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add(pat)
+    db.flush()
+
+    alert = BreakoutAlert(
+        user_id=user.id,
+        scan_pattern_id=pat.id,
+        ticker="CACHE",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        outcome="pending",
+        score_at_alert=88.0,
+        price_at_alert=42.0,
+        entry_price=42.0,
+        stop_loss=39.0,
+        target_price=48.0,
+        alerted_at=datetime.utcnow(),
+        indicator_snapshot={"imminent_scorecard": {"signal_lane": "standard"}},
+    )
+    db.add(alert)
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="edge_reliability_snapshot",
+            event_kind="outcome",
+            dedupe_key=f"edge-reliability-snapshot-test:{pat.id}",
+            status="done",
+            payload={
+                "scan_pattern_id": pat.id,
+                "asset_class": "stock",
+                "slice_asset_class": "stock",
+                "signal_lane": "standard",
+                "lifecycle_stage": "promoted",
+                "expected_ev_pct": 2.0,
+                "calibrated_ev_pct": 2.25,
+                "realized_ev_pct": 3.5,
+                "ev_calibration_error": 1.25,
+                "brier_score": 0.16,
+                "closed_evidence_count": 7,
+                "paper_live_gap_pct": 0.25,
+                "graduation_blocker": "graduation_ready",
+                "recommended_work_event": "edge_reliability_refresh",
+                "edge_eval_count": 12,
+                "primary_symbol": "CACHE",
+                "window_days": 7,
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    with patch(
+        "app.routers.trading_sub.monitor.edge_supply_rows",
+        side_effect=AssertionError("imminent alerts must not recompute edge supply"),
+    ):
+        resp = client.get("/api/trading/monitor/imminent-alerts?hours=72")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    row = next(x for x in body["alerts"] if x["ticker"] == "CACHE")
+    assert row["calibrated_ev_pct"] == pytest.approx(2.25)
+    assert row["calibrated_ev_after_cost_pct"] > 0
+    assert row["realized_ev_pct"] == pytest.approx(3.5)
+    assert row["ev_calibration_error"] == pytest.approx(1.25)
+    assert row["brier_score"] == pytest.approx(0.16)
+    assert row["closed_evidence_count"] == 7
+    assert row["edge_reliability_snapshot_event_id"] is not None
+    assert row["edge_reliability_snapshot_at"] is not None
+    assert row["cash_deployment_rank"] in (None, 1)
 
 
 def test_edge_supply_endpoint_exposes_profitability_diagnostics(db, paired_client):

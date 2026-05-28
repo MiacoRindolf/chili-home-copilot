@@ -29,6 +29,7 @@ from ...services.trading.cash_deployment import (
 from ...services.trading.edge_reliability import (
     edge_supply_rows,
     edge_supply_summary,
+    latest_edge_reliability_snapshots,
 )
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
@@ -705,19 +706,15 @@ def api_monitor_imminent_alerts(
     edge_supply_by_pattern: dict[int, dict[str, Any]] = {}
     if pat_ids:
         try:
-            for row in edge_supply_rows(
-                db,
-                pattern_ids=pat_ids,
-                window_days=max(1, int(hours / 24) or 1),
-                limit=max(30, len(pat_ids)),
-            ):
-                if row.get("scan_pattern_id") is None:
-                    continue
-                edge_supply_by_pattern[int(row["scan_pattern_id"])] = (
-                    annotate_cash_deployment_row(db, row, user_id=user_id)
+            snapshots = latest_edge_reliability_snapshots(db, scan_pattern_ids=pat_ids)
+            for pid, row in snapshots.items():
+                edge_supply_by_pattern[int(pid)] = annotate_cash_deployment_row(
+                    db,
+                    row,
+                    user_id=user_id,
                 )
         except Exception:
-            logger.debug("[monitor] edge supply diagnostics failed", exc_info=True)
+            logger.debug("[monitor] cached edge supply diagnostics failed", exc_info=True)
     alert_ids = [int(a.id) for a in alerts]
     runs_by_alert: dict[int, AutoTraderRun] = {}
     if alert_ids:
@@ -854,6 +851,8 @@ def api_monitor_imminent_alerts(
                 "graduation_blocker": supply.get("graduation_blocker"),
                 "recommended_work_event": supply.get("recommended_work_event"),
                 "cash_deployment_rank": supply.get("cash_deployment_rank"),
+                "edge_reliability_snapshot_event_id": supply.get("snapshot_event_id"),
+                "edge_reliability_snapshot_at": supply.get("snapshot_created_at"),
                 "allocation_score": json_safe(supply.get("allocation_score")),
                 "max_safe_notional": json_safe(supply.get("max_safe_notional")),
                 "venue_readiness": supply.get("venue_readiness"),
