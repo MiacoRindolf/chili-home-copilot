@@ -137,6 +137,25 @@ class ProjectAutonomyArtifact(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class ProjectAutonomyArchitectReview(Base):
+    """Durable architect-quality gate result for an Autopilot plan attempt."""
+
+    __tablename__ = "project_autonomy_architect_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    attempt_index = Column(Integer, nullable=False, default=1)
+    status = Column(String(40), nullable=False, default="failed", index=True)
+    score = Column(Integer, nullable=False, default=0)
+    confidence = Column(String(40), nullable=False, default="low")
+    dimensions_json = Column(Text, nullable=False, default="{}")
+    alternatives_json = Column(Text, nullable=False, default="[]")
+    critique_json = Column(Text, nullable=False, default="{}")
+    selected_files_json = Column(Text, nullable=False, default="[]")
+    blocking_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class ProjectAutonomyLease(Base):
     """Repo/file/merge leases that keep concurrent autonomous runs from colliding."""
 

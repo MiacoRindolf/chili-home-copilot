@@ -19448,6 +19448,40 @@ def _migration_278_project_autonomy_chat_plan_mode(conn) -> None:
     logger.info("[mig278] project autonomy chat/plan mode installed")
 
 
+def _migration_279_project_autonomy_architect_reviews(conn) -> None:
+    """Durable architect-quality gate reviews for Project Autopilot plans."""
+
+    tables = _tables(conn)
+    if "project_autonomy_architect_reviews" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_architect_reviews (
+                id SERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NOT NULL,
+                attempt_index INTEGER NOT NULL DEFAULT 1,
+                status VARCHAR(40) NOT NULL DEFAULT 'failed',
+                score INTEGER NOT NULL DEFAULT 0,
+                confidence VARCHAR(40) NOT NULL DEFAULT 'low',
+                dimensions_json TEXT NOT NULL DEFAULT '{}',
+                alternatives_json TEXT NOT NULL DEFAULT '[]',
+                critique_json TEXT NOT NULL DEFAULT '{}',
+                selected_files_json TEXT NOT NULL DEFAULT '[]',
+                blocking_reason TEXT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_architect_reviews_run_id "
+            "ON project_autonomy_architect_reviews(run_id, id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_architect_reviews_status "
+            "ON project_autonomy_architect_reviews(status, score)"
+        ))
+
+    conn.commit()
+    logger.info("[mig279] project autonomy architect reviews installed")
+
+
 def _migration_281_llm_cost_observability(conn) -> None:
     """Add provider/cost fields and seed trading LLM gateway purposes."""
 
@@ -19980,6 +20014,8 @@ MIGRATIONS = [
      _migration_277_project_autonomy_tables),
     ("278_project_autonomy_chat_plan_mode",
      _migration_278_project_autonomy_chat_plan_mode),
+    ("279_project_autonomy_architect_reviews",
+     _migration_279_project_autonomy_architect_reviews),
     ("281_llm_cost_observability",
      _migration_281_llm_cost_observability),
 ]

@@ -108,6 +108,29 @@ void main() {
     expect(body, isNot(contains('Connection refused')));
   });
 
+  test('model cooldowns explain skipped local models without raw metadata', () {
+    final body = AutonomyRunPresenter.artifactBody({
+      'artifact_type': 'model_call',
+      'name': 'plan_model_call',
+      'content_json': {
+        'ok': true,
+        'model': 'qwen3:4b',
+        'latency_ms': 1200,
+        'skipped_models': {
+          'qwen2.5-coder:3b-instruct-q8_0': {
+            'reason': 'The local planning model timed out.',
+          },
+        },
+      },
+    });
+
+    expect(body, contains('qwen3:4b'));
+    expect(body, contains('Skipped qwen2.5-coder:3b-instruct-q8_0'));
+    expect(body, contains('recent local model call timed out'));
+    expect(body, isNot(contains('{')));
+    expect(body, isNot(contains('reason')));
+  });
+
   test('plan and visual artifacts summarize for chat cockpit', () {
     final plan = AutonomyRunPresenter.planBody({
       'analysis': 'Refactor the Autopilot panel into a chat cockpit.',
@@ -119,6 +142,13 @@ void main() {
     final screenshot = AutonomyRunPresenter.artifactBody({
       'artifact_type': 'visual_screenshot',
       'content_json': {'path': 'C:/tmp/chili_focus.png'},
+    });
+    final rejectedScreenshot = AutonomyRunPresenter.artifactBody({
+      'artifact_type': 'visual_screenshot',
+      'content_json': {
+        'skipped': true,
+        'skip_reason': 'Visual evidence path was rejected.',
+      },
     });
     final video = AutonomyRunPresenter.artifactBody({
       'artifact_type': 'visual_video',
@@ -144,6 +174,7 @@ void main() {
     expect(plan, contains('Refactor the Autopilot panel'));
     expect(plan, contains('brain_dispatch_screen.dart'));
     expect(screenshot, contains('screenshot evidence'));
+    expect(rejectedScreenshot, contains('Screenshot validation was skipped'));
     expect(video, contains('Video validation was skipped'));
     expect(promptImage, contains('Attached image evidence'));
     expect(modelFallbackPlan, contains('Local model planning was unavailable'));
@@ -152,12 +183,78 @@ void main() {
     for (final body in [
       plan,
       screenshot,
+      rejectedScreenshot,
       video,
       promptImage,
       modelFallbackPlan
     ]) {
       expect(body, isNot(contains('{')));
     }
+  });
+
+  test('architect review presenter explains quality gate', () {
+    final passed = {
+      'status': 'passed',
+      'score': 92,
+      'confidence': 'high',
+      'selected_files': [
+        {
+          'path': 'chili_mobile/lib/src/brain/autonomy_run_presenter.dart',
+          'rationale': 'Plan presentation is shown here',
+        },
+      ],
+      'alternatives': [
+        {
+          'path': 'chili_mobile/lib/src/brain/brain_dispatch_screen.dart',
+          'reason': 'Cockpit controls live here',
+        },
+      ],
+      'critique': {'blockers': []},
+    };
+    final failed = {
+      'status': 'needs_clarification',
+      'score': 62,
+      'confidence': 'low',
+      'blocking_reason': 'Plan quality gate failed: mismatched_domain',
+      'critique': {
+        'blockers': ['mismatched_domain']
+      },
+    };
+
+    expect(AutonomyRunPresenter.architectReviewPassed(passed), isTrue);
+    expect(AutonomyRunPresenter.architectReviewPassed(failed), isFalse);
+    expect(AutonomyRunPresenter.architectReviewBody(passed),
+        contains('Verdict: passed (92/100'));
+    expect(AutonomyRunPresenter.architectReviewBody(passed),
+        contains('Selected:'));
+    expect(AutonomyRunPresenter.architectReviewBody(failed),
+        contains('Blockers: the selected files do not match'));
+    expect(AutonomyRunPresenter.architectReviewBody(failed),
+        isNot(contains('mismatched_domain')));
+
+    final revision = {
+      'status': 'needs_revision',
+      'score': 0,
+      'confidence': 'low',
+      'blocking_reason':
+          'Operator feedback changed the requirements; the previous plan must be revised and reviewed again.',
+      'critique': {
+        'blockers': ['operator_feedback']
+      },
+    };
+    expect(AutonomyRunPresenter.architectReviewStatusLabel(revision),
+        'needs revision');
+    expect(AutonomyRunPresenter.architectReviewBody(revision),
+        contains('your feedback changed the requirements'));
+    expect(AutonomyRunPresenter.architectReviewBody(revision),
+        isNot(contains('operator_feedback')));
+
+    final artifact = AutonomyRunPresenter.artifactBody({
+      'artifact_type': 'architect_review',
+      'content_json': passed,
+    });
+    expect(artifact, contains('Verdict: passed'));
+    expect(artifact, isNot(contains('{')));
   });
 
   test('validation output names skipped local gates', () {

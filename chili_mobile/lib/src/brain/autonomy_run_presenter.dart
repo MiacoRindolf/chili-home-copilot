@@ -4,6 +4,26 @@ class AutonomyRunPresenter {
       'Local model planning was unavailable';
   static const _compactTextLimit = 900;
   static const _modelErrorSnippetLimit = 260;
+  static const _architectReviewPassingScore = 85;
+  static const _architectReviewStatusLabels = {
+    'passed': 'passed',
+    'failed': 'needs revision',
+    'needs_revision': 'needs revision',
+    'needs_clarification': 'needs clarification',
+  };
+  static const _architectReviewBlockerLabels = {
+    'broad_rewrite_without_justification':
+        'the scope is too broad for a safe autonomous run',
+    'file_missing': 'one or more selected files no longer exist',
+    'low_score': 'the plan did not meet the quality threshold',
+    'mismatched_domain': 'the selected files do not match the requested area',
+    'no_concrete_file': 'the plan does not name a concrete file',
+    'operator_feedback':
+        'your feedback changed the requirements, so the plan must be revised',
+    'unsafe_or_destructive_action':
+        'the request may affect real data or destructive operations',
+    'vague_file_rationale': 'the file choice was not explained well enough',
+  };
   static const _rawModelErrorMarkers = [
     'http://',
     'https://',
@@ -196,6 +216,12 @@ class AutonomyRunPresenter {
         if (sha.isNotEmpty) return 'Created commit ${_shortSha(sha)}.';
         break;
       case 'visual_screenshot':
+        if (json['skipped'] == true) {
+          final reason = _firstText(json, ['skip_reason', 'reason']);
+          return reason.isEmpty
+              ? 'Screenshot validation was skipped.'
+              : 'Screenshot validation was skipped: $reason';
+        }
         final path = _firstText(json, ['path', 'url']);
         if (path.isNotEmpty) return 'Attached screenshot evidence: $path';
         return 'Requested screenshot evidence for UI/UX validation.';
@@ -221,6 +247,8 @@ class AutonomyRunPresenter {
         final summary = _firstText(json, ['summary', 'message']);
         if (summary.isNotEmpty) return summary;
         break;
+      case 'architect_review':
+        return architectReviewBody(json);
     }
 
     if (content.isNotEmpty && !_looksStructured(content)) return content;
@@ -289,6 +317,67 @@ class AutonomyRunPresenter {
     return parts.join('\n\n');
   }
 
+  static bool architectReviewPassed(dynamic raw) {
+    final review = _map(raw);
+    final status = _text(review['status']).toLowerCase();
+    final score = _intValue(review['score']);
+    return status == 'passed' && score >= _architectReviewPassingScore;
+  }
+
+  static String architectReviewStatusLabel(dynamic raw) {
+    final review = _map(raw);
+    final status = _text(review['status']).toLowerCase().trim();
+    if (status.isEmpty) return 'not reviewed';
+    return _architectReviewStatusLabels[status] ?? status.replaceAll('_', ' ');
+  }
+
+  static String architectReviewBody(dynamic raw) {
+    final review = _map(raw);
+    if (review.isEmpty) return '';
+    final status = architectReviewStatusLabel(review);
+    final score = _intValue(review['score']);
+    final confidence = _text(review['confidence']).replaceAll('_', ' ');
+    final selected = _mapList(review['selected_files'])
+        .map((item) {
+          final path = _firstText(item, ['path', 'file']);
+          final rationale = _firstText(item, ['rationale', 'reason']);
+          if (path.isEmpty) return '';
+          return rationale.isEmpty ? path : '$path - $rationale';
+        })
+        .where((item) => item.isNotEmpty)
+        .toList();
+    final blockers = _stringList(_map(review['critique'])['blockers'])
+        .map(_architectReviewBlockerLabel)
+        .where((item) => item.isNotEmpty)
+        .toList();
+    final alternatives = _mapList(review['alternatives'])
+        .map((item) {
+          final path = _firstText(item, ['path', 'file']);
+          final reason = _firstText(item, ['reason', 'rationale']);
+          if (path.isEmpty) return '';
+          return reason.isEmpty ? path : '$path - $reason';
+        })
+        .where((item) => item.isNotEmpty)
+        .toList();
+    final parts = <String>[
+      'Verdict: ${status.isEmpty ? 'not reviewed' : status} '
+          '($score/100${confidence.isEmpty ? '' : ', $confidence confidence'}).',
+    ];
+    if (selected.isNotEmpty) {
+      parts.add('Selected: ${_listSummary(selected, limit: 3)}.');
+    }
+    if (blockers.isNotEmpty) {
+      parts.add('Blockers: ${_listSummary(blockers, limit: 5)}.');
+    }
+    final reason =
+        _friendlyArchitectBlockingReason(_text(review['blocking_reason']));
+    if (reason.isNotEmpty) parts.add(_truncate(reason, 260));
+    if (alternatives.isNotEmpty) {
+      parts.add('Alternatives: ${_listSummary(alternatives, limit: 3)}.');
+    }
+    return parts.join('\n');
+  }
+
   static String compact(dynamic value) {
     if (value == null) return '';
     if (value is String) return _truncate(value.trim(), _compactTextLimit);
@@ -329,20 +418,21 @@ class AutonomyRunPresenter {
     final modelText = model.isEmpty ? '' : ' with $model';
     final latencyText = latency.isEmpty ? '' : ' in $latency';
     final error = _firstText(json, ['error', 'error_message', 'message']);
+    final cooldownText = _modelCooldownText(json['skipped_models']);
 
     if (isChatModelCall) {
       if (ok == false) {
         return 'The local brainstorm chat model did not answer$latencyText. '
-            'No repo scan or code changes were started.';
+            'No repo scan or code changes were started.$cooldownText';
       }
-      return 'The local brainstorm chat model answered$latencyText.';
+      return 'The local brainstorm chat model answered$latencyText.$cooldownText';
     }
     if (ok == false) {
       final friendlyError = _friendlyModelError(error);
       final reason = friendlyError.isEmpty ? '' : ': $friendlyError';
-      return 'Model call for $target$modelText did not complete$latencyText$reason';
+      return 'Model call for $target$modelText did not complete$latencyText$reason$cooldownText';
     }
-    return 'Model call for $target$modelText completed$latencyText.';
+    return 'Model call for $target$modelText completed$latencyText.$cooldownText';
   }
 
   static String _friendlyModelError(String error) {
@@ -361,6 +451,44 @@ class AutonomyRunPresenter {
       return 'the local model service was not reachable';
     }
     return _truncate(trimmed, _modelErrorSnippetLimit);
+  }
+
+  static String _modelCooldownText(dynamic raw) {
+    final skipped = _map(raw);
+    if (skipped.isEmpty) return '';
+    final names = skipped.keys
+        .map((name) => name.trim())
+        .where((name) => name.isNotEmpty)
+        .take(3)
+        .toList();
+    if (names.isEmpty) return '';
+    final summary = _listSummary(names);
+    return ' Skipped $summary because a recent local model call timed out.';
+  }
+
+  static String _architectReviewBlockerLabel(String blocker) {
+    final key = blocker.trim().toLowerCase();
+    if (key.isEmpty) return '';
+    return _architectReviewBlockerLabels[key] ?? key.replaceAll('_', ' ');
+  }
+
+  static String _friendlyArchitectBlockingReason(String reason) {
+    final trimmed = reason.trim();
+    if (trimmed.isEmpty) return '';
+    final lower = trimmed.toLowerCase();
+    const prefix = 'plan quality gate failed:';
+    if (!lower.startsWith(prefix)) {
+      return trimmed.replaceAll('_', ' ');
+    }
+    final rawBlockers = trimmed.substring(prefix.length).split(',');
+    final blockers = rawBlockers
+        .map(_architectReviewBlockerLabel)
+        .where((item) => item.isNotEmpty)
+        .toList();
+    if (blockers.isEmpty) {
+      return 'The architect quality gate failed.';
+    }
+    return 'The architect quality gate failed: ${_listSummary(blockers, limit: 5)}.';
   }
 
   static String _safePlanText(dynamic raw) {
@@ -420,6 +548,12 @@ class AutonomyRunPresenter {
     if (ms == null || ms <= 0) return '';
     if (ms >= 1000) return '${(ms / 1000).toStringAsFixed(1)}s';
     return '${ms.round()}ms';
+  }
+
+  static int _intValue(dynamic raw) {
+    if (raw is int) return raw;
+    if (raw is num) return raw.round();
+    return int.tryParse(_text(raw)) ?? 0;
   }
 
   static String _firstText(Map<String, dynamic> map, List<String> keys) {

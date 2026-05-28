@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.models import ProjectAutonomyRun, ProjectDomainRun
+from app.models import ProjectAutonomyArchitectReview, ProjectAutonomyRun, ProjectDomainRun
 from app.models.code_brain import CodeRepo
 
 
@@ -127,7 +127,24 @@ def test_project_autonomy_create_list_detail_cancel_and_merge(
     db_run.status = "awaiting_approval"
     db_run.current_stage = "plan"
     db_run.plan_status = "awaiting_approval"
-    db_run.plan_json = '{"analysis":"ok","files":[{"path":"app/example.py","action":"modify"}],"notes":""}'
+    db_run.plan_json = (
+        '{"analysis":"Change app example safely.",'
+        '"files":[{"path":"app/example.py","action":"modify","description":"Change app example safely."}],'
+        '"notes":""}'
+    )
+    db.add(
+        ProjectAutonomyArchitectReview(
+            run_id=run_id,
+            attempt_index=1,
+            status="passed",
+            score=90,
+            confidence="high",
+            dimensions_json="{}",
+            alternatives_json="[]",
+            critique_json='{"blockers":[]}',
+            selected_files_json='[{"path":"app/example.py","rationale":"route test"}]',
+        )
+    )
     db.commit()
     approved = client.post(f"/api/brain/project/autonomy/runs/{run_id}/plan/approve")
     assert approved.status_code == 200

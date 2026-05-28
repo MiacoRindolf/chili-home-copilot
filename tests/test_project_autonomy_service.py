@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
+from app import migrations
 from app.models import (
+    ProjectAutonomyArchitectReview,
     ProjectAutonomyArtifact,
     ProjectAutonomyLease,
     ProjectAutonomyMessage,
@@ -36,6 +39,7 @@ def _sqlite_autonomy_session():
             ProjectAutonomyMessage.__table__,
             ProjectAutonomyStep.__table__,
             ProjectAutonomyArtifact.__table__,
+            ProjectAutonomyArchitectReview.__table__,
             ProjectAutonomyLease.__table__,
         ],
     )
@@ -76,6 +80,27 @@ def test_select_local_model_recommends_coder_model_when_empty(monkeypatch):
     assert selected["available"] is False
     assert selected["model"] is None
     assert "qwen2.5-coder:7b" in selected["recommendation"]
+
+
+def test_select_local_model_skips_timed_out_model_during_cooldown(monkeypatch):
+    orchestrator._MODEL_COOLDOWNS.clear()
+    try:
+        timed_out_model = "qwen2.5-coder:3b-instruct-q8_0"
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "list_models",
+            lambda: [timed_out_model, "qwen3:4b"],
+        )
+
+        orchestrator._mark_model_cooldown(timed_out_model, "TimeoutError: timed out")
+        selected = orchestrator.select_local_model()
+
+        assert selected["available"] is True
+        assert selected["model"] == "qwen3:4b"
+        assert timed_out_model in selected["skipped_models"]
+        assert selected["skipped_models"][timed_out_model]["reason"] == "The local planning model timed out."
+    finally:
+        orchestrator._MODEL_COOLDOWNS.clear()
 
 
 def test_build_local_plan_uses_bounded_warm_ollama_options(monkeypatch, tmp_path):
@@ -129,6 +154,101 @@ def test_build_local_plan_uses_bounded_warm_ollama_options(monkeypatch, tmp_path
         db.close()
 
 
+def test_build_local_plan_cools_down_model_after_timeout(monkeypatch, tmp_path):
+    orchestrator._MODEL_COOLDOWNS.clear()
+    db = _sqlite_autonomy_session()
+    try:
+        timed_out_model = "qwen2.5-coder:3b-instruct-q8_0"
+        target = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+        target.parent.mkdir(parents=True)
+        target.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_plan_timeout_cooldown",
+            repo_id=repo.id,
+            prompt="Improve certificate failure messaging in the desktop app",
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "list_models",
+            lambda: [timed_out_model, "qwen3:4b"],
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {"repos": [], "insights": [], "hotspots": [], "relevant_files": []},
+        )
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=False,
+                text="",
+                latency_ms=90001,
+                error="TimeoutError: timed out",
+            ),
+        )
+
+        plan = orchestrator.build_local_plan(db, run, repo)
+        selected_after_timeout = orchestrator.select_local_model()
+
+        assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+        assert timed_out_model in orchestrator._MODEL_COOLDOWNS
+        assert selected_after_timeout["model"] == "qwen3:4b"
+    finally:
+        orchestrator._MODEL_COOLDOWNS.clear()
+        db.close()
+
+
+def test_build_local_plan_uses_fallback_when_all_models_are_cooling_down(monkeypatch, tmp_path):
+    orchestrator._MODEL_COOLDOWNS.clear()
+    db = _sqlite_autonomy_session()
+    try:
+        cooled_model = "qwen2.5-coder:3b-instruct-q8_0"
+        target = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+        target.parent.mkdir(parents=True)
+        target.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_all_models_cooling",
+            repo_id=repo.id,
+            prompt="Improve certificate failure messaging in the desktop app",
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator.ollama_client, "list_models", lambda: [cooled_model])
+        orchestrator._mark_model_cooldown(cooled_model, "TimeoutError: timed out")
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {"repos": [], "insights": [], "hotspots": [], "relevant_files": []},
+        )
+
+        plan = orchestrator.build_local_plan(db, run, repo)
+
+        assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(ProjectAutonomyArtifact.run_id == run.run_id, ProjectAutonomyArtifact.name == "heuristic_plan_fallback")
+            .one()
+        )
+        assert artifact.content_json is not None
+        assert "qwen2.5-coder:3b-instruct-q8_0" in artifact.content_json
+    finally:
+        orchestrator._MODEL_COOLDOWNS.clear()
+        db.close()
+
+
 def test_build_local_plan_uses_heuristic_fast_path_for_vague_small_request(monkeypatch, tmp_path):
     db = _sqlite_autonomy_session()
     try:
@@ -169,6 +289,193 @@ def test_build_local_plan_uses_heuristic_fast_path_for_vague_small_request(monke
             .one()
         )
         assert "Autopilot cockpit polish" in (artifact.content_json or "")
+    finally:
+        db.close()
+
+
+def test_architect_review_model_payload_and_artifact(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo_file = tmp_path / "app/example.py"
+        repo_file.parent.mkdir(parents=True)
+        repo_file.write_text("VALUE = 1\n", encoding="utf-8")
+        run = ProjectAutonomyRun(
+            run_id="pa_review_model",
+            prompt="change example",
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        plan = {
+            "analysis": "Change the example constant safely.",
+            "files": [
+                {
+                    "path": "app/example.py",
+                    "action": "modify",
+                    "description": "Change the example constant in a focused way.",
+                }
+            ],
+            "notes": "",
+        }
+        files = orchestrator._plan_files(plan)
+        review = orchestrator._review_architect_plan(
+            plan=plan,
+            files=files,
+            context={"relevant_files": [], "hotspots": [], "insights": [], "repos": []},
+            repo_path=tmp_path,
+            prompt=run.prompt,
+            attempt_index=1,
+        )
+
+        row = orchestrator._record_architect_review(db, run, review)
+        db.commit()
+        payload = orchestrator.run_payload(db, run, include_events=True)
+
+        assert row.status == "passed"
+        assert payload["architect_review"]["status"] == "passed"
+        assert payload["architect_review"]["score"] >= orchestrator.ARCHITECT_REVIEW_PASSING_SCORE
+        assert any(a["artifact_type"] == "architect_review" for a in payload["artifacts"])
+    finally:
+        db.close()
+
+
+def test_architect_review_migration_creates_table():
+    engine = create_engine("sqlite:///:memory:")
+    with engine.connect() as conn:
+        migrations._migration_279_project_autonomy_architect_reviews(conn)
+        cols = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(project_autonomy_architect_reviews)")).fetchall()
+        }
+
+        assert {
+            "run_id",
+            "attempt_index",
+            "status",
+            "score",
+            "confidence",
+            "dimensions_json",
+            "alternatives_json",
+            "critique_json",
+            "selected_files_json",
+            "blocking_reason",
+        }.issubset(cols)
+        conn.execute(
+            text(
+                "INSERT INTO project_autonomy_architect_reviews "
+                "(run_id, attempt_index, status, score, confidence) "
+                "VALUES ('pa_migration', 1, 'passed', 91, 'high')"
+            )
+        )
+        row = conn.execute(
+            text("SELECT status, score FROM project_autonomy_architect_reviews WHERE run_id='pa_migration'")
+        ).one()
+        assert row[0] == "passed"
+        assert row[1] == 91
+
+
+def test_approve_plan_requires_passed_architect_review(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_review_gate",
+            repo_id=repo.id,
+            prompt="find a small enhancement for the desktop app",
+            status="awaiting_approval",
+            current_stage="plan",
+            execution_mode="plan_approval",
+            plan_status="awaiting_approval",
+            plan_json='{"analysis":"bad","files":[{"path":"chili_mobile/lib/src/network/chili_api_client.dart","action":"modify"}],"notes":""}',
+        )
+        db.add(run)
+        db.commit()
+        orchestrator._record_architect_review(
+            db,
+            run,
+            {
+                "attempt_index": 1,
+                "status": "failed",
+                "score": 40,
+                "confidence": "low",
+                "dimensions": {},
+                "alternatives": [],
+                "critique": {"blockers": ["mismatched_domain"]},
+                "selected_files": [],
+                "blocking_reason": "Plan quality gate failed: mismatched_domain",
+            },
+        )
+        db.commit()
+
+        with pytest.raises(ValueError, match="quality gate"):
+            orchestrator.approve_plan(db, run.run_id)
+    finally:
+        db.close()
+
+
+def test_plan_feedback_invalidates_previous_architect_review(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_feedback_invalidates_review",
+            repo_id=repo.id,
+            prompt="add image attachments to Autopilot prompts",
+            status="awaiting_approval",
+            current_stage="plan",
+            execution_mode="plan_approval",
+            plan_status="awaiting_approval",
+            plan_json=(
+                '{"analysis":"Add prompt attachments.",'
+                '"files":[{"path":"chili_mobile/lib/src/brain/brain_dispatch_screen.dart",'
+                '"action":"modify","description":"Add prompt attachment controls."}],'
+                '"notes":""}'
+            ),
+            files_json='["chili_mobile/lib/src/brain/brain_dispatch_screen.dart"]',
+            agents_json='[{"name":"architect","files":["chili_mobile/lib/src/brain/brain_dispatch_screen.dart"]}]',
+        )
+        db.add(run)
+        db.commit()
+        orchestrator._record_architect_review(
+            db,
+            run,
+            {
+                "attempt_index": 1,
+                "status": "passed",
+                "score": 92,
+                "confidence": "high",
+                "dimensions": {},
+                "alternatives": [],
+                "critique": {"blockers": [], "next_action": "approval_ready"},
+                "selected_files": [
+                    {
+                        "path": "chili_mobile/lib/src/brain/brain_dispatch_screen.dart",
+                        "rationale": "Composer controls live here.",
+                    }
+                ],
+                "blocking_reason": None,
+            },
+        )
+        db.commit()
+
+        payload = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="That plan misses the drag-and-drop image path; revise it.",
+        )
+
+        assert payload["status"] == "queued"
+        assert payload["plan_status"] == "revising"
+        assert payload["plan"] == {}
+        assert payload["files"] == []
+        assert payload["architect_review"]["status"] == "needs_revision"
+        assert payload["architect_review"]["score"] == 0
+        assert "previous approval is no longer valid" in payload["messages"][-1]["content"]
     finally:
         db.close()
 
@@ -311,6 +618,122 @@ def test_plan_approval_run_stops_before_worktree(monkeypatch, tmp_path):
         db.close()
 
 
+def test_planning_revises_failed_architect_review_before_approval(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        presenter = tmp_path / "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
+        api = tmp_path / "chili_mobile/lib/src/network/chili_api_client.dart"
+        presenter.parent.mkdir(parents=True)
+        presenter.write_text("class AutonomyRunPresenter {}\n", encoding="utf-8")
+        api.parent.mkdir(parents=True)
+        api.write_text("class ChiliApiClient {}\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "."], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            timeout=60,
+        )
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_review_revise",
+            repo_id=repo.id,
+            prompt="find a small enhancement for the desktop app",
+            status="queued",
+            current_stage="queued",
+            execution_mode="plan_approval",
+            plan_status="drafting",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {"repos": [], "insights": [], "hotspots": [], "relevant_files": []},
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "build_local_plan",
+            lambda *args, **kwargs: {
+                "analysis": "Change API client for broad desktop request.",
+                "files": [
+                    {
+                        "path": "chili_mobile/lib/src/network/chili_api_client.dart",
+                        "action": "modify",
+                        "description": "Change API client for the broad desktop enhancement.",
+                    }
+                ],
+                "notes": "",
+            },
+        )
+
+        payload = orchestrator.run_autonomy_sync(db, run.run_id)
+
+        assert payload["status"] == "awaiting_approval"
+        assert payload["architect_review"]["status"] == "passed"
+        assert payload["files"] == ["chili_mobile/lib/src/brain/autonomy_run_presenter.dart"]
+        reviews = db.query(ProjectAutonomyArchitectReview).filter_by(run_id=run.run_id).all()
+        assert len(reviews) >= 2
+        assert reviews[0].status == "failed"
+        assert reviews[-1].status == "passed"
+    finally:
+        db.close()
+
+
+def test_planning_asks_for_clarification_after_failed_review_attempts(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        (tmp_path / "README.md").write_text("test repo\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "."], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            timeout=60,
+        )
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_review_clarify",
+            repo_id=repo.id,
+            prompt="find a small enhancement for the desktop app",
+            status="queued",
+            current_stage="queued",
+            execution_mode="plan_approval",
+            plan_status="drafting",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {"repos": [], "insights": [], "hotspots": [], "relevant_files": []},
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "build_local_plan",
+            lambda *args, **kwargs: {"analysis": "No concrete plan yet.", "files": [], "notes": ""},
+        )
+
+        payload = orchestrator.run_autonomy_sync(db, run.run_id)
+
+        assert payload["status"] == "awaiting_clarification"
+        assert payload["plan_status"] == "awaiting_clarification"
+        assert payload["architect_review"]["status"] == "needs_clarification"
+        assert any(m["message_type"] == "clarification" for m in payload["messages"])
+        plan_messages = [m["content"] for m in payload["messages"] if m["message_type"] == "plan"]
+        assert plan_messages
+        assert "won't ask for approval yet" in plan_messages[-1]
+        assert "waiting for your approval" not in plan_messages[-1]
+        with pytest.raises(ValueError):
+            orchestrator.approve_plan(db, run.run_id)
+    finally:
+        db.close()
+
+
 def test_approved_plan_resumes_implementation_phase(monkeypatch, tmp_path):
     db = _sqlite_autonomy_session()
     try:
@@ -367,6 +790,72 @@ def test_visual_validation_records_video_skip_as_non_blocking_artifact():
         assert video["content_json"]["skipped"] is True
         assert any(a["artifact_type"] == "ux_review" for a in payload["artifacts"])
         assert payload["messages"][-1]["message_type"] == "validation"
+    finally:
+        db.close()
+
+
+def test_visual_validation_accepts_safe_absolute_desktop_screenshot_path():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_visual_path",
+            prompt="review the UI",
+            status="awaiting_approval",
+            current_stage="plan",
+            execution_mode="plan_approval",
+            plan_status="awaiting_approval",
+        )
+        db.add(run)
+        db.commit()
+        screenshot_path = r"D:\captures\chili_focus.png"
+
+        payload = orchestrator.record_visual_validation(
+            db,
+            run.run_id,
+            kind="screenshot",
+            path=screenshot_path,
+        )
+
+        assert payload is not None
+        screenshot = next(a for a in payload["artifacts"] if a["artifact_type"] == "visual_screenshot")
+        assert screenshot["content_json"]["path"] == screenshot_path
+        assert screenshot["content_json"]["source"] == "desktop"
+        assert screenshot["content_json"]["skipped"] is False
+    finally:
+        db.close()
+
+
+def test_visual_validation_rejects_unsafe_path_without_persisting_raw_value():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_visual_unsafe",
+            prompt="review the UI",
+            status="awaiting_approval",
+            current_stage="plan",
+            execution_mode="plan_approval",
+            plan_status="awaiting_approval",
+        )
+        db.add(run)
+        db.commit()
+        unsafe_path = "../secrets/chili.env"
+
+        payload = orchestrator.record_visual_validation(
+            db,
+            run.run_id,
+            kind="screenshot",
+            path=unsafe_path,
+        )
+
+        assert payload is not None
+        screenshot = next(a for a in payload["artifacts"] if a["artifact_type"] == "visual_screenshot")
+        artifact_json = json.dumps(screenshot["content_json"])
+        assert screenshot["content_json"]["path"] is None
+        assert screenshot["content_json"]["skipped"] is True
+        assert screenshot["content_json"]["path_rejected"] is True
+        assert "rejected" in screenshot["content_json"]["skip_reason"]
+        assert unsafe_path not in artifact_json
+        assert any("rejected" in m["content"] for m in payload["messages"])
     finally:
         db.close()
 
@@ -451,13 +940,76 @@ def test_autopilot_chat_stores_image_attachments_in_message_metadata(tmp_path):
         user_messages = [m for m in payload["messages"] if m["role"] == "user"]
         assert user_messages[0]["metadata"]["attachments"][0]["name"] == image.name
         assert user_messages[-1]["metadata"]["attachments"][0]["name"] == "second.png"
-        assert "Attached images:" in orchestrator._conversation_prompt(db, run)
+        conversation_prompt = orchestrator._conversation_prompt(db, run)
+        assert "Attached images:" in conversation_prompt
+        assert "local desktop image" in conversation_prompt
+        assert str(image) not in conversation_prompt
         artifacts = (
             db.query(ProjectAutonomyArtifact)
             .filter(ProjectAutonomyArtifact.run_id == run.run_id, ProjectAutonomyArtifact.artifact_type == "prompt_image")
             .all()
         )
         assert len(artifacts) == 2
+    finally:
+        db.close()
+
+
+def test_autopilot_chat_rejects_unsafe_image_attachment_sources(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+
+        run = orchestrator.create_run(
+            db,
+            prompt="Please review this UI state.",
+            repo_id=repo.id,
+            attachments=[
+                {
+                    "kind": "image",
+                    "path": "../secrets/chili.png",
+                    "name": "leak.png",
+                    "mime_type": "image/png",
+                },
+                {
+                    "kind": "image",
+                    "url": "file:///C:/Users/rindo/secret.png",
+                    "name": "secret.png",
+                    "mime_type": "image/png",
+                },
+            ],
+        )
+
+        payload = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="Use this screenshot instead.",
+            attachments=[
+                {
+                    "kind": "image",
+                    "url": "https://getchili.app/captures/autopilot.png?cache=1",
+                    "name": "autopilot.png",
+                    "mime_type": "image/png",
+                }
+            ],
+        )
+
+        first_user = [m for m in payload["messages"] if m["role"] == "user"][0]
+        latest_user = [m for m in payload["messages"] if m["role"] == "user"][-1]
+        assert "attachments" not in first_user["metadata"]
+        assert latest_user["metadata"]["attachments"][0]["url"].startswith("https://getchili.app/")
+        conversation_prompt = orchestrator._conversation_prompt(db, run)
+        assert "remote image URL" in conversation_prompt
+        assert "https://getchili.app/captures/autopilot.png" not in conversation_prompt
+        serialized = json.dumps(payload)
+        assert "../secrets/chili.png" not in serialized
+        assert "file:///C:/Users/rindo/secret.png" not in serialized
+        artifacts = [
+            a for a in payload["artifacts"] if a["artifact_type"] == "prompt_image"
+        ]
+        assert len(artifacts) == 1
+        assert artifacts[0]["content_json"]["url"].startswith("https://getchili.app/")
     finally:
         db.close()
 
@@ -710,6 +1262,80 @@ def test_heuristic_plan_fallback_prefers_available_deterministic_desktop_patch(t
     )
 
     assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/chili_api_client.dart"
+
+
+def test_autopilot_prompt_attachment_fallback_targets_cockpit_file(tmp_path):
+    presenter_file = tmp_path / "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
+    cockpit_file = tmp_path / "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
+    presenter_file.parent.mkdir(parents=True)
+    presenter_file.write_text("class AutonomyRunPresenter {}\n", encoding="utf-8")
+    cockpit_file.write_text("class BrainDispatchScreen {}\n", encoding="utf-8")
+    context = {"repos": [], "insights": [], "hotspots": [], "relevant_files": []}
+
+    plan = orchestrator._fallback_plan_from_context(
+        context,
+        tmp_path,
+        "please add a way to add image to a prompt here in autopilot just like claude and codex",
+        "planner unavailable",
+    )
+
+    assert plan["files"][0]["path"] == "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
+    assert "prompt attachments" in plan["files"][0]["description"]
+
+
+def test_architect_review_blocks_attachment_plan_in_presenter(tmp_path):
+    presenter_file = tmp_path / "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
+    cockpit_file = tmp_path / "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
+    presenter_file.parent.mkdir(parents=True)
+    presenter_file.write_text("class AutonomyRunPresenter {}\n", encoding="utf-8")
+    cockpit_file.write_text("class BrainDispatchScreen {}\n", encoding="utf-8")
+    prompt = "please add a way to add image to a prompt here in autopilot just like claude and codex"
+    context = {"repos": [], "insights": [], "hotspots": [], "relevant_files": []}
+    bad_plan = {
+        "analysis": "Improve Autopilot plan text.",
+        "files": [
+            {
+                "path": "chili_mobile/lib/src/brain/autonomy_run_presenter.dart",
+                "action": "modify",
+                "description": "Improve Autopilot plan presentation.",
+            }
+        ],
+        "notes": "",
+    }
+    bad_review = orchestrator._review_architect_plan(
+        plan=bad_plan,
+        files=orchestrator._plan_files(bad_plan),
+        context=context,
+        repo_path=tmp_path,
+        prompt=prompt,
+        attempt_index=1,
+    )
+
+    assert bad_review["status"] == "failed"
+    assert "mismatched_domain" in bad_review["critique"]["blockers"]
+
+    good_plan = {
+        "analysis": "Add image attachment controls to the Autopilot chat composer.",
+        "files": [
+            {
+                "path": "chili_mobile/lib/src/brain/brain_dispatch_screen.dart",
+                "action": "modify",
+                "description": "Add image attachment controls to the Autopilot prompt composer.",
+            }
+        ],
+        "notes": "",
+    }
+    good_review = orchestrator._review_architect_plan(
+        plan=good_plan,
+        files=orchestrator._plan_files(good_plan),
+        context=context,
+        repo_path=tmp_path,
+        prompt=prompt,
+        attempt_index=1,
+    )
+
+    assert good_review["status"] == "passed"
+    assert good_review["score"] >= orchestrator.ARCHITECT_REVIEW_PASSING_SCORE
 
 
 def test_vague_small_plan_is_narrowed_away_from_large_desktop_file(tmp_path):

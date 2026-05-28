@@ -22,11 +22,13 @@ import difflib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import urlparse
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ...models import (
+    ProjectAutonomyArchitectReview,
     ProjectAutonomyArtifact,
     ProjectAutonomyLearningSample,
     ProjectAutonomyLease,
@@ -64,6 +66,7 @@ AUTONOMOUS_KIND = "autonomous"
 EXECUTION_MODE_PLAN_APPROVAL = "plan_approval"
 EXECUTION_MODE_FULL_AUTOPILOT = "full_autopilot"
 RUN_STATUS_AWAITING_APPROVAL = "awaiting_approval"
+RUN_STATUS_AWAITING_CLARIFICATION = "awaiting_clarification"
 RUN_STATUS_BLOCKED = "blocked"
 RUN_STATUS_CANCELLED = "cancelled"
 RUN_STATUS_CHATTING = "chatting"
@@ -75,6 +78,7 @@ RUN_STATUS_QUEUED = "queued"
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_VALIDATING = "validating"
 PLAN_STATUS_AWAITING_APPROVAL = "awaiting_approval"
+PLAN_STATUS_AWAITING_CLARIFICATION = "awaiting_clarification"
 PLAN_STATUS_APPROVED = "approved"
 PLAN_STATUS_DRAFTING = "drafting"
 PLAN_STATUS_IMPLEMENTED = "implemented"
@@ -87,18 +91,47 @@ STAGE_PLAN = "plan"
 STAGE_QUEUED = RUN_STATUS_QUEUED
 STAGE_REPO_SCAN = "repo_scan"
 STAGE_ASSIGN_ROLES = "assign_roles"
+STAGE_ARCHITECT_REVIEW = "architect_review"
 ATTACHMENT_KIND_IMAGE = "image"
 ATTACHMENT_ARTIFACT_TYPE_IMAGE = "prompt_image"
 ATTACHMENT_IMAGE_MIME_PREFIX = "image/"
 ATTACHMENT_DEFAULT_IMAGE_NAME = "attached image"
 ATTACHMENT_CONTEXT_HEADING = "Attached images:"
+ATTACHMENT_CONTEXT_LOCAL_SOURCE_LABEL = "local desktop image"
+ATTACHMENT_CONTEXT_REMOTE_SOURCE_LABEL = "remote image URL"
+ATTACHMENT_CONTEXT_SOURCELESS_LABEL = "image evidence"
 ATTACHMENT_NAME_LIMIT = 180
 ATTACHMENT_SOURCE_LIMIT = 900
+ATTACHMENT_UNSAFE_PATH_REASON = "Image attachment path was rejected because it is not a safe absolute local file path."
+ATTACHMENT_UNSAFE_URL_REASON = "Image attachment URL was rejected because only http and https URLs are allowed."
+ATTACHMENT_PATH_TOO_LONG_REASON = "Image attachment path was rejected because it is too long."
+ATTACHMENT_URL_TOO_LONG_REASON = "Image attachment URL was rejected because it is too long."
+VISUAL_KIND_SCREENSHOT = "screenshot"
+VISUAL_KIND_VIDEO = "video"
+VISUAL_ARTIFACT_TYPE_SCREENSHOT = "visual_screenshot"
+VISUAL_ARTIFACT_TYPE_VIDEO = "visual_video"
+VISUAL_EVIDENCE_SOURCE_DESKTOP = "desktop"
+VISUAL_EVIDENCE_SOURCE_URL = "url"
+VISUAL_EVIDENCE_SOURCE_NONE = "none"
+VISUAL_SCREENSHOT_UNAVAILABLE_REASON = "Screenshot evidence was requested, but no image capture was provided."
+VISUAL_VIDEO_UNAVAILABLE_REASON = "Desktop video capture is not available yet for this run."
+VISUAL_UNSAFE_PATH_REASON = "Visual evidence path was rejected because it is not a safe absolute local file path."
+VISUAL_UNSAFE_URL_REASON = "Visual evidence URL was rejected because only http and https URLs are allowed."
+VISUAL_PATH_TOO_LONG_REASON = "Visual evidence path was rejected because it is too long."
+VISUAL_URL_TOO_LONG_REASON = "Visual evidence URL was rejected because it is too long."
+VISUAL_SCREENSHOT_EXT_REASON = "Screenshot evidence path was rejected because it is not a supported image file."
+VISUAL_VIDEO_EXT_REASON = "Video evidence path was rejected because it is not a supported video file."
 OPERATOR_SAFE_PLAN_TEXT_LIMIT = 900
 ERROR_SNIPPET_LIMIT = 900
 CHAT_REPLY_LIMIT = 1800
 WORKTREE_GIT_TIMEOUT_SEC = 180
 PLAN_START_CHAT_ACTION_LABEL = "Start plan"
+ARCHITECT_REVIEW_PASSING_SCORE = 85
+ARCHITECT_REVIEW_MAX_ATTEMPTS = 3
+ARCHITECT_REVIEW_STATUS_PASSED = "passed"
+ARCHITECT_REVIEW_STATUS_FAILED = "failed"
+ARCHITECT_REVIEW_STATUS_NEEDS_CLARIFICATION = "needs_clarification"
+ARCHITECT_REVIEW_STATUS_NEEDS_REVISION = "needs_revision"
 DESKTOP_AUTOPILOT_PRESENTER_FILE = "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
 DESKTOP_AUTOPILOT_COCKPIT_FILE = "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
 DESKTOP_NETWORK_ERROR_FILE = "chili_mobile/lib/src/network/network_error_message.dart"
@@ -128,6 +161,33 @@ BROAD_DESKTOP_DETAIL_TOKENS = frozenset({
 })
 DESKTOP_UI_PROMPT_TOKENS = frozenset({"app", "desktop", "flutter", "native", "screen", "ui"})
 DESKTOP_AUTOPILOT_PROMPT_TOKENS = frozenset({"autonomous", "autopilot", "brain", "operator"})
+DESKTOP_AUTOPILOT_ATTACHMENT_TOKENS = frozenset({
+    "attach",
+    "attached",
+    "attachment",
+    "file",
+    "files",
+    "image",
+    "images",
+    "photo",
+    "photos",
+    "picture",
+    "pictures",
+    "screenshot",
+    "screenshots",
+    "upload",
+})
+DESKTOP_AUTOPILOT_COMPOSER_TOKENS = frozenset({
+    "chat",
+    "composer",
+    "enter",
+    "input",
+    "message",
+    "prompt",
+    "send",
+    "textbox",
+    "textarea",
+})
 DESKTOP_AUTOPILOT_PLAN_OVERRIDE_TOKENS = frozenset({
     "autopilot cockpit",
     "autopilot presenter",
@@ -140,6 +200,10 @@ DESKTOP_AUTOPILOT_PLAN_OVERRIDE_TOKENS = frozenset({
 DESKTOP_AUTOPILOT_PLAN_FILES = (
     DESKTOP_AUTOPILOT_PRESENTER_FILE,
     DESKTOP_AUTOPILOT_COCKPIT_FILE,
+)
+DESKTOP_AUTOPILOT_COCKPIT_INTENT_FILES = (
+    DESKTOP_AUTOPILOT_COCKPIT_FILE,
+    DESKTOP_AUTOPILOT_PRESENTER_FILE,
 )
 DESKTOP_SEEDED_FILES = (
     DESKTOP_AUTOPILOT_PRESENTER_FILE,
@@ -194,7 +258,11 @@ TERMINAL_STATUSES = frozenset({
     RUN_STATUS_FAILED,
     RUN_STATUS_CANCELLED,
 })
-IDLE_STATUSES = frozenset({RUN_STATUS_AWAITING_APPROVAL, RUN_STATUS_CHATTING})
+IDLE_STATUSES = frozenset({
+    RUN_STATUS_AWAITING_APPROVAL,
+    RUN_STATUS_AWAITING_CLARIFICATION,
+    RUN_STATUS_CHATTING,
+})
 ACTIVE_STATUSES = frozenset({
     RUN_STATUS_QUEUED,
     RUN_STATUS_RUNNING,
@@ -223,6 +291,7 @@ _EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT
 _EDIT_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_CTX") or "4096")
 _EDIT_MAX_FILE_LINES = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_MAX_FILE_LINES") or "260")
 _OLLAMA_KEEP_ALIVE = os.environ.get("CHILI_PROJECT_AUTOPILOT_OLLAMA_KEEP_ALIVE") or "15m"
+_MODEL_COOLDOWN_SEC = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_MODEL_COOLDOWN_SEC") or "900")
 
 _STAGE_ORDER = (
     "classify",
@@ -272,6 +341,11 @@ def _clip(text: str | None, limit: int = 6000) -> str:
 
 _MESSAGE_ATTACHMENT_LIMIT = 10
 _IMAGE_ATTACHMENT_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
+_VIDEO_EVIDENCE_EXTS = frozenset({".mp4", ".webm", ".mov", ".mkv", ".avi"})
+_VISUAL_URL_SCHEMES = frozenset({"http", "https"})
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 _RAW_MODEL_ERROR_MARKERS = (
     "http://",
     "https://",
@@ -282,6 +356,59 @@ _RAW_MODEL_ERROR_MARKERS = (
     "traceback",
     "ollama:",
 )
+_MODEL_COOLDOWN_ERROR_MARKERS = frozenset({"timed out", "timeouterror", "timeout"})
+_MODEL_COOLDOWNS: dict[str, dict[str, Any]] = {}
+
+
+def _is_absolute_local_source_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("//"):
+        return False
+    return normalized.startswith("/") or bool(_WINDOWS_ABSOLUTE_PATH_RE.match(path))
+
+
+def _has_parent_source_path_segment(path: str) -> bool:
+    parts = [part for part in path.replace("\\", "/").split("/") if part and part != "."]
+    return ".." in parts
+
+
+def _sanitize_absolute_local_source_path(
+    raw_path: str | None,
+    *,
+    unsafe_reason: str,
+    too_long_reason: str,
+) -> tuple[str | None, str | None]:
+    raw = (raw_path or "").strip().strip('"')
+    if not raw:
+        return None, None
+    if len(raw) > ATTACHMENT_SOURCE_LIMIT:
+        return None, too_long_reason
+    if _CONTROL_CHAR_RE.search(raw):
+        return None, unsafe_reason
+    if not _WINDOWS_ABSOLUTE_PATH_RE.match(raw) and _URL_SCHEME_RE.match(raw):
+        return None, unsafe_reason
+    if not _is_absolute_local_source_path(raw) or _has_parent_source_path_segment(raw):
+        return None, unsafe_reason
+    return raw, None
+
+
+def _sanitize_http_source_url(
+    raw_url: str | None,
+    *,
+    unsafe_reason: str,
+    too_long_reason: str,
+) -> tuple[str | None, str | None]:
+    raw = (raw_url or "").strip()
+    if not raw:
+        return None, None
+    if len(raw) > ATTACHMENT_SOURCE_LIMIT:
+        return None, too_long_reason
+    if _CONTROL_CHAR_RE.search(raw):
+        return None, unsafe_reason
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in _VISUAL_URL_SCHEMES or not parsed.netloc:
+        return None, unsafe_reason
+    return raw, None
 
 
 def _normalise_message_attachments(raw: Any) -> list[dict[str, Any]]:
@@ -291,16 +418,25 @@ def _normalise_message_attachments(raw: Any) -> list[dict[str, Any]]:
     for item in raw[:_MESSAGE_ATTACHMENT_LIMIT]:
         if not isinstance(item, dict):
             continue
-        path = str(item.get("path") or "").strip()
-        url = str(item.get("url") or "").strip()
+        path, _ = _sanitize_absolute_local_source_path(
+            str(item.get("path") or ""),
+            unsafe_reason=ATTACHMENT_UNSAFE_PATH_REASON,
+            too_long_reason=ATTACHMENT_PATH_TOO_LONG_REASON,
+        )
+        url, _ = _sanitize_http_source_url(
+            str(item.get("url") or ""),
+            unsafe_reason=ATTACHMENT_UNSAFE_URL_REASON,
+            too_long_reason=ATTACHMENT_URL_TOO_LONG_REASON,
+        )
         if not path and not url:
             continue
         name = str(item.get("name") or "").strip()
         if not name:
-            name = os.path.basename(path) if path else url.rsplit("/", 1)[-1]
+            name = os.path.basename(path) if path else os.path.basename(urlparse(url or "").path)
         name = name.split("?", 1)[0].strip() or ATTACHMENT_DEFAULT_IMAGE_NAME
         mime_type = str(item.get("mime_type") or item.get("mime") or "").strip()
-        ext = Path(name).suffix.lower() or Path(path).suffix.lower()
+        source_ext = Path(path).suffix.lower() if path else Path(urlparse(url or "").path).suffix.lower()
+        ext = Path(name).suffix.lower() or source_ext
         if ext not in _IMAGE_ATTACHMENT_EXTS and not mime_type.startswith(ATTACHMENT_IMAGE_MIME_PREFIX):
             continue
         clean: dict[str, Any] = {
@@ -324,14 +460,22 @@ def _message_attachments_from_metadata(raw: str | None) -> list[dict[str, Any]]:
     return _normalise_message_attachments(metadata.get("attachments"))
 
 
+def _attachment_context_source_label(item: dict[str, Any]) -> str:
+    if item.get("path"):
+        return ATTACHMENT_CONTEXT_LOCAL_SOURCE_LABEL
+    if item.get("url"):
+        return ATTACHMENT_CONTEXT_REMOTE_SOURCE_LABEL
+    return ATTACHMENT_CONTEXT_SOURCELESS_LABEL
+
+
 def _attachment_context(attachments: list[dict[str, Any]]) -> str:
     if not attachments:
         return ""
     lines = [ATTACHMENT_CONTEXT_HEADING]
     for idx, item in enumerate(attachments[:_MESSAGE_ATTACHMENT_LIMIT], start=1):
         name = str(item.get("name") or f"image {idx}")
-        source = str(item.get("path") or item.get("url") or "").strip()
-        lines.append(f"- {name}" + (f" ({source})" if source else ""))
+        source_label = _attachment_context_source_label(item)
+        lines.append(f"- {name} ({source_label})")
     return "\n".join(lines)
 
 
@@ -359,6 +503,59 @@ def _record_attachment_artifacts(
             content_json={"source": source, **item},
             commit=False,
         )
+
+
+def _clean_visual_kind(kind: str | None) -> str:
+    clean = (kind or VISUAL_KIND_SCREENSHOT).strip().lower()
+    return clean if clean in {VISUAL_KIND_SCREENSHOT, VISUAL_KIND_VIDEO} else VISUAL_KIND_SCREENSHOT
+
+
+def _visual_artifact_type(kind: str) -> str:
+    return VISUAL_ARTIFACT_TYPE_VIDEO if kind == VISUAL_KIND_VIDEO else VISUAL_ARTIFACT_TYPE_SCREENSHOT
+
+
+def _visual_allowed_exts(kind: str) -> frozenset[str]:
+    return _VIDEO_EVIDENCE_EXTS if kind == VISUAL_KIND_VIDEO else _IMAGE_ATTACHMENT_EXTS
+
+
+def _visual_extension_reason(kind: str) -> str:
+    return VISUAL_VIDEO_EXT_REASON if kind == VISUAL_KIND_VIDEO else VISUAL_SCREENSHOT_EXT_REASON
+
+
+def _sanitize_visual_evidence_path(kind: str, raw_path: str | None) -> tuple[str | None, str | None]:
+    raw, reason = _sanitize_absolute_local_source_path(
+        raw_path,
+        unsafe_reason=VISUAL_UNSAFE_PATH_REASON,
+        too_long_reason=VISUAL_PATH_TOO_LONG_REASON,
+    )
+    if reason or not raw:
+        return None, reason
+    if Path(raw).suffix.lower() not in _visual_allowed_exts(kind):
+        return None, _visual_extension_reason(kind)
+    return raw, None
+
+
+def _sanitize_visual_evidence_url(kind: str, raw_url: str | None) -> tuple[str | None, str | None]:
+    raw, reason = _sanitize_http_source_url(
+        raw_url,
+        unsafe_reason=VISUAL_UNSAFE_URL_REASON,
+        too_long_reason=VISUAL_URL_TOO_LONG_REASON,
+    )
+    if reason or not raw:
+        return None, reason
+    parsed = urlparse(raw)
+    ext = Path(parsed.path).suffix.lower()
+    if ext and ext not in _visual_allowed_exts(kind):
+        return None, _visual_extension_reason(kind)
+    return raw, None
+
+
+def _visual_skip_reason(kind: str, path_reason: str | None, url_reason: str | None) -> str:
+    if path_reason:
+        return path_reason
+    if url_reason:
+        return url_reason
+    return VISUAL_VIDEO_UNAVAILABLE_REASON if kind == VISUAL_KIND_VIDEO else VISUAL_SCREENSHOT_UNAVAILABLE_REASON
 
 
 def _safe_rel_path(path: str | None) -> str | None:
@@ -506,9 +703,34 @@ def _has_broad_desktop_plan_override(prompt_lower: str) -> bool:
     return _has_any_token(prompt_lower, DESKTOP_AUTOPILOT_PLAN_OVERRIDE_TOKENS)
 
 
+def _is_autopilot_cockpit_request(prompt: str) -> bool:
+    prompt_lower = (prompt or "").lower()
+    mentions_autopilot = _has_any_token(prompt_lower, DESKTOP_AUTOPILOT_PROMPT_TOKENS)
+    mentions_composer = _has_any_token(prompt_lower, DESKTOP_AUTOPILOT_COMPOSER_TOKENS)
+    mentions_attachment = _has_any_token(prompt_lower, DESKTOP_AUTOPILOT_ATTACHMENT_TOKENS)
+    return mentions_autopilot and mentions_composer and (
+        mentions_attachment
+        or "enter key" in prompt_lower
+        or "send button" in prompt_lower
+        or "message box" in prompt_lower
+        or "prompt box" in prompt_lower
+    )
+
+
+def _autopilot_cockpit_reason(prompt: str) -> str:
+    prompt_lower = (prompt or "").lower()
+    if _has_any_token(prompt_lower, DESKTOP_AUTOPILOT_ATTACHMENT_TOKENS):
+        return "The request asks for Autopilot prompt attachments; those composer controls live in the desktop cockpit screen."
+    if "enter key" in prompt_lower or "send button" in prompt_lower or "message box" in prompt_lower:
+        return "The request asks for Autopilot chat input behavior; the composer and send controls live in the desktop cockpit screen."
+    return "The request targets the Autopilot chat cockpit, which is implemented by the desktop brain screen."
+
+
 def _is_broad_desktop_enhancement_request(prompt: str) -> bool:
     prompt_lower = (prompt or "").lower()
     if not _is_vague_small_request(prompt):
+        return False
+    if _is_autopilot_cockpit_request(prompt):
         return False
     if _has_broad_desktop_plan_override(prompt_lower):
         return True
@@ -577,6 +799,7 @@ def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
         "merge_status": row.merge_status,
         "merge_message": row.merge_message,
         "plan": _operator_safe_plan_payload(plan),
+        "architect_review": {},
         "agents": _json_load(row.agents_json, []),
         "files": _json_load(row.files_json, []),
         "commands": _json_load(row.commands_json, []),
@@ -620,6 +843,25 @@ def _artifact_payload(row: ProjectAutonomyArtifact) -> dict[str, Any]:
     }
 
 
+def _architect_review_payload(row: ProjectAutonomyArchitectReview | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    return {
+        "id": row.id,
+        "run_id": row.run_id,
+        "attempt_index": row.attempt_index,
+        "status": row.status,
+        "score": row.score,
+        "confidence": row.confidence,
+        "dimensions": _json_load(row.dimensions_json, {}),
+        "alternatives": _json_load(row.alternatives_json, []),
+        "critique": _json_load(row.critique_json, {}),
+        "selected_files": _json_load(row.selected_files_json, []),
+        "blocking_reason": row.blocking_reason,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
 def _message_payload(row: ProjectAutonomyMessage) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -634,6 +876,7 @@ def _message_payload(row: ProjectAutonomyMessage) -> dict[str, Any]:
 
 def run_payload(db: Session, row: ProjectAutonomyRun, *, include_events: bool = False) -> dict[str, Any]:
     payload = _run_payload(row)
+    payload["architect_review"] = _architect_review_payload(_latest_architect_review(db, row.run_id))
     if include_events:
         payload["messages"] = [
             _message_payload(message)
@@ -697,6 +940,15 @@ def get_run(
     if row is None:
         return None
     return run_payload(db, row, include_events=include_events)
+
+
+def _latest_architect_review(db: Session, run_id: str) -> ProjectAutonomyArchitectReview | None:
+    return (
+        db.query(ProjectAutonomyArchitectReview)
+        .filter(ProjectAutonomyArchitectReview.run_id == run_id)
+        .order_by(ProjectAutonomyArchitectReview.id.desc())
+        .first()
+    )
 
 
 def recover_orphaned_runs(db: Session, *, user_id: int | None = None) -> int:
@@ -868,17 +1120,19 @@ def create_run(
     )
     if clean_attachments:
         _record_attachment_artifacts(db, row, clean_attachments, source="initial_prompt")
+    prompt_metadata: dict[str, Any] = {
+        "repo_id": int(repo.id),
+        "repo_name": repo.name,
+    }
+    if clean_attachments:
+        prompt_metadata["attachments"] = clean_attachments
     _record_message(
         db,
         row,
         "user",
         clean_prompt,
         message_type="prompt",
-        metadata={
-            "repo_id": int(repo.id),
-            "repo_name": repo.name,
-            "attachments": clean_attachments,
-        },
+        metadata=prompt_metadata,
         commit=False,
     )
     if not start_planning:
@@ -976,7 +1230,7 @@ def append_user_message(
         row,
         "user",
         display_content,
-        metadata={"attachments": clean_attachments},
+        metadata={"attachments": clean_attachments} if clean_attachments else None,
         commit=False,
     )
     if clean_attachments:
@@ -987,16 +1241,27 @@ def append_user_message(
         else:
             reply = _chat_reply(db, row, display_content)
             _record_message(db, row, "assistant", reply, message_type="chat", commit=False)
-    if row.plan_status in {PLAN_STATUS_AWAITING_APPROVAL, PLAN_STATUS_REVISING} and row.status == RUN_STATUS_AWAITING_APPROVAL:
+    if (
+        row.plan_status in {
+            PLAN_STATUS_AWAITING_APPROVAL,
+            PLAN_STATUS_AWAITING_CLARIFICATION,
+            PLAN_STATUS_REVISING,
+        }
+        and row.status in {RUN_STATUS_AWAITING_APPROVAL, RUN_STATUS_AWAITING_CLARIFICATION}
+    ):
         row.status = RUN_STATUS_QUEUED
         row.plan_status = PLAN_STATUS_REVISING
         row.current_stage = "plan"
         row.prompt = _conversation_prompt(db, row)
+        row.plan_json = "{}"
+        row.files_json = "[]"
+        row.agents_json = "[]"
+        _record_architect_review_invalidated_by_feedback(db, row, display_content)
         _record_message(
             db,
             row,
             "assistant",
-            "I'll revise the plan with that feedback before making any code changes.",
+            "I'll revise the plan with that feedback before making any code changes. The previous approval is no longer valid.",
             message_type="status",
             commit=False,
         )
@@ -1009,9 +1274,14 @@ def approve_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dic
     row = _get_run_row(db, run_id, user_id=user_id)
     if row is None:
         return None
+    if row.status != RUN_STATUS_AWAITING_APPROVAL or row.plan_status != PLAN_STATUS_AWAITING_APPROVAL:
+        raise ValueError("This run is not waiting on an approval-ready architect plan.")
     plan = _json_load(row.plan_json, {})
     if not plan:
         raise ValueError("This run does not have a plan to approve yet.")
+    review = _latest_architect_review(db, row.run_id)
+    if not _architect_review_passed(review):
+        raise ValueError("Architect quality gate has not passed. Revise the plan before approval.")
     row.plan_status = PLAN_STATUS_APPROVED
     row.status = RUN_STATUS_QUEUED
     row.current_stage = STAGE_IMPLEMENT
@@ -1035,6 +1305,7 @@ def start_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dict[
     idle_or_terminal_restartable = {
         RUN_STATUS_CHATTING,
         RUN_STATUS_AWAITING_APPROVAL,
+        RUN_STATUS_AWAITING_CLARIFICATION,
         RUN_STATUS_BLOCKED,
         RUN_STATUS_CANCELLED,
     }
@@ -1087,25 +1358,40 @@ def record_visual_validation(
     row = _get_run_row(db, run_id, user_id=user_id)
     if row is None:
         return None
-    clean_kind = (kind or "screenshot").strip().lower()
-    if clean_kind not in {"screenshot", "video"}:
-        clean_kind = "screenshot"
-    clean_path = (path or "").strip()
-    clean_url = (url or "").strip()
+    clean_kind = _clean_visual_kind(kind)
+    clean_path, path_reject_reason = _sanitize_visual_evidence_path(clean_kind, path)
+    clean_url, url_reject_reason = _sanitize_visual_evidence_url(clean_kind, url)
     clean_note = (note or "").strip()
-    artifact_type = "visual_video" if clean_kind == "video" else "visual_screenshot"
+    artifact_type = _visual_artifact_type(clean_kind)
+    evidence_available = bool(clean_path or clean_url)
+    skipped = not evidence_available
+    source = (
+        VISUAL_EVIDENCE_SOURCE_DESKTOP
+        if clean_path
+        else VISUAL_EVIDENCE_SOURCE_URL
+        if clean_url
+        else VISUAL_EVIDENCE_SOURCE_NONE
+    )
     payload = {
         "kind": clean_kind,
-        "source": "desktop" if clean_path else "backend",
+        "source": source,
         "path": clean_path or None,
         "url": clean_url or None,
         "note": clean_note or None,
-        "skipped": clean_kind == "video" and not clean_path,
-        "skip_reason": "Desktop video capture is not available yet for this run." if clean_kind == "video" and not clean_path else None,
+        "skipped": skipped,
+        "skip_reason": _visual_skip_reason(clean_kind, path_reject_reason, url_reject_reason) if skipped else None,
+        "path_rejected": bool(path and path_reject_reason),
+        "path_reject_reason": path_reject_reason,
+        "url_rejected": bool(url and url_reject_reason),
+        "url_reject_reason": url_reject_reason,
     }
     _add_artifact(db, row.run_id, artifact_type, f"{clean_kind}_evidence", content_json=payload, commit=False)
-    if clean_kind == "screenshot":
-        review = "UI evidence attached. The UI and UX agents can use this screenshot when reviewing the run."
+    if clean_kind == VISUAL_KIND_SCREENSHOT:
+        review = (
+            "UI evidence attached. The UI and UX agents can use this screenshot when reviewing the run."
+            if evidence_available
+            else payload["skip_reason"] or VISUAL_SCREENSHOT_UNAVAILABLE_REASON
+        )
         _add_artifact(
             db,
             row.run_id,
@@ -1117,8 +1403,8 @@ def record_visual_validation(
     else:
         review = (
             "Video evidence attached for UI/UX validation."
-            if clean_path
-            else "Video validation was requested, but no recording was available. This does not block code validation."
+            if evidence_available
+            else f"{payload['skip_reason']} This does not block code validation."
         )
         _add_artifact(
             db,
@@ -1244,12 +1530,378 @@ def _record_message(
     return row
 
 
-def _plan_message(plan: dict[str, Any], files: list[dict[str, Any]], agents: list[dict[str, Any]]) -> str:
+def _path_tokens(path: str) -> set[str]:
+    return {
+        token
+        for token in re.split(r"[^a-z0-9]+", path.lower())
+        if len(token) >= 3
+    }
+
+
+def _prompt_tokens(prompt: str) -> set[str]:
+    stop = {
+        "and",
+        "for",
+        "the",
+        "this",
+        "that",
+        "with",
+        "from",
+        "your",
+        "you",
+        "are",
+        "into",
+        "then",
+        "please",
+        "user",
+        "message",
+    }
+    return {
+        token
+        for token in re.split(r"[^a-z0-9]+", prompt.lower())
+        if len(token) >= 3 and token not in stop
+    }
+
+
+def _dimension(score: int, reason: str) -> dict[str, Any]:
+    return {"score": max(0, min(100, int(score))), "reason": reason}
+
+
+def _review_confidence(score: int, blockers: list[str]) -> str:
+    if blockers or score < ARCHITECT_REVIEW_PASSING_SCORE:
+        return "low" if score < 70 else "medium"
+    if score >= 95:
+        return "very_high"
+    return "high"
+
+
+def _plan_file_description(file: dict[str, Any]) -> str:
+    return str(file.get("description") or "").strip()
+
+
+def _plan_mentions_generic_file_pick(plan: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        [
+            str(plan.get("analysis") or ""),
+            str(plan.get("notes") or ""),
+            " ".join(_plan_file_description(item) for item in plan.get("files") or [] if isinstance(item, dict)),
+        ]
+    ).lower()
+    generic_markers = (
+        "small support file",
+        "because the request was vague",
+        "selected a very large file",
+        "directly responds to the operator request",
+    )
+    return any(marker in haystack for marker in generic_markers)
+
+
+def _selected_file_rationale(prompt: str, rel: str, description: str) -> str:
+    lower = prompt.lower()
+    if _is_autopilot_cockpit_request(prompt) and rel == DESKTOP_AUTOPILOT_COCKPIT_FILE:
+        return _autopilot_cockpit_reason(prompt)
+    if rel == DESKTOP_AUTOPILOT_PRESENTER_FILE:
+        return "Autopilot plan presentation is shown by the desktop presenter."
+    if rel == DESKTOP_AUTOPILOT_COCKPIT_FILE:
+        return "The desktop Autopilot cockpit layout and controls live in this screen."
+    if rel == DESKTOP_API_CLIENT_FILE:
+        return "The request mentions API, backend, network, or response handling."
+    if rel == DESKTOP_NETWORK_ERROR_FILE:
+        return "The request is about desktop-visible network or backend error copy."
+    if any(token in lower for token in _path_tokens(rel)):
+        return "The file path shares concrete terms with the operator request."
+    if description:
+        return "The plan description ties this file to the requested behavior."
+    return "No strong rationale was found for this file."
+
+
+def _expected_plan_files_for_prompt(prompt: str) -> set[str]:
+    prompt_lower = (prompt or "").lower()
+    if _is_autopilot_cockpit_request(prompt):
+        return {DESKTOP_AUTOPILOT_COCKPIT_FILE}
+    if _has_any_token(prompt_lower, BROAD_DESKTOP_DETAIL_TOKENS) and not _has_broad_desktop_plan_override(prompt_lower):
+        return {DESKTOP_API_CLIENT_FILE, DESKTOP_NETWORK_ERROR_FILE}
+    if _is_broad_desktop_enhancement_request(prompt):
+        return set(DESKTOP_AUTOPILOT_PLAN_FILES)
+    return set()
+
+
+def _architect_alternatives(context: dict[str, Any], repo_path: Path | None, prompt: str, selected: list[str]) -> list[dict[str, Any]]:
+    selected_set = set(selected)
+    alternatives: list[dict[str, Any]] = []
+    for rel in _rank_fallback_files(_plan_candidate_files(context, repo_path, prompt), repo_path, prompt):
+        if rel in selected_set:
+            continue
+        alternatives.append(
+            {
+                "path": rel,
+                "reason": _selected_file_rationale(prompt, rel, ""),
+            }
+        )
+        if len(alternatives) >= 4:
+            break
+    return alternatives
+
+
+def _review_architect_plan(
+    *,
+    plan: dict[str, Any],
+    files: list[dict[str, Any]],
+    context: dict[str, Any],
+    repo_path: Path | None,
+    prompt: str,
+    attempt_index: int,
+) -> dict[str, Any]:
+    selected = [str(item.get("path") or "") for item in files if item.get("path")]
+    descriptions = [_plan_file_description(item) for item in files]
+    prompt_lower = prompt.lower()
+    blockers: list[str] = []
+
+    if not selected:
+        blockers.append("no_concrete_file")
+    if len(selected) > _MAX_FILES_PER_EDIT:
+        blockers.append("broad_rewrite_without_justification")
+
+    missing = [path for path in selected if not _candidate_exists(repo_path, path)]
+    if missing:
+        blockers.append("file_missing")
+
+    unsafe_markers = ("drop table", "delete database", "rm -rf", "wipe", "destroy", "real data", "production migration")
+    if any(marker in prompt_lower for marker in unsafe_markers):
+        blockers.append("unsafe_or_destructive_action")
+
+    broad_desktop = _is_broad_desktop_enhancement_request(prompt)
+    detailed_network = _has_any_token(prompt_lower, BROAD_DESKTOP_DETAIL_TOKENS) and not _has_broad_desktop_plan_override(prompt_lower)
+    if broad_desktop and any(path in {DESKTOP_API_CLIENT_FILE, DESKTOP_NETWORK_ERROR_FILE} for path in selected):
+        blockers.append("mismatched_domain")
+    if detailed_network and selected and not any(path in {DESKTOP_API_CLIENT_FILE, DESKTOP_NETWORK_ERROR_FILE} for path in selected):
+        blockers.append("mismatched_domain")
+    if _plan_mentions_generic_file_pick(plan):
+        blockers.append("vague_file_rationale")
+
+    expected_files = _expected_plan_files_for_prompt(prompt)
+    selected_set = set(selected)
+    matches_expected = bool(expected_files & selected_set)
+    if expected_files and selected and not matches_expected and "mismatched_domain" not in blockers:
+        blockers.append("mismatched_domain")
+
+    selected_overlap = 0
+    request_terms = _prompt_tokens(prompt)
+    for path in selected:
+        selected_overlap += len(request_terms & _path_tokens(path))
+    has_known_good_desktop = broad_desktop and any(path in DESKTOP_AUTOPILOT_PLAN_FILES for path in selected)
+    has_known_good_network = detailed_network and any(path in {DESKTOP_API_CLIENT_FILE, DESKTOP_NETWORK_ERROR_FILE} for path in selected)
+
+    intent_fit = 96 if matches_expected else 95 if has_known_good_desktop or has_known_good_network else 74
+    if selected_overlap:
+        intent_fit = max(intent_fit, 88)
+    if not selected:
+        intent_fit = 0
+    if "mismatched_domain" in blockers:
+        intent_fit = 35
+
+    file_relevance = 97 if matches_expected else 96 if has_known_good_desktop or has_known_good_network else 76
+    if selected_overlap:
+        file_relevance = max(file_relevance, 86)
+    if missing:
+        file_relevance = 25
+
+    scope_control = 96 if 1 <= len(selected) <= 2 else 45
+    analysis_text = str(plan.get("analysis") or "").strip()
+    specificity = 92 if all(len(desc) >= 24 for desc in descriptions) and descriptions else 78
+    if specificity < 85 and len(analysis_text) >= 20 and selected:
+        specificity = 86
+    if "vague_file_rationale" in blockers:
+        specificity = min(specificity, 60)
+    validation_readiness = 90 if selected and all(Path(path).suffix in {".py", ".dart", ".js", ".ts", ".tsx", ".jsx", ".html", ".css"} for path in selected) else 72
+    risk_safety = 30 if "unsafe_or_destructive_action" in blockers else 92
+    user_value = 92 if descriptions and not _plan_mentions_generic_file_pick(plan) else 72
+    if user_value < 85 and len(analysis_text) >= 20 and selected:
+        user_value = 86
+    if has_known_good_desktop or has_known_good_network:
+        user_value = max(user_value, 90)
+
+    dimensions = {
+        "intent_fit": _dimension(intent_fit, "Does the selected work match the operator intent?"),
+        "file_relevance": _dimension(file_relevance, "Are selected files defensible for this request?"),
+        "scope_control": _dimension(scope_control, "Is the plan narrow enough for a safe local run?"),
+        "implementation_specificity": _dimension(specificity, "Does the plan say what will change?"),
+        "validation_readiness": _dimension(validation_readiness, "Can the repo run meaningful validation after edits?"),
+        "risk_safety": _dimension(risk_safety, "Does the plan avoid unsafe or destructive actions?"),
+        "user_value": _dimension(user_value, "Will the plan visibly improve the requested workflow?"),
+    }
+    score = min(item["score"] for item in dimensions.values())
+    if score < ARCHITECT_REVIEW_PASSING_SCORE and "low_score" not in blockers:
+        blockers.append("low_score")
+    status = ARCHITECT_REVIEW_STATUS_PASSED if not blockers and score >= ARCHITECT_REVIEW_PASSING_SCORE else ARCHITECT_REVIEW_STATUS_FAILED
+    selected_files = [
+        {
+            "path": path,
+            "rationale": _selected_file_rationale(prompt, path, descriptions[index] if index < len(descriptions) else ""),
+        }
+        for index, path in enumerate(selected)
+    ]
+    alternatives = _architect_alternatives(context, repo_path, prompt, selected)
+    critique = {
+        "blockers": blockers,
+        "summary": (
+            "Architect review passed."
+            if status == ARCHITECT_REVIEW_STATUS_PASSED
+            else "Plan needs revision before implementation."
+        ),
+        "next_action": (
+            "approval_ready"
+            if status == ARCHITECT_REVIEW_STATUS_PASSED
+            else "revise_plan"
+        ),
+    }
+    blocking_reason = None
+    if status != ARCHITECT_REVIEW_STATUS_PASSED:
+        blocking_reason = "Plan quality gate failed: " + ", ".join(blockers)
+    return {
+        "attempt_index": attempt_index,
+        "status": status,
+        "score": score,
+        "confidence": _review_confidence(score, blockers),
+        "dimensions": dimensions,
+        "alternatives": alternatives,
+        "critique": critique,
+        "selected_files": selected_files,
+        "blocking_reason": blocking_reason,
+    }
+
+
+def _record_architect_review(
+    db: Session,
+    run: ProjectAutonomyRun,
+    review: dict[str, Any],
+) -> ProjectAutonomyArchitectReview:
+    row = ProjectAutonomyArchitectReview(
+        run_id=run.run_id,
+        attempt_index=int(review.get("attempt_index") or 1),
+        status=str(review.get("status") or ARCHITECT_REVIEW_STATUS_FAILED),
+        score=int(review.get("score") or 0),
+        confidence=str(review.get("confidence") or "low"),
+        dimensions_json=_json_text(review.get("dimensions") or {}),
+        alternatives_json=_json_text(review.get("alternatives") or []),
+        critique_json=_json_text(review.get("critique") or {}),
+        selected_files_json=_json_text(review.get("selected_files") or []),
+        blocking_reason=review.get("blocking_reason"),
+    )
+    db.add(row)
+    db.flush()
+    payload = _architect_review_payload(row)
+    _add_artifact(
+        db,
+        run.run_id,
+        "architect_review",
+        f"architect_review_attempt_{row.attempt_index}",
+        content_json=payload,
+        commit=False,
+    )
+    return row
+
+
+def _architect_review_passed(review: ProjectAutonomyArchitectReview | dict[str, Any] | None) -> bool:
+    if review is None:
+        return False
+    if isinstance(review, ProjectAutonomyArchitectReview):
+        return review.status == ARCHITECT_REVIEW_STATUS_PASSED and int(review.score or 0) >= ARCHITECT_REVIEW_PASSING_SCORE
+    return (
+        str(review.get("status") or "") == ARCHITECT_REVIEW_STATUS_PASSED
+        and int(review.get("score") or 0) >= ARCHITECT_REVIEW_PASSING_SCORE
+    )
+
+
+def _record_architect_review_invalidated_by_feedback(
+    db: Session,
+    run: ProjectAutonomyRun,
+    feedback: str,
+) -> None:
+    latest = _latest_architect_review(db, run.run_id)
+    latest_payload = _architect_review_payload(latest)
+    selected_files = latest_payload.get("selected_files") or []
+    _record_architect_review(
+        db,
+        run,
+        {
+            "attempt_index": int(latest_payload.get("attempt_index") or 0) + 1,
+            "status": ARCHITECT_REVIEW_STATUS_NEEDS_REVISION,
+            "score": 0,
+            "confidence": "low",
+            "dimensions": {},
+            "alternatives": latest_payload.get("alternatives") or [],
+            "critique": {
+                "blockers": ["operator_feedback"],
+                "summary": "Operator feedback invalidated the previous plan before implementation.",
+                "next_action": "revise_plan",
+                "feedback_preview": _clip(feedback, 240),
+            },
+            "selected_files": selected_files,
+            "blocking_reason": "Operator feedback changed the requirements; the previous plan must be revised and reviewed again.",
+        },
+    )
+
+
+def _revise_plan_from_review(
+    plan: dict[str, Any],
+    review: dict[str, Any],
+    context: dict[str, Any],
+    repo_path: Path | None,
+    prompt: str,
+) -> dict[str, Any] | None:
+    blockers = set((review.get("critique") or {}).get("blockers") or [])
+    if _is_broad_desktop_enhancement_request(prompt):
+        revised = _broad_desktop_enhancement_plan(repo_path)
+        if revised is not None:
+            return revised
+    if blockers & {"no_concrete_file", "file_missing", "mismatched_domain", "vague_file_rationale", "low_score"}:
+        revised = _fallback_plan_from_context(context, repo_path, prompt, "architect review requested a safer plan")
+        if revised.get("files"):
+            return revised
+    if blockers == {"low_score"}:
+        improved = dict(plan)
+        improved["notes"] = "Revised after architect review; approval remains gated by the next review."
+        return improved
+    return None
+
+
+def _architect_review_summary(review: dict[str, Any]) -> str:
+    status = str(review.get("status") or "")
+    score = int(review.get("score") or 0)
+    confidence = str(review.get("confidence") or "low").replace("_", " ")
+    if status == ARCHITECT_REVIEW_STATUS_PASSED:
+        return f"Architect quality gate passed at {score}/100 confidence {confidence}."
+    reason = str(review.get("blocking_reason") or "Plan quality gate failed.")
+    return f"Architect quality gate did not pass ({score}/100): {reason}"
+
+
+def _clarification_message(review: dict[str, Any]) -> str:
+    reason = str(review.get("blocking_reason") or "the plan is not specific enough yet")
+    return (
+        "I do not have an implementation plan I trust yet. "
+        f"{reason}. Tell me the exact behavior or screen you want changed, and I will draft a stronger plan before touching files."
+    )
+
+
+def _plan_message(
+    plan: dict[str, Any],
+    files: list[dict[str, Any]],
+    agents: list[dict[str, Any]],
+    review: dict[str, Any] | None = None,
+) -> str:
     analysis = _operator_safe_plan_text(plan.get("analysis"))
     notes = _operator_safe_plan_text(plan.get("notes"))
     file_paths = [str(item.get("path") or "") for item in files if item.get("path")]
     agent_names = [str(item.get("name") or "") for item in agents if item.get("name")]
-    parts = ["I drafted a plan and I'm waiting for your approval before changing files."]
+    review_passed = review is None or review.get("status") == ARCHITECT_REVIEW_STATUS_PASSED
+    parts = [
+        (
+            "I drafted a plan and I'm waiting for your approval before changing files."
+            if review_passed
+            else "I drafted a candidate plan, but the architect quality gate did not pass. I won't ask for approval yet."
+        )
+    ]
     if analysis:
         parts.append(analysis)
     descriptions = [
@@ -1263,6 +1915,26 @@ def _plan_message(plan: dict[str, Any], files: list[dict[str, Any]], agents: lis
         parts.append("I expect to work in: " + ", ".join(file_paths[:6]) + ("." if len(file_paths) <= 6 else f", and {len(file_paths) - 6} more."))
     if agent_names:
         parts.append("Lanes: " + ", ".join(agent_names[:6]) + ".")
+    if review:
+        parts.append(_architect_review_summary(review))
+        selected = review.get("selected_files") or []
+        if selected:
+            rationale = [
+                f"{item.get('path')}: {item.get('rationale')}"
+                for item in selected[:3]
+                if item.get("path") and item.get("rationale")
+            ]
+            if rationale:
+                parts.append("Why these files: " + " ".join(rationale))
+        alternatives = review.get("alternatives") or []
+        if alternatives:
+            rejected = [
+                f"{item.get('path')} ({item.get('reason')})"
+                for item in alternatives[:3]
+                if item.get("path")
+            ]
+            if rejected:
+                parts.append("Alternatives considered: " + "; ".join(rejected) + ".")
     if notes and notes != analysis:
         parts.append(notes)
     parts.append("Send feedback to revise the plan, or approve it to let me implement in an isolated worktree.")
@@ -1340,6 +2012,7 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
         timeout_sec=45,
         options={"num_predict": 220, "num_ctx": 2048, "keep_alive": _OLLAMA_KEEP_ALIVE},
     )
+    _note_model_call_result(str(model_info["model"]), result)
     _add_artifact(
         db,
         run.run_id,
@@ -1350,6 +2023,7 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
             "ok": result.ok,
             "latency_ms": result.latency_ms,
             "error": result.error,
+            "skipped_models": model_info.get("skipped_models"),
             "purpose": "brainstorm_chat",
         },
         commit=False,
@@ -1461,32 +2135,80 @@ def _check_cancel(db: Session, run: ProjectAutonomyRun) -> None:
         raise AutonomyCancelled("Run cancelled by operator.")
 
 
+def _model_cooldown_expired(info: dict[str, Any], now: datetime) -> bool:
+    until = info.get("until")
+    return not isinstance(until, datetime) or until <= now
+
+
+def _active_model_cooldowns(now: datetime | None = None) -> dict[str, dict[str, Any]]:
+    now = now or _utcnow()
+    expired = [model for model, info in _MODEL_COOLDOWNS.items() if _model_cooldown_expired(info, now)]
+    for model in expired:
+        _MODEL_COOLDOWNS.pop(model, None)
+    return dict(_MODEL_COOLDOWNS)
+
+
+def _model_call_should_cooldown(error: str | None) -> bool:
+    lower = (error or "").lower()
+    return any(marker in lower for marker in _MODEL_COOLDOWN_ERROR_MARKERS)
+
+
+def _mark_model_cooldown(model: str | None, error: str | None) -> None:
+    clean = (model or "").strip()
+    if not clean or not _model_call_should_cooldown(error):
+        return
+    _MODEL_COOLDOWNS[clean] = {
+        "until": _utcnow() + timedelta(seconds=max(1, _MODEL_COOLDOWN_SEC)),
+        "reason": _friendly_model_issue(error),
+    }
+
+
+def _clear_model_cooldown(model: str | None) -> None:
+    clean = (model or "").strip()
+    if clean:
+        _MODEL_COOLDOWNS.pop(clean, None)
+
+
+def _note_model_call_result(model: str | None, result: Any) -> None:
+    if bool(getattr(result, "ok", False)):
+        _clear_model_cooldown(model)
+    else:
+        _mark_model_cooldown(model, getattr(result, "error", None))
+
+
 def select_local_model() -> dict[str, Any]:
     models = ollama_client.list_models()
+    skipped = _active_model_cooldowns()
+    cooling = set(skipped.keys())
     for preferred in _MODEL_PREFERENCE:
         exact = next((model for model in models if model == preferred), None)
-        if exact:
+        if exact and exact not in cooling:
             return {
                 "model": exact,
                 "available": True,
                 "installed_models": models,
+                "skipped_models": skipped,
                 "recommendation": None,
             }
         if ":" in preferred:
             continue
         prefix = f"{preferred}:"
         for model in models:
+            if model in cooling:
+                continue
             if model == preferred or model.startswith(prefix):
                 return {
                     "model": model,
                     "available": True,
                     "installed_models": models,
+                    "skipped_models": skipped,
                     "recommendation": None,
                 }
     return {
         "model": None,
         "available": False,
         "installed_models": models,
+        "skipped_models": skipped,
         "recommendation": "Pull a local coder model, for example: ollama pull qwen2.5-coder:7b",
     }
 
@@ -1503,6 +2225,8 @@ def _candidate_exists(repo_path: Path | None, rel_path: str) -> bool:
 def _plan_candidate_files(context: dict[str, Any], repo_path: Path | None, prompt: str) -> list[str]:
     prompt_lower = (prompt or "").lower()
     seeded: list[str] = []
+    if _is_autopilot_cockpit_request(prompt):
+        seeded.extend(DESKTOP_AUTOPILOT_COCKPIT_INTENT_FILES)
     if any(token in prompt_lower for token in ("desktop", "flutter", "native", "ui", "screen", "autopilot")):
         seeded.extend(DESKTOP_SEEDED_FILES)
     if any(token in prompt_lower for token in ("project brain", "project autopilot", "autonomy", "autonomous")):
@@ -1602,6 +2326,11 @@ def _rank_fallback_files(files: list[str], repo_path: Path | None, prompt: str) 
             and not _has_broad_desktop_plan_override(prompt_lower)
         )
         priority_map = DESKTOP_NETWORK_FILE_PRIORITY if should_prefer_network else DESKTOP_FILE_PRIORITY
+        if _is_autopilot_cockpit_request(prompt) and path in DESKTOP_AUTOPILOT_COCKPIT_INTENT_FILES:
+            priority_map = {
+                DESKTOP_AUTOPILOT_COCKPIT_FILE: 0,
+                DESKTOP_AUTOPILOT_PRESENTER_FILE: 2,
+            }
         direct = priority_map.get(path, 10)
         return (direct, size, path)
 
@@ -1681,6 +2410,23 @@ def _narrow_plan_for_local_model(
     return narrowed
 
 
+def _fallback_file_description(prompt: str, rel: str) -> str:
+    if rel == DESKTOP_AUTOPILOT_COCKPIT_FILE and _is_autopilot_cockpit_request(prompt):
+        return _autopilot_cockpit_reason(prompt)
+    if rel == DESKTOP_AUTOPILOT_PRESENTER_FILE:
+        return "Improve human-readable Autopilot plan presentation and approval guidance in the desktop presenter."
+    if rel == DESKTOP_AUTOPILOT_COCKPIT_FILE:
+        return "Update the desktop Autopilot cockpit controls and chat layout for the requested workflow."
+    if rel == DESKTOP_API_CLIENT_FILE:
+        return "Improve desktop API response handling for the requested backend or network workflow."
+    if rel == DESKTOP_NETWORK_ERROR_FILE:
+        return "Improve desktop-visible network error copy for the requested failure mode."
+    shared_terms = sorted(_prompt_tokens(prompt) & _path_tokens(rel))
+    if shared_terms:
+        return "Update this file because its path matches request terms: " + ", ".join(shared_terms[:4]) + "."
+    return "Inspect this existing candidate and make only a tightly scoped change if it owns the requested behavior."
+
+
 def _fallback_plan_from_context(
     context: dict[str, Any],
     repo_path: Path | None,
@@ -1717,10 +2463,7 @@ def _fallback_plan_from_context(
             {
                 "path": rel,
                 "action": "modify",
-                "description": (
-                    "Make a small, low-risk implementation that directly responds to the operator request: "
-                    f"{_clip(prompt, 320)}. Preserve existing behavior and local project conventions."
-                ),
+                "description": _fallback_file_description(prompt, rel),
             }
             for rel in files
         ],
@@ -1728,13 +2471,17 @@ def _fallback_plan_from_context(
     }
 
 
-def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> dict[str, Any]:
-    model_info = select_local_model()
-    if not model_info.get("model"):
-        raise AutonomyBlocked(str(model_info.get("recommendation") or "No local Ollama model is available."))
-    context = _gather_context(db, int(repo.id), run.prompt, user_id=run.user_id)
+def build_local_plan(
+    db: Session,
+    run: ProjectAutonomyRun,
+    repo: CodeRepo,
+    *,
+    context: dict[str, Any] | None = None,
+    repo_path: Path | None = None,
+) -> dict[str, Any]:
+    context = context if context is not None else _gather_context(db, int(repo.id), run.prompt, user_id=run.user_id)
     context["operator_request"] = run.prompt
-    repo_path = resolve_repo_runtime_path(repo)
+    repo_path = repo_path if repo_path is not None else resolve_repo_runtime_path(repo)
     if _is_vague_small_request(run.prompt):
         fallback = _fallback_plan_from_context(
             context,
@@ -1747,6 +2494,24 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
         if fallback.get("files"):
             _add_artifact(db, run.run_id, "plan", "heuristic_plan_fast_path", content_json=fallback)
             return fallback
+    model_info = select_local_model()
+    if not model_info.get("model"):
+        fallback = _fallback_plan_from_context(
+            context,
+            repo_path,
+            run.prompt,
+            str(model_info.get("recommendation") or "No local Ollama model is available."),
+        )
+        _add_artifact(
+            db,
+            run.run_id,
+            "plan",
+            "heuristic_plan_fallback",
+            content_json={**fallback, "model_selection": model_info},
+        )
+        if fallback.get("files"):
+            return fallback
+        raise AutonomyBlocked(str(model_info.get("recommendation") or "No local Ollama model is available."))
     prompt = _build_autonomy_plan_prompt(context, repo_path)
     messages = [
         {
@@ -1769,6 +2534,7 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
             "keep_alive": _OLLAMA_KEEP_ALIVE,
         },
     )
+    _note_model_call_result(str(model_info["model"]), result)
     _add_artifact(
         db,
         run.run_id,
@@ -1780,6 +2546,7 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
             "latency_ms": result.latency_ms,
             "error": result.error,
             "installed_models": model_info.get("installed_models"),
+            "skipped_models": model_info.get("skipped_models"),
             "prompt_chars": len(prompt),
             "timeout_sec": _PLAN_TIMEOUT_SEC,
             "num_predict": _PLAN_NUM_PREDICT,
@@ -2071,6 +2838,7 @@ def generate_diffs_from_plan(
                 "keep_alive": _OLLAMA_KEEP_ALIVE,
             },
         )
+        _note_model_call_result(str(model_info["model"]), result)
         _add_artifact(
             db,
             run.run_id,
@@ -2082,6 +2850,7 @@ def generate_diffs_from_plan(
                 "ok": result.ok,
                 "latency_ms": result.latency_ms,
                 "error": result.error,
+                "skipped_models": model_info.get("skipped_models"),
                 "prompt_chars": len(prompt),
                 "timeout_sec": _EDIT_TIMEOUT_SEC,
                 "num_predict": _EDIT_NUM_PREDICT,
@@ -2571,6 +3340,80 @@ def _record_learning(
     return payload
 
 
+def _build_reviewed_plan(
+    db: Session,
+    run: ProjectAutonomyRun,
+    repo: CodeRepo,
+    repo_path: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    try:
+        context = _gather_context(db, int(repo.id), run.prompt, user_id=run.user_id)
+    except Exception as exc:
+        context = {"repos": [], "insights": [], "hotspots": [], "relevant_files": []}
+        _add_artifact(
+            db,
+            run.run_id,
+            "architect_review",
+            "repo_context_unavailable",
+            content_json={"error": _clip(str(exc), ERROR_SNIPPET_LIMIT)},
+            commit=False,
+        )
+    context["operator_request"] = run.prompt
+    candidate: dict[str, Any] | None = None
+    latest_plan: dict[str, Any] = {}
+    latest_files: list[dict[str, Any]] = []
+    latest_review: dict[str, Any] = {}
+
+    for attempt in range(1, ARCHITECT_REVIEW_MAX_ATTEMPTS + 1):
+        _check_cancel(db, run)
+        plan = candidate or build_local_plan(db, run, repo, context=context, repo_path=repo_path)
+        plan.setdefault("analysis", "")
+        plan.setdefault("files", [])
+        plan.setdefault("notes", "")
+        files = _plan_files(plan)
+        review = _review_architect_plan(
+            plan=plan,
+            files=files,
+            context=context,
+            repo_path=repo_path,
+            prompt=run.prompt,
+            attempt_index=attempt,
+        )
+        _record_architect_review(db, run, review)
+        _record_step(
+            db,
+            run,
+            STAGE_ARCHITECT_REVIEW,
+            "Architect reviewed plan quality",
+            status=(
+                "completed"
+                if review.get("status") == ARCHITECT_REVIEW_STATUS_PASSED
+                else "blocked"
+            ),
+            detail={
+                "attempt_index": attempt,
+                "score": review.get("score"),
+                "status": review.get("status"),
+                "blocking_reason": review.get("blocking_reason"),
+            },
+            commit=False,
+        )
+        db.commit()
+        latest_plan = plan
+        latest_files = files
+        latest_review = review
+        if review.get("status") == ARCHITECT_REVIEW_STATUS_PASSED:
+            return latest_plan, latest_files, latest_review
+        candidate = _revise_plan_from_review(plan, review, context, repo_path, run.prompt)
+        if candidate is None:
+            candidate = plan
+
+    latest_review["status"] = ARCHITECT_REVIEW_STATUS_NEEDS_CLARIFICATION
+    latest_review["blocking_reason"] = latest_review.get("blocking_reason") or "Plan quality gate failed after local revisions."
+    _record_architect_review(db, run, latest_review)
+    return latest_plan, latest_files, latest_review
+
+
 def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, repo_path: Path) -> dict[str, Any]:
     run.status = RUN_STATUS_RUNNING
     run.plan_status = PLAN_STATUS_DRAFTING if run.plan_status != PLAN_STATUS_REVISING else PLAN_STATUS_REVISING
@@ -2597,10 +3440,7 @@ def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, re
     _record_step(db, run, STAGE_REPO_SCAN, "Scanning repository context", detail={"repo": repo.name, "path": str(repo_path)})
     _check_cancel(db, run)
     _record_step(db, run, STAGE_PLAN, "Architect is drafting an implementation plan")
-    plan = build_local_plan(db, run, repo)
-    files = _plan_files(plan)
-    if not files:
-        raise AutonomyBlocked("The plan did not identify concrete files to change.")
+    plan, files, review = _build_reviewed_plan(db, run, repo, repo_path)
     run.plan_json = _json_text(plan)
     run.files_json = _json_text([item["path"] for item in files])
     _add_artifact(db, run.run_id, "plan", "architect_plan", content_json=plan, commit=False)
@@ -2612,11 +3452,30 @@ def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, re
         db,
         run,
         "assistant",
-        _plan_message(plan, files, agents),
+        _plan_message(plan, files, agents, review),
         message_type="plan",
-        metadata={"plan": plan, "files": files, "agents": agents},
+        metadata={"plan": plan, "files": files, "agents": agents, "architect_review": review},
         commit=False,
     )
+    if review.get("status") != ARCHITECT_REVIEW_STATUS_PASSED:
+        run.status = RUN_STATUS_AWAITING_CLARIFICATION
+        run.current_stage = STAGE_ARCHITECT_REVIEW
+        run.plan_status = PLAN_STATUS_AWAITING_CLARIFICATION
+        run.updated_at = _utcnow()
+        _record_message(
+            db,
+            run,
+            "assistant",
+            _clarification_message(review),
+            message_type="clarification",
+            metadata={"architect_review": review},
+            commit=False,
+        )
+        db.commit()
+        db.refresh(run)
+        return run_payload(db, run, include_events=True)
+    if not files:
+        raise AutonomyBlocked("The plan did not identify concrete files to change.")
     if run.execution_mode == EXECUTION_MODE_FULL_AUTOPILOT:
         run.plan_status = PLAN_STATUS_APPROVED
         db.commit()

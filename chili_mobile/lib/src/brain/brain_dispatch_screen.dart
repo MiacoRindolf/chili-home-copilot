@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -75,10 +76,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotImagePreviewSize = 82.0;
   static const _autopilotBubbleMaxWidth = 720.0;
   static const _autopilotMessagePreviewLimit = 1400;
+  static const _autopilotChatFollowThreshold = 96.0;
   static const _autopilotPastedImagePrefix = 'chili_autopilot_paste';
   static const _autopilotExecutionModePlanApproval =
       ChiliApiClient.projectAutonomyPlanApprovalMode;
   static const _autopilotStatusAwaitingApproval = 'awaiting_approval';
+  static const _autopilotStatusAwaitingClarification =
+      'awaiting_clarification';
   static const _autopilotStatusChatting = 'chatting';
   static const _autopilotAttachmentKindImage = 'image';
   static const _autopilotArtifactPromptImage = 'prompt_image';
@@ -96,6 +100,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   bool _autonomyListInFlight = false;
   bool _autonomyRefreshInFlight = false;
   bool _statusRefreshInFlight = false;
+  bool _autopilotDropActive = false;
+  String? _lastAutopilotChatSignature;
   String? _autonomyError;
   Timer? _autonomyTimer;
 
@@ -471,6 +477,41 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     }
   }
 
+  void _handleAutopilotImageDrop(DropDoneDetails details) {
+    final seen = _autopilotPendingImages.toSet();
+    final imagePaths = <String>[];
+    var sawUnsupportedFile = false;
+    for (final file in details.files) {
+      final path = file.path.trim();
+      if (path.isEmpty) continue;
+      if (!_isAutopilotImageFile(path)) {
+        sawUnsupportedFile = true;
+        continue;
+      }
+      if (seen.add(path)) imagePaths.add(path);
+    }
+
+    final slots = _autopilotMaxPendingImages - _autopilotPendingImages.length;
+    final accepted = slots <= 0 ? <String>[] : imagePaths.take(slots).toList();
+    final hitLimit = imagePaths.length > accepted.length;
+    setState(() {
+      _autopilotDropActive = false;
+      if (accepted.isNotEmpty) {
+        _autopilotPendingImages.addAll(accepted);
+      }
+      if (accepted.isEmpty) {
+        _autonomyError = sawUnsupportedFile
+            ? 'Drop a PNG, JPG, GIF, WebP, or BMP image.'
+            : null;
+      } else if (hitLimit) {
+        _autonomyError =
+            'Added ${accepted.length} image(s). Autopilot supports up to $_autopilotMaxPendingImages images per message.';
+      } else {
+        _autonomyError = null;
+      }
+    });
+  }
+
   List<Map<String, dynamic>> _autopilotAttachmentPayloads() {
     return [
       for (final path in _autopilotPendingImages)
@@ -491,6 +532,61 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return _autopilotMimeByExt['.png']!;
   }
 
+  String _autopilotChatSignature(Map<String, dynamic>? run) {
+    if (run == null) return '';
+    final runId = run['run_id']?.toString() ?? '';
+    final updated = run['updated_at']?.toString() ?? '';
+    final stage = run['current_stage']?.toString() ?? '';
+    final status = run['status']?.toString() ?? '';
+    final messageCount = _asMapList(run['messages']).length;
+    final artifactCount = _asMapList(run['artifacts']).length;
+    return '$runId|$status|$stage|$updated|$messageCount|$artifactCount';
+  }
+
+  bool _autopilotChatIsNearBottom() {
+    if (!_autopilotChatScroll.hasClients) return true;
+    final position = _autopilotChatScroll.position;
+    final distance = position.maxScrollExtent - position.pixels;
+    return distance <= _autopilotChatFollowThreshold;
+  }
+
+  void _scheduleAutopilotChatFollow({
+    required String signature,
+    bool force = false,
+    bool wasNearBottom = true,
+  }) {
+    if (!force && !wasNearBottom) {
+      _lastAutopilotChatSignature = signature;
+      return;
+    }
+    if (_lastAutopilotChatSignature == signature && !force) return;
+    _lastAutopilotChatSignature = signature;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_autopilotChatScroll.hasClients) return;
+      final max = _autopilotChatScroll.position.maxScrollExtent;
+      _autopilotChatScroll.animateTo(
+        max,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  void _syncAutonomyRunListState(Map<String, dynamic>? run) {
+    if (run == null) return;
+    final runId = run['run_id']?.toString() ?? '';
+    if (runId.isEmpty) return;
+    final index =
+        _autonomyRuns.indexWhere((item) => item['run_id']?.toString() == runId);
+    if (index < 0) {
+      _autonomyRuns = [run, ..._autonomyRuns];
+      return;
+    }
+    final updated = List<Map<String, dynamic>>.from(_autonomyRuns);
+    updated[index] = {...updated[index], ...run};
+    _autonomyRuns = updated;
+  }
+
   Future<void> _loadAutonomyRuns({bool silent = false}) async {
     if (!mounted) return;
     if (_autonomyListInFlight) return;
@@ -506,10 +602,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       Map<String, dynamic>? active = _activeAutonomyRun;
       if (list.isNotEmpty) {
         final activeId = active?['run_id']?.toString();
-        active = list.firstWhere(
-          (r) => r['run_id']?.toString() == activeId,
-          orElse: () => list.first,
-        );
+        Map<String, dynamic>? matchingActive;
+        for (final item in list) {
+          if (item['run_id']?.toString() == activeId) {
+            matchingActive = item;
+            break;
+          }
+        }
+        active = matchingActive == null
+            ? list.first
+            : {
+                ...matchingActive,
+                ...?active,
+                'status': matchingActive['status'],
+                'current_stage': matchingActive['current_stage'],
+                'plan_status': matchingActive['plan_status'],
+                'merge_status': matchingActive['merge_status'],
+                'updated_at': matchingActive['updated_at'],
+              };
       }
       if (!mounted) return;
       setState(() {
@@ -542,10 +652,23 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     try {
       final run = await _api.getProjectAutonomyRun(runId);
       if (!mounted) return;
+      final oldRunId = _activeAutonomyRun?['run_id']?.toString();
+      final newRunId = run['run_id']?.toString();
+      final follow = force ||
+          oldRunId != newRunId ||
+          _lastAutopilotChatSignature == null ||
+          _autopilotChatIsNearBottom();
+      final signature = _autopilotChatSignature(run);
       setState(() {
         _activeAutonomyRun = run;
+        _syncAutonomyRunListState(run);
         _autonomyError = null;
       });
+      _scheduleAutopilotChatFollow(
+        signature: signature,
+        force: force || oldRunId != newRunId,
+        wasNearBottom: follow,
+      );
     } catch (e) {
       if (!mounted || silent) return;
       setState(() => _autonomyError = userVisibleNetworkError(e));
@@ -587,6 +710,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       if (!mounted) return;
       setState(() {
         _activeAutonomyRun = run;
+        _syncAutonomyRunListState(run);
         _autopilotPromptCtrl.clear();
         _autopilotPendingImages.clear();
       });
@@ -647,7 +771,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     });
     try {
       final run = await _api.approveProjectAutonomyPlan(runId);
-      if (mounted) setState(() => _activeAutonomyRun = run);
+      if (mounted) {
+        setState(() {
+          _activeAutonomyRun = run;
+          _syncAutonomyRunListState(run);
+        });
+      }
       await _loadAutonomyRuns(silent: true);
       await _refreshActiveAutonomyRun(silent: true, force: true);
     } catch (e) {
@@ -666,7 +795,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     });
     try {
       final run = await _api.startProjectAutonomyPlan(runId);
-      if (mounted) setState(() => _activeAutonomyRun = run);
+      if (mounted) {
+        setState(() {
+          _activeAutonomyRun = run;
+          _syncAutonomyRunListState(run);
+        });
+      }
       await _loadAutonomyRuns(silent: true);
       await _refreshActiveAutonomyRun(silent: true, force: true);
     } catch (e) {
@@ -693,7 +827,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         path: path,
         note: 'Desktop screenshot captured from the Autopilot cockpit.',
       );
-      if (mounted) setState(() => _activeAutonomyRun = run);
+      if (mounted) {
+        setState(() {
+          _activeAutonomyRun = run;
+          _syncAutonomyRunListState(run);
+        });
+      }
     } catch (e) {
       _autopilotFocus.stop();
       if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
@@ -715,7 +854,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         kind: 'video',
         note: 'Video validation requested from the desktop cockpit.',
       );
-      if (mounted) setState(() => _activeAutonomyRun = run);
+      if (mounted) {
+        setState(() {
+          _activeAutonomyRun = run;
+          _syncAutonomyRunListState(run);
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
     } finally {
@@ -751,7 +895,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     });
     try {
       final run = await _api.cancelProjectAutonomyRun(runId);
-      if (mounted) setState(() => _activeAutonomyRun = run);
+      if (mounted) {
+        setState(() {
+          _activeAutonomyRun = run;
+          _syncAutonomyRunListState(run);
+        });
+      }
       await _refreshActiveAutonomyRun(silent: true, force: true);
     } catch (e) {
       if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
@@ -769,13 +918,63 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     });
     try {
       final run = await _api.mergeProjectAutonomyRun(runId);
-      if (mounted) setState(() => _activeAutonomyRun = run);
+      if (mounted) {
+        setState(() {
+          _activeAutonomyRun = run;
+          _syncAutonomyRunListState(run);
+        });
+      }
       await _loadAutonomyRuns(silent: true);
     } catch (e) {
       if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
     } finally {
       if (mounted) setState(() => _autonomyBusy = false);
     }
+  }
+
+  Future<void> _copyAutopilotRunSummary(Map<String, dynamic> run) async {
+    final summary = _autopilotRunSummary(run);
+    await Clipboard.setData(ClipboardData(text: summary));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Autopilot summary copied.')),
+    );
+  }
+
+  String _autopilotRunSummary(Map<String, dynamic> run) {
+    final runId = run['run_id']?.toString() ?? 'Autopilot run';
+    final status = _autonomyStatusLabel(run['status']?.toString() ?? '');
+    final stage = _autonomyStageLabel(run['current_stage']?.toString() ?? '');
+    final merge =
+        _autonomyMergeStatusLabel(run['merge_status']?.toString() ?? '');
+    final prompt = run['prompt']?.toString().trim() ?? '';
+    final planBody = AutonomyRunPresenter.planBody(_asMap(run['plan']));
+    final reviewBody =
+        AutonomyRunPresenter.architectReviewBody(_asMap(run['architect_review']));
+    final validation = AutonomyRunPresenter.validationBody(
+      _asMapList(run['validation']),
+    );
+    final files = _asStringList(run['files']);
+    final branch = run['integration_branch']?.toString() ?? '';
+    final worktree = run['worktree_path']?.toString() ?? '';
+    final issue = AutonomyRunPresenter.blockedRunMessage(run);
+    final blocked = {'blocked', 'failed', 'cancelled'}
+        .contains(run['status']?.toString() ?? '');
+    final lines = <String>[
+      runId,
+      'Status: $status',
+      if (stage.trim().isNotEmpty) 'Stage: $stage',
+      if (merge.trim().isNotEmpty && merge != 'merge unknown') 'Merge: $merge',
+      if (prompt.isNotEmpty) 'Prompt: $prompt',
+      if (planBody.isNotEmpty) 'Plan:\n$planBody',
+      if (reviewBody.isNotEmpty) 'Architect quality:\n$reviewBody',
+      if (files.isNotEmpty) 'Files: ${files.take(8).join(', ')}',
+      if (validation.isNotEmpty) 'Validation:\n$validation',
+      if (branch.isNotEmpty) 'Branch: $branch',
+      if (worktree.isNotEmpty) 'Worktree: $worktree',
+      if (blocked && issue.isNotEmpty) 'Operator next step:\n$issue',
+    ];
+    return lines.join('\n\n');
   }
 
   Future<void> _submitQueue() async {
@@ -1252,12 +1451,120 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return dark ? Colors.indigo.shade200 : Colors.indigo.shade700;
       case _autopilotStatusAwaitingApproval:
         return dark ? Colors.teal.shade200 : Colors.teal.shade700;
+      case _autopilotStatusAwaitingClarification:
+        return dark ? Colors.amber.shade200 : Colors.amber.shade800;
       case _autopilotStatusChatting:
         return dark ? Colors.cyan.shade200 : Colors.cyan.shade700;
       case 'running':
         return dark ? Colors.blue.shade300 : Colors.blue.shade700;
       default:
         return dark ? Colors.grey.shade400 : Colors.grey.shade700;
+    }
+  }
+
+  String _autonomyStatusLabel(String status) {
+    switch (status) {
+      case _autopilotStatusAwaitingApproval:
+        return 'awaiting approval';
+      case _autopilotStatusAwaitingClarification:
+        return 'needs clarification';
+      case _autopilotStatusChatting:
+        return 'chatting';
+      case 'queued':
+        return 'queued';
+      case 'running':
+        return 'running';
+      case 'validating':
+        return 'validating';
+      case 'merging':
+        return 'merging';
+      case 'merged':
+        return 'merged';
+      case 'completed':
+        return 'completed';
+      case 'blocked':
+        return 'blocked';
+      case 'failed':
+        return 'failed';
+      case 'cancelled':
+        return 'cancelled';
+      case 'ready':
+        return 'ready';
+      default:
+        return status.replaceAll('_', ' ').trim().isEmpty
+            ? 'unknown'
+            : status.replaceAll('_', ' ');
+    }
+  }
+
+  String _autonomyStageLabel(String stage) {
+    switch (stage) {
+      case 'queued':
+        return 'queued';
+      case 'chat':
+        return 'chat';
+      case 'classify':
+        return 'reading request';
+      case 'repo_scan':
+        return 'scanning repo';
+      case 'plan':
+        return 'planning';
+      case 'assign_roles':
+        return 'assigning lanes';
+      case 'architect_review':
+        return 'architect review';
+      case 'implement':
+        return 'implementing';
+      case 'integrate':
+        return 'integrating';
+      case 'validate':
+        return 'validating';
+      case 'repair':
+        return 'repairing';
+      case 'merge':
+        return 'merge check';
+      case 'learn':
+        return 'learning';
+      default:
+        return stage.replaceAll('_', ' ');
+    }
+  }
+
+  String _autonomyPlanStatusLabel(String status) {
+    switch (status) {
+      case 'drafting':
+        return 'plan drafting';
+      case 'revising':
+        return 'plan revising';
+      case _autopilotStatusAwaitingApproval:
+        return 'plan awaiting approval';
+      case _autopilotStatusAwaitingClarification:
+        return 'plan needs clarification';
+      case 'approved':
+        return 'plan approved';
+      case 'implemented':
+        return 'plan implemented';
+      case _autopilotStatusChatting:
+        return 'brainstorming';
+      default:
+        return status.replaceAll('_', ' ');
+    }
+  }
+
+  String _autonomyMergeStatusLabel(String status) {
+    switch (status) {
+      case 'pending':
+        return 'merge pending';
+      case 'blocked':
+        return 'merge blocked';
+      case 'merged':
+        return 'merged safely';
+      case 'clean':
+        return 'merge clean';
+      default:
+        return status.replaceAll('_', ' ').trim().isEmpty
+            ? 'merge unknown'
+            : 'merge ${status.replaceAll('_', ' ')}';
     }
   }
 
@@ -1474,10 +1781,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   spacing: 6,
                   runSpacing: 4,
                   children: [
-                    _miniChip(status, color.withValues(alpha: 0.12), color),
+                    _miniChip(_autonomyStatusLabel(status),
+                        color.withValues(alpha: 0.12), color),
                     if (stage.isNotEmpty)
                       _miniChip(
-                        stage,
+                        _autonomyStageLabel(stage),
                         _autonomyBubbleBackground(Colors.blueGrey),
                         Colors.blueGrey.shade800,
                       ),
@@ -1545,22 +1853,23 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   spacing: 6,
                   runSpacing: 4,
                   children: [
-                    _miniChip(status, color.withValues(alpha: 0.12), color),
+                    _miniChip(_autonomyStatusLabel(status),
+                        color.withValues(alpha: 0.12), color),
                     if (stage.isNotEmpty)
                       _miniChip(
-                        stage,
+                        _autonomyStageLabel(stage),
                         _autonomyBubbleBackground(Colors.indigo),
                         Colors.indigo.shade800,
                       ),
                     if (merge.isNotEmpty)
                       _miniChip(
-                        'merge: $merge',
+                        _autonomyMergeStatusLabel(merge),
                         _autonomyBubbleBackground(Colors.blueGrey),
                         Colors.blueGrey.shade800,
                       ),
                     if (planStatus.isNotEmpty)
                       _miniChip(
-                        'plan: $planStatus',
+                        _autonomyPlanStatusLabel(planStatus),
                         _autonomyBubbleBackground(Colors.teal),
                         Colors.teal.shade800,
                       ),
@@ -1589,12 +1898,66 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final visibleMessages =
         messages.isNotEmpty ? messages : _fallbackAutonomyMessages(run);
     final widgets = visibleMessages.map(_buildAutonomyMessageBubble).toList();
+    final progress = _buildAutonomyProgressBubble(run);
+    if (progress != null) widgets.add(progress);
     return ListView(
       controller: _autopilotChatScroll,
       padding: const EdgeInsets.fromLTRB(18, 16, 18, 24),
       children: widgets.isEmpty
           ? [_emptyAutonomyState('Start the conversation with CHILI')]
           : widgets,
+    );
+  }
+
+  Widget? _buildAutonomyProgressBubble(Map<String, dynamic> run) {
+    final status = run['status']?.toString() ?? '';
+    final planStatus = run['plan_status']?.toString() ?? '';
+    final active = const {'queued', 'running', 'validating', 'merging'}
+            .contains(status) ||
+        const {'drafting', 'revising'}.contains(planStatus);
+    if (!active || _autonomyTerminal(run)) return null;
+
+    final steps = _asMapList(run['steps']);
+    final latestStep = steps.isEmpty ? <String, dynamic>{} : steps.last;
+    final stage = latestStep['stage']?.toString().trim().isNotEmpty == true
+        ? latestStep['stage'].toString()
+        : run['current_stage']?.toString() ?? '';
+    final stepStatus = latestStep['status']?.toString() ?? status;
+    final stepBody = latestStep.isEmpty
+        ? ''
+        : AutonomyRunPresenter.stepBody(latestStep).trim();
+    final body = stepBody.isNotEmpty
+        ? 'Current progress: $stepBody'
+        : switch (stage) {
+            'queued' => 'Current progress: waiting for the local Autopilot worker.',
+            'plan' => 'Current progress: drafting and reviewing the architect plan.',
+            'implement' => 'Current progress: implementing in an isolated worktree.',
+            'validate' => 'Current progress: running validation gates.',
+            'merge' => 'Current progress: checking merge safety.',
+            _ => 'Current progress: CHILI is working on this run.',
+          };
+    final color = _autonomyStatusColor(status);
+    return _buildChatBubble(
+      icon: Icons.sync,
+      title: 'CHILI is working',
+      body: body,
+      meta: _shortStamp(latestStep['created_at'] ?? run['updated_at']),
+      color: color,
+      background: _autonomyBubbleBackground(color, alpha: 0.08),
+      chips: [
+        if (stage.isNotEmpty)
+          _miniChip(
+            _autonomyStageLabel(stage),
+            _autonomyBubbleBackground(Colors.indigo),
+            Colors.indigo.shade800,
+          ),
+        if (stepStatus.isNotEmpty)
+          _miniChip(
+            _autonomyStatusLabel(stepStatus),
+            _autonomyBubbleBackground(Colors.green),
+            Colors.green.shade800,
+          ),
+      ],
     );
   }
 
@@ -1816,7 +2179,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _buildAutonomyComposer() {
-    return Container(
+    final dropColor = Theme.of(context).colorScheme.primary;
+    final composer = Container(
       padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
       decoration: BoxDecoration(
         color: _autonomySidebarColor(),
@@ -1828,39 +2192,56 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   _autopilotStatusAwaitingApproval &&
               _activeAutonomyRun?['plan_status']?.toString() ==
                   _autopilotStatusAwaitingApproval) ...[
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.only(bottom: 10),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: _autonomyBubbleBackground(Colors.teal, alpha: 0.10),
-                border: Border.all(color: Colors.teal.withValues(alpha: 0.22)),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Wrap(
-                spacing: 10,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Text(
-                    'Plan Mode is waiting for approval.',
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.onSurface,
-                      fontWeight: FontWeight.w600,
+            Builder(builder: (context) {
+              final review = _asMap(_activeAutonomyRun?['architect_review']);
+              final reviewPassed =
+                  AutonomyRunPresenter.architectReviewPassed(review);
+              return Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _autonomyBubbleBackground(
+                    reviewPassed ? Colors.teal : Colors.orange,
+                    alpha: 0.10,
+                  ),
+                  border: Border.all(
+                    color: (reviewPassed ? Colors.teal : Colors.orange)
+                        .withValues(alpha: 0.22),
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Wrap(
+                  spacing: 10,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      reviewPassed
+                          ? 'Plan Mode is waiting for approval.'
+                          : 'Architect quality gate has not passed.',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurface,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
-                  FilledButton.icon(
-                    onPressed: _autonomyBusy ? null : _approveAutopilotPlan,
-                    icon: const Icon(Icons.play_arrow, size: 18),
-                    label: const Text('Approve and implement'),
-                  ),
-                  Text(
-                    'Or send feedback below to revise it.',
-                    style: TextStyle(color: _mutedTextColor(), fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
+                    if (reviewPassed)
+                      FilledButton.icon(
+                        onPressed:
+                            _autonomyBusy ? null : _approveAutopilotPlan,
+                        icon: const Icon(Icons.play_arrow, size: 18),
+                        label: const Text('Approve and implement'),
+                      ),
+                    Text(
+                      reviewPassed
+                          ? 'Or send feedback below to revise it.'
+                          : 'Send feedback below so CHILI can revise it.',
+                      style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+                    ),
+                  ],
+                ),
+              );
+            }),
           ],
           if (_autopilotPendingImages.isNotEmpty) ...[
             _buildAutopilotImagePreviewStrip(
@@ -1950,6 +2331,64 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         ],
       ),
     );
+    return DropTarget(
+      enable: !_autonomyBusy,
+      onDragEntered: (_) {
+        if (!_autopilotDropActive) {
+          setState(() => _autopilotDropActive = true);
+        }
+      },
+      onDragExited: (_) {
+        if (_autopilotDropActive) {
+          setState(() => _autopilotDropActive = false);
+        }
+      },
+      onDragDone: _handleAutopilotImageDrop,
+      child: Stack(
+        children: [
+          composer,
+          if (_autopilotDropActive)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Container(
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: _autonomyBubbleBackground(dropColor, alpha: 0.18),
+                    border: Border.all(
+                      color: dropColor.withValues(alpha: 0.42),
+                      width: 2,
+                    ),
+                  ),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                    decoration: BoxDecoration(
+                      color: _autonomySidebarColor(),
+                      border: Border.all(color: _autonomyDividerColor()),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.add_photo_alternate_outlined,
+                            color: dropColor),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Drop images to attach',
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.onSurface,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _buildAutonomyRepoPicker() {
@@ -1982,11 +2421,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   Widget _buildAutonomyActionPanel(Map<String, dynamic> run) {
     final status = run['status']?.toString() ?? '';
     final planStatus = run['plan_status']?.toString() ?? '';
+    final architectReview = _asMap(run['architect_review']);
     final terminal = _autonomyTerminal(run);
     final branch = run['integration_branch']?.toString() ?? '';
     final merge = run['merge_status']?.toString() ?? '';
     final canApprove = status == _autopilotStatusAwaitingApproval &&
         planStatus == _autopilotStatusAwaitingApproval &&
+        AutonomyRunPresenter.architectReviewPassed(architectReview) &&
         _asMap(run['plan']).isNotEmpty;
     final canStartPlan = status == _autopilotStatusChatting ||
         planStatus == _autopilotStatusChatting;
@@ -2032,6 +2473,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               label: const Text('Refresh'),
             ),
             OutlinedButton.icon(
+              onPressed:
+                  _autonomyBusy ? null : () => _copyAutopilotRunSummary(run),
+              icon: const Icon(Icons.copy_all_outlined, size: 18),
+              label: const Text('Copy summary'),
+            ),
+            OutlinedButton.icon(
               onPressed: _autonomyBusy || terminal ? null : _cancelAutopilot,
               icon: const Icon(Icons.stop_circle_outlined, size: 18),
               label: const Text('Cancel'),
@@ -2064,7 +2511,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         if (status == _autopilotStatusAwaitingApproval) ...[
           const SizedBox(height: 10),
           Text(
-            'Plan Mode is waiting. Send feedback in chat to revise, or approve when it looks right.',
+            AutonomyRunPresenter.architectReviewPassed(architectReview)
+                ? 'Plan Mode is waiting. Send feedback in chat to revise, or approve when it looks right.'
+                : 'Architect quality gate has not passed. Send feedback in chat to revise this plan.',
+            style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+          ),
+        ] else if (status == _autopilotStatusAwaitingClarification) ...[
+          const SizedBox(height: 10),
+          Text(
+            'CHILI needs clarification before it can produce an approval-ready plan.',
             style: TextStyle(color: _mutedTextColor(), fontSize: 12),
           ),
         ] else if (canStartPlan) ...[
@@ -2108,6 +2563,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       );
     }
     final plan = _asMap(run['plan']);
+    final architectReview = _asMap(run['architect_review']);
     final agents = _asMapList(run['agents']);
     final files = _asStringList(run['files']);
     final validation = _asMapList(run['validation']);
@@ -2135,19 +2591,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             runSpacing: 6,
             children: [
               _miniChip(
-                  run['status']?.toString() ?? 'unknown',
+                  _autonomyStatusLabel(run['status']?.toString() ?? 'unknown'),
                   _autonomyStatusColor(run['status']?.toString() ?? '')
                       .withValues(alpha: 0.12),
                   _autonomyStatusColor(run['status']?.toString() ?? '')),
               if (run['current_stage'] != null)
                 _miniChip(
-                  '${run['current_stage']}',
+                  _autonomyStageLabel('${run['current_stage']}'),
                   _autonomyBubbleBackground(Colors.indigo),
                   Colors.indigo.shade800,
                 ),
               if (run['merge_status'] != null)
                 _miniChip(
-                  'merge: ${run['merge_status']}',
+                  _autonomyMergeStatusLabel('${run['merge_status']}'),
                   _autonomyBubbleBackground(Colors.blueGrey),
                   Colors.blueGrey.shade800,
                 ),
@@ -2160,6 +2616,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           if (errorMessage.isNotEmpty)
             _kvSelectable(
                 'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
+          const Divider(height: 28),
+          _buildAutonomyArchitectQuality(architectReview),
           const Divider(height: 28),
           _buildAutonomyPlan(plan, files),
           const Divider(height: 28),
@@ -2202,6 +2660,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return Icons.merge_type;
       case _autopilotStatusAwaitingApproval:
         return Icons.rule_folder_outlined;
+      case _autopilotStatusAwaitingClarification:
+        return Icons.help_outline;
       case _autopilotStatusChatting:
         return Icons.forum_outlined;
       case 'running':
@@ -2223,6 +2683,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return Icons.warning_amber_outlined;
       case 'commit':
         return Icons.commit;
+      case 'architect_review':
+        return Icons.verified_outlined;
       case _autopilotArtifactPromptImage:
         return Icons.image_outlined;
       case 'visual_screenshot':
@@ -2244,6 +2706,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final merge = run['merge_status']?.toString() ?? 'pending';
     final statusColor = _autonomyStatusColor(status);
     final plan = _asMap(run['plan']);
+    final architectReview = _asMap(run['architect_review']);
     final agents = _asMapList(run['agents']);
     final files = _asStringList(run['files']);
     final validation = _asMapList(run['validation']);
@@ -2272,10 +2735,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   ),
                 ),
                 _miniChip(
-                    status, statusColor.withValues(alpha: 0.12), statusColor),
+                    _autonomyStatusLabel(status),
+                    statusColor.withValues(alpha: 0.12),
+                    statusColor),
                 const SizedBox(width: 6),
                 _miniChip(
-                  'merge: $merge',
+                  _autonomyMergeStatusLabel(merge),
                   _autonomyBubbleBackground(Colors.blueGrey),
                   Colors.blueGrey.shade800,
                 ),
@@ -2288,7 +2753,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               children: [
                 if (stage.isNotEmpty)
                   _miniChip(
-                    stage,
+                    _autonomyStageLabel(stage),
                     _autonomyBubbleBackground(Colors.indigo),
                     Colors.indigo.shade800,
                   ),
@@ -2317,6 +2782,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               _kvSelectable(
                   'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
             const Divider(height: 28),
+            _buildAutonomyArchitectQuality(architectReview),
+            const Divider(height: 28),
             _buildAutonomyPlan(plan, files),
             const Divider(height: 28),
             _buildAutonomyAgents(agents),
@@ -2329,6 +2796,47 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildAutonomyArchitectQuality(Map<String, dynamic> review) {
+    final body = AutonomyRunPresenter.architectReviewBody(review);
+    final passed = AutonomyRunPresenter.architectReviewPassed(review);
+    final status = AutonomyRunPresenter.architectReviewStatusLabel(review);
+    final color = passed
+        ? _autonomyStatusColor('completed')
+        : _autonomyStatusColor('blocked');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Architect quality',
+            style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        if (body.isEmpty)
+          Text('Waiting for architect review',
+              style: TextStyle(color: _mutedTextColor()))
+        else ...[
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _miniChip(
+                passed ? 'passed' : status,
+                _autonomyBubbleBackground(color),
+                color,
+              ),
+              if (review['score'] != null)
+                _miniChip(
+                  '${review['score']}/100',
+                  _autonomyBubbleBackground(Colors.blueGrey),
+                  Colors.blueGrey.shade800,
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SelectableText(body, style: const TextStyle(fontSize: 13)),
+        ],
+      ],
     );
   }
 
@@ -2493,6 +3001,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final visible = artifacts
         .where((artifact) => {
               'model_call',
+              'architect_review',
               'worktree',
               'diff',
               'diff_rejected',
@@ -2642,13 +3151,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 children: [
                   if (stage.isNotEmpty)
                     _miniChip(
-                      stage,
+                      _autonomyStageLabel(stage),
                       _autonomyBubbleBackground(Colors.blueGrey),
                       Colors.blueGrey.shade800,
                     ),
                   if (status.isNotEmpty)
                     _miniChip(
-                      status,
+                      _autonomyStatusLabel(status),
                       _autonomyBubbleBackground(Colors.green),
                       Colors.green.shade800,
                     ),
