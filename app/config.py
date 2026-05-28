@@ -148,6 +148,11 @@ AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY = True
 AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
 )
+AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_ENABLED = True
+AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 2
+)
+AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD = 1
 AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION = True
 AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH = True
 AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED = False
@@ -2569,6 +2574,30 @@ class Settings(BaseSettings):
         ge=0,
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_PAPER_SHADOW_DEDUPE_RECENT_REASON_FAMILY_MINUTES"
+        ),
+    )
+    chili_autotrader_broker_reject_suppression_enabled: bool = Field(
+        default=AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_BROKER_REJECT_SUPPRESSION_ENABLED"
+        ),
+    )
+    chili_autotrader_broker_reject_suppression_minutes: int = Field(
+        default=AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_MINUTES,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_BROKER_REJECT_SUPPRESSION_MINUTES"
+        ),
+        description=(
+            "Cooldown window for suppressing repeated broker submissions with "
+            "the same action fingerprint after a broker reject."
+        ),
+    )
+    chili_autotrader_broker_reject_suppression_threshold: int = Field(
+        default=AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_BROKER_REJECT_SUPPRESSION_THRESHOLD"
         ),
     )
     # Paper-shadow evidence should be scored against the same kind of dynamic

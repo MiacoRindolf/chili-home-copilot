@@ -10,6 +10,7 @@ from app import models
 from app.models.trading import (
     AutoTraderRun,
     BreakoutAlert,
+    PaperTrade,
     PatternMonitorDecision,
     ScanPattern,
     Trade,
@@ -191,6 +192,95 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
     assert by_ticker["NEGEV"]["autotrader_blocker_category"] == "negative_expected_edge"
     assert body["summary"]["positive_edge_recert_debt"] >= 1
     assert body["summary"]["negative_expected_edge"] >= 1
+
+
+def test_edge_supply_endpoint_exposes_profitability_diagnostics(db, paired_client):
+    client, user = paired_client
+
+    pat = ScanPattern(
+        name="edge_supply_ready",
+        rules_json={},
+        origin="brain",
+        asset_class="stock",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add(pat)
+    db.flush()
+
+    alert = BreakoutAlert(
+        user_id=user.id,
+        scan_pattern_id=pat.id,
+        ticker="READY",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        outcome="pending",
+        score_at_alert=86.0,
+        price_at_alert=50.0,
+        entry_price=50.0,
+        stop_loss=47.0,
+        target_price=58.0,
+        alerted_at=datetime.utcnow(),
+        indicator_snapshot={"imminent_scorecard": {"signal_lane": "standard"}},
+    )
+    db.add(alert)
+    db.flush()
+
+    db.add(
+        AutoTraderRun(
+            user_id=user.id,
+            breakout_alert_id=alert.id,
+            scan_pattern_id=pat.id,
+            ticker="READY",
+            decision="skipped",
+            reason="selector:secondary_gate_observation",
+            rule_snapshot={
+                "entry_edge": {
+                    "expected_net_pct": 2.0,
+                    "probability": 0.62,
+                    "breakeven_probability": 0.46,
+                    "probability_source": "pattern_regime_hit_rate",
+                },
+            },
+        )
+    )
+    for idx in range(5):
+        db.add(
+            PaperTrade(
+                scan_pattern_id=pat.id,
+                paper_shadow_of_alert_id=alert.id,
+                ticker="READY",
+                direction="long",
+                entry_price=50.0,
+                stop_price=47.0,
+                target_price=58.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(hours=idx + 1),
+                exit_date=datetime.utcnow() - timedelta(minutes=idx + 1),
+                exit_price=52.0,
+                pnl=2.0,
+                pnl_pct=4.0,
+                signal_json={"paper_shadow": True},
+            )
+        )
+    db.commit()
+
+    resp = client.get("/api/trading/monitor/edge-supply?window_days=7&limit=10")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    row = next(x for x in body["rows"] if x["scan_pattern_id"] == pat.id)
+    assert row["calibrated_ev_pct"] == pytest.approx(2.5)
+    assert row["realized_ev_pct"] == pytest.approx(4.0)
+    assert row["ev_calibration_error"] == pytest.approx(2.0)
+    assert row["brier_score"] == pytest.approx(0.1444)
+    assert row["closed_evidence_count"] == 5
+    assert row["graduation_blocker"] == "graduation_ready"
+    assert row["recommended_work_event"] == "edge_reliability_refresh"
+    assert row["cash_deployment_rank"] == 1
+    assert body["summary"]["graduation_ready"] >= 1
 
 
 def test_active_setups_exposes_execution_state(db, paired_client):

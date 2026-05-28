@@ -9384,6 +9384,13 @@ function loadImminentAlerts() {
         var evColor = ev > 0 ? '#86efac' : '#f87171';
         html += '<div>EV<b style="color:' + evColor + ';">' + ev.toFixed(2) + '%</b></div>';
       }
+      if (a.calibrated_ev_pct != null) {
+        var cev = Number(a.calibrated_ev_pct);
+        html += '<div>Cal EV<b style="color:' + (cev > 0 ? '#86efac' : '#f87171') + ';">' + cev.toFixed(2) + '%</b></div>';
+      }
+      if (a.closed_evidence_count != null) {
+        html += '<div>Closed<b>' + Number(a.closed_evidence_count || 0).toFixed(0) + '</b></div>';
+      }
       html += '</div>';
       if (a.regime) html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">Regime: ' + escHtml(a.regime) + '</div>';
       if (a.autotrader_decision) {
@@ -9391,6 +9398,9 @@ function loadImminentAlerts() {
       }
       if (a.autotrader_blocker_category) {
         html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">' + escHtml(a.autotrader_blocker_category) + (a.autotrader_next_action ? ' -> ' + escHtml(a.autotrader_next_action) : '') + '</div>';
+      }
+      if (a.graduation_blocker || a.recommended_work_event) {
+        html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">Reliability: ' + escHtml(a.graduation_blocker || 'pending') + (a.recommended_work_event ? ' -> ' + escHtml(a.recommended_work_event) : '') + '</div>';
       }
       html += '</div>';
       html += '<div style="text-align:right;">';

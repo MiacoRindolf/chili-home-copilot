@@ -1,6 +1,8 @@
 """AutoTrader v1 orchestrator: pattern-imminent alerts → gates → paper or RH live."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from datetime import datetime, time as datetime_time, timedelta, timezone
@@ -18,6 +20,9 @@ from ...config import (
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_MAX_TICK_MAX_SECONDS,
     AUTOTRADER_MIN_TICK_MAX_SECONDS,
+    AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_ENABLED,
+    AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_MINUTES,
+    AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
     AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
@@ -1824,6 +1829,149 @@ def _audit(
         logger.debug("[autotrader] shadow_consume failed; ignored", exc_info=True)
 
 
+def _broker_reject_action_fingerprint(
+    alert: BreakoutAlert,
+    *,
+    venue: str,
+    side: str,
+    qty: float,
+    snap: dict[str, Any] | None,
+    order_hint: str | None = None,
+) -> str:
+    """Stable key for a broker submission shape, excluding transient prices."""
+    meta = {}
+    if isinstance(snap, dict):
+        opt = snap.get("option_meta")
+        if isinstance(opt, dict):
+            meta = {
+                "expiration": opt.get("expiration"),
+                "strike": opt.get("strike"),
+                "option_type": opt.get("option_type"),
+                "legs": opt.get("legs") if isinstance(opt.get("legs"), list) else None,
+            }
+    payload = {
+        "venue": str(venue or "unknown").strip().lower(),
+        "side": str(side or "buy").strip().lower(),
+        "ticker": str(getattr(alert, "ticker", "") or "").upper(),
+        "asset_type": str(getattr(alert, "asset_type", "") or "").lower(),
+        "scan_pattern_id": getattr(alert, "scan_pattern_id", None),
+        "qty": round(float(qty or 0.0), QUANTITY_ROUND_DIGITS),
+        "order_hint": str(order_hint or "market").strip().lower(),
+        "options_path": (
+            bool((snap or {}).get("options_path")) if isinstance(snap, dict) else False
+        ),
+        "option_meta": meta,
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
+
+
+def _broker_reject_suppression(
+    db: Session,
+    alert: BreakoutAlert,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    if not bool(
+        getattr(
+            settings,
+            "chili_autotrader_broker_reject_suppression_enabled",
+            AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_ENABLED,
+        )
+    ):
+        return None
+    minutes = int(
+        getattr(
+            settings,
+            "chili_autotrader_broker_reject_suppression_minutes",
+            AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_MINUTES,
+        )
+        or 0
+    )
+    if minutes <= 0:
+        return None
+    threshold = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "chili_autotrader_broker_reject_suppression_threshold",
+                AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD,
+            )
+            or AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD
+        ),
+    )
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    ticker = str(getattr(alert, "ticker", "") or "").upper()
+    q = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.ticker == ticker)
+        .filter(AutoTraderRun.created_at >= cutoff)
+        .filter(AutoTraderRun.reason.like("broker:%"))
+    )
+    if getattr(alert, "scan_pattern_id", None) is not None:
+        q = q.filter(AutoTraderRun.scan_pattern_id == alert.scan_pattern_id)
+    q = q.order_by(AutoTraderRun.created_at.desc()).limit(max(10, threshold * 5))
+    matches = []
+    for row in q.all():
+        row_snap = row.rule_snapshot if isinstance(row.rule_snapshot, dict) else {}
+        if str(row_snap.get("broker_reject_fingerprint") or "") == fingerprint:
+            matches.append(row)
+            if len(matches) >= threshold:
+                break
+    if len(matches) < threshold:
+        return None
+    last = matches[0]
+    last_reason = str(last.reason or "broker:unknown")
+    return {
+        "fingerprint": fingerprint,
+        "recent_reject_count": len(matches),
+        "window_minutes": minutes,
+        "last_reject_run_id": int(last.id),
+        "last_reject_reason": last_reason,
+    }
+
+
+def _annotate_broker_reject(
+    snap: dict[str, Any],
+    *,
+    fingerprint: str,
+    venue: str,
+    error: Any,
+) -> None:
+    snap["broker_reject_fingerprint"] = fingerprint
+    snap["broker_reject_venue"] = str(venue or "unknown").strip().lower()
+    snap["broker_reject_error"] = str(error or "unknown")[:500]
+
+
+def _maybe_block_repeated_broker_reject(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    fingerprint: str,
+    snap: dict[str, Any],
+    llm_snap: dict[str, Any] | None,
+    out: dict[str, Any],
+) -> bool:
+    suppression = _broker_reject_suppression(db, alert, fingerprint)
+    if suppression is None:
+        return False
+    snap["broker_reject_suppression"] = suppression
+    reason_tail = str(suppression.get("last_reject_reason") or "broker:unknown")
+    if reason_tail.startswith("broker:"):
+        reason_tail = reason_tail[len("broker:"):]
+    _block_live_order(
+        db,
+        uid=uid,
+        alert=alert,
+        reason=f"broker_reject_suppressed:{reason_tail}"[:255],
+        snap=snap,
+        llm_snap=llm_snap,
+        out=out,
+    )
+    return True
+
+
 def _block_live_order(
     db: Session,
     *,
@@ -3442,6 +3590,29 @@ def _execute_broker_buy(
         # The strategy layer (Q2.T1 vertical_spread / iron_condor /
         # etc.) emits the legs + direction; the autotrader just routes.
         legs = opt_meta.get("legs")
+        option_order_hint = (
+            "option_spread"
+            if isinstance(legs, list) and len(legs) > 1
+            else "option_limit"
+        )
+        reject_fp = _broker_reject_action_fingerprint(
+            alert,
+            venue="robinhood_options",
+            side="buy",
+            qty=float(qty),
+            snap=snap,
+            order_hint=option_order_hint,
+        )
+        if _maybe_block_repeated_broker_reject(
+            db,
+            uid=uid,
+            alert=alert,
+            fingerprint=reject_fp,
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        ):
+            return None
         try:
             if isinstance(legs, list) and len(legs) > 1:
                 res = opt_ad.place_spread(
@@ -3466,6 +3637,12 @@ def _execute_broker_buy(
         except Exception as exc:
             res = {"ok": False, "error": f"options_adapter_exception:{exc}"}
         if not res.get("ok"):
+            _annotate_broker_reject(
+                snap,
+                fingerprint=reject_fp,
+                venue="robinhood_options",
+                error=res.get("error"),
+            )
             _audit(
                 db, user_id=uid, alert=alert,
                 decision="blocked", reason=f"broker:{res.get('error')}",
@@ -3807,6 +3984,24 @@ def _execute_broker_buy(
                         )
                         cb_res = None
                     else:
+                        cb_reject_fp = _broker_reject_action_fingerprint(
+                            alert,
+                            venue="coinbase",
+                            side="buy",
+                            qty=float(qty),
+                            snap=snap,
+                            order_hint="limit_post_only",
+                        )
+                        if _maybe_block_repeated_broker_reject(
+                            db,
+                            uid=uid,
+                            alert=alert,
+                            fingerprint=cb_reject_fp,
+                            snap=snap,
+                            llm_snap=llm_snap,
+                            out=out,
+                        ):
+                            return None
                         cb_res = cb_ad.place_limit_order_gtc(
                             product_id=alert.ticker,
                             side="buy",
@@ -3853,6 +4048,24 @@ def _execute_broker_buy(
                 cb_res = None
 
         if cb_res is None:
+            cb_reject_fp = _broker_reject_action_fingerprint(
+                alert,
+                venue="coinbase",
+                side="buy",
+                qty=float(qty),
+                snap=snap,
+                order_hint="market",
+            )
+            if _maybe_block_repeated_broker_reject(
+                db,
+                uid=uid,
+                alert=alert,
+                fingerprint=cb_reject_fp,
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            ):
+                return None
             cb_res = cb_ad.place_market_order(
                 product_id=alert.ticker,
                 side="buy",
@@ -3860,6 +4073,12 @@ def _execute_broker_buy(
                 client_order_id=client_order_id,
             )
         if not cb_res.get("ok"):
+            _annotate_broker_reject(
+                snap,
+                fingerprint=cb_reject_fp,
+                venue="coinbase",
+                error=cb_res.get("error"),
+            )
             _audit(
                 db, user_id=uid, alert=alert,
                 decision="blocked",
@@ -3966,6 +4185,25 @@ def _execute_broker_buy(
                 _ticker, exc_info=True,
             )
 
+    rh_reject_fp = _broker_reject_action_fingerprint(
+        alert,
+        venue="robinhood",
+        side="buy",
+        qty=float(qty),
+        snap=snap,
+        order_hint="market",
+    )
+    if _maybe_block_repeated_broker_reject(
+        db,
+        uid=uid,
+        alert=alert,
+        fingerprint=rh_reject_fp,
+        snap=snap,
+        llm_snap=llm_snap,
+        out=out,
+    ):
+        return None
+
     res = ad.place_market_order(
         product_id=alert.ticker,
         side="buy",
@@ -3973,6 +4211,12 @@ def _execute_broker_buy(
         client_order_id=client_order_id,
     )
     if not res.get("ok"):
+        _annotate_broker_reject(
+            snap,
+            fingerprint=rh_reject_fp,
+            venue="robinhood",
+            error=res.get("error"),
+        )
         _audit(
             db,
             user_id=uid,

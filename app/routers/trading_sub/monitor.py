@@ -20,6 +20,11 @@ from ...models.trading import (
 )
 from ...services import trading_service as ts
 from ...services.trading.broker_position_truth import filter_broker_stale_open_trades
+from ...services.trading.edge_reliability import (
+    edge_supply_rows,
+    edge_supply_summary,
+    null_lineage_short_paper_candidates,
+)
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
 from ._utils import json_safe
@@ -645,6 +650,21 @@ def api_monitor_imminent_alerts(
     if pat_ids:
         for p in db.query(ScanPattern).filter(ScanPattern.id.in_(pat_ids)).all():
             patterns[p.id] = p
+    edge_supply_by_pattern: dict[int, dict[str, Any]] = {}
+    if pat_ids:
+        try:
+            edge_supply_by_pattern = {
+                int(row["scan_pattern_id"]): row
+                for row in edge_supply_rows(
+                    db,
+                    pattern_ids=pat_ids,
+                    window_days=max(1, int(hours / 24) or 1),
+                    limit=max(30, len(pat_ids)),
+                )
+                if row.get("scan_pattern_id") is not None
+            }
+        except Exception:
+            logger.debug("[monitor] edge supply diagnostics failed", exc_info=True)
     alert_ids = [int(a.id) for a in alerts]
     runs_by_alert: dict[int, AutoTraderRun] = {}
     if alert_ids:
@@ -672,6 +692,11 @@ def api_monitor_imminent_alerts(
         )
         blocker_category = _imminent_blocker_category(run, pat, signal_lane)
         _bump_imminent_summary(summary, blocker_category)
+        supply = (
+            edge_supply_by_pattern.get(int(a.scan_pattern_id))
+            if a.scan_pattern_id
+            else {}
+        ) or {}
         items.append(
             {
                 "id": a.id,
@@ -711,6 +736,15 @@ def api_monitor_imminent_alerts(
                 "paper_observation_signal_lane": signal_lane,
                 "autotrader_blocker_category": blocker_category,
                 "autotrader_next_action": _imminent_next_action(blocker_category),
+                "calibrated_ev_pct": json_safe(supply.get("calibrated_ev_pct")),
+                "realized_ev_pct": json_safe(supply.get("realized_ev_pct")),
+                "ev_calibration_error": json_safe(supply.get("ev_calibration_error")),
+                "brier_score": json_safe(supply.get("brier_score")),
+                "closed_evidence_count": supply.get("closed_evidence_count"),
+                "paper_live_gap_pct": json_safe(supply.get("paper_live_gap_pct")),
+                "graduation_blocker": supply.get("graduation_blocker"),
+                "recommended_work_event": supply.get("recommended_work_event"),
+                "cash_deployment_rank": supply.get("cash_deployment_rank"),
                 "trade_plan": a.trade_plan,
             }
         )
@@ -721,5 +755,40 @@ def api_monitor_imminent_alerts(
             "alerts": json_safe(items),
             "total": len(items),
             "summary": summary,
+        }
+    )
+
+
+@router.get("/monitor/edge-supply")
+def api_monitor_edge_supply(
+    request: Request,
+    db: Session = Depends(get_db),
+    window_days: int = Query(30, ge=1, le=120),
+    limit: int = Query(25, ge=1, le=100),
+):
+    """Pattern-level edge reliability and live-candidate supply diagnostics."""
+    get_identity_ctx(request, db)
+    try:
+        rows = edge_supply_rows(
+            db,
+            window_days=window_days,
+            limit=limit,
+        )
+        null_lineage = null_lineage_short_paper_candidates(
+            db,
+            window_days=window_days,
+            limit=10,
+        )
+    except Exception as exc:
+        logger.exception("[monitor] edge supply failed")
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "window_days": window_days,
+            "rows": json_safe(rows),
+            "summary": json_safe(edge_supply_summary(rows)),
+            "null_lineage_research_candidates": json_safe(null_lineage),
         }
     )

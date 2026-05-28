@@ -2308,6 +2308,25 @@ def passes_rule_gate(
                 else:
                     return False, "missed_entry_slippage", snap
             else:
+                try:
+                    adjusted_alert = _entry_price_adjusted_alert(alert, px)
+                    adjusted_edge = evaluate_entry_edge(
+                        db,
+                        adjusted_alert,
+                        settings=settings,
+                        pat_ctx=pat_ctx,
+                        confidence=conf,
+                    )
+                    snap["slippage_reprice_edge"] = adjusted_edge.snapshot
+                    snap["slippage_reprice_edge_reason"] = adjusted_edge.reason
+                    snap["slippage_reprice_original_entry_price"] = round(ref, 8)
+                    snap["slippage_reprice_current_price"] = round(px, 8)
+                    snap["slippage_reprice_expected_net_pct"] = (
+                        adjusted_edge.snapshot.get("expected_net_pct")
+                    )
+                    snap["slippage_reprice_positive_edge"] = bool(adjusted_edge.allowed)
+                except Exception as exc:
+                    snap["slippage_reprice_error"] = type(exc).__name__
                 return False, "missed_entry_slippage", snap
     else:
         snap["entry_slippage_pct"] = None
