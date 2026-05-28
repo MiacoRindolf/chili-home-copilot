@@ -37,6 +37,30 @@ _FALLBACK = PurposePolicy(
 )
 
 
+_CODE_DEFAULTS: dict[str, PurposePolicy] = {
+    "project_web_research": PurposePolicy(
+        purpose="project_web_research",
+        routing_strategy="passthrough",
+        decompose=False,
+        cross_examine=False,
+        use_premium_synthesis=False,
+        high_stakes=False,
+    ),
+    "reasoning_web_research": PurposePolicy(
+        purpose="reasoning_web_research",
+        routing_strategy="passthrough",
+        decompose=False,
+        cross_examine=False,
+        use_premium_synthesis=False,
+        high_stakes=False,
+    ),
+}
+
+
+def _clone_policy(policy: PurposePolicy, purpose: str | None = None) -> PurposePolicy:
+    return PurposePolicy(**{**policy.__dict__, "purpose": purpose or policy.purpose})
+
+
 def get_policy(db: Session, purpose: str) -> PurposePolicy:
     purpose = (purpose or "").strip() or "llm_default"
     try:
@@ -52,6 +76,10 @@ def get_policy(db: Session, purpose: str) -> PurposePolicy:
         row = None
 
     if row is None:
+        code_default = _CODE_DEFAULTS.get(purpose)
+        if code_default is not None:
+            return _clone_policy(code_default, purpose)
+
         # Fall back to llm_default if the specific purpose row is missing
         if purpose != "llm_default":
             try:
@@ -66,7 +94,7 @@ def get_policy(db: Session, purpose: str) -> PurposePolicy:
                 row = None
 
     if row is None:
-        return PurposePolicy(**{**_FALLBACK.__dict__, "purpose": purpose})
+        return _clone_policy(_FALLBACK, purpose)
 
     return PurposePolicy(
         purpose=str(row[0]),

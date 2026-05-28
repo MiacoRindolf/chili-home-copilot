@@ -8,6 +8,7 @@ import pytest
 from app import openai_client as oc
 from app.config import Settings
 from app.services.context_brain import llm_gateway as gw
+from app.services.context_brain import purpose_policy as policy_mod
 from app.services.context_brain.llm_gateway import gateway_chat, gateway_chat_stream
 from app.services.context_brain.tree_types import PurposePolicy
 from app.services.llm_cost import estimate_cost_usd, provider_from_base_url
@@ -245,6 +246,64 @@ def test_gateway_exact_cache_never_caches_high_stakes_passthrough(monkeypatch):
 
     assert chat.call_count == 2
     assert all(call.kwargs.get("cache_status") is None for call in finalize.call_args_list)
+
+
+def test_web_research_purpose_has_offline_code_default_when_db_seed_missing():
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, *_args, **_kwargs):
+            self.calls += 1
+            return EmptyResult()
+
+    db = EmptyDb()
+
+    policy = policy_mod.get_policy(db, "reasoning_web_research")
+
+    assert policy.purpose == "reasoning_web_research"
+    assert policy.routing_strategy == "passthrough"
+    assert policy.use_premium_synthesis is False
+    assert policy.high_stakes is False
+    assert db.calls == 1
+
+
+def test_gateway_exact_cache_uses_web_research_code_default(monkeypatch):
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def execute(self, *_args, **_kwargs):
+            return EmptyResult()
+
+    chat = MagicMock(
+        return_value={
+            "reply": '{"summary":"ok","sources":[],"relevance_score":0.8}',
+            "model": "gpt-5.5",
+            "provider": "openai",
+            "tokens_used": 50,
+        }
+    )
+    finalize = MagicMock()
+    log_ids = iter([301, 302])
+
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._write_gateway_log_start", lambda *a, **k: next(log_ids))
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "summarize this search payload"}]
+    gateway_chat(messages, purpose="reasoning_web_research", system_prompt="json only", db=EmptyDb())
+    gateway_chat(messages, purpose="reasoning_web_research", system_prompt="json only", db=EmptyDb())
+
+    assert chat.call_count == 1
+    assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
+    assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
+    assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
 
 
 def test_gateway_stream_logs_provider_and_estimated_cost(monkeypatch):

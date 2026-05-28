@@ -186,6 +186,25 @@ def reset_cache() -> None:
         _cache_stats["coalesced"] = 0
 
 
+def _infer_purpose_from_stack() -> str | None:
+    try:
+        import inspect
+        import os
+
+        for frame in inspect.stack()[2:8]:
+            fpath = (frame.filename or "").replace("\\", "/")
+            if "/project_brain/agents/" in fpath:
+                base = os.path.splitext(os.path.basename(fpath))[0]
+                return f"project_{base}"
+            if "/project_brain/playwright_runner.py" in fpath:
+                return "project_playwright"
+            if "/project_brain/web_research.py" in fpath:
+                return "project_web_research"
+    except Exception:
+        return None
+    return None
+
+
 def call_llm(
     messages: list[dict[str, Any]],
     max_tokens: int = 800,
@@ -216,6 +235,9 @@ def call_llm(
         logger.debug("[llm_caller] LLM not configured")
         return {"reply": "", "gateway_log_id": None} if return_meta else ""
 
+    if not purpose:
+        purpose = _infer_purpose_from_stack()
+
     cache_key = None
     inflight_owner = False
     inflight_key = None
@@ -239,26 +261,6 @@ def call_llm(
             cache_key = None
             inflight_owner = False
             inflight_key = None
-
-    # Phase F.14 — auto-detect purpose for project_brain agents so the
-    # learning loop sees per-agent traffic without editing every agent file.
-    if not purpose:
-        try:
-            import inspect, os
-            for frame in inspect.stack()[1:6]:
-                fpath = (frame.filename or "").replace("\\", "/")
-                if "/project_brain/agents/" in fpath:
-                    base = os.path.splitext(os.path.basename(fpath))[0]
-                    purpose = f"project_{base}"
-                    break
-                if "/project_brain/playwright_runner.py" in fpath:
-                    purpose = "project_playwright"
-                    break
-                if "/project_brain/web_research.py" in fpath:
-                    purpose = "project_web_research"
-                    break
-        except Exception:
-            purpose = None
 
     try:
         # Phase F.14 — gateway path when purpose is given.

@@ -116,6 +116,38 @@ def test_call_llm_cacheable_false_never_caches(_cfg):
     assert stats["hits"] == 0 and stats["misses"] == 0
 
 
+@patch("app.services.llm_caller._cache_config", return_value=(256, 600))
+def test_call_llm_autodetects_project_web_research_before_cache_key(_cfg, monkeypatch):
+    captured_purposes: list[str | None] = []
+    original_cache_key = llm_caller._cache_key
+
+    def spy_cache_key(messages, max_tokens, system_prompt, purpose=None):
+        captured_purposes.append(purpose)
+        return original_cache_key(messages, max_tokens, system_prompt, purpose)
+
+    gateway = MagicMock(
+        return_value={
+            "reply": '{"summary":"ok","sources":[],"relevance_score":0.9}',
+            "model": "gpt-5.5",
+            "gateway_log_id": 77,
+        }
+    )
+    monkeypatch.setattr(llm_caller, "_cache_key", spy_cache_key)
+    monkeypatch.setattr("app.openai_client.is_configured", lambda: True)
+    monkeypatch.setattr("app.services.context_brain.llm_gateway.gateway_chat", gateway)
+
+    from app.services.project_brain.web_research import _summarize_raw
+
+    first = _summarize_raw("cacheable research", "[]", "trace")
+    second = _summarize_raw("cacheable research", "[]", "trace")
+
+    assert first and first["summary"] == "ok"
+    assert second and second["summary"] == "ok"
+    assert captured_purposes == ["project_web_research", "project_web_research"]
+    assert gateway.call_count == 1
+    assert gateway.call_args.kwargs["purpose"] == "project_web_research"
+
+
 def test_call_llm_cache_ttl_expiry_causes_miss(monkeypatch):
     monkeypatch.setattr(llm_caller, "_cache_config", lambda: (256, 600))
     mock_chat = MagicMock(return_value={"reply": "ok", "model": "m1"})
