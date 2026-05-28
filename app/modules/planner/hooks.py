@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json as json_mod
 import re
 from datetime import date, timedelta
 from math import ceil
 
 from sqlalchemy.orm import Session
 
-from ... import openai_client
 from ...logger import log_info
 from ...services import planner_service
 
@@ -170,6 +168,43 @@ _PROJECT_TEMPLATE_PATTERNS: tuple[tuple[re.Pattern[str], tuple[tuple[str, str, f
         ),
     ),
 )
+_GENERIC_PROJECT_TEMPLATE: tuple[tuple[str, str, float], ...] = (
+    (
+        "Define the outcome and success criteria",
+        "Complexity: Low. Duration: 1-2 hours. Reasoning: A concrete target, deadline, and definition of done prevent the project from turning into vague activity.",
+        0.25,
+    ),
+    (
+        "Capture constraints, assumptions, and unknowns",
+        "Complexity: Low. Duration: 1-2 hours. Reasoning: Listing limits, risks, and open questions early makes the first execution pass sharper and cheaper.",
+        0.25,
+    ),
+    (
+        "Break the work into deliverables",
+        "Complexity: Medium. Duration: 2-4 hours. Reasoning: Deliverable-level planning exposes dependencies and gives each work block a clear output.",
+        0.5,
+    ),
+    (
+        "Gather required materials and references",
+        "Complexity: Medium. Duration: 2-4 hours. Reasoning: Preparing inputs before execution reduces context switching and prevents blocked work sessions.",
+        0.5,
+    ),
+    (
+        "Complete the first usable version",
+        "Complexity: High. Duration: 1-3 days. Reasoning: A first complete pass turns the plan into something inspectable and makes remaining uncertainty concrete.",
+        2.0,
+    ),
+    (
+        "Review quality and close gaps",
+        "Complexity: Medium. Duration: 0.5-1 day. Reasoning: A structured review catches missing pieces, unclear decisions, and places where expectations drifted.",
+        1.0,
+    ),
+    (
+        "Ship, share, or archive the result",
+        "Complexity: Low. Duration: 1-2 hours. Reasoning: Closing the loop preserves the project output and creates a clear next action if more work is needed.",
+        0.25,
+    ),
+)
 
 
 def detect_create_project_with_tasks_intent(message: str) -> tuple[bool, str | None]:
@@ -187,7 +222,7 @@ def detect_create_project_with_tasks_intent(message: str) -> tuple[bool, str | N
 
 
 def _mechanical_task_suggestions(project_name: str) -> list[dict]:
-    """Return deterministic task suggestions for common project archetypes."""
+    """Return deterministic task suggestions for any named project."""
     name = (project_name or "").strip()
     if not name:
         return []
@@ -203,7 +238,14 @@ def _mechanical_task_suggestions(project_name: str) -> list[dict]:
             }
             for title, desc, days in template
         ]
-    return []
+    return [
+        {
+            "title": title,
+            "description": f"{desc} Project: {name}.",
+            "estimated_days": days,
+        }
+        for title, desc, days in _GENERIC_PROJECT_TEMPLATE
+    ]
 
 
 def generate_tasks_for_project(
@@ -213,65 +255,12 @@ def generate_tasks_for_project(
     user_id: int,
     trace_id: str,
 ) -> int:
-    """Create suggested tasks with LLM fallback only when mechanics lack coverage."""
+    """Create deterministic suggested tasks without paying for planner LLM fallback."""
     items = _mechanical_task_suggestions(project_name)
     if items:
         log_info(trace_id, f"planner_mechanical_tasks project_id={project_id} count={len(items)}")
     else:
-        if not openai_client.is_configured():
-            return 0
-
-        today = date.today().isoformat()
-        prompt = (
-            f'For a project called "{project_name}", suggest 6 to 12 concrete, actionable tasks. '
-            "Use well-researched, realistic time estimates (industry benchmarks, common studies: "
-            "e.g. resume update 2-4 hours, job application 1-2 hours each, interview prep 3-5 hours). "
-            'Return ONLY a JSON array. Each object must have: "title" (string), '
-            '"description" (string, include Complexity, Duration, Reasoning), and '
-            '"estimated_days" (number, working days to complete). '
-            "estimated_days: use decimals for part-days (e.g. 0.25 = ~2 hours, 0.5 = half day, 1 = one full day). "
-            "Minimum 0.25. Be accurate based on typical task duration research. "
-            f"Today is {today}. Tasks will be scheduled sequentially starting from today. "
-            'Example: [{"title": "Update resume", "description": "Complexity: Low. Duration: 2-3 hours. '
-            'Reasoning: ATS-friendly resume increases callback rate.", "estimated_days": 0.25}, '
-            '{"title": "Apply to 5 target companies", "description": "Complexity: Medium. Duration: 5-10 hours total. '
-            'Reasoning: Quality applications take 1-2 hrs each (research, tailoring).", "estimated_days": 1.5}]'
-        )
-        try:
-            _system = (
-                "You are a project planning assistant. Return only a valid JSON array. "
-                "Every task must have title, description, and estimated_days (number)."
-            )
-            try:
-                from ...services.context_brain.llm_gateway import gateway_chat
-                result = gateway_chat(
-                    messages=[{"role": "user", "content": prompt}],
-                    purpose='planner_intent',
-                    system_prompt=_system,
-                    trace_id=trace_id,
-                )
-            except Exception:
-                result = openai_client.chat(
-                    messages=[{"role": "user", "content": prompt}],
-                    system_prompt=_system,
-                    trace_id=trace_id,
-                )
-            text = (result.get("reply") or "").strip()
-        except Exception as e:  # pragma: no cover - defensive logging
-            log_info(trace_id, f"generate_tasks_for_project_error={e}")
-            return 0
-
-        start_idx = text.find("[")
-        end_idx = text.rfind("]")
-        if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
-            return 0
-
-        try:
-            items = json_mod.loads(text[start_idx : end_idx + 1])
-        except json_mod.JSONDecodeError:
-            return 0
-        if not isinstance(items, list):
-            return 0
+        return 0
 
     cursor = date.today()
     added = 0
