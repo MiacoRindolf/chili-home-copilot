@@ -1,6 +1,7 @@
 """
-Dedicated APScheduler process. Docker Compose sets CHILI_SCHEDULER_ROLE=all on this service
-so broker sync, scans, code/reasoning cycles, etc. stay out of Uvicorn; the web app uses
+Dedicated APScheduler process. Docker Compose sets CHILI_SCHEDULER_ROLE on
+domain-specific worker services so broker sync, scans, code/reasoning cycles,
+and market snapshots stay out of Uvicorn; the web app uses
 CHILI_SCHEDULER_ROLE=none.
 
 Local default below is ``worker`` (heavy scans + heartbeat only) if you run the script
@@ -9,7 +10,7 @@ without env vars.
 Usage:
   python scripts/scheduler_worker.py
 
-Docker: see docker-compose ``scheduler-worker`` service.
+Docker: see docker-compose ``scheduler-worker`` and ``market-snapshot-worker`` services.
 """
 import os
 import sys

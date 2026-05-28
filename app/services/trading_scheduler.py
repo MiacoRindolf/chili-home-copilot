@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -28,6 +28,35 @@ _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
 _VIABILITY_BRIDGE_MAX_TICKERS = 30
+
+
+def _learning_status_blocks_market_snapshots(
+    status: dict,
+    settings_obj,
+) -> tuple[bool, str]:
+    """Return whether a reported learning cycle should defer OHLCV snapshots."""
+    if not status.get("running"):
+        return False, "learning_idle"
+
+    stale_s = max(
+        300,
+        int(getattr(settings_obj, "learning_cycle_stale_seconds", 10800) or 10800),
+    )
+    started_raw = status.get("started_at")
+    if not started_raw:
+        return True, "learning_running_without_started_at"
+
+    try:
+        started = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        age_s = (datetime.now(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()
+    except Exception:
+        return True, "learning_running_unparseable_started_at"
+
+    if age_s > stale_s:
+        return False, f"stale_learning_running_age_s={int(age_s)}"
+    return True, f"learning_running_age_s={int(age_s)}"
 
 
 def _record_batch_job_failure_resilient(
@@ -303,12 +332,21 @@ def _run_brain_market_snapshot_job():
             from .trading.learning import get_learning_status
 
             _st = get_learning_status()
-            if _st.get("running"):
+            blocks_snapshots, block_reason = _learning_status_blocks_market_snapshots(
+                _st, _settings,
+            )
+            if blocks_snapshots:
                 logger.info(
                     "[scheduler] brain_market_snapshots deferred: learning cycle running "
-                    "(avoid parallel OHLCV with brain-worker; next interval will retry)"
+                    "(%s; avoid parallel OHLCV with brain-worker; next interval will retry)",
+                    block_reason,
                 )
                 return
+            if str(block_reason).startswith("stale_learning_running"):
+                logger.warning(
+                    "[scheduler] brain_market_snapshots proceeding despite stale learning-live flag: %s",
+                    block_reason,
+                )
         except Exception as _def_e:
             logger.debug("[scheduler] snapshot defer check skipped: %s", _def_e)
 
@@ -4171,6 +4209,7 @@ def start_scheduler():
         if role not in (
             "all", "web", "worker",
             "autotrader_only", "cron_only", "broker_sync_only",
+            "market_snapshot_only",
         ):
             logger.warning(
                 "[scheduler] invalid CHILI_SCHEDULER_ROLE=%r; using 'all' "
@@ -4182,6 +4221,12 @@ def start_scheduler():
         # (so scheduler-worker container drops both hot-loop call paths).
         include_heavy = role in ("all", "worker", "cron_only")
         include_web_light = role in ("all", "web", "cron_only")
+        # Market snapshots feed HRP/cash deployment, pattern mining, and
+        # vitals. Keep them available in the minimal trading stack without
+        # requiring the full heavy scheduler/profile.
+        include_market_snapshots = role in (
+            "all", "worker", "cron_only", "market_snapshot_only",
+        )
         # autotrader_only registers ONLY autotrader jobs. 'all'/'worker' still
         # include them (legacy behavior preserved). 'cron_only' excludes them.
         include_autotrader = role in ("all", "worker", "autotrader_only")
@@ -4207,7 +4252,9 @@ def start_scheduler():
         elif _hb_env_falsy:
             emit_worker_heartbeat = False
         else:
-            emit_worker_heartbeat = role in ("worker", "cron_only", "all")
+            emit_worker_heartbeat = role in (
+                "worker", "cron_only", "market_snapshot_only", "all",
+            )
 
         _scheduler = BackgroundScheduler(daemon=True)
         logger.info(
@@ -4260,8 +4307,9 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=35),
             )
 
-        if getattr(settings, "brain_market_snapshot_scheduler_enabled", True) and (
-            include_web_light or role in ("all", "worker")
+        if (
+            include_market_snapshots
+            and getattr(settings, "brain_market_snapshot_scheduler_enabled", True)
         ):
             _bsm = max(5, int(getattr(settings, "brain_market_snapshot_interval_minutes", 15)))
             _scheduler.add_job(

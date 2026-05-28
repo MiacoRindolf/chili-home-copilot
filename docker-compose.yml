@@ -3,7 +3,8 @@
 # Logical groups (single file, no extra infra for neural mesh v1):
 #   1) Foundation: postgres, ollama
 #   2) App / control plane: chili (FastAPI), brain (HTTP delegate)
-#   3) Minimal trading runtime: broker-sync-worker, autotrader-worker, fast-scan-worker.
+#   3) Minimal trading runtime: broker-sync-worker, autotrader-worker,
+#      fast-scan-worker, market-snapshot-worker.
 #   4) Heavy/offline lanes live behind profiles so Docker Desktop restarts do not
 #      resurrect every memory-heavy worker at once.
 #      Use: docker compose --profile heavy-workers up -d scheduler-worker brain-worker backtest-worker brain-work-dispatcher
@@ -485,7 +486,55 @@ services:
       retries: 3
       start_period: 15s
 
-  # All APScheduler jobs (broker sync, scans, code/reasoning cycles, …). ``chili`` uses role ``none``.
+  # Market snapshot worker. Keeps trading_snapshots fresh for HRP sizing,
+  # cash-deployment reliability, pattern mining, and setup vitals without
+  # requiring the full heavy scheduler/research profile.
+  market-snapshot-worker:
+    image: chili-app:local
+    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    labels:
+      com.chili.service: market-snapshot-worker
+      com.chili.entrypoint: scheduler_worker_market_snapshots
+    command: ["python", "scripts/scheduler_worker.py"]
+    env_file:
+      - path: .env
+        required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
+      - CHILI_SCHEDULER_ROLE=market_snapshot_only
+      - CHILI_SCHEDULER_EMIT_HEARTBEAT=1
+      - CHILI_RUNNING_IN_DOCKER=1
+      - CHILI_CONTAINER_CPU_LIMIT=2
+      - DATABASE_POOL_SIZE=4
+      - DATABASE_MAX_OVERFLOW=4
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - D:/CHILI-Docker/chili-data:/app/data
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Heavy APScheduler jobs (scans, code/reasoning cycles, research lanes).
+  # ``chili`` uses role ``none``; broker/autotrader hot paths have their own workers.
   scheduler-worker:
     image: chili-app:local
     profiles:

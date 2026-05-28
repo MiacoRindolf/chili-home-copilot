@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from app.config import settings
 
 ROLE_ALL = "all"
 HEARTBEAT_JOB_ID = "scheduler_worker_heartbeat"
+
+
+class _SettingsWithLearningStale:
+    learning_cycle_stale_seconds = 3600
 
 
 class _FakeBatchSession:
@@ -243,6 +249,60 @@ def test_scheduler_worker_role_registers_heavy_without_legacy_breakout(monkeypat
     finally:
         stop_scheduler()
         monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+
+def test_scheduler_market_snapshot_only_role_is_dedicated_lane(monkeypatch):
+    """The minimal trading stack has a dedicated market snapshot producer."""
+    from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
+
+    stop_scheduler()
+    monkeypatch.setattr(settings, "chili_scheduler_role", "market_snapshot_only")
+    try:
+        start_scheduler()
+        job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
+        assert "brain_market_snapshots" in job_ids
+        assert HEARTBEAT_JOB_ID in job_ids
+        assert "daily_market_scan" not in job_ids
+        assert "broker_sync" not in job_ids
+        assert "autotrader_tick" not in job_ids
+        assert "price_monitor" not in job_ids
+    finally:
+        stop_scheduler()
+        monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
+
+
+def test_market_snapshots_defer_for_fresh_learning_status():
+    from app.services.trading_scheduler import _learning_status_blocks_market_snapshots
+
+    status = {
+        "running": True,
+        "started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+    }
+
+    blocks, reason = _learning_status_blocks_market_snapshots(
+        status,
+        _SettingsWithLearningStale,
+    )
+
+    assert blocks is True
+    assert reason.startswith("learning_running_age_s=")
+
+
+def test_market_snapshots_ignore_stale_learning_status():
+    from app.services.trading_scheduler import _learning_status_blocks_market_snapshots
+
+    status = {
+        "running": True,
+        "started_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+    }
+
+    blocks, reason = _learning_status_blocks_market_snapshots(
+        status,
+        _SettingsWithLearningStale,
+    )
+
+    assert blocks is False
+    assert reason.startswith("stale_learning_running_age_s=")
 
 
 def test_brain_worker_default_interval_five_minutes():
