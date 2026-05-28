@@ -21,6 +21,8 @@ BROKER_COINBASE = "coinbase"
 BROKER_METAMASK = "metamask"
 BROKER_MANUAL = "manual"
 
+_KNOWN_NUMERIC_CRYPTO_BASES = frozenset({"00"})
+
 
 # ── Status aggregation ───────────────────────────────────────────────
 
@@ -54,7 +56,10 @@ def get_all_broker_statuses() -> dict[str, Any]:
 
 def _is_crypto(ticker: str) -> bool:
     t = (ticker or "").upper()
-    return t.endswith("-USD") and not t.replace("-USD", "").isdigit()
+    if not t.endswith("-USD"):
+        return False
+    base = t.replace("-USD", "")
+    return bool(base) and (not base.isdigit() or base in _KNOWN_NUMERIC_CRYPTO_BASES)
 
 
 def get_best_broker_for(ticker: str) -> str:

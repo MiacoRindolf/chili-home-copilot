@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app import models
 from app.models.trading import Trade
 
@@ -309,6 +311,30 @@ def test_get_quote_prices_batch_uses_rh_stocks_get_quotes() -> None:
     fake_stocks.get_quotes.assert_called_once()
     assert out["AAA"] == 10.0
     assert out["BBB"] == 55.3
+
+
+def test_get_quote_prices_batch_treats_known_numeric_crypto_as_crypto() -> None:
+    import robin_stocks.robinhood as _rh
+
+    from app.services.trading.venue.robinhood_spot import RobinhoodSpotAdapter
+
+    adapter = RobinhoodSpotAdapter()
+    fake_stocks = MagicMock()
+    with (
+        patch.object(_rh, "stocks", fake_stocks),
+        patch(
+            "app.services.broker_service.get_crypto_quote",
+            return_value={
+                "bid_price": "0.0040",
+                "ask_price": "0.0042",
+                "mark_price": "0.0041",
+            },
+        ),
+    ):
+        out = adapter.get_quote_prices_batch(["00-USD"])
+
+    fake_stocks.get_quotes.assert_not_called()
+    assert out["00"] == pytest.approx(0.0041)
 
 
 # ── Monitor integration ───────────────────────────────────────────────────

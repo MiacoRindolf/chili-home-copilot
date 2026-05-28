@@ -2306,7 +2306,10 @@ def _scale_costs_for_asset_class(
     but higher frequency costs.  Returns (adjusted_spread, adjusted_commission).
     """
     t = (ticker or "").upper()
-    is_crypto = t.endswith("-USD") and not t.replace("-USD", "").isdigit()
+    base = t.replace("-USD", "") if t.endswith("-USD") else ""
+    is_crypto = t.endswith("-USD") and bool(base) and (
+        not base.isdigit() or base in {"00"}
+    )
 
     if is_crypto:
         base = t.replace("-USD", "")

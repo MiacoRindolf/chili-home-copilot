@@ -26,6 +26,7 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 _VENUE = "robinhood"
+_KNOWN_NUMERIC_CRYPTO_BASES = frozenset({"00"})
 
 
 def reset_duplicate_client_order_guard_for_tests() -> None:
@@ -81,7 +82,7 @@ def _is_crypto_product(product_id: str) -> bool:
     if not s.endswith("-USD"):
         return False
     base = s[:-4]
-    return bool(base) and not base.isdigit()
+    return bool(base) and (not base.isdigit() or base in _KNOWN_NUMERIC_CRYPTO_BASES)
 
 
 def _now_freshness(

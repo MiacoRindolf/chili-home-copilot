@@ -149,6 +149,12 @@ def test_crypto_qty_eight_decimal():
     assert normalize_quantity(0.000000018, "BTC-USD") == pytest.approx(0.00000002)
 
 
+def test_known_numeric_crypto_uses_crypto_precision():
+    assert float(tick_size("00-USD", 0.0042)) == pytest.approx(1e-8)
+    assert normalize_price(0.004200019, "00-USD") == pytest.approx(0.00420002)
+    assert normalize_quantity(0.000000018, "00-USD") == pytest.approx(0.00000002)
+
+
 def test_option_qty_is_integer_contracts():
     # OCC symbols quote in whole contracts only
     assert normalize_quantity(5.7, SAMPLE_CALL_3PLUS) == pytest.approx(6.0)

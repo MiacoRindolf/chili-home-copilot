@@ -64,13 +64,15 @@ from decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal, InvalidOperation
 
 logger = logging.getLogger(__name__)
 
+_KNOWN_NUMERIC_CRYPTO_BASES = frozenset({"00"})
+
 
 # ── Venue detection ───────────────────────────────────────────────────
 
 
 def _is_crypto(ticker: str) -> bool:
     """A ticker is treated as crypto if it ends in '-USD' and the
-    pre-suffix part is not all digits.
+    pre-suffix part is not all digits, except known numeric crypto listings.
 
     Pattern matches CHILI's existing convention (broker_manager.py:55).
     Examples: BTC-USD, DOGE-USD, AVAX-USD → True. SPY → False.
@@ -81,7 +83,7 @@ def _is_crypto(ticker: str) -> bool:
     if not t.endswith("-USD"):
         return False
     base = t.replace("-USD", "")
-    return bool(base) and not base.isdigit()
+    return bool(base) and (not base.isdigit() or base in _KNOWN_NUMERIC_CRYPTO_BASES)
 
 
 def _is_option_symbol(ticker: str) -> bool:
