@@ -732,6 +732,30 @@ def latest_edge_reliability_snapshots(
     *,
     scan_pattern_ids: list[int] | set[int] | tuple[int, ...],
 ) -> dict[int, dict[str, Any]]:
+    by_slice = latest_edge_reliability_snapshot_slices(
+        db,
+        scan_pattern_ids=scan_pattern_ids,
+    )
+    out: dict[int, dict[str, Any]] = {}
+    for (pid, _slice), payload in by_slice.items():
+        if pid not in out:
+            out[pid] = payload
+    return out
+
+
+def latest_edge_reliability_snapshot_slices(
+    db: Session,
+    *,
+    scan_pattern_ids: list[int] | set[int] | tuple[int, ...],
+) -> dict[tuple[int, str], dict[str, Any]]:
+    """Return the latest reliability snapshot per pattern and asset slice.
+
+    ``ScanPattern.asset_class='all'`` patterns are intentionally allowed, but
+    their stock/crypto/options evidence should remain separately calibrated.
+    Request-path consumers can use the exact ``(pattern_id, asset_class)`` row
+    and fall back only to the explicit ``all`` slice when no asset-specific
+    snapshot has been materialized yet.
+    """
     ids = [int(x) for x in scan_pattern_ids if x is not None]
     if not ids:
         return {}
@@ -743,15 +767,23 @@ def latest_edge_reliability_snapshots(
         .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
         .all()
     )
-    out: dict[int, dict[str, Any]] = {}
+    out: dict[tuple[int, str], dict[str, Any]] = {}
     for row in rows:
         payload = _json_dict(row.payload)
         pid = _safe_int(payload.get("scan_pattern_id"))
-        if pid is None or pid in out:
+        if pid is None:
+            continue
+        slice_key = (
+            _canonical_asset_class(payload.get("slice_asset_class"))
+            or _canonical_asset_class(payload.get("asset_class"))
+            or "all"
+        )
+        key = (pid, slice_key)
+        if key in out:
             continue
         payload["snapshot_event_id"] = int(row.id)
         payload["snapshot_created_at"] = row.created_at.isoformat() if row.created_at else None
-        out[pid] = payload
+        out[key] = payload
     return out
 
 

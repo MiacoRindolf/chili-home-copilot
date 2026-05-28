@@ -400,6 +400,121 @@ def test_imminent_alerts_use_cached_edge_snapshots(db, paired_client):
     assert row["cash_deployment_rank"] in (None, 1)
 
 
+def test_imminent_alerts_keep_cached_edge_snapshots_asset_sliced(db, paired_client):
+    client, user = paired_client
+
+    pat = ScanPattern(
+        name="diag_mixed_asset_snapshot",
+        rules_json={},
+        origin="brain",
+        asset_class="all",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add(pat)
+    db.flush()
+
+    stock_alert = BreakoutAlert(
+        user_id=user.id,
+        scan_pattern_id=pat.id,
+        ticker="MIXS",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        outcome="pending",
+        score_at_alert=82.0,
+        price_at_alert=25.0,
+        entry_price=25.0,
+        stop_loss=23.0,
+        target_price=30.0,
+        alerted_at=datetime.utcnow(),
+        indicator_snapshot={"imminent_scorecard": {"signal_lane": "standard"}},
+    )
+    crypto_alert = BreakoutAlert(
+        user_id=user.id,
+        scan_pattern_id=pat.id,
+        ticker="MIXC-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        outcome="pending",
+        score_at_alert=84.0,
+        price_at_alert=0.25,
+        entry_price=0.25,
+        stop_loss=0.23,
+        target_price=0.32,
+        alerted_at=datetime.utcnow(),
+        indicator_snapshot={"imminent_scorecard": {"signal_lane": "standard"}},
+    )
+    db.add_all([stock_alert, crypto_alert])
+    db.add_all([
+        BrainWorkEvent(
+            domain="trading",
+            event_type="edge_reliability_snapshot",
+            event_kind="outcome",
+            dedupe_key=f"edge-reliability-snapshot-test:{pat.id}:stock",
+            status="done",
+            payload={
+                "scan_pattern_id": pat.id,
+                "asset_class": "stock",
+                "slice_asset_class": "stock",
+                "lifecycle_stage": "promoted",
+                "expected_ev_pct": 1.1,
+                "calibrated_ev_pct": 1.4,
+                "realized_ev_pct": 1.8,
+                "brier_score": 0.18,
+                "closed_evidence_count": 8,
+                "graduation_blocker": "graduation_ready",
+                "edge_eval_count": 11,
+                "primary_symbol": "MIXS",
+                "window_days": 7,
+            },
+            created_at=datetime.utcnow(),
+        ),
+        BrainWorkEvent(
+            domain="trading",
+            event_type="edge_reliability_snapshot",
+            event_kind="outcome",
+            dedupe_key=f"edge-reliability-snapshot-test:{pat.id}:crypto",
+            status="done",
+            payload={
+                "scan_pattern_id": pat.id,
+                "asset_class": "crypto",
+                "slice_asset_class": "crypto",
+                "lifecycle_stage": "promoted",
+                "expected_ev_pct": 2.9,
+                "calibrated_ev_pct": 3.2,
+                "realized_ev_pct": 4.1,
+                "brier_score": 0.12,
+                "closed_evidence_count": 9,
+                "graduation_blocker": "graduation_ready",
+                "edge_eval_count": 13,
+                "primary_symbol": "MIXC-USD",
+                "window_days": 7,
+            },
+            created_at=datetime.utcnow(),
+        ),
+    ])
+    db.commit()
+
+    resp = client.get("/api/trading/monitor/imminent-alerts?hours=72")
+
+    assert resp.status_code == 200
+    by_ticker = {row["ticker"]: row for row in resp.json()["alerts"]}
+    assert by_ticker["MIXS"]["calibrated_ev_pct"] == pytest.approx(1.4)
+    assert by_ticker["MIXS"]["realized_ev_pct"] == pytest.approx(1.8)
+    assert by_ticker["MIXS"]["venue_readiness"] == "equity_live_enabled"
+    assert by_ticker["MIXC-USD"]["calibrated_ev_pct"] == pytest.approx(3.2)
+    assert by_ticker["MIXC-USD"]["realized_ev_pct"] == pytest.approx(4.1)
+    assert by_ticker["MIXC-USD"]["venue_readiness"] in {
+        "crypto_live_enabled",
+        "crypto_live_disabled",
+    }
+    assert (
+        by_ticker["MIXS"]["edge_reliability_snapshot_event_id"]
+        != by_ticker["MIXC-USD"]["edge_reliability_snapshot_event_id"]
+    )
+
+
 def test_edge_supply_endpoint_exposes_profitability_diagnostics(db, paired_client):
     client, user = paired_client
 

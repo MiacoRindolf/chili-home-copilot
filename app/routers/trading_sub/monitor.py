@@ -29,7 +29,7 @@ from ...services.trading.cash_deployment import (
 from ...services.trading.edge_reliability import (
     edge_supply_rows,
     edge_supply_summary,
-    latest_edge_reliability_snapshots,
+    latest_edge_reliability_snapshot_slices,
 )
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
@@ -179,6 +179,17 @@ def _safe_float(value: Any) -> float | None:
     if out != out:
         return None
     return out
+
+
+def _canonical_imminent_asset_class(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"stock", "stocks", "equity", "equities"}:
+        return "stock"
+    if raw in {"crypto", "cryptocurrency", "coin", "coinbase_spot"}:
+        return "crypto"
+    if raw in {"option", "options"}:
+        return "options"
+    return "all"
 
 
 def _autotrader_snapshot(run: AutoTraderRun | None) -> dict[str, Any]:
@@ -703,12 +714,15 @@ def api_monitor_imminent_alerts(
     if pat_ids:
         for p in db.query(ScanPattern).filter(ScanPattern.id.in_(pat_ids)).all():
             patterns[p.id] = p
-    edge_supply_by_pattern: dict[int, dict[str, Any]] = {}
+    edge_supply_by_pattern_asset: dict[tuple[int, str], dict[str, Any]] = {}
     if pat_ids:
         try:
-            snapshots = latest_edge_reliability_snapshots(db, scan_pattern_ids=pat_ids)
-            for pid, row in snapshots.items():
-                edge_supply_by_pattern[int(pid)] = annotate_cash_deployment_row(
+            snapshots = latest_edge_reliability_snapshot_slices(
+                db,
+                scan_pattern_ids=pat_ids,
+            )
+            for key, row in snapshots.items():
+                edge_supply_by_pattern_asset[key] = annotate_cash_deployment_row(
                     db,
                     row,
                     user_id=user_id,
@@ -742,11 +756,15 @@ def api_monitor_imminent_alerts(
         )
         blocker_category = _imminent_blocker_category(run, pat, signal_lane)
         _bump_imminent_summary(summary, blocker_category)
-        supply = (
-            edge_supply_by_pattern.get(int(a.scan_pattern_id))
-            if a.scan_pattern_id
-            else {}
-        ) or {}
+        supply: dict[str, Any] = {}
+        if a.scan_pattern_id:
+            pid = int(a.scan_pattern_id)
+            asset_key = _canonical_imminent_asset_class(a.asset_type)
+            supply = (
+                edge_supply_by_pattern_asset.get((pid, asset_key))
+                or edge_supply_by_pattern_asset.get((pid, "all"))
+                or {}
+            )
         items.append(
             {
                 "id": a.id,
