@@ -2324,6 +2324,12 @@ def passes_rule_gate(
                     snap["slippage_reprice_expected_net_pct"] = (
                         adjusted_edge.snapshot.get("expected_net_pct")
                     )
+                    snap["reprice_ev_after_cost"] = adjusted_edge.snapshot.get(
+                        "expected_net_pct"
+                    )
+                    snap["reprice_decision"] = (
+                        "retry_if_allowed" if adjusted_edge.allowed else "wait"
+                    )
                     snap["slippage_reprice_positive_edge"] = bool(adjusted_edge.allowed)
                 except Exception as exc:
                     snap["slippage_reprice_error"] = type(exc).__name__

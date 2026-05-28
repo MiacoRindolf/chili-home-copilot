@@ -7,14 +7,23 @@ import pytest
 from app.config import settings
 from app.models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from app.services.trading.cash_deployment import cash_deployment_rows, cash_deployment_summary
+from app.services.trading.edge_reliability import persist_edge_reliability_snapshot
 
 
-def _pattern(db, *, name: str, lifecycle: str = "promoted", recert: bool = False, recert_reason: str | None = None):
+def _pattern(
+    db,
+    *,
+    name: str,
+    lifecycle: str = "promoted",
+    recert: bool = False,
+    recert_reason: str | None = None,
+    asset_class: str = "stock",
+):
     pat = ScanPattern(
         name=name,
         rules_json={},
         origin="test",
-        asset_class="stock",
+        asset_class=asset_class,
         timeframe="1d",
         active=True,
         lifecycle_stage=lifecycle,
@@ -26,11 +35,11 @@ def _pattern(db, *, name: str, lifecycle: str = "promoted", recert: bool = False
     return pat
 
 
-def _alert(db, pat: ScanPattern, *, ticker: str):
+def _alert(db, pat: ScanPattern, *, ticker: str, asset_type: str = "stock"):
     alert = BreakoutAlert(
         scan_pattern_id=pat.id,
         ticker=ticker,
-        asset_type="stock",
+        asset_type=asset_type,
         alert_tier="pattern_imminent",
         outcome="pending",
         score_at_alert=85.0,
@@ -93,7 +102,7 @@ def _closed_paper(db, pat: ScanPattern, alert: BreakoutAlert, *, count: int = 5,
                 exit_price=100.0 + pnl_pct,
                 pnl=pnl_pct,
                 pnl_pct=pnl_pct,
-                signal_json={"paper_shadow": True},
+                signal_json={"paper_shadow": True, "asset_type": alert.asset_type},
             )
         )
 
@@ -192,4 +201,91 @@ def test_cash_deployment_exposure_cap_blocks_sizing(db, monkeypatch):
     assert row["cash_deployment_category"] == "positive_ev_execution_blocked"
     assert row["exposure_blocker"]
     assert row["max_safe_notional"] == 0.0
+    assert row["live_deployable"] is False
+
+
+def test_cash_deployment_stale_edge_evidence_needs_refresh(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 1)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_data_age_hours", 1.0)
+
+    old = datetime.utcnow() - timedelta(hours=2)
+    pat = _pattern(db, name="cash stale evidence")
+    alert = _alert(db, pat, ticker="STALE")
+    alert.alerted_at = old
+    run = _run(db, pat, alert, expected=2.0)
+    run.created_at = old
+    _closed_paper(db, pat, alert, count=2, pnl_pct=4.0)
+    db.commit()
+
+    rows = cash_deployment_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+
+    assert row["cash_deployment_category"] == "needs_calibration"
+    assert row["freshness_blocker"] == "stale_data"
+    assert row["recommended_work_event"] == "edge_reliability_refresh"
+    assert row["max_safe_notional"] == 0.0
+    assert row["live_deployable"] is False
+
+
+def test_cash_deployment_prefers_materialized_asset_slices(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_crypto_cost_pct", 0.25)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 1)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.5)
+
+    pat = _pattern(db, name="all asset slice cash", asset_class="all")
+    stock_alert = _alert(db, pat, ticker="SLICE", asset_type="stock")
+    crypto_alert = _alert(db, pat, ticker="SLICE-USD", asset_type="crypto")
+    _run(db, pat, stock_alert, expected=2.0)
+    _run(db, pat, crypto_alert, expected=-2.0, reason="non_positive_expected_edge")
+    _closed_paper(db, pat, stock_alert, count=5, pnl_pct=4.0)
+    _closed_paper(db, pat, crypto_alert, count=5, pnl_pct=-2.0)
+    db.commit()
+
+    snapshot = persist_edge_reliability_snapshot(
+        db,
+        pat.id,
+        window_days=7,
+        source="test_materialized_slice",
+    )
+    db.commit()
+
+    assert snapshot["asset_slice_count"] == 2
+    rows = cash_deployment_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    by_asset = {row["asset_class"]: row for row in rows}
+
+    assert set(by_asset) == {"stock", "crypto"}
+    assert by_asset["stock"]["snapshot_granularity"] == "asset_slice"
+    assert by_asset["stock"]["calibrated_ev_after_cost_pct"] > 0
+    assert by_asset["stock"]["cash_deployment_category"] == "live_deployable"
+    assert by_asset["crypto"]["snapshot_granularity"] == "asset_slice"
+    assert by_asset["crypto"]["calibrated_ev_after_cost_pct"] < 0
+    assert by_asset["crypto"]["cash_deployment_category"] == "negative_ev"
+    assert by_asset["crypto"]["cash_deployment_rank"] is None
+
+
+def test_repeated_broker_rejects_degrade_venue_readiness(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 1)
+    monkeypatch.setattr(settings, "chili_cash_deployment_venue_degrade_min_rejects", 2)
+    monkeypatch.setattr(settings, "chili_cash_deployment_venue_degrade_reject_rate", 0.1)
+
+    pat = _pattern(db, name="cash repeated reject")
+    alert = _alert(db, pat, ticker="RJCT2")
+    _run(db, pat, alert, expected=2.0, reason="broker:Robinhood returned no order_id")
+    _run(db, pat, alert, expected=2.1, reason="broker:Robinhood returned no order_id")
+    _closed_paper(db, pat, alert, count=1, pnl_pct=4.0)
+    db.commit()
+
+    rows = cash_deployment_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+
+    assert row["cash_deployment_category"] == "positive_ev_execution_blocked"
+    assert row["execution_blocker"] == "venue_degraded_repeated_broker_rejects"
+    assert "degraded_repeated_rejects" in row["venue_readiness"]
     assert row["live_deployable"] is False

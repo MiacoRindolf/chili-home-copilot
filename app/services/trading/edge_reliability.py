@@ -1,9 +1,9 @@
 """Pattern-level edge reliability and profitability supply diagnostics.
 
-This module deliberately stays aggregate-only: it reads existing AutoTrader,
-paper, live, and alert evidence, then writes durable snapshots to the
-``brain_work_events`` outcome ledger. It does not promote patterns or relax
-live-trading gates.
+This module deliberately stores aggregate metrics only: it reads existing
+AutoTrader, paper, live, and alert evidence, then writes pattern-level and
+asset-sliced snapshots to the ``brain_work_events`` outcome ledger. It does
+not promote patterns or relax live-trading gates.
 """
 from __future__ import annotations
 
@@ -35,10 +35,13 @@ EDGE_RELIABILITY_SNAPSHOT = "edge_reliability_snapshot"
 RECERT_RESCUE_DIAGNOSTIC = "recert_rescue_diagnostic"
 EXIT_VARIANT_DIAGNOSTIC = "exit_variant_diagnostic"
 PROVENANCE_BACKFILL_DIAGNOSTIC = "provenance_backfill_diagnostic"
+EDGE_RELIABILITY_GRANULARITY_PATTERN = "pattern"
+EDGE_RELIABILITY_GRANULARITY_ASSET_SLICE = "asset_slice"
 
 DEFAULT_WINDOW_DAYS = 30
 DEFAULT_MIN_CLOSED_EVIDENCE = 5
 DEFAULT_TOP_LIMIT = 25
+RunSliceRecord = tuple[AutoTraderRun, BreakoutAlert | None, dict[str, Any], dict[str, str]]
 
 HARD_RECERT_REASONS = frozenset({
     "negative_oos_recert",
@@ -80,6 +83,76 @@ def _json_dict(value: Any) -> dict[str, Any]:
             return {}
         return dict(parsed) if isinstance(parsed, dict) else {}
     return {}
+
+
+def _canonical_asset_class(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"stock", "stocks", "equity", "equities", "us_equity", "us_eq"}:
+        return "stock"
+    if raw in {"crypto", "cryptocurrency", "coin", "coinbase_spot"}:
+        return "crypto"
+    if raw in {"option", "options"}:
+        return "options"
+    if raw in {"", "all", "unknown", "none"}:
+        return None
+    return raw
+
+
+def _asset_class_for_evidence(
+    *,
+    ticker: Any = None,
+    alert: BreakoutAlert | None = None,
+    pattern: ScanPattern | None = None,
+    trade: Trade | None = None,
+    paper: PaperTrade | None = None,
+) -> str:
+    direct = None
+    if alert is not None:
+        direct = _canonical_asset_class(getattr(alert, "asset_type", None))
+    if direct is None and trade is not None:
+        direct = _canonical_asset_class(getattr(trade, "asset_kind", None))
+    if direct is None and paper is not None:
+        signal = _json_dict(getattr(paper, "signal_json", None))
+        direct = _canonical_asset_class(signal.get("asset_type") or signal.get("asset_class"))
+    if direct is None and pattern is not None:
+        direct = _canonical_asset_class(getattr(pattern, "asset_class", None))
+    symbol = str(
+        ticker
+        or getattr(alert, "ticker", None)
+        or getattr(trade, "ticker", None)
+        or getattr(paper, "ticker", None)
+        or ""
+    ).strip().upper()
+    if direct is None and symbol.endswith("-USD"):
+        direct = "crypto"
+    return direct or "stock"
+
+
+def _probability_source_for(edge: dict[str, Any]) -> str:
+    return str(edge.get("probability_source") or "unknown").strip().lower() or "unknown"
+
+
+def _execution_lane_for(run: AutoTraderRun) -> str:
+    snap = _json_dict(getattr(run, "rule_snapshot", None))
+    for key in ("execution_lane", "autotrader_execution_lane", "broker_lane"):
+        lane = str(snap.get(key) or "").strip().lower()
+        if lane:
+            return lane
+    reason = str(getattr(run, "reason", "") or "").strip().lower()
+    decision = str(getattr(run, "decision", "") or "").strip().lower()
+    if decision in {"placed", "scaled_in"}:
+        return "live"
+    if reason in SHADOW_REASONS or snap.get("paper_observation_signal_lane"):
+        return "shadow_observation"
+    if reason == "non_positive_expected_edge":
+        return "ev_gate"
+    if reason == "missed_entry_slippage":
+        return "slippage_gate"
+    if reason == "pattern_recert_required":
+        return "recert_gate"
+    if reason.startswith("broker:") or reason.startswith("broker_reject_suppressed:") or reason.startswith("venue_"):
+        return "broker_reject"
+    return decision or "unknown"
 
 
 def _mean(values: list[float]) -> float | None:
@@ -248,6 +321,13 @@ def _recommended_work_event(blocker: str, *, scan_pattern_id: int | None) -> str
 def _row_fingerprint(row: dict[str, Any]) -> str:
     payload = {
         "scan_pattern_id": row.get("scan_pattern_id"),
+        "snapshot_granularity": row.get("snapshot_granularity"),
+        "edge_slice_id": row.get("edge_slice_id"),
+        "asset_class": row.get("asset_class"),
+        "signal_lane": row.get("signal_lane"),
+        "probability_source": row.get("probability_source"),
+        "execution_lane": row.get("execution_lane"),
+        "lifecycle_stage": row.get("lifecycle_stage"),
         "window_days": row.get("window_days"),
         "edge_eval_count": row.get("edge_eval_count"),
         "closed_evidence_count": row.get("closed_evidence_count"),
@@ -258,6 +338,64 @@ def _row_fingerprint(row: dict[str, Any]) -> str:
     }
     blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:20]
+
+
+def _slice_id(
+    *,
+    scan_pattern_id: int,
+    asset_class: str,
+    signal_lane: str,
+    probability_source: str,
+    lifecycle_stage: str,
+    execution_lane: str,
+    window_days: int,
+) -> str:
+    parts = {
+        "p": int(scan_pattern_id),
+        "asset": asset_class,
+        "lane": signal_lane,
+        "prob": probability_source,
+        "life": lifecycle_stage,
+        "exec": execution_lane,
+        "w": int(window_days),
+    }
+    blob = json.dumps(parts, sort_keys=True, separators=(",", ":"))
+    suffix = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+    return (
+        f"p{int(scan_pattern_id)}:{asset_class}:{signal_lane}:"
+        f"{probability_source}:{lifecycle_stage}:{execution_lane}:w{int(window_days)}:{suffix}"
+    )
+
+
+def _run_slice_dimensions(
+    run: AutoTraderRun,
+    *,
+    alert: BreakoutAlert | None,
+    pattern: ScanPattern | None,
+    edge: dict[str, Any],
+) -> dict[str, str]:
+    lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "unknown").strip().lower()
+    return {
+        "asset_class": _asset_class_for_evidence(
+            ticker=getattr(run, "ticker", None),
+            alert=alert,
+            pattern=pattern,
+        ),
+        "signal_lane": _signal_lane_for(alert, run),
+        "probability_source": _probability_source_for(edge),
+        "lifecycle_stage": lifecycle or "unknown",
+        "execution_lane": _execution_lane_for(run),
+    }
+
+
+def _slice_key(dimensions: dict[str, str]) -> tuple[str, str, str, str, str]:
+    return (
+        dimensions.get("asset_class") or "stock",
+        dimensions.get("signal_lane") or "standard",
+        dimensions.get("probability_source") or "unknown",
+        dimensions.get("lifecycle_stage") or "unknown",
+        dimensions.get("execution_lane") or "unknown",
+    )
 
 
 def compute_pattern_edge_reliability(
@@ -444,8 +582,11 @@ def compute_pattern_edge_reliability(
     )
     row = {
         "scan_pattern_id": pid,
+        "snapshot_granularity": EDGE_RELIABILITY_GRANULARITY_PATTERN,
+        "edge_slice_id": None,
         "pattern_name": getattr(pattern, "name", None),
         "asset_class": getattr(pattern, "asset_class", None),
+        "pattern_asset_class": getattr(pattern, "asset_class", None),
         "timeframe": getattr(pattern, "timeframe", None),
         "lifecycle_stage": getattr(pattern, "lifecycle_stage", None),
         "promotion_status": getattr(pattern, "promotion_status", None),
@@ -505,6 +646,314 @@ def compute_pattern_edge_reliability(
     return row
 
 
+def compute_pattern_edge_reliability_slices(
+    db: Session,
+    scan_pattern_id: int,
+    *,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    min_closed_evidence: int = DEFAULT_MIN_CLOSED_EVIDENCE,
+) -> list[dict[str, Any]]:
+    """Compute reliability rows by asset/lane/source/execution slice.
+
+    The pattern-level aggregate remains useful for backward compatibility, but
+    live cash deployment must not average stock, crypto, options, shadow, and
+    broker-failure evidence into one authority number. Slice rows include only
+    closed outcomes linked to the same alert ids as the slice, which is
+    conservative when provenance is incomplete and prevents cross-asset leakage.
+    """
+    pid = int(scan_pattern_id)
+    pattern = db.get(ScanPattern, pid)
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
+
+    runs = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.scan_pattern_id == pid)
+        .filter(AutoTraderRun.created_at >= cutoff)
+        .order_by(AutoTraderRun.created_at.asc())
+        .all()
+    )
+    if not runs:
+        return []
+
+    alert_ids = {
+        int(run.breakout_alert_id)
+        for run in runs
+        if getattr(run, "breakout_alert_id", None) is not None
+    }
+    alerts_by_id: dict[int, BreakoutAlert] = {}
+    if alert_ids:
+        alerts_by_id = {
+            int(row.id): row
+            for row in db.query(BreakoutAlert).filter(BreakoutAlert.id.in_(alert_ids)).all()
+        }
+
+    grouped: dict[tuple[str, str, str, str, str], list[RunSliceRecord]] = {}
+    for run in runs:
+        alert = alerts_by_id.get(int(run.breakout_alert_id)) if run.breakout_alert_id else None
+        edge = _entry_edge_snapshot(run)
+        dimensions = _run_slice_dimensions(run, alert=alert, pattern=pattern, edge=edge)
+        grouped.setdefault(_slice_key(dimensions), []).append((run, alert, edge, dimensions))
+
+    pattern_alert_ids = [
+        int(row.id)
+        for row in (
+            db.query(BreakoutAlert.id)
+            .filter(BreakoutAlert.scan_pattern_id == pid)
+            .filter(BreakoutAlert.alerted_at >= cutoff)
+            .all()
+        )
+    ]
+    paper_link_filter = (
+        PaperTrade.paper_shadow_of_alert_id.in_(pattern_alert_ids)
+        if pattern_alert_ids
+        else false()
+    )
+    paper_rows = [
+        row
+        for row in (
+            db.query(PaperTrade)
+            .filter(
+                PaperTrade.status == "closed",
+                or_(
+                    PaperTrade.scan_pattern_id == pid,
+                    paper_link_filter,
+                ),
+            )
+            .all()
+        )
+        if (_event_time(row) is None or _event_time(row) >= cutoff)
+    ]
+    live_rows = (
+        db.query(Trade)
+        .filter(Trade.scan_pattern_id == pid)
+        .filter(Trade.status == "closed")
+        .filter(
+            or_(
+                Trade.entry_date.is_(None),
+                Trade.entry_date >= cutoff,
+                Trade.exit_date >= cutoff,
+            )
+        )
+        .all()
+    )
+
+    rows: list[dict[str, Any]] = []
+    for key, records in grouped.items():
+        asset_class, signal_lane, probability_source, lifecycle_stage, execution_lane = key
+        slice_alert_ids = {
+            int(run.breakout_alert_id)
+            for run, _alert, _edge, _dims in records
+            if getattr(run, "breakout_alert_id", None) is not None
+        }
+
+        expected_values: list[float] = []
+        probabilities: list[float] = []
+        breakevens: list[float] = []
+        reason_counts: Counter[str] = Counter()
+        decision_counts: Counter[str] = Counter()
+        signal_lanes: Counter[str] = Counter()
+        probability_sources: Counter[str] = Counter()
+        asset_types: Counter[str] = Counter()
+        tickers: Counter[str] = Counter()
+        latest_seen: datetime | None = None
+        prob_by_alert: dict[int, float] = {}
+
+        for run, alert, edge, dimensions in records:
+            latest_seen = max(filter(None, [latest_seen, _event_time(run)]), default=None)
+            expected = _safe_float(edge.get("expected_net_pct"))
+            if expected is not None:
+                expected_values.append(expected)
+            prob = _safe_float(edge.get("probability"))
+            if prob is not None:
+                probabilities.append(prob)
+                if getattr(run, "breakout_alert_id", None) is not None:
+                    prob_by_alert[int(run.breakout_alert_id)] = prob
+            be = _safe_float(edge.get("breakeven_probability"))
+            if be is not None:
+                breakevens.append(be)
+            reason_counts[_reason_bucket(str(getattr(run, "reason", "") or ""))] += 1
+            decision = str(getattr(run, "decision", "") or "unknown").strip().lower()
+            decision_counts[decision or "unknown"] += 1
+            signal_lanes[dimensions["signal_lane"]] += 1
+            probability_sources[dimensions["probability_source"]] += 1
+            asset_types[dimensions["asset_class"]] += 1
+            ticker = str(
+                getattr(run, "ticker", None)
+                or getattr(alert, "ticker", None)
+                or ""
+            ).strip().upper()
+            if ticker:
+                tickers[ticker] += 1
+
+        slice_paper_rows = [
+            row
+            for row in paper_rows
+            if getattr(row, "paper_shadow_of_alert_id", None) is not None
+            and int(getattr(row, "paper_shadow_of_alert_id")) in slice_alert_ids
+        ]
+        slice_live_rows = [
+            row
+            for row in live_rows
+            if getattr(row, "related_alert_id", None) is not None
+            and int(getattr(row, "related_alert_id")) in slice_alert_ids
+        ]
+
+        paper_returns = [_paper_return_pct(row) for row in slice_paper_rows]
+        paper_returns_f = [v for v in paper_returns if v is not None]
+        live_returns = [_live_return_pct(row) for row in slice_live_rows]
+        live_returns_f = [v for v in live_returns if v is not None]
+        all_returns = paper_returns_f + live_returns_f
+
+        labels: list[int] = []
+        brier_terms: list[float] = []
+        fallback_p = _mean(probabilities)
+        for row in slice_paper_rows:
+            label = _outcome_label(getattr(row, "pnl", None))
+            if label is None:
+                continue
+            labels.append(label)
+            alert_id = getattr(row, "paper_shadow_of_alert_id", None)
+            pred = prob_by_alert.get(int(alert_id)) if alert_id is not None else fallback_p
+            if pred is not None:
+                brier_terms.append((float(pred) - float(label)) ** 2)
+        for row in slice_live_rows:
+            label = _outcome_label(getattr(row, "pnl", None))
+            if label is None:
+                continue
+            labels.append(label)
+            alert_id = getattr(row, "related_alert_id", None)
+            pred = prob_by_alert.get(int(alert_id)) if alert_id is not None else fallback_p
+            if pred is not None:
+                brier_terms.append((float(pred) - float(label)) ** 2)
+
+        expected_ev = _mean(expected_values)
+        realized_ev = _mean(all_returns)
+        closed_n = len(all_returns)
+        calibrated_ev = _calibrated_ev(expected_ev, realized_ev, closed_n)
+        paper_ev = _mean(paper_returns_f)
+        live_ev = _mean(live_returns_f)
+        paper_live_gap = (
+            live_ev - paper_ev
+            if live_ev is not None and paper_ev is not None
+            else None
+        )
+        broker_rejects = int(reason_counts.get("broker_execution_reject", 0))
+        slippage_misses = int(reason_counts.get("missed_entry_slippage", 0))
+        edge_eval_count = len(records)
+        winners = [v for v in all_returns if v > 0.0]
+        losers = [abs(v) for v in all_returns if v <= 0.0]
+        avg_win = _mean(winners)
+        avg_loss = _mean(losers)
+        payoff_ratio = (
+            avg_win / avg_loss
+            if avg_win is not None and avg_loss is not None and avg_loss > 0.0
+            else None
+        )
+        blocker = _graduation_blocker(
+            pattern,
+            expected_ev_pct=expected_ev,
+            calibrated_ev_pct=calibrated_ev,
+            realized_ev_pct=realized_ev,
+            closed_n=closed_n,
+            broker_rejects=broker_rejects,
+            edge_eval_count=edge_eval_count,
+            min_closed=min_closed_evidence,
+        )
+        slice_id = _slice_id(
+            scan_pattern_id=pid,
+            asset_class=asset_class,
+            signal_lane=signal_lane,
+            probability_source=probability_source,
+            lifecycle_stage=lifecycle_stage,
+            execution_lane=execution_lane,
+            window_days=window_days,
+        )
+        row = {
+            "scan_pattern_id": pid,
+            "snapshot_granularity": EDGE_RELIABILITY_GRANULARITY_ASSET_SLICE,
+            "edge_slice_id": slice_id,
+            "slice_dimensions": {
+                "asset_class": asset_class,
+                "signal_lane": signal_lane,
+                "probability_source": probability_source,
+                "lifecycle_stage": lifecycle_stage,
+                "execution_lane": execution_lane,
+            },
+            "pattern_name": getattr(pattern, "name", None),
+            "asset_class": asset_class,
+            "pattern_asset_class": getattr(pattern, "asset_class", None),
+            "signal_lane": signal_lane,
+            "probability_source": probability_source,
+            "execution_lane": execution_lane,
+            "timeframe": getattr(pattern, "timeframe", None),
+            "lifecycle_stage": getattr(pattern, "lifecycle_stage", None),
+            "promotion_status": getattr(pattern, "promotion_status", None),
+            "recert_required": bool(getattr(pattern, "recert_required", False)) if pattern else False,
+            "recert_reason": getattr(pattern, "recert_reason", None),
+            "window_days": int(window_days),
+            "window_start": cutoff.isoformat(),
+            "window_end": datetime.utcnow().isoformat(),
+            "edge_eval_count": edge_eval_count,
+            "positive_expected_edge_count": sum(1 for v in expected_values if v > 0.0),
+            "negative_expected_edge_count": int(reason_counts.get("negative_expected_edge", 0)),
+            "shadow_block_count": int(reason_counts.get("shadow_observation", 0)),
+            "recert_block_count": int(reason_counts.get("recert_required", 0)),
+            "slippage_miss_count": slippage_misses,
+            "broker_reject_count": broker_rejects,
+            "placed_count": int(decision_counts.get("placed", 0)),
+            "broker_reject_rate": _round(
+                broker_rejects / edge_eval_count if edge_eval_count else 0.0,
+                6,
+            ),
+            "slippage_miss_rate": _round(
+                slippage_misses / edge_eval_count if edge_eval_count else 0.0,
+                6,
+            ),
+            "expected_ev_pct": _round(expected_ev, 6),
+            "calibrated_ev_pct": _round(calibrated_ev, 6),
+            "realized_ev_pct": _round(realized_ev, 6),
+            "ev_calibration_error": _round(
+                realized_ev - expected_ev
+                if realized_ev is not None and expected_ev is not None
+                else None,
+                6,
+            ),
+            "brier_score": _round(_mean(brier_terms), 6),
+            "closed_evidence_count": closed_n,
+            "paper_closed_count": len(paper_returns_f),
+            "live_closed_count": len(live_returns_f),
+            "paper_realized_ev_pct": _round(paper_ev, 6),
+            "live_realized_ev_pct": _round(live_ev, 6),
+            "paper_live_gap_pct": _round(paper_live_gap, 6),
+            "observed_win_rate": _round(_mean([float(x) for x in labels]), 6),
+            "payoff_ratio": _round(payoff_ratio, 6),
+            "avg_probability": _round(fallback_p, 6),
+            "avg_breakeven_probability": _round(_mean(breakevens), 6),
+            "probability_sources": dict(probability_sources),
+            "signal_lanes": dict(signal_lanes),
+            "asset_types": dict(asset_types),
+            "tickers": dict(tickers),
+            "primary_symbol": tickers.most_common(1)[0][0] if tickers else None,
+            "reason_counts": dict(reason_counts),
+            "decision_counts": dict(decision_counts),
+            "graduation_blocker": blocker,
+            "recommended_work_event": _recommended_work_event(blocker, scan_pattern_id=pid),
+            "latest_observed_at": latest_seen.isoformat() if latest_seen else None,
+        }
+        row["evidence_fingerprint"] = _row_fingerprint(row)
+        rows.append(row)
+
+    rows.sort(
+        key=lambda row: (
+            row.get("asset_class") or "",
+            row.get("signal_lane") or "",
+            row.get("probability_source") or "",
+            row.get("execution_lane") or "",
+        )
+    )
+    return rows
+
+
 def persist_edge_reliability_snapshot(
     db: Session,
     scan_pattern_id: int,
@@ -532,6 +981,29 @@ def persist_edge_reliability_snapshot(
         claimable=False,
     )
     row["snapshot_event_id"] = event_id
+    slice_event_ids: list[int] = []
+    for slice_row in compute_pattern_edge_reliability_slices(
+        db,
+        int(scan_pattern_id),
+        window_days=window_days,
+    ):
+        slice_fp = str(slice_row.get("evidence_fingerprint") or "none")
+        slice_id = str(slice_row.get("edge_slice_id") or "none")
+        slice_event_id = enqueue_outcome_event(
+            db,
+            event_type=EDGE_RELIABILITY_SNAPSHOT,
+            dedupe_key=(
+                f"{EDGE_RELIABILITY_SNAPSHOT}:p{int(scan_pattern_id)}:"
+                f"slice:{slice_id}:{slice_fp}"
+            ),
+            payload={**slice_row, "source": source},
+            parent_event_id=parent_event_id,
+            claimable=False,
+        )
+        if slice_event_id is not None:
+            slice_event_ids.append(int(slice_event_id))
+    row["asset_slice_snapshot_event_ids"] = slice_event_ids
+    row["asset_slice_count"] = len(slice_event_ids)
     return row
 
 
@@ -607,12 +1079,52 @@ def latest_edge_reliability_snapshots(
     out: dict[int, dict[str, Any]] = {}
     for row in rows:
         payload = _json_dict(row.payload)
+        if payload.get("snapshot_granularity") == EDGE_RELIABILITY_GRANULARITY_ASSET_SLICE:
+            continue
         pid = _safe_int(payload.get("scan_pattern_id"))
         if pid is None or pid in out:
             continue
         payload["snapshot_event_id"] = int(row.id)
         payload["snapshot_created_at"] = row.created_at.isoformat() if row.created_at else None
         out[pid] = payload
+    return out
+
+
+def latest_edge_reliability_slice_snapshots(
+    db: Session,
+    *,
+    scan_pattern_ids: list[int] | set[int] | tuple[int, ...],
+    window_days: int | None = None,
+) -> list[dict[str, Any]]:
+    ids = [int(x) for x in scan_pattern_ids if x is not None]
+    if not ids:
+        return []
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_SNAPSHOT)
+        .filter(BrainWorkEvent.event_kind == "outcome")
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext.in_([str(x) for x in ids]))
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+        .all()
+    )
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        payload = _json_dict(row.payload)
+        if payload.get("snapshot_granularity") != EDGE_RELIABILITY_GRANULARITY_ASSET_SLICE:
+            continue
+        if window_days is not None and _safe_int(payload.get("window_days")) != int(window_days):
+            continue
+        slice_id = str(payload.get("edge_slice_id") or "")
+        if not slice_id or slice_id in seen:
+            continue
+        pid = _safe_int(payload.get("scan_pattern_id"))
+        if pid is None:
+            continue
+        seen.add(slice_id)
+        payload["snapshot_event_id"] = int(row.id)
+        payload["snapshot_created_at"] = row.created_at.isoformat() if row.created_at else None
+        out.append(payload)
     return out
 
 
@@ -638,15 +1150,37 @@ def edge_supply_rows(
         ids = [int(x) for x in pattern_ids if x is not None]
 
     out: list[dict[str, Any]] = []
-    for pid in ids[: max(1, int(limit) * 4)]:
+    candidate_ids = ids[: max(1, int(limit) * 4)]
+    snapshot_rows = latest_edge_reliability_slice_snapshots(
+        db,
+        scan_pattern_ids=candidate_ids,
+        window_days=window_days,
+    )
+    out.extend(snapshot_rows)
+    covered_ids = {
+        int(row["scan_pattern_id"])
+        for row in snapshot_rows
+        if row.get("scan_pattern_id") is not None
+    }
+    for pid in candidate_ids:
+        if pid in covered_ids:
+            continue
         try:
-            out.append(
-                compute_pattern_edge_reliability(
-                    db,
-                    pid,
-                    window_days=window_days,
-                )
+            slices = compute_pattern_edge_reliability_slices(
+                db,
+                pid,
+                window_days=window_days,
             )
+            if slices:
+                out.extend(slices)
+            else:
+                out.append(
+                    compute_pattern_edge_reliability(
+                        db,
+                        pid,
+                        window_days=window_days,
+                    )
+                )
         except Exception:
             continue
 
@@ -678,8 +1212,11 @@ def edge_supply_rows(
 def edge_supply_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     blockers: Counter[str] = Counter(str(row.get("graduation_blocker") or "unknown") for row in rows)
     recommended: Counter[str] = Counter(str(row.get("recommended_work_event") or "unknown") for row in rows)
+    granularities: Counter[str] = Counter(str(row.get("snapshot_granularity") or "unknown") for row in rows)
+    assets: Counter[str] = Counter(str(row.get("asset_class") or "unknown") for row in rows)
     return {
         "total": len(rows),
+        "asset_slice_rows": int(granularities.get(EDGE_RELIABILITY_GRANULARITY_ASSET_SLICE, 0)),
         "graduation_ready": int(blockers.get("graduation_ready", 0)),
         "quality_blocked": int(blockers.get("quality_blocked", 0)),
         "recert_blocked": int(blockers.get("recert_blocked", 0) + blockers.get("hard_recert_blocked", 0)),
@@ -687,6 +1224,8 @@ def edge_supply_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "needs_more_closed_evidence": int(blockers.get("needs_more_closed_evidence", 0)),
         "shadow_evidence_collection": int(blockers.get("shadow_evidence_collection", 0)),
         "blockers": dict(blockers),
+        "asset_classes": dict(assets),
+        "granularities": dict(granularities),
         "recommended_work_events": dict(recommended),
     }
 

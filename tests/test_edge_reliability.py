@@ -17,11 +17,13 @@ from app.services.trading.brain_work.handlers.profitability import (
 )
 from app.services.trading.brain_work.ledger import enqueue_work_event
 from app.services.trading.edge_reliability import (
+    EDGE_RELIABILITY_GRANULARITY_ASSET_SLICE,
     EDGE_RELIABILITY_REFRESH,
     EDGE_RELIABILITY_SNAPSHOT,
     RECERT_RESCUE_REFRESH,
     RECERT_RESCUE_DIAGNOSTIC,
     compute_pattern_edge_reliability,
+    compute_pattern_edge_reliability_slices,
     emit_edge_reliability_refresh_requested,
 )
 
@@ -29,11 +31,12 @@ from app.services.trading.edge_reliability import (
 def _pattern(db, **kwargs) -> ScanPattern:
     if kwargs.get("promotion_gate_passed") and "cpcv_n_paths" not in kwargs:
         kwargs["cpcv_n_paths"] = 20
+    asset_class = kwargs.pop("asset_class", "stocks")
     pat = ScanPattern(
         name=kwargs.pop("name", "edge reliability pattern"),
         rules_json={},
         origin="test",
-        asset_class="stocks",
+        asset_class=asset_class,
         timeframe="1d",
         active=True,
         lifecycle_stage=kwargs.pop("lifecycle_stage", "promoted"),
@@ -44,11 +47,17 @@ def _pattern(db, **kwargs) -> ScanPattern:
     return pat
 
 
-def _alert(db, pat: ScanPattern, ticker: str = "EDGE") -> BreakoutAlert:
+def _alert(
+    db,
+    pat: ScanPattern,
+    ticker: str = "EDGE",
+    *,
+    asset_type: str = "stock",
+) -> BreakoutAlert:
     alert = BreakoutAlert(
         scan_pattern_id=pat.id,
         ticker=ticker,
-        asset_type="stock",
+        asset_type=asset_type,
         alert_tier="pattern_imminent",
         outcome="pending",
         score_at_alert=80.0,
@@ -82,6 +91,35 @@ def _run(db, pat: ScanPattern, alert: BreakoutAlert, *, expected: float = 2.0):
                 "probability_source": "pattern_regime_hit_rate",
             },
         },
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _closed_shadow(
+    db,
+    pat: ScanPattern,
+    alert: BreakoutAlert,
+    *,
+    pnl_pct: float,
+) -> PaperTrade:
+    row = PaperTrade(
+        scan_pattern_id=pat.id,
+        paper_shadow_of_alert_id=alert.id,
+        ticker=alert.ticker,
+        direction="long",
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        quantity=1.0,
+        status="closed",
+        entry_date=datetime.utcnow(),
+        exit_date=datetime.utcnow(),
+        exit_price=100.0 + pnl_pct,
+        pnl=pnl_pct,
+        pnl_pct=pnl_pct,
+        signal_json={"paper_shadow": True, "asset_type": alert.asset_type},
     )
     db.add(row)
     db.flush()
@@ -136,6 +174,31 @@ def test_edge_reliability_attribution_from_runs_paper_and_live(db):
     assert row["closed_evidence_count"] == 2
     assert row["brier_score"] == pytest.approx(0.16)
     assert row["recommended_work_event"] == EDGE_RELIABILITY_REFRESH
+
+
+def test_asset_sliced_reliability_keeps_stock_and_crypto_evidence_separate(db):
+    pat = _pattern(db, asset_class="all")
+    stock_alert = _alert(db, pat, ticker="EDGE", asset_type="stock")
+    crypto_alert = _alert(db, pat, ticker="EDGE-USD", asset_type="crypto")
+    _run(db, pat, stock_alert, expected=2.0)
+    _run(db, pat, crypto_alert, expected=-3.0)
+    _closed_shadow(db, pat, stock_alert, pnl_pct=4.0)
+    _closed_shadow(db, pat, crypto_alert, pnl_pct=-2.0)
+    db.commit()
+
+    slices = compute_pattern_edge_reliability_slices(db, pat.id, window_days=7)
+    by_asset = {row["asset_class"]: row for row in slices}
+
+    assert set(by_asset) == {"stock", "crypto"}
+    assert by_asset["stock"]["snapshot_granularity"] == EDGE_RELIABILITY_GRANULARITY_ASSET_SLICE
+    assert by_asset["stock"]["pattern_asset_class"] == "all"
+    assert by_asset["stock"]["expected_ev_pct"] == pytest.approx(2.0)
+    assert by_asset["stock"]["realized_ev_pct"] == pytest.approx(4.0)
+    assert by_asset["stock"]["primary_symbol"] == "EDGE"
+    assert by_asset["crypto"]["expected_ev_pct"] == pytest.approx(-3.0)
+    assert by_asset["crypto"]["realized_ev_pct"] == pytest.approx(-2.0)
+    assert by_asset["crypto"]["primary_symbol"] == "EDGE-USD"
+    assert by_asset["stock"]["edge_slice_id"] != by_asset["crypto"]["edge_slice_id"]
 
 
 def test_recert_rescue_diagnostic_never_clears_hard_recert(db):
@@ -222,7 +285,16 @@ def test_edge_reliability_work_dedupe_and_dispatch(db):
     snapshot = (
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_SNAPSHOT)
+        .filter(BrainWorkEvent.payload["snapshot_granularity"].astext == "pattern")
         .one()
     )
     assert snapshot.payload["scan_pattern_id"] == pat.id
     assert snapshot.payload["expected_ev_pct"] == pytest.approx(1.25)
+    slice_snapshot = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_SNAPSHOT)
+        .filter(BrainWorkEvent.payload["snapshot_granularity"].astext == "asset_slice")
+        .one()
+    )
+    assert slice_snapshot.payload["scan_pattern_id"] == pat.id
+    assert slice_snapshot.payload["asset_class"] == "stock"

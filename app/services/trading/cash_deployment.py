@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -55,6 +56,21 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 def _round(value: float | None, digits: int = 6) -> float | None:
     return round(float(value), digits) if value is not None and math.isfinite(float(value)) else None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _canonical_asset_class(value: Any) -> str | None:
@@ -149,6 +165,41 @@ def _venue_readiness(asset_class: str) -> tuple[str, float, str | None]:
             return "options_live_enabled", 1.0, None
         return "options_live_disabled", 0.0, "options_live_disabled"
     return "equity_live_enabled", 1.0, None
+
+
+def _repeated_reject_blocker(row: dict[str, Any]) -> str | None:
+    rejects = _safe_int(row.get("broker_reject_count"))
+    rate = _safe_float(row.get("broker_reject_rate"), 0.0) or 0.0
+    min_rejects = int(
+        getattr(settings, "chili_cash_deployment_venue_degrade_min_rejects", 2)
+        or 2
+    )
+    min_rate = _safe_float(
+        getattr(settings, "chili_cash_deployment_venue_degrade_reject_rate", 0.05),
+        0.05,
+    ) or 0.0
+    if rejects >= max(1, min_rejects) and rate >= max(0.0, min_rate):
+        return "venue_degraded_repeated_broker_rejects"
+    return None
+
+
+def _freshness_blocker(row: dict[str, Any]) -> str | None:
+    max_hours = _safe_float(
+        getattr(settings, "chili_cash_deployment_max_data_age_hours", 6.0),
+        6.0,
+    )
+    if max_hours is None or max_hours <= 0.0:
+        return None
+    observed_at = (
+        _parse_iso_datetime(row.get("latest_observed_at"))
+        or _parse_iso_datetime(row.get("snapshot_created_at"))
+        or _parse_iso_datetime(row.get("window_end"))
+    )
+    if observed_at is None:
+        return "stale_data_missing_observation_timestamp"
+    if datetime.utcnow() - observed_at > timedelta(hours=max_hours):
+        return "stale_data"
+    return None
 
 
 def _correlation_bucket(symbol: str | None, asset_class: str) -> str:
@@ -260,6 +311,7 @@ def _cash_category(
     calibrated_ev_after_cost: float | None,
     exposure_blocker: str | None,
     execution_blocker: str | None,
+    freshness_blocker: str | None,
 ) -> str:
     blocker = str(row.get("graduation_blocker") or "").strip().lower()
     lifecycle = str(row.get("lifecycle_stage") or "").strip().lower()
@@ -273,6 +325,8 @@ def _cash_category(
 
     if calibrated_ev_after_cost is None or calibrated_ev_after_cost <= 0.0:
         return "negative_ev"
+    if freshness_blocker:
+        return "needs_calibration"
     if blocker in RECERT_BLOCKERS or bool(row.get("recert_required")):
         return "positive_ev_recert" if positive_supply else "negative_ev"
     if blocker in EXECUTION_BLOCKERS or _safe_int(row.get("broker_reject_count")) > 0:
@@ -369,17 +423,23 @@ def annotate_cash_deployment_row(
     calibrated = _safe_float(out.get("calibrated_ev_pct"))
     after_cost = calibrated - cost if calibrated is not None else None
     venue, venue_score, venue_blocker = _venue_readiness(asset_class)
+    reject_blocker = _repeated_reject_blocker(out)
+    freshness_blocker = _freshness_blocker(out)
+    if reject_blocker is not None:
+        venue = f"{venue}:degraded_repeated_rejects"
+        venue_score = min(venue_score, 0.25)
     exposure_blocker, max_notional, exposure = _exposure_and_notional(
         db,
         user_id=user_id,
         asset_class=asset_class,
     )
-    execution_blocker = venue_blocker
+    execution_blocker = venue_blocker or reject_blocker
     category = _cash_category(
         out,
         calibrated_ev_after_cost=after_cost,
         exposure_blocker=exposure_blocker,
         execution_blocker=execution_blocker,
+        freshness_blocker=freshness_blocker,
     )
     work_event = _recommended_work_event(out, category)
     evidence_value = max(0.0, after_cost or 0.0) * math.log1p(
@@ -412,6 +472,7 @@ def annotate_cash_deployment_row(
             "correlation_bucket": _correlation_bucket(symbol, asset_class),
             "exposure_blocker": exposure_blocker,
             "execution_blocker": execution_blocker,
+            "freshness_blocker": freshness_blocker,
             "recert_blocker": out.get("recert_reason") if category == "positive_ev_recert" else None,
             "recommended_work_event": work_event,
             "expected_evidence_value": round(evidence_value, 6),

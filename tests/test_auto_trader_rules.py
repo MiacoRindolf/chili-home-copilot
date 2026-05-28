@@ -165,9 +165,12 @@ def test_passes_rule_gate_slippage_fail(_mock_port, _mock_rth):
     settings.chili_autotrader_max_concurrent = 5
     settings.chili_autotrader_assumed_capital_usd = 100_000.0
 
-    ok, reason, _ = passes_rule_gate(db, alert, settings=settings, ctx=ctx, for_new_entry=True)
+    ok, reason, snap = passes_rule_gate(db, alert, settings=settings, ctx=ctx, for_new_entry=True)
     assert not ok
     assert reason == "missed_entry_slippage"
+    if "slippage_reprice_expected_net_pct" in snap:
+        assert snap["reprice_ev_after_cost"] == snap["slippage_reprice_expected_net_pct"]
+        assert snap["reprice_decision"] in {"retry_if_allowed", "wait"}
 
 
 @patch("app.services.trading.pattern_imminent_alerts.us_stock_session_open", return_value=True)

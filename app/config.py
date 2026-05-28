@@ -4723,6 +4723,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_MAX_ABS_PAPER_LIVE_GAP_PCT"),
         description="Absolute paper-vs-live EV gap above which cash deployment stays calibration-blocked.",
     )
+    chili_cash_deployment_max_data_age_hours: float = Field(
+        default=6.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_MAX_DATA_AGE_HOURS"),
+        description="Maximum age for the latest edge observation before cash deployment sends the row back to reliability refresh; 0 disables.",
+    )
     chili_cash_deployment_equity_cost_pct: float = Field(
         default=0.05,
         ge=0.0,
@@ -4758,6 +4764,19 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_BROKER_REJECT_PENALTY_PCT"),
         description="Extra EV drag applied to patterns with recent broker rejects; hard execution blockers still prevent live deployability.",
+    )
+    chili_cash_deployment_venue_degrade_min_rejects: int = Field(
+        default=2,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_VENUE_DEGRADE_MIN_REJECTS"),
+        description="Recent broker reject count that marks a cash-deployment venue/action as degraded.",
+    )
+    chili_cash_deployment_venue_degrade_reject_rate: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_VENUE_DEGRADE_REJECT_RATE"),
+        description="Recent broker reject rate that marks a cash-deployment venue/action as degraded.",
     )
 
     # Decision ledger + net-expectancy allocator (momentum autopilot / brain). Live enforcement OFF by default.
