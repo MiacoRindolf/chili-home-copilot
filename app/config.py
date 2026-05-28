@@ -1497,6 +1497,10 @@ class Settings(BaseSettings):
     # position covariance. When OFF (default), naive sizing is preserved and
     # HRP is computed in shadow for comparison via portfolio_sizing_log.
     chili_hrp_sizing_enabled: bool = False
+    # Maximum calendar age for the newest bar in each symbol's HRP return
+    # history. This tolerates weekends/market holidays while blocking
+    # week-old snapshot feeds from driving live allocation weights.
+    chili_hrp_returns_max_staleness_days: int = 5
     # Q2.T1: options lane scaffold. When OFF (default), all options code paths
     # are inert. When ON, paper-only by default (set chili_options_lane_live
     # to True for live broker submission via Tradier). Hard greeks-budget

@@ -65,6 +65,7 @@ _MIN_OBS_PER_SYMBOL = 30
 _NAIVE_RISK_FRAC = 0.02       # 2% per trade — current default
 _MAX_HRP_WEIGHT = 0.30        # cap any single HRP weight at 30% of total
 _MIN_HRP_WEIGHT = 0.005       # floor below which we treat as zero
+_DEFAULT_MAX_RETURN_STALENESS_DAYS = 5
 
 
 @dataclass
@@ -199,22 +200,59 @@ def _compute_hrp_weights(
 
 # --- Returns fetch -----------------------------------------------------
 
+def _max_return_staleness_days() -> int:
+    try:
+        from ...config import settings
+
+        value = int(
+            getattr(
+                settings,
+                "chili_hrp_returns_max_staleness_days",
+                _DEFAULT_MAX_RETURN_STALENESS_DAYS,
+            )
+            or _DEFAULT_MAX_RETURN_STALENESS_DAYS
+        )
+    except Exception:
+        value = _DEFAULT_MAX_RETURN_STALENESS_DAYS
+    return max(1, value)
+
+
+def _iso_dt(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
 def _fetch_returns_matrix(
-    db: Session, symbols: list[str]
-) -> tuple[Optional["np.ndarray"], list[str]]:
+    db: Session,
+    symbols: list[str],
+    *,
+    now: datetime | None = None,
+    max_staleness_days: int | None = None,
+) -> tuple[Optional["np.ndarray"], list[str], dict[str, Any]]:
     """Fetch trailing daily-bar returns per symbol from trading_snapshots.
 
-    Returns ``(matrix, symbols_kept)`` where ``matrix`` has shape
-    (T, n_kept) — rows are days, columns are symbols. Symbols with
-    insufficient history are dropped.
+    Returns ``(matrix, symbols_kept, meta)`` where ``matrix`` has shape
+    (T, n_kept). Symbols with insufficient or stale daily history are dropped.
     """
     try:
         import numpy as np
     except ImportError:
-        return None, []
+        return None, [], {"hrp_skip": "numpy_unavailable"}
 
-    cutoff = datetime.utcnow() - timedelta(days=_RETURN_WINDOW_DAYS * 2)
-    series_by_symbol: dict[str, list[float]] = {}
+    as_of = now or datetime.utcnow()
+    staleness_days = (
+        max(1, int(max_staleness_days))
+        if max_staleness_days is not None
+        else _max_return_staleness_days()
+    )
+    cutoff = as_of - timedelta(days=_RETURN_WINDOW_DAYS * 2)
+    freshness_cutoff = as_of - timedelta(days=staleness_days)
+    meta: dict[str, Any] = {
+        "return_window_days": _RETURN_WINDOW_DAYS,
+        "min_obs_per_symbol": _MIN_OBS_PER_SYMBOL,
+        "bar_interval": "1d",
+        "max_staleness_days": staleness_days,
+        "freshness_cutoff_utc": _iso_dt(freshness_cutoff),
+    }
 
     try:
         rows = db.execute(
@@ -224,6 +262,7 @@ def _fetch_returns_matrix(
                 FROM trading_snapshots
                 WHERE bar_start_at >= :cutoff
                   AND ticker = ANY(:symbols)
+                  AND bar_interval = '1d'
                   AND close_price IS NOT NULL AND close_price > 0
                 ORDER BY ticker, bar_start_at
                 """
@@ -232,7 +271,7 @@ def _fetch_returns_matrix(
         ).fetchall()
     except Exception as e:
         logger.debug("[hrp] returns fetch failed: %s", e)
-        return None, []
+        return None, [], {"hrp_skip": "returns_fetch_failed", "error": str(e)[:200]}
 
     by_sym: dict[str, list[tuple[datetime, float]]] = {}
     for tk, ts, px in rows:
@@ -240,16 +279,33 @@ def _fetch_returns_matrix(
 
     kept: list[str] = []
     matrix_cols: list[list[float]] = []
+    stale_symbols: list[dict[str, Any]] = []
+    insufficient_symbols: list[str] = []
     target_len = None
     for sym in symbols:
         sym_upper = sym.upper()
         bars = by_sym.get(sym_upper, [])
-        if len(bars) < _MIN_OBS_PER_SYMBOL:
+        if not bars:
+            insufficient_symbols.append(sym_upper)
             continue
-        # Compute log returns.
         bars.sort(key=lambda x: x[0])
+        latest_bar = bars[-1][0]
+        if latest_bar < freshness_cutoff:
+            age_days = (as_of - latest_bar).total_seconds() / 86400.0
+            stale_symbols.append(
+                {
+                    "symbol": sym_upper,
+                    "latest_bar_utc": _iso_dt(latest_bar),
+                    "age_days": round(age_days, 2),
+                }
+            )
+            continue
+        if len(bars) < _MIN_OBS_PER_SYMBOL:
+            insufficient_symbols.append(sym_upper)
+            continue
         prices = [b[1] for b in bars[-_RETURN_WINDOW_DAYS:]]
         if len(prices) < _MIN_OBS_PER_SYMBOL:
+            insufficient_symbols.append(sym_upper)
             continue
         returns = [
             math.log(prices[i] / prices[i - 1])
@@ -264,15 +320,28 @@ def _fetch_returns_matrix(
         matrix_cols.append(returns[-target_len:])
         kept.append(sym_upper)
 
+    if stale_symbols:
+        meta["stale_symbols"] = stale_symbols[:5]
+        meta["stale_symbol_count"] = len(stale_symbols)
+    if insufficient_symbols:
+        meta["insufficient_history_symbols"] = insufficient_symbols[:5]
+        meta["insufficient_history_symbol_count"] = len(insufficient_symbols)
+
     if not matrix_cols or len(matrix_cols) < 2:
-        return None, []
+        meta["hrp_skip"] = (
+            "returns_history_stale"
+            if stale_symbols and not kept
+            else "insufficient_returns_history"
+        )
+        return None, [], meta
 
     try:
         m = np.array(matrix_cols).T  # (T, n)
-        return m, kept
+        meta["kept_symbols"] = kept
+        return m, kept, meta
     except Exception as e:
         logger.debug("[hrp] matrix assembly failed: %s", e)
-        return None, []
+        return None, [], {"hrp_skip": "matrix_assembly_failed", "error": str(e)[:200]}
 
 
 def _fetch_active_position_symbols(db: Session, user_id: Optional[int]) -> list[str]:
@@ -343,7 +412,9 @@ def decide_position_size(
     decision.n_active_positions = len(active)
 
     if len(universe) >= 2:
-        returns, kept = _fetch_returns_matrix(db, universe)
+        returns, kept, returns_meta = _fetch_returns_matrix(db, universe)
+        if returns_meta:
+            decision.meta.update(returns_meta)
         if returns is not None and symbol.upper() in kept:
             weights, cond = _compute_hrp_weights(returns, kept)
             decision.cov_condition_number = cond
@@ -361,7 +432,8 @@ def decide_position_size(
                 decision.meta["hrp_skip"] = "weights_undefined"
         else:
             decision.meta["hrp_skip"] = (
-                "insufficient_returns_history" if returns is None else "symbol_dropped"
+                decision.meta.get("hrp_skip")
+                or ("insufficient_returns_history" if returns is None else "symbol_dropped")
             )
     else:
         decision.meta["hrp_skip"] = "fewer_than_2_symbols"
