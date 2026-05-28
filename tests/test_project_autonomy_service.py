@@ -435,6 +435,37 @@ def test_start_plan_transitions_chat_to_queued_plan(tmp_path):
         db.close()
 
 
+def test_plan_intent_message_starts_plan_without_chat_model(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hi", repo_id=repo.id)
+        monkeypatch.setattr(
+            orchestrator,
+            "_chat_reply",
+            lambda *args, **kwargs: pytest.fail(
+                "plan intent should not call brainstorm chat"
+            ),
+        )
+
+        payload = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="create a plan for it",
+        )
+
+        assert payload is not None
+        assert payload["status"] == "queued"
+        assert payload["plan_status"] == "drafting"
+        assert payload["messages"][-1]["message_type"] == "status"
+        assert "draft a plan" in payload["messages"][-1]["content"]
+        assert "create a plan for it" in payload["prompt"]
+    finally:
+        db.close()
+
+
 def test_recover_orphaned_runs_blocks_pre_restart_active_run(monkeypatch):
     db = _sqlite_autonomy_session()
     try:

@@ -87,6 +87,27 @@ void main() {
     }
   });
 
+  test('chat model failures are explained without local endpoint noise', () {
+    final body = AutonomyRunPresenter.artifactBody({
+      'artifact_type': 'model_call',
+      'name': 'chat_model_call',
+      'content_json': {
+        'ok': false,
+        'model': 'qwen2.5-coder:3b-instruct-q8_0',
+        'purpose': 'brainstorm_chat',
+        'latency_ms': 45100,
+        'error':
+            'TimeoutError: timed out; http://127.0.0.1:11434: URLError: <urlopen error [Errno 111] Connection refused>',
+      },
+    });
+
+    expect(body, contains('local brainstorm chat model did not answer'));
+    expect(body, contains('45.1s'));
+    expect(body, contains('No repo scan or code changes were started'));
+    expect(body, isNot(contains('http://')));
+    expect(body, isNot(contains('Connection refused')));
+  });
+
   test('plan and visual artifacts summarize for chat cockpit', () {
     final plan = AutonomyRunPresenter.planBody({
       'analysis': 'Refactor the Autopilot panel into a chat cockpit.',

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../network/chili_api_client.dart';
 import '../network/network_error_message.dart';
@@ -465,6 +466,33 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     } finally {
       if (mounted) setState(() => _autonomyBusy = false);
     }
+  }
+
+  void _submitAutopilotComposer() {
+    if (_autonomyBusy || _codeRepos.isEmpty) return;
+    if (_autopilotPromptCtrl.text.trim().isEmpty) return;
+    unawaited(_startAutopilot());
+  }
+
+  TextEditingValue _formatAutopilotComposerInput(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final oldBreaks = '\n'.allMatches(oldValue.text).length;
+    final newBreaks = '\n'.allMatches(newValue.text).length;
+    final enterPressed = HardwareKeyboard.instance
+            .isLogicalKeyPressed(LogicalKeyboardKey.enter) ||
+        HardwareKeyboard.instance
+            .isLogicalKeyPressed(LogicalKeyboardKey.numpadEnter);
+    if (newBreaks > oldBreaks &&
+        enterPressed &&
+        !HardwareKeyboard.instance.isShiftPressed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _submitAutopilotComposer();
+      });
+      return oldValue;
+    }
+    return newValue;
   }
 
   Future<void> _approveAutopilotPlan() async {
@@ -1579,17 +1607,31 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Expanded(
-                child: TextField(
-                  controller: _autopilotPromptCtrl,
-                  minLines: 2,
-                  maxLines: 5,
-                  decoration: InputDecoration(
-                    labelText: _activeAutonomyRun == null ||
-                            _autonomyTerminal(_activeAutonomyRun)
-                        ? 'Start an Autopilot chat'
-                        : 'Message CHILI about this run',
-                    alignLabelWithHint: true,
-                    border: const OutlineInputBorder(),
+                child: CallbackShortcuts(
+                  bindings: <ShortcutActivator, VoidCallback>{
+                    const SingleActivator(LogicalKeyboardKey.enter):
+                        _submitAutopilotComposer,
+                    const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                        _submitAutopilotComposer,
+                  },
+                  child: TextField(
+                    controller: _autopilotPromptCtrl,
+                    minLines: 2,
+                    maxLines: 5,
+                    inputFormatters: [
+                      TextInputFormatter.withFunction(
+                        _formatAutopilotComposerInput,
+                      ),
+                    ],
+                    onSubmitted: (_) => _submitAutopilotComposer(),
+                    decoration: InputDecoration(
+                      labelText: _activeAutonomyRun == null ||
+                              _autonomyTerminal(_activeAutonomyRun)
+                          ? 'Start an Autopilot chat'
+                          : 'Message CHILI about this run',
+                      alignLabelWithHint: true,
+                      border: const OutlineInputBorder(),
+                    ),
                   ),
                 ),
               ),

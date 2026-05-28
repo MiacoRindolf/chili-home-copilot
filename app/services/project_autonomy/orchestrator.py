@@ -220,6 +220,28 @@ def _looks_like_greeting_or_chat(prompt: str) -> bool:
     )
 
 
+def _looks_like_plan_start_prompt(prompt: str) -> bool:
+    lower = (prompt or "").strip().lower()
+    if not lower:
+        return False
+    negative_markers = ("don't plan", "do not plan", "no plan", "not a plan")
+    if any(marker in lower for marker in negative_markers):
+        return False
+    plan_markers = (
+        "create a plan",
+        "make a plan",
+        "draft a plan",
+        "start a plan",
+        "start plan",
+        "plan it",
+        "plan this",
+        "plan for it",
+        "create plan",
+        "start planning",
+    )
+    return any(marker in lower for marker in plan_markers)
+
+
 def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -622,8 +644,11 @@ def append_user_message(
         raise ValueError("Message is required.")
     _record_message(db, row, "user", clean, commit=False)
     if row.status == "chatting":
-        reply = _chat_reply(db, row, clean)
-        _record_message(db, row, "assistant", reply, message_type="chat", commit=False)
+        if _looks_like_plan_start_prompt(clean):
+            _mark_plan_requested(db, row)
+        else:
+            reply = _chat_reply(db, row, clean)
+            _record_message(db, row, "assistant", reply, message_type="chat", commit=False)
     if row.plan_status in {"awaiting_approval", "revising"} and row.status == "awaiting_approval":
         row.status = "queued"
         row.plan_status = "revising"
@@ -671,6 +696,13 @@ def start_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dict[
         return None
     if row.status not in {"chatting", "awaiting_approval", "blocked", "cancelled"} and row.status in ACTIVE_STATUSES:
         raise ValueError("This Autopilot run is already working.")
+    _mark_plan_requested(db, row)
+    db.commit()
+    db.refresh(row)
+    return run_payload(db, row, include_events=True)
+
+
+def _mark_plan_requested(db: Session, row: ProjectAutonomyRun) -> None:
     row.prompt = _conversation_prompt(db, row)
     row.status = "queued"
     row.current_stage = "queued"
@@ -696,9 +728,6 @@ def start_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dict[
         message_type="status",
         commit=False,
     )
-    db.commit()
-    db.refresh(row)
-    return run_payload(db, row, include_events=True)
 
 
 def record_visual_validation(

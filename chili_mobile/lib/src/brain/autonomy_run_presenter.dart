@@ -289,17 +289,43 @@ class AutonomyRunPresenter {
     final model = _firstText(json, ['model', 'model_name']);
     final purpose = _firstText(json, ['purpose', 'stage', 'task']);
     final latency = _formatDurationMs(json['latency_ms']);
+    final isChatModelCall = name == 'chat_model_call' ||
+        purpose == 'brainstorm_chat' ||
+        purpose == 'chat';
     final target =
         purpose.isNotEmpty ? purpose : (name.isNotEmpty ? name : 'planning');
     final modelText = model.isEmpty ? '' : ' with $model';
     final latencyText = latency.isEmpty ? '' : ' in $latency';
     final error = _firstText(json, ['error', 'error_message', 'message']);
 
+    if (isChatModelCall) {
+      if (ok == false) {
+        return 'The local brainstorm chat model did not answer$latencyText. '
+            'No repo scan or code changes were started.';
+      }
+      return 'The local brainstorm chat model answered$latencyText.';
+    }
     if (ok == false) {
-      final reason = error.isEmpty ? '' : ': ${_truncate(error, 260)}';
+      final friendlyError = _friendlyModelError(error);
+      final reason = friendlyError.isEmpty ? '' : ': $friendlyError';
       return 'Model call for $target$modelText did not complete$latencyText$reason';
     }
     return 'Model call for $target$modelText completed$latencyText.';
+  }
+
+  static String _friendlyModelError(String error) {
+    final trimmed = error.trim();
+    if (trimmed.isEmpty) return '';
+    final lower = trimmed.toLowerCase();
+    if (lower.contains('timed out') || lower.contains('timeouterror')) {
+      return 'the local model timed out';
+    }
+    if (lower.contains('connection refused') ||
+        lower.contains('urlopen error') ||
+        lower.contains('failed to establish a new connection')) {
+      return 'the local model service was not reachable';
+    }
+    return _truncate(trimmed, 260);
   }
 
   static bool _validationPassed(Map<String, dynamic> item) {
