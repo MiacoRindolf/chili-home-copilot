@@ -54,6 +54,11 @@ AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
 AUTOTRADER_DEFAULT_TICK_MAX_SECONDS = 45
 AUTOTRADER_MIN_TICK_MAX_SECONDS = 5
 AUTOTRADER_MAX_TICK_MAX_SECONDS = 300
+AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_ENABLED = True
+AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS = (
+    AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS * 3
+)
+AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED = True
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_MINUTES = 5
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_MINUTES = 60
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_SECONDS = (
@@ -2754,6 +2759,40 @@ class Settings(BaseSettings):
         le=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_CANDIDATE_BATCH_SIZE"),
         description="Maximum AutoTrader alerts processed in one tick.",
+    )
+    chili_autotrader_fresh_candidate_fastlane_enabled: bool = Field(
+        default=AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FRESH_CANDIDATE_FASTLANE_ENABLED"
+        ),
+        description=(
+            "When true, very fresh imminent alerts are pulled to the front of "
+            "the AutoTrader batch so execution-sensitive candidates do not sit "
+            "behind older, likely-stale alerts."
+        ),
+    )
+    chili_autotrader_fresh_candidate_fastlane_max_age_seconds: int = Field(
+        default=AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
+        ge=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+        le=SECONDS_PER_MINUTE * 5,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FRESH_CANDIDATE_FASTLANE_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "Freshness window used by the AutoTrader candidate fast lane. "
+            "Older unprocessed alerts remain eligible after the fresh queue."
+        ),
+    )
+    chili_autotrader_candidate_price_prefetch_enabled: bool = Field(
+        default=AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_CANDIDATE_PRICE_PREFETCH_ENABLED"
+        ),
+        description=(
+            "When true, AutoTrader batch-prefetches current quotes for selected "
+            "candidates and reuses them inside the rule gate, reducing per-alert "
+            "market-data latency without weakening execution gates."
+        ),
     )
     chili_autotrader_stock_session_defer_enabled: bool = Field(
         default=AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED,

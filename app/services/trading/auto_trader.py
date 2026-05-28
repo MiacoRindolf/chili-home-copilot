@@ -10,12 +10,14 @@ from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, text
+from sqlalchemy import case, or_, text
 from sqlalchemy.orm import Session, aliased
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
     AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
+    AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
@@ -599,6 +601,158 @@ def _autotrader_tick_soft_budget_seconds() -> int:
         lower=AUTOTRADER_MIN_TICK_MAX_SECONDS,
         upper=AUTOTRADER_MAX_TICK_MAX_SECONDS,
     )
+
+
+def _fresh_candidate_fastlane_state(
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    enabled = bool(
+        getattr(
+            settings,
+            "chili_autotrader_fresh_candidate_fastlane_enabled",
+            False,
+        )
+    )
+    max_age_seconds = _settings_int_clamped(
+        "chili_autotrader_fresh_candidate_fastlane_max_age_seconds",
+        AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
+        lower=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+        upper=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS * 30,
+    )
+    now_utc = now or datetime.utcnow()
+    return {
+        "enabled": enabled,
+        "max_age_seconds": max_age_seconds,
+        "cutoff": now_utc - timedelta(seconds=max_age_seconds),
+    }
+
+
+def _candidate_order_by_clauses(
+    fastlane_state: dict[str, Any],
+) -> list[Any]:
+    if not bool(fastlane_state.get("enabled")):
+        return [BreakoutAlert.id.asc()]
+    cutoff = fastlane_state.get("cutoff")
+    if not isinstance(cutoff, datetime):
+        return [BreakoutAlert.id.asc()]
+    return [
+        case((BreakoutAlert.alerted_at >= cutoff, 0), else_=1).asc(),
+        BreakoutAlert.alerted_at.desc(),
+        BreakoutAlert.id.desc(),
+    ]
+
+
+def _candidate_price_prefetch_enabled() -> bool:
+    return bool(
+        getattr(
+            settings,
+            "chili_autotrader_candidate_price_prefetch_enabled",
+            False,
+        )
+    )
+
+
+def _quote_price_from_snapshot(snapshot: Any) -> float | None:
+    if not isinstance(snapshot, dict):
+        return None
+    for key in ("price", "last_price", "mid"):
+        raw = snapshot.get(key)
+        try:
+            price = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            price = None
+        if price is not None and price > 0:
+            return price
+    return None
+
+
+def _prefetch_candidate_prices(
+    candidates: list[BreakoutAlert],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    meta: dict[str, Any] = {
+        "enabled": _candidate_price_prefetch_enabled(),
+        "requested": 0,
+        "hits": 0,
+        "price_bus_hits": 0,
+        "batch_requested": 0,
+        "batch_hits": 0,
+        "elapsed_seconds": 0.0,
+        "error": None,
+    }
+    if not meta["enabled"] or not candidates:
+        return {}, meta
+    tickers = sorted({
+        str(getattr(alert, "ticker", "") or "").strip().upper()
+        for alert in candidates
+        if str(getattr(alert, "ticker", "") or "").strip()
+    })
+    meta["requested"] = len(tickers)
+    if not tickers:
+        return {}, meta
+    started = time.monotonic()
+    prices: dict[str, float] = {}
+    try:
+        try:
+            from .price_bus import get_live_quote
+        except Exception:
+            get_live_quote = None  # type: ignore[assignment]
+        if get_live_quote is not None:
+            for ticker in tickers:
+                quote = get_live_quote(ticker)
+                price = _quote_price_from_snapshot(quote)
+                if price is not None:
+                    prices[ticker] = price
+        meta["price_bus_hits"] = len(prices)
+        missing = [ticker for ticker in tickers if ticker not in prices]
+        if not missing:
+            meta["hits"] = len(prices)
+            return prices, meta
+        from .market_data import fetch_quotes_batch
+
+        meta["batch_requested"] = len(missing)
+        quotes = fetch_quotes_batch(missing, allow_provider_fallback=False) or {}
+        batch_hits = 0
+        for ticker in missing:
+            quote = quotes.get(ticker) or quotes.get(ticker.upper())
+            price = _quote_price_from_snapshot(quote)
+            if price is not None:
+                prices[ticker] = price
+                batch_hits += 1
+        meta["batch_hits"] = batch_hits
+    except Exception as exc:
+        meta["error"] = f"{type(exc).__name__}: {exc}"[:240]
+        logger.debug("[autotrader] candidate price prefetch failed", exc_info=True)
+    finally:
+        meta["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    meta["hits"] = len(prices)
+    return prices, meta
+
+
+def _attach_prefetched_prices(
+    candidates: list[BreakoutAlert],
+    prices: dict[str, float],
+) -> None:
+    if not prices:
+        return
+    for alert in candidates:
+        key = str(getattr(alert, "ticker", "") or "").strip().upper()
+        price = prices.get(key)
+        if price is None:
+            continue
+        setattr(alert, "_chili_prefetched_current_price", float(price))
+
+
+def _current_price_for_alert(alert: BreakoutAlert) -> float | None:
+    prefetched = getattr(alert, "_chili_prefetched_current_price", None)
+    try:
+        prefetched_price = float(prefetched) if prefetched is not None else None
+    except (TypeError, ValueError):
+        prefetched_price = None
+    if prefetched_price is not None and prefetched_price > 0:
+        setattr(alert, "_chili_current_price_source", "batch_prefetch")
+        return prefetched_price
+    setattr(alert, "_chili_current_price_source", "single_fetch")
+    return _current_price(alert.ticker)
 
 
 def _stock_session_defer_state(now: datetime | None = None) -> dict[str, Any]:
@@ -2411,6 +2565,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             candidate_base = candidate_base.filter(non_stock_asset_filter)
     batch_limit = _autotrader_candidate_batch_size()
     tick_budget_s = _autotrader_tick_soft_budget_seconds()
+    fresh_fastlane = _fresh_candidate_fastlane_state()
     fresh_candidate_pool = int(candidate_base.count())
     stock_deferred_pool = 0
     stock_stale_unprocessed = 0
@@ -2437,7 +2592,9 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             ).count()
         )
     candidates = (
-        candidate_base.order_by(BreakoutAlert.id.asc()).limit(batch_limit).all()
+        candidate_base.order_by(
+            *_candidate_order_by_clauses(fresh_fastlane)
+        ).limit(batch_limit).all()
     )
     retry_pool = 0
     retry_candidates: list[BreakoutAlert] = []
@@ -2450,6 +2607,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         )
         candidates.extend(retry_candidates)
     candidate_pool = fresh_candidate_pool + retry_pool
+    prefetched_prices, price_prefetch_meta = _prefetch_candidate_prices(candidates)
+    _attach_prefetched_prices(candidates, prefetched_prices)
 
     out: dict[str, Any] = {
         "processed": 0,
@@ -2457,6 +2616,26 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "scaled_in": 0,
         "skipped": 0,
         "fresh_candidate_pool": fresh_candidate_pool,
+        "fresh_candidate_fastlane_enabled": bool(fresh_fastlane.get("enabled")),
+        "fresh_candidate_fastlane_max_age_seconds": fresh_fastlane.get("max_age_seconds"),
+        "candidate_price_prefetch_enabled": bool(price_prefetch_meta.get("enabled")),
+        "candidate_price_prefetch_requested": int(
+            price_prefetch_meta.get("requested") or 0
+        ),
+        "candidate_price_prefetch_hits": int(price_prefetch_meta.get("hits") or 0),
+        "candidate_price_prefetch_price_bus_hits": int(
+            price_prefetch_meta.get("price_bus_hits") or 0
+        ),
+        "candidate_price_prefetch_batch_requested": int(
+            price_prefetch_meta.get("batch_requested") or 0
+        ),
+        "candidate_price_prefetch_batch_hits": int(
+            price_prefetch_meta.get("batch_hits") or 0
+        ),
+        "candidate_price_prefetch_elapsed_seconds": price_prefetch_meta.get(
+            "elapsed_seconds"
+        ),
+        "candidate_price_prefetch_error": price_prefetch_meta.get("error"),
         "stock_session_defer_active": bool(stock_defer.get("active")),
         "stock_session_defer_reason": stock_defer.get("reason"),
         "stock_session_defer_max_age_hours": stock_defer.get("max_age_hours"),
@@ -2558,6 +2737,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
         "synergy_retry_batch=%d stock_defer_active=%s stock_deferred_pool=%d "
         "stock_stale_unprocessed=%d tick_budget_s=%s tick_deferred=%d "
+        "fresh_fastlane=%s price_prefetch_hits=%s/%s price_prefetch_elapsed_s=%s "
         "tick_elapsed_s=%.3f last_kind=%s last_reason=%s last_alert_id=%s "
         "last_ticker=%s",
         uid,
@@ -2575,6 +2755,10 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out.get("stock_session_stale_unprocessed"),
         out.get("tick_budget_seconds"),
         out.get("tick_budget_deferred"),
+        out.get("fresh_candidate_fastlane_enabled"),
+        out.get("candidate_price_prefetch_hits"),
+        out.get("candidate_price_prefetch_requested"),
+        out.get("candidate_price_prefetch_elapsed_seconds"),
         out.get("tick_elapsed_seconds"),
         out.get("tick_last_kind") or "-",
         out.get("tick_last_reason") or "-",
@@ -3178,9 +3362,22 @@ def _process_one_alert(
         # an alert. The gate is an additive safety, not a critical path.
         logger.debug("[regime_gate] eval skipped due to error: %s", _rg_exc)
 
-    px = _current_price(alert.ticker)
+    px = _current_price_for_alert(alert)
     if px is None:
-        _audit(db, user_id=uid, alert=alert, decision="skipped", reason="no_quote")
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="skipped",
+            reason="no_quote",
+            rule_snapshot={
+                "entry_quote_source": getattr(
+                    alert,
+                    "_chili_current_price_source",
+                    "single_fetch",
+                ),
+            },
+        )
         out["skipped"] += 1
         _autotrader_tick_note(out, kind="skipped", reason="no_quote", alert=alert)
         return
@@ -3392,6 +3589,12 @@ def _process_one_alert(
     ok, reason, snap = passes_rule_gate(
         db, alert, settings=settings, ctx=ctx, for_new_entry=for_new, fallback_user_id=uid,
     )
+    snap["entry_quote_source"] = getattr(
+        alert,
+        "_chili_current_price_source",
+        "single_fetch",
+    )
+    snap["entry_quote_prefetch_used"] = snap["entry_quote_source"] == "batch_prefetch"
     if not ok:
         if (
             bool(getattr(alert, "_chili_shadow_observation_only", False))
