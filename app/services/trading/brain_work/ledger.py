@@ -662,6 +662,25 @@ def _payload_dict(ev: BrainWorkEvent) -> dict[str, Any]:
     return ev.payload if isinstance(ev.payload, dict) else {}
 
 
+def _last_done_timestamps_by_type(
+    db: Session,
+    event_types: list[str],
+) -> dict[str, datetime]:
+    if not event_types:
+        return {}
+    rows = (
+        db.query(BrainWorkEvent.event_type, func.max(BrainWorkEvent.processed_at))
+        .filter(
+            BrainWorkEvent.domain == "trading",
+            BrainWorkEvent.status == "done",
+            BrainWorkEvent.event_type.in_(event_types),
+        )
+        .group_by(BrainWorkEvent.event_type)
+        .all()
+    )
+    return {str(event_type): processed_at for event_type, processed_at in rows if event_type and processed_at}
+
+
 def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str, Any]:
     """Counts, per-type pending/retry, processing leases, and recent outcomes for API/UI."""
     now = datetime.utcnow()
@@ -720,19 +739,15 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
 
     type_rows = db.query(BrainWorkEvent.event_type).filter(dom).distinct().all()
     event_types = [str(r[0]) for r in type_rows if r[0] is not None]
-    last_done_by_type: dict[str, str | None] = {}
-    for et_s in event_types:
-        row = (
-            db.query(BrainWorkEvent)
-            .filter(
-                dom,
-                BrainWorkEvent.status == "done",
-                BrainWorkEvent.event_type == et_s,
-            )
-            .order_by(BrainWorkEvent.processed_at.desc().nullslast(), BrainWorkEvent.id.desc())
-            .first()
+    last_done_timestamps = _last_done_timestamps_by_type(db, event_types)
+    last_done_by_type: dict[str, str | None] = {
+        et_s: (
+            last_done_timestamps[et_s].isoformat()
+            if last_done_timestamps.get(et_s)
+            else None
         )
-        last_done_by_type[et_s] = row.processed_at.isoformat() if row and row.processed_at else None
+        for et_s in event_types
+    }
 
     recent = (
         db.query(BrainWorkEvent)
