@@ -40,10 +40,12 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
 from sqlalchemy import inspect as sa_inspect, text
+from sqlalchemy.exc import OperationalError
 
 from app.services.trading.realized_pnl_sql import trade_return_fraction_sql
 
@@ -52,6 +54,59 @@ from sqlalchemy.engine import Engine
 
 _SCHEMA_LOCK_CLASSID = 0x4348  # CH
 _SCHEMA_LOCK_OBJID = 0x4D49  # MI
+_SCHEMA_LOCK_CONNECT_ATTEMPTS = 90
+_SCHEMA_LOCK_CONNECT_DELAY_SECONDS = 2.0
+
+
+def _schema_lock_env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        logger.warning("[migrations] invalid integer %s=%r; using %d", name, raw, default)
+        return default
+
+
+def _schema_lock_env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return max(minimum, float(raw))
+    except ValueError:
+        logger.warning("[migrations] invalid float %s=%r; using %.1f", name, raw, default)
+        return default
+
+
+def _connect_for_schema_startup_lock(engine: Engine):
+    attempts = _schema_lock_env_int(
+        "CHILI_SCHEMA_STARTUP_CONNECT_ATTEMPTS",
+        _SCHEMA_LOCK_CONNECT_ATTEMPTS,
+    )
+    delay_seconds = _schema_lock_env_float(
+        "CHILI_SCHEMA_STARTUP_CONNECT_DELAY_SECONDS",
+        _SCHEMA_LOCK_CONNECT_DELAY_SECONDS,
+    )
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+        except OperationalError:
+            if attempt >= attempts:
+                raise
+            if attempt == 1 or attempt % 5 == 0:
+                logger.warning(
+                    "[migrations] database unavailable before schema startup lock; "
+                    "retrying (%d/%d)",
+                    attempt,
+                    attempts,
+                    exc_info=True,
+                )
+            time.sleep(delay_seconds)
+
+    raise RuntimeError("unreachable schema startup connection retry state")
 
 
 @contextmanager
@@ -61,7 +116,7 @@ def schema_startup_lock(engine: Engine) -> Iterator[None]:
         yield
         return
 
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+    with _connect_for_schema_startup_lock(engine) as conn:
         logger.info("[migrations] waiting for schema startup advisory lock")
         conn.execute(
             text("SELECT pg_advisory_lock(:classid, :objid)"),
