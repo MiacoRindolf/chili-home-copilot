@@ -1,0 +1,29 @@
+import pytest
+
+from app.services import desktop_refinement
+
+
+@pytest.mark.parametrize(
+    ("spoken", "expected"),
+    [
+        ("Chrome", "chrome"),
+        ("the visual studio code", "visual studio code"),
+        ("note pad", "notepad"),
+        ("notepad plus plus", "notepad++"),
+        ("power shell", "powershell"),
+        ("task manager", "task manager"),
+    ],
+)
+def test_normalize_app_name_uses_mechanical_alias_without_llm(monkeypatch, spoken, expected):
+    def fail_if_llm_checked():
+        raise AssertionError("known desktop app aliases should not reach LLM setup")
+
+    monkeypatch.setattr("app.openai_client.is_configured", fail_if_llm_checked)
+
+    assert desktop_refinement.normalize_app_name(spoken) == expected
+
+
+def test_normalize_app_name_falls_back_when_no_alias_and_llm_unconfigured(monkeypatch):
+    monkeypatch.setattr("app.openai_client.is_configured", lambda: False)
+
+    assert desktop_refinement.normalize_app_name("mystery app") == "mystery app"

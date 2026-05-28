@@ -13,6 +13,65 @@ from . import desktop_app_aliases as alias_module
 _DESKTOP_VERB = re.compile(
     r"(?i)^\s*(?:open|launch|start|run|close|quit|kill|exit|stop)\s+(?:the\s+)?(?:my\s+)?\S",
 )
+_APP_NAME_CLEAN_RE = re.compile(r"[^a-z0-9+]+")
+_SPOKEN_ALIAS_OVERRIDES = {
+    "note pad": "notepad",
+    "notepad plus plus": "notepad++",
+    "notepad plus": "notepad++",
+    "calculator": "calculator",
+    "calc": "calc",
+    "file explorer": "file explorer",
+    "explorer": "explorer",
+    "command prompt": "command prompt",
+    "cmd": "cmd",
+    "power shell": "powershell",
+    "powershell": "powershell",
+    "windows terminal": "windows terminal",
+    "task manager": "task manager",
+    "snipping tool": "snipping tool",
+    "google chrome": "google chrome",
+    "chrome": "chrome",
+    "microsoft edge": "microsoft edge",
+    "edge": "edge",
+    "fire fox": "firefox",
+    "firefox": "firefox",
+    "visual studio code": "visual studio code",
+    "vs code": "vs code",
+    "v s code": "vs code",
+    "vscode": "vscode",
+    "visual studio": "visual studio",
+    "microsoft teams": "microsoft teams",
+    "teams": "teams",
+    "microsoft word": "microsoft word",
+    "word": "word",
+    "microsoft excel": "microsoft excel",
+    "excel": "excel",
+}
+
+
+def _normalize_app_alias_key(value: str) -> str:
+    cleaned = _APP_NAME_CLEAN_RE.sub(" ", (value or "").lower()).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return re.sub(r"^(?:the|my)\s+", "", cleaned).strip()
+
+
+def _deterministic_app_alias(app_name: str) -> str | None:
+    normalized = _normalize_app_alias_key(app_name)
+    if not normalized:
+        return None
+
+    alias_by_key = {
+        _normalize_app_alias_key(alias): alias
+        for alias in alias_module.DESKTOP_APP_ALIAS_KEYS
+    }
+    direct = alias_by_key.get(normalized)
+    if direct:
+        return direct
+
+    override = _SPOKEN_ALIAS_OVERRIDES.get(normalized)
+    if override and override in alias_module.DESKTOP_APP_ALIAS_KEYS:
+        return override
+    return None
 
 
 def looks_like_desktop_command(message: str) -> bool:
@@ -72,6 +131,14 @@ def normalize_app_name(app_name: str, trace_id: str = "desktop_norm") -> str:
         return app_name
     if not settings.desktop_refinement_enabled:
         return app_name.strip()
+
+    deterministic = _deterministic_app_alias(app_name)
+    if deterministic:
+        log_info(
+            trace_id,
+            f"desktop_norm_mechanical original={app_name!r} canonical={deterministic!r}",
+        )
+        return deterministic
 
     from .. import openai_client
 

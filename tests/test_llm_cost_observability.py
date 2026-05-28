@@ -284,7 +284,15 @@ def test_reasoning_background_purpose_has_offline_code_default_when_db_seed_miss
     assert db.calls == 1
 
 
-@pytest.mark.parametrize("purpose", ["code_review", "code_search"])
+@pytest.mark.parametrize(
+    "purpose",
+    [
+        "code_review",
+        "code_search",
+        "desktop_normalize_app",
+        "desktop_refine_speech",
+    ],
+)
 def test_code_purpose_has_offline_code_default_when_db_seed_missing(purpose):
     class EmptyResult:
         def fetchone(self):
@@ -521,6 +529,45 @@ def test_gateway_exact_cache_uses_project_agent_code_default(monkeypatch):
 
     assert chat.call_count == 1
     assert log_start.call_args_list[0].kwargs["purpose"] == "project_backend_engineer"
+    assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
+    assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
+    assert finalize.call_args_list[1].kwargs["provider"] == "cache"
+    assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
+
+
+@pytest.mark.parametrize("purpose", ["desktop_normalize_app", "desktop_refine_speech"])
+def test_gateway_exact_cache_uses_desktop_defaults_when_db_seed_missing(monkeypatch, purpose):
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def execute(self, *_args, **_kwargs):
+            return EmptyResult()
+
+    chat = MagicMock(
+        return_value={
+            "reply": "visual studio code",
+            "model": "gpt-5.5",
+            "provider": "openai",
+            "tokens_used": 20,
+        }
+    )
+    finalize = MagicMock()
+    log_ids = iter([801, 802])
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        lambda *a, **k: next(log_ids),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "User said: visual studio code"}]
+    gateway_chat(messages, purpose=purpose, system_prompt="normalize", db=EmptyDb())
+    gateway_chat(messages, purpose=purpose, system_prompt="normalize", db=EmptyDb())
+
+    assert chat.call_count == 1
     assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
     assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
     assert finalize.call_args_list[1].kwargs["provider"] == "cache"
