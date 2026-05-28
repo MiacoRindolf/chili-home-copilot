@@ -827,7 +827,52 @@ def test_gateway_stream_logs_provider_and_estimated_cost(monkeypatch):
     assert kwargs["provider"] == "openai"
     assert kwargs["provider_base_url"] == "https://api.openai.com/v1"
     assert kwargs["estimated_cost_usd"] > 0
-    assert kwargs["cache_status"] == "stream"
+    assert kwargs["cache_status"] == "gateway_stream_cache_miss"
+
+
+def test_gateway_stream_replays_exact_cache_for_low_stakes_stream(monkeypatch):
+    finalize = MagicMock()
+    stream = MagicMock(return_value=iter([("cached ", "gpt-5.5"), ("answer", "gpt-5.5")]))
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.policy_mod.get_policy",
+        lambda db, purpose: PurposePolicy(
+            purpose=purpose,
+            routing_strategy="passthrough",
+            decompose=False,
+            cross_examine=False,
+            use_premium_synthesis=True,
+            high_stakes=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        MagicMock(side_effect=[501, 502]),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat_stream", stream)
+    monkeypatch.setattr(oc, "provider_base_url_for_model", lambda model: "https://api.openai.com/v1")
+    monkeypatch.setattr(oc, "_safe_log_llm_call", lambda **kwargs: None)
+
+    kwargs = {
+        "messages": [{"role": "user", "content": "same stream prompt"}],
+        "purpose": "smart_pick_stream",
+        "system_prompt": "static smart-pick policy",
+        "trace_id": "stream-cache-test",
+        "user_message": "same request",
+        "user_id": 42,
+        "db": object(),
+    }
+    first = list(gateway_chat_stream(**kwargs))
+    second = list(gateway_chat_stream(**kwargs))
+
+    assert "".join(tok for tok, _ in first) == "cached answer"
+    assert "".join(tok for tok, _ in second) == "cached answer"
+    assert stream.call_count == 1
+    assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_stream_cache_miss"
+    assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_stream_cache_hit"
+    assert finalize.call_args_list[1].kwargs["provider"] == "cache"
+    assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
 
 
 def test_no_direct_paid_openai_calls_outside_gateway_voice_vision():

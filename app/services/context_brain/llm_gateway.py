@@ -69,10 +69,12 @@ _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
     "reasoning_user_model",
     "reasoning_web_research",
     "trading_analyze",
+    "trading_analyze_stream",
     "trading_pattern_mine",
     "trading_reflect",
     "trading_reasoning",
     "trading_smart_pick",
+    "smart_pick_stream",
     "pattern_research_extract",
 })
 _GATEWAY_EXACT_CACHE_TTL_SEC = 600
@@ -793,6 +795,9 @@ def gateway_chat_stream(
     own_db = False
     log_id: Optional[int] = None
     policy: Optional[PurposePolicy] = None
+    gateway_cache_key: str | None = None
+    finalized = False
+    cache_status = "stream"
     if db is None:
         try:
             db = _open_db_session()
@@ -878,6 +883,36 @@ def gateway_chat_stream(
             except Exception as e:
                 logger.debug("[context_brain.gateway] stream augmented failed, passthrough: %s", e)
 
+        if _gateway_cache_allowed(policy):
+            gateway_cache_key = _gateway_cache_key(
+                policy=policy,
+                messages=messages,
+                system_prompt=prompt,
+                user_message=inferred_user_message,
+                max_tokens=max_tokens,
+                strict_escalation=strict_escalation,
+                model_override=model_override,
+                user_id=user_id,
+                project_id=project_id,
+            )
+            cached = _gateway_cache_get(gateway_cache_key)
+            if cached is not None:
+                result = _return_gateway_cache_hit(
+                    db=db,
+                    log_id=log_id,
+                    started_at=started_at,
+                    messages=messages,
+                    system_prompt=prompt,
+                    user_message=inferred_user_message,
+                    cached=cached,
+                    cache_status="gateway_stream_cache_hit",
+                )
+                finalized = True
+                reply = str(result.get("reply") or "")
+                if reply:
+                    yield reply, str(result.get("model") or "cache")
+                return
+
         for tok, model in openai_client.chat_stream(
             messages=messages,
             system_prompt=prompt,
@@ -896,7 +931,7 @@ def gateway_chat_stream(
         error_message = str(e)
         raise
     finally:
-        if db is not None and log_id:
+        if db is not None and log_id and not finalized:
             completion = "".join(reply_parts)
             prompt_text = (prompt or "") + "\n" + "\n".join(
                 str(m.get("content") or "") for m in messages if isinstance(m, dict)
@@ -913,6 +948,18 @@ def gateway_chat_stream(
                 completion_tokens=completion_tokens,
                 cached_tokens=0,
             )
+            if success and gateway_cache_key:
+                _gateway_cache_put(gateway_cache_key, {
+                    "reply": completion,
+                    "model": model_seen or "stream",
+                    "provider": provider,
+                    "provider_base_url": provider_base_url,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                    "estimated_cost_usd": estimated_cost,
+                })
+                cache_status = "gateway_stream_cache_miss"
             _finalize_gateway_log(
                 db,
                 log_id,
@@ -928,7 +975,7 @@ def gateway_chat_stream(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
-                cache_status="stream",
+                cache_status=cache_status,
                 estimated_cost_usd=estimated_cost,
             )
             try:
@@ -950,7 +997,7 @@ def gateway_chat_stream(
                     cached_tokens=0,
                     reasoning_tokens=0,
                     total_tokens=total_tokens,
-                    cache_status="stream",
+                    cache_status=cache_status,
                     estimated_cost_usd=estimated_cost,
                     latency_ms=int((time.monotonic() - started_at) * 1000),
                     success=success,
