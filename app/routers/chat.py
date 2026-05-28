@@ -46,6 +46,54 @@ def _sync_chat_service_openai_client() -> None:
     chat_service_module.openai_client = openai_client
 
 
+def _chat_stream_purpose(action_type: str) -> str:
+    return "chat_search" if action_type == "web_search" else "chat_user"
+
+
+def _stream_gateway_chat_tokens(
+    *,
+    messages: list[dict],
+    system_prompt: str,
+    action_type: str,
+    trace_id: str,
+    user_message: str,
+    user_id: int | None,
+    db: Session,
+):
+    """Route chat SSE through the LLM gateway; preserve direct streaming fallback."""
+    purpose = _chat_stream_purpose(action_type)
+    gateway_yielded = False
+    try:
+        from ..services.context_brain.llm_gateway import gateway_chat_stream
+
+        for tok, model in gateway_chat_stream(
+            messages=messages,
+            purpose=purpose,
+            system_prompt=system_prompt,
+            trace_id=trace_id,
+            user_message=user_message,
+            strict_escalation=False,
+            user_id=user_id,
+            db=db,
+        ):
+            gateway_yielded = True
+            yield tok, model
+        return
+    except Exception as exc:
+        if gateway_yielded:
+            log_info(trace_id, f"gateway_chat_stream failed after tokens: {exc}")
+            raise
+        log_info(trace_id, f"gateway_chat_stream failed, falling back: {exc}")
+
+    for tok, model in openai_client.chat_stream(
+        messages=messages,
+        system_prompt=system_prompt,
+        trace_id=trace_id,
+        user_message=user_message,
+    ):
+        yield tok, model
+
+
 @router.get("/chat")
 def chat_page(request: Request):
     return request.app.state.templates.TemplateResponse(
@@ -939,9 +987,13 @@ async def mobile_chat_stream_api(
         def stream_openai_gen():
             full = []
             used_model = model_used
-            for tok, model in openai_client.chat_stream(
-                messages=messages, system_prompt=system_prompt,
+            for tok, model in _stream_gateway_chat_tokens(
+                messages=messages,
+                system_prompt=system_prompt,
+                action_type=action_type,
                 trace_id=trace_id, user_message=message,
+                user_id=user_id,
+                db=db,
             ):
                 full.append(tok)
                 used_model = model
@@ -1211,7 +1263,15 @@ async def chat_stream_api(
         def stream_openai_gen():
             full = []
             used_model = model_used
-            for tok, model in openai_client.chat_stream(messages=messages, system_prompt=system_prompt, trace_id=trace_id, user_message=message):
+            for tok, model in _stream_gateway_chat_tokens(
+                messages=messages,
+                system_prompt=system_prompt,
+                action_type=action_type,
+                trace_id=trace_id,
+                user_message=message,
+                user_id=user_id,
+                db=db,
+            ):
                 full.append(tok)
                 used_model = model
                 yield sse_event({"token": tok, "done": False})

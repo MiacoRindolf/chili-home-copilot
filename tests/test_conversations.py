@@ -168,9 +168,10 @@ class TestStreamingEndpoint:
         assert last_event["done"] is True
         assert last_event["action_type"] == "llm_offline"
 
+    @patch("app.services.context_brain.llm_gateway.gateway_chat_stream")
     @patch("app.routers.chat.openai_client")
     @patch("app.services.chat_service.plan_action")
-    def test_stream_openai_fallback(self, mock_plan, mock_openai, paired_client, db):
+    def test_stream_openai_fallback(self, mock_plan, mock_openai, mock_gateway_stream, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
             "type": "unknown",
@@ -181,7 +182,7 @@ class TestStreamingEndpoint:
         mock_openai.SYSTEM_PROMPT = "Test system"
         mock_openai.OPENAI_MODEL = "gpt-test"
         mock_openai.LLM_MODEL = "gpt-test"
-        mock_openai.chat_stream.return_value = iter([("Hello", "gpt-test"), (" world", "gpt-test"), ("!", "gpt-test")])
+        mock_gateway_stream.return_value = iter([("Hello", "gpt-test"), (" world", "gpt-test"), ("!", "gpt-test")])
 
         resp = client.post("/api/chat/stream", data={"message": "tell me a joke"})
         assert resp.status_code == 200
@@ -202,6 +203,34 @@ class TestStreamingEndpoint:
         assert "".join(tokens) == "Hello world!"
         assert done_event["action_type"] == "general_chat"
         assert done_event["model_used"] == "gpt-test"
+        assert mock_gateway_stream.call_count == 1
+        assert mock_gateway_stream.call_args.kwargs["purpose"] == "chat_user"
+        assert mock_openai.chat_stream.call_count == 0
+
+    def test_stream_gateway_helper_routes_search_synthesis(self, monkeypatch):
+        from app.routers import chat as chat_router
+
+        gateway_stream = MagicMock(return_value=iter([("Search answer", "gpt-test")]))
+        monkeypatch.setattr(
+            "app.services.context_brain.llm_gateway.gateway_chat_stream",
+            gateway_stream,
+        )
+
+        out = list(
+            chat_router._stream_gateway_chat_tokens(
+                messages=[{"role": "user", "content": "search this"}],
+                system_prompt="search system",
+                action_type="web_search",
+                trace_id="stream-search-test",
+                user_message="search this",
+                user_id=12,
+                db=object(),
+            )
+        )
+
+        assert out == [("Search answer", "gpt-test")]
+        assert gateway_stream.call_args.kwargs["purpose"] == "chat_search"
+        assert gateway_stream.call_args.kwargs["strict_escalation"] is False
 
 
 class TestExecuteTool:
