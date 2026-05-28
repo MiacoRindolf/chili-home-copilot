@@ -37,6 +37,8 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import Trade
+from .contracts import parse_contract_quantity
+from .quote_store import record_quote_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +221,35 @@ def _option_exit_requested_quantity(trade: Trade, raw_order: dict[str, Any]) -> 
     return qty if qty is not None and qty > 0 else None
 
 
+def _option_exit_contract_quantity(trade: Trade) -> int | None:
+    return parse_contract_quantity(getattr(trade, "quantity", None))
+
+
+def _record_exit_quote_snapshot(
+    db: Session,
+    trade: Trade,
+    meta: dict[str, Any],
+    quote: dict[str, Any],
+) -> bool:
+    """Persist the quote the exit monitor actually used, best effort."""
+    try:
+        opt_meta = dict(meta or {})
+        opt_meta.setdefault("underlying", getattr(trade, "ticker", None))
+        return record_quote_snapshot(
+            db,
+            chain_id=None,
+            option_meta=opt_meta,
+            quote=quote,
+        )
+    except Exception:
+        logger.debug(
+            "[options_exit_monitor] quote snapshot write failed trade=%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+        return False
+
+
 def _option_exit_submit_fill_is_complete(
     trade: Trade,
     raw_order: dict[str, Any],
@@ -266,6 +297,10 @@ def _configured_autotrader_user_id() -> int | None:
         return int(uid) if uid is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _parameter_value_or_default(value: Any, default: Any) -> Any:
+    return default if value is None else value
 
 
 def _opt_meta(t: Trade) -> dict[str, Any]:
@@ -390,6 +425,7 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         "skipped_no_quote": 0,
         "skipped_adapter_off": 0,
         "skipped_no_user_scope": 0,
+        "quote_snapshots": 0,
     }
 
     if not bool(getattr(settings, "chili_autotrader_options_exit_monitor_enabled", False)):
@@ -410,18 +446,21 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
     _register_exit_parameters(db)
     from ..strategy_parameter import get_parameter
 
-    dte_threshold = int(get_parameter(
+    dte_threshold_raw = get_parameter(
         db, STRATEGY_FAMILY, "exit_dte",
         default=float(getattr(settings, "chili_autotrader_options_exit_dte", 7)),
-    ) or 7)
-    stop_pct = float(get_parameter(
+    )
+    dte_threshold = int(_parameter_value_or_default(dte_threshold_raw, 7))
+    stop_pct_raw = get_parameter(
         db, STRATEGY_FAMILY, "exit_stop_pct",
         default=float(getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0)),
-    ) or 50.0)
-    tp_pct = float(get_parameter(
+    )
+    stop_pct = float(_parameter_value_or_default(stop_pct_raw, 50.0))
+    tp_pct_raw = get_parameter(
         db, STRATEGY_FAMILY, "exit_tp_pct",
         default=float(getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0)),
-    ) or 100.0)
+    )
+    tp_pct = float(_parameter_value_or_default(tp_pct_raw, 100.0))
 
     # Lazy import to avoid a hard module-load dependency on the
     # adapter (broker_service ultimately imports robin_stocks).
@@ -484,6 +523,8 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         if not quote:
             summary["skipped_no_quote"] += 1
             continue
+        if _record_exit_quote_snapshot(db, t, meta, quote):
+            summary["quote_snapshots"] += 1
         try:
             bid = float(quote.get("bid_price") or 0)
         except (TypeError, ValueError):
@@ -580,13 +621,24 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             )
             summary["skipped_no_quote"] += 1
             continue
+        exit_qty = _option_exit_contract_quantity(t)
+        if exit_qty is None:
+            logger.warning(
+                "[options_exit_monitor] trade=%s reason=%s invalid contract "
+                "quantity=%r; refusing to synthesize quantity=1",
+                t.id,
+                reason,
+                getattr(t, "quantity", None),
+            )
+            summary["errors"] += 1
+            continue
         try:
             res = adapter.place_option_sell(
                 underlying=str(meta.get("underlying") or t.ticker),
                 expiration=expiration,
                 strike=float(strike),
                 option_type=option_type,
-                quantity=int(t.quantity or 0) or 1,
+                quantity=exit_qty,
                 limit_price=float(limit_price),
                 position_effect="close",
             )

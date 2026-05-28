@@ -323,7 +323,9 @@ def synthesize_option_meta(
     from ..strategy_parameter import get_parameter
     from ..tick_normalizer import normalize_price
     from ..venue.robinhood_options import RobinhoodOptionsAdapter
-    from .entry_quality import OPTION_CONTRACT_MULTIPLIER, evaluate_long_option_entry
+    from .contracts import OPTION_CONTRACT_MULTIPLIER, normalize_option_meta
+    from .entry_quality import evaluate_long_option_entry
+    from .quote_store import create_chain_snapshot, record_quote_snapshot
 
     _register_synthesis_parameters(db)
 
@@ -429,6 +431,14 @@ def synthesize_option_meta(
 
     accepted: list[dict[str, Any]] = []
     reject_counts: Counter[str] = Counter()
+    chain_snapshot_id = create_chain_snapshot(
+        db,
+        underlying=sym,
+        expiration=expiration,
+        venue="robinhood",
+        spot_price=float(spot),
+        n_contracts=len(candidate_strikes),
+    )
 
     for strike in candidate_strikes:
         contract = adapter.find_contract(sym, expiration, strike, "call")
@@ -444,7 +454,7 @@ def synthesize_option_meta(
         if prices is None:
             reject_counts["bad_quote"] += 1
             continue
-        _bid, ask, _mid, spread_pct = prices
+        bid, ask, mid, spread_pct = prices
         if spread_pct > max_spread_pct:
             reject_counts["spread_above_max"] += 1
             continue
@@ -468,11 +478,29 @@ def synthesize_option_meta(
             "synthesis_target_dte": target_dte,
             "synthesis_max_spread_pct": max_spread_pct,
             "synthesis_spread_pct": round(spread_pct, 3),
+            "synthesis_bid": round(bid, 4),
+            "synthesis_ask": round(ask, 4),
+            "synthesis_mid": round(mid, 4),
             "synthesis_spot_at_pick": round(spot, 4),
             "synthesis_contract_notional_usd": round(contract_notional_usd, 2),
             "synthesis_budget_usd": round(contract_budget_usd, 2),
             "synthesis_candidate_count": len(candidate_strikes),
         }
+        meta = normalize_option_meta(
+            meta,
+            underlying=sym,
+            current_underlying_price=spot,
+            quote=quote,
+        )
+        quote_recorded = record_quote_snapshot(
+            db,
+            chain_id=chain_snapshot_id,
+            option_meta=meta,
+            quote=quote,
+        )
+        meta["quote_snapshot_recorded"] = bool(quote_recorded)
+        if chain_snapshot_id is not None:
+            meta["chain_snapshot_id"] = int(chain_snapshot_id)
 
         if (
             underlying_target is not None

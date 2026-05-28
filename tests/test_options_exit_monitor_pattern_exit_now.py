@@ -171,6 +171,36 @@ def test_options_exit_order_state_and_raw_order_normalization():
     assert raw["average_price"] == "1.45"
 
 
+def test_options_exit_quote_snapshot_uses_contract_metadata(monkeypatch):
+    from app.services.trading.options import exit_monitor as mod
+
+    calls = []
+
+    def _record_quote_snapshot(_db, **kwargs):
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(mod, "record_quote_snapshot", _record_quote_snapshot)
+    trade = SimpleNamespace(id=42, ticker="SPY")
+    meta = {
+        "expiration": "2026-06-19",
+        "strike": 729.0,
+        "option_type": "call",
+    }
+
+    assert mod._record_exit_quote_snapshot(
+        object(),
+        trade,
+        meta,
+        {"bid_price": "3.95", "ask_price": "4.05"},
+    ) is True
+
+    assert calls[0]["chain_id"] is None
+    assert calls[0]["option_meta"]["underlying"] == "SPY"
+    assert calls[0]["option_meta"]["strike"] == 729.0
+    assert calls[0]["quote"]["ask_price"] == "4.05"
+
+
 def test_options_exit_submission_persists_pending_context_and_finalizes_filled():
     options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
 
@@ -180,6 +210,8 @@ def test_options_exit_submission_persists_pending_context_and_finalizes_filled()
     assert "tca_reference_exit_price = :ref" in options_src
     assert 'summary["working"] += 1' in options_src
     assert 'summary["closed"] += 1' in options_src
+    assert "quote_snapshots" in options_src
+    assert "_record_exit_quote_snapshot" in options_src
 
 
 def test_options_exit_user_scope_resolves_autotrader_then_brain(monkeypatch):
@@ -204,6 +236,29 @@ def test_options_exit_pass_is_scoped_to_configured_autopilot_user():
     assert "brain_default_user_id" in options_src
     assert "live_autopilot_trade_filter" in options_src
     assert "Trade.user_id == int(uid)" in options_src
+
+
+def test_options_exit_preserves_zero_dte_parameter_value():
+    from app.services.trading.options.exit_monitor import _parameter_value_or_default
+
+    assert _parameter_value_or_default(0, 7) == 0
+    assert _parameter_value_or_default(0.0, 7) == 0.0
+    assert _parameter_value_or_default(None, 7) == 7
+
+
+def test_options_exit_rejects_malformed_contract_quantity():
+    from app.services.trading.options.exit_monitor import _option_exit_contract_quantity
+
+    assert _option_exit_contract_quantity(SimpleNamespace(quantity=2)) == 2
+    assert _option_exit_contract_quantity(SimpleNamespace(quantity="1.5")) is None
+    assert _option_exit_contract_quantity(SimpleNamespace(quantity=0)) is None
+
+
+def test_options_exit_never_defaults_contract_quantity_to_one():
+    options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
+
+    assert "quantity=int(t.quantity or 0) or 1" not in options_src
+    assert "refusing to synthesize quantity=1" in options_src
 
 
 def test_case1_fresh_exit_now_meta_returned():
