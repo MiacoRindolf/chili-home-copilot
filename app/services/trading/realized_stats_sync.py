@@ -129,6 +129,10 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
             FROM trading_trades
             WHERE status = 'closed'
               AND scan_pattern_id IS NOT NULL
+              AND scan_pattern_id != -1
+              AND pnl IS NOT NULL
+              AND entry_price > 0
+              AND quantity > 0
               AND exit_date > NOW() - make_interval(days => :lookback)
             UNION ALL
             SELECT scan_pattern_id,
@@ -158,22 +162,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
         SELECT scan_pattern_id,
                count(*) AS n,
                sum(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
-               avg(
-                 CASE
-                   WHEN pnl IS NOT NULL
-                        AND entry_price IS NOT NULL AND entry_price > 0
-                        AND quantity IS NOT NULL AND quantity > 0
-                   THEN (pnl / (entry_price * quantity * contract_multiplier)) * 100.0
-                   WHEN entry_price IS NOT NULL AND entry_price > 0
-                        AND exit_price IS NOT NULL
-                        AND LOWER(COALESCE(direction, 'long')) = 'short'
-                   THEN ((entry_price - exit_price) / entry_price) * 100.0
-                   WHEN entry_price IS NOT NULL AND entry_price > 0
-                        AND exit_price IS NOT NULL
-                   THEN ((exit_price - entry_price) / entry_price) * 100.0
-                   ELSE NULL
-                 END
-               ) AS avg_ret_pct,
+               avg((pnl / (entry_price * quantity * contract_multiplier)) * 100.0) AS avg_ret_pct,
                avg(
                  CASE
                    WHEN pnl > 0 AND entry_price > 0 AND quantity > 0
@@ -297,7 +286,12 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
         SELECT count(*) FROM scan_patterns
         WHERE NOT EXISTS (
             SELECT 1 FROM trading_trades
-            WHERE scan_pattern_id = scan_patterns.id AND status = 'closed'
+            WHERE scan_pattern_id = scan_patterns.id
+              AND scan_pattern_id != -1
+              AND status = 'closed'
+              AND pnl IS NOT NULL
+              AND entry_price > 0
+              AND quantity > 0
         )
         AND (
             NOT :include_paper_dynamic
@@ -306,6 +300,9 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                 WHERE scan_pattern_id = scan_patterns.id
                   AND status = 'closed'
                   AND scan_pattern_id != -1
+                  AND pnl IS NOT NULL
+                  AND entry_price > 0
+                  AND quantity > 0
                   AND (
                     paper_shadow_of_alert_id IS NOT NULL
                     OR COALESCE(signal_json, '{}'::jsonb) @> '{"auto_trader_v1": true}'::jsonb
