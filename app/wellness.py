@@ -5,7 +5,7 @@ Two-layer detection:
   2. Mental health topics → Ollama with therapeutic prompt (local, private)
 
 All mental health conversations stay on-device when Ollama is running.
-Groq is the fallback only if Ollama is offline.
+The LLM gateway is the only paid fallback if Ollama is offline.
 """
 import re
 import requests
@@ -133,7 +133,7 @@ def wellness_chat(
 ) -> dict:
     """Route mental health conversation through Ollama (local, private).
 
-    Falls back to Groq via openai_client if Ollama is unreachable.
+    Falls back through the LLM gateway if Ollama is unreachable.
     Returns {"reply": str, "model": str}.
     """
     system = THERAPEUTIC_PROMPT
@@ -154,7 +154,7 @@ def wellness_chat(
         return {"reply": reply, "model": f"{_OLLAMA_MODEL}-wellness"}
 
     except Exception as e:
-        log_info(trace_id, f"wellness_ollama_error={e}, falling back to groq")
+        log_info(trace_id, f"wellness_ollama_error={e}, falling back to gateway")
         from . import openai_client
         if openai_client.is_configured():
             try:
@@ -166,13 +166,12 @@ def wellness_chat(
                     trace_id=trace_id,
                     user_message=messages[-1]["content"] if messages else "",
                 )
-            except Exception:
-                result = openai_client.chat(
-                    messages=messages,
-                    system_prompt=system,
-                    trace_id=trace_id,
-                    user_message=messages[-1]["content"] if messages else "",
+            except Exception as gw_error:
+                log_info(
+                    trace_id,
+                    f"wellness_gateway_error={gw_error}; direct_openai_bypass_disabled",
                 )
+                result = {"reply": "", "model": "gateway_error"}
             if result["reply"]:
                 return {"reply": result["reply"], "model": result["model"] + "-wellness"}
         return {
@@ -190,7 +189,7 @@ def wellness_chat_stream(
 ):
     """Stream mental health conversation via Ollama (local).
 
-    Yields (token, model) tuples. Falls back to Groq if Ollama is down.
+    Yields (token, model) tuples. Falls back through the LLM gateway if Ollama is down.
     """
     system = THERAPEUTIC_PROMPT
     if personality_context:
@@ -222,7 +221,7 @@ def wellness_chat_stream(
         log_info(trace_id, f"wellness_ollama_stream_complete model={_OLLAMA_MODEL}")
 
     except Exception as e:
-        log_info(trace_id, f"wellness_ollama_stream_error={e}, falling back to groq")
+        log_info(trace_id, f"wellness_ollama_stream_error={e}, falling back to gateway")
         from . import openai_client
         if openai_client.is_configured():
             user_message = messages[-1]["content"] if messages else ""
@@ -244,12 +243,8 @@ def wellness_chat_stream(
                 if gateway_yielded:
                     log_info(trace_id, f"wellness_gateway_stream_error_after_tokens={gw_error}")
                     raise
-                log_info(trace_id, f"wellness_gateway_stream_error={gw_error}, falling back direct")
-
-            for tok, model in openai_client.chat_stream(
-                messages=messages,
-                system_prompt=system,
-                trace_id=trace_id,
-                user_message=user_message,
-            ):
-                yield tok, model + "-wellness"
+                log_info(
+                    trace_id,
+                    f"wellness_gateway_stream_error={gw_error}; direct_openai_stream_bypass_disabled",
+                )
+                return

@@ -1,7 +1,9 @@
 """Tests for the wellness detection module."""
+import inspect
 import pytest
 from unittest.mock import patch, MagicMock
 
+import app.wellness as wellness_module
 from app.wellness import (
     detect_crisis,
     detect_wellness_topic,
@@ -112,14 +114,43 @@ class TestWellnessChat:
 
     @patch("app.wellness.requests.post", side_effect=Exception("connection refused"))
     @patch("app.openai_client.is_configured", return_value=True)
-    @patch("app.openai_client.chat", return_value={"reply": "I'm here for you.", "model": "llama-3.3"})
-    def test_fallback_to_groq(self, mock_chat, mock_configured, mock_post):
+    def test_fallback_routes_through_gateway(self, mock_configured, mock_post, monkeypatch):
+        gateway = MagicMock(
+            return_value={"reply": "I'm here for you.", "model": "gpt-5.5"}
+        )
+        direct_chat = MagicMock(side_effect=AssertionError("direct OpenAI bypassed gateway"))
+        monkeypatch.setattr("app.services.context_brain.llm_gateway.gateway_chat", gateway)
+        monkeypatch.setattr("app.openai_client.chat", direct_chat)
+
         result = wellness_chat(
             messages=[{"role": "user", "content": "I'm feeling anxious"}],
             user_name="Bob",
         )
         assert result["reply"] == "I'm here for you."
         assert "wellness" in result["model"]
+        assert gateway.call_count == 1
+        assert gateway.call_args.kwargs["purpose"] == "wellness_chat"
+        direct_chat.assert_not_called()
+
+    @patch("app.wellness.requests.post", side_effect=Exception("connection refused"))
+    @patch("app.openai_client.is_configured", return_value=True)
+    def test_gateway_failure_does_not_fall_back_to_direct_openai(
+        self, mock_configured, mock_post, monkeypatch
+    ):
+        gateway = MagicMock(side_effect=RuntimeError("gateway unavailable"))
+        direct_chat = MagicMock(side_effect=AssertionError("direct OpenAI bypassed gateway"))
+        monkeypatch.setattr("app.services.context_brain.llm_gateway.gateway_chat", gateway)
+        monkeypatch.setattr("app.openai_client.chat", direct_chat)
+
+        result = wellness_chat(
+            messages=[{"role": "user", "content": "I'm feeling anxious"}],
+            user_name="Bob",
+        )
+
+        assert "try again" in result["reply"].lower()
+        assert result["model"] == "offline-wellness"
+        assert gateway.call_count == 1
+        direct_chat.assert_not_called()
 
     @patch("app.wellness.requests.post", side_effect=Exception("connection refused"))
     @patch("app.openai_client.is_configured", return_value=False)
@@ -158,3 +189,34 @@ class TestWellnessChat:
         assert gateway_stream.call_count == 1
         assert gateway_stream.call_args.kwargs["purpose"] == "wellness_chat"
         assert direct_stream.call_count == 0
+
+    @patch("app.wellness.requests.post", side_effect=Exception("connection refused"))
+    @patch("app.openai_client.is_configured", return_value=True)
+    def test_stream_gateway_failure_skips_direct_openai_stream(
+        self, mock_configured, mock_post, monkeypatch
+    ):
+        gateway_stream = MagicMock(side_effect=RuntimeError("gateway unavailable"))
+        direct_stream = MagicMock(side_effect=AssertionError("direct OpenAI stream bypassed gateway"))
+        monkeypatch.setattr(
+            "app.services.context_brain.llm_gateway.gateway_chat_stream",
+            gateway_stream,
+        )
+        monkeypatch.setattr("app.openai_client.chat_stream", direct_stream)
+
+        out = list(wellness_chat_stream(
+            messages=[{"role": "user", "content": "I'm feeling anxious"}],
+            user_name="Bob",
+            trace_id="wellness-stream-test",
+        ))
+
+        assert out == []
+        assert gateway_stream.call_count == 1
+        direct_stream.assert_not_called()
+
+    def test_wellness_source_has_no_direct_openai_fallback(self):
+        source = inspect.getsource(wellness_module)
+
+        assert "openai_client.chat(" not in source
+        assert "openai_client.chat_stream(" not in source
+        assert "direct_openai_bypass_disabled" in source
+        assert "direct_openai_stream_bypass_disabled" in source
