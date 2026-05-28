@@ -17,6 +17,7 @@ from .ledger import (
     enqueue_outcome_event,
     mark_work_done,
     mark_work_retry_or_dead,
+    recover_retryable_dead_work,
     release_stale_leases,
 )
 from .promotion_surface import emit_promotion_surface_change
@@ -331,7 +332,8 @@ def run_brain_work_dispatch_round(
     if not brain_work_ledger_enabled():
         return {"ok": True, "skipped": True, "reason": "ledger_disabled", "processed": 0}
 
-    release_stale_leases(db)
+    stale_leases_released = release_stale_leases(db)
+    dead_letter_recovery = recover_retryable_dead_work(db)
     db.commit()
 
     lease_s = int(getattr(settings, "brain_work_lease_seconds", 900))
@@ -641,6 +643,8 @@ def run_brain_work_dispatch_round(
         "claimed": claimed_total,
         "per_type": per_type,
         "errors": errors,
+        "stale_leases_released": stale_leases_released,
+        "dead_letter_recovery": dead_letter_recovery,
         "thin_evidence_sweep": thin_evidence_sweep,
         "market_snapshots": market_snapshots,
     }

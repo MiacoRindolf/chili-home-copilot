@@ -16,6 +16,20 @@ from ....models.trading import BrainWorkEvent
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work_ledger]"
 
+_DEAD_RECOVERY_PAYLOAD_KEY = "transient_dead_recovery_count"
+_DEAD_RECOVERY_EVENT_TYPES = ("backtest_requested",)
+_DEAD_RECOVERY_ERROR_MARKERS = (
+    "can't reconnect until invalid transaction is rolled back",
+    "current transaction is aborted",
+    "infailedsqltransaction",
+    "server closed the connection unexpectedly",
+    "connection already closed",
+    "connection not open",
+)
+_DEAD_RECOVERY_DEFAULT_LIMIT = 8
+_DEAD_RECOVERY_DEFAULT_MAX_PER_EVENT = 1
+_DEAD_RECOVERY_DEFAULT_DELAY_SECONDS = 10
+
 
 def brain_work_ledger_enabled() -> bool:
     return bool(getattr(settings, "brain_work_ledger_enabled", True))
@@ -338,6 +352,132 @@ def release_stale_leases(db: Session) -> int:
     r = db.execute(sql)
     db.flush()
     return int(r.rowcount or 0)
+
+
+def _dead_recovery_marker(error: str | None) -> str | None:
+    text_l = (error or "").lower()
+    for marker in _DEAD_RECOVERY_ERROR_MARKERS:
+        if marker in text_l:
+            return marker
+    return None
+
+
+def _payload_int(payload: dict[str, Any], key: str) -> int:
+    try:
+        return int(payload.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def recover_retryable_dead_work(
+    db: Session,
+    *,
+    event_types: tuple[str, ...] | None = None,
+    limit: int | None = None,
+    max_recoveries_per_event: int | None = None,
+    delay_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Requeue dead work that died from known transient infra/session failures.
+
+    This intentionally does not recover semantic handler failures. The primary
+    use case is old backtest work stranded by infrastructure issues after the
+    dispatcher/session bug has been fixed.
+    """
+    if not bool(getattr(settings, "brain_work_dead_letter_recovery_enabled", True)):
+        return {"ok": True, "enabled": False, "recovered": 0, "ids": []}
+
+    types = tuple(event_types or _DEAD_RECOVERY_EVENT_TYPES)
+    if not types:
+        return {"ok": True, "enabled": True, "recovered": 0, "ids": []}
+
+    lim = int(
+        limit
+        if limit is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_limit",
+            _DEAD_RECOVERY_DEFAULT_LIMIT,
+        )
+    )
+    if lim <= 0:
+        return {"ok": True, "enabled": True, "recovered": 0, "ids": []}
+
+    max_recoveries = int(
+        max_recoveries_per_event
+        if max_recoveries_per_event is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_max_per_event",
+            _DEAD_RECOVERY_DEFAULT_MAX_PER_EVENT,
+        )
+    )
+    delay = int(
+        delay_seconds
+        if delay_seconds is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_delay_seconds",
+            _DEAD_RECOVERY_DEFAULT_DELAY_SECONDS,
+        )
+    )
+    now = datetime.utcnow()
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(
+            BrainWorkEvent.domain == "trading",
+            BrainWorkEvent.event_kind == "work",
+            BrainWorkEvent.status == "dead",
+            BrainWorkEvent.event_type.in_(types),
+        )
+        .order_by(
+            BrainWorkEvent.processed_at.asc().nullsfirst(),
+            BrainWorkEvent.id.asc(),
+        )
+        .limit(lim * 4)
+        .all()
+    )
+
+    recovered_ids: list[int] = []
+    skipped_non_retryable = 0
+    skipped_max_recoveries = 0
+    for row in rows:
+        if len(recovered_ids) >= lim:
+            break
+        marker = _dead_recovery_marker(row.last_error)
+        if marker is None:
+            skipped_non_retryable += 1
+            continue
+        payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
+        recovery_count = _payload_int(payload, _DEAD_RECOVERY_PAYLOAD_KEY)
+        if recovery_count >= max(0, max_recoveries):
+            skipped_max_recoveries += 1
+            continue
+
+        max_attempts = max(1, int(row.max_attempts or 1))
+        payload[_DEAD_RECOVERY_PAYLOAD_KEY] = recovery_count + 1
+        payload["transient_dead_recovered_at"] = now.isoformat()
+        payload["transient_dead_recovery_marker"] = marker
+        row.payload = payload
+        row.status = "retry_wait"
+        row.attempts = min(int(row.attempts or 0), max_attempts - 1)
+        row.max_attempts = max_attempts
+        row.lease_holder = None
+        row.lease_expires_at = None
+        row.processed_at = None
+        row.next_run_at = now + timedelta(seconds=max(0, delay))
+        row.updated_at = now
+        recovered_ids.append(int(row.id))
+
+    db.flush()
+    return {
+        "ok": True,
+        "enabled": True,
+        "event_types": list(types),
+        "recovered": len(recovered_ids),
+        "ids": recovered_ids,
+        "skipped_non_retryable": skipped_non_retryable,
+        "skipped_max_recoveries": skipped_max_recoveries,
+    }
 
 
 def mark_work_done(db: Session, event_id: int) -> None:

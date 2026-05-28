@@ -10,6 +10,7 @@ from app.services.trading.brain_work.ledger import (
     get_work_ledger_summary,
     mark_work_done,
     mark_work_retry_or_dead,
+    recover_retryable_dead_work,
     release_stale_leases,
 )
 
@@ -163,6 +164,81 @@ def test_summary_includes_dead_letter_diagnostics(db) -> None:
     assert row["max_attempts"] == 1
     assert "Can't reconnect" in row["last_error"]
     assert row["processed_at"] is not None
+
+
+def test_retryable_dead_work_recovery_requeues_once(db) -> None:
+    eid = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:retryable-dead-recovery",
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+        max_attempts=1,
+    )
+    db.commit()
+    assert eid is not None
+
+    rows = claim_work_batch(
+        db,
+        limit=1,
+        lease_seconds=60,
+        holder_id="pytest:dead-recovery",
+        event_type="backtest_requested",
+    )
+    db.commit()
+    assert len(rows) == 1
+    mark_work_retry_or_dead(
+        db,
+        int(rows[0].id),
+        "Can't reconnect until invalid transaction is rolled back.",
+    )
+    db.commit()
+
+    result = recover_retryable_dead_work(
+        db,
+        event_types=("backtest_requested",),
+        limit=4,
+        max_recoveries_per_event=1,
+        delay_seconds=0,
+    )
+    db.commit()
+
+    assert result["recovered"] == 1
+    assert result["ids"] == [eid]
+    recovered = claim_work_batch(
+        db,
+        limit=1,
+        lease_seconds=60,
+        holder_id="pytest:dead-recovered",
+        event_type="backtest_requested",
+    )
+    db.commit()
+    assert [int(row.id) for row in recovered] == [eid]
+    assert recovered[0].attempts == 1
+    payload = recovered[0].payload
+    assert payload["transient_dead_recovery_count"] == 1
+    assert (
+        payload["transient_dead_recovery_marker"]
+        == "can't reconnect until invalid transaction is rolled back"
+    )
+
+    mark_work_retry_or_dead(
+        db,
+        int(recovered[0].id),
+        "Can't reconnect until invalid transaction is rolled back.",
+    )
+    db.commit()
+    second = recover_retryable_dead_work(
+        db,
+        event_types=("backtest_requested",),
+        limit=4,
+        max_recoveries_per_event=1,
+        delay_seconds=0,
+    )
+    db.commit()
+
+    assert second["recovered"] == 0
+    assert second["skipped_max_recoveries"] >= 1
 
 
 def test_enqueue_or_refresh_debounced_merges_payload(db) -> None:
