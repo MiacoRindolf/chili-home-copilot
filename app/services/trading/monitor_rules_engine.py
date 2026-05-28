@@ -423,14 +423,59 @@ def get_complexity_band(rules_json: dict | None) -> str:
 
 # ── Rule Aggregation (called from learning cycle) ────────────────────
 
+def _scan_pattern_names_by_id(db: Session, pattern_ids: set[int]) -> dict[int, str]:
+    if not pattern_ids:
+        return {}
+
+    from ...models.trading import ScanPattern
+
+    rows = (
+        db.query(ScanPattern.id, ScanPattern.name)
+        .filter(ScanPattern.id.in_(sorted(pattern_ids)))
+        .all()
+    )
+    names: dict[int, str] = {}
+    for pattern_id, name in rows:
+        if pattern_id is None:
+            continue
+        pid = int(pattern_id)
+        names[pid] = str(name or f"pattern_{pid}")[:120]
+    return names
+
+
+def _monitor_decision_rules_by_key(
+    db: Session,
+    keys: set[tuple[str, str]],
+) -> dict[tuple[str, str], Any]:
+    if not keys:
+        return {}
+
+    from ...models.trading import MonitorDecisionRule
+
+    pattern_types = sorted({ptype for ptype, _sig in keys})
+    signatures = sorted({sig for _ptype, sig in keys})
+    rows = (
+        db.query(MonitorDecisionRule)
+        .filter(
+            MonitorDecisionRule.pattern_type.in_(pattern_types),
+            MonitorDecisionRule.signal_signature.in_(signatures),
+        )
+        .all()
+    )
+    return {
+        (str(row.pattern_type), str(row.signal_signature)): row
+        for row in rows
+        if (str(row.pattern_type), str(row.signal_signature)) in keys
+    }
+
+
 def aggregate_decision_outcomes(db: Session) -> dict[str, Any]:
     """Aggregate resolved PatternMonitorDecision rows into MonitorDecisionRule
     entries.  Called by learn_from_monitor_decisions.
 
     Returns summary stats.
     """
-    from ...models.trading import PatternMonitorDecision, MonitorDecisionRule, ScanPattern
-    from sqlalchemy import func
+    from ...models.trading import PatternMonitorDecision, MonitorDecisionRule
 
     cutoff = datetime.utcnow() - timedelta(days=90)
     rows = (
@@ -445,6 +490,16 @@ def aggregate_decision_outcomes(db: Session) -> dict[str, Any]:
     if not rows:
         return {"rules_updated": 0, "rows_processed": 0}
 
+    pattern_ids: set[int] = set()
+    for r in rows:
+        if not r.scan_pattern_id:
+            continue
+        try:
+            pattern_ids.add(int(r.scan_pattern_id))
+        except (TypeError, ValueError):
+            continue
+    pattern_names = _scan_pattern_names_by_id(db, pattern_ids)
+
     # Group by (pattern_type, signal_signature)
     buckets: dict[tuple[str, str], list] = {}
     for r in rows:
@@ -455,9 +510,10 @@ def aggregate_decision_outcomes(db: Session) -> dict[str, Any]:
         # Resolve pattern type
         ptype = "unknown"
         if r.scan_pattern_id:
-            sp = db.query(ScanPattern).filter(ScanPattern.id == r.scan_pattern_id).first()
-            if sp:
-                ptype = (sp.name or f"pattern_{sp.id}")[:120]
+            try:
+                ptype = pattern_names.get(int(r.scan_pattern_id), "unknown")
+            except (TypeError, ValueError):
+                ptype = "unknown"
 
         # Reconstruct signal snapshot from stored conditions_snapshot
         tp = snap.get("trade_plan", {})
@@ -465,6 +521,8 @@ def aggregate_decision_outcomes(db: Session) -> dict[str, Any]:
 
         key = (ptype, sig)
         buckets.setdefault(key, []).append(r)
+
+    existing_rules = _monitor_decision_rules_by_key(db, set(buckets))
 
     rules_updated = 0
     for (ptype, sig), decisions in buckets.items():
@@ -503,14 +561,7 @@ def aggregate_decision_outcomes(db: Session) -> dict[str, Any]:
         rolling = [bool(d.was_beneficial) for d in recent]
 
         # Determine graduation status
-        existing = (
-            db.query(MonitorDecisionRule)
-            .filter(
-                MonitorDecisionRule.pattern_type == ptype,
-                MonitorDecisionRule.signal_signature == sig,
-            )
-            .first()
-        )
+        existing = existing_rules.get((ptype, sig))
 
         grad_status = _compute_graduation(
             sample_count=n,
