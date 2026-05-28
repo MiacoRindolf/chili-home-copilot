@@ -23,6 +23,9 @@ String userVisibleNetworkError(Object error) {
   if (s.contains('timed out') || s.contains('TimeoutException')) {
     return 'Connection timed out. Check the Backend URL and firewall / VPN.';
   }
+  if (s.contains('FormatException') || s.contains('Unexpected character')) {
+    return 'The server sent a response this app could not read. Check that the Backend URL points at the CHILI API, not a login page or proxy error page.';
+  }
   return s;
 }
 
