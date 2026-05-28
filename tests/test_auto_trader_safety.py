@@ -487,6 +487,14 @@ def test_candidate_price_prefetch_attaches_batch_quote(db, monkeypatch):
     assert out["ok"] is True
     assert out["candidate_price_prefetch_requested"] == 1
     assert out["candidate_price_prefetch_hits"] == 1
+    assert out["tick_runtime_gate_elapsed_seconds"] >= 0
+    assert out["tick_lock_cleanup_elapsed_seconds"] >= 0
+    assert out["tick_candidate_select_elapsed_seconds"] >= 0
+    assert out["tick_processing_elapsed_seconds"] >= 0
+    assert out["tick_candidate_pool_zero_diag_elapsed_seconds"] == 0.0
+    assert out["tick_slowest_alert_elapsed_seconds"] >= 0
+    assert out["tick_slowest_alert_id"] == alert.id
+    assert out["tick_slowest_alert_ticker"] == "PREF-USD"
     assert seen == [10.25]
 
 

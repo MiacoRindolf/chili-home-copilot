@@ -521,6 +521,22 @@ def _autotrader_tick_note(
         out["tick_last_ticker"] = (alert.ticker or "").upper()
 
 
+def _record_slowest_tick_alert(
+    out: dict[str, Any],
+    *,
+    alert: BreakoutAlert,
+    elapsed_seconds: float,
+) -> None:
+    """Track the slowest alert in a tick for execution-latency forensics."""
+    elapsed = round(max(0.0, elapsed_seconds), 3)
+    current = float(out.get("tick_slowest_alert_elapsed_seconds") or 0.0)
+    if elapsed < current:
+        return
+    out["tick_slowest_alert_elapsed_seconds"] = elapsed
+    out["tick_slowest_alert_id"] = int(alert.id)
+    out["tick_slowest_alert_ticker"] = (alert.ticker or "").upper()
+
+
 _CANDIDATE_POOL_ZERO_DIAG_INTERVAL_S = 300.0
 _last_candidate_pool_zero_diag_at = 0.0
 
@@ -2658,17 +2674,21 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     if not rt.get("tick_allowed"):
         return {"ok": True, "skipped": True, "reason": "paused_or_disabled", "runtime": rt}
 
+    runtime_gate_elapsed_s = round(time.monotonic() - tick_started, 3)
+    cleanup_started = time.monotonic()
     # AAA -- janitor pass: kill any leaked autotrader advisory-lock holders
     # from previous abandoned ticks. Cheap, idempotent. Default threshold
     # 120s -- well past the 45s tick budget so legitimate slow ticks never
     # get killed by us.
     _cleanup_leaked_advisory_locks(db)
+    cleanup_elapsed_s = round(time.monotonic() - cleanup_started, 3)
 
     uid = _resolve_user_id()
     if uid is None:
         logger.debug("[autotrader] No user id (chili_autotrader_user_id / brain_default_user_id)")
         return {"ok": False, "error": "no_user_id"}
 
+    candidate_select_started = time.monotonic()
     # Match alerts scoped to this autotrader user AND system-generated
     # (``user_id IS NULL``) pattern-imminent alerts. The imminent generator
     # writes alerts without a specific owner; treating them as processable by
@@ -2754,6 +2774,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         )
         candidates.extend(retry_candidates)
     candidate_pool = candidate_pool_base + retry_pool
+    candidate_select_elapsed_s = round(time.monotonic() - candidate_select_started, 3)
     prefetched_prices, price_prefetch_meta = _prefetch_candidate_prices(candidates)
     _attach_prefetched_prices(candidates, prefetched_prices)
 
@@ -2807,8 +2828,17 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "tick_last_reason": None,
         "tick_last_alert_id": None,
         "tick_last_ticker": None,
+        "tick_runtime_gate_elapsed_seconds": runtime_gate_elapsed_s,
+        "tick_lock_cleanup_elapsed_seconds": cleanup_elapsed_s,
+        "tick_candidate_select_elapsed_seconds": candidate_select_elapsed_s,
+        "tick_processing_elapsed_seconds": 0.0,
+        "tick_candidate_pool_zero_diag_elapsed_seconds": 0.0,
+        "tick_slowest_alert_elapsed_seconds": 0.0,
+        "tick_slowest_alert_id": None,
+        "tick_slowest_alert_ticker": None,
     }
 
+    processing_started = time.monotonic()
     for idx, alert in enumerate(candidates):
         if out["processed"] > 0 and (time.monotonic() - tick_started) >= tick_budget_s:
             deferred = len(candidates) - idx
@@ -2830,6 +2860,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 time.monotonic() - tick_started,
             )
             break
+        alert_started = time.monotonic()
         # P0.2 — acquire advisory lock before the TOCTOU window. Without
         # this, two ticks (different scheduler replicas) can both pass the
         # audit-row check and both call place_market_order. The lock is
@@ -2840,6 +2871,11 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 kind="unclaimed",
                 reason="advisory_lock_busy",
                 alert=alert,
+            )
+            _record_slowest_tick_alert(
+                out,
+                alert=alert,
+                elapsed_seconds=time.monotonic() - alert_started,
             )
             continue
 
@@ -2881,10 +2917,26 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 )
             out["processed"] += 1
         finally:
-            _release_alert_claim(db, int(alert.id))
+            try:
+                _release_alert_claim(db, int(alert.id))
+            finally:
+                _record_slowest_tick_alert(
+                    out,
+                    alert=alert,
+                    elapsed_seconds=time.monotonic() - alert_started,
+                )
 
+    out["tick_processing_elapsed_seconds"] = round(
+        time.monotonic() - processing_started,
+        3,
+    )
     if candidate_pool == 0:
+        diag_started = time.monotonic()
         diag = _maybe_log_candidate_pool_zero(db, uid=uid)
+        out["tick_candidate_pool_zero_diag_elapsed_seconds"] = round(
+            time.monotonic() - diag_started,
+            3,
+        )
         if diag is not None:
             out["candidate_pool_zero_diag"] = diag
     out["tick_elapsed_seconds"] = round(time.monotonic() - tick_started, 3)
@@ -2897,6 +2949,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "stock_stale_unprocessed=%d tick_budget_s=%s tick_deferred=%d "
         "fresh_fastlane=%s fresh_burst=%s price_prefetch_hits=%s/%s "
         "price_prefetch_elapsed_s=%s "
+        "phase_s=runtime:%s cleanup:%s select:%s process:%s diag:%s "
+        "slowest_alert_s=%s slowest_alert_id=%s slowest_ticker=%s "
         "tick_elapsed_s=%.3f last_kind=%s last_reason=%s last_alert_id=%s "
         "last_ticker=%s",
         uid,
@@ -2921,6 +2975,16 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out.get("candidate_price_prefetch_hits"),
         out.get("candidate_price_prefetch_requested"),
         out.get("candidate_price_prefetch_elapsed_seconds"),
+        out.get("tick_runtime_gate_elapsed_seconds"),
+        out.get("tick_lock_cleanup_elapsed_seconds"),
+        out.get("tick_candidate_select_elapsed_seconds"),
+        out.get("tick_processing_elapsed_seconds"),
+        out.get("tick_candidate_pool_zero_diag_elapsed_seconds"),
+        out.get("tick_slowest_alert_elapsed_seconds"),
+        out.get("tick_slowest_alert_id")
+        if out.get("tick_slowest_alert_id") is not None
+        else "-",
+        out.get("tick_slowest_alert_ticker") or "-",
         out.get("tick_elapsed_seconds"),
         out.get("tick_last_kind") or "-",
         out.get("tick_last_reason") or "-",
