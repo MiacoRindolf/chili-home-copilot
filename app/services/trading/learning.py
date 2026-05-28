@@ -7656,6 +7656,48 @@ def snapshot_learning_for_brain_worker_status_file() -> dict[str, Any]:
     return {k: st.get(k) for k in _BRAIN_WORKER_STATUS_LEARNING_KEYS}
 
 
+def _is_stale_learning_live_snapshot(
+    snap: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    stale_seconds: int | None = None,
+) -> tuple[bool, str | None]:
+    if not snap.get("running"):
+        return False, None
+    started_raw = snap.get("started_at")
+    if not started_raw:
+        return False, None
+    try:
+        started = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        as_of = now or datetime.now(timezone.utc)
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        age_s = (as_of.astimezone(timezone.utc) - started.astimezone(timezone.utc)).total_seconds()
+    except Exception:
+        return False, None
+
+    if stale_seconds is None:
+        try:
+            from ...config import settings
+
+            stale_seconds = int(getattr(settings, "learning_cycle_stale_seconds", 10800) or 10800)
+        except Exception:
+            stale_seconds = 10800
+    stale_seconds = max(300, int(stale_seconds))
+    if age_s <= stale_seconds:
+        return False, None
+    return True, f"stale_learning_live_age_s={int(age_s)}"
+
+
+def _mark_stale_learning_live_overlay(status: dict[str, Any], snap: dict[str, Any], reason: str) -> None:
+    status["learning_live_stale"] = True
+    status["learning_live_stale_reason"] = reason
+    if snap.get("started_at"):
+        status["learning_live_stale_started_at"] = snap.get("started_at")
+
+
 def _overlay_learning_from_brain_worker_status_file(status: dict[str, Any]) -> None:
     """When the trading brain worker runs out-of-process, merge its live cycle snapshot for the web UI."""
     try:
@@ -7677,6 +7719,10 @@ def _overlay_learning_from_brain_worker_status_file(status: dict[str, Any]) -> N
         snap = data.get("learning")
         if not isinstance(snap, dict):
             return
+        stale, reason = _is_stale_learning_live_snapshot(snap)
+        if stale:
+            _mark_stale_learning_live_overlay(status, snap, reason or "stale_learning_live")
+            return
         for k in _BRAIN_WORKER_STATUS_LEARNING_KEYS:
             if k in snap:
                 status[k] = snap[k]
@@ -7697,6 +7743,10 @@ def _overlay_learning_from_brain_worker_db(status: dict[str, Any]) -> None:
                 return
             data = json.loads(row.learning_live_json)
             if not isinstance(data, dict):
+                return
+            stale, reason = _is_stale_learning_live_snapshot(data)
+            if stale:
+                _mark_stale_learning_live_overlay(status, data, reason or "stale_learning_live")
                 return
             for k in _BRAIN_WORKER_STATUS_LEARNING_KEYS:
                 if k in data:
