@@ -165,8 +165,11 @@ def _aggregate_oos_backtest_evidence(
                 END * oos_trade_count
             ), 0.0) AS wins_float,
             SUM(
-                COALESCE(oos_return_pct, 0.0) * oos_trade_count
-            ) / NULLIF(SUM(oos_trade_count), 0) AS avg_return
+                oos_return_pct * oos_trade_count
+            ) / NULLIF(
+                SUM(oos_trade_count) FILTER (WHERE oos_return_pct IS NOT NULL),
+                0
+            ) AS avg_return
         FROM trading_backtests
         WHERE {" AND ".join(where)}
     """), params).mappings().first()
