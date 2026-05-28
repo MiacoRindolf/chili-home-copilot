@@ -182,11 +182,21 @@ def _extract_sharpe(bt_result: dict[str, Any]) -> float | None:
     if not trades:
         return None
 
+    import math
+
     returns = []
     for t in trades:
-        ret = t.get("return_pct") or t.get("pnl_pct")
-        if ret is not None:
-            returns.append(float(ret))
+        ret = t.get("return_pct")
+        if ret is None:
+            ret = t.get("pnl_pct")
+        if ret is None:
+            continue
+        try:
+            ret_f = float(ret)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(ret_f):
+            returns.append(ret_f)
 
     if len(returns) < 2:
         return None
@@ -197,5 +207,4 @@ def _extract_sharpe(bt_result: dict[str, Any]) -> float | None:
     if std_r <= 0:
         return 0.0
 
-    import math
     return round(mean_r / std_r * math.sqrt(252), 4)
