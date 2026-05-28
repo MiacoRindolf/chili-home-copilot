@@ -73,9 +73,12 @@ _MODEL_PREFERENCE = (
     "llama3.2:1b",
 )
 
-_PLAN_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_TIMEOUT_SEC") or "150")
-_PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "900")
+_PLAN_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_TIMEOUT_SEC") or "90")
+_PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "500")
 _PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "9000")
+_EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_SEC") or "150")
+_EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
+_EDIT_MAX_FILE_LINES = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_MAX_FILE_LINES") or "260")
 
 _STAGE_ORDER = (
     "classify",
@@ -686,13 +689,34 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
     return _clip("\n".join(parts), _PLAN_PROMPT_CHAR_LIMIT)
 
 
+def _rank_fallback_files(files: list[str], repo_path: Path | None, prompt: str) -> list[str]:
+    prompt_lower = (prompt or "").lower()
+    pool = files
+    if any(token in prompt_lower for token in ("desktop", "flutter", "native", "ui", "screen")):
+        desktop_files = [path for path in files if path.startswith("chili_mobile/")]
+        if desktop_files:
+            pool = desktop_files
+
+    def sort_key(path: str) -> tuple[int, int, str]:
+        if repo_path is None:
+            return (1, 0, path)
+        try:
+            size = (repo_path / path).stat().st_size
+        except OSError:
+            size = 999_999_999
+        direct = 0 if path.endswith(("network_error_message.dart", "chili_api_client.dart")) else 1
+        return (direct, size, path)
+
+    return sorted(pool, key=sort_key)
+
+
 def _fallback_plan_from_context(
     context: dict[str, Any],
     repo_path: Path | None,
     prompt: str,
     reason: str,
 ) -> dict[str, Any]:
-    files = _plan_candidate_files(context, repo_path, prompt)[:3]
+    files = _rank_fallback_files(_plan_candidate_files(context, repo_path, prompt), repo_path, prompt)[:1]
     if not files:
         return {
             "analysis": f"Local model planning was unavailable ({reason}); no safe candidate files were identified.",
@@ -980,9 +1004,10 @@ def generate_diffs_from_plan(
     ]
     diffs: list[str] = []
     for item in files:
+        _check_cancel(db, run)
         rel = str(item.get("path") or "")
         desc = str(item.get("description") or "")
-        content = _read_file_content(str(repo_path), rel)
+        content = _read_file_content(str(repo_path), rel, max_lines=_EDIT_MAX_FILE_LINES)
         if validation_context:
             desc = desc + "\n\nValidation failure to repair:\n" + validation_context
         prompt = _build_edit_prompt(rel, content or "", desc, conventions)
@@ -993,8 +1018,8 @@ def generate_diffs_from_plan(
             ],
             str(model_info["model"]),
             temperature=0.1,
-            timeout_sec=120,
-            options={"num_predict": 2400},
+            timeout_sec=_EDIT_TIMEOUT_SEC,
+            options={"num_predict": _EDIT_NUM_PREDICT},
         )
         _add_artifact(
             db,
@@ -1007,12 +1032,21 @@ def generate_diffs_from_plan(
                 "ok": result.ok,
                 "latency_ms": result.latency_ms,
                 "error": result.error,
+                "prompt_chars": len(prompt),
             },
         )
+        _check_cancel(db, run)
         if not result.ok:
             continue
         diff = _extract_diff(result.text)
         if not diff:
+            _add_artifact(
+                db,
+                run.run_id,
+                "diff_rejected",
+                rel,
+                content_json={"reason": "model_response_missing_unified_diff", "response_preview": _clip(result.text, 800)},
+            )
             continue
         validity = _validate_diff(diff, rel, content)
         if not validity.get("valid"):

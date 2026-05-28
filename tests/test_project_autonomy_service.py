@@ -131,8 +131,11 @@ def test_integration_branch_name_avoids_nested_ref_conflicts():
 
 def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):
     desktop_file = tmp_path / "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
+    error_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
     desktop_file.parent.mkdir(parents=True)
     desktop_file.write_text("// desktop brain screen\n", encoding="utf-8")
+    error_file.parent.mkdir(parents=True)
+    error_file.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
     context = {
         "repos": [{"name": "repo", "runtime_path": str(tmp_path)}],
         "insights": [],
@@ -148,4 +151,5 @@ def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):
     )
 
     assert plan["files"]
-    assert plan["files"][0]["path"] == "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
+    assert len(plan["files"]) == 1
+    assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
