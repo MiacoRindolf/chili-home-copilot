@@ -1,95 +1,84 @@
-# NEXT_TASK: f-position-identity-phase-5h-production-rename-brief-and-preflight
+# NEXT_TASK: f-position-identity-phase-5i-post-rename-soak
 
 STATUS: PENDING
 
 ## Goal
 
-Prepare the final production migration brief and preflight for the physical
-rename from `trading_trades` to `trading_management_envelopes`.
+Soak the Phase 5H physical rename after production DDL.
 
-Do not mix semantic cleanup into this phase. The only acceptable production
-change is the compatibility-first physical rename that Phase 5G proved in a
-transactional dry run.
+The compatibility view must stay in place. This task is observation plus
+selective cleanup planning, not another destructive schema change.
 
 ## Current Gate State
 
-- Phase 5E soak: `READY_FOR_RENAME_BRIEF`
-- Fresh post-mig-275 data represented:
-  - fresh decisions: 3
-  - fresh envelopes: 3
-  - fresh closes: 7
+- Phase 5H migration applied: `283_position_identity_phase5h_physical_rename`
+- Physical base table: `trading_management_envelopes` (`relkind='r'`)
+- Legacy compatibility view: `trading_trades` (`relkind='v'`)
+- Phase 5E compare after rename: `READY_FOR_RENAME_BRIEF`
+- Fresh decisions: 3
+- Fresh envelopes: 3
+- Fresh closes: 7
 - Hard linkage issues: 0
-- Fresh close mismatches: 0
+- 30d attribution mismatched rows: 0
 - 30d attribution drift: $0.0000
-- Phase 5F audit:
-  - runtime files with literal `trading_trades`: 35
-  - runtime files with `Trade` ORM-symbol references: 101
-- Phase 5G dry-run on `chili_test`: green
-  - old SQL through `trading_trades` compatibility view: green
-  - new SQL through `trading_management_envelopes` base table: green
+- Live rollback smoke:
+  - old SQL through `trading_trades`: green
+  - new SQL through `trading_management_envelopes`: green
   - SQLAlchemy `Trade` flush through compatibility view: green
-  - Phase 5B view survived: green
-  - rollback restored original schema: green
-- `STAGING_DATABASE_URL` is not configured locally; staging rehearsal did not
-  run.
+  - Phase 5A trigger created/linked 3/3 decisions: green
+  - row count before/after rollback: 705 -> 705
+- Schema-specific log scan: no rename-path errors.
 
 ## Tasks
 
-1. Run final preflight:
-   - rerun `python scripts\d-phase5g-rename-dry-run.py`
-   - rerun Phase 5E reporting compare against live read models
-   - verify no open broker envelopes missing `position_id`
-   - verify no new hard linkage issues
-2. If a staging URL becomes available, run:
+1. Let at least one fresh entry and one fresh close occur after mig 283.
+2. Rerun:
 
    ```powershell
-   $env:PHASE5G_DRY_RUN_DATABASE_URL = "<staging-url>"
-   python scripts\d-phase5g-rename-dry-run.py --allow-staging
+   python scripts\d-phase5e-reporting-soak-probe.py
    ```
 
-3. Write the production migration exactly as:
-
-   ```sql
-   DROP VIEW IF EXISTS trading_management_envelopes;
-   ALTER TABLE trading_trades RENAME TO trading_management_envelopes;
-   CREATE VIEW trading_trades AS
-   SELECT * FROM trading_management_envelopes;
-   ```
-
-4. After deploy, smoke:
-   - `SELECT COUNT(*) FROM trading_trades`
-   - `SELECT COUNT(*) FROM trading_management_envelopes`
-   - old raw SQL through `trading_trades`
-   - new raw SQL through `trading_management_envelopes`
-   - SQLAlchemy `Trade` flush
-   - `/api/trading/attribution/live-vs-research?phase5b_compare=true`
-   - autotrader, Coinbase sync, Robinhood broker sync, bracket reconcile, stop
-     engine logs for tracebacks
+3. Verify:
+   - `HARD_LINKAGE_ISSUES=0`
+   - `FRESH_CLOSE_MISMATCHES=0`
+   - `MISMATCHED_ROWS=0`
+   - `MISMATCHED_PNL=0.0000`
+4. Scan worker logs for schema-specific errors:
+   - `NoReferencedTableError`
+   - `UndefinedTable`
+   - `relation trading_* does not exist`
+   - `PendingRollbackError`
+   - `cannot truncate`
+5. If clean, write Phase 5I closeout and queue Phase 5J selective reader cleanup:
+   - Prefer `trading_management_envelopes` in new analytics/reporting SQL.
+   - Keep `trading_trades` compatibility view.
+   - Do not rename the Python `Trade` class yet.
 
 ## Acceptance
 
-- Final preflight remains green.
-- Production migration is the tiny compatibility rename only.
-- No columns, constraints, indexes, close-reason strings, `trade_id`, or
-  `source_trade_id` fields are dropped.
-- Post-deploy smoke shows old and new names both usable.
-- Phase 5E attribution compare remains clean after the rename.
+- Fresh post-mig-283 entry/close represented in read models.
+- Phase 5E compare remains clean.
+- No schema-specific worker errors.
+- Compatibility view still works.
+- No live trading behavior changed.
 
 ## Rollback
+
+Only if a rename-specific production issue appears:
 
 ```sql
 DROP VIEW IF EXISTS trading_trades;
 ALTER TABLE trading_management_envelopes RENAME TO trading_trades;
 CREATE VIEW trading_management_envelopes AS
 SELECT * FROM trading_trades;
+DELETE FROM schema_version
+ WHERE version_id = '283_position_identity_phase5h_physical_rename';
 ```
 
 Then force-recreate affected workers and rerun the Phase 5E compare.
 
 ## References
 
-- `docs/STRATEGY/CC_REPORTS/2026-05-28_f-position-identity-phase-5e-soak-closeout.md`
-- `docs/STRATEGY/CC_REPORTS/2026-05-28_f-position-identity-phase-5f-rename-audit.md`
-- `docs/STRATEGY/CC_REPORTS/2026-05-28_f-position-identity-phase-5g-physical-rename-dry-run.md`
-- `scripts/d-phase5f-rename-audit.py`
+- `docs/STRATEGY/CC_REPORTS/2026-05-28_f-position-identity-phase-5h-production-physical-rename.md`
+- `scripts/d-phase5e-reporting-soak-probe.py`
 - `scripts/d-phase5g-rename-dry-run.py`
