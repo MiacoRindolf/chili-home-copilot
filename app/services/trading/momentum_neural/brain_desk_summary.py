@@ -43,6 +43,14 @@ _PREVIEW_VERSION = 1
 _LIVE_LOW_N = 3
 
 
+def _momentum_variants_by_id(db: Session, variant_ids: set[int]) -> dict[int, MomentumStrategyVariant]:
+    ids = sorted({int(variant_id) for variant_id in variant_ids if int(variant_id) > 0})
+    if not ids:
+        return {}
+    rows = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id.in_(ids)).all()
+    return {int(row.id): row for row in rows if row.id is not None}
+
+
 def _brain_ls(db: Session, node_id: str) -> dict[str, Any]:
     st = db.query(BrainNodeState).filter(BrainNodeState.node_id == node_id).one_or_none()
     if not st or not isinstance(st.local_state, dict):
@@ -169,8 +177,9 @@ def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
             best = max(vstats, key=lambda x: float(x.avg_bps or -1e9))
             worst = min(vstats, key=lambda x: float(x.avg_bps or 1e9))
             vid_b, vid_w = int(best.variant_id), int(worst.variant_id)
-            vb = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == vid_b).one_or_none()
-            vw = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == vid_w).one_or_none()
+            variants_by_id = _momentum_variants_by_id(db, {vid_b, vid_w})
+            vb = variants_by_id.get(vid_b)
+            vw = variants_by_id.get(vid_w)
             out["best_variant"] = {
                 "variant_id": vid_b,
                 "label": vb.label if vb else str(vid_b),
@@ -381,8 +390,10 @@ def get_momentum_variants_brain_summary(db: Session, *, days: int = 14) -> dict[
         )
     except Exception:
         return out
+    variant_ids = {int(vid) for vid, _cnt in ranked if vid is not None}
+    variants_by_id = _momentum_variants_by_id(db, variant_ids)
     for vid, _cnt in ranked:
-        v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == int(vid)).one_or_none()
+        v = variants_by_id.get(int(vid))
         if not v:
             continue
         try:
