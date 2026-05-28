@@ -314,6 +314,20 @@ def _apply_slippage(price: float, direction: str, is_entry: bool) -> float:
         return price - slip if direction == "long" else price + slip
 
 
+def _paper_stop_exit_reference_price(
+    pt: PaperTrade,
+    *,
+    current_price: float,
+    stop_price: float,
+) -> float:
+    """Use the executable option quote when an option gaps through its stop."""
+    if not _is_option_paper_trade(pt):
+        return float(stop_price)
+    if str(pt.direction or "long").strip().lower() == "short":
+        return max(float(current_price), float(stop_price))
+    return min(float(current_price), float(stop_price))
+
+
 def _expiry_days_for_timeframe(timeframe: str) -> int:
     """Adaptive expiry based on pattern timeframe."""
     tf_map = {"5m": 1, "15m": 2, "1h": 3, "4h": 5, "1d": 10, "1wk": 30}
@@ -1279,12 +1293,22 @@ def check_paper_exits(
             # Stop hit (includes trailing)
             if is_long and effective_stop and price <= effective_stop:
                 reason = "trailing_stop" if trail_stop and trail_stop >= (pt.stop_price or 0) else "stop"
-                _close_paper_trade(pt, _apply_slippage(effective_stop, pt.direction, is_entry=False), reason)
+                ref_price = _paper_stop_exit_reference_price(
+                    pt,
+                    current_price=float(price),
+                    stop_price=float(effective_stop),
+                )
+                _close_paper_trade(pt, _apply_slippage(ref_price, pt.direction, is_entry=False), reason)
                 _paper_close_ledger(db, pt)
                 closed += 1
             elif not is_long and effective_stop and price >= effective_stop:
                 reason = "trailing_stop" if trail_stop and trail_stop <= (pt.stop_price or float("inf")) else "stop"
-                _close_paper_trade(pt, _apply_slippage(effective_stop, pt.direction, is_entry=False), reason)
+                ref_price = _paper_stop_exit_reference_price(
+                    pt,
+                    current_price=float(price),
+                    stop_price=float(effective_stop),
+                )
+                _close_paper_trade(pt, _apply_slippage(ref_price, pt.direction, is_entry=False), reason)
                 _paper_close_ledger(db, pt)
                 closed += 1
             # Target hit

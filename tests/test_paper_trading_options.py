@@ -267,6 +267,7 @@ def test_check_paper_exits_option_target_waits_for_executable_bid(monkeypatch) -
     from app.services.trading import paper_trading
 
     monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    monkeypatch.setattr(paper_trading.settings, "backtest_commission", 0.0, raising=False)
     trade = PaperTrade(
         id=101,
         ticker="SPY",
@@ -301,6 +302,54 @@ def test_check_paper_exits_option_target_waits_for_executable_bid(monkeypatch) -
     assert result == {"checked": 1, "closed": 0, "trailing_updated": 0}
     assert trade.status == "open"
     assert db.commits == 0
+    assert quote.call_args.kwargs["purpose"] == "exit"
+
+
+def test_check_paper_exits_option_stop_uses_gapped_executable_bid(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    monkeypatch.setattr(paper_trading.settings, "backtest_commission", 0.0, raising=False)
+    trade = PaperTrade(
+        id=102,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        stop_price=0.60,
+        target_price=2.50,
+        quantity=2.0,
+        status="open",
+        entry_date=datetime.utcnow(),
+        signal_json={
+            **_option_signal(),
+            "_paper_meta": {"expiry_days": 5, "trailing_enabled": False},
+        },
+    )
+    db = _FakeDb(rows=[trade])
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={
+            "price": 0.45,
+            "mark_price": 0.45,
+            "executable_price": 0.45,
+            "source": "robinhood_options",
+        },
+    ) as quote, patch(
+        "app.services.trading.paper_trading._paper_dynamic_monitor_decision",
+        return_value=None,
+    ):
+        result = paper_trading.check_paper_exits(db, user_id=1)
+
+    assert result == {"checked": 1, "closed": 1, "trailing_updated": 0}
+    assert trade.status == "closed"
+    assert trade.exit_reason == "stop"
+    assert trade.exit_price == pytest.approx(0.45)
+    assert trade.pnl == pytest.approx(-160.0)
+    assert trade.pnl_pct == pytest.approx(-64.0)
+    assert db.commits == 1
     assert quote.call_args.kwargs["purpose"] == "exit"
 
 
