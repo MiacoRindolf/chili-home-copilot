@@ -24,6 +24,7 @@ from app.config import (
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_LIFECYCLE_STAGES,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_MIN_EXPECTED_NET_PCT,
     AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES,
+    AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
     AUTOTRADER_MAX_TICK_MAX_SECONDS,
     AUTOTRADER_MIN_TICK_MAX_SECONDS,
@@ -74,6 +75,9 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
             AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS
         ),
         chili_autotrader_tick_max_seconds=AUTOTRADER_MIN_TICK_MAX_SECONDS,
+        chili_autotrader_stale_candidate_sweep_interval_seconds=(
+            AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS
+        ),
         chili_autotrader_synergy_enabled=False,
         chili_autotrader_synergy_scale_notional_usd=0.0,
         chili_autotrader_assumed_capital_usd=100_000.0,
@@ -365,6 +369,65 @@ def test_fresh_candidate_fastlane_prioritizes_new_alerts(db, monkeypatch):
     assert out["ok"] is True
     assert out["fresh_candidate_fastlane_enabled"] is True
     assert processed == ["NEWFAST"]
+
+
+def test_fresh_fastlane_throttles_stale_backlog_sweeps(db, monkeypatch):
+    user = models.User(name="fresh_fastlane_stale_sweep")
+    db.add(user)
+    db.flush()
+    now = datetime.utcnow()
+    stale_alerts = [
+        BreakoutAlert(
+            ticker=f"STALE{i}",
+            asset_type="crypto",
+            alert_tier="pattern_imminent",
+            score_at_alert=0.8,
+            price_at_alert=10.0,
+            entry_price=10.0,
+            stop_loss=9.0,
+            target_price=12.0,
+            user_id=user.id,
+            alerted_at=now - timedelta(minutes=5, milliseconds=-i),
+        )
+        for i in range(2)
+    ]
+    db.add_all(stale_alerts)
+    db.commit()
+
+    settings = _minimal_settings(user.id)
+    settings.chili_autotrader_candidate_batch_size = 1
+    settings.chili_autotrader_fresh_candidate_fastlane_enabled = True
+    settings.chili_autotrader_fresh_candidate_fastlane_max_age_seconds = 30
+    settings.chili_autotrader_stale_candidate_sweep_interval_seconds = 60
+    settings.chili_autotrader_candidate_price_prefetch_enabled = False
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(at_mod, "_last_stale_candidate_sweep_at", 0.0)
+    monkeypatch.setattr(
+        at_mod,
+        "effective_autotrader_runtime",
+        lambda _db: _live_runtime(),
+    )
+    from app.services.trading import governance
+
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    processed: list[str] = []
+    monkeypatch.setattr(at_mod, "_process_one_alert", _audit_only_process(processed))
+
+    first = at_mod.run_auto_trader_tick(db)
+    second = at_mod.run_auto_trader_tick(db)
+    monkeypatch.setattr(at_mod, "_last_stale_candidate_sweep_at", 0.0)
+    third = at_mod.run_auto_trader_tick(db)
+
+    assert first["ok"] is True
+    assert first["stale_candidate_sweep_checked"] is True
+    assert first["candidate_pool_exact"] is True
+    assert second["ok"] is True
+    assert second["stale_candidate_sweep_checked"] is False
+    assert second["candidate_pool_exact"] is False
+    assert second["processed"] == 0
+    assert third["ok"] is True
+    assert third["stale_candidate_sweep_checked"] is True
+    assert processed == ["STALE1", "STALE0"]
 
 
 def test_fresh_candidate_fastlane_bursts_across_one_fresh_window(db, monkeypatch):

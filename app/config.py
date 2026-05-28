@@ -54,11 +54,18 @@ AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
 AUTOTRADER_DEFAULT_TICK_MAX_SECONDS = 45
 AUTOTRADER_MIN_TICK_MAX_SECONDS = 5
 AUTOTRADER_MAX_TICK_MAX_SECONDS = 300
+AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
 AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_ENABLED = True
 AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS = (
     AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS * 3
 )
 AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED = True
+AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS = (
+    AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS
+)
+AUTOTRADER_STALE_CANDIDATE_SWEEP_MAX_SECONDS = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * SECONDS_PER_MINUTE
+)
 AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED = True
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_MINUTES = 5
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_MINUTES = 60
@@ -87,7 +94,6 @@ AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ENABLED = True
 AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_MINUTES = 20
 AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_THRESHOLD = 3
 AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ASSET_TYPES = "stock,crypto"
-AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
 PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT = 1.5
 PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS = 24
 AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS = (
@@ -2794,6 +2800,21 @@ class Settings(BaseSettings):
             "fresh-candidate fast lane, sized from the freshness window and "
             "scheduler cadence, so alert bursts are evaluated before they age "
             "into slippage without increasing live-trading eligibility."
+        ),
+    )
+    chili_autotrader_stale_candidate_sweep_interval_seconds: int = Field(
+        default=AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS,
+        ge=0,
+        le=AUTOTRADER_STALE_CANDIDATE_SWEEP_MAX_SECONDS,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_STALE_CANDIDATE_SWEEP_INTERVAL_SECONDS"
+        ),
+        description=(
+            "Minimum interval between AutoTrader probes of older non-fresh "
+            "imminent alerts. Fresh alerts are still checked every tick; the "
+            "older backlog is sampled on cadence so stale rows do not add "
+            "latency to execution-sensitive fresh entries. Set to 0 to probe "
+            "older rows every tick."
         ),
     )
     chili_autotrader_candidate_price_prefetch_enabled: bool = Field(

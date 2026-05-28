@@ -19,6 +19,8 @@ from ...config import (
     AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
     AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED,
     AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
+    AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS,
+    AUTOTRADER_STALE_CANDIDATE_SWEEP_MAX_SECONDS,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
@@ -717,6 +719,31 @@ def _fresh_candidate_fastlane_state(
         "max_age_seconds": max_age_seconds,
         "cutoff": now_utc - timedelta(seconds=max_age_seconds),
     }
+
+
+_last_stale_candidate_sweep_at = 0.0
+
+
+def _stale_candidate_sweep_interval_seconds() -> int:
+    return _settings_int_clamped(
+        "chili_autotrader_stale_candidate_sweep_interval_seconds",
+        AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS,
+        lower=0,
+        upper=AUTOTRADER_STALE_CANDIDATE_SWEEP_MAX_SECONDS,
+    )
+
+
+def _should_probe_stale_candidates(now: float | None = None) -> tuple[bool, int]:
+    """Throttle older alert probes so fresh-entry ticks stay lightweight."""
+    global _last_stale_candidate_sweep_at
+    interval = _stale_candidate_sweep_interval_seconds()
+    if interval <= 0:
+        return True, interval
+    observed_now = time.monotonic() if now is None else float(now)
+    if observed_now - _last_stale_candidate_sweep_at >= interval:
+        _last_stale_candidate_sweep_at = observed_now
+        return True, interval
+    return False, interval
 
 
 def _candidate_order_by_clauses(
@@ -2755,6 +2782,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             ).count()
         )
     fresh_cutoff = fresh_fastlane.get("cutoff")
+    stale_candidate_sweep_checked = True
+    stale_candidate_sweep_interval_s = _stale_candidate_sweep_interval_seconds()
     if bool(fresh_fastlane.get("enabled")) and isinstance(fresh_cutoff, datetime):
         fresh_candidate_refs = (
             candidate_base.filter(BreakoutAlert.alerted_at >= fresh_cutoff)
@@ -2768,6 +2797,11 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             int(candidate_query_limit) - len(fresh_candidate_refs),
         )
         if remaining_candidate_slots > 0:
+            (
+                stale_candidate_sweep_checked,
+                stale_candidate_sweep_interval_s,
+            ) = _should_probe_stale_candidates()
+        if remaining_candidate_slots > 0 and stale_candidate_sweep_checked:
             older_candidate_refs = (
                 candidate_base.filter(
                     or_(
@@ -2794,23 +2828,16 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         )
         fresh_candidate_pool = len(candidate_refs)
         fresh_candidate_pool_exact = len(candidate_refs) < candidate_query_limit
-    if bool(fresh_fastlane.get("enabled")) and isinstance(fresh_cutoff, datetime):
-        fresh_candidate_pool = sum(
-            1
-            for _, alerted_at in candidate_refs
-            if alerted_at is not None and alerted_at >= fresh_cutoff
-        )
-        fresh_candidate_pool_exact = (
-            len(candidate_refs) < candidate_query_limit
-            or fresh_candidate_pool < len(candidate_refs)
-        )
     effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
         base_limit=batch_limit,
         fresh_fastlane_state=fresh_fastlane,
         fresh_candidate_count=fresh_candidate_pool,
     )
     candidate_pool_base = len(candidate_refs)
-    candidate_pool_exact = len(candidate_refs) < candidate_query_limit
+    candidate_pool_exact = (
+        len(candidate_refs) < candidate_query_limit
+        and bool(stale_candidate_sweep_checked)
+    )
     candidate_ids = [int(row_id) for row_id, _ in candidate_refs[:effective_batch_limit]]
     if candidate_ids:
         selected_candidates = (
@@ -2851,6 +2878,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "candidate_batch_effective_size": effective_batch_limit,
         "candidate_query_limit": int(candidate_query_limit),
         "candidate_pool_exact": bool(candidate_pool_exact),
+        "stale_candidate_sweep_checked": bool(stale_candidate_sweep_checked),
+        "stale_candidate_sweep_interval_seconds": int(stale_candidate_sweep_interval_s),
         "fresh_candidate_pool": fresh_candidate_pool,
         "fresh_candidate_pool_exact": bool(fresh_candidate_pool_exact),
         "fresh_candidate_fastlane_enabled": bool(fresh_fastlane.get("enabled")),
@@ -3016,7 +3045,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
 
     logger.info(
         "[autotrader] tick uid=%s candidate_pool=%d pool_exact=%s "
-        "query_limit=%d batch=%d base_batch=%d "
+        "query_limit=%d stale_sweep_checked=%s stale_sweep_interval_s=%s "
+        "batch=%d base_batch=%d "
         "effective_batch=%d processed=%d placed=%d "
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
         "synergy_retry_batch=%d stock_defer_active=%s stock_deferred_pool=%d "
@@ -3031,6 +3061,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         candidate_pool,
         out.get("candidate_pool_exact"),
         out.get("candidate_query_limit"),
+        out.get("stale_candidate_sweep_checked"),
+        out.get("stale_candidate_sweep_interval_seconds"),
         len(candidates),
         batch_limit,
         effective_batch_limit,
