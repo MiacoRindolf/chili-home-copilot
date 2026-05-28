@@ -68,6 +68,26 @@ def test_project_autonomy_create_list_detail_cancel_and_merge(
     assert payload["run"]["messages"][1]["role"] == "assistant"
     assert started_threads == []
 
+    with_image = client.post(
+        f"/api/brain/project/autonomy/runs/{run_id}/messages",
+        json={
+            "content": "Use this image when we add UI evidence support.",
+            "attachments": [
+                {
+                    "kind": "image",
+                    "path": str(repo_root / "tests" / "fixtures" / "autopilot.png"),
+                    "name": "autopilot.png",
+                    "mime_type": "image/png",
+                }
+            ],
+        },
+    )
+    assert with_image.status_code == 200
+    last_user = [
+        m for m in with_image.json()["run"]["messages"] if m["role"] == "user"
+    ][-1]
+    assert last_user["metadata"]["attachments"][0]["name"] == "autopilot.png"
+
     domain_run = db.query(ProjectDomainRun).filter(ProjectDomainRun.run_kind == "autonomous").first()
     assert domain_run is not None
     assert domain_run.repo_id == repo.id

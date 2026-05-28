@@ -629,16 +629,26 @@ class _ProjectAnalysisRunBody(BaseModel):
     planner_task_id: int | None = None
 
 
+class _ProjectAutonomyAttachmentBody(BaseModel):
+    kind: str | None = project_autonomy.ATTACHMENT_KIND_IMAGE
+    path: str | None = None
+    url: str | None = None
+    name: str | None = None
+    mime_type: str | None = None
+
+
 class _ProjectAutonomyRunBody(BaseModel):
     prompt: str
     repo_id: int | None = None
     autonomy_level: str | None = "full_local"
-    execution_mode: str | None = "plan_approval"
+    execution_mode: str | None = project_autonomy.EXECUTION_MODE_PLAN_APPROVAL
     start_planning: bool = False
+    attachments: list[_ProjectAutonomyAttachmentBody] | None = None
 
 
 class _ProjectAutonomyMessageBody(BaseModel):
-    content: str
+    content: str = ""
+    attachments: list[_ProjectAutonomyAttachmentBody] | None = None
 
 
 class _ProjectAutonomyVisualValidationBody(BaseModel):
@@ -915,8 +925,9 @@ def api_brain_project_autonomy_create(
             repo_id=body.repo_id,
             user_id=ctx["user_id"],
             autonomy_level=body.autonomy_level or "full_local",
-            execution_mode=body.execution_mode or "plan_approval",
+            execution_mode=body.execution_mode or project_autonomy.EXECUTION_MODE_PLAN_APPROVAL,
             start_planning=bool(body.start_planning),
+            attachments=[item.model_dump() for item in body.attachments or []],
         )
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
@@ -943,6 +954,7 @@ def api_brain_project_autonomy_message(
             run_id,
             content=body.content,
             user_id=ctx["user_id"],
+            attachments=[item.model_dump() for item in body.attachments or []],
         )
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)

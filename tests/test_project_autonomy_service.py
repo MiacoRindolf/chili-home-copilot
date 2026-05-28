@@ -167,7 +167,7 @@ def test_build_local_plan_uses_heuristic_fast_path_for_vague_small_request(monke
             .filter(ProjectAutonomyArtifact.run_id == run.run_id, ProjectAutonomyArtifact.name == "heuristic_plan_fast_path")
             .one()
         )
-        assert "vague small request" in (artifact.content_json or "")
+        assert "conservative local planning path" in (artifact.content_json or "")
     finally:
         db.close()
 
@@ -406,9 +406,78 @@ def test_create_run_defaults_to_chatting_without_planning_worker(tmp_path):
         assert payload["steps"][0]["stage"] == "chat"
         assert payload["messages"][0]["role"] == "user"
         assert payload["messages"][1]["role"] == "assistant"
-        assert "won’t scan or edit" in payload["messages"][1]["content"]
+        assert "won't scan or edit" in payload["messages"][1]["content"]
     finally:
         db.close()
+
+
+def test_autopilot_chat_stores_image_attachments_in_message_metadata(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        image = tmp_path / "autopilot_prompt.png"
+        image.write_bytes(b"not really a png, but path metadata only")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+
+        run = orchestrator.create_run(
+            db,
+            prompt="Please review this UI state.",
+            repo_id=repo.id,
+            attachments=[
+                {
+                    "kind": "image",
+                    "path": str(image),
+                    "name": image.name,
+                    "mime_type": "image/png",
+                }
+            ],
+        )
+        payload = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="Use this screenshot when you draft the plan.",
+            attachments=[
+                {
+                    "kind": "image",
+                    "path": str(image),
+                    "name": "second.png",
+                    "mime_type": "image/png",
+                }
+            ],
+        )
+
+        user_messages = [m for m in payload["messages"] if m["role"] == "user"]
+        assert user_messages[0]["metadata"]["attachments"][0]["name"] == image.name
+        assert user_messages[-1]["metadata"]["attachments"][0]["name"] == "second.png"
+        assert "Attached images:" in orchestrator._conversation_prompt(db, run)
+        artifacts = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(ProjectAutonomyArtifact.run_id == run.run_id, ProjectAutonomyArtifact.artifact_type == "prompt_image")
+            .all()
+        )
+        assert len(artifacts) == 2
+    finally:
+        db.close()
+
+
+def test_plan_message_hides_raw_local_model_errors():
+    plan = {
+        "analysis": "Local model planning was unavailable (http://ollama:11434: TimeoutError: timed out).",
+        "files": [{"path": "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"}],
+        "notes": "URLError: <urlopen error [Errno 111] Connection refused>",
+    }
+
+    message = orchestrator._plan_message(
+        plan,
+        plan["files"],
+        [{"name": "architect"}, {"name": "ui"}],
+    )
+
+    assert "http://" not in message
+    assert "URLError" not in message
+    assert "local planning model" in message.lower()
+    assert "brain_dispatch_screen.dart" in message
 
 
 def test_start_plan_transitions_chat_to_queued_plan(tmp_path):

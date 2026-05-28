@@ -40,6 +40,7 @@ class CancelToken {
 class ChiliApiClient {
   /// Current server root; applied immediately when changed in Settings (see [AppConfig.setBaseUrl]).
   static String get baseUrl => AppConfig.instance.apiBaseUrl;
+  static const projectAutonomyPlanApprovalMode = 'plan_approval';
 
   String? _token;
 
@@ -643,14 +644,16 @@ class ChiliApiClient {
   Future<Map<String, dynamic>> createProjectAutonomyRun({
     required String prompt,
     int? repoId,
-    String executionMode = 'plan_approval',
+    String executionMode = projectAutonomyPlanApprovalMode,
     bool startPlanning = false,
+    List<Map<String, dynamic>> attachments = const [],
   }) async {
     final body = <String, dynamic>{
       'prompt': prompt.trim(),
       if (repoId != null) 'repo_id': repoId,
       'execution_mode': executionMode,
       'start_planning': startPlanning,
+      if (attachments.isNotEmpty) 'attachments': attachments,
     };
     final res = await _client.post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs'),
@@ -693,11 +696,16 @@ class ChiliApiClient {
   Future<Map<String, dynamic>> sendProjectAutonomyMessage({
     required String runId,
     required String content,
+    List<Map<String, dynamic>> attachments = const [],
   }) async {
+    final body = <String, dynamic>{
+      'content': content.trim(),
+      if (attachments.isNotEmpty) 'attachments': attachments,
+    };
     final res = await _client.post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/messages'),
       headers: _headers(),
-      body: jsonEncode({'content': content.trim()}),
+      body: jsonEncode(body),
     );
     Map<String, dynamic>? decoded;
     try {

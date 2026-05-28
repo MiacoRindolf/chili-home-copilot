@@ -60,10 +60,60 @@ from ..coding_task.validator_runner import (
 from ..context_brain import ollama_client
 from ..project_domain_runs import finish_run, start_run
 
-TERMINAL_STATUSES = frozenset({"merged", "completed", "blocked", "failed", "cancelled"})
-IDLE_STATUSES = frozenset({"awaiting_approval", "chatting"})
-ACTIVE_STATUSES = frozenset({"queued", "running", "validating", "merging", "revising"})
 AUTONOMOUS_KIND = "autonomous"
+EXECUTION_MODE_PLAN_APPROVAL = "plan_approval"
+EXECUTION_MODE_FULL_AUTOPILOT = "full_autopilot"
+RUN_STATUS_AWAITING_APPROVAL = "awaiting_approval"
+RUN_STATUS_BLOCKED = "blocked"
+RUN_STATUS_CANCELLED = "cancelled"
+RUN_STATUS_CHATTING = "chatting"
+RUN_STATUS_COMPLETED = "completed"
+RUN_STATUS_FAILED = "failed"
+RUN_STATUS_MERGED = "merged"
+RUN_STATUS_MERGING = "merging"
+RUN_STATUS_QUEUED = "queued"
+RUN_STATUS_RUNNING = "running"
+RUN_STATUS_VALIDATING = "validating"
+PLAN_STATUS_AWAITING_APPROVAL = "awaiting_approval"
+PLAN_STATUS_APPROVED = "approved"
+PLAN_STATUS_DRAFTING = "drafting"
+PLAN_STATUS_IMPLEMENTED = "implemented"
+PLAN_STATUS_REVISING = "revising"
+MERGE_STATUS_PENDING = "pending"
+STAGE_CHAT = "chat"
+STAGE_CLASSIFY = "classify"
+STAGE_IMPLEMENT = "implement"
+STAGE_PLAN = "plan"
+STAGE_QUEUED = RUN_STATUS_QUEUED
+STAGE_REPO_SCAN = "repo_scan"
+STAGE_ASSIGN_ROLES = "assign_roles"
+ATTACHMENT_KIND_IMAGE = "image"
+ATTACHMENT_ARTIFACT_TYPE_IMAGE = "prompt_image"
+ATTACHMENT_IMAGE_MIME_PREFIX = "image/"
+ATTACHMENT_DEFAULT_IMAGE_NAME = "attached image"
+ATTACHMENT_CONTEXT_HEADING = "Attached images:"
+ATTACHMENT_NAME_LIMIT = 180
+ATTACHMENT_SOURCE_LIMIT = 900
+OPERATOR_SAFE_PLAN_TEXT_LIMIT = 900
+ERROR_SNIPPET_LIMIT = 900
+CHAT_REPLY_LIMIT = 1800
+WORKTREE_GIT_TIMEOUT_SEC = 180
+PLAN_START_CHAT_ACTION_LABEL = "Start plan"
+TERMINAL_STATUSES = frozenset({
+    RUN_STATUS_MERGED,
+    RUN_STATUS_COMPLETED,
+    RUN_STATUS_BLOCKED,
+    RUN_STATUS_FAILED,
+    RUN_STATUS_CANCELLED,
+})
+IDLE_STATUSES = frozenset({RUN_STATUS_AWAITING_APPROVAL, RUN_STATUS_CHATTING})
+ACTIVE_STATUSES = frozenset({
+    RUN_STATUS_QUEUED,
+    RUN_STATUS_RUNNING,
+    RUN_STATUS_VALIDATING,
+    RUN_STATUS_MERGING,
+    PLAN_STATUS_REVISING,
+})
 
 _MODEL_PREFERENCE = (
     "chili-coder:current",
@@ -130,6 +180,97 @@ def _json_load(raw: str | None, fallback: Any) -> Any:
 
 def _clip(text: str | None, limit: int = 6000) -> str:
     return truncate_text(text or "", max_bytes=limit)[0]
+
+
+_MESSAGE_ATTACHMENT_LIMIT = 10
+_IMAGE_ATTACHMENT_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
+_RAW_MODEL_ERROR_MARKERS = (
+    "http://",
+    "https://",
+    "urlerror",
+    "timeouterror",
+    "connection refused",
+    "errno",
+    "traceback",
+    "ollama:",
+)
+
+
+def _normalise_message_attachments(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw[:_MESSAGE_ATTACHMENT_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not path and not url:
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            name = os.path.basename(path) if path else url.rsplit("/", 1)[-1]
+        name = name.split("?", 1)[0].strip() or ATTACHMENT_DEFAULT_IMAGE_NAME
+        mime_type = str(item.get("mime_type") or item.get("mime") or "").strip()
+        ext = Path(name).suffix.lower() or Path(path).suffix.lower()
+        if ext not in _IMAGE_ATTACHMENT_EXTS and not mime_type.startswith(ATTACHMENT_IMAGE_MIME_PREFIX):
+            continue
+        clean: dict[str, Any] = {
+            "kind": ATTACHMENT_KIND_IMAGE,
+            "name": _clip(name, ATTACHMENT_NAME_LIMIT),
+        }
+        if path:
+            clean["path"] = _clip(path, ATTACHMENT_SOURCE_LIMIT)
+        if url:
+            clean["url"] = _clip(url, ATTACHMENT_SOURCE_LIMIT)
+        if mime_type:
+            clean["mime_type"] = _clip(mime_type, 120)
+        out.append(clean)
+    return out
+
+
+def _message_attachments_from_metadata(raw: str | None) -> list[dict[str, Any]]:
+    metadata = _json_load(raw, {})
+    if not isinstance(metadata, dict):
+        return []
+    return _normalise_message_attachments(metadata.get("attachments"))
+
+
+def _attachment_context(attachments: list[dict[str, Any]]) -> str:
+    if not attachments:
+        return ""
+    lines = [ATTACHMENT_CONTEXT_HEADING]
+    for idx, item in enumerate(attachments[:_MESSAGE_ATTACHMENT_LIMIT], start=1):
+        name = str(item.get("name") or f"image {idx}")
+        source = str(item.get("path") or item.get("url") or "").strip()
+        lines.append(f"- {name}" + (f" ({source})" if source else ""))
+    return "\n".join(lines)
+
+
+def _attachment_display_text(attachments: list[dict[str, Any]]) -> str:
+    if not attachments:
+        return ""
+    if len(attachments) == 1:
+        return f"Attached image: {attachments[0].get('name') or ATTACHMENT_KIND_IMAGE}"
+    return f"Attached {len(attachments)} images."
+
+
+def _record_attachment_artifacts(
+    db: Session,
+    run: ProjectAutonomyRun,
+    attachments: list[dict[str, Any]],
+    *,
+    source: str,
+) -> None:
+    for idx, item in enumerate(attachments[:_MESSAGE_ATTACHMENT_LIMIT], start=1):
+        _add_artifact(
+            db,
+            run.run_id,
+            ATTACHMENT_ARTIFACT_TYPE_IMAGE,
+            str(item.get("name") or f"image_{idx}"),
+            content_json={"source": source, **item},
+            commit=False,
+        )
 
 
 def _safe_rel_path(path: str | None) -> str | None:
@@ -240,6 +381,29 @@ def _looks_like_plan_start_prompt(prompt: str) -> bool:
         "start planning",
     )
     return any(marker in lower for marker in plan_markers)
+
+
+def _friendly_model_issue(reason: str | None) -> str:
+    lower = (reason or "").lower()
+    if "vague small request" in lower:
+        return "This was broad enough for a conservative local planning path."
+    if "timed out" in lower or "timeouterror" in lower or "timeout" in lower:
+        return "The local planning model timed out."
+    if "connection refused" in lower or "urlopen" in lower or "not reachable" in lower:
+        return "The local planning model was not reachable."
+    if "unusable model json" in lower or "usable" in lower:
+        return "The local planning model did not return a usable plan."
+    return "The local planning model was unavailable."
+
+
+def _operator_safe_plan_text(text: str | None) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    lower = clean.lower()
+    if any(marker in lower for marker in _RAW_MODEL_ERROR_MARKERS):
+        return _friendly_model_issue(clean)
+    return _clip(clean, OPERATOR_SAFE_PLAN_TEXT_LIMIT)
 
 
 def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
@@ -482,10 +646,14 @@ def create_run(
     user_id: int | None = None,
     autonomy_level: str = "full_local",
     model_policy: str = "local_first",
-    execution_mode: str = "plan_approval",
+    execution_mode: str = EXECUTION_MODE_PLAN_APPROVAL,
     start_planning: bool = False,
+    attachments: Any = None,
 ) -> ProjectAutonomyRun:
     clean_prompt = (prompt or "").strip()
+    clean_attachments = _normalise_message_attachments(attachments)
+    if not clean_prompt and clean_attachments:
+        clean_prompt = _attachment_display_text(clean_attachments)
     if not clean_prompt:
         raise ValueError("Prompt is required.")
     repo = _resolve_repo_for_run(db, repo_id, user_id=user_id)
@@ -493,10 +661,13 @@ def create_run(
         raise ValueError("No reachable registered repo is available for Project Autopilot.")
     if resolve_repo_runtime_path(repo) is None:
         raise ValueError("The selected repo is registered but not reachable from this runtime.")
-    clean_execution_mode = execution_mode if execution_mode in {"plan_approval", "full_autopilot"} else "plan_approval"
-    initial_status = "queued" if start_planning else "chatting"
-    initial_stage = "queued" if start_planning else "chat"
-    initial_plan_status = "drafting" if start_planning else "chatting"
+    allowed_execution_modes = {EXECUTION_MODE_PLAN_APPROVAL, EXECUTION_MODE_FULL_AUTOPILOT}
+    clean_execution_mode = (
+        execution_mode if execution_mode in allowed_execution_modes else EXECUTION_MODE_PLAN_APPROVAL
+    )
+    initial_status = RUN_STATUS_QUEUED if start_planning else RUN_STATUS_CHATTING
+    initial_stage = STAGE_QUEUED if start_planning else STAGE_CHAT
+    initial_plan_status = PLAN_STATUS_DRAFTING if start_planning else RUN_STATUS_CHATTING
 
     run_id = "pa_" + uuid.uuid4().hex[:14]
     project_run = start_run(
@@ -525,7 +696,7 @@ def create_run(
         plan_status=initial_plan_status,
         chat_title=clean_prompt[:120],
         model_policy=model_policy,
-        merge_status="pending",
+        merge_status=MERGE_STATUS_PENDING,
     )
     db.add(row)
     db.flush()
@@ -544,15 +715,22 @@ def create_run(
         "prompt",
         "operator_prompt",
         content=clean_prompt,
+        content_json={"attachments": clean_attachments} if clean_attachments else None,
         commit=False,
     )
+    if clean_attachments:
+        _record_attachment_artifacts(db, row, clean_attachments, source="initial_prompt")
     _record_message(
         db,
         row,
         "user",
         clean_prompt,
         message_type="prompt",
-        metadata={"repo_id": int(repo.id), "repo_name": repo.name},
+        metadata={
+            "repo_id": int(repo.id),
+            "repo_name": repo.name,
+            "attachments": clean_attachments,
+        },
         commit=False,
     )
     if not start_planning:
@@ -635,30 +813,42 @@ def append_user_message(
     *,
     content: str,
     user_id: int | None = None,
+    attachments: Any = None,
 ) -> dict[str, Any] | None:
     row = _get_run_row(db, run_id, user_id=user_id)
     if row is None:
         return None
+    clean_attachments = _normalise_message_attachments(attachments)
     clean = (content or "").strip()
-    if not clean:
+    display_content = clean or _attachment_display_text(clean_attachments)
+    if not display_content:
         raise ValueError("Message is required.")
-    _record_message(db, row, "user", clean, commit=False)
-    if row.status == "chatting":
-        if _looks_like_plan_start_prompt(clean):
+    _record_message(
+        db,
+        row,
+        "user",
+        display_content,
+        metadata={"attachments": clean_attachments},
+        commit=False,
+    )
+    if clean_attachments:
+        _record_attachment_artifacts(db, row, clean_attachments, source="chat_message")
+    if row.status == RUN_STATUS_CHATTING:
+        if _looks_like_plan_start_prompt(display_content):
             _mark_plan_requested(db, row)
         else:
-            reply = _chat_reply(db, row, clean)
+            reply = _chat_reply(db, row, display_content)
             _record_message(db, row, "assistant", reply, message_type="chat", commit=False)
-    if row.plan_status in {"awaiting_approval", "revising"} and row.status == "awaiting_approval":
-        row.status = "queued"
-        row.plan_status = "revising"
+    if row.plan_status in {PLAN_STATUS_AWAITING_APPROVAL, PLAN_STATUS_REVISING} and row.status == RUN_STATUS_AWAITING_APPROVAL:
+        row.status = RUN_STATUS_QUEUED
+        row.plan_status = PLAN_STATUS_REVISING
         row.current_stage = "plan"
         row.prompt = _conversation_prompt(db, row)
         _record_message(
             db,
             row,
             "assistant",
-            "I’ll revise the plan with that feedback before making any code changes.",
+            "I'll revise the plan with that feedback before making any code changes.",
             message_type="status",
             commit=False,
         )
@@ -674,14 +864,14 @@ def approve_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dic
     plan = _json_load(row.plan_json, {})
     if not plan:
         raise ValueError("This run does not have a plan to approve yet.")
-    row.plan_status = "approved"
-    row.status = "queued"
-    row.current_stage = "implement"
+    row.plan_status = PLAN_STATUS_APPROVED
+    row.status = RUN_STATUS_QUEUED
+    row.current_stage = STAGE_IMPLEMENT
     _record_message(
         db,
         row,
         "assistant",
-        "Plan approved. I’m starting implementation in an isolated worktree now.",
+        "Plan approved. I'm starting implementation in an isolated worktree now.",
         message_type="status",
         commit=False,
     )
@@ -694,7 +884,13 @@ def start_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dict[
     row = _get_run_row(db, run_id, user_id=user_id)
     if row is None:
         return None
-    if row.status not in {"chatting", "awaiting_approval", "blocked", "cancelled"} and row.status in ACTIVE_STATUSES:
+    idle_or_terminal_restartable = {
+        RUN_STATUS_CHATTING,
+        RUN_STATUS_AWAITING_APPROVAL,
+        RUN_STATUS_BLOCKED,
+        RUN_STATUS_CANCELLED,
+    }
+    if row.status not in idle_or_terminal_restartable and row.status in ACTIVE_STATUSES:
         raise ValueError("This Autopilot run is already working.")
     _mark_plan_requested(db, row)
     db.commit()
@@ -704,17 +900,17 @@ def start_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dict[
 
 def _mark_plan_requested(db: Session, row: ProjectAutonomyRun) -> None:
     row.prompt = _conversation_prompt(db, row)
-    row.status = "queued"
-    row.current_stage = "queued"
-    row.plan_status = "drafting"
-    row.merge_status = "pending"
+    row.status = RUN_STATUS_QUEUED
+    row.current_stage = STAGE_QUEUED
+    row.plan_status = PLAN_STATUS_DRAFTING
+    row.merge_status = MERGE_STATUS_PENDING
     row.error_message = None
     row.merge_message = None
     row.cancel_requested = False
     _record_step(
         db,
         row,
-        "queued",
+        STAGE_QUEUED,
         "Autopilot plan requested",
         status="completed",
         detail={"prompt_preview": row.prompt[:240], "repo_id": row.repo_id},
@@ -800,7 +996,13 @@ def _conversation_prompt(db: Session, run: ProjectAutonomyRun) -> str:
     )
     if not rows:
         return run.prompt
-    parts = [f"User message {idx + 1}: {row.content}" for idx, row in enumerate(rows)]
+    parts = []
+    for idx, row in enumerate(rows):
+        part = f"User message {idx + 1}: {row.content}"
+        attachment_context = _attachment_context(_message_attachments_from_metadata(row.metadata_json))
+        if attachment_context:
+            part = f"{part}\n{attachment_context}"
+        parts.append(part)
     return "\n\n".join(parts)
 
 
@@ -895,18 +1097,18 @@ def _record_message(
 
 
 def _plan_message(plan: dict[str, Any], files: list[dict[str, Any]], agents: list[dict[str, Any]]) -> str:
-    analysis = str(plan.get("analysis") or "").strip()
-    notes = str(plan.get("notes") or "").strip()
+    analysis = _operator_safe_plan_text(plan.get("analysis"))
+    notes = _operator_safe_plan_text(plan.get("notes"))
     file_paths = [str(item.get("path") or "") for item in files if item.get("path")]
     agent_names = [str(item.get("name") or "") for item in agents if item.get("name")]
-    parts = ["I drafted a plan and I’m waiting for your approval before changing files."]
+    parts = ["I drafted a plan and I'm waiting for your approval before changing files."]
     if analysis:
         parts.append(analysis)
     if file_paths:
         parts.append("I expect to work in: " + ", ".join(file_paths[:6]) + ("." if len(file_paths) <= 6 else f", and {len(file_paths) - 6} more."))
     if agent_names:
         parts.append("Lanes: " + ", ".join(agent_names[:6]) + ".")
-    if notes:
+    if notes and notes != analysis:
         parts.append(notes)
     parts.append("Send feedback to revise the plan, or approve it to let me implement in an isolated worktree.")
     return "\n\n".join(parts)
@@ -928,12 +1130,12 @@ def _completion_message(run: ProjectAutonomyRun) -> str:
 def _initial_chat_reply(prompt: str) -> str:
     if _looks_like_greeting_or_chat(prompt):
         return (
-            "Hey, I’m here. We can brainstorm, inspect ideas, or shape a plan together. "
-            "I won’t scan or edit the repo until you start a plan."
+            "Hey, I'm here. We can brainstorm, inspect ideas, or shape a plan together. "
+            "I won't scan or edit the repo until you start a plan."
         )
     return (
-        "I’m ready to help shape this. We can talk it through here first; when you want me "
-        "to inspect the repo and draft an implementation plan, use Start plan in the sidebar."
+        "I'm ready to help shape this. We can talk it through here first; when you want me "
+            f"to inspect the repo and draft an implementation plan, use {PLAN_START_CHAT_ACTION_LABEL} in the sidebar."
     )
 
 
@@ -943,12 +1145,12 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
     if any(token in latest_user_message.lower() for token in ("implement", "change", "fix", "add", "update", "build")):
         return (
             "That sounds implementation-shaped. I can keep brainstorming here, or you can use "
-            "Start plan in the sidebar when you want me to scan the repo and draft a safe plan."
+            f"{PLAN_START_CHAT_ACTION_LABEL} in the sidebar when you want me to scan the repo and draft a safe plan."
         )
     model_info = select_local_model()
     if not model_info.get("model"):
         return (
-            "I’m with you. We can keep shaping the idea here; local model chat is unavailable, "
+            "I'm with you. We can keep shaping the idea here; local model chat is unavailable, "
             "but planning and implementation can still use the repo-aware Autopilot flow when you start a plan."
         )
     recent = (
@@ -970,7 +1172,12 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
     ]
     for row in reversed(recent):
         role = "assistant" if row.role == "assistant" else "user"
-        messages.append({"role": role, "content": row.content})
+        content = row.content
+        if role == "user":
+            attachment_context = _attachment_context(_message_attachments_from_metadata(row.metadata_json))
+            if attachment_context:
+                content = f"{content}\n{attachment_context}"
+        messages.append({"role": role, "content": content})
     result = ollama_client.chat(
         messages,
         str(model_info["model"]),
@@ -993,10 +1200,10 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
         commit=False,
     )
     if result.ok and result.text.strip():
-        return _clip(result.text.strip(), 1800)
+        return _clip(result.text.strip(), CHAT_REPLY_LIMIT)
     return (
-        "I’m here for the brainstorming. The local chat model didn’t answer cleanly, "
-        "but we can still keep the idea moving or start a plan when you’re ready."
+        "I'm here for the brainstorming. The local chat model didn't answer cleanly, "
+        "but we can still keep the idea moving or start a plan when you're ready."
     )
 
 
@@ -1035,7 +1242,7 @@ def _finish(
     run.status = status
     run.current_stage = stage
     if status in TERMINAL_STATUSES:
-        run.plan_status = "implemented" if run.plan_status == "approved" else run.plan_status
+        run.plan_status = PLAN_STATUS_IMPLEMENTED if run.plan_status == PLAN_STATUS_APPROVED else run.plan_status
     run.error_message = error_message
     if merge_status is not None:
         run.merge_status = merge_status
@@ -1336,16 +1543,17 @@ def _fallback_plan_from_context(
         if deterministic_files:
             ranked_files = deterministic_files
     files = ranked_files[:1]
+    friendly_reason = _friendly_model_issue(reason)
     if not files:
         return {
-            "analysis": f"Local model planning was unavailable ({reason}); no safe candidate files were identified.",
+            "analysis": f"{friendly_reason} I could not identify a safe candidate file to change.",
             "files": [],
-            "notes": "Heuristic fallback could not continue without candidate files.",
+            "notes": "No implementation will start until a safer plan can be drafted.",
         }
     return {
         "analysis": (
-            f"Local model planning was unavailable ({reason}), so the architect fell back to a conservative "
-            "repo-index plan using the operator request and known project files."
+            f"{friendly_reason} I used the repo index, the conversation, and known project files to draft "
+            "a conservative plan."
         ),
         "files": [
             {
@@ -1358,7 +1566,7 @@ def _fallback_plan_from_context(
             }
             for rel in files
         ],
-        "notes": "Heuristic fallback plan; generated diffs and validation gates still decide whether the run may merge.",
+        "notes": "This fallback plan stays approval-first; generated diffs and validation gates still decide whether the run may merge.",
     }
 
 
@@ -1751,7 +1959,7 @@ def generate_diffs_from_plan(
             continue
         check = _git(repo_path, ["apply", "--check"], input_text=diff, timeout=60)
         if check.returncode != 0:
-            stderr = _clip(check.stderr or check.stdout or "", 900)
+            stderr = _clip(check.stderr or check.stdout or "", ERROR_SNIPPET_LIMIT)
             _add_artifact(
                 db,
                 run.run_id,
@@ -1912,9 +2120,11 @@ def _create_run_worktree(repo_path: Path, run: ProjectAutonomyRun, base_sha: str
         shutil.rmtree(worktree, ignore_errors=True)
     _git(repo_path, ["worktree", "unlock", str(worktree)], timeout=30)
     _git(repo_path, ["worktree", "prune"], timeout=60)
-    proc = _git(repo_path, ["worktree", "add", "-B", branch, str(worktree), base_sha], timeout=180)
+    proc = _git(repo_path, ["worktree", "add", "-B", branch, str(worktree), base_sha], timeout=WORKTREE_GIT_TIMEOUT_SEC)
     if proc.returncode != 0:
-        raise AutonomyBlocked(f"Could not create isolated worktree: {(proc.stderr or proc.stdout or '').strip()[:900]}")
+        raise AutonomyBlocked(
+            f"Could not create isolated worktree: {(proc.stderr or proc.stdout or '').strip()[:ERROR_SNIPPET_LIMIT]}"
+        )
     if not worktree.is_dir():
         raise AutonomyBlocked(f"Could not create isolated worktree at {worktree}.")
     return branch, worktree
@@ -1926,10 +2136,14 @@ def _apply_diffs(worktree: Path, diffs: list[str]) -> None:
     patch = "\n".join(diff.rstrip() for diff in diffs) + "\n"
     check = _git(worktree, ["apply", "--check"], input_text=patch, timeout=120)
     if check.returncode != 0:
-        raise AutonomyBlocked(f"Generated diff did not apply cleanly: {(check.stderr or check.stdout or '').strip()[:900]}")
+        raise AutonomyBlocked(
+            f"Generated diff did not apply cleanly: {(check.stderr or check.stdout or '').strip()[:ERROR_SNIPPET_LIMIT]}"
+        )
     applied = _git(worktree, ["apply"], input_text=patch, timeout=120)
     if applied.returncode != 0:
-        raise AutonomyBlocked(f"Could not apply generated diff: {(applied.stderr or applied.stdout or '').strip()[:900]}")
+        raise AutonomyBlocked(
+            f"Could not apply generated diff: {(applied.stderr or applied.stdout or '').strip()[:ERROR_SNIPPET_LIMIT]}"
+        )
 
 
 def _changed_files(worktree: Path) -> list[str]:
@@ -1962,10 +2176,12 @@ def _commit_if_needed(worktree: Path, run: ProjectAutonomyRun) -> str | None:
             "-m",
             message,
         ],
-        timeout=180,
+        timeout=WORKTREE_GIT_TIMEOUT_SEC,
     )
     if proc.returncode != 0:
-        raise AutonomyBlocked(f"Commit failed in integration branch: {(proc.stderr or proc.stdout or '').strip()[:900]}")
+        raise AutonomyBlocked(
+            f"Commit failed in integration branch: {(proc.stderr or proc.stdout or '').strip()[:ERROR_SNIPPET_LIMIT]}"
+        )
     return _git_text(worktree, ["rev-parse", "HEAD"], timeout=60)
 
 
@@ -2144,9 +2360,9 @@ def _attempt_merge(db: Session, run: ProjectAutonomyRun, repo_path: Path, change
         run.merge_status = "blocked"
         run.merge_message = msg
         return {"ok": False, "reason": msg, "dirty_files": dirty}
-    proc = _git(repo_path, ["merge", "--ff-only", str(run.integration_branch)], timeout=180)
+    proc = _git(repo_path, ["merge", "--ff-only", str(run.integration_branch)], timeout=WORKTREE_GIT_TIMEOUT_SEC)
     if proc.returncode != 0:
-        msg = f"Merge was not clean: {(proc.stderr or proc.stdout or '').strip()[:900]}"
+        msg = f"Merge was not clean: {(proc.stderr or proc.stdout or '').strip()[:ERROR_SNIPPET_LIMIT]}"
         run.merge_status = "blocked"
         run.merge_message = msg
         return {"ok": False, "reason": msg}
@@ -2189,13 +2405,13 @@ def _record_learning(
 
 
 def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, repo_path: Path) -> dict[str, Any]:
-    run.status = "running"
-    run.plan_status = "drafting" if run.plan_status not in {"revising"} else "revising"
+    run.status = RUN_STATUS_RUNNING
+    run.plan_status = PLAN_STATUS_DRAFTING if run.plan_status != PLAN_STATUS_REVISING else PLAN_STATUS_REVISING
     if run.started_at is None:
         run.started_at = _utcnow()
     db.commit()
 
-    _record_step(db, run, "classify", "Classifying request", detail={"prompt_preview": run.prompt[:240]})
+    _record_step(db, run, STAGE_CLASSIFY, "Classifying request", detail={"prompt_preview": run.prompt[:240]})
     _check_cancel(db, run)
     if _looks_like_live_monitoring_prompt(run.prompt):
         raise AutonomyBlocked(
@@ -2211,9 +2427,9 @@ def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, re
     run.base_sha = base_sha
     db.commit()
 
-    _record_step(db, run, "repo_scan", "Scanning repository context", detail={"repo": repo.name, "path": str(repo_path)})
+    _record_step(db, run, STAGE_REPO_SCAN, "Scanning repository context", detail={"repo": repo.name, "path": str(repo_path)})
     _check_cancel(db, run)
-    _record_step(db, run, "plan", "Architect is drafting an implementation plan")
+    _record_step(db, run, STAGE_PLAN, "Architect is drafting an implementation plan")
     plan = build_local_plan(db, run, repo)
     files = _plan_files(plan)
     if not files:
@@ -2224,7 +2440,7 @@ def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, re
 
     agents = assign_agent_lanes(files)
     run.agents_json = _json_text(agents)
-    _record_step(db, run, "assign_roles", "Architect assigned agent lanes", detail={"agents": agents}, commit=False)
+    _record_step(db, run, STAGE_ASSIGN_ROLES, "Architect assigned agent lanes", detail={"agents": agents}, commit=False)
     _record_message(
         db,
         run,
@@ -2234,14 +2450,14 @@ def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, re
         metadata={"plan": plan, "files": files, "agents": agents},
         commit=False,
     )
-    if run.execution_mode == "full_autopilot":
-        run.plan_status = "approved"
+    if run.execution_mode == EXECUTION_MODE_FULL_AUTOPILOT:
+        run.plan_status = PLAN_STATUS_APPROVED
         db.commit()
         return _run_implementation_phase(db, run, repo, repo_path)
 
-    run.status = "awaiting_approval"
-    run.current_stage = "plan"
-    run.plan_status = "awaiting_approval"
+    run.status = RUN_STATUS_AWAITING_APPROVAL
+    run.current_stage = STAGE_PLAN
+    run.plan_status = PLAN_STATUS_AWAITING_APPROVAL
     run.updated_at = _utcnow()
     db.commit()
     db.refresh(run)
@@ -2260,9 +2476,9 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
         run.target_branch = run.base_branch
     if not run.base_sha:
         run.base_sha = _git_text(repo_path, ["rev-parse", "HEAD"], timeout=60)
-    run.status = "running"
-    run.current_stage = "implement"
-    run.plan_status = "approved"
+    run.status = RUN_STATUS_RUNNING
+    run.current_stage = STAGE_IMPLEMENT
+    run.plan_status = PLAN_STATUS_APPROVED
     if run.started_at is None:
         run.started_at = _utcnow()
     db.commit()
@@ -2384,7 +2600,7 @@ def run_autonomy_sync(db: Session, run_id: str, on_event: Callable[[dict[str, An
     try:
         if repo is None or repo_path is None:
             raise AutonomyBlocked("Selected repo is no longer reachable.")
-        if run.plan_status == "approved" and _json_load(run.plan_json, {}):
+        if run.plan_status == PLAN_STATUS_APPROVED and _json_load(run.plan_json, {}):
             return _run_implementation_phase(db, run, repo, repo_path)
         return _run_planning_phase(db, run, repo, repo_path)
     except AutonomyCancelled as exc:

@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:pasteboard/pasteboard.dart';
 
 import '../network/chili_api_client.dart';
 import '../network/network_error_message.dart';
@@ -52,6 +54,37 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   final TextEditingController _autopilotPromptCtrl = TextEditingController();
   final ScrollController _autopilotChatScroll = ScrollController();
   final FocusController _autopilotFocus = FocusController();
+  final List<String> _autopilotPendingImages = [];
+  static const _autopilotImageExts = {
+    '.jpg',
+    '.jpeg',
+    '.png',
+    '.gif',
+    '.webp',
+    '.bmp',
+  };
+  static const _autopilotMimeByExt = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+  };
+  static const _autopilotMaxPendingImages = 10;
+  static const _autopilotImagePreviewSize = 82.0;
+  static const _autopilotBubbleMaxWidth = 720.0;
+  static const _autopilotMessagePreviewLimit = 1400;
+  static const _autopilotPastedImagePrefix = 'chili_autopilot_paste';
+  static const _autopilotExecutionModePlanApproval =
+      ChiliApiClient.projectAutonomyPlanApprovalMode;
+  static const _autopilotStatusAwaitingApproval = 'awaiting_approval';
+  static const _autopilotStatusChatting = 'chatting';
+  static const _autopilotAttachmentKindImage = 'image';
+  static const _autopilotArtifactPromptImage = 'prompt_image';
+  static const _autopilotStartPlanLabel = 'Start plan';
+  static const _autopilotAttachedImagePromptLabel =
+      'Describe the attached image(s)';
   List<Map<String, dynamic>> _codeRepos = [];
   int? _autonomyRepoId;
   List<Map<String, dynamic>> _autonomyRuns = [];
@@ -364,6 +397,89 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         .contains(status);
   }
 
+  bool _isAutopilotImageFile(String path) {
+    final lower = path.toLowerCase().split('?').first;
+    return _autopilotImageExts.any(lower.endsWith);
+  }
+
+  String _autopilotFileName(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final parts = normalized.split('/');
+    return parts.isEmpty || parts.last.trim().isEmpty ? 'image' : parts.last;
+  }
+
+  void _addAutopilotPendingImage(String path) {
+    if (path.trim().isEmpty || !_isAutopilotImageFile(path)) {
+      setState(
+          () => _autonomyError = 'Attach a PNG, JPG, GIF, WebP, or BMP image.');
+      return;
+    }
+    if (_autopilotPendingImages.contains(path)) return;
+    if (_autopilotPendingImages.length >= _autopilotMaxPendingImages) {
+      setState(() => _autonomyError =
+          'Autopilot supports up to $_autopilotMaxPendingImages images per message.');
+      return;
+    }
+    setState(() {
+      _autopilotPendingImages.add(path);
+      _autonomyError = null;
+    });
+  }
+
+  void _removeAutopilotPendingImage(int index) {
+    if (index < 0 || index >= _autopilotPendingImages.length) return;
+    setState(() => _autopilotPendingImages.removeAt(index));
+  }
+
+  Future<void> _pickAutopilotImages() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: true,
+    );
+    if (result == null) return;
+    for (final file in result.files) {
+      final path = file.path;
+      if (path != null) _addAutopilotPendingImage(path);
+    }
+  }
+
+  Future<void> _pasteAutopilotImage() async {
+    try {
+      final imageBytes = await Pasteboard.image;
+      if (imageBytes == null || imageBytes.isEmpty) {
+        setState(() => _autonomyError = 'Clipboard does not contain an image.');
+        return;
+      }
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final tempFile = File(
+          '${Directory.systemTemp.path}/${_autopilotPastedImagePrefix}_$ts.png');
+      await tempFile.writeAsBytes(imageBytes);
+      _addAutopilotPendingImage(tempFile.path);
+    } catch (e) {
+      if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
+    }
+  }
+
+  List<Map<String, dynamic>> _autopilotAttachmentPayloads() {
+    return [
+      for (final path in _autopilotPendingImages)
+        {
+          'kind': _autopilotAttachmentKindImage,
+          'path': path,
+          'name': _autopilotFileName(path),
+          'mime_type': _autopilotMimeType(path),
+        },
+    ];
+  }
+
+  String _autopilotMimeType(String path) {
+    final lower = path.toLowerCase().split('?').first;
+    for (final entry in _autopilotMimeByExt.entries) {
+      if (lower.endsWith(entry.key)) return entry.value;
+    }
+    return _autopilotMimeByExt['.png']!;
+  }
+
   Future<void> _loadAutonomyRuns({bool silent = false}) async {
     if (!mounted) return;
     if (!silent) {
@@ -421,8 +537,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
 
   Future<void> _startAutopilot() async {
     final prompt = _autopilotPromptCtrl.text.trim();
-    if (prompt.isEmpty) {
-      setState(() => _autonomyError = 'Enter a message for Project Autopilot.');
+    final attachments = _autopilotAttachmentPayloads();
+    if (prompt.isEmpty && attachments.isEmpty) {
+      setState(() => _autonomyError =
+          'Enter a message or attach an image for Project Autopilot.');
       return;
     }
     final runId = _activeAutonomyRun?['run_id']?.toString() ?? '';
@@ -438,17 +556,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           ? await _api.sendProjectAutonomyMessage(
               runId: runId,
               content: prompt,
+              attachments: attachments,
             )
           : await _api.createProjectAutonomyRun(
               prompt: prompt,
               repoId: _autonomyRepoId,
-              executionMode: 'plan_approval',
+              executionMode: _autopilotExecutionModePlanApproval,
               startPlanning: false,
+              attachments: attachments,
             );
       if (!mounted) return;
       setState(() {
         _activeAutonomyRun = run;
         _autopilotPromptCtrl.clear();
+        _autopilotPendingImages.clear();
       });
       await _loadAutonomyRuns(silent: true);
       await _refreshActiveAutonomyRun(silent: true, force: true);
@@ -470,7 +591,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
 
   void _submitAutopilotComposer() {
     if (_autonomyBusy || _codeRepos.isEmpty) return;
-    if (_autopilotPromptCtrl.text.trim().isEmpty) return;
+    if (_autopilotPromptCtrl.text.trim().isEmpty &&
+        _autopilotPendingImages.isEmpty) {
+      return;
+    }
     unawaited(_startAutopilot());
   }
 
@@ -588,6 +712,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       _autopilotPromptCtrl.selection = TextSelection.collapsed(
         offset: _autopilotPromptCtrl.text.length,
       );
+      _autopilotPendingImages.clear();
       if (repoId != null) _autonomyRepoId = repoId;
       _autonomyError = null;
     });
@@ -1106,9 +1231,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       case 'validating':
       case 'merging':
         return dark ? Colors.indigo.shade200 : Colors.indigo.shade700;
-      case 'awaiting_approval':
+      case _autopilotStatusAwaitingApproval:
         return dark ? Colors.teal.shade200 : Colors.teal.shade700;
-      case 'chatting':
+      case _autopilotStatusChatting:
         return dark ? Colors.cyan.shade200 : Colors.cyan.shade700;
       case 'running':
         return dark ? Colors.blue.shade300 : Colors.blue.shade700;
@@ -1248,7 +1373,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   ? null
                   : () {
                       _autopilotPromptCtrl.clear();
-                      setState(() => _activeAutonomyRun = null);
+                      setState(() {
+                        _activeAutonomyRun = null;
+                        _autopilotPendingImages.clear();
+                      });
                     },
               icon: const Icon(Icons.add, size: 18),
               label: const Text('New run'),
@@ -1493,6 +1621,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final role = message['role']?.toString() ?? 'assistant';
     final type = message['message_type']?.toString() ?? 'chat';
     final body = message['content']?.toString() ?? '';
+    final imagePaths = _messageImagePaths(message);
     final isUser = role == 'user';
     final scheme = Theme.of(context).colorScheme;
     final color = isUser
@@ -1529,7 +1658,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       alignRight: isUser,
       color: color,
       background: _autonomyBubbleBackground(color, alpha: isUser ? 0.12 : 0.08),
+      imagePaths: imagePaths,
     );
+  }
+
+  List<String> _messageImagePaths(Map<String, dynamic> message) {
+    final metadata = _asMap(message['metadata']);
+    final attachments = _asMapList(metadata['attachments']);
+    return attachments
+        .map((item) => item['path']?.toString() ?? '')
+        .where((path) => path.trim().isNotEmpty)
+        .toList();
   }
 
   Widget _buildChatBubble({
@@ -1540,10 +1679,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     String body = '',
     String meta = '',
     List<Widget> chips = const [],
+    List<String> imagePaths = const [],
     bool alignRight = false,
   }) {
     final content = ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 720),
+      constraints: const BoxConstraints(maxWidth: _autopilotBubbleMaxWidth),
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.all(12),
@@ -1572,13 +1712,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             if (body.trim().isNotEmpty) ...[
               const SizedBox(height: 8),
               SelectableText(
-                body.length > 1400 ? '${body.substring(0, 1400)}...' : body,
+                body.length > _autopilotMessagePreviewLimit
+                    ? '${body.substring(0, _autopilotMessagePreviewLimit)}...'
+                    : body,
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurface,
                   fontSize: 13,
                   height: 1.35,
                 ),
               ),
+            ],
+            if (imagePaths.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              _buildAutopilotImagePreviewStrip(imagePaths, removable: false),
             ],
             if (chips.isNotEmpty) ...[
               const SizedBox(height: 8),
@@ -1594,6 +1740,62 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     );
   }
 
+  Widget _buildAutopilotImagePreviewStrip(
+    List<String> paths, {
+    required bool removable,
+  }) {
+    final border = _autonomyDividerColor();
+    return SizedBox(
+      height: _autopilotImagePreviewSize,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: paths.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final path = paths[index];
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Tooltip(
+                message: _autopilotFileName(path),
+                child: Container(
+                  width: _autopilotImagePreviewSize,
+                  height: _autopilotImagePreviewSize,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: border),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: Image.file(
+                    File(path),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Center(
+                      child: Icon(
+                        Icons.broken_image_outlined,
+                        color: _mutedTextColor(),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              if (removable)
+                Positioned(
+                  top: -8,
+                  right: -8,
+                  child: IconButton.filledTonal(
+                    tooltip: 'Remove image',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _removeAutopilotPendingImage(index),
+                    icon: const Icon(Icons.close, size: 16),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildAutonomyComposer() {
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
@@ -1603,9 +1805,68 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       ),
       child: Column(
         children: [
+          if (_activeAutonomyRun?['status']?.toString() ==
+                  _autopilotStatusAwaitingApproval &&
+              _activeAutonomyRun?['plan_status']?.toString() ==
+                  _autopilotStatusAwaitingApproval) ...[
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _autonomyBubbleBackground(Colors.teal, alpha: 0.10),
+                border: Border.all(color: Colors.teal.withValues(alpha: 0.22)),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(
+                    'Plan Mode is waiting for approval.',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurface,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  FilledButton.icon(
+                    onPressed: _autonomyBusy ? null : _approveAutopilotPlan,
+                    icon: const Icon(Icons.play_arrow, size: 18),
+                    label: const Text('Approve and implement'),
+                  ),
+                  Text(
+                    'Or send feedback below to revise it.',
+                    style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (_autopilotPendingImages.isNotEmpty) ...[
+            _buildAutopilotImagePreviewStrip(
+              _autopilotPendingImages,
+              removable: true,
+            ),
+            const SizedBox(height: 10),
+          ],
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              IconButton.outlined(
+                tooltip: 'Attach images',
+                onPressed: _autonomyBusy ? null : _pickAutopilotImages,
+                icon: Icon(_autopilotPendingImages.isEmpty
+                    ? Icons.attach_file
+                    : Icons.collections_outlined),
+              ),
+              const SizedBox(width: 8),
+              IconButton.outlined(
+                tooltip: 'Paste image from clipboard',
+                onPressed: _autonomyBusy ? null : _pasteAutopilotImage,
+                icon: const Icon(Icons.content_paste),
+              ),
+              const SizedBox(width: 10),
               Expanded(
                 child: CallbackShortcuts(
                   bindings: <ShortcutActivator, VoidCallback>{
@@ -1628,7 +1889,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       labelText: _activeAutonomyRun == null ||
                               _autonomyTerminal(_activeAutonomyRun)
                           ? 'Start an Autopilot chat'
-                          : 'Message CHILI about this run',
+                          : _autopilotPendingImages.isNotEmpty
+                              ? _autopilotAttachedImagePromptLabel
+                              : 'Message CHILI about this run',
                       alignLabelWithHint: true,
                       border: const OutlineInputBorder(),
                     ),
@@ -1703,10 +1966,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final terminal = _autonomyTerminal(run);
     final branch = run['integration_branch']?.toString() ?? '';
     final merge = run['merge_status']?.toString() ?? '';
-    final canApprove = status == 'awaiting_approval' &&
-        planStatus == 'awaiting_approval' &&
+    final canApprove = status == _autopilotStatusAwaitingApproval &&
+        planStatus == _autopilotStatusAwaitingApproval &&
         _asMap(run['plan']).isNotEmpty;
-    final canStartPlan = status == 'chatting' || planStatus == 'chatting';
+    final canStartPlan = status == _autopilotStatusChatting ||
+        planStatus == _autopilotStatusChatting;
     final canMerge = terminal &&
         branch.isNotEmpty &&
         status != 'merged' &&
@@ -1720,7 +1984,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           FilledButton.icon(
             onPressed: _autonomyBusy ? null : _startAutopilotPlan,
             icon: const Icon(Icons.account_tree_outlined, size: 18),
-            label: const Text('Start plan'),
+            label: const Text(_autopilotStartPlanLabel),
           ),
         if (canStartPlan) const SizedBox(height: 8),
         if (canApprove)
@@ -1778,7 +2042,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             ),
           ],
         ),
-        if (status == 'awaiting_approval') ...[
+        if (status == _autopilotStatusAwaitingApproval) ...[
           const SizedBox(height: 10),
           Text(
             'Plan Mode is waiting. Send feedback in chat to revise, or approve when it looks right.',
@@ -1917,9 +2181,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return Icons.fact_check_outlined;
       case 'merging':
         return Icons.merge_type;
-      case 'awaiting_approval':
+      case _autopilotStatusAwaitingApproval:
         return Icons.rule_folder_outlined;
-      case 'chatting':
+      case _autopilotStatusChatting:
         return Icons.forum_outlined;
       case 'running':
         return Icons.autorenew;
@@ -1940,6 +2204,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return Icons.warning_amber_outlined;
       case 'commit':
         return Icons.commit;
+      case _autopilotArtifactPromptImage:
+        return Icons.image_outlined;
       case 'visual_screenshot':
         return Icons.screenshot_monitor;
       case 'visual_video':
@@ -2048,23 +2314,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _buildAutonomyPlan(Map<String, dynamic> plan, List<String> files) {
-    final analysis = plan['analysis']?.toString() ?? '';
-    final notes = plan['notes']?.toString() ?? '';
+    final planBody = AutonomyRunPresenter.planBody(plan);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text('Architect plan', style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: 8),
-        if (analysis.isEmpty && notes.isEmpty && files.isEmpty)
+        if (planBody.isEmpty && files.isEmpty)
           Text('Waiting for plan', style: TextStyle(color: _mutedTextColor()))
         else ...[
-          if (analysis.isNotEmpty)
-            SelectableText(analysis, style: const TextStyle(fontSize: 13)),
-          if (notes.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            SelectableText(notes,
-                style: TextStyle(fontSize: 13, color: _mutedTextColor())),
-          ],
+          if (planBody.isNotEmpty)
+            SelectableText(planBody, style: const TextStyle(fontSize: 13)),
           if (files.isNotEmpty) ...[
             const SizedBox(height: 10),
             Wrap(
@@ -2218,6 +2478,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               'diff',
               'diff_rejected',
               'commit',
+              _autopilotArtifactPromptImage,
               'visual_screenshot',
               'visual_video',
               'ui_review',
@@ -2282,7 +2543,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                         ),
                       ),
                     ],
-                    if (type == 'visual_screenshot' &&
+                    if ((type == 'visual_screenshot' ||
+                            type == _autopilotArtifactPromptImage) &&
                         path != null &&
                         File(path).existsSync()) ...[
                       const SizedBox(height: 8),

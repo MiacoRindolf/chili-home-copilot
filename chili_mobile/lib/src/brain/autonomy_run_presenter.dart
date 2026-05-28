@@ -1,4 +1,20 @@
 class AutonomyRunPresenter {
+  static const _artifactTypePromptImage = 'prompt_image';
+  static const _fallbackPlanUnavailableText =
+      'Local model planning was unavailable';
+  static const _compactTextLimit = 900;
+  static const _modelErrorSnippetLimit = 260;
+  static const _rawModelErrorMarkers = [
+    'http://',
+    'https://',
+    'urlerror',
+    'timeouterror',
+    'connection refused',
+    'errno',
+    'traceback',
+    'ollama:',
+  ];
+
   static const interruptedWorkerMessage =
       'This run stopped because the backend restarted during implementation. '
       'No changes were merged. Start a fresh run from the same prompt.';
@@ -192,6 +208,13 @@ class AutonomyRunPresenter {
         final path = _firstText(json, ['path', 'url']);
         if (path.isNotEmpty) return 'Attached video evidence: $path';
         return 'Requested video evidence for UI/UX validation.';
+      case _artifactTypePromptImage:
+        final attachmentName = _firstText(json, ['name']);
+        final source = _firstText(json, ['source']);
+        final label = attachmentName.isEmpty ? name : attachmentName;
+        return source.isEmpty
+            ? 'Attached image evidence: $label'
+            : 'Attached image evidence for $source: $label';
       case 'ui_review':
       case 'ux_review':
         final summary = _firstText(json, ['summary', 'message']);
@@ -242,8 +265,8 @@ class AutonomyRunPresenter {
 
   static String planBody(Map<String, dynamic> plan) {
     if (plan.isEmpty) return '';
-    final analysis = _text(plan['analysis']).trim();
-    final notes = _text(plan['notes']).trim();
+    final analysis = _safePlanText(plan['analysis']);
+    final notes = _safePlanText(plan['notes']);
     final files = _mapList(plan['files'])
         .map((file) => _firstText(file, ['path', 'file']))
         .where((path) => path.isNotEmpty)
@@ -253,13 +276,13 @@ class AutonomyRunPresenter {
     if (files.isNotEmpty) {
       parts.add('Files: ${_listSummary(files, limit: 6)}.');
     }
-    if (notes.isNotEmpty) parts.add(notes);
+    if (notes.isNotEmpty && notes != analysis) parts.add(notes);
     return parts.join('\n\n');
   }
 
   static String compact(dynamic value) {
     if (value == null) return '';
-    if (value is String) return _truncate(value.trim(), 900);
+    if (value is String) return _truncate(value.trim(), _compactTextLimit);
     if (value is num || value is bool) return value.toString();
     if (value is List) {
       if (value.isEmpty) return '';
@@ -279,9 +302,9 @@ class AutonomyRunPresenter {
           .map((entry) => '${_label(entry.key)}: ${_compactValue(entry.value)}')
           .where((entry) => !entry.endsWith(': '))
           .toList();
-      return _truncate(entries.join('; '), 900);
+      return _truncate(entries.join('; '), _compactTextLimit);
     }
-    return _truncate(value.toString(), 900);
+    return _truncate(value.toString(), _compactTextLimit);
   }
 
   static String _modelCallBody(Map<String, dynamic> json, String name) {
@@ -325,7 +348,19 @@ class AutonomyRunPresenter {
         lower.contains('failed to establish a new connection')) {
       return 'the local model service was not reachable';
     }
-    return _truncate(trimmed, 260);
+    return _truncate(trimmed, _modelErrorSnippetLimit);
+  }
+
+  static String _safePlanText(dynamic raw) {
+    final text = _text(raw).trim();
+    if (text.isEmpty) return '';
+    final lower = text.toLowerCase();
+    if (_rawModelErrorMarkers.any(lower.contains)) {
+      return _friendlyModelError(text).isEmpty
+          ? '$_fallbackPlanUnavailableText.'
+          : '$_fallbackPlanUnavailableText: ${_friendlyModelError(text)}';
+    }
+    return _truncate(text, _compactTextLimit);
   }
 
   static bool _validationPassed(Map<String, dynamic> item) {

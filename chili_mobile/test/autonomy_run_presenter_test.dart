@@ -127,12 +127,35 @@ void main() {
         'skip_reason': 'Desktop video capture is not available yet',
       },
     });
+    final promptImage = AutonomyRunPresenter.artifactBody({
+      'artifact_type': 'prompt_image',
+      'name': 'autopilot.png',
+      'content_json': {'name': 'autopilot.png', 'source': 'chat_message'},
+    });
+    final modelFallbackPlan = AutonomyRunPresenter.planBody({
+      'analysis':
+          'Local model planning was unavailable (http://ollama:11434: TimeoutError: timed out).',
+      'files': [
+        {'path': 'chili_mobile/lib/src/brain/brain_dispatch_screen.dart'},
+      ],
+      'notes': 'URLError: <urlopen error [Errno 111] Connection refused>',
+    });
 
     expect(plan, contains('Refactor the Autopilot panel'));
     expect(plan, contains('brain_dispatch_screen.dart'));
     expect(screenshot, contains('screenshot evidence'));
     expect(video, contains('Video validation was skipped'));
-    for (final body in [plan, screenshot, video]) {
+    expect(promptImage, contains('Attached image evidence'));
+    expect(modelFallbackPlan, contains('Local model planning was unavailable'));
+    expect(modelFallbackPlan, isNot(contains('http://')));
+    expect(modelFallbackPlan, isNot(contains('URLError')));
+    for (final body in [
+      plan,
+      screenshot,
+      video,
+      promptImage,
+      modelFallbackPlan
+    ]) {
       expect(body, isNot(contains('{')));
     }
   });
