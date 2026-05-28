@@ -131,6 +131,70 @@ def _record_batch_job_failure_resilient(
                 pass
 
 
+def _finish_wrapper_batch_job_resilient(
+    db,
+    *,
+    session_factory: Callable[[], object],
+    finish_fn: Callable[..., None],
+    job_id: str,
+    ok: bool,
+    error: str | None = None,
+    meta: dict | None = None,
+    log_label: str,
+) -> str:
+    """Finish a scheduler-wrapper batch row even after the primary DB session breaks."""
+    meta_payload = dict(meta or {})
+    try:
+        finish_fn(db, job_id, ok=ok, error=error, meta=meta_payload)
+        db.commit()
+        return "primary_session"
+    except Exception:
+        logger.debug(
+            "[scheduler_job] %s primary batch_job_finish failed; retrying fresh session",
+            log_label,
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug(
+                "[scheduler_job] %s primary rollback after finish miss failed",
+                log_label,
+                exc_info=True,
+            )
+
+    fallback_db = None
+    try:
+        fallback_db = session_factory()
+        fallback_meta = dict(meta_payload)
+        fallback_meta["finish_session"] = "fresh_session"
+        finish_fn(fallback_db, job_id, ok=ok, error=error, meta=fallback_meta)
+        fallback_db.commit()
+        return "fresh_session"
+    except Exception:
+        logger.warning(
+            "[scheduler_job] %s fresh-session batch_job_finish failed",
+            log_label,
+            exc_info=True,
+        )
+        if fallback_db is not None:
+            try:
+                fallback_db.rollback()
+            except Exception:
+                logger.debug(
+                    "[scheduler_job] %s fresh-session rollback failed",
+                    log_label,
+                    exc_info=True,
+                )
+        return "failed"
+    finally:
+        if fallback_db is not None:
+            try:
+                fallback_db.close()
+            except Exception:
+                pass
+
+
 def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
     """Run a scheduler callback with structured logs + brain_batch_jobs row;
     swallow exceptions after logging.
@@ -193,18 +257,16 @@ def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
             dur_ms,
         )
         if _wrapper_jid is not None and _wrapper_db is not None:
-            try:
-                _bbj_finish(
-                    _wrapper_db, _wrapper_jid, ok=False,
-                    error=str(exc)[:500],
-                    meta={"duration_ms": dur_ms, "wrapper": "run_scheduler_job_guarded"},
-                )
-                _wrapper_db.commit()
-            except Exception:
-                logger.debug(
-                    "[scheduler_job] job_id=%s baseline batch_job_finish(failed) failed",
-                    job_id, exc_info=True,
-                )
+            _finish_wrapper_batch_job_resilient(
+                _wrapper_db,
+                session_factory=_SL,
+                finish_fn=_bbj_finish,
+                job_id=_wrapper_jid,
+                ok=False,
+                error=str(exc)[:500],
+                meta={"duration_ms": dur_ms, "wrapper": "run_scheduler_job_guarded"},
+                log_label=f"job_id={job_id} finish_failed",
+            )
         if _wrapper_db is not None:
             try:
                 _wrapper_db.close()
@@ -219,17 +281,15 @@ def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
         dur_ms,
     )
     if _wrapper_jid is not None and _wrapper_db is not None:
-        try:
-            _bbj_finish(
-                _wrapper_db, _wrapper_jid, ok=True,
-                meta={"duration_ms": dur_ms, "wrapper": "run_scheduler_job_guarded"},
-            )
-            _wrapper_db.commit()
-        except Exception:
-            logger.debug(
-                "[scheduler_job] job_id=%s baseline batch_job_finish(ok) failed",
-                job_id, exc_info=True,
-            )
+        _finish_wrapper_batch_job_resilient(
+            _wrapper_db,
+            session_factory=_SL,
+            finish_fn=_bbj_finish,
+            job_id=_wrapper_jid,
+            ok=True,
+            meta={"duration_ms": dur_ms, "wrapper": "run_scheduler_job_guarded"},
+            log_label=f"job_id={job_id} finish_ok",
+        )
     if _wrapper_db is not None:
         try:
             _wrapper_db.close()
@@ -4231,6 +4291,9 @@ def start_scheduler():
         include_cash_deployment_work = role in (
             "all", "web", "cron_only", "market_snapshot_only",
         )
+        include_batch_reconciler = role in (
+            "all", "web", "worker", "cron_only", "market_snapshot_only",
+        )
         # autotrader_only registers ONLY autotrader jobs. 'all'/'worker' still
         # include them (legacy behavior preserved). 'cron_only' excludes them.
         include_autotrader = role in ("all", "worker", "autotrader_only")
@@ -4331,7 +4394,12 @@ def start_scheduler():
         # broker-sync-worker container. Non-broker jobs (weekly_review,
         # price_monitor) stay on include_web_light. The outer disjunction
         # ensures broker_sync_only role still enters this block.
-        if include_web_light or include_broker_sync or include_cash_deployment_work:
+        if (
+            include_web_light
+            or include_broker_sync
+            or include_cash_deployment_work
+            or include_batch_reconciler
+        ):
             if include_web_light:
                 _scheduler.add_job(
                     _run_weekly_review_job,
@@ -4499,6 +4567,17 @@ def start_scheduler():
                     next_run_time=datetime.now() + timedelta(seconds=90),
                 )
 
+            if include_batch_reconciler:
+                _scheduler.add_job(
+                    _run_brain_batch_reconciler_job,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="brain_batch_reconciler",
+                    name="Stale brain_batch_jobs reconciler (every 5min)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=20),
+                )
+
             # FIX 45b: remaining non-broker jobs in this block stay gated on
             # include_web_light so they don't fire for broker_sync_only role.
             if include_web_light:
@@ -4520,16 +4599,6 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=55),
-                )
-
-                _scheduler.add_job(
-                    _run_brain_batch_reconciler_job,
-                    trigger=IntervalTrigger(minutes=5),
-                    id="brain_batch_reconciler",
-                    name="Stale brain_batch_jobs reconciler (every 5min)",
-                    replace_existing=True,
-                    max_instances=1,
-                    next_run_time=datetime.now() + timedelta(seconds=20),
                 )
 
                 _scheduler.add_job(

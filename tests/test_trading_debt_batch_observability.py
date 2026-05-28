@@ -34,6 +34,61 @@ def test_run_scheduler_job_guarded_swallows_and_logs_exception(caplog: pytest.Lo
     )
 
 
+def test_finish_wrapper_batch_job_uses_fresh_session_after_primary_failure() -> None:
+    from app.services.trading_scheduler import _finish_wrapper_batch_job_resilient
+
+    class FakeSession:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.commits = 0
+            self.rollbacks = 0
+            self.closed = False
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    primary = FakeSession("primary")
+    fallback = FakeSession("fallback")
+    calls: list[tuple[str, str, bool, dict]] = []
+
+    def finish_fn(
+        db,
+        job_id: str,
+        *,
+        ok: bool,
+        error: str | None = None,
+        meta: dict | None = None,
+    ) -> None:
+        calls.append((db.name, job_id, ok, dict(meta or {})))
+        if db is primary:
+            raise RuntimeError("socket closed")
+
+    result = _finish_wrapper_batch_job_resilient(
+        primary,
+        session_factory=lambda: fallback,
+        finish_fn=finish_fn,
+        job_id="job-1",
+        ok=True,
+        meta={"duration_ms": 12},
+        log_label="unit_test",
+    )
+
+    assert result == "fresh_session"
+    assert primary.rollbacks == 1
+    assert fallback.commits == 1
+    assert fallback.closed is True
+    assert calls == [
+        ("primary", "job-1", True, {"duration_ms": 12}),
+        ("fallback", "job-1", True, {"duration_ms": 12, "finish_session": "fresh_session"}),
+    ]
+
+
 def test_dispatch_alert_passes_classified_tier_to_send_sms(db, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
