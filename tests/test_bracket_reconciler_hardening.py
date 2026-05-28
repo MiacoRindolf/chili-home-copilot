@@ -333,6 +333,22 @@ class TestOrphanStopCoverage:
         summary = run_reconciliation_sweep(db, broker_view_fn=_broker_fn())
         assert summary.trades_scanned == 0
 
+    def test_closed_intent_on_cancelled_trade_is_not_rescanned(self, db):
+        """``closed`` is terminal too; do not keep sweeping settled intents."""
+        t = _make_trade(db, ticker="ORPHAN_CLOSED", status="cancelled")
+        intent_id = _intent(db, t)
+        db.execute(text("""
+            UPDATE trading_bracket_intents
+            SET intent_state = 'closed' WHERE id = :id
+        """), {"id": intent_id})
+        db.commit()
+
+        rows = _load_local_view(db)
+        assert all(row["trade_id"] != t.id for row in rows)
+
+        summary = run_reconciliation_sweep(db, broker_view_fn=_broker_fn())
+        assert summary.trades_scanned == 0
+
     def test_open_trade_scope_still_works(self, db):
         """Regression: the new OR clause must not drop open-trade coverage."""
         t = _make_trade(db, ticker="OPEN_CTRL")

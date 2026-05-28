@@ -2508,8 +2508,8 @@ def _load_local_view(
     * Always: every open live trade (``status='open'``,
       ``broker_source IS NOT NULL``) — the classical reconciliation path.
     * Also: any trade whose ``BracketIntent`` has NOT yet reached a
-      terminal state (i.e. not ``reconciled`` and not
-      ``authoritative_closed``) — including trades that are
+      terminal state (i.e. not ``reconciled``, ``authoritative_closed``,
+      or ``closed``) — including trades that are
       ``cancelled`` / ``expired`` / ``closed``. Without this, a
       cancelled entry that left a working stop at the broker (orphan)
       would never be scanned and never classified as ``orphan_stop``.
@@ -2533,7 +2533,7 @@ def _load_local_view(
         "     bi.id IS NOT NULL"
         "     AND t.broker_source IS NOT NULL"
         "     AND t.status <> 'open'"
-        "     AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed')"
+        "     AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')"
         "   )"
         " )"
     )
@@ -2844,7 +2844,7 @@ def run_missing_stop_watchdog(
         WHERE t.status = 'open'
           AND t.broker_source IS NOT NULL
           AND NOT {_option_trade_predicate_sql('t')}
-          AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed')
+          AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')
           {user_filter}
         ORDER BY t.id
     """)
