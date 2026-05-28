@@ -7,6 +7,7 @@ from app.services.trading.stop_engine import (
     MarketContext,
     StopDecisionResult,
     StopState,
+    _crypto_missing_qty_backoff_active,
     _fetch_market_context,
     _result_has_trade_state_change,
     _should_suppress_alert,
@@ -51,6 +52,48 @@ def test_fetch_market_context_normalizes_aware_quote_ts(monkeypatch):
     assert context.is_stale is False
     assert context.quote_ts is not None
     assert context.quote_ts.tzinfo is None
+
+
+def test_crypto_missing_qty_backoff_active_only_inside_window():
+    now = datetime(2026, 5, 28, 19, 50, tzinfo=timezone.utc)
+    trade = SimpleNamespace(
+        ticker="DIEM-USD",
+        broker_source="coinbase",
+        pending_exit_reason="missing_broker_qty",
+        indicator_snapshot={
+            "crypto_exit_missing_qty_backoff": {
+                "backoff_until": "2026-05-28T19:55:00+00:00",
+                "streak": 438,
+            }
+        },
+    )
+
+    meta = _crypto_missing_qty_backoff_active(trade, now=now)
+
+    assert meta is not None
+    assert meta["streak"] == 438
+    assert _crypto_missing_qty_backoff_active(
+        trade,
+        now=datetime(2026, 5, 28, 19, 56, tzinfo=timezone.utc),
+    ) is None
+
+
+def test_crypto_missing_qty_backoff_ignores_non_crypto_trade():
+    trade = SimpleNamespace(
+        ticker="ACMR",
+        broker_source="robinhood",
+        pending_exit_reason="missing_broker_qty",
+        indicator_snapshot={
+            "crypto_exit_missing_qty_backoff": {
+                "backoff_until": "2026-05-28T19:55:00+00:00",
+            }
+        },
+    )
+
+    assert _crypto_missing_qty_backoff_active(
+        trade,
+        now=datetime(2026, 5, 28, 19, 50, tzinfo=timezone.utc),
+    ) is None
 
 
 def test_fetch_market_context_prefers_trade_broker_quote(monkeypatch):

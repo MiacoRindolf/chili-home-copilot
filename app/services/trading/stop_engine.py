@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 SECONDS_PER_HOUR = 3600
 DEFAULT_MARKET_CONTEXT_STALENESS_SECS = 300
 DEFAULT_ALERT_COOLDOWN_SECS = SECONDS_PER_HOUR
+CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY = "crypto_exit_missing_qty_backoff"
+CRYPTO_EXIT_MISSING_QTY_PENDING_REASON = "missing_broker_qty"
 
 
 # ── Stop state machine ──────────────────────────────────────────────
@@ -230,6 +232,39 @@ def _to_naive_utc(value: datetime | str | None) -> datetime | None:
     if value.tzinfo is None or value.utcoffset() is None:
         return value
     return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _crypto_missing_qty_backoff_active(
+    trade: Any,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return active crypto exit missing-quantity backoff metadata, if any."""
+    ticker = str(getattr(trade, "ticker", "") or "").upper()
+    broker_source = str(getattr(trade, "broker_source", "") or "").strip().lower()
+    if not (_is_crypto(ticker) or broker_source == "coinbase"):
+        return None
+    if (
+        str(getattr(trade, "pending_exit_reason", "") or "").strip().lower()
+        != CRYPTO_EXIT_MISSING_QTY_PENDING_REASON
+    ):
+        return None
+    snap = getattr(trade, "indicator_snapshot", None)
+    if not isinstance(snap, dict):
+        return None
+    meta = snap.get(CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY)
+    if not isinstance(meta, dict):
+        return None
+    try:
+        backoff_until = _to_naive_utc(meta.get("backoff_until"))
+    except (TypeError, ValueError):
+        return None
+    if backoff_until is None:
+        return None
+    now_utc = _to_naive_utc(now) or _now_naive_utc()
+    if now_utc >= backoff_until:
+        return None
+    return {**meta, "backoff_until_dt": backoff_until}
 
 
 def _safe_market_float(value: Any) -> float | None:
@@ -1635,6 +1670,8 @@ def evaluate_all(
         "delegated_to_options_exit_monitor": [],
         "skipped_stale_broker_positions": [],
         "reconciled_stale_broker_positions": [],
+        "crypto_missing_qty_backoff": [],
+        "suppressed_crypto_missing_qty_backoff": 0,
         "regime": "cautious",
         "alerts": [],
     }
@@ -1731,23 +1768,48 @@ def evaluate_all(
                 summary["total_checked"] += 1
 
                 if result.alert_event and result.alert_event != "DATA_STALE":
-                    result_suppressed = _should_suppress_alert(
-                        trade.id,
-                        result.alert_event,
-                        recent_decisions,
-                        adaptive_cooldowns,
-                    )
-                    # Suppression is primarily an operator-noise control, but
-                    # it must also prevent duplicate STOP_HIT/TARGET_HIT rows
-                    # from flooding the audit table. Still record suppressed
-                    # events that actually mutate trade state so stop moves do
-                    # not disappear from the audit trail.
-                    if (
-                        not result_suppressed
-                        or _result_has_trade_state_change(trade, result)
-                    ):
-                        _record_stop_decision(db, trade.id, result)
-                    _apply_stop_to_trade(db, trade, result)
+                    missing_qty_backoff = None
+                    if result.alert_event in {"STOP_HIT", "TARGET_HIT", "TIME_EXIT"}:
+                        missing_qty_backoff = _crypto_missing_qty_backoff_active(trade)
+                    if missing_qty_backoff is not None:
+                        result_suppressed = True
+                        summary["suppressed_crypto_missing_qty_backoff"] += 1
+                        summary["crypto_missing_qty_backoff"].append({
+                            "trade_id": int(trade.id),
+                            "ticker": trade.ticker,
+                            "event": result.alert_event,
+                            "broker_source": getattr(trade, "broker_source", None),
+                            "backoff_until": missing_qty_backoff.get("backoff_until"),
+                            "streak": missing_qty_backoff.get("streak"),
+                        })
+                        logger.info(
+                            "[stop_engine] suppressed %s for %s trade#%s: "
+                            "crypto exit is already deferred on missing broker qty "
+                            "until=%s streak=%s",
+                            result.alert_event,
+                            trade.ticker,
+                            trade.id,
+                            missing_qty_backoff.get("backoff_until"),
+                            missing_qty_backoff.get("streak"),
+                        )
+                    else:
+                        result_suppressed = _should_suppress_alert(
+                            trade.id,
+                            result.alert_event,
+                            recent_decisions,
+                            adaptive_cooldowns,
+                        )
+                        # Suppression is primarily an operator-noise control, but
+                        # it must also prevent duplicate STOP_HIT/TARGET_HIT rows
+                        # from flooding the audit table. Still record suppressed
+                        # events that actually mutate trade state so stop moves do
+                        # not disappear from the audit trail.
+                        if (
+                            not result_suppressed
+                            or _result_has_trade_state_change(trade, result)
+                        ):
+                            _record_stop_decision(db, trade.id, result)
+                        _apply_stop_to_trade(db, trade, result)
                 # f-coinbase-bracket-coverage-fix (2026-05-10): emit
                 # bracket intent on every sweep, not gated on alert_event.
                 # The previous gate meant a freshly-entered Coinbase trade
