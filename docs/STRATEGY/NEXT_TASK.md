@@ -28,14 +28,20 @@ selective cleanup planning, not another destructive schema change.
   - Phase 5A trigger created/linked 3/3 decisions: green
   - row count before/after rollback: 705 -> 705
 - Schema-specific log scan: no rename-path errors.
+- Phase 5I watcher installed: `CHILI-phase5i-post-rename-soak-probe`
+  - cadence: every 30 minutes for 14 days
+  - output: `scripts/dispatch-phase5i-post-rename-soak-probe-out.txt`
+  - latest manual run: `IN_FLIGHT`, 0 fresh decisions/envelopes/closes, 0
+    hard linkage issues, 0 schema-specific log errors
 
 ## Tasks
 
-1. Let at least one fresh entry and one fresh close occur after mig 283.
-2. Rerun:
+1. Let at least one fresh entry and one fresh close occur after mig 283. The
+   scheduled watcher now checks this automatically.
+2. Rerun manually when needed:
 
    ```powershell
-   python scripts\d-phase5e-reporting-soak-probe.py
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
    ```
 
 3. Verify:
@@ -82,3 +88,5 @@ Then force-recreate affected workers and rerun the Phase 5E compare.
 - `docs/STRATEGY/CC_REPORTS/2026-05-28_f-position-identity-phase-5h-production-physical-rename.md`
 - `scripts/d-phase5e-reporting-soak-probe.py`
 - `scripts/d-phase5g-rename-dry-run.py`
+- `scripts/d-phase5i-post-rename-soak-probe.py`
+- `docs/RUNBOOKS/WATCHER_phase5i_post_rename_soak.md`
