@@ -79,3 +79,46 @@ def test_asset_kind_option_quote_never_falls_back_to_stock_quote() -> None:
 
     assert quote["price"] is None
     assert quote["source"] == "robinhood_options_unavailable"
+
+
+def test_option_broker_quote_rejects_crossed_premium_market() -> None:
+    from app.services.trading.broker_quotes import broker_quote_for_trade
+
+    trade = SimpleNamespace(
+        ticker="SPY",
+        broker_source="robinhood",
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot={
+            "asset_type": "options",
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+            },
+        },
+    )
+    fake_options = SimpleNamespace(
+        is_enabled=lambda: True,
+        find_contract=lambda *_args: {"id": "spy-729c"},
+        get_quote=lambda _option_id: {
+            "bid_price": "4.10",
+            "ask_price": "4.00",
+            "mark_price": "4.05",
+        },
+    )
+
+    with patch(
+        "app.services.trading.venue.factory.get_adapter",
+        side_effect=AssertionError("option quote must not route to stock adapter"),
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ):
+        quote = broker_quote_for_trade(trade, purpose="display")
+
+    assert quote["price"] is None
+    assert quote["source"] == "robinhood_options_unavailable"
+    assert quote["quote_error"] == "crossed_option_market"

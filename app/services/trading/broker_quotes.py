@@ -270,6 +270,8 @@ def _option_quote_for_trade(
 
         bid = _safe_float(quote.get("bid_price"))
         ask = _safe_float(quote.get("ask_price"))
+        if bid is not None and ask is not None and bid > ask:
+            return {**unavailable, "quote_error": "crossed_option_market"}
         mid = ((bid + ask) / 2.0) if bid is not None and ask is not None else None
         mark = _safe_float(quote.get("mark_price"))
         adjusted_mark = _safe_float(quote.get("adjusted_mark_price"))
