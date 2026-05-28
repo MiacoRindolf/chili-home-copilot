@@ -2559,6 +2559,18 @@ def passes_rule_gate(
         if target is not None and float(target) <= ref:
             return False, "target_not_above_entry", snap
 
+    if bool(getattr(alert, "_chili_shadow_observation_only", False)):
+        snap["shadow_observation_risk_authority_skipped"] = True
+        snap["shadow_observation_risk_authority_skip_reason"] = (
+            "shadow_observation_only"
+        )
+        snap["daily_loss_cap_source"] = "shadow_observation_not_live"
+        snap["portfolio_check"] = {
+            "ok": None,
+            "reason": "shadow_observation_only",
+        }
+        return True, "ok", snap
+
     # Phase 2: pull brain-driven risk context (regime + dial + drawdown).
     # dial_value = 1.0 is baseline. risk_off tightens it (lower notional,
     # fewer concurrent); risk_on loosens it up to the configured ceiling.

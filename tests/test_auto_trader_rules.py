@@ -285,6 +285,95 @@ def test_passes_rule_gate_skips_legacy_stock_price_cap_when_fractional_equity_en
     assert snap["symbol_price_cap_skipped_reason"] == "fractional_equity_enabled"
 
 
+def test_passes_rule_gate_shadow_observation_skips_live_risk_authority():
+    db = MagicMock()
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_allow_extended_hours=False,
+        chili_autotrader_crypto_enabled=False,
+        chili_autotrader_options_enabled=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=0.0,
+        chili_autotrader_max_symbol_price_usd=500.0,
+        chili_autotrader_fractional_equity_enabled=True,
+        chili_autotrader_max_entry_slippage_pct=5.0,
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=1.5,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=20,
+        chili_autotrader_max_concurrent_crypto=20,
+        chili_autotrader_max_concurrent_options=20,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+        chili_autotrader_broker_equity_cache_ttl_seconds=300,
+        chili_autotrader_broker_equity_cache_max_stale_seconds=900,
+    )
+    alert = BreakoutAlert(
+        ticker="SHADOW",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=115.0,
+        user_id=1,
+    )
+    setattr(alert, "_chili_shadow_observation_only", True)
+    ctx = RuleGateContext(
+        current_price=100.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_pattern_signal_context",
+            return_value={},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            return_value=EntryEdgeDecision(
+                True,
+                "positive_expected_edge",
+                {"expected_net_pct": 1.25},
+            ),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_slippage_pct",
+            return_value=(5.0, "test"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_brain_risk_context",
+            side_effect=AssertionError(
+                "shadow observations should skip brain risk authority"
+            ),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_capital",
+            side_effect=AssertionError(
+                "shadow observations should skip broker-backed capital"
+            ),
+        ),
+        patch(
+            "app.services.trading.portfolio_risk.check_new_trade_allowed",
+            side_effect=AssertionError(
+                "shadow observations should skip live portfolio authority"
+            ),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db, alert, settings=settings, ctx=ctx, for_new_entry=True
+        )
+
+    assert ok
+    assert reason == "ok"
+    assert snap["entry_edge_expected_net_pct"] == 1.25
+    assert snap["shadow_observation_risk_authority_skipped"] is True
+    assert snap["portfolio_check"]["reason"] == "shadow_observation_only"
+
+
 def test_passes_rule_gate_keeps_stock_price_cap_when_fractional_equity_disabled():
     high_price_stock = 250.0
     legacy_whole_share_cap = 200.0
