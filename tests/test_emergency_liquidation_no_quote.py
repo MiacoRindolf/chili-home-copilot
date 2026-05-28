@@ -90,7 +90,7 @@ class _FakeEmergencyDb:
         return _FakeQuery([])
 
 
-def test_emergency_close_all_paper_option_uses_premium_mark_and_multiplier():
+def test_emergency_close_all_paper_option_uses_executable_premium_and_multiplier():
     from app.services.trading import emergency_liquidation as elq
 
     paper = SimpleNamespace(
@@ -127,7 +127,12 @@ def test_emergency_close_all_paper_option_uses_premium_mark_and_multiplier():
         ),
         patch(
             "app.services.trading.broker_quotes.broker_quote_for_trade",
-            return_value={"price": 1.45, "source": "robinhood_options"},
+            return_value={
+                "price": 1.45,
+                "mark_price": 1.45,
+                "executable_price": 1.40,
+                "source": "robinhood_options",
+            },
         ),
     ):
         result = elq.emergency_close_all(
@@ -139,9 +144,69 @@ def test_emergency_close_all_paper_option_uses_premium_mark_and_multiplier():
     assert result["ok"] is True
     assert result["closed_paper"] == 1
     assert paper.status == "closed"
-    assert paper.exit_price == pytest.approx(1.45)
-    assert paper.pnl == pytest.approx(40.0)
-    assert paper.pnl_pct == pytest.approx(16.0)
+    assert paper.exit_price == pytest.approx(1.40)
+    assert paper.pnl == pytest.approx(30.0)
+    assert paper.pnl_pct == pytest.approx(12.0)
+
+
+def test_emergency_close_all_paper_option_rejects_mark_without_executable_quote():
+    from app.services.trading import emergency_liquidation as elq
+
+    paper = SimpleNamespace(
+        id=8802,
+        user_id=None,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        signal_json={
+            "asset_type": "options",
+            "options_path": True,
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+                "limit_price": 1.25,
+            },
+        },
+    )
+    fake_db = _FakeEmergencyDb(live_rows=[], paper_rows=[paper])
+
+    with (
+        patch(
+            "app.services.trading.market_data.fetch_quote",
+            side_effect=AssertionError("paper option liquidation must not fetch underlying spot"),
+        ),
+        patch(
+            "app.services.trading.governance.activate_kill_switch",
+            return_value=None,
+        ),
+        patch(
+            "app.services.trading.broker_quotes.broker_quote_for_trade",
+            return_value={
+                "price": 1.45,
+                "mark_price": 1.45,
+                "executable_price": None,
+                "source": "robinhood_options",
+            },
+        ),
+    ):
+        result = elq.emergency_close_all(
+            fake_db,
+            user_id=None,
+            reason="test_paper_option_liquidation",
+        )
+
+    assert result["ok"] is True
+    assert result["closed_paper"] == 1
+    assert paper.status == "closed"
+    assert paper.exit_price is None
+    assert paper.exit_reason.endswith(":no_quote")
+    assert paper.pnl is None
+    assert paper.pnl_pct is None
 
 
 def test_emergency_close_all_option_routes_sell_to_close_without_underlying_quote():
