@@ -316,7 +316,8 @@ async def run_code_agent(
     Phase F.10: every LLM call here goes through the Universal Gateway
     with a specific purpose tag so the brain can apply the right
     routing strategy per call site (plan = tree-decomposed, edit/create
-    = augmented). Falls back to direct openai_client.chat on any error.
+    = augmented). Gateway failures fail closed so paid calls keep their
+    budget, policy, and observability controls.
     """
     from ...openai_client import is_configured
 
@@ -327,7 +328,6 @@ async def run_code_agent(
     # gets a different purpose so the policy table can route them
     # individually.
     from ..context_brain.llm_gateway import gateway_chat as _gateway_chat
-    from ...openai_client import chat as _legacy_chat
 
     def llm_chat(messages, system_prompt=None, trace_id="llm",
                  user_message="", max_tokens=1024, strict_escalation=True,
@@ -345,15 +345,11 @@ async def run_code_agent(
                 db=db,
             )
         except Exception as _e:
-            logger.warning("[code_agent] gateway_chat failed (%s); falling back", _e)
-            return _legacy_chat(
-                messages=messages,
-                system_prompt=system_prompt,
-                trace_id=trace_id,
-                user_message=user_message,
-                max_tokens=max_tokens,
-                strict_escalation=strict_escalation,
+            logger.warning(
+                "[code_agent] gateway_chat failed (%s); direct_openai_bypass_disabled",
+                _e,
             )
+            return {"reply": "", "model": "gateway_error", "tokens_used": 0}
 
     # Track gateway calls so we can record outcomes against them at the end.
     _dispatch_log_ids: list[tuple[int, str, bool]] = []  # (gateway_log_id, purpose, success)
@@ -376,7 +372,7 @@ async def run_code_agent(
     plan_model = plan_result.get("model", "unknown")
 
     # ── DO NOT REMOVE — masking-bug guard (CHILI Dispatch Phase D.0) ──
-    # openai_client.chat() returns {"reply": "", "model": "error"} when every
+    # The legacy LLM cascade returns {"reply": "", "model": "error"} when every
     # cascade tier failed. Without this check, the empty sentinel was being
     # persisted as a fake success-shaped row in coding_agent_suggestion
     # (model='error', diffs=[]), masking real failures from the dispatch

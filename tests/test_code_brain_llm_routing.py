@@ -1,7 +1,9 @@
 from unittest.mock import MagicMock
+import inspect
 
 from app.services.code_brain import reviewer
 from app.services.code_brain import search as code_search
+from app.services.code_brain import agent as code_agent
 
 
 def test_code_reviewer_routes_llm_through_code_review_purpose(monkeypatch):
@@ -64,3 +66,11 @@ def test_code_search_routes_llm_through_cacheable_code_search_purpose(monkeypatc
     assert result["results"][0]["symbol"] == "search_code"
     assert llm.call_args.kwargs["purpose"] == "code_search"
     assert llm.call_args.kwargs["cacheable"] is True
+
+
+def test_code_agent_source_has_no_direct_openai_fallback():
+    source = inspect.getsource(code_agent.run_code_agent)
+
+    assert "openai_client.chat(" not in source
+    assert "_legacy_chat" not in source
+    assert "direct_openai_bypass_disabled" in source
