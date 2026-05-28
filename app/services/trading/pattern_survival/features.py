@@ -145,8 +145,11 @@ def _collect_realized_30d(db: Session, pattern_id: int) -> dict[str, Optional[fl
                        END AS pnl_pct
                 FROM trading_trades
                 WHERE scan_pattern_id = :p
+                  AND status = 'closed'
                   AND exit_date >= NOW() - INTERVAL '30 days'
                   AND pnl IS NOT NULL
+                  AND entry_price > 0
+                  AND quantity > 0
             )
             SELECT
                 COUNT(*)::int AS trades,
