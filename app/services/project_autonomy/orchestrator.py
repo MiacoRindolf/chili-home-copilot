@@ -913,11 +913,18 @@ def _ensure_git_repo(path: Path) -> None:
         raise AutonomyBlocked("Selected repo is not a git worktree.")
 
 
+def integration_branch_name(run_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(run_id or "").strip()).strip(".-")
+    if not safe:
+        safe = uuid.uuid4().hex[:14]
+    return f"project-auto-{safe}"
+
+
 def _create_run_worktree(repo_path: Path, run: ProjectAutonomyRun, base_sha: str) -> tuple[str, Path]:
     base = Path(os.environ.get("CHILI_PROJECT_AUTOPILOT_WORKTREE_DIR") or tempfile.gettempdir()) / "chili-project-autopilot"
     base.mkdir(parents=True, exist_ok=True)
     worktree = base / run.run_id
-    branch = f"project-auto/{run.run_id}"
+    branch = integration_branch_name(run.run_id)
 
     if worktree.exists():
         _git(repo_path, ["worktree", "remove", "--force", str(worktree)], timeout=120)

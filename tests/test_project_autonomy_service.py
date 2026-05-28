@@ -109,3 +109,8 @@ def test_agent_lane_assignment_keeps_architect_lead():
     names = [lane["name"] for lane in lanes]
     assert names[0] == "architect"
     assert {"backend", "frontend", "qa"}.issubset(set(names))
+
+
+def test_integration_branch_name_avoids_nested_ref_conflicts():
+    assert orchestrator.integration_branch_name("pa_abc123") == "project-auto-pa_abc123"
+    assert "/" not in orchestrator.integration_branch_name("pa/nested")
