@@ -73,6 +73,8 @@ MANAGED_EDGE_ACTIVE_MODES = frozenset(
 MANAGED_EDGE_GEOMETRY_SOURCE = "managed_directional_exit"
 REALIZED_DYNAMIC_GEOMETRY_SOURCE = "realized_dynamic_exit_blend"
 STATIC_TARGET_STOP_GEOMETRY_SOURCE = "static_target_stop"
+AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ENABLED = True
+AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ASSET_TYPES = "stock,crypto"
 
 
 @dataclass
@@ -1766,6 +1768,22 @@ def _favorable_entry_drift_enabled_for(settings: Any, asset_type: str) -> bool:
     return "all" in allowed_assets or asset in allowed_assets
 
 
+def _positive_reprice_entry_enabled_for(settings: Any, asset_type: str) -> bool:
+    if not _settings_bool(
+        settings,
+        "chili_autotrader_positive_reprice_entry_enabled",
+        AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ENABLED,
+    ):
+        return False
+    allowed_assets = _settings_csv_set(
+        settings,
+        "chili_autotrader_positive_reprice_entry_asset_types",
+        AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ASSET_TYPES,
+    )
+    asset = str(asset_type or "stock").strip().lower()
+    return "all" in allowed_assets or asset in allowed_assets
+
+
 def evaluate_entry_edge(
     db: Session,
     alert: BreakoutAlert,
@@ -2325,9 +2343,26 @@ def passes_rule_gate(
                         adjusted_edge.snapshot.get("expected_net_pct")
                     )
                     snap["slippage_reprice_positive_edge"] = bool(adjusted_edge.allowed)
+                    reprice_enabled = _positive_reprice_entry_enabled_for(
+                        settings,
+                        alert.asset_type or "stock",
+                    )
+                    snap["slippage_reprice_positive_edge_enabled"] = reprice_enabled
+                    snap["slippage_reprice_max_pct"] = round(favorable_limit, 4)
+                    if adjusted_edge.allowed and reprice_enabled and slip <= favorable_limit:
+                        snap["entry_edge"] = adjusted_edge.snapshot
+                        snap["entry_edge_reason"] = adjusted_edge.reason
+                        snap["entry_edge_expected_net_pct"] = adjusted_edge.snapshot.get(
+                            "expected_net_pct"
+                        )
+                        snap["entry_reference_price_adjusted"] = True
+                        snap["slippage_reprice_accepted"] = True
+                        ref = px
+                    else:
+                        return False, "missed_entry_slippage", snap
                 except Exception as exc:
                     snap["slippage_reprice_error"] = type(exc).__name__
-                return False, "missed_entry_slippage", snap
+                    return False, "missed_entry_slippage", snap
     else:
         snap["entry_slippage_pct"] = None
         snap["slippage_skipped_reason"] = "options_path"

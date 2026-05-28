@@ -106,7 +106,16 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
         active=True,
         lifecycle_stage="promoted",
     )
-    db.add_all([recert_pat, negative_pat])
+    slippage_pat = ScanPattern(
+        name="diag_slippage",
+        rules_json={},
+        origin="brain",
+        asset_class="stock",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add_all([recert_pat, negative_pat, slippage_pat])
     db.flush()
 
     recert_alert = BreakoutAlert(
@@ -141,7 +150,22 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
         alerted_at=datetime.utcnow(),
         indicator_snapshot={},
     )
-    db.add_all([recert_alert, negative_alert])
+    slippage_alert = BreakoutAlert(
+        user_id=user.id,
+        scan_pattern_id=slippage_pat.id,
+        ticker="SLIP",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        outcome="pending",
+        score_at_alert=77.0,
+        price_at_alert=30.0,
+        entry_price=30.0,
+        stop_loss=27.0,
+        target_price=36.0,
+        alerted_at=datetime.utcnow(),
+        indicator_snapshot={},
+    )
+    db.add_all([recert_alert, negative_alert, slippage_alert])
     db.flush()
     db.add_all([
         AutoTraderRun(
@@ -177,6 +201,34 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
                 },
             },
         ),
+        AutoTraderRun(
+            user_id=user.id,
+            breakout_alert_id=slippage_alert.id,
+            scan_pattern_id=slippage_pat.id,
+            ticker="SLIP",
+            decision="skipped",
+            reason="missed_entry_slippage",
+            rule_snapshot={
+                "entry_edge": {
+                    "expected_net_pct": 1.1,
+                    "probability": 0.58,
+                    "breakeven_probability": 0.47,
+                    "probability_source": "directional_mfe_mae_pattern",
+                },
+                "entry_slippage_pct": 3.75,
+                "entry_slippage_signed_pct": 3.75,
+                "entry_slippage_direction": "adverse",
+                "slippage_tolerance_pct": 1.0,
+                "slippage_source": "configured",
+                "slippage_reprice_original_entry_price": 30.0,
+                "slippage_reprice_current_price": 31.125,
+                "slippage_reprice_expected_net_pct": -0.35,
+                "slippage_reprice_positive_edge": False,
+                "slippage_reprice_positive_edge_enabled": True,
+                "slippage_reprice_max_pct": 2.5,
+                "slippage_reprice_edge_reason": "non_positive_expected_edge",
+            },
+        ),
     ])
     db.commit()
 
@@ -190,8 +242,21 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
     assert by_ticker["RECRT"]["recert_required"] is True
     assert by_ticker["RECRT"]["autotrader_blocker_category"] == "positive_edge_recert_debt"
     assert by_ticker["NEGEV"]["autotrader_blocker_category"] == "negative_expected_edge"
+    assert by_ticker["SLIP"]["autotrader_blocker_category"] == "missed_entry_slippage"
+    assert by_ticker["SLIP"]["entry_slippage_pct"] == pytest.approx(3.75)
+    assert by_ticker["SLIP"]["slippage_reprice_current_price"] == pytest.approx(31.125)
+    assert by_ticker["SLIP"]["slippage_reprice_expected_net_pct"] == pytest.approx(-0.35)
+    assert by_ticker["SLIP"]["slippage_reprice_positive_edge"] is False
+    assert by_ticker["SLIP"]["slippage_reprice_positive_edge_enabled"] is True
+    assert by_ticker["SLIP"]["slippage_reprice_max_pct"] == pytest.approx(2.5)
+    assert by_ticker["SLIP"]["slippage_reprice_accepted"] is None
+    assert (
+        by_ticker["SLIP"]["slippage_reprice_next_action"]
+        == "wait_for_fresh_entry_or_tighter_price"
+    )
     assert body["summary"]["positive_edge_recert_debt"] >= 1
     assert body["summary"]["negative_expected_edge"] >= 1
+    assert body["summary"]["missed_entry_slippage"] >= 1
 
 
 def test_edge_supply_endpoint_exposes_profitability_diagnostics(db, paired_client):

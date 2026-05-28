@@ -206,8 +206,31 @@ def _snapshot_text(run: AutoTraderRun | None, key: str) -> str | None:
     return text or None
 
 
+def _snapshot_float(run: AutoTraderRun | None, key: str) -> float | None:
+    return _safe_float(_autotrader_snapshot(run).get(key))
+
+
+def _snapshot_bool(run: AutoTraderRun | None, key: str) -> bool | None:
+    value = _autotrader_snapshot(run).get(key)
+    return value if isinstance(value, bool) else None
+
+
 def _edge_float(edge: dict[str, Any], key: str) -> float | None:
     return _safe_float(edge.get(key))
+
+
+def _slippage_reprice_next_action(run: AutoTraderRun | None) -> str | None:
+    reason = str(getattr(run, "reason", "") or "").strip().lower() if run else ""
+    if reason != "missed_entry_slippage":
+        return None
+    positive = _snapshot_bool(run, "slippage_reprice_positive_edge")
+    if positive is True:
+        return "retry_if_current_quote_still_positive_after_costs"
+    if positive is False:
+        return "wait_for_fresh_entry_or_tighter_price"
+    if _snapshot_text(run, "slippage_reprice_error"):
+        return "inspect_reprice_diagnostic_error"
+    return "wait_for_fresh_entry_or_reprice"
 
 
 def _imminent_blocker_category(
@@ -739,6 +762,53 @@ def api_monitor_imminent_alerts(
                     _edge_float(edge, "breakeven_probability")
                 ),
                 "entry_edge_probability_source": edge.get("probability_source"),
+                "entry_slippage_pct": json_safe(
+                    _snapshot_float(run, "entry_slippage_pct")
+                ),
+                "entry_slippage_signed_pct": json_safe(
+                    _snapshot_float(run, "entry_slippage_signed_pct")
+                ),
+                "entry_slippage_direction": _snapshot_text(
+                    run,
+                    "entry_slippage_direction",
+                ),
+                "slippage_tolerance_pct": json_safe(
+                    _snapshot_float(run, "slippage_tolerance_pct")
+                ),
+                "slippage_source": _snapshot_text(run, "slippage_source"),
+                "slippage_reprice_original_entry_price": json_safe(
+                    _snapshot_float(run, "slippage_reprice_original_entry_price")
+                ),
+                "slippage_reprice_current_price": json_safe(
+                    _snapshot_float(run, "slippage_reprice_current_price")
+                ),
+                "slippage_reprice_expected_net_pct": json_safe(
+                    _snapshot_float(run, "slippage_reprice_expected_net_pct")
+                ),
+                "slippage_reprice_positive_edge": _snapshot_bool(
+                    run,
+                    "slippage_reprice_positive_edge",
+                ),
+                "slippage_reprice_positive_edge_enabled": _snapshot_bool(
+                    run,
+                    "slippage_reprice_positive_edge_enabled",
+                ),
+                "slippage_reprice_max_pct": json_safe(
+                    _snapshot_float(run, "slippage_reprice_max_pct")
+                ),
+                "slippage_reprice_accepted": _snapshot_bool(
+                    run,
+                    "slippage_reprice_accepted",
+                ),
+                "slippage_reprice_edge_reason": _snapshot_text(
+                    run,
+                    "slippage_reprice_edge_reason",
+                ),
+                "slippage_reprice_error": _snapshot_text(
+                    run,
+                    "slippage_reprice_error",
+                ),
+                "slippage_reprice_next_action": _slippage_reprice_next_action(run),
                 "paper_observation_signal_lane": signal_lane,
                 "autotrader_blocker_category": blocker_category,
                 "autotrader_next_action": _imminent_next_action(blocker_category),
