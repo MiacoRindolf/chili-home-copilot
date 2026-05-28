@@ -114,7 +114,7 @@ def resolve_response(
                     {"name": project_name, "description": "", "tasks": []},
                     "", is_guest, user_id=user_id,
                 )
-                if executed and openai_client.is_configured() and planner_hooks:
+                if executed and planner_hooks:
                     projects = planner_service.list_projects(db, user_id)
                     proj = next((p for p in projects if p["name"] == project_name), None)
                     if proj:
@@ -238,7 +238,6 @@ def resolve_response(
         and action_type == "add_plan_project_with_tasks"
         and executed
         and fallback_project_name
-        and openai_client.is_configured()
     ):
         projects = planner_service.list_projects(db, user_id)
         proj = next((p for p in projects if p["name"] == fallback_project_name), None)

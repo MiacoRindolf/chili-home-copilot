@@ -52,6 +52,7 @@ _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
     "desktop_refine_speech",
     "memory_extract",
     "personality_apply",
+    "planner_intent",
     "project_ai_engineer",
     "project_architect",
     "project_backend_engineer",

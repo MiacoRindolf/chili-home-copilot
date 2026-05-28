@@ -18,6 +18,158 @@ _CREATE_PROJECT_AND_TASKS = re.compile(
 _ADD_TASKS_PATTERN = re.compile(
     r"(?i)\b(?:add\s+(?:in\s+)?the\s+)?tasks?\b|tasks?\s+(?:you\s+think\s+)?(?:i\s+)?need\s+to\s+do|add\s+in\s+the\s+tasks|suggest\s+tasks|tasks?\s+in\s+which|what\s+tasks?\s+(?:i\s+)?(?:need\s+to\s+)?do"
 )
+_PROJECT_TEMPLATE_PATTERNS: tuple[tuple[re.Pattern[str], tuple[tuple[str, str, float], ...]], ...] = (
+    (
+        re.compile(r"(?i)\b(job|career|resume|cv|interview|apply|hiring)\b"),
+        (
+            (
+                "Clarify target roles and success criteria",
+                "Complexity: Low. Duration: 1-2 hours. Reasoning: Clear role filters prevent wasted applications and make later tailoring faster.",
+                0.25,
+            ),
+            (
+                "Refresh resume and core profile",
+                "Complexity: Medium. Duration: 2-4 hours. Reasoning: A current ATS-friendly resume and profile are the reusable base for high-quality outreach.",
+                0.5,
+            ),
+            (
+                "Build a prioritized company list",
+                "Complexity: Medium. Duration: 2-3 hours. Reasoning: Ranking targets by fit, timing, and referrals improves focus before applying.",
+                0.5,
+            ),
+            (
+                "Tailor the first application packet",
+                "Complexity: Medium. Duration: 1-2 hours. Reasoning: A tailored resume and short cover note become the model for subsequent applications.",
+                0.5,
+            ),
+            (
+                "Submit the first application batch",
+                "Complexity: Medium. Duration: 5-10 hours. Reasoning: Quality applications usually take focused research and customization.",
+                1.5,
+            ),
+            (
+                "Prepare interview stories and examples",
+                "Complexity: Medium. Duration: 3-5 hours. Reasoning: STAR-format examples reduce interview friction and improve answer quality.",
+                1.0,
+            ),
+            (
+                "Set up tracking and follow-up cadence",
+                "Complexity: Low. Duration: 1 hour. Reasoning: A tracker keeps next actions visible and prevents missed follow-ups.",
+                0.25,
+            ),
+        ),
+    ),
+    (
+        re.compile(r"(?i)\b(app|application|software|website|web\s*site|mobile|api|dashboard|saas|feature|prototype|mvp)\b"),
+        (
+            (
+                "Define users, outcome, and scope",
+                "Complexity: Medium. Duration: 2-4 hours. Reasoning: A narrow outcome and explicit non-goals keep the build from sprawling.",
+                0.5,
+            ),
+            (
+                "Map core user flows",
+                "Complexity: Medium. Duration: 2-3 hours. Reasoning: Flow mapping exposes missing states before engineering starts.",
+                0.5,
+            ),
+            (
+                "Design the data model and interfaces",
+                "Complexity: Medium. Duration: 3-5 hours. Reasoning: Stable data contracts reduce rework across frontend, backend, and tests.",
+                1.0,
+            ),
+            (
+                "Build the smallest usable version",
+                "Complexity: High. Duration: 2-5 days. Reasoning: A thin end-to-end slice proves the architecture and creates something testable.",
+                3.0,
+            ),
+            (
+                "Add validation, empty states, and errors",
+                "Complexity: Medium. Duration: 1-2 days. Reasoning: Production usability depends on predictable behavior outside the happy path.",
+                1.5,
+            ),
+            (
+                "Write focused tests for the main workflow",
+                "Complexity: Medium. Duration: 1 day. Reasoning: Workflow tests catch regressions where users actually spend time.",
+                1.0,
+            ),
+            (
+                "Ship a review build and collect feedback",
+                "Complexity: Low. Duration: 0.5-1 day. Reasoning: A review build turns assumptions into concrete fixes.",
+                1.0,
+            ),
+        ),
+    ),
+    (
+        re.compile(r"(?i)\b(trip|travel|vacation|holiday|itinerary|flight|hotel)\b"),
+        (
+            (
+                "Set budget, dates, and constraints",
+                "Complexity: Low. Duration: 1 hour. Reasoning: Budget and date boundaries make every later booking decision easier.",
+                0.25,
+            ),
+            (
+                "Research destinations and neighborhoods",
+                "Complexity: Medium. Duration: 2-4 hours. Reasoning: Location choice drives cost, transit time, and daily experience.",
+                0.5,
+            ),
+            (
+                "Book transport and lodging",
+                "Complexity: Medium. Duration: 2-3 hours. Reasoning: Booking the anchors early reduces price drift and schedule risk.",
+                0.5,
+            ),
+            (
+                "Draft day-by-day itinerary",
+                "Complexity: Medium. Duration: 2-4 hours. Reasoning: A light itinerary balances must-do activities with recovery time.",
+                0.5,
+            ),
+            (
+                "Handle documents, insurance, and reservations",
+                "Complexity: Medium. Duration: 1-2 hours. Reasoning: Confirming paperwork and reservations prevents avoidable travel issues.",
+                0.5,
+            ),
+            (
+                "Prepare packing and departure checklist",
+                "Complexity: Low. Duration: 1 hour. Reasoning: A checklist reduces last-minute misses.",
+                0.25,
+            ),
+        ),
+    ),
+    (
+        re.compile(r"(?i)\b(move|moving|relocat|apartment|house|home|renovat|remodel)\b"),
+        (
+            (
+                "Define scope, budget, and deadline",
+                "Complexity: Low. Duration: 1-2 hours. Reasoning: Scope and budget control tradeoffs before vendors or purchases enter the picture.",
+                0.25,
+            ),
+            (
+                "Inventory spaces, items, and constraints",
+                "Complexity: Medium. Duration: 2-4 hours. Reasoning: A clear inventory prevents underestimating labor, supplies, and dependencies.",
+                0.5,
+            ),
+            (
+                "Get quotes or reserve required help",
+                "Complexity: Medium. Duration: 2-3 hours. Reasoning: Movers, contractors, and helpers often become the schedule bottleneck.",
+                0.5,
+            ),
+            (
+                "Order supplies and prepare staging areas",
+                "Complexity: Low. Duration: 1-2 hours. Reasoning: Supplies and staging reduce friction once execution starts.",
+                0.25,
+            ),
+            (
+                "Execute the main work block",
+                "Complexity: High. Duration: 1-3 days. Reasoning: The core move or renovation work needs protected time and coordination.",
+                2.0,
+            ),
+            (
+                "Inspect, clean up, and close loose ends",
+                "Complexity: Medium. Duration: 0.5-1 day. Reasoning: A closeout pass catches damage, missing items, and unfinished details.",
+                1.0,
+            ),
+        ),
+    ),
+)
 
 
 def detect_create_project_with_tasks_intent(message: str) -> tuple[bool, str | None]:
@@ -34,6 +186,26 @@ def detect_create_project_with_tasks_intent(message: str) -> tuple[bool, str | N
     return True, name.title()
 
 
+def _mechanical_task_suggestions(project_name: str) -> list[dict]:
+    """Return deterministic task suggestions for common project archetypes."""
+    name = (project_name or "").strip()
+    if not name:
+        return []
+
+    for pattern, template in _PROJECT_TEMPLATE_PATTERNS:
+        if not pattern.search(name):
+            continue
+        return [
+            {
+                "title": title,
+                "description": f"{desc} Project: {name}.",
+                "estimated_days": days,
+            }
+            for title, desc, days in template
+        ]
+    return []
+
+
 def generate_tasks_for_project(
     db: Session,
     project_id: int,
@@ -41,61 +213,65 @@ def generate_tasks_for_project(
     user_id: int,
     trace_id: str,
 ) -> int:
-    """Use the cloud LLM to suggest tasks with well-researched ETAs and create them with start/end dates for Gantt."""
-    if not openai_client.is_configured():
-        return 0
+    """Create suggested tasks with LLM fallback only when mechanics lack coverage."""
+    items = _mechanical_task_suggestions(project_name)
+    if items:
+        log_info(trace_id, f"planner_mechanical_tasks project_id={project_id} count={len(items)}")
+    else:
+        if not openai_client.is_configured():
+            return 0
 
-    today = date.today().isoformat()
-    prompt = (
-        f'For a project called "{project_name}", suggest 6 to 12 concrete, actionable tasks. '
-        "Use well-researched, realistic time estimates (industry benchmarks, common studies: "
-        "e.g. resume update 2-4 hours, job application 1-2 hours each, interview prep 3-5 hours). "
-        'Return ONLY a JSON array. Each object must have: "title" (string), '
-        '"description" (string, include Complexity, Duration, Reasoning), and '
-        '"estimated_days" (number, working days to complete). '
-        "estimated_days: use decimals for part-days (e.g. 0.25 = ~2 hours, 0.5 = half day, 1 = one full day). "
-        "Minimum 0.25. Be accurate based on typical task duration research. "
-        f"Today is {today}. Tasks will be scheduled sequentially starting from today. "
-        'Example: [{"title": "Update resume", "description": "Complexity: Low. Duration: 2-3 hours. '
-        'Reasoning: ATS-friendly resume increases callback rate.", "estimated_days": 0.25}, '
-        '{"title": "Apply to 5 target companies", "description": "Complexity: Medium. Duration: 5-10 hours total. '
-        'Reasoning: Quality applications take 1-2 hrs each (research, tailoring).", "estimated_days": 1.5}]'
-    )
-    try:
-        _system = (
-            "You are a project planning assistant. Return only a valid JSON array. "
-            "Every task must have title, description, and estimated_days (number)."
+        today = date.today().isoformat()
+        prompt = (
+            f'For a project called "{project_name}", suggest 6 to 12 concrete, actionable tasks. '
+            "Use well-researched, realistic time estimates (industry benchmarks, common studies: "
+            "e.g. resume update 2-4 hours, job application 1-2 hours each, interview prep 3-5 hours). "
+            'Return ONLY a JSON array. Each object must have: "title" (string), '
+            '"description" (string, include Complexity, Duration, Reasoning), and '
+            '"estimated_days" (number, working days to complete). '
+            "estimated_days: use decimals for part-days (e.g. 0.25 = ~2 hours, 0.5 = half day, 1 = one full day). "
+            "Minimum 0.25. Be accurate based on typical task duration research. "
+            f"Today is {today}. Tasks will be scheduled sequentially starting from today. "
+            'Example: [{"title": "Update resume", "description": "Complexity: Low. Duration: 2-3 hours. '
+            'Reasoning: ATS-friendly resume increases callback rate.", "estimated_days": 0.25}, '
+            '{"title": "Apply to 5 target companies", "description": "Complexity: Medium. Duration: 5-10 hours total. '
+            'Reasoning: Quality applications take 1-2 hrs each (research, tailoring).", "estimated_days": 1.5}]'
         )
         try:
-            from ...services.context_brain.llm_gateway import gateway_chat
-            result = gateway_chat(
-                messages=[{"role": "user", "content": prompt}],
-                purpose='planner_intent',
-                system_prompt=_system,
-                trace_id=trace_id,
+            _system = (
+                "You are a project planning assistant. Return only a valid JSON array. "
+                "Every task must have title, description, and estimated_days (number)."
             )
-        except Exception:
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt=_system,
-                trace_id=trace_id,
-            )
-        text = (result.get("reply") or "").strip()
-    except Exception as e:  # pragma: no cover - defensive logging
-        log_info(trace_id, f"generate_tasks_for_project_error={e}")
-        return 0
+            try:
+                from ...services.context_brain.llm_gateway import gateway_chat
+                result = gateway_chat(
+                    messages=[{"role": "user", "content": prompt}],
+                    purpose='planner_intent',
+                    system_prompt=_system,
+                    trace_id=trace_id,
+                )
+            except Exception:
+                result = openai_client.chat(
+                    messages=[{"role": "user", "content": prompt}],
+                    system_prompt=_system,
+                    trace_id=trace_id,
+                )
+            text = (result.get("reply") or "").strip()
+        except Exception as e:  # pragma: no cover - defensive logging
+            log_info(trace_id, f"generate_tasks_for_project_error={e}")
+            return 0
 
-    start_idx = text.find("[")
-    end_idx = text.rfind("]")
-    if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
-        return 0
+        start_idx = text.find("[")
+        end_idx = text.rfind("]")
+        if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+            return 0
 
-    try:
-        items = json_mod.loads(text[start_idx : end_idx + 1])
-    except json_mod.JSONDecodeError:
-        return 0
-    if not isinstance(items, list):
-        return 0
+        try:
+            items = json_mod.loads(text[start_idx : end_idx + 1])
+        except json_mod.JSONDecodeError:
+            return 0
+        if not isinstance(items, list):
+            return 0
 
     cursor = date.today()
     added = 0
