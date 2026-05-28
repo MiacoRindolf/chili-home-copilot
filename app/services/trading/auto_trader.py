@@ -90,6 +90,7 @@ SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
 QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_coinbase_cap",
     "blocked_llm_not_viable",
+    "blocked_llm_unavailable",
     "blocked_max_concurrent_crypto",
     "blocked_max_concurrent_equity",
     "blocked_max_concurrent_global",
@@ -230,6 +231,18 @@ def _should_run_llm_revalidation(alert: BreakoutAlert) -> tuple[bool, str | None
     ):
         return False, LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH
     return True, None
+
+
+def _llm_revalidation_block_reason(llm_snapshot: dict[str, Any] | None) -> str:
+    """Classify LLM gate failures without weakening the fail-closed gate."""
+    snap = llm_snapshot if isinstance(llm_snapshot, dict) else {}
+    error = str(snap.get("error") or "").strip().lower()
+    raw_preview = str(snap.get("raw_preview") or "").strip()
+    if error in {"llm_unavailable", "provider_unavailable", "not_configured"}:
+        return "llm_unavailable"
+    if error == "parse_failed" and not raw_preview:
+        return "llm_unavailable"
+    return "llm_not_viable"
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -1446,6 +1459,7 @@ def _qualified_reject_shadow_decision(reason: str | None) -> str | None:
         return f"skipped_{r}"
     if r in {
         "llm_not_viable",
+        "llm_unavailable",
     }:
         return f"blocked_{r}"
     if r in {
@@ -3427,12 +3441,16 @@ def _process_one_alert(
             trace_id=f"autotrader-{alert.id}",
         )
         if not viable:
+            llm_block_reason = _llm_revalidation_block_reason(llm_snap)
+            snap["llm_revalidation_block_reason"] = llm_block_reason
+            if llm_block_reason == "llm_unavailable":
+                snap["llm_unavailable"] = True
             _audit(
                 db,
                 user_id=uid,
                 alert=alert,
                 decision="blocked",
-                reason="llm_not_viable",
+                reason=llm_block_reason,
                 rule_snapshot=snap,
                 llm_snapshot=llm_snap,
             )
@@ -3443,10 +3461,10 @@ def _process_one_alert(
                     alert=alert,
                     px=px,
                     snap={**(snap or {}), "llm_snapshot": llm_snap},
-                    reason="llm_not_viable",
+                    reason=llm_block_reason,
                 )
             out["skipped"] += 1
-            _autotrader_tick_note(out, kind="blocked", reason="llm_not_viable", alert=alert)
+            _autotrader_tick_note(out, kind="blocked", reason=llm_block_reason, alert=alert)
             return
 
     # P1.4 — runtime feature-parity assertion at entry. Fetches a fresh

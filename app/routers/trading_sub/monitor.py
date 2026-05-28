@@ -263,6 +263,10 @@ def _imminent_blocker_category(
         return "negative_expected_edge"
     if reason == "missed_entry_slippage":
         return "missed_entry_slippage"
+    if reason == "llm_unavailable":
+        return "llm_provider_unavailable"
+    if reason == "llm_not_viable":
+        return "llm_revalidation_block"
     if (
         signal_lane == "hard_recert_shadow"
         or reason == "pattern_recert_required"
@@ -293,6 +297,8 @@ def _imminent_next_action(category: str) -> str:
         "recert_required": "complete_recert_before_live",
         "missed_entry_slippage": "wait_for_fresh_entry_or_reprice",
         "broker_execution_reject": "fix_execution_lane",
+        "llm_provider_unavailable": "restore_llm_provider_or_disable_revalidation",
+        "llm_revalidation_block": "review_llm_revalidation_reason",
         "autotrader_execution_error": "inspect_autotrader_exception",
         "live_eligible_candidate": "await_autotrader_processing",
         "placed": "already_placed",
@@ -309,6 +315,8 @@ def _empty_imminent_summary() -> dict[str, int]:
         "positive_edge_recert_debt": 0,
         "missed_entry_slippage": 0,
         "broker_execution_rejects": 0,
+        "llm_provider_unavailable": 0,
+        "llm_revalidation_blocks": 0,
         "autotrader_execution_errors": 0,
         "live_eligible_candidates": 0,
         "other": 0,
@@ -327,6 +335,14 @@ def _bump_imminent_summary(summary: dict[str, int], category: str) -> None:
     elif category == "broker_execution_reject":
         summary["broker_execution_rejects"] = (
             int(summary.get("broker_execution_rejects", 0)) + 1
+        )
+    elif category == "llm_provider_unavailable":
+        summary["llm_provider_unavailable"] = (
+            int(summary.get("llm_provider_unavailable", 0)) + 1
+        )
+    elif category == "llm_revalidation_block":
+        summary["llm_revalidation_blocks"] = (
+            int(summary.get("llm_revalidation_blocks", 0)) + 1
         )
     elif category == "autotrader_execution_error":
         summary["autotrader_execution_errors"] = (

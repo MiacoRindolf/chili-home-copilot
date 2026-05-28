@@ -509,6 +509,22 @@ def test_qualified_block_shadow_decisions_cover_learning_dead_ends():
         == "blocked_llm_not_viable"
     )
     assert (
+        at_mod._qualified_reject_shadow_decision("llm_unavailable")
+        == "blocked_llm_unavailable"
+    )
+    assert (
+        at_mod._llm_revalidation_block_reason({"error": "llm_unavailable"})
+        == "llm_unavailable"
+    )
+    assert (
+        at_mod._llm_revalidation_block_reason({"error": "parse_failed", "raw_preview": ""})
+        == "llm_unavailable"
+    )
+    assert (
+        at_mod._llm_revalidation_block_reason({"error": "parse_failed", "raw_preview": "oops"})
+        == "llm_not_viable"
+    )
+    assert (
         at_mod._qualified_reject_shadow_decision("synergy_disabled_second_signal")
         == "skipped_synergy_disabled_second_signal"
     )

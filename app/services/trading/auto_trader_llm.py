@@ -68,16 +68,32 @@ def run_revalidation_llm(
         "ohlcv_summary": ohlcv_summary or "",
     }
     messages = [{"role": "user", "content": json.dumps(user_payload, default=str)}]
-    raw = call_llm(
+    result = call_llm(
         messages,
         max_tokens=256,
         trace_id=trace_id,
         cacheable=False,
         system_prompt=system,
+        return_meta=True,
     )
+    if isinstance(result, dict):
+        raw = result.get("reply", "")
+        gateway_log_id = result.get("gateway_log_id")
+    else:
+        raw = result
+        gateway_log_id = None
+    raw = raw if isinstance(raw, str) else str(raw or "")
+    if not raw.strip():
+        snap: dict[str, Any] = {"error": "llm_unavailable", "raw_preview": ""}
+        if gateway_log_id is not None:
+            snap["gateway_log_id"] = gateway_log_id
+        return False, snap
     parsed = parse_revalidation_response(raw)
     if parsed is None:
-        return False, {"error": "parse_failed", "raw_preview": (raw or "")[:500]}
+        snap = {"error": "parse_failed", "raw_preview": (raw or "")[:500]}
+        if gateway_log_id is not None:
+            snap["gateway_log_id"] = gateway_log_id
+        return False, snap
 
     viable = bool(parsed.get("viable"))
     try:
@@ -86,4 +102,6 @@ def run_revalidation_llm(
         conf = 0.0
     reason = str(parsed.get("reason", ""))[:500]
     snap = {"viable": viable, "confidence": conf, "reason": reason, "raw": parsed}
+    if gateway_log_id is not None:
+        snap["gateway_log_id"] = gateway_log_id
     return viable, snap

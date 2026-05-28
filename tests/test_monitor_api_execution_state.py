@@ -80,6 +80,14 @@ def test_imminent_blocker_category_derivation():
         _imminent_blocker_category(run("broker:quantity_precision", 0.8), promoted, None)
         == "broker_execution_reject"
     )
+    assert (
+        _imminent_blocker_category(run("llm_unavailable", 0.8), promoted, None)
+        == "llm_provider_unavailable"
+    )
+    assert (
+        _imminent_blocker_category(run("llm_not_viable", 0.8), promoted, None)
+        == "llm_revalidation_block"
+    )
     assert _imminent_blocker_category(None, promoted, None) == "live_eligible_candidate"
 
 
