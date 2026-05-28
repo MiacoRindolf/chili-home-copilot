@@ -10,6 +10,17 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
+def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
+    ids = sorted({int(pid) for pid in pattern_ids if int(pid) > 0})
+    if not ids:
+        return {}
+
+    from ...models.trading import ScanPattern
+
+    rows = db.query(ScanPattern).filter(ScanPattern.id.in_(ids)).all()
+    return {int(row.id): row for row in rows if row.id is not None}
+
+
 def live_vs_research_by_pattern(
     db: Session,
     user_id: int | None,
@@ -19,7 +30,7 @@ def live_vs_research_by_pattern(
     include_phase5b_compare: bool = False,
 ) -> dict[str, Any]:
     """Aggregate closed trades with ``scan_pattern_id`` vs ``ScanPattern`` research fields."""
-    from ...models.trading import ScanPattern, Trade
+    from ...models.trading import Trade
 
     from .backtest_metrics import backtest_win_rate_db_to_display_pct
 
@@ -51,10 +62,11 @@ def live_vs_research_by_pattern(
         by_pid[int(t.scan_pattern_id or 0)].append(t)
 
     rows: list[dict[str, Any]] = []
+    patterns_by_id = _scan_patterns_by_id(db, set(by_pid))
     for pid, tlist in by_pid.items():
         if pid <= 0:
             continue
-        pat = db.query(ScanPattern).filter(ScanPattern.id == pid).first()
+        pat = patterns_by_id.get(pid)
         pnls = [float(t.pnl or 0) for t in tlist]
         wins = sum(1 for p in pnls if p > 0)
         n = len(tlist)
@@ -268,7 +280,7 @@ def post_trade_review(
     The returned dict is additive and does not mutate DB state.
     """
     from datetime import datetime, timedelta
-    from ...models.trading import ScanPattern, Trade
+    from ...models.trading import Trade
     from .backtest_metrics import backtest_win_rate_db_to_display_pct
 
     if user_id is None:
@@ -338,11 +350,12 @@ def post_trade_review(
     outperformers: list[dict[str, Any]] = []
     underperformers: list[dict[str, Any]] = []
     feedback_signals: list[dict[str, Any]] = []
+    patterns_by_id = _scan_patterns_by_id(db, set(by_pid))
 
     for pid, trades in by_pid.items():
         if pid <= 0:
             continue
-        pat = db.query(ScanPattern).filter(ScanPattern.id == pid).first()
+        pat = patterns_by_id.get(pid)
         trade_pnls = [float(t.pnl or 0) for t in trades]
         t_wins = sum(1 for p in trade_pnls if p > 0)
         t_n = len(trade_pnls)
