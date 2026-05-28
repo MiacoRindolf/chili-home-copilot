@@ -10,6 +10,17 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
+def _trading_insights_by_id(db: Session, insight_ids: set[int]) -> dict[int, Any]:
+    ids = sorted({int(insight_id) for insight_id in insight_ids if int(insight_id) > 0})
+    if not ids:
+        return {}
+
+    from ...models.trading import TradingInsight
+
+    rows = db.query(TradingInsight).filter(TradingInsight.id.in_(ids)).all()
+    return {int(row.id): row for row in rows if row.id is not None}
+
+
 def run_cross_asset_backtest_cleanup(db: Session) -> dict[str, Any]:
     """Backfill ``asset_class`` when still ``all``, delete mismatched ``BacktestResult`` rows,
     recompute affected ``TradingInsight`` win/loss counts, then refresh ``ticker_scope``.
@@ -57,6 +68,7 @@ def run_cross_asset_backtest_cleanup(db: Session) -> dict[str, Any]:
     ]
 
     affected_insights: set[int] = set()
+    affected_insight_rows: dict[int, TradingInsight] = {}
     deleted = 0
 
     def _purge_for_patterns(pattern_ids: list[int], require_crypto_ticker: bool) -> None:
@@ -73,6 +85,8 @@ def run_cross_asset_backtest_cleanup(db: Session) -> dict[str, Any]:
         if ins_ids:
             clauses.append(BacktestResult.related_insight_id.in_(ins_ids))
         rows = db.query(BacktestResult).filter(or_(*clauses)).all()
+        rows_to_delete: list[BacktestResult] = []
+        related_insight_ids: set[int] = set()
         for bt in rows:
             t = bt.ticker or ""
             if require_crypto_ticker:
@@ -84,10 +98,17 @@ def run_cross_asset_backtest_cleanup(db: Session) -> dict[str, Any]:
             if bt.scan_pattern_id:
                 patterns_for_scope.add(bt.scan_pattern_id)
             if bt.related_insight_id:
-                affected_insights.add(bt.related_insight_id)
-                ins_row = db.get(TradingInsight, bt.related_insight_id)
-                if ins_row and ins_row.scan_pattern_id:
-                    patterns_for_scope.add(ins_row.scan_pattern_id)
+                insight_id = int(bt.related_insight_id)
+                affected_insights.add(insight_id)
+                related_insight_ids.add(insight_id)
+            rows_to_delete.append(bt)
+
+        insight_rows = _trading_insights_by_id(db, related_insight_ids)
+        affected_insight_rows.update(insight_rows)
+        for ins_row in insight_rows.values():
+            if ins_row.scan_pattern_id:
+                patterns_for_scope.add(ins_row.scan_pattern_id)
+        for bt in rows_to_delete:
             db.delete(bt)
             deleted += 1
 
@@ -100,7 +121,7 @@ def run_cross_asset_backtest_cleanup(db: Session) -> dict[str, Any]:
     from .insight_backtest_panel_sync import sync_insight_backtest_tallies_from_evidence_panel
 
     for ins_id in affected_insights:
-        ins = db.get(TradingInsight, ins_id)
+        ins = affected_insight_rows.get(ins_id)
         if not ins:
             continue
         try:
