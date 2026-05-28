@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import PaperTrade, ScanPattern
+from .return_math import paper_trade_return_pct
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,20 @@ def evaluate_shadow_test(
 
     control_returns, control_hold_days = _extract_trade_returns(control_trades)
     variant_returns, variant_hold_days = _extract_trade_returns(variant_trades)
+    if len(control_returns) < MIN_TRADES_FOR_COMPARISON:
+        return {
+            "ok": False,
+            "reason": "insufficient_control_trades",
+            "n": len(control_returns),
+            "raw_n": len(control_trades),
+        }
+    if len(variant_returns) < MIN_TRADES_FOR_COMPARISON:
+        return {
+            "ok": False,
+            "reason": "insufficient_variant_trades",
+            "n": len(variant_returns),
+            "raw_n": len(variant_trades),
+        }
     control_daily = _dailyize_returns(control_returns, control_hold_days)
     variant_daily = _dailyize_returns(variant_returns, variant_hold_days)
 
@@ -149,7 +164,10 @@ def _extract_trade_returns(trades: list[PaperTrade]) -> tuple[list[float], list[
     returns: list[float] = []
     hold_days: list[float] = []
     for t in trades:
-        returns.append(float(t.pnl_pct or 0.0))
+        realized_return = paper_trade_return_pct(t)
+        if realized_return is None:
+            continue
+        returns.append(float(realized_return))
         entry = getattr(t, "entry_date", None)
         exit_ = getattr(t, "exit_date", None)
         if entry and exit_:
