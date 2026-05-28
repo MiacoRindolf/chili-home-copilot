@@ -172,13 +172,8 @@ def resolve_response(
                     db=db,
                 )
             except Exception as _e:
-                log_info(trace_id, f"gateway_chat failed, falling back: {_e}")
-                result = openai_client.chat(
-                    messages=openai_messages,
-                    system_prompt=openai_system,
-                    trace_id=trace_id,
-                    user_message=message,
-                )
+                log_info(trace_id, f"gateway_chat failed; direct_openai_bypass_disabled: {_e}")
+                result = {"reply": "", "model": "gateway_error", "tokens_used": 0}
             if result.get("reply"):
                 return {"reply": result["reply"], "action_type": "general_chat", "executed": True, "model_used": result["model"], "rag_sources": [], "personality_used": False, "client_action": None, "gateway_log_id": result.get("gateway_log_id")}
 
@@ -261,8 +256,9 @@ def resolve_response(
         try:
             from .context_brain.llm_gateway import gateway_chat
             result = gateway_chat(messages=openai_messages, purpose='chat_search', system_prompt=search_system, trace_id=trace_id, user_message=message, db=db, user_id=user_id)
-        except Exception:
-            result = openai_client.chat(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message)
+        except Exception as _e:
+            log_info(trace_id, f"chat_search_gateway_failed; direct_openai_bypass_disabled: {_e}")
+            result = {"reply": "", "model": "gateway_error", "tokens_used": 0}
         if result.get("reply"):
             llm_reply = result["reply"]
             model_used = result["model"]
@@ -314,8 +310,8 @@ def resolve_response(
                 db=db,
             )
         except Exception as _e:
-            log_info(trace_id, f"gateway_chat failed, falling back: {_e}")
-            result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
+            log_info(trace_id, f"gateway_chat failed; direct_openai_bypass_disabled: {_e}")
+            result = {"reply": "", "model": "gateway_error", "tokens_used": 0}
         if result.get("reply"):
             llm_reply = result["reply"]
             action_type = "general_chat"
