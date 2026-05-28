@@ -148,6 +148,20 @@ def _classify_severity(current: Optional[str], latest: Optional[str]) -> str:
     return "info"
 
 
+def _alerts_by_package(db: Session, repo_id: int, package_names: List[str]) -> Dict[str, CodeDepAlert]:
+    if not package_names:
+        return {}
+    rows = (
+        db.query(CodeDepAlert)
+        .filter(
+            CodeDepAlert.repo_id == repo_id,
+            CodeDepAlert.package_name.in_(sorted(set(package_names))),
+        )
+        .all()
+    )
+    return {str(row.package_name): row for row in rows}
+
+
 def scan_dependencies(db: Session, repo_id: int) -> Dict[str, Any]:
     """Scan deps for a repo, check latest versions, create/update alerts."""
     repo = db.query(CodeRepo).filter(CodeRepo.id == repo_id).first()
@@ -168,8 +182,11 @@ def scan_dependencies(db: Session, repo_id: int) -> Dict[str, Any]:
         CodeDepAlert.resolved.is_(False),
     ).update({"resolved": True})
 
+    deps_to_check = all_deps[:100]
+    existing_alerts = _alerts_by_package(db, repo_id, [dep["name"] for dep in deps_to_check])
+
     alert_count = 0
-    for dep in all_deps[:100]:
+    for dep in deps_to_check:
         name = dep["name"]
         eco = dep["ecosystem"]
         current = dep.get("current_version")
@@ -186,14 +203,7 @@ def scan_dependencies(db: Session, repo_id: int) -> Dict[str, Any]:
         if severity == "ok":
             continue
 
-        existing = (
-            db.query(CodeDepAlert)
-            .filter(
-                CodeDepAlert.repo_id == repo_id,
-                CodeDepAlert.package_name == name,
-            )
-            .first()
-        )
+        existing = existing_alerts.get(name)
         if existing:
             existing.current_version = current
             existing.latest_version = latest
@@ -201,7 +211,7 @@ def scan_dependencies(db: Session, repo_id: int) -> Dict[str, Any]:
             existing.resolved = False
             existing.detected_at = __import__("datetime").datetime.utcnow()
         else:
-            db.add(CodeDepAlert(
+            existing = CodeDepAlert(
                 repo_id=repo_id,
                 package_name=name,
                 current_version=current,
@@ -209,7 +219,9 @@ def scan_dependencies(db: Session, repo_id: int) -> Dict[str, Any]:
                 severity=severity,
                 alert_type="outdated",
                 ecosystem=eco,
-            ))
+            )
+            existing_alerts[name] = existing
+            db.add(existing)
         alert_count += 1
 
     db.commit()
