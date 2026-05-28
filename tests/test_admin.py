@@ -11,9 +11,53 @@ from app.metrics import (
     per_user_chore_stats, system_alerts, admin_dashboard_json,
     latency_stats, record_latency, get_counts, model_stats,
     total_stats, messages_per_day, hourly_activity, feature_usage,
-    response_time_trend, conversation_stats, top_users,
+    response_time_trend, conversation_stats, top_users, user_stats,
     _LATENCIES_MS,
 )
+
+
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def group_by(self, *_args, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _MetricsQuerySession:
+    def __init__(self, rows_by_query):
+        self.rows_by_query = rows_by_query
+        self.query_calls = 0
+
+    def query(self, *entities):
+        self.query_calls += 1
+        key = self._query_key(entities)
+        return _FakeQuery(self.rows_by_query.get(key, []))
+
+    @staticmethod
+    def _query_key(entities):
+        if len(entities) == 1 and entities[0] in (User, Device, HousemateProfile):
+            return entities[0].__name__
+        names = " ".join(str(entity) for entity in entities)
+        if "ChatMessage.convo_key" in names:
+            return "message_counts"
+        if "Conversation.convo_key" in names:
+            return "conversation_counts"
+        if "Chore.assigned_to" in names:
+            return "chore_counts"
+        return names
 
 
 class TestPerUserChoreStats:
@@ -59,6 +103,70 @@ class TestPerUserChoreStats:
         names = {r["name"]: r for r in result}
         assert names["Alice"]["rate"] == 100.0
         assert names["Bob"]["rate"] == 0
+
+    def test_query_count_does_not_scale_with_user_count(self):
+        users = [User(id=i, name=f"PerfChoreUser{i}") for i in range(1, 6)]
+        db = _MetricsQuerySession({
+            "User": users,
+            "chore_counts": [(u.id, 2, 1) for u in users],
+        })
+
+        result = per_user_chore_stats(db)
+
+        assert len(result) == len(users)
+        assert all(row["assigned"] == 2 for row in result)
+        assert all(row["done"] == 1 for row in result)
+        assert db.query_calls == 2
+
+
+class TestUserStats:
+    def test_query_count_batches_devices_and_profiles(self):
+        users = [
+            User(id=i, name=f"PerfStatsUser{i}", email=f"perfstats{i}@test.local")
+            for i in range(1, 5)
+        ]
+        db = _MetricsQuerySession({
+            "User": users,
+            "message_counts": [(f"user:{u.id}", 1) for u in users],
+            "conversation_counts": [(f"user:{u.id}", 1) for u in users],
+            "Device": [
+                Device(id=u.id, token=f"token-{u.id}", label=f"phone-{u.id}", user_id=u.id)
+                for u in users
+            ],
+            "HousemateProfile": [
+                HousemateProfile(id=u.id, user_id=u.id, interests="coffee")
+                for u in users
+            ],
+        })
+
+        result = user_stats(db)
+
+        assert len(result) == len(users)
+        assert all(row["device_count"] == 1 for row in result)
+        assert all(row["has_profile"] is True for row in result)
+        assert all(row["message_count"] == 1 for row in result)
+        assert db.query_calls == 5
+
+
+class TestTopUsers:
+    def test_query_count_batches_user_name_lookup(self):
+        users = [
+            User(id=1, name="Alice"),
+            User(id=2, name="Bob"),
+        ]
+        db = _MetricsQuerySession({
+            "message_counts": [("user:1", 4), ("user:2", 3), ("user:not-int", 2)],
+            "User": users,
+        })
+
+        result = top_users(db, limit=3)
+
+        assert result == [
+            {"name": "Alice", "messages": 4},
+            {"name": "Bob", "messages": 3},
+            {"name": "Unknown", "messages": 2},
+        ]
+        assert db.query_calls == 2
 
 
 class TestSystemAlerts:

@@ -1,6 +1,6 @@
 from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import func, distinct, text
+from sqlalchemy import case, func, distinct, text
 from .models import Chore, Birthday, ChatMessage, ChatLog, Conversation, User, Device, HousemateProfile, ActivityLog
 
 # In-memory latency tracking (resets on server restart, keeps last 500)
@@ -78,6 +78,9 @@ def total_stats(db: Session) -> dict:
 def user_stats(db: Session) -> list[dict]:
     """Per-user enriched stats for the admin users page."""
     users = db.query(User).order_by(User.name.asc()).all()
+    if not users:
+        return []
+    user_ids = [u.id for u in users]
 
     msg_counts = dict(
         db.query(ChatMessage.convo_key, func.count(ChatMessage.id))
@@ -91,12 +94,28 @@ def user_stats(db: Session) -> list[dict]:
         .group_by(Conversation.convo_key)
         .all()
     )
+    devices_by_user: dict[int, list[Device]] = {}
+    for device in (
+        db.query(Device)
+        .filter(Device.user_id.in_(user_ids))
+        .order_by(Device.user_id.asc(), Device.id.asc())
+        .all()
+    ):
+        devices_by_user.setdefault(device.user_id, []).append(device)
+    profiles_by_user = {
+        profile.user_id: profile
+        for profile in (
+            db.query(HousemateProfile)
+            .filter(HousemateProfile.user_id.in_(user_ids))
+            .all()
+        )
+    }
 
     results = []
     for u in users:
         key = f"user:{u.id}"
-        devices = db.query(Device).filter(Device.user_id == u.id).all()
-        profile = db.query(HousemateProfile).filter(HousemateProfile.user_id == u.id).first()
+        devices = devices_by_user.get(u.id, [])
+        profile = profiles_by_user.get(u.id)
 
         results.append({
             "id": u.id,
@@ -234,12 +253,27 @@ def top_users(db: Session, limit: int = 5) -> list[dict]:
         .limit(limit)
         .all()
     )
+    user_ids: list[int] = []
+    for convo_key, _ in rows:
+        if not convo_key.startswith("user:"):
+            continue
+        try:
+            user_ids.append(int(convo_key.replace("user:", "", 1)))
+        except ValueError:
+            continue
+    users_by_id = {
+        user.id: user
+        for user in db.query(User).filter(User.id.in_(user_ids)).all()
+    } if user_ids else {}
     result = []
     for convo_key, cnt in rows:
-        user_id = int(convo_key.replace("user:", "")) if convo_key.startswith("user:") else None
+        try:
+            user_id = int(convo_key.replace("user:", "", 1)) if convo_key.startswith("user:") else None
+        except ValueError:
+            user_id = None
         name = "Unknown"
         if user_id:
-            user = db.query(User).filter(User.id == user_id).first()
+            user = users_by_id.get(user_id)
             if user:
                 name = user.name
         result.append({"name": name, "messages": cnt})
@@ -249,10 +283,25 @@ def top_users(db: Session, limit: int = 5) -> list[dict]:
 def per_user_chore_stats(db: Session) -> list[dict]:
     """Chore completion stats per user (assigned chores)."""
     users = db.query(User).all()
+    if not users:
+        return []
+    user_ids = [u.id for u in users]
+    chore_counts = {
+        user_id: (int(assigned or 0), int(done or 0))
+        for user_id, assigned, done in (
+            db.query(
+                Chore.assigned_to,
+                func.count(Chore.id),
+                func.sum(case((Chore.done.is_(True), 1), else_=0)),
+            )
+            .filter(Chore.assigned_to.in_(user_ids))
+            .group_by(Chore.assigned_to)
+            .all()
+        )
+    }
     results = []
     for u in users:
-        assigned = db.query(Chore).filter(Chore.assigned_to == u.id).count()
-        done = db.query(Chore).filter(Chore.assigned_to == u.id, Chore.done == True).count()
+        assigned, done = chore_counts.get(u.id, (0, 0))
         rate = round((done / assigned) * 100, 1) if assigned > 0 else 0
         results.append({
             "name": u.name, "assigned": assigned, "done": done,
