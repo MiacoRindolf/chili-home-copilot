@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -97,3 +98,51 @@ def test_unknown_goal_still_uses_existing_llm_gate(monkeypatch):
 
     assert proactive_chat.generate_opening_message(EmptyDb(), user_id=42, goal=goal) is None
     chat.assert_not_called()
+
+
+def test_unknown_goal_uses_gateway_when_configured(monkeypatch):
+    goal = _goal("novel_gap", "Ask about a highly specific unknown topic.")
+    monkeypatch.setattr(proactive_chat.openai_client, "is_configured", lambda: True)
+    direct_chat = MagicMock(side_effect=AssertionError("reasoning_proactive must not bypass gateway"))
+    monkeypatch.setattr(proactive_chat.openai_client, "chat", direct_chat)
+
+    from app.services.context_brain import llm_gateway
+
+    gateway = MagicMock(return_value={"reply": "What has made that topic feel worth exploring now?"})
+    monkeypatch.setattr(llm_gateway, "gateway_chat", gateway)
+
+    data = proactive_chat.generate_opening_message(EmptyDb(), user_id=42, goal=goal)
+
+    assert data == {
+        "message": "What has made that topic feel worth exploring now?",
+        "goal_id": 17,
+        "goal_description": "Ask about a highly specific unknown topic.",
+    }
+    assert proactive_chat._pending_openers[42] == data
+    assert gateway.call_args.kwargs["purpose"] == "reasoning_proactive"
+    direct_chat.assert_not_called()
+
+
+def test_gateway_exception_does_not_fall_back_to_direct_openai(monkeypatch):
+    goal = _goal("novel_gap", "Ask about a highly specific unknown topic.")
+    monkeypatch.setattr(proactive_chat.openai_client, "is_configured", lambda: True)
+    direct_chat = MagicMock(side_effect=AssertionError("reasoning_proactive must not bypass gateway"))
+    monkeypatch.setattr(proactive_chat.openai_client, "chat", direct_chat)
+
+    from app.services.context_brain import llm_gateway
+
+    monkeypatch.setattr(
+        llm_gateway,
+        "gateway_chat",
+        MagicMock(side_effect=RuntimeError("gateway unavailable")),
+    )
+
+    assert proactive_chat.generate_opening_message(EmptyDb(), user_id=42, goal=goal) is None
+    assert 42 not in proactive_chat._pending_openers
+    direct_chat.assert_not_called()
+
+
+def test_reasoning_proactive_source_has_no_direct_chat_fallback():
+    source = Path(proactive_chat.__file__).read_text(encoding="utf-8")
+
+    assert "openai_client.chat(" not in source

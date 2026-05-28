@@ -130,12 +130,9 @@ def generate_opening_message(db: Session, user_id: int, goal: ReasoningLearningG
             system_prompt="You are Chili's conversational brain. Return only the chat message.",
             trace_id="reasoning_insight_opening",
         )
-    except Exception:
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt="You are Chili's conversational brain. Return only the chat message.",
-            trace_id="reasoning_insight_opening",
-        )
+    except Exception as e:
+        log_info("reasoning_insight_opening", f"gateway_error={e}")
+        return None
     msg = (result.get("reply") or "").strip()
     if not msg:
         return None
