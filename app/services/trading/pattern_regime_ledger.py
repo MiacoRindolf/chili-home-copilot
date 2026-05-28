@@ -48,12 +48,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .realized_pnl_sql import trade_contract_multiplier_sql
+from .realized_pnl_sql import trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
 
 
-_TRADE_CONTRACT_MULTIPLIER_SQL = trade_contract_multiplier_sql("t")
+_TRADE_RETURN_PCT_SQL = f"({trade_return_fraction_sql('t')}) * 100.0"
 
 
 # Each dimension is a (regime_dimension_name, sql_for_(pid, regime_label, pnl,
@@ -64,30 +64,8 @@ REGIME_DIMENSIONS: dict[str, str] = {
         f"""
         SELECT t.scan_pattern_id AS pid,
                COALESCE(r.ticker_regime_label, 'unknown') AS regime_label,
-               COALESCE(
-                 t.pnl,
-                 CASE
-                   WHEN t.quantity IS NOT NULL
-                   THEN
-                     CASE
-                       WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                       THEN (t.entry_price - t.exit_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
-                       ELSE (t.exit_price - t.entry_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
-                     END
-                   ELSE NULL
-                 END
-               ) AS pnl,
-               CASE
-                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
-                      AND t.exit_price IS NOT NULL
-                 THEN
-                   CASE
-                     WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                     THEN ((t.entry_price - t.exit_price) / t.entry_price) * 100.0
-                     ELSE ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
-                   END
-                 ELSE NULL
-               END AS ret_pct,
+               t.pnl AS pnl,
+               {_TRADE_RETURN_PCT_SQL} AS ret_pct,
                EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
         FROM trading_trades t
         LEFT JOIN LATERAL (
@@ -100,9 +78,11 @@ REGIME_DIMENSIONS: dict[str, str] = {
         ) r ON TRUE
         WHERE t.status = 'closed' AND t.scan_pattern_id IS NOT NULL
           AND t.exit_date IS NOT NULL
+          AND t.pnl IS NOT NULL
           AND t.entry_price IS NOT NULL
           AND t.entry_price > 0
-          AND t.exit_price IS NOT NULL
+          AND t.quantity IS NOT NULL
+          AND t.quantity > 0
           AND t.exit_date > NOW() - make_interval(days => :wd)
         """
     ),
@@ -110,30 +90,8 @@ REGIME_DIMENSIONS: dict[str, str] = {
         f"""
         SELECT t.scan_pattern_id AS pid,
                COALESCE(b.breadth_label, 'unknown') AS regime_label,
-               COALESCE(
-                 t.pnl,
-                 CASE
-                   WHEN t.quantity IS NOT NULL
-                   THEN
-                     CASE
-                       WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                       THEN (t.entry_price - t.exit_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
-                       ELSE (t.exit_price - t.entry_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
-                     END
-                   ELSE NULL
-                 END
-               ) AS pnl,
-               CASE
-                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
-                      AND t.exit_price IS NOT NULL
-                 THEN
-                   CASE
-                     WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                     THEN ((t.entry_price - t.exit_price) / t.entry_price) * 100.0
-                     ELSE ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
-                   END
-                 ELSE NULL
-               END AS ret_pct,
+               t.pnl AS pnl,
+               {_TRADE_RETURN_PCT_SQL} AS ret_pct,
                EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
         FROM trading_trades t
         LEFT JOIN LATERAL (
@@ -144,9 +102,11 @@ REGIME_DIMENSIONS: dict[str, str] = {
         ) b ON TRUE
         WHERE t.status = 'closed' AND t.scan_pattern_id IS NOT NULL
           AND t.exit_date IS NOT NULL
+          AND t.pnl IS NOT NULL
           AND t.entry_price IS NOT NULL
           AND t.entry_price > 0
-          AND t.exit_price IS NOT NULL
+          AND t.quantity IS NOT NULL
+          AND t.quantity > 0
           AND t.exit_date > NOW() - make_interval(days => :wd)
         """
     ),
@@ -154,30 +114,8 @@ REGIME_DIMENSIONS: dict[str, str] = {
         f"""
         SELECT t.scan_pattern_id AS pid,
                COALESCE(c.cross_asset_label, 'unknown') AS regime_label,
-               COALESCE(
-                 t.pnl,
-                 CASE
-                   WHEN t.quantity IS NOT NULL
-                   THEN
-                     CASE
-                       WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                       THEN (t.entry_price - t.exit_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
-                       ELSE (t.exit_price - t.entry_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
-                     END
-                   ELSE NULL
-                 END
-               ) AS pnl,
-               CASE
-                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
-                      AND t.exit_price IS NOT NULL
-                 THEN
-                   CASE
-                     WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                     THEN ((t.entry_price - t.exit_price) / t.entry_price) * 100.0
-                     ELSE ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
-                   END
-                 ELSE NULL
-               END AS ret_pct,
+               t.pnl AS pnl,
+               {_TRADE_RETURN_PCT_SQL} AS ret_pct,
                EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
         FROM trading_trades t
         LEFT JOIN LATERAL (
@@ -188,9 +126,11 @@ REGIME_DIMENSIONS: dict[str, str] = {
         ) c ON TRUE
         WHERE t.status = 'closed' AND t.scan_pattern_id IS NOT NULL
           AND t.exit_date IS NOT NULL
+          AND t.pnl IS NOT NULL
           AND t.entry_price IS NOT NULL
           AND t.entry_price > 0
-          AND t.exit_price IS NOT NULL
+          AND t.quantity IS NOT NULL
+          AND t.quantity > 0
           AND t.exit_date > NOW() - make_interval(days => :wd)
         """
     ),
@@ -198,30 +138,8 @@ REGIME_DIMENSIONS: dict[str, str] = {
         f"""
         SELECT t.scan_pattern_id AS pid,
                COALESCE(v.vol_regime_label, 'unknown') AS regime_label,
-               COALESCE(
-                 t.pnl,
-                 CASE
-                   WHEN t.quantity IS NOT NULL
-                   THEN
-                     CASE
-                       WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                       THEN (t.entry_price - t.exit_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
-                       ELSE (t.exit_price - t.entry_price) * t.quantity * ({_TRADE_CONTRACT_MULTIPLIER_SQL})
-                     END
-                   ELSE NULL
-                 END
-               ) AS pnl,
-               CASE
-                 WHEN t.entry_price IS NOT NULL AND t.entry_price > 0
-                      AND t.exit_price IS NOT NULL
-                 THEN
-                   CASE
-                     WHEN LOWER(COALESCE(t.direction, 'long')) = 'short'
-                     THEN ((t.entry_price - t.exit_price) / t.entry_price) * 100.0
-                     ELSE ((t.exit_price - t.entry_price) / t.entry_price) * 100.0
-                   END
-                 ELSE NULL
-               END AS ret_pct,
+               t.pnl AS pnl,
+               {_TRADE_RETURN_PCT_SQL} AS ret_pct,
                EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
         FROM trading_trades t
         LEFT JOIN LATERAL (
@@ -232,9 +150,11 @@ REGIME_DIMENSIONS: dict[str, str] = {
         ) v ON TRUE
         WHERE t.status = 'closed' AND t.scan_pattern_id IS NOT NULL
           AND t.exit_date IS NOT NULL
+          AND t.pnl IS NOT NULL
           AND t.entry_price IS NOT NULL
           AND t.entry_price > 0
-          AND t.exit_price IS NOT NULL
+          AND t.quantity IS NOT NULL
+          AND t.quantity > 0
           AND t.exit_date > NOW() - make_interval(days => :wd)
         """
     ),

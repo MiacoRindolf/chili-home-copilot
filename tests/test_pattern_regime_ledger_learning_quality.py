@@ -9,7 +9,7 @@ from app.models.trading import ScanPattern, Trade
 from app.services.trading.pattern_regime_ledger import build_ledger
 
 
-def test_regime_ledger_excludes_closed_trades_without_exit_price(db):
+def test_regime_ledger_excludes_closed_trades_without_realized_pnl(db):
     pattern = ScanPattern(
         name="ledger-quality-pattern",
         rules_json={},
@@ -25,7 +25,7 @@ def test_regime_ledger_excludes_closed_trades_without_exit_price(db):
                 ticker="ABC",
                 direction="long",
                 entry_price=10.0,
-                exit_price=None,
+                exit_price=11.0,
                 quantity=2.0,
                 entry_date=now - timedelta(days=2),
                 exit_date=now - timedelta(days=1),
@@ -37,13 +37,13 @@ def test_regime_ledger_excludes_closed_trades_without_exit_price(db):
                 ticker="ABC",
                 direction="long",
                 entry_price=10.0,
-                exit_price=11.0,
+                exit_price=None,
                 quantity=2.0,
                 entry_date=now - timedelta(days=2),
                 exit_date=now - timedelta(days=1),
                 status="closed",
                 scan_pattern_id=pattern.id,
-                pnl=None,
+                pnl=2.0,
             ),
         ]
     )
@@ -70,7 +70,7 @@ def test_regime_ledger_excludes_closed_trades_without_exit_price(db):
         assert row["sum_pnl"] == pytest.approx(2.0)
 
 
-def test_regime_ledger_option_fallback_pnl_uses_contract_multiplier(db):
+def test_regime_ledger_option_realized_pnl_uses_contract_multiplier(db):
     pattern = ScanPattern(
         name="ledger-option-pattern",
         rules_json={},
@@ -85,13 +85,13 @@ def test_regime_ledger_option_fallback_pnl_uses_contract_multiplier(db):
             ticker="XYZ",
             direction="long",
             entry_price=1.25,
-            exit_price=1.45,
+            exit_price=716.0,
             quantity=2.0,
             entry_date=now - timedelta(days=2),
             exit_date=now - timedelta(days=1),
             status="closed",
             scan_pattern_id=pattern.id,
-            pnl=None,
+            pnl=40.0,
             asset_kind="option",
             indicator_snapshot={
                 "asset_type": "options",
