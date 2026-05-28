@@ -328,6 +328,18 @@ def test_exit_validation_skips_maker_filled_table_for_non_maker_entry():
     assert miner._metrics.validations_recorded == 1
 
 
+def test_exit_validation_skips_missing_realized_return():
+    miner = _make_miner()
+
+    miner._handle_exit_inserted({
+        "entry_execution_id": 7,
+        "holding_period_s": 60.0,
+    })
+
+    miner._engine.begin.assert_not_called()
+    assert miner._metrics.validations_recorded == 0
+
+
 # ---------------------------------------------------------------------------
 # stats() surfaces the new counters
 # ---------------------------------------------------------------------------

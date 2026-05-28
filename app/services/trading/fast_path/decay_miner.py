@@ -45,6 +45,7 @@ import asyncio
 import heapq
 import json
 import logging
+import math
 import os
 import select
 import time
@@ -553,12 +554,16 @@ class FastPathDecayMiner:
         entry_execution_id = int(payload.get("entry_execution_id") or 0)
         if entry_execution_id <= 0:
             return
+        realized_return_raw = payload.get("realized_return_pct")
+        if realized_return_raw is None:
+            return
         try:
-            realized_return_frac = float(
-                payload.get("realized_return_pct") or 0.0
-            ) / 100.0
+            realized_return_pct = float(realized_return_raw)
         except (TypeError, ValueError):
             return
+        if not math.isfinite(realized_return_pct):
+            return
+        realized_return_frac = realized_return_pct / 100.0
         try:
             holding_period_s = float(payload.get("holding_period_s") or 0.0)
         except (TypeError, ValueError):
