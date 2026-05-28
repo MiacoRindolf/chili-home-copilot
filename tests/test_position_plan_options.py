@@ -157,3 +157,29 @@ def test_position_plan_option_context_does_not_default_bad_quantity_to_one() -> 
     assert pos["asset_type"] == "options"
     assert pos["quantity"] is None
     assert pos["quantity_error"] == "invalid_option_contract_quantity"
+
+
+def test_position_plan_llm_call_opts_into_cache_and_singleflight(monkeypatch) -> None:
+    from app.services.trading import position_plan_generator as ppg
+
+    captured = {}
+
+    def fake_call_llm(messages, **kwargs):
+        captured["messages"] = messages
+        captured.update(kwargs)
+        return '{"portfolio_summary":{},"position_plans":[]}'
+
+    monkeypatch.setattr(ppg, "call_llm", fake_call_llm)
+
+    raw = ppg._call_position_plan_llm(
+        [{"role": "user", "content": '{"portfolio":{},"positions":[]}'}],
+        max_tokens=900,
+        system_prompt="system",
+    )
+
+    assert raw.startswith("{")
+    assert captured["cacheable"] is True
+    assert captured["purpose"] == "position_plan_generator"
+    assert captured["trace_id"] == "position-plan-generator"
+    assert captured["max_tokens"] == 900
+    assert captured["system_prompt"] == "system"

@@ -432,6 +432,24 @@ def _build_portfolio_context(
     }
 
 
+def _call_position_plan_llm(
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int,
+    system_prompt: str,
+) -> str:
+    """Route deterministic position-plan prompts through cache + single-flight."""
+    raw = call_llm(
+        messages,
+        max_tokens=max_tokens,
+        trace_id="position-plan-generator",
+        cacheable=True,
+        purpose="position_plan_generator",
+        system_prompt=system_prompt,
+    )
+    return raw if isinstance(raw, str) else str(raw or "")
+
+
 def generate_position_plans(
     db: Session,
     user_id: int | None,
@@ -518,11 +536,9 @@ def generate_position_plans(
     messages = [{"role": "user", "content": user_msg}]
 
     max_tokens = min(8192, 400 * len(trades) + 600)
-    raw = call_llm(
+    raw = _call_position_plan_llm(
         messages,
         max_tokens=max_tokens,
-        trace_id="position-plan-generator",
-        purpose="position_plan_generator",
         system_prompt=system_prompt,
     )
 
