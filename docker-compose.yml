@@ -146,10 +146,10 @@ services:
       - ./docs:/app/docs
       # LOCAL DEV — mount Python package so scheduler/WS-off fixes apply without ``docker build``.
       - ./app:/app/app
-      # Phase 4 LOCAL DEV ONLY — read-only host checkout at /workspace for in-container coding
-      # validation (CODE_BRAIN_REPOS=/workspace). Omit for production-like deploys. Do not widen
-      # to read-write unless a concrete validator step proves write is required (Phase 4 blocker).
-      - .:/workspace:ro
+      # LOCAL DEV ONLY — writable host checkout at /workspace for Project Autopilot
+      # worktrees/branches and in-container coding validation (CODE_BRAIN_REPOS=/workspace).
+      # Omit for production-like deploys.
+      - .:/workspace
       # Brain Worker UI controls the separate ``brain-worker`` service — needs engine access
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
