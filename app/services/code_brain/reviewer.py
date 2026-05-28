@@ -55,6 +55,23 @@ def _get_commit_diff(repo_path: str, commit_hash: str) -> str:
     return diff
 
 
+def _reviewed_commit_hashes(db: Session, commit_hashes: List[str]) -> set[str]:
+    if not commit_hashes:
+        return set()
+    rows = (
+        db.query(CodeReview.commit_hash)
+        .filter(CodeReview.commit_hash.in_(commit_hashes))
+        .all()
+    )
+    reviewed: set[str] = set()
+    for row in rows:
+        try:
+            reviewed.add(str(row[0]))
+        except (TypeError, KeyError, IndexError):
+            reviewed.add(str(row))
+    return reviewed
+
+
 def _review_diff_with_llm(diff_text: str, repo_context: str, commit_info: Dict[str, str]) -> Dict[str, Any]:
     """Send diff to LLM for code review. Returns structured findings."""
     from ..llm_caller import call_llm
@@ -131,11 +148,7 @@ def review_recent_commits(db: Session, repo_id: int, user_id: Optional[int] = No
     if not commits:
         return {"reviewed": 0}
 
-    already_reviewed = set()
-    for c in commits:
-        existing = db.query(CodeReview).filter(CodeReview.commit_hash == c["hash"]).first()
-        if existing:
-            already_reviewed.add(c["hash"])
+    already_reviewed = _reviewed_commit_hashes(db, [c["hash"] for c in commits])
 
     to_review = [c for c in commits if c["hash"] not in already_reviewed]
     if not to_review:
