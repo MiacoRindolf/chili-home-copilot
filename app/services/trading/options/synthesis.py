@@ -294,9 +294,19 @@ def _quote_prices(quote: dict[str, Any]) -> Optional[tuple[float, float, float, 
 def _quality_sort_key(meta: dict[str, Any]) -> tuple[float, float, float, float]:
     """Rank accepted contracts without hidden weights."""
     quality = meta.get("entry_quality") if isinstance(meta.get("entry_quality"), dict) else {}
+    ev_after_cost = quality.get("expected_value_after_cost_pct_of_premium")
+    reward_after_cost = quality.get("option_reward_risk_after_cost")
     return (
-        float(quality.get("expected_value_pct_of_premium") or 0.0),
-        float(quality.get("option_reward_risk") or 0.0),
+        float(
+            ev_after_cost
+            if ev_after_cost is not None
+            else quality.get("expected_value_pct_of_premium") or 0.0
+        ),
+        float(
+            reward_after_cost
+            if reward_after_cost is not None
+            else quality.get("option_reward_risk") or 0.0
+        ),
         -float(meta.get("synthesis_spread_pct") or NO_BID_SPREAD_PCT),
         -float(meta.get("synthesis_contract_notional_usd") or 0.0),
     )
@@ -551,7 +561,9 @@ def synthesize_option_meta(
 
     _NO_SURVIVOR_CACHE.pop(cache_key, None)
     selected = max(accepted, key=_quality_sort_key)
-    selected["synthesis_selected_by"] = "expected_value_then_reward_risk_then_spread"
+    selected["synthesis_selected_by"] = (
+        "expected_value_after_cost_then_reward_risk_after_cost_then_spread"
+    )
     selected["synthesis_reject_counts"] = dict(reject_counts)
     logger.info(
         "[options_synth] %s %s selected %sC qty=%s limit=%.2f budget=%.2f rejects=%s",

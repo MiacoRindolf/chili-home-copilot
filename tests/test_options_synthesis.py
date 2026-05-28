@@ -8,6 +8,7 @@ from app.config import (
 )
 from app.services.trading.options.synthesis import (
     clear_synthesis_no_survivor_cache,
+    _quality_sort_key,
     synthesize_option_meta,
 )
 
@@ -87,6 +88,33 @@ def test_synthesize_option_meta_selects_affordable_quality_contract(monkeypatch)
     assert meta["synthesis_contract_notional_usd"] == 150.0
     assert meta["synthesis_reject_counts"]["contract_cost_above_budget"] == 2
     assert meta["entry_quality"]["option_reward_risk"] > 1.0
+
+
+def test_option_synthesis_ranks_contracts_by_after_cost_edge():
+    cheap_on_paper_but_wide = {
+        "synthesis_spread_pct": 18.0,
+        "synthesis_contract_notional_usd": 100.0,
+        "entry_quality": {
+            "expected_value_pct_of_premium": 240.0,
+            "expected_value_after_cost_pct_of_premium": 12.0,
+            "option_reward_risk": 3.5,
+            "option_reward_risk_after_cost": 1.1,
+        },
+    }
+    lower_raw_but_clean = {
+        "synthesis_spread_pct": 2.0,
+        "synthesis_contract_notional_usd": 120.0,
+        "entry_quality": {
+            "expected_value_pct_of_premium": 180.0,
+            "expected_value_after_cost_pct_of_premium": 45.0,
+            "option_reward_risk": 2.4,
+            "option_reward_risk_after_cost": 1.8,
+        },
+    }
+
+    assert _quality_sort_key(lower_raw_but_clean) > _quality_sort_key(
+        cheap_on_paper_but_wide
+    )
 
 
 def test_synthesize_option_meta_rejects_when_contract_exceeds_budget(monkeypatch):

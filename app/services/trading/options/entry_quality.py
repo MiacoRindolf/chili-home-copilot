@@ -107,6 +107,20 @@ def _round_optional(value: Optional[float], places: int = SNAPSHOT_PRICE_DECIMAL
     return round(value, places)
 
 
+def _quote_snapshot_price(option_meta: Mapping[str, Any], *keys: str) -> Optional[float]:
+    quote_snapshot = option_meta.get("quote_snapshot")
+    if isinstance(quote_snapshot, Mapping):
+        for key in keys:
+            value = _coerce_positive_float(quote_snapshot.get(key))
+            if value is not None:
+                return value
+    for key in keys:
+        value = _coerce_positive_float(option_meta.get(f"synthesis_{key}"))
+        if value is not None:
+            return value
+    return None
+
+
 def _adaptive_parameter(
     db: Optional[Session],
     *,
@@ -340,6 +354,63 @@ def evaluate_long_option_entry(
         }
     )
 
+    quote_bid = _quote_snapshot_price(option_meta, "bid", "bid_price")
+    quote_ask = _quote_snapshot_price(option_meta, "ask", "ask_price")
+    liquidity_cost_per_share = ZERO_PAYOFF
+    if quote_bid is not None and quote_ask is not None:
+        snapshot.update(
+            {
+                "entry_bid": _round_optional(quote_bid),
+                "entry_ask": _round_optional(quote_ask),
+            }
+        )
+        if quote_bid > quote_ask:
+            return OptionEntryDecision(False, "crossed_option_quote_snapshot", snapshot)
+        liquidity_cost_per_share = max(quote_ask - quote_bid, ZERO_PAYOFF)
+
+    option_profit_after_cost = option_profit_at_target - liquidity_cost_per_share
+    option_loss_after_cost = min(premium, option_loss_at_stop + liquidity_cost_per_share)
+    option_reward_risk_after_cost = (
+        option_profit_after_cost / option_loss_after_cost
+        if option_loss_after_cost > ZERO_PAYOFF
+        else math.inf
+    )
+    expected_value_after_cost_per_share = (
+        probability * option_profit_after_cost
+        - (PROBABILITY_CEILING - probability) * option_loss_after_cost
+    )
+    expected_value_after_cost_pct = (
+        expected_value_after_cost_per_share / premium * PERCENT_SCALE
+    )
+    expected_value_after_cost_per_contract = (
+        expected_value_after_cost_per_share * OPTION_CONTRACT_MULTIPLIER
+    )
+    snapshot.update(
+        {
+            "execution_cost_model": "entry_spread_penalty_v1",
+            "liquidity_cost_per_share": _round_optional(liquidity_cost_per_share),
+            "liquidity_cost_pct_of_premium": _round_optional(
+                liquidity_cost_per_share / premium * PERCENT_SCALE,
+                SNAPSHOT_RATIO_DECIMALS,
+            ),
+            "option_profit_at_target_after_cost": _round_optional(
+                option_profit_after_cost
+            ),
+            "option_loss_at_stop_after_cost": _round_optional(option_loss_after_cost),
+            "option_reward_risk_after_cost": _round_optional(
+                option_reward_risk_after_cost, SNAPSHOT_RATIO_DECIMALS
+            ),
+            "expected_value_after_cost_per_contract": _round_optional(
+                expected_value_after_cost_per_contract,
+                SNAPSHOT_DOLLAR_DECIMALS,
+            ),
+            "expected_value_after_cost_pct_of_premium": _round_optional(
+                expected_value_after_cost_pct,
+                SNAPSHOT_RATIO_DECIMALS,
+            ),
+        }
+    )
+
     if underlying_reward_risk < thresholds.min_underlying_reward_risk:
         return OptionEntryDecision(False, "underlying_reward_risk_below_min", snapshot)
     if option_profit_at_target <= ZERO_PAYOFF:
@@ -348,5 +419,13 @@ def evaluate_long_option_entry(
         return OptionEntryDecision(False, "option_reward_risk_below_min", snapshot)
     if expected_value_pct < thresholds.min_expected_value_pct:
         return OptionEntryDecision(False, "option_expected_value_below_min", snapshot)
+    if option_profit_after_cost <= ZERO_PAYOFF:
+        return OptionEntryDecision(
+            False, "option_target_profit_after_cost_non_positive", snapshot
+        )
+    if option_reward_risk_after_cost < thresholds.min_option_reward_risk:
+        return OptionEntryDecision(False, "option_reward_risk_after_cost_below_min", snapshot)
+    if expected_value_after_cost_pct < thresholds.min_expected_value_pct:
+        return OptionEntryDecision(False, "option_expected_value_after_cost_below_min", snapshot)
 
     return OptionEntryDecision(True, "ok", snapshot)
