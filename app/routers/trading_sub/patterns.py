@@ -167,7 +167,12 @@ def api_suggest_pattern(
     )
 
     try:
-        resp = call_llm(prompt, max_tokens=800)
+        resp = call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=800,
+            trace_id="pattern-suggest",
+            purpose="pattern_suggest",
+        )
         if not resp:
             return JSONResponse({"ok": False, "error": "LLM returned empty response"}, status_code=500)
 

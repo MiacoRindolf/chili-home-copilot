@@ -379,13 +379,16 @@ def generate_position_plans(
     }, default=str, separators=(",", ":"))
 
     system_prompt = _load_system_prompt()
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_msg},
-    ]
+    messages = [{"role": "user", "content": user_msg}]
 
     max_tokens = min(8192, 400 * len(trades) + 600)
-    raw = call_llm(messages, max_tokens=max_tokens, trace_id="position-plan-generator")
+    raw = call_llm(
+        messages,
+        max_tokens=max_tokens,
+        trace_id="position-plan-generator",
+        purpose="position_plan_generator",
+        system_prompt=system_prompt,
+    )
 
     if not raw:
         logger.error("[position_plan] LLM returned empty response")

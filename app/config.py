@@ -284,7 +284,18 @@ class Settings(BaseSettings):
     # Groq / OpenAI-compat primary stack (tiers 2–3 in app.openai_client after OpenAI official).
     llm_api_key: str = ""
     # OpenAI official API (api.openai.com) — tried first when set. Also fills primary_api_key if llm_api_key empty.
-    openai_api_key: str = ""
+    openai_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("OPENAI_API_KEY", "PAID_OPENAI_API_KEY"),
+    )
+    openai_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("OPENAI_MODEL", "PAID_OPENAI_MODEL"),
+    )
+    openai_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias=AliasChoices("OPENAI_BASE_URL", "PAID_OPENAI_BASE_URL"),
+    )
     llm_model: str = "llama-3.3-70b-versatile"
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
@@ -310,6 +321,14 @@ class Settings(BaseSettings):
     # Groq bucket keeps its historical 85K preemptive threshold.
     openai_daily_token_limit: int = 0
     premium_daily_token_limit: int = 0
+
+    # Paid LLM cost controls. ``shadow`` records spend only; ``enforce``
+    # preemptively skips paid OpenAI calls after the daily budget is reached.
+    chili_llm_premium_daily_budget_usd: float = 0.0
+    chili_llm_cost_mode: str = "shadow"
+    chili_llm_default_cheap_model: str = "gpt-5.4-mini"
+    chili_llm_escalation_model: str = "gpt-5.5"
+    chili_llm_purpose_model_overrides_json: str = "{}"
 
     # Vision fallback (often same as premium)
     openai_vision_model: str = "gpt-4o-mini"
@@ -5064,6 +5083,14 @@ class Settings(BaseSettings):
                 "STAGING_DATABASE_URL must be a PostgreSQL URL or empty. See docs/STAGING_DATABASE.md."
             )
         return url
+
+    @field_validator("chili_llm_cost_mode")
+    @classmethod
+    def _llm_cost_mode(cls, v: str) -> str:
+        mode = (v or "shadow").strip().lower()
+        if mode not in {"shadow", "enforce"}:
+            raise ValueError("CHILI_LLM_COST_MODE must be 'shadow' or 'enforce'")
+        return mode
 
     @property
     def primary_api_key(self) -> str:

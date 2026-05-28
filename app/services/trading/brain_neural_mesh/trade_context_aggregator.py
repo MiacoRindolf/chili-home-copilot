@@ -167,13 +167,7 @@ def _call_teacher_llm(children: dict[str, dict[str, Any]]) -> Optional[dict[str,
         return cached
 
     try:
-        from ....config import settings
-        import openai
-
-        api_key = getattr(settings, "openai_api_key", None)
-        if not api_key:
-            _log.debug("%s no OPENAI_API_KEY, skipping teacher LLM", LOG_PREFIX)
-            return None
+        from ...context_brain.llm_gateway import gateway_chat
 
         children_summary = {}
         for nid, cs in children.items():
@@ -196,22 +190,23 @@ def _call_teacher_llm(children: dict[str, dict[str, Any]]) -> Optional[dict[str,
             '"reasoning": "<brief reasoning>"}'
         )
 
-        client = openai.OpenAI(api_key=api_key, base_url="https://api.openai.com/v1")
         start = time.monotonic()
-        resp = client.chat.completions.create(
-            model="gpt-4o",  # GPT-5.4 uses the latest available model
-            messages=[
-                {"role": "system", "content": "You are a trading brain aggregation expert. Respond with JSON only."},
-                {"role": "user", "content": prompt},
-            ],
+        result = gateway_chat(
+            messages=[{"role": "user", "content": prompt}],
+            purpose="trading_reasoning",
+            system_prompt="You are a trading brain aggregation expert. Respond with JSON only.",
+            trace_id="mesh-trade-context",
+            user_message=prompt,
             max_tokens=256,
-            temperature=0.1,
+            strict_escalation=False,
         )
         elapsed = time.monotonic() - start
 
+        raw = (result.get("reply") or "").strip() if isinstance(result, dict) else ""
+        if not raw:
+            _log.debug("%s teacher LLM returned empty response", LOG_PREFIX)
+            return None
         _increment_daily_calls()
-        raw = resp.choices[0].message.content or ""
-        raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0]
 

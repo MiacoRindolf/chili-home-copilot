@@ -378,10 +378,7 @@ def get_adjustment(
         trade_plan_health=trade_plan_health,
     )
 
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
-    ]
+    messages = [{"role": "user", "content": user_msg}]
 
     try:
         raw = call_llm(
@@ -389,6 +386,8 @@ def get_adjustment(
             max_tokens=300,
             trace_id=f"pattern-adjust-{ticker}",
             cacheable=True,
+            purpose="pattern_adjustment",
+            system_prompt=_SYSTEM_PROMPT,
         )
         raw_text = raw if isinstance(raw, str) else str(raw or "")
         if not raw_text.strip():

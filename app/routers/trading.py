@@ -764,28 +764,17 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
     messages.append({"role": "user", "content": user_msg})
 
     try:
-        try:
-            from ..services.context_brain.llm_gateway import gateway_chat
-            result = gateway_chat(
-                messages=messages,
-                purpose='trading_analyze',
-                system_prompt=f"{_get_trading_prompt()}\n\n---\n\n{ai_context}",
-                trace_id=trace_id,
-                user_message=user_msg,
-                max_tokens=2048,
-                user_id=ctx.get("user_id"),
-                db=db,
-            )
-        except Exception as _ge:
-            log_info(trace_id, f"[trading] gateway_chat failed, falling back: {_ge}")
-            from .. import openai_client
-            result = openai_client.chat(
-                messages=messages,
-                system_prompt=f"{_get_trading_prompt()}\n\n---\n\n{ai_context}",
-                trace_id=trace_id,
-                user_message=user_msg,
-                max_tokens=2048,
-            )
+        from ..services.context_brain.llm_gateway import gateway_chat
+        result = gateway_chat(
+            messages=messages,
+            purpose='trading_analyze',
+            system_prompt=f"{_get_trading_prompt()}\n\n---\n\n{ai_context}",
+            trace_id=trace_id,
+            user_message=user_msg,
+            max_tokens=2048,
+            user_id=ctx.get("user_id"),
+            db=db,
+        )
         reply = result.get("reply", "Could not generate analysis.")
     except Exception as e:
         log_info(trace_id, f"[trading] AI analysis error: {e}")
@@ -862,7 +851,7 @@ def api_analyze_stream(
     cache_key = _analyze_stream_key(ctx.get("user_id"), ticker, interval, ai_context, user_msg)
 
     def _generate():
-        from .. import openai_client
+        from ..services.context_brain.llm_gateway import gateway_chat_stream
         full_text_parts: list[str] = []
         cached_model: str | None = None
 
@@ -899,12 +888,15 @@ def api_analyze_stream(
         try:
             _stream_had_token = False
             live_model: str | None = None
-            for tok, model in openai_client.chat_stream(
+            for tok, model in gateway_chat_stream(
                 messages=messages,
+                purpose="trading_analyze_stream",
                 system_prompt=system_prompt,
                 trace_id=trace_id,
                 user_message=user_msg,
                 max_tokens=2048,
+                user_id=ctx.get("user_id"),
+                db=db,
             ):
                 _stream_had_token = True
                 live_model = model
@@ -1073,7 +1065,7 @@ End with portfolio allocation advice and any general market context warnings.
     system_prompt_full = f"{system_prompt}\n{smart_pick_addendum}\n\n---\n\n{full_context}"
 
     def _generate():
-        from .. import openai_client
+        from ..services.context_brain.llm_gateway import gateway_chat_stream
 
         try:
             # First send metadata so the UI can show counts immediately
@@ -1084,12 +1076,15 @@ End with portfolio allocation advice and any general market context warnings.
             yield f"data: {json.dumps({'meta': meta})}\n\n"
 
             _stream_had_token = False
-            for tok, model in openai_client.chat_stream(
+            for tok, model in gateway_chat_stream(
                 messages=[{"role": "user", "content": user_msg}],
+                purpose="smart_pick_stream",
                 system_prompt=system_prompt_full,
                 trace_id=trace_id,
                 user_message=user_msg,
                 max_tokens=4096,
+                user_id=ctx.get("user_id"),
+                db=db,
             ):
                 _stream_had_token = True
                 yield f"data: {json.dumps({'token': tok})}\n\n"

@@ -341,16 +341,15 @@ def _extract_patterns_from_content(
 
     try:
         response = call_llm(
-            messages=[
-                {"role": "system", "content": (
-                    "You are a precise technical analyst and pattern extraction engine. "
-                    "You convert qualitative trading knowledge into quantitative rule sets."
-                )},
-                {"role": "user", "content": prompt},
-            ],
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=1500,
             trace_id="web_pattern_extract",
             cacheable=True,
+            purpose="pattern_research_extract",
+            system_prompt=(
+                "You are a precise technical analyst and pattern extraction engine. "
+                "You convert qualitative trading knowledge into quantitative rule sets."
+            ),
         )
 
         if not response:
