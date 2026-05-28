@@ -62,6 +62,7 @@ from .pattern_regime_performance_model import (
     build_pattern_regime_cells,
     compute_ledger_run_id,
 )
+from .realized_pnl_sql import paper_trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
 _ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
@@ -139,20 +140,35 @@ def _today_utc_date() -> date:
 def _fetch_closed_trades(
     db: Session, *, as_of_date: date, window_days: int
 ) -> List[ClosedTradeRecord]:
-    """Load closed paper trades in the rolling exit_date window."""
+    """Load closed paper trades in the rolling exit_date window.
+
+    ``ClosedTradeRecord.pnl_pct`` is a fraction, so derive it from
+    realized P&L over contract-aware notional instead of trusting the
+    legacy paper ``pnl_pct`` column, which is stored in percent points.
+    """
     start = as_of_date - timedelta(days=int(window_days))
     end = as_of_date - timedelta(days=1)
     rows = db.execute(
         text(
-            """
-            SELECT scan_pattern_id, ticker, entry_date, exit_date, pnl_pct
-              FROM trading_paper_trades
-             WHERE status = 'closed'
-               AND scan_pattern_id IS NOT NULL
-               AND exit_date IS NOT NULL
-               AND pnl_pct IS NOT NULL
-               AND DATE(exit_date) >= :start
-               AND DATE(exit_date) <= :end
+            f"""
+            SELECT
+                pt.scan_pattern_id,
+                pt.ticker,
+                pt.entry_date,
+                pt.exit_date,
+                {paper_trade_return_fraction_sql("pt")} AS realized_return_frac
+              FROM trading_paper_trades pt
+             WHERE pt.status = 'closed'
+               AND pt.scan_pattern_id IS NOT NULL
+               AND pt.scan_pattern_id != -1
+               AND pt.exit_date IS NOT NULL
+               AND pt.pnl IS NOT NULL
+               AND pt.entry_price IS NOT NULL
+               AND pt.entry_price > 0
+               AND pt.quantity IS NOT NULL
+               AND pt.quantity > 0
+               AND DATE(pt.exit_date) >= :start
+               AND DATE(pt.exit_date) <= :end
             """
         ),
         {"start": start, "end": end},
