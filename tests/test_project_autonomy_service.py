@@ -153,3 +153,27 @@ def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):
     assert plan["files"]
     assert len(plan["files"]) == 1
     assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+
+
+def test_vague_small_plan_is_narrowed_away_from_large_desktop_file(tmp_path):
+    large_file = tmp_path / "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
+    small_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+    large_file.parent.mkdir(parents=True)
+    large_file.write_text("\n".join("// line" for _ in range(800)), encoding="utf-8")
+    small_file.parent.mkdir(parents=True)
+    small_file.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
+    context = {"relevant_files": [], "hotspots": [], "insights": [], "repos": []}
+    plan = {
+        "analysis": "Improve loading feedback.",
+        "files": [{"path": "chili_mobile/lib/src/brain/brain_dispatch_screen.dart", "action": "modify"}],
+        "notes": "",
+    }
+
+    narrowed = orchestrator._narrow_plan_for_local_model(
+        plan,
+        context,
+        tmp_path,
+        "find a small enhancement for the desktop app",
+    )
+
+    assert narrowed["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"

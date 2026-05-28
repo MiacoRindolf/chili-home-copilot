@@ -710,6 +710,79 @@ def _rank_fallback_files(files: list[str], repo_path: Path | None, prompt: str) 
     return sorted(pool, key=sort_key)
 
 
+def _file_line_count(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0
+
+
+def _is_vague_small_request(prompt: str) -> bool:
+    prompt_lower = (prompt or "").lower()
+    return any(
+        phrase in prompt_lower
+        for phrase in (
+            "small enhancement",
+            "find a small",
+            "first prompt as a test",
+            "quick improvement",
+            "tiny improvement",
+        )
+    )
+
+
+def _narrow_plan_for_local_model(
+    plan: dict[str, Any],
+    context: dict[str, Any],
+    repo_path: Path | None,
+    prompt: str,
+) -> dict[str, Any]:
+    if not _is_vague_small_request(prompt) or repo_path is None:
+        return plan
+    raw_files = plan.get("files")
+    if not isinstance(raw_files, list):
+        return plan
+
+    picks_large_file = False
+    for item in raw_files:
+        if not isinstance(item, dict):
+            continue
+        rel = _safe_rel_path(str(item.get("path") or ""))
+        if rel is None:
+            continue
+        full = repo_path / rel
+        try:
+            size = full.stat().st_size
+        except OSError:
+            continue
+        if size > 50_000 or _file_line_count(full) > 700:
+            picks_large_file = True
+            break
+    if not picks_large_file:
+        return plan
+
+    fallback_files = _rank_fallback_files(_plan_candidate_files(context, repo_path, prompt), repo_path, prompt)[:1]
+    if not fallback_files:
+        return plan
+    narrowed = dict(plan)
+    narrowed["files"] = [
+        {
+            "path": fallback_files[0],
+            "action": "modify",
+            "description": (
+                "Make a focused, low-risk desktop usability enhancement in this small support file. "
+                f"Operator request: {_clip(prompt, 320)}"
+            ),
+        }
+    ]
+    notes = str(narrowed.get("notes") or "")
+    narrowed["notes"] = (notes + " " if notes else "") + (
+        "Narrowed to a smaller file because the request was vague and the local model selected a very large file."
+    )
+    return narrowed
+
+
 def _fallback_plan_from_context(
     context: dict[str, Any],
     repo_path: Path | None,
@@ -795,6 +868,10 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
         if fallback.get("files"):
             return fallback
         raise AutonomyBlocked("Local model did not return a usable implementation plan.")
+    narrowed = _narrow_plan_for_local_model(plan, context, repo_path, run.prompt)
+    if narrowed is not plan:
+        _add_artifact(db, run.run_id, "plan", "local_model_narrowed_plan", content_json=narrowed)
+        plan = narrowed
     plan.setdefault("analysis", "")
     plan.setdefault("files", [])
     plan.setdefault("notes", "")
@@ -1051,6 +1128,19 @@ def generate_diffs_from_plan(
         validity = _validate_diff(diff, rel, content)
         if not validity.get("valid"):
             _add_artifact(db, run.run_id, "diff_rejected", rel, content_json=validity)
+            continue
+        check = _git(repo_path, ["apply", "--check"], input_text=diff, timeout=60)
+        if check.returncode != 0:
+            _add_artifact(
+                db,
+                run.run_id,
+                "diff_rejected",
+                rel,
+                content_json={
+                    "reason": "git_apply_check_failed",
+                    "stderr": _clip(check.stderr or check.stdout or "", 900),
+                },
+            )
             continue
         diffs.append(diff)
         _add_artifact(db, run.run_id, "diff", rel, content=diff)
