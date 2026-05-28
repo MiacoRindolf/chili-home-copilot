@@ -109,13 +109,12 @@ def refine_desktop_transcription(message: str, trace_id: str = "desktop_refine")
                 trace_id=trace_id,
                 user_message=message,
             )
-        except Exception:
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": user_content}],
-                system_prompt=system,
-                trace_id=trace_id,
-                user_message=message,
+        except Exception as gw_error:
+            log_info(
+                trace_id,
+                f"desktop_refine_gateway_error={gw_error}; direct_openai_bypass_disabled",
             )
+            result = {"reply": "", "model": "gateway_error"}
         reply = (result.get("reply") or "").strip()
         if reply:
             log_info(trace_id, f"desktop_refine original={message!r} refined={reply!r}")
@@ -162,13 +161,12 @@ def normalize_app_name(app_name: str, trace_id: str = "desktop_norm") -> str:
                 trace_id=trace_id,
                 user_message=app_name,
             )
-        except Exception:
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": user_content}],
-                system_prompt=system,
-                trace_id=trace_id,
-                user_message=app_name,
+        except Exception as gw_error:
+            log_info(
+                trace_id,
+                f"desktop_norm_gateway_error={gw_error}; direct_openai_bypass_disabled",
             )
+            result = {"reply": "", "model": "gateway_error"}
         reply = (result.get("reply") or "").strip()
         if reply:
             log_info(trace_id, f"desktop_norm original={app_name!r} canonical={reply!r}")
