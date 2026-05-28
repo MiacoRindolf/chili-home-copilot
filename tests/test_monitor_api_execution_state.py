@@ -280,7 +280,115 @@ def test_edge_supply_endpoint_exposes_profitability_diagnostics(db, paired_clien
     assert row["graduation_blocker"] == "graduation_ready"
     assert row["recommended_work_event"] == "edge_reliability_refresh"
     assert row["cash_deployment_rank"] == 1
+    assert row["calibrated_ev_after_cost_pct"] == pytest.approx(2.45)
+    assert row["cash_deployment_category"] == "live_deployable"
+    assert row["allocation_score"] > 0
     assert body["summary"]["graduation_ready"] >= 1
+    assert body["cash_deployment_summary"]["live_deployable"] >= 1
+
+
+def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired_client):
+    client, user = paired_client
+
+    pat = ScanPattern(
+        name="cash_endpoint_ready",
+        rules_json={},
+        origin="brain",
+        asset_class="stock",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add(pat)
+    db.flush()
+
+    alert = BreakoutAlert(
+        user_id=user.id,
+        scan_pattern_id=pat.id,
+        ticker="CASHR",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        outcome="pending",
+        score_at_alert=86.0,
+        price_at_alert=50.0,
+        entry_price=50.0,
+        stop_loss=47.0,
+        target_price=58.0,
+        alerted_at=datetime.utcnow(),
+        indicator_snapshot={"imminent_scorecard": {"signal_lane": "standard"}},
+    )
+    db.add(alert)
+    db.flush()
+    db.add(
+        AutoTraderRun(
+            user_id=user.id,
+            breakout_alert_id=alert.id,
+            scan_pattern_id=pat.id,
+            ticker="CASHR",
+            decision="skipped",
+            reason="selector:secondary_gate_observation",
+            rule_snapshot={
+                "entry_edge": {
+                    "expected_net_pct": 2.0,
+                    "probability": 0.62,
+                    "breakeven_probability": 0.46,
+                    "probability_source": "pattern_regime_hit_rate",
+                },
+            },
+        )
+    )
+    for idx in range(5):
+        db.add(
+            PaperTrade(
+                scan_pattern_id=pat.id,
+                paper_shadow_of_alert_id=alert.id,
+                ticker="CASHR",
+                direction="long",
+                entry_price=50.0,
+                stop_price=47.0,
+                target_price=58.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(hours=idx + 2),
+                exit_date=datetime.utcnow() - timedelta(hours=idx + 1),
+                exit_price=52.0,
+                pnl=2.0,
+                pnl_pct=4.0,
+                signal_json={"paper_shadow": True},
+            )
+        )
+    db.add(
+        PaperTrade(
+            scan_pattern_id=None,
+            ticker="NULLW",
+            direction="short",
+            entry_price=100.0,
+            stop_price=110.0,
+            target_price=80.0,
+            quantity=10.0,
+            status="closed",
+            entry_date=datetime.utcnow() - timedelta(hours=3),
+            exit_date=datetime.utcnow() - timedelta(hours=2),
+            exit_price=85.0,
+            pnl=150.0,
+            pnl_pct=15.0,
+            signal_json={"source": "null_lineage_short", "direction": "short"},
+        )
+    )
+    db.commit()
+
+    resp = client.get("/api/trading/monitor/cash-deployment?window_days=7&limit=10")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    row = next(x for x in body["rows"] if x["scan_pattern_id"] == pat.id)
+    assert row["live_deployable"] is True
+    assert row["cash_deployment_rank"] == 1
+    assert row["calibrated_ev_after_cost_pct"] > 0
+    assert row["max_safe_notional"] > 0
+    assert body["summary"]["live_deployable"] >= 1
+    assert body["summary"]["needs_provenance"] >= 1
+    assert body["null_lineage_research_candidates"][0]["cash_deployment_category"] == "needs_provenance"
 
 
 def test_active_setups_exposes_execution_state(db, paired_client):

@@ -71,6 +71,29 @@ def test_claim_and_complete_work_row(db) -> None:
     assert rows2 == []
 
 
+def test_claim_prioritizes_expected_evidence_value_within_type(db) -> None:
+    low = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="xv:low-evidence",
+        payload={"scan_pattern_id": 1001, "expected_evidence_value": 1.0},
+        lease_scope="edge",
+    )
+    high = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="xv:high-evidence",
+        payload={"scan_pattern_id": 1002, "expected_evidence_value": 9.0},
+        lease_scope="edge",
+    )
+    db.commit()
+
+    rows = claim_work_batch(db, limit=2, lease_seconds=60, holder_id="pytest:evidence", event_type="exit_variant_refresh")
+    db.commit()
+
+    assert [int(row.id) for row in rows] == [high, low]
+
+
 def test_release_stale_lease_marks_retry(db) -> None:
     from sqlalchemy import text
 

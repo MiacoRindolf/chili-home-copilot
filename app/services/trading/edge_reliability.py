@@ -299,6 +299,7 @@ def compute_pattern_edge_reliability(
     signal_lanes: Counter[str] = Counter()
     probability_sources: Counter[str] = Counter()
     asset_types: Counter[str] = Counter()
+    tickers: Counter[str] = Counter()
     latest_seen: datetime | None = None
     prob_by_alert: dict[int, float] = {}
 
@@ -324,6 +325,13 @@ def compute_pattern_edge_reliability(
         signal_lanes[_signal_lane_for(alert, run)] += 1
         source = str(edge.get("probability_source") or "unknown").strip() or "unknown"
         probability_sources[source] += 1
+        ticker = str(
+            getattr(run, "ticker", None)
+            or getattr(alert, "ticker", None)
+            or ""
+        ).strip().upper()
+        if ticker:
+            tickers[ticker] += 1
         asset = str(
             getattr(alert, "asset_type", None)
             or getattr(pattern, "asset_class", None)
@@ -485,6 +493,8 @@ def compute_pattern_edge_reliability(
         "probability_sources": dict(probability_sources),
         "signal_lanes": dict(signal_lanes),
         "asset_types": dict(asset_types),
+        "tickers": dict(tickers),
+        "primary_symbol": tickers.most_common(1)[0][0] if tickers else None,
         "reason_counts": dict(reason_counts),
         "decision_counts": dict(decision_counts),
         "graduation_blocker": blocker,

@@ -21,6 +21,14 @@ def brain_work_ledger_enabled() -> bool:
     return bool(getattr(settings, "brain_work_ledger_enabled", True))
 
 
+def _expected_evidence_value(ev: BrainWorkEvent) -> float:
+    payload = ev.payload if isinstance(ev.payload, dict) else {}
+    try:
+        return float(payload.get("expected_evidence_value") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def enqueue_work_event(
     db: Session,
     *,
@@ -194,7 +202,14 @@ _CLAIM_SQL_WORK_ONLY = text(
           AND event_type = :etype
           AND status IN ('pending', 'retry_wait')
           AND next_run_at <= CURRENT_TIMESTAMP
-        ORDER BY next_run_at ASC, created_at ASC
+        ORDER BY
+          CASE
+            WHEN (payload->>'expected_evidence_value') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+            THEN (payload->>'expected_evidence_value')::double precision
+            ELSE 0.0
+          END DESC,
+          next_run_at ASC,
+          created_at ASC
         LIMIT :lim
         FOR UPDATE SKIP LOCKED
     ) AS sub
@@ -220,7 +235,14 @@ _CLAIM_SQL_ANY_KIND = text(
           AND event_type = :etype
           AND status IN ('pending', 'retry_wait')
           AND next_run_at <= CURRENT_TIMESTAMP
-        ORDER BY next_run_at ASC, created_at ASC
+        ORDER BY
+          CASE
+            WHEN (payload->>'expected_evidence_value') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+            THEN (payload->>'expected_evidence_value')::double precision
+            ELSE 0.0
+          END DESC,
+          next_run_at ASC,
+          created_at ASC
         LIMIT :lim
         FOR UPDATE SKIP LOCKED
     ) AS sub
@@ -255,12 +277,20 @@ def claim_work_batch(
     if not ids:
         return []
     db.expire_all()
-    return (
+    rows = (
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.id.in_(ids))
-        .order_by(BrainWorkEvent.next_run_at.asc(), BrainWorkEvent.created_at.asc())
         .all()
     )
+    rows.sort(
+        key=lambda ev: (
+            -_expected_evidence_value(ev),
+            ev.next_run_at,
+            ev.created_at,
+            int(ev.id),
+        )
+    )
+    return rows
 
 
 _RELEASE_STALE_SQL_WORK_ONLY = text(
