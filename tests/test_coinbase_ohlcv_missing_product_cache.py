@@ -41,6 +41,16 @@ class _QuoteResponse:
         return {"price": "123.45", "bid": "123.40", "ask": "123.50"}
 
 
+class _RateLimitResponse:
+    status_code = 429
+    headers = {"Retry-After": "2"}
+
+    def raise_for_status(self) -> None:
+        exc = requests.HTTPError("429 Client Error: Too Many Requests")
+        exc.response = self
+        raise exc
+
+
 def _raise_not_found(*_args, **_kwargs):
     return _Response()
 
@@ -145,3 +155,48 @@ def test_public_product_catalog_allows_known_product_quote(monkeypatch):
         f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products",
         f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/BTC-USD/ticker",
     ]
+
+
+def test_quote_429_opens_provider_backoff(monkeypatch):
+    calls: list[str] = []
+    now = [100.0]
+
+    def _get(url, **_kwargs):
+        calls.append(str(url))
+        if len(calls) == 1:
+            return _RateLimitResponse()
+        return _QuoteResponse()
+
+    monkeypatch.setenv("CHILI_COINBASE_OHLCV_PRODUCT_PREFILTER_ENABLED", "0")
+    monkeypatch.setattr(coinbase_ohlcv.time, "time", lambda: now[0])
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.get_quote("BTC-USD") is None
+    assert coinbase_ohlcv.get_quote("ETH-USD") is None
+    assert calls == [
+        f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/BTC-USD/ticker",
+    ]
+
+    now[0] += 2.1
+
+    quote = coinbase_ohlcv.get_quote("ETH-USD")
+    assert quote is not None
+    assert quote["last_price"] == 123.45
+    assert calls[-1] == (
+        f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/ETH-USD/ticker"
+    )
+
+
+def test_catalog_429_does_not_fall_through_to_product_request(monkeypatch):
+    calls: list[str] = []
+
+    def _get(url, **_kwargs):
+        calls.append(str(url))
+        if str(url).endswith("/products"):
+            return _RateLimitResponse()
+        raise AssertionError(f"unexpected product-specific request: {url}")
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.get_quote("BTC-USD") is None
+    assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]

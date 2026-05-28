@@ -60,8 +60,10 @@ _COINBASE_PRODUCT_LIST_TTL_ENV = "CHILI_COINBASE_OHLCV_PRODUCT_LIST_TTL_SECONDS"
 _COINBASE_PRODUCT_LIST_FAILURE_TTL_ENV = (
     "CHILI_COINBASE_OHLCV_PRODUCT_LIST_FAILURE_TTL_SECONDS"
 )
+_COINBASE_RATE_LIMIT_BACKOFF_ENV = "CHILI_COINBASE_OHLCV_RATE_LIMIT_BACKOFF_SECONDS"
 _COINBASE_DEFAULT_PRODUCT_LIST_TTL_S = 3600
 _COINBASE_DEFAULT_PRODUCT_LIST_FAILURE_TTL_S = 300
+_COINBASE_DEFAULT_RATE_LIMIT_BACKOFF_S = 60
 
 
 # Coinbase Exchange API granularities (seconds). Anything else returns 400.
@@ -94,6 +96,9 @@ _CIRCUIT_LOCK = threading.Lock()
 _CIRCUIT_FAILS = 0
 _CIRCUIT_OPEN_UNTIL = 0.0
 _CIRCUIT_LAST_LOG = 0.0
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_OPEN_UNTIL = 0.0
+_RATE_LIMIT_LAST_LOG = 0.0
 _MISSING_PRODUCT_LOCK = threading.Lock()
 _MISSING_PRODUCTS: dict[str, float] = {}
 _PRODUCT_CATALOG_LOCK = threading.Lock()
@@ -166,17 +171,29 @@ def _product_list_failure_ttl_s() -> int:
     )
 
 
+def _rate_limit_backoff_s() -> int:
+    return _env_int(
+        _COINBASE_RATE_LIMIT_BACKOFF_ENV,
+        _COINBASE_DEFAULT_RATE_LIMIT_BACKOFF_S,
+    )
+
+
 def reset_missing_product_cache_for_tests() -> None:
     """Clear Coinbase product caches for focused tests."""
     global _PRODUCT_CATALOG_IDS
     global _PRODUCT_CATALOG_EXPIRES_AT
     global _PRODUCT_CATALOG_RETRY_AFTER
+    global _RATE_LIMIT_OPEN_UNTIL
+    global _RATE_LIMIT_LAST_LOG
     with _MISSING_PRODUCT_LOCK:
         _MISSING_PRODUCTS.clear()
     with _PRODUCT_CATALOG_LOCK:
         _PRODUCT_CATALOG_IDS = None
         _PRODUCT_CATALOG_EXPIRES_AT = 0.0
         _PRODUCT_CATALOG_RETRY_AFTER = 0.0
+    with _RATE_LIMIT_LOCK:
+        _RATE_LIMIT_OPEN_UNTIL = 0.0
+        _RATE_LIMIT_LAST_LOG = 0.0
 
 
 def _product_not_found(exc: requests.RequestException) -> bool:
@@ -228,6 +245,8 @@ def _catalog_product_id(row: Any) -> str:
 
 
 def _fetch_public_product_catalog() -> set[str] | None:
+    if _rate_limit_is_open("catalog", "products"):
+        return None
     url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{_COINBASE_PRODUCTS_PATH}"
     try:
         resp = _SESSION.get(url, timeout=_request_timeout_s())
@@ -297,6 +316,58 @@ def _circuit_is_open(product_id: str, interval: str) -> bool:
         return True
 
 
+def _rate_limit_is_open(product_id: str, interval: str) -> bool:
+    """Return True while a Coinbase 429 backoff is active."""
+    global _RATE_LIMIT_LAST_LOG
+    now = time.time()
+    with _RATE_LIMIT_LOCK:
+        remaining = _RATE_LIMIT_OPEN_UNTIL - now
+        if remaining <= 0:
+            return False
+        if now - _RATE_LIMIT_LAST_LOG >= 60:
+            _RATE_LIMIT_LAST_LOG = now
+            logger.warning(
+                "[coinbase_ohlcv] rate-limit backoff OPEN - skipping %s %s (%ss remaining)",
+                product_id,
+                interval,
+                int(remaining),
+            )
+        return True
+
+
+def _retry_after_seconds(exc: requests.RequestException) -> int:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    raw = None
+    if headers is not None:
+        try:
+            raw = headers.get("Retry-After")
+        except AttributeError:
+            raw = None
+    try:
+        return max(1, int(float(str(raw))))
+    except (TypeError, ValueError):
+        return _rate_limit_backoff_s()
+
+
+def _record_rate_limit_backoff(exc: requests.RequestException) -> None:
+    global _RATE_LIMIT_OPEN_UNTIL
+    global _RATE_LIMIT_LAST_LOG
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status != 429:
+        return
+    backoff_s = _retry_after_seconds(exc)
+    until = time.time() + backoff_s
+    with _RATE_LIMIT_LOCK:
+        _RATE_LIMIT_OPEN_UNTIL = max(_RATE_LIMIT_OPEN_UNTIL, until)
+        _RATE_LIMIT_LAST_LOG = time.time()
+    logger.warning(
+        "[coinbase_ohlcv] rate-limit backoff OPEN - 429 from Coinbase, "
+        "skipping calls for %ss",
+        backoff_s,
+    )
+
+
 def _request_failure_counts(exc: requests.RequestException) -> bool:
     if _product_not_found(exc):
         return False
@@ -318,6 +389,7 @@ def _record_request_success() -> None:
 
 def _record_request_failure(exc: requests.RequestException) -> None:
     global _CIRCUIT_FAILS, _CIRCUIT_OPEN_UNTIL, _CIRCUIT_LAST_LOG
+    _record_rate_limit_backoff(exc)
     if not _request_failure_counts(exc):
         return
     trip = _env_int("CHILI_COINBASE_OHLCV_CIRCUIT_TRIP", 5)
@@ -425,9 +497,13 @@ def get_ohlcv(
         return []
     if _circuit_is_open(product_id, interval):
         return []
+    if _rate_limit_is_open(product_id, interval):
+        return []
     support = _public_product_support(product_id)
     if support is False:
         _mark_product_missing(product_id)
+        return []
+    if _rate_limit_is_open(product_id, interval):
         return []
     start_dt, end_dt = _resolve_window(start=start, end=end, period=period)
 
@@ -509,9 +585,13 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
         return None
     if _circuit_is_open(product_id, "quote"):
         return None
+    if _rate_limit_is_open(product_id, "quote"):
+        return None
     support = _public_product_support(product_id)
     if support is False:
         _mark_product_missing(product_id)
+        return None
+    if _rate_limit_is_open(product_id, "quote"):
         return None
     path = _COINBASE_TICKER_PATH_TEMPLATE.format(product_id=product_id)
     url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{path}"
