@@ -38,6 +38,37 @@ MEMORY_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CLAUSE_SPLIT_RE = re.compile(
+    r"[.;!\n]+|\s+(?:and|also|but)\s+(?=(?:i\b|i[' ]?m\b|im\b|i[' ]?ve\b|ive\b|my\b))",
+    re.IGNORECASE,
+)
+_INTEREST_RE = re.compile(
+    r"^(?:i\s+)?(?:really\s+|very\s+)?(?:love|like|enjoy|am into|i[' ]?m into|im into)\s+(.+)$",
+    re.IGNORECASE,
+)
+_FAVORITE_RE = re.compile(
+    r"^my\s+favorite\s+([\w -]{2,40})\s+is\s+(.+)$",
+    re.IGNORECASE,
+)
+_DIETARY_RE = re.compile(
+    r"^(?:i(?:'m| am)|im)\s+(vegetarian|vegan|gluten[- ]free|dairy[- ]free|pescatarian|keto|kosher|halal)\b",
+    re.IGNORECASE,
+)
+_ALLERGY_RE = re.compile(
+    r"^(?:i(?:'m| am)|im)\s+allergic\s+to\s+(.+)$",
+    re.IGNORECASE,
+)
+_WORK_RE = re.compile(
+    r"^(?:i\s+)?(?:work\s+as|work\s+in|am\s+working\s+as|i[' ]?m\s+working\s+as|im\s+working\s+as)\s+(.+)$",
+    re.IGNORECASE,
+)
+_GOAL_RE = re.compile(
+    r"^(?:i\s+)?(?:want\s+to|plan\s+to|hope\s+to|my\s+goal\s+is\s+to|goal\s+is\s+to)\s+(.+)$",
+    re.IGNORECASE,
+)
+_DUPLICATE_PREFIX_RE = re.compile(r"^(?:likes|loves|enjoys)\s+", re.IGNORECASE)
+_VAGUE_OBJECTS = {"it", "this", "that", "things", "stuff", "them"}
+
 EXTRACTION_PROMPT = (
     "From this conversation exchange, extract any personal facts about the user. "
     "Focus on things worth remembering long-term: interests, preferences, habits, "
@@ -65,54 +96,104 @@ def _should_extract(action_type: str | None, user_message: str) -> bool:
     return bool(MEMORY_SIGNAL_RE.search(msg))
 
 
-def extract_facts(
-    user_message: str,
-    assistant_reply: str,
-    user_id: int,
-    db: Session,
-    action_type: str | None = None,
-    source_message_id: int | None = None,
-    trace_id: str = "memory",
-) -> list[dict]:
-    """Extract personal facts from a conversation turn and store them.
+def _clean_mechanical_value(value: str) -> str:
+    text = re.sub(r"\s+", " ", (value or "").strip(" .;!?,\"'"))
+    text = re.sub(r"\s+(?:a lot|so much|very much|too)$", "", text, flags=re.IGNORECASE)
+    return text.strip(" .;!?,\"'")
 
-    Returns list of newly stored facts (may be empty).
+
+def _title_fact(value: str) -> str:
+    value = _clean_mechanical_value(value)
+    if not value:
+        return ""
+    return value[0].upper() + value[1:]
+
+
+def _mechanical_fact_for_clause(clause: str) -> dict | None:
+    text = _clean_mechanical_value(clause)
+    if not text:
+        return None
+
+    match = _DIETARY_RE.match(text)
+    if match:
+        diet = match.group(1).replace("-", " ").title()
+        return {"category": "dietary", "content": diet}
+
+    match = _ALLERGY_RE.match(text)
+    if match:
+        item = _title_fact(match.group(1))
+        if item:
+            return {"category": "health", "content": f"Allergic to {item.lower()}"}
+        return None
+
+    match = _WORK_RE.match(text)
+    if match:
+        role = _clean_mechanical_value(match.group(1))
+        if role and role.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "work", "content": f"Works as {role}"}
+        return None
+
+    match = _GOAL_RE.match(text)
+    if match:
+        goal = _clean_mechanical_value(match.group(1))
+        if goal and goal.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "goal", "content": f"Goal: {goal}"}
+        return None
+
+    match = _FAVORITE_RE.match(text)
+    if match:
+        kind = _clean_mechanical_value(match.group(1)).lower()
+        thing = _clean_mechanical_value(match.group(2))
+        if thing and thing.casefold() not in _VAGUE_OBJECTS:
+            category = "interest" if any(word in kind for word in ("hobby", "activity", "sport", "food")) else "preference"
+            return {"category": category, "content": f"Favorite {kind}: {thing}"}
+        return None
+
+    match = _INTEREST_RE.match(text)
+    if match:
+        thing = _clean_mechanical_value(match.group(1))
+        if thing and thing.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "interest", "content": f"Likes {thing}"}
+
+    return None
+
+
+def _extract_mechanical_facts(user_message: str) -> tuple[list[dict], bool]:
+    """Extract simple explicit facts without LLM help.
+
+    The boolean is True only when every memory-bearing clause was handled,
+    letting the caller skip the LLM for clearly mechanical cases.
     """
-    if not openai_client.is_configured():
-        return []
+    clauses = [
+        _clean_mechanical_value(part)
+        for part in _CLAUSE_SPLIT_RE.split(user_message or "")
+        if _clean_mechanical_value(part)
+    ]
+    facts: list[dict] = []
+    unmatched = 0
+    seen: set[tuple[str, str]] = set()
 
-    if not _should_extract(action_type, user_message):
-        return []
+    for clause in clauses:
+        fact = _mechanical_fact_for_clause(clause)
+        if not fact:
+            unmatched += 1
+            continue
+        key = (str(fact.get("category") or ""), str(fact.get("content") or "").casefold())
+        if key not in seen:
+            facts.append(fact)
+            seen.add(key)
 
-    exchange = f"USER: {user_message}\nASSISTANT: {assistant_reply}"
-    prompt = EXTRACTION_PROMPT + exchange
+    return facts, bool(facts) and unmatched == 0
 
-    try:
-        try:
-            from .services.context_brain.llm_gateway import gateway_chat
-            result = gateway_chat(
-                messages=[{"role": "user", "content": prompt}],
-                purpose='memory_extract',
-                system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
-                trace_id=trace_id,
-            )
-        except Exception:
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
-                trace_id=trace_id,
-            )
-    except Exception as e:
-        log_info(trace_id, f"memory_extraction_error={e}")
-        return []
 
-    if not result.get("reply"):
-        return []
-
-    facts = _parse_facts(result["reply"], trace_id)
-    if not facts:
-        return []
-
+def _store_facts(
+    *,
+    user_id: int,
+    facts: list[dict],
+    db: Session,
+    source_message_id: int | None,
+    trace_id: str,
+) -> list[dict]:
     stored = []
     for fact in facts:
         category = fact.get("category", "").lower().strip()
@@ -140,6 +221,111 @@ def extract_facts(
     return stored
 
 
+def _memory_duplicate_key(content: str) -> str:
+    normalized = _clean_mechanical_value(content).casefold()
+    normalized = _DUPLICATE_PREFIX_RE.sub("", normalized).strip()
+    return normalized
+
+
+def extract_facts(
+    user_message: str,
+    assistant_reply: str,
+    user_id: int,
+    db: Session,
+    action_type: str | None = None,
+    source_message_id: int | None = None,
+    trace_id: str = "memory",
+) -> list[dict]:
+    """Extract personal facts from a conversation turn and store them.
+
+    Returns list of newly stored facts (may be empty).
+    """
+    if not _should_extract(action_type, user_message):
+        return []
+
+    mechanical_facts, mechanical_complete = _extract_mechanical_facts(user_message)
+    if mechanical_complete:
+        return _store_facts(
+            user_id=user_id,
+            facts=mechanical_facts,
+            db=db,
+            source_message_id=source_message_id,
+            trace_id=trace_id,
+        )
+
+    if not openai_client.is_configured():
+        if mechanical_facts:
+            return _store_facts(
+                user_id=user_id,
+                facts=mechanical_facts,
+                db=db,
+                source_message_id=source_message_id,
+                trace_id=trace_id,
+            )
+        return []
+
+    exchange = f"USER: {user_message}\nASSISTANT: {assistant_reply}"
+    prompt = EXTRACTION_PROMPT + exchange
+
+    try:
+        try:
+            from .services.context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=[{"role": "user", "content": prompt}],
+                purpose='memory_extract',
+                system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
+                trace_id=trace_id,
+            )
+        except Exception:
+            result = openai_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
+                trace_id=trace_id,
+            )
+    except Exception as e:
+        log_info(trace_id, f"memory_extraction_error={e}")
+        if mechanical_facts:
+            return _store_facts(
+                user_id=user_id,
+                facts=mechanical_facts,
+                db=db,
+                source_message_id=source_message_id,
+                trace_id=trace_id,
+            )
+        return []
+
+    if not result.get("reply"):
+        if mechanical_facts:
+            return _store_facts(
+                user_id=user_id,
+                facts=mechanical_facts,
+                db=db,
+                source_message_id=source_message_id,
+                trace_id=trace_id,
+            )
+        return []
+
+    facts = _parse_facts(result["reply"], trace_id)
+    if not facts:
+        if mechanical_facts:
+            return _store_facts(
+                user_id=user_id,
+                facts=mechanical_facts,
+                db=db,
+                source_message_id=source_message_id,
+                trace_id=trace_id,
+            )
+        return []
+
+    return _store_facts(
+        user_id=user_id,
+        facts=facts,
+        db=db,
+        source_message_id=source_message_id,
+        trace_id=trace_id,
+    )
+
+
 def _parse_facts(text: str, trace_id: str) -> list[dict]:
     """Parse LLM response into a list of fact dicts."""
     text = text.strip()
@@ -158,7 +344,7 @@ def _parse_facts(text: str, trace_id: str) -> list[dict]:
 
 def _is_duplicate(user_id: int, content: str, db: Session) -> bool:
     """Check if an identical (case-insensitive) fact already exists for this user."""
-    normalized = content.lower().strip()
+    normalized = _memory_duplicate_key(content)
     existing = (
         db.query(UserMemory)
         .filter(
@@ -168,7 +354,7 @@ def _is_duplicate(user_id: int, content: str, db: Session) -> bool:
         .all()
     )
     for mem in existing:
-        if mem.content.lower().strip() == normalized:
+        if _memory_duplicate_key(mem.content) == normalized:
             return True
     return False
 

@@ -11,6 +11,8 @@ from app.memory import (
     get_interest_breakdown,
     delete_memory,
     _should_extract,
+    _extract_mechanical_facts,
+    _memory_duplicate_key,
     _is_duplicate,
     _parse_facts,
     VALID_CATEGORIES,
@@ -71,6 +73,29 @@ class TestParseFacts:
 
     def test_no_brackets(self):
         assert _parse_facts('{"key": "val"}', "test") == []
+
+
+# ---------------------------------------------------------------------------
+# _extract_mechanical_facts
+# ---------------------------------------------------------------------------
+
+class TestMechanicalFacts:
+    def test_extracts_explicit_interest_and_diet_without_llm(self):
+        facts, complete = _extract_mechanical_facts("I love hiking and I'm vegetarian")
+        assert complete is True
+        assert facts == [
+            {"category": "interest", "content": "Likes hiking"},
+            {"category": "dietary", "content": "Vegetarian"},
+        ]
+
+    def test_leaves_mixed_ambiguous_message_for_llm(self):
+        facts, complete = _extract_mechanical_facts("I love hiking and my brother is Sam")
+        assert complete is False
+        assert facts == [{"category": "interest", "content": "Likes hiking"}]
+
+    def test_duplicate_key_normalizes_interest_verbs(self):
+        assert _memory_duplicate_key("Likes hiking") == _memory_duplicate_key("Enjoys hiking")
+        assert _memory_duplicate_key("Loves hiking") == "hiking"
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +166,7 @@ class TestExtractFacts:
         assert len(result) == 2
         assert result[0]["category"] == "interest"
         assert result[1]["category"] == "dietary"
+        mock_client.chat.assert_not_called()
 
         stored = db.query(UserMemory).filter(UserMemory.user_id == user.id).all()
         assert len(stored) == 2
@@ -149,8 +175,21 @@ class TestExtractFacts:
     def test_skips_when_not_configured(self, mock_client, db):
         mock_client.is_configured.return_value = False
 
-        result = extract_facts("I love hiking", "Cool!", 1, db, trace_id="test")
+        result = extract_facts("Something personal", "Cool!", 1, db, trace_id="test")
         assert result == []
+
+    @patch("app.memory.openai_client")
+    def test_mechanical_facts_do_not_require_llm_configuration(self, mock_client, db):
+        mock_client.is_configured.return_value = False
+
+        user = User(name="NoLlmMemUser")
+        db.add(user)
+        db.commit()
+
+        result = extract_facts("I'm allergic to peanuts", "Noted.", user.id, db, trace_id="test")
+
+        assert result == [{"category": "health", "content": "Allergic to peanuts"}]
+        mock_client.chat.assert_not_called()
 
     @patch("app.memory.openai_client")
     def test_skips_tool_actions(self, mock_client, db):
@@ -200,7 +239,7 @@ class TestExtractFacts:
         mock_client.is_configured.return_value = True
         mock_client.chat.side_effect = Exception("LLM down")
 
-        result = extract_facts("I love hiking", "Cool!", 1, db, trace_id="test")
+        result = extract_facts("Something personal", "Cool!", 1, db, trace_id="test")
         assert result == []
 
     @patch("app.memory.openai_client")
@@ -208,7 +247,7 @@ class TestExtractFacts:
         mock_client.is_configured.return_value = True
         mock_client.chat.return_value = {"reply": "", "model": "test", "tokens_used": 0}
 
-        result = extract_facts("I love hiking", "Cool!", 1, db, trace_id="test")
+        result = extract_facts("Something personal", "Cool!", 1, db, trace_id="test")
         assert result == []
 
 
