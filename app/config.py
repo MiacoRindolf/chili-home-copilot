@@ -58,6 +58,7 @@ AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_ENABLED = True
 AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS = (
     AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS * 3
 )
+AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED = True
 AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED = True
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_MINUTES = 5
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_MINUTES = 60
@@ -2781,6 +2782,18 @@ class Settings(BaseSettings):
         description=(
             "Freshness window used by the AutoTrader candidate fast lane. "
             "Older unprocessed alerts remain eligible after the fresh queue."
+        ),
+    )
+    chili_autotrader_fresh_candidate_burst_enabled: bool = Field(
+        default=AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FRESH_CANDIDATE_BURST_ENABLED"
+        ),
+        description=(
+            "When true, AutoTrader expands the selected batch only for the "
+            "fresh-candidate fast lane, sized from the freshness window and "
+            "scheduler cadence, so alert bursts are evaluated before they age "
+            "into slippage without increasing live-trading eligibility."
         ),
     )
     chili_autotrader_candidate_price_prefetch_enabled: bool = Field(
