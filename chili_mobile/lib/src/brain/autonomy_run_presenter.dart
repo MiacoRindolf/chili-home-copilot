@@ -268,12 +268,20 @@ class AutonomyRunPresenter {
     if (plan.isEmpty) return '';
     final analysis = _safePlanText(plan['analysis']);
     final notes = _safePlanText(plan['notes']);
-    final files = _mapList(plan['files'])
+    final fileItems = _mapList(plan['files']);
+    final files = fileItems
         .map((file) => _firstText(file, ['path', 'file']))
         .where((path) => path.isNotEmpty)
         .toList();
+    final changes = fileItems
+        .map((file) => _safePlanText(file['description']))
+        .where((description) => description.isNotEmpty)
+        .toList();
     final parts = <String>[];
     if (analysis.isNotEmpty) parts.add(analysis);
+    if (changes.isNotEmpty) {
+      parts.add('Plan: ${_listSummary(changes, limit: 3)}.');
+    }
     if (files.isNotEmpty) {
       parts.add('Files: ${_listSummary(files, limit: 6)}.');
     }

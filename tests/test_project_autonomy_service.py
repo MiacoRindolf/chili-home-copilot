@@ -132,9 +132,9 @@ def test_build_local_plan_uses_bounded_warm_ollama_options(monkeypatch, tmp_path
 def test_build_local_plan_uses_heuristic_fast_path_for_vague_small_request(monkeypatch, tmp_path):
     db = _sqlite_autonomy_session()
     try:
-        target = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+        target = tmp_path / "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
         target.parent.mkdir(parents=True)
-        target.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
+        target.write_text("class AutonomyRunPresenter {}\n", encoding="utf-8")
         repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
         db.add(repo)
         db.commit()
@@ -161,13 +161,14 @@ def test_build_local_plan_uses_heuristic_fast_path_for_vague_small_request(monke
 
         plan = orchestrator.build_local_plan(db, run, repo)
 
-        assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+        assert plan["files"][0]["path"] == "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
+        assert "Autopilot cockpit polish" in plan["analysis"]
         artifact = (
             db.query(ProjectAutonomyArtifact)
             .filter(ProjectAutonomyArtifact.run_id == run.run_id, ProjectAutonomyArtifact.name == "heuristic_plan_fast_path")
             .one()
         )
-        assert "conservative local planning path" in (artifact.content_json or "")
+        assert "Autopilot cockpit polish" in (artifact.content_json or "")
     finally:
         db.close()
 
@@ -593,9 +594,11 @@ def test_recover_orphaned_runs_blocks_pre_restart_active_run(monkeypatch):
 
 
 def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):
+    presenter_file = tmp_path / "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
     desktop_file = tmp_path / "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
     error_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
-    desktop_file.parent.mkdir(parents=True)
+    presenter_file.parent.mkdir(parents=True)
+    presenter_file.write_text("class AutonomyRunPresenter {}\n", encoding="utf-8")
     desktop_file.write_text("// desktop brain screen\n", encoding="utf-8")
     error_file.parent.mkdir(parents=True)
     error_file.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
@@ -615,7 +618,56 @@ def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):
 
     assert plan["files"]
     assert len(plan["files"]) == 1
-    assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+    assert plan["files"][0]["path"] == "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
+    assert "Autopilot cockpit polish" in plan["analysis"]
+
+
+def test_heuristic_plan_revision_overrides_incidental_network_words(tmp_path):
+    presenter_file = tmp_path / "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
+    api_file = tmp_path / "chili_mobile/lib/src/network/chili_api_client.dart"
+    presenter_file.parent.mkdir(parents=True)
+    presenter_file.write_text("class AutonomyRunPresenter {}\n", encoding="utf-8")
+    api_file.parent.mkdir(parents=True)
+    api_file.write_text("class ChiliApiClient {}\n", encoding="utf-8")
+    context = {"repos": [], "insights": [], "hotspots": [], "relevant_files": []}
+
+    plan = orchestrator._fallback_plan_from_context(
+        context,
+        tmp_path,
+        (
+            "find a small enhancement for the desktop app. revise to an Autopilot cockpit "
+            "plan presentation and do not target API/network errors"
+        ),
+        "fast path",
+    )
+
+    assert plan["files"][0]["path"] == "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
+    assert "Autopilot cockpit polish" in plan["analysis"]
+
+
+def test_deterministic_small_desktop_diff_updates_presenter_plan_copy():
+    content = (
+        "class AutonomyRunPresenter {\n"
+        "  static String planBody(Map<String, dynamic> plan) {\n"
+        "    if (plan.isEmpty) return '';\n"
+        "    final analysis = _safePlanText(plan['analysis']);\n"
+        "    final notes = _safePlanText(plan['notes']);\n"
+        f"{orchestrator.PRESENTER_PLAN_BODY_OLD_SNIPPET}"
+        "    if (notes.isNotEmpty && notes != analysis) parts.add(notes);\n"
+        "    return parts.join('\\n\\n');\n"
+        "  }\n"
+        "}\n"
+    )
+
+    diff = orchestrator._deterministic_small_desktop_diff(
+        orchestrator.DESKTOP_AUTOPILOT_PRESENTER_FILE,
+        content,
+        "find a small enhancement for the desktop app",
+    )
+
+    assert diff is not None
+    assert "final fileItems = _mapList(plan['files']);" in diff
+    assert "Plan: ${_listSummary(changes, limit: 3)}." in diff
 
 
 def test_heuristic_plan_fallback_prefers_available_deterministic_desktop_patch(tmp_path):
@@ -653,7 +705,7 @@ def test_heuristic_plan_fallback_prefers_available_deterministic_desktop_patch(t
     plan = orchestrator._fallback_plan_from_context(
         context,
         tmp_path,
-        "find a small enhancement for the desktop app",
+        "find a small enhancement for the desktop app API error handling",
         "fast path",
     )
 
@@ -662,11 +714,11 @@ def test_heuristic_plan_fallback_prefers_available_deterministic_desktop_patch(t
 
 def test_vague_small_plan_is_narrowed_away_from_large_desktop_file(tmp_path):
     large_file = tmp_path / "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
-    small_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+    small_file = tmp_path / "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
     large_file.parent.mkdir(parents=True)
     large_file.write_text("\n".join("// line" for _ in range(800)), encoding="utf-8")
-    small_file.parent.mkdir(parents=True)
-    small_file.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
+    small_file.parent.mkdir(parents=True, exist_ok=True)
+    small_file.write_text("class AutonomyRunPresenter {}\n", encoding="utf-8")
     context = {"relevant_files": [], "hotspots": [], "insights": [], "repos": []}
     plan = {
         "analysis": "Improve loading feedback.",
@@ -681,7 +733,7 @@ def test_vague_small_plan_is_narrowed_away_from_large_desktop_file(tmp_path):
         "find a small enhancement for the desktop app",
     )
 
-    assert narrowed["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+    assert narrowed["files"][0]["path"] == "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
 
 
 def test_runtime_resolves_container_aliases_to_host_workspace():

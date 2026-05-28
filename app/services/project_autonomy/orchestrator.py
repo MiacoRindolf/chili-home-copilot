@@ -99,6 +99,94 @@ ERROR_SNIPPET_LIMIT = 900
 CHAT_REPLY_LIMIT = 1800
 WORKTREE_GIT_TIMEOUT_SEC = 180
 PLAN_START_CHAT_ACTION_LABEL = "Start plan"
+DESKTOP_AUTOPILOT_PRESENTER_FILE = "chili_mobile/lib/src/brain/autonomy_run_presenter.dart"
+DESKTOP_AUTOPILOT_COCKPIT_FILE = "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
+DESKTOP_NETWORK_ERROR_FILE = "chili_mobile/lib/src/network/network_error_message.dart"
+DESKTOP_API_CLIENT_FILE = "chili_mobile/lib/src/network/chili_api_client.dart"
+BROAD_DESKTOP_PLAN_ANALYSIS = (
+    "Your request is broad, so I chose a small Autopilot cockpit polish instead of guessing across the app."
+)
+BROAD_DESKTOP_PLAN_DESCRIPTION = (
+    "Improve Autopilot plan presentation so broad requests explain the chosen enhancement and approval path clearly."
+)
+BROAD_DESKTOP_PLAN_NOTES = (
+    "Approval-first: send feedback to steer the enhancement, or approve to implement it in a worktree."
+)
+BROAD_DESKTOP_INTERNAL_REASON = "broad desktop enhancement routed to autopilot cockpit polish"
+BROAD_DESKTOP_DETAIL_TOKENS = frozenset({
+    "api",
+    "auth",
+    "backend url",
+    "certificate",
+    "connection",
+    "error",
+    "http",
+    "json",
+    "network",
+    "response",
+    "timeout",
+})
+DESKTOP_UI_PROMPT_TOKENS = frozenset({"app", "desktop", "flutter", "native", "screen", "ui"})
+DESKTOP_AUTOPILOT_PROMPT_TOKENS = frozenset({"autonomous", "autopilot", "brain", "operator"})
+DESKTOP_AUTOPILOT_PLAN_OVERRIDE_TOKENS = frozenset({
+    "autopilot cockpit",
+    "autopilot presenter",
+    "autonomy_run_presenter",
+    "broad desktop",
+    "desktop-app enhancement",
+    "plan presentation",
+    "approval path",
+})
+DESKTOP_AUTOPILOT_PLAN_FILES = (
+    DESKTOP_AUTOPILOT_PRESENTER_FILE,
+    DESKTOP_AUTOPILOT_COCKPIT_FILE,
+)
+DESKTOP_SEEDED_FILES = (
+    DESKTOP_AUTOPILOT_PRESENTER_FILE,
+    DESKTOP_AUTOPILOT_COCKPIT_FILE,
+    DESKTOP_NETWORK_ERROR_FILE,
+    DESKTOP_API_CLIENT_FILE,
+)
+DESKTOP_FILE_PRIORITY = {
+    DESKTOP_AUTOPILOT_PRESENTER_FILE: 0,
+    DESKTOP_AUTOPILOT_COCKPIT_FILE: 1,
+    DESKTOP_NETWORK_ERROR_FILE: 2,
+    DESKTOP_API_CLIENT_FILE: 3,
+}
+DESKTOP_NETWORK_FILE_PRIORITY = {
+    DESKTOP_API_CLIENT_FILE: 0,
+    DESKTOP_NETWORK_ERROR_FILE: 1,
+    DESKTOP_AUTOPILOT_PRESENTER_FILE: 5,
+    DESKTOP_AUTOPILOT_COCKPIT_FILE: 6,
+}
+PRESENTER_PLAN_BODY_OLD_SNIPPET = """    final files = _mapList(plan['files'])
+        .map((file) => _firstText(file, ['path', 'file']))
+        .where((path) => path.isNotEmpty)
+        .toList();
+    final parts = <String>[];
+    if (analysis.isNotEmpty) parts.add(analysis);
+    if (files.isNotEmpty) {
+      parts.add('Files: ${_listSummary(files, limit: 6)}.');
+    }
+"""
+PRESENTER_PLAN_BODY_NEW_SNIPPET = """    final fileItems = _mapList(plan['files']);
+    final files = fileItems
+        .map((file) => _firstText(file, ['path', 'file']))
+        .where((path) => path.isNotEmpty)
+        .toList();
+    final changes = fileItems
+        .map((file) => _safePlanText(file['description']))
+        .where((description) => description.isNotEmpty)
+        .toList();
+    final parts = <String>[];
+    if (analysis.isNotEmpty) parts.add(analysis);
+    if (changes.isNotEmpty) {
+      parts.add('Plan: ${_listSummary(changes, limit: 3)}.');
+    }
+    if (files.isNotEmpty) {
+      parts.add('Files: ${_listSummary(files, limit: 6)}.');
+    }
+"""
 TERMINAL_STATUSES = frozenset({
     RUN_STATUS_MERGED,
     RUN_STATUS_COMPLETED,
@@ -385,6 +473,8 @@ def _looks_like_plan_start_prompt(prompt: str) -> bool:
 
 def _friendly_model_issue(reason: str | None) -> str:
     lower = (reason or "").lower()
+    if "broad desktop enhancement" in lower:
+        return BROAD_DESKTOP_PLAN_ANALYSIS
     if "vague small request" in lower:
         return "This was broad enough for a conservative local planning path."
     if "timed out" in lower or "timeouterror" in lower or "timeout" in lower:
@@ -406,6 +496,51 @@ def _operator_safe_plan_text(text: str | None) -> str:
     ):
         return _friendly_model_issue(clean)
     return _clip(clean, OPERATOR_SAFE_PLAN_TEXT_LIMIT)
+
+
+def _has_any_token(text: str, tokens: Iterable[str]) -> bool:
+    return any(token in text for token in tokens)
+
+
+def _has_broad_desktop_plan_override(prompt_lower: str) -> bool:
+    return _has_any_token(prompt_lower, DESKTOP_AUTOPILOT_PLAN_OVERRIDE_TOKENS)
+
+
+def _is_broad_desktop_enhancement_request(prompt: str) -> bool:
+    prompt_lower = (prompt or "").lower()
+    if not _is_vague_small_request(prompt):
+        return False
+    if _has_broad_desktop_plan_override(prompt_lower):
+        return True
+    if _has_any_token(prompt_lower, BROAD_DESKTOP_DETAIL_TOKENS):
+        return False
+    has_desktop_surface = _has_any_token(prompt_lower, DESKTOP_UI_PROMPT_TOKENS)
+    has_autopilot_surface = _has_any_token(prompt_lower, DESKTOP_AUTOPILOT_PROMPT_TOKENS)
+    return has_desktop_surface or has_autopilot_surface
+
+
+def _broad_desktop_enhancement_plan(repo_path: Path | None) -> dict[str, Any] | None:
+    target = next(
+        (
+            rel
+            for rel in DESKTOP_AUTOPILOT_PLAN_FILES
+            if _candidate_exists(repo_path, rel)
+        ),
+        None,
+    )
+    if target is None:
+        return None
+    return {
+        "analysis": BROAD_DESKTOP_PLAN_ANALYSIS,
+        "files": [
+            {
+                "path": target,
+                "action": "modify",
+                "description": BROAD_DESKTOP_PLAN_DESCRIPTION,
+            }
+        ],
+        "notes": BROAD_DESKTOP_PLAN_NOTES,
+    }
 
 
 def _operator_safe_plan_payload(plan: dict[str, Any]) -> dict[str, Any]:
@@ -1117,6 +1252,13 @@ def _plan_message(plan: dict[str, Any], files: list[dict[str, Any]], agents: lis
     parts = ["I drafted a plan and I'm waiting for your approval before changing files."]
     if analysis:
         parts.append(analysis)
+    descriptions = [
+        str(item.get("description") or "").strip()
+        for item in files
+        if str(item.get("description") or "").strip()
+    ]
+    if descriptions:
+        parts.append("Planned change: " + "; ".join(descriptions[:3]) + ".")
     if file_paths:
         parts.append("I expect to work in: " + ", ".join(file_paths[:6]) + ("." if len(file_paths) <= 6 else f", and {len(file_paths) - 6} more."))
     if agent_names:
@@ -1362,13 +1504,7 @@ def _plan_candidate_files(context: dict[str, Any], repo_path: Path | None, promp
     prompt_lower = (prompt or "").lower()
     seeded: list[str] = []
     if any(token in prompt_lower for token in ("desktop", "flutter", "native", "ui", "screen", "autopilot")):
-        seeded.extend(
-            [
-                "chili_mobile/lib/src/brain/brain_dispatch_screen.dart",
-                "chili_mobile/lib/src/network/chili_api_client.dart",
-                "chili_mobile/lib/src/network/network_error_message.dart",
-            ]
-        )
+        seeded.extend(DESKTOP_SEEDED_FILES)
     if any(token in prompt_lower for token in ("project brain", "project autopilot", "autonomy", "autonomous")):
         seeded.extend(
             [
@@ -1461,7 +1597,12 @@ def _rank_fallback_files(files: list[str], repo_path: Path | None, prompt: str) 
             size = (repo_path / path).stat().st_size
         except OSError:
             size = 999_999_999
-        direct = 0 if path.endswith(("network_error_message.dart", "chili_api_client.dart")) else 1
+        should_prefer_network = (
+            _has_any_token(prompt_lower, BROAD_DESKTOP_DETAIL_TOKENS)
+            and not _has_broad_desktop_plan_override(prompt_lower)
+        )
+        priority_map = DESKTOP_NETWORK_FILE_PRIORITY if should_prefer_network else DESKTOP_FILE_PRIORITY
+        direct = priority_map.get(path, 10)
         return (direct, size, path)
 
     return sorted(pool, key=sort_key)
@@ -1546,6 +1687,10 @@ def _fallback_plan_from_context(
     prompt: str,
     reason: str,
 ) -> dict[str, Any]:
+    if _is_broad_desktop_enhancement_request(prompt):
+        plan = _broad_desktop_enhancement_plan(repo_path)
+        if plan is not None:
+            return plan
     ranked_files = _rank_fallback_files(_plan_candidate_files(context, repo_path, prompt), repo_path, prompt)
     if _is_vague_small_request(prompt) and repo_path is not None:
         deterministic_files: list[str] = []
@@ -1595,7 +1740,9 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
             context,
             repo_path,
             run.prompt,
-            "vague small request routed to heuristic fast path",
+            BROAD_DESKTOP_INTERNAL_REASON
+            if _is_broad_desktop_enhancement_request(run.prompt)
+            else "vague small request routed to heuristic fast path",
         )
         if fallback.get("files"):
             _add_artifact(db, run.run_id, "plan", "heuristic_plan_fast_path", content_json=fallback)
@@ -1996,9 +2143,16 @@ def generate_diffs_from_plan(
 
 def _deterministic_small_desktop_diff(rel: str, content: str, prompt: str) -> str | None:
     prompt_lower = (prompt or "").lower()
-    if not _is_vague_small_request(prompt) or not any(token in prompt_lower for token in ("desktop", "app", "ui")):
+    if not _is_vague_small_request(prompt) or not _has_any_token(prompt_lower, DESKTOP_UI_PROMPT_TOKENS):
         return None
-    if rel == "chili_mobile/lib/src/network/chili_api_client.dart":
+    if rel == DESKTOP_AUTOPILOT_PRESENTER_FILE:
+        if "final fileItems = _mapList(plan['files']);" in content:
+            return None
+        if PRESENTER_PLAN_BODY_OLD_SNIPPET not in content:
+            return None
+        updated = content.replace(PRESENTER_PLAN_BODY_OLD_SNIPPET, PRESENTER_PLAN_BODY_NEW_SNIPPET, 1)
+        return _unified_diff(rel, content, updated)
+    if rel == DESKTOP_API_CLIENT_FILE:
         updated = content
         pattern = re.compile(
             r"(?m)^(?P<indent>\s*)final err = decoded\?\['error'\] \?\? "
@@ -2015,7 +2169,7 @@ def _deterministic_small_desktop_diff(rel: str, content: str, prompt: str) -> st
             count=1,
         )
         return _unified_diff(rel, content, updated)
-    if rel != "chili_mobile/lib/src/network/network_error_message.dart":
+    if rel != DESKTOP_NETWORK_ERROR_FILE:
         return None
     updated = content
     if "case 403:" not in updated and "Access denied (403)" not in updated:
