@@ -1,4 +1,5 @@
 """Phase B tests: content-hash LRU+TTL cache + free-tier-first cascade reorder."""
+import threading
 import time
 from unittest.mock import patch, MagicMock
 
@@ -36,6 +37,52 @@ def test_call_llm_cache_hit_skips_second_provider_call(_cfg):
     stats = llm_caller.get_cache_stats()
     assert stats["hits"] == 1 and stats["misses"] == 1
     assert 0.0 < stats["hit_rate"] <= 1.0
+
+
+@patch("app.services.llm_caller._cache_config", return_value=(256, 600))
+def test_call_llm_cache_singleflight_coalesces_concurrent_provider_calls(_cfg):
+    provider_started = threading.Event()
+    provider_release = threading.Event()
+    start = threading.Barrier(6)
+    calls = 0
+    lock = threading.Lock()
+    results: list[str] = []
+
+    def fake_chat(**_kwargs):
+        nonlocal calls
+        with lock:
+            calls += 1
+        provider_started.set()
+        assert provider_release.wait(5)
+        return {"reply": "shared-reply", "model": "m1"}
+
+    def worker():
+        start.wait()
+        reply = llm_caller.call_llm(
+            messages=[{"role": "user", "content": "same deterministic prompt"}],
+            max_tokens=100,
+            cacheable=True,
+        )
+        with lock:
+            results.append(reply)
+
+    with patch("app.openai_client.chat", side_effect=fake_chat), patch(
+        "app.openai_client.is_configured", return_value=True
+    ):
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        start.wait()
+        assert provider_started.wait(5)
+        time.sleep(0.1)
+        provider_release.set()
+        for thread in threads:
+            thread.join(timeout=5)
+
+    assert calls == 1
+    assert results == ["shared-reply"] * 5
+    stats = llm_caller.get_cache_stats()
+    assert stats["coalesced"] >= 1
 
 
 @patch("app.services.llm_caller._cache_config", return_value=(256, 600))

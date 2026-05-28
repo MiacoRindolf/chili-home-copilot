@@ -18,6 +18,7 @@ import random
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,17 @@ logger = logging.getLogger(__name__)
 
 _cache_lock = threading.Lock()
 _cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
-_cache_stats = {"hits": 0, "misses": 0, "evictions": 0}
+_cache_stats = {"hits": 0, "misses": 0, "evictions": 0, "coalesced": 0}
+
+
+@dataclass
+class _InflightCall:
+    event: threading.Event = field(default_factory=threading.Event)
+    reply: str | None = None
+
+
+_inflight: dict[str, _InflightCall] = {}
+_INFLIGHT_WAIT_TIMEOUT_SECONDS = 120.0
 
 
 def _cache_config() -> tuple[int, int]:
@@ -36,6 +47,11 @@ def _cache_config() -> tuple[int, int]:
     except Exception:
         max_entries, ttl_seconds = 256, 600
     return max_entries, ttl_seconds
+
+
+def _cache_enabled() -> bool:
+    max_entries, ttl = _cache_config()
+    return max_entries > 0 and ttl > 0
 
 
 def _cache_key(
@@ -106,12 +122,44 @@ def _cache_put(key: str, reply: str) -> None:
             _cache_stats["evictions"] += 1
 
 
+def _inflight_begin(key: str) -> tuple[_InflightCall, bool]:
+    with _cache_lock:
+        existing = _inflight.get(key)
+        if existing is not None:
+            return existing, False
+        call = _InflightCall()
+        _inflight[key] = call
+        return call, True
+
+
+def _inflight_finish(key: str, reply: str) -> None:
+    with _cache_lock:
+        call = _inflight.pop(key, None)
+        if call is None:
+            return
+        call.reply = reply
+        call.event.set()
+
+
+def _inflight_wait(key: str, call: _InflightCall, trace_id: str) -> str | None:
+    if not call.event.wait(_INFLIGHT_WAIT_TIMEOUT_SECONDS):
+        logger.debug("[llm_caller] inflight_wait_timeout trace=%s key=%s", trace_id, key[:12])
+        return None
+    if call.reply:
+        with _cache_lock:
+            _cache_stats["coalesced"] += 1
+        logger.debug("[llm_caller] inflight_coalesced trace=%s key=%s", trace_id, key[:12])
+        return call.reply
+    return None
+
+
 def get_cache_stats() -> dict[str, Any]:
     with _cache_lock:
         size = len(_cache)
         hits = _cache_stats["hits"]
         misses = _cache_stats["misses"]
         evictions = _cache_stats["evictions"]
+        coalesced = _cache_stats["coalesced"]
     total = hits + misses
     hit_rate = (hits / total) if total else 0.0
     max_entries, ttl_seconds = _cache_config()
@@ -119,6 +167,7 @@ def get_cache_stats() -> dict[str, Any]:
         "hits": hits,
         "misses": misses,
         "evictions": evictions,
+        "coalesced": coalesced,
         "size": size,
         "hit_rate": round(hit_rate, 4),
         "max_entries": max_entries,
@@ -130,9 +179,11 @@ def reset_cache() -> None:
     """Intended for tests only."""
     with _cache_lock:
         _cache.clear()
+        _inflight.clear()
         _cache_stats["hits"] = 0
         _cache_stats["misses"] = 0
         _cache_stats["evictions"] = 0
+        _cache_stats["coalesced"] = 0
 
 
 def call_llm(
@@ -166,16 +217,28 @@ def call_llm(
         return {"reply": "", "gateway_log_id": None} if return_meta else ""
 
     cache_key = None
+    inflight_owner = False
+    inflight_key = None
     if cacheable:
         try:
-            cache_key = _cache_key(messages, max_tokens, system_prompt, purpose)
-            cached = _cache_get(cache_key)
-            if cached is not None:
-                logger.debug("[llm_caller] cache_hit trace=%s key=%s", trace_id, cache_key[:12])
-                return {"reply": cached, "gateway_log_id": None} if return_meta else cached
+            if _cache_enabled():
+                cache_key = _cache_key(messages, max_tokens, system_prompt, purpose)
+                cached = _cache_get(cache_key)
+                if cached is not None:
+                    logger.debug("[llm_caller] cache_hit trace=%s key=%s", trace_id, cache_key[:12])
+                    return {"reply": cached, "gateway_log_id": None} if return_meta else cached
+                inflight, inflight_owner = _inflight_begin(cache_key)
+                if inflight_owner:
+                    inflight_key = cache_key
+                else:
+                    coalesced = _inflight_wait(cache_key, inflight, trace_id)
+                    if coalesced is not None:
+                        return {"reply": coalesced, "gateway_log_id": None} if return_meta else coalesced
         except Exception as e:
             logger.debug("[llm_caller] cache read failed: %s", e)
             cache_key = None
+            inflight_owner = False
+            inflight_key = None
 
     # Phase F.14 — auto-detect purpose for project_brain agents so the
     # learning loop sees per-agent traffic without editing every agent file.
@@ -238,9 +301,13 @@ def call_llm(
                 _cache_put(cache_key, text)
             except Exception as e:
                 logger.debug("[llm_caller] cache write failed: %s", e)
+        if inflight_owner and inflight_key is not None:
+            _inflight_finish(inflight_key, text)
         if return_meta:
             return {"reply": text, "gateway_log_id": gw_log_id}
         return text
     except Exception as e:
+        if inflight_owner and inflight_key is not None:
+            _inflight_finish(inflight_key, "")
         logger.warning("[llm_caller] LLM call failed: %s", e)
         return {"reply": "", "gateway_log_id": None} if return_meta else ""
