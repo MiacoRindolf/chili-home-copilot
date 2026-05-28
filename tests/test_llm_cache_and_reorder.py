@@ -229,6 +229,27 @@ def test_call_llm_autodetects_project_web_research_before_cache_key(_cfg, monkey
     assert gateway.call_args.kwargs["purpose"] == "project_web_research"
 
 
+def test_project_web_research_prompt_keeps_variable_inputs_last(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_call_llm(**kwargs):
+        captured.update(kwargs)
+        return '{"summary":"ok","sources":[],"relevance_score":0.8}'
+
+    monkeypatch.setattr("app.openai_client.is_configured", lambda: True)
+    monkeypatch.setattr("app.services.project_brain.web_research.call_llm", fake_call_llm)
+
+    from app.services.project_brain.web_research import _summarize_raw
+
+    result = _summarize_raw("model routing", '[{"title":"Doc","url":"https://x"}]', "trace")
+
+    assert result and result["summary"] == "ok"
+    prompt = captured["messages"][1]["content"]
+    assert prompt.index("Return ONLY valid JSON") < prompt.index("Variable Inputs:")
+    assert prompt.index("Variable Inputs:") < prompt.index("Topic: model routing")
+    assert prompt.endswith('Raw results:\n[{"title":"Doc","url":"https://x"}]\n')
+
+
 def test_call_llm_cache_ttl_expiry_causes_miss(monkeypatch):
     monkeypatch.setattr(llm_caller, "_cache_config", lambda: (256, 600))
     mock_chat = MagicMock(return_value={"reply": "ok", "model": "m1"})

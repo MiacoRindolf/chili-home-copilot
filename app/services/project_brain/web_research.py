@@ -22,14 +22,16 @@ logger = logging.getLogger(__name__)
 def _summarize_raw(topic: str, raw: str, trace_id: str) -> dict | None:
     """Use LLM to summarize raw search results into structured JSON."""
     prompt = (
-        f"Summarize the following web search results about '{topic}'.\n\n"
-        f"Raw results:\n{raw[:3000]}\n\n"
+        "Summarize web search results for a technical audience.\n\n"
         "Return ONLY valid JSON:\n"
         "{\n"
         '  "summary": "3-6 sentence concise summary for a technical audience",\n'
         '  "sources": [{"title": "...", "url": "..."}],\n'
         '  "relevance_score": 0.0\n'
-        "}\n"
+        "}\n\n"
+        "Variable Inputs:\n"
+        f"Topic: {topic}\n\n"
+        f"Raw results:\n{raw[:3000]}\n"
     )
     reply = call_llm(
         messages=[
