@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import case, distinct, func, or_
 
 from ..models import (
     PlanProject, PlanTask, ProjectMember, TaskComment,
@@ -703,35 +703,46 @@ def get_user_project_summary(db: Session, user_id: int) -> str:
 
 
 def get_all_users_task_summary(db: Session) -> list[dict]:
-    users = db.query(User).all()
-    result = []
-    for u in users:
-        member_projects = (
-            db.query(PlanProject)
-            .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
-            .filter(ProjectMember.user_id == u.id)
-            .all()
+    today = date.today()
+    rows = (
+        db.query(
+            User.id.label("user_id"),
+            User.name.label("user_name"),
+            func.count(distinct(ProjectMember.project_id)).label("project_count"),
+            func.count(PlanTask.id).label("total_tasks"),
+            func.coalesce(
+                func.sum(case((PlanTask.status == "done", 1), else_=0)),
+                0,
+            ).label("done_tasks"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            PlanTask.end_date < today,
+                            case((PlanTask.status != "done", 1), else_=0),
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("overdue_tasks"),
         )
-        total_tasks = 0
-        done_tasks = 0
-        overdue_tasks = 0
-        today = date.today()
-        for p in member_projects:
-            for t in p.tasks:
-                total_tasks += 1
-                if t.status == "done":
-                    done_tasks += 1
-                elif t.end_date and t.end_date < today and t.status != "done":
-                    overdue_tasks += 1
-        result.append({
-            "user_id": u.id,
-            "user_name": u.name,
-            "project_count": len(member_projects),
-            "total_tasks": total_tasks,
-            "done_tasks": done_tasks,
-            "overdue_tasks": overdue_tasks,
-        })
-    return result
+        .outerjoin(ProjectMember, ProjectMember.user_id == User.id)
+        .outerjoin(PlanTask, PlanTask.project_id == ProjectMember.project_id)
+        .group_by(User.id, User.name)
+        .all()
+    )
+    return [
+        {
+            "user_id": int(row.user_id),
+            "user_name": row.user_name,
+            "project_count": int(row.project_count or 0),
+            "total_tasks": int(row.total_tasks or 0),
+            "done_tasks": int(row.done_tasks or 0),
+            "overdue_tasks": int(row.overdue_tasks or 0),
+        }
+        for row in rows
+    ]
 
 
 def get_user_task_summary_stats(db: Session, user_id: int) -> list[dict]:
