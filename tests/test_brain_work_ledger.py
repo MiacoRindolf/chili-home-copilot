@@ -7,7 +7,9 @@ from app.services.trading.brain_work.ledger import (
     enqueue_or_refresh_debounced_work,
     enqueue_outcome_event,
     enqueue_work_event,
+    get_work_ledger_summary,
     mark_work_done,
+    mark_work_retry_or_dead,
     release_stale_leases,
 )
 
@@ -115,6 +117,52 @@ def test_release_stale_lease_marks_retry(db) -> None:
     n = release_stale_leases(db)
     db.commit()
     assert n >= 1
+
+
+def test_summary_includes_dead_letter_diagnostics(db) -> None:
+    eid = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:dead-letter-diagnostics",
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+        max_attempts=1,
+    )
+    db.commit()
+    assert eid is not None
+
+    rows = claim_work_batch(
+        db,
+        limit=1,
+        lease_seconds=60,
+        holder_id="pytest:dead-letter",
+        event_type="backtest_requested",
+    )
+    db.commit()
+    assert len(rows) == 1
+
+    mark_work_retry_or_dead(
+        db,
+        int(rows[0].id),
+        "Can't reconnect until invalid transaction is rolled back.",
+    )
+    db.commit()
+
+    summary = get_work_ledger_summary(db, recent_limit=5)
+
+    assert summary["dead_last_24h"] >= 1
+    assert summary["dead_by_type_24h"]["backtest_requested"] >= 1
+    recent_dead = [row for row in summary["recent_dead_letters"] if row["id"] == eid]
+    assert recent_dead
+    row = recent_dead[0]
+    assert row["event_type"] == "backtest_requested"
+    assert row["lease_scope"] == "backtest"
+    assert row["scan_pattern_id"] == 537
+    assert row["source"] == "operator_boost"
+    assert row["attempts"] == 1
+    assert row["max_attempts"] == 1
+    assert "Can't reconnect" in row["last_error"]
+    assert row["processed_at"] is not None
 
 
 def test_enqueue_or_refresh_debounced_merges_payload(db) -> None:

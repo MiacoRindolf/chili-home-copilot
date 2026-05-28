@@ -373,6 +373,10 @@ def mark_work_retry_or_dead(db: Session, event_id: int, error: str) -> None:
         ev.next_run_at = now + timedelta(seconds=delay)
 
 
+def _payload_dict(ev: BrainWorkEvent) -> dict[str, Any]:
+    return ev.payload if isinstance(ev.payload, dict) else {}
+
+
 def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str, Any]:
     """Counts, per-type pending/retry, processing leases, and recent outcomes for API/UI."""
     now = datetime.utcnow()
@@ -401,6 +405,17 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
         .scalar()
         or 0
     )
+    dead_by_type_rows = (
+        db.query(BrainWorkEvent.event_type, func.count(BrainWorkEvent.id))
+        .filter(
+            dom,
+            BrainWorkEvent.status == "dead",
+            BrainWorkEvent.processed_at >= now - timedelta(hours=24),
+        )
+        .group_by(BrainWorkEvent.event_type)
+        .all()
+    )
+    dead_by_type_24h = {str(et): int(c) for et, c in dead_by_type_rows}
 
     pending_by_type_rows = (
         db.query(BrainWorkEvent.event_type, func.count(BrainWorkEvent.id))
@@ -446,6 +461,17 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
         db.query(BrainWorkEvent)
         .filter(dom, BrainWorkEvent.event_kind == "outcome")
         .order_by(BrainWorkEvent.processed_at.desc().nullslast(), BrainWorkEvent.id.desc())
+        .limit(min(recent_limit, 12))
+        .all()
+    )
+    recent_dead = (
+        db.query(BrainWorkEvent)
+        .filter(dom, BrainWorkEvent.status == "dead")
+        .order_by(
+            BrainWorkEvent.processed_at.desc().nullslast(),
+            BrainWorkEvent.updated_at.desc().nullslast(),
+            BrainWorkEvent.id.desc(),
+        )
         .limit(min(recent_limit, 12))
         .all()
     )
@@ -497,6 +523,7 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
         "pending_work": int(pending),
         "retry_wait": int(retry_wait),
         "dead_last_24h": int(dead_24h),
+        "dead_by_type_24h": dead_by_type_24h,
         "pending_by_type": pending_by_type,
         "processing": [
             {
@@ -529,6 +556,23 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
                 "processed_at": r.processed_at.isoformat() if r.processed_at else None,
             }
             for r in recent_outcomes
+        ],
+        "recent_dead_letters": [
+            {
+                "id": int(r.id),
+                "event_type": r.event_type,
+                "event_kind": r.event_kind,
+                "lease_scope": getattr(r, "lease_scope", None) or "general",
+                "scan_pattern_id": _payload_dict(r).get("scan_pattern_id"),
+                "source": _payload_dict(r).get("source"),
+                "attempts": int(r.attempts or 0),
+                "max_attempts": int(r.max_attempts or 0),
+                "last_error": (r.last_error or "")[:500],
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "processed_at": r.processed_at.isoformat() if r.processed_at else None,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in recent_dead
         ],
         "execution_outcomes_24h": execution_outcomes_24h,
         "execution_pulse": execution_pulse,
