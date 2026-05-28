@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -302,6 +302,65 @@ def test_check_paper_exits_option_target_waits_for_executable_bid(monkeypatch) -
     assert trade.status == "open"
     assert db.commits == 0
     assert quote.call_args.kwargs["purpose"] == "exit"
+
+
+def test_shadow_option_stale_janitor_cancels_without_pnl_when_no_executable_quote(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    trade = PaperTrade(
+        id=201,
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        stop_price=0.60,
+        target_price=2.50,
+        quantity=2.0,
+        status="open",
+        entry_date=datetime.utcnow() - timedelta(hours=3),
+        signal_json={
+            **_option_signal(),
+            "auto_trader_v1": True,
+            "paper_shadow": True,
+        },
+    )
+    db = _FakeDb(rows=[trade])
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={
+            "price": 1.25,
+            "mark_price": 1.25,
+            "executable_price": None,
+            "source": "robinhood_options_unavailable",
+        },
+    ), patch(
+        "app.services.trading.paper_trading._apply_slippage",
+        side_effect=AssertionError("unquoted stale option shadows must not book a fill"),
+    ):
+        result = paper_trading.prune_autotrader_paper_shadow_capacity(
+            db,
+            user_id=1,
+            max_open=100,
+            max_age_hours=1,
+            buffer=5,
+        )
+
+    assert result["closed"] == 1
+    assert result["cancelled"] == 1
+    assert result["stale_closed"] == 0
+    assert result["stale_cancelled"] == 1
+    assert trade.status == paper_trading.PAPER_TRADE_STATUS_CANCELLED
+    assert trade.exit_reason == paper_trading.PAPER_SHADOW_STALE_NO_QUOTE_REASON
+    assert trade.exit_price is None
+    assert trade.pnl is None
+    assert trade.pnl_pct is None
+    assert trade.signal_json[paper_trading.PAPER_SHADOW_CAPACITY_EVICTION_META_KEY][
+        "pnl_recorded"
+    ] is False
+    assert db.commits == 1
 
 
 def test_auto_enter_option_signal_uses_asset_gate_and_meta_contract_quantity(
