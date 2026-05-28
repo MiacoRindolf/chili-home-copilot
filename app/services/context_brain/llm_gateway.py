@@ -25,6 +25,7 @@ where the tree pipeline is buying us quality vs just adding latency.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Optional
@@ -32,12 +33,38 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .. import openai_client
+from ... import openai_client
+from ...config import settings
+from ..llm_cost import approximate_tokens, estimate_cost_usd, provider_from_base_url
 from . import purpose_policy as policy_mod
 from . import tree_coordinator as tree_mod
 from .tree_types import GatewayCallResult, PurposePolicy
 
 logger = logging.getLogger(__name__)
+
+
+def _purpose_model_override(purpose: str, policy: PurposePolicy | None = None) -> str | None:
+    """Configured non-high-stakes paid model override for a gateway purpose."""
+    raw = getattr(settings, "chili_llm_purpose_model_overrides_json", "") or ""
+    if not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        logger.debug("[context_brain.gateway] invalid purpose override JSON: %s", e)
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    model = parsed.get(purpose) or parsed.get("*")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    if policy is not None and policy.high_stakes:
+        logger.info(
+            "[context_brain.gateway] ignoring model override for high-stakes purpose=%s",
+            purpose,
+        )
+        return None
+    return model.strip()
 
 
 def _open_db_session():
@@ -105,34 +132,76 @@ def _finalize_gateway_log(
     synth_ms: int = 0,
     error_kind: Optional[str] = None,
     error_message: Optional[str] = None,
+    provider: Optional[str] = None,
+    provider_base_url: Optional[str] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cached_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    total_tokens: int = 0,
+    service_tier: Optional[str] = None,
+    cache_status: Optional[str] = None,
+    estimated_cost_usd: float = 0.0,
 ) -> None:
     if not log_id:
         return
     total_ms = int((time.monotonic() - started_at_mono) * 1000)
+    params = {
+        "de": decomposed, "cc": chunk_count, "ce": cross_examined,
+        "oc": ollama_calls, "pc": premium_calls,
+        "ot": ollama_tokens, "pt": premium_tokens,
+        "pcu": float(premium_cost_usd),
+        "tl": total_ms, "dl": decompose_ms, "chl": chunk_ms,
+        "col": compile_ms, "sl": synth_ms,
+        "ok": success, "ek": error_kind,
+        "em": (error_message or "")[:1000] if error_message else None,
+        "prov": provider,
+        "pbu": provider_base_url,
+        "prompt_t": int(prompt_tokens or 0),
+        "completion_t": int(completion_tokens or 0),
+        "cached_t": int(cached_tokens or 0),
+        "reasoning_t": int(reasoning_tokens or 0),
+        "total_t": int(total_tokens or 0),
+        "service_t": service_tier,
+        "cache_s": cache_status,
+        "estimated": float(estimated_cost_usd or 0.0),
+        "id": int(log_id),
+    }
     try:
-        db.execute(text(
-            "UPDATE llm_gateway_log SET "
-            "  decomposed = :de, chunk_count = :cc, cross_examined = :ce, "
-            "  ollama_calls_count = :oc, premium_calls_count = :pc, "
-            "  ollama_total_tokens = :ot, premium_total_tokens = :pt, "
-            "  premium_cost_usd = :pcu, "
-            "  total_latency_ms = :tl, decompose_latency_ms = :dl, "
-            "  chunk_latency_ms = :chl, compile_latency_ms = :col, "
-            "  synthesize_latency_ms = :sl, "
-            "  success = :ok, error_kind = :ek, error_message = :em, "
-            "  completed_at = NOW() "
-            "WHERE id = :id"
-        ), {
-            "de": decomposed, "cc": chunk_count, "ce": cross_examined,
-            "oc": ollama_calls, "pc": premium_calls,
-            "ot": ollama_tokens, "pt": premium_tokens,
-            "pcu": float(premium_cost_usd),
-            "tl": total_ms, "dl": decompose_ms, "chl": chunk_ms,
-            "col": compile_ms, "sl": synth_ms,
-            "ok": success, "ek": error_kind,
-            "em": (error_message or "")[:1000] if error_message else None,
-            "id": int(log_id),
-        })
+        try:
+            db.execute(text(
+                "UPDATE llm_gateway_log SET "
+                "  decomposed = :de, chunk_count = :cc, cross_examined = :ce, "
+                "  ollama_calls_count = :oc, premium_calls_count = :pc, "
+                "  ollama_total_tokens = :ot, premium_total_tokens = :pt, "
+                "  premium_cost_usd = :pcu, "
+                "  total_latency_ms = :tl, decompose_latency_ms = :dl, "
+                "  chunk_latency_ms = :chl, compile_latency_ms = :col, "
+                "  synthesize_latency_ms = :sl, "
+                "  success = :ok, error_kind = :ek, error_message = :em, "
+                "  provider = :prov, provider_base_url = :pbu, "
+                "  prompt_tokens = :prompt_t, completion_tokens = :completion_t, "
+                "  cached_tokens = :cached_t, reasoning_tokens = :reasoning_t, "
+                "  total_tokens = :total_t, service_tier = :service_t, "
+                "  cache_status = :cache_s, estimated_cost_usd = :estimated, "
+                "  completed_at = NOW() "
+                "WHERE id = :id"
+            ), params)
+        except Exception:
+            db.rollback()
+            db.execute(text(
+                "UPDATE llm_gateway_log SET "
+                "  decomposed = :de, chunk_count = :cc, cross_examined = :ce, "
+                "  ollama_calls_count = :oc, premium_calls_count = :pc, "
+                "  ollama_total_tokens = :ot, premium_total_tokens = :pt, "
+                "  premium_cost_usd = :pcu, "
+                "  total_latency_ms = :tl, decompose_latency_ms = :dl, "
+                "  chunk_latency_ms = :chl, compile_latency_ms = :col, "
+                "  synthesize_latency_ms = :sl, "
+                "  success = :ok, error_kind = :ek, error_message = :em, "
+                "  completed_at = NOW() "
+                "WHERE id = :id"
+            ), params)
         db.commit()
     except Exception as e:
         try:
@@ -150,6 +219,7 @@ def _passthrough(
     user_message: str,
     max_tokens: int,
     strict_escalation: bool,
+    model_override: Optional[str] = None,
 ) -> dict:
     """Direct call to the legacy openai_client.chat() cascade."""
     return openai_client.chat(
@@ -159,7 +229,47 @@ def _passthrough(
         user_message=user_message,
         max_tokens=max_tokens,
         strict_escalation=strict_escalation,
+        model_override=model_override,
     )
+
+
+def _cost_fields_from_result(result: dict[str, Any]) -> dict[str, Any]:
+    model = str(result.get("model") or "")
+    provider_base_url = str(
+        result.get("provider_base_url")
+        or openai_client.provider_base_url_for_model(model)
+        or ""
+    )
+    provider = str(result.get("provider") or provider_from_base_url(provider_base_url))
+    prompt_tokens = int(result.get("prompt_tokens") or 0)
+    completion_tokens = int(result.get("completion_tokens") or 0)
+    total_tokens = int(result.get("total_tokens") or result.get("tokens_used") or 0)
+    cached_tokens = int(result.get("cached_tokens") or 0)
+    cost = float(
+        result.get("estimated_cost_usd")
+        or estimate_cost_usd(
+            provider=provider,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+        )
+        or 0.0
+    )
+    return {
+        "provider": provider,
+        "provider_base_url": provider_base_url or None,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cached_tokens": cached_tokens,
+        "reasoning_tokens": int(result.get("reasoning_tokens") or 0),
+        "total_tokens": total_tokens,
+        "service_tier": result.get("service_tier"),
+        "estimated_cost_usd": cost,
+        "premium_calls": 1 if provider == "openai" else 0,
+        "premium_tokens": total_tokens if provider == "openai" else 0,
+        "premium_cost_usd": cost if provider == "openai" else 0.0,
+    }
 
 
 def _augmented(
@@ -173,6 +283,7 @@ def _augmented(
     db: Session,
     user_id: Optional[int],
     project_id: Optional[int],
+    model_override: Optional[str] = None,
 ) -> dict:
     """Phase F.1-F.3 pipeline: assemble structured context, single LLM
     call. Same as ``chat_service.gather_context_only`` but invokable
@@ -198,6 +309,7 @@ def _augmented(
                     user_message=user_message,
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
+                    model_override=model_override,
                 )
     except Exception as e:
         logger.debug("[context_brain.gateway] augmented failed, passthrough: %s", e)
@@ -208,6 +320,7 @@ def _augmented(
         system_prompt=system_prompt, trace_id=trace_id,
         user_message=user_message, max_tokens=max_tokens,
         strict_escalation=strict_escalation,
+        model_override=model_override,
     )
 
 
@@ -256,6 +369,7 @@ def gateway_chat(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
+        model_override = _purpose_model_override(policy.purpose, policy)
 
         log_id = _write_gateway_log_start(
             db,
@@ -339,13 +453,14 @@ def gateway_chat(
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
                     db=db, user_id=user_id, project_id=project_id,
+                    model_override=model_override,
                 )
+                cost_fields = _cost_fields_from_result(result)
                 _finalize_gateway_log(
                     db, log_id,
                     success=bool(result.get("reply")) and result.get("model") != "error",
                     started_at_mono=started_at,
-                    premium_calls=1,
-                    premium_tokens=int(result.get("tokens_used") or 0),
+                    **cost_fields,
                 )
                 if isinstance(result, dict):
                     result["gateway_log_id"] = int(log_id) if log_id else None
@@ -359,13 +474,14 @@ def gateway_chat(
                     user_message=inferred_user_message,
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
+                    model_override=model_override,
                 )
+                cost_fields = _cost_fields_from_result(result)
                 _finalize_gateway_log(
                     db, log_id,
                     success=bool(result.get("reply")) and result.get("model") != "error",
                     started_at_mono=started_at,
-                    premium_calls=1,
-                    premium_tokens=int(result.get("tokens_used") or 0),
+                    **cost_fields,
                 )
                 if isinstance(result, dict):
                     result["gateway_log_id"] = int(log_id) if log_id else None
@@ -383,6 +499,201 @@ def gateway_chat(
                 strict_escalation=strict_escalation,
             )
     finally:
+        if own_db and db is not None:
+            try: db.close()
+            except Exception: pass
+
+
+def gateway_chat_stream(
+    messages: list[dict],
+    *,
+    purpose: str,
+    system_prompt: Optional[str] = None,
+    trace_id: str = "gateway-stream",
+    user_message: str = "",
+    max_tokens: int = 1024,
+    strict_escalation: bool = True,
+    user_id: Optional[int] = None,
+    project_id: Optional[int] = None,
+    chat_message_id: Optional[int] = None,
+    db: Optional[Session] = None,
+):
+    """Streaming sibling of ``gateway_chat`` for SSE call sites.
+
+    OpenAI-compatible streaming does not return token usage through our SDK
+    path, so this records provider/base URL/model and approximate token/cost
+    telemetry after the stream completes.
+    """
+    started_at = time.monotonic()
+    own_db = False
+    log_id: Optional[int] = None
+    policy: Optional[PurposePolicy] = None
+    if db is None:
+        try:
+            db = _open_db_session()
+            own_db = True
+        except Exception as e:
+            logger.warning("[context_brain.gateway] no db session for stream, falling through: %s", e)
+            yield from openai_client.chat_stream(
+                messages=messages,
+                system_prompt=system_prompt,
+                trace_id=trace_id,
+                user_message=user_message,
+                max_tokens=max_tokens,
+                strict_escalation=strict_escalation,
+                model_override=_purpose_model_override(purpose),
+            )
+            return
+
+    prompt = system_prompt or openai_client.SYSTEM_PROMPT
+    reply_parts: list[str] = []
+    model_seen: Optional[str] = None
+    success = False
+    error_message: Optional[str] = None
+
+    try:
+        inferred_user_message = user_message
+        if not inferred_user_message and messages:
+            last_user = next(
+                (m for m in reversed(messages) if (m.get("role") == "user")),
+                None,
+            )
+            if last_user:
+                inferred_user_message = (last_user.get("content") or "").strip()
+
+        try:
+            policy = policy_mod.get_policy(db, purpose)
+        except Exception as e:
+            logger.warning("[context_brain.gateway] stream policy failed, falling through: %s", e)
+            model_override = _purpose_model_override(purpose)
+            for tok, model in openai_client.chat_stream(
+                messages=messages,
+                system_prompt=prompt,
+                trace_id=trace_id,
+                user_message=inferred_user_message,
+                max_tokens=max_tokens,
+                strict_escalation=strict_escalation,
+                model_override=model_override,
+            ):
+                reply_parts.append(tok)
+                model_seen = model
+                yield tok, model
+            success = bool(reply_parts)
+            return
+        if not policy.enabled or policy.routing_strategy == "tree":
+            policy = PurposePolicy(
+                **{**policy.__dict__, "routing_strategy": "passthrough"},
+            )
+        model_override = _purpose_model_override(policy.purpose, policy)
+
+        log_id = _write_gateway_log_start(
+            db,
+            purpose=policy.purpose,
+            routing_strategy=policy.routing_strategy,
+            user_id=user_id,
+            chat_message_id=chat_message_id,
+            primary_local_model=policy.primary_local_model,
+            secondary_local_model=policy.secondary_local_model,
+            synthesizer_model=policy.synthesizer_model,
+        )
+
+        if policy.routing_strategy == "augmented":
+            try:
+                from .assembly import assemble_context  # type: ignore
+                if user_id is not None:
+                    assembled = assemble_context(
+                        inferred_user_message,
+                        db=db,
+                        user_id=int(user_id),
+                        project_id=project_id,
+                        trace_id=trace_id,
+                    )
+                    if assembled.prompt_text:
+                        prompt = prompt.rstrip() + "\n\n" + assembled.prompt_text
+            except Exception as e:
+                logger.debug("[context_brain.gateway] stream augmented failed, passthrough: %s", e)
+
+        for tok, model in openai_client.chat_stream(
+            messages=messages,
+            system_prompt=prompt,
+            trace_id=trace_id,
+            user_message=inferred_user_message,
+            max_tokens=max_tokens,
+            strict_escalation=strict_escalation,
+            model_override=model_override,
+        ):
+            if model:
+                model_seen = model
+            reply_parts.append(tok)
+            yield tok, model
+        success = bool(reply_parts)
+    except Exception as e:
+        error_message = str(e)
+        raise
+    finally:
+        if db is not None and log_id:
+            completion = "".join(reply_parts)
+            prompt_text = (prompt or "") + "\n" + "\n".join(
+                str(m.get("content") or "") for m in messages if isinstance(m, dict)
+            )
+            prompt_tokens = approximate_tokens(prompt_text)
+            completion_tokens = approximate_tokens(completion)
+            total_tokens = prompt_tokens + completion_tokens
+            provider_base_url = openai_client.provider_base_url_for_model(model_seen)
+            provider = provider_from_base_url(provider_base_url)
+            estimated_cost = estimate_cost_usd(
+                provider=provider,
+                model=model_seen or "",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cached_tokens=0,
+            )
+            _finalize_gateway_log(
+                db,
+                log_id,
+                success=success,
+                started_at_mono=started_at,
+                premium_calls=1 if provider == "openai" else 0,
+                premium_tokens=total_tokens if provider == "openai" else 0,
+                premium_cost_usd=estimated_cost if provider == "openai" else 0.0,
+                error_kind=None if success else ("stream_exception" if error_message else "empty_stream"),
+                error_message=error_message,
+                provider=provider,
+                provider_base_url=provider_base_url or None,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cache_status="stream",
+                estimated_cost_usd=estimated_cost,
+            )
+            try:
+                openai_client._safe_log_llm_call(  # telemetry-only private helper
+                    trace_id=trace_id,
+                    provider=provider,
+                    tier=1 if provider == "openai" else (2 if provider == "groq" else 3),
+                    model=model_seen or "unknown",
+                    provider_base_url=provider_base_url or None,
+                    system_prompt=prompt,
+                    user_prompt="\n".join(
+                        str(m.get("content") or "") for m in messages if isinstance(m, dict)
+                    ),
+                    completion=completion if completion else None,
+                    tokens_in=prompt_tokens,
+                    tokens_out=completion_tokens,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cached_tokens=0,
+                    reasoning_tokens=0,
+                    total_tokens=total_tokens,
+                    cache_status="stream",
+                    estimated_cost_usd=estimated_cost,
+                    latency_ms=int((time.monotonic() - started_at) * 1000),
+                    success=success,
+                    weak_response=False,
+                    failure_kind=None if success else "empty_stream",
+                )
+            except Exception:
+                pass
         if own_db and db is not None:
             try: db.close()
             except Exception: pass

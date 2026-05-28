@@ -593,6 +593,25 @@ def test_close_position_now_live_option_routes_sell_to_close() -> None:
     )
 
 
+def test_close_position_now_live_option_rejects_fractional_contract_quantity() -> None:
+    t = _option_trade_stub(quantity=1.5)
+    fake_db = _fake_trade_db(t)
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        side_effect=AssertionError("invalid local option quantity must not touch broker"),
+    ), patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        side_effect=AssertionError("option close-now must not use the spot adapter"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res == {"ok": False, "error": "bad_option_contract_quantity"}
+    assert t.status == "open"
+    fake_db.add.assert_not_called()
+    fake_db.commit.assert_not_called()
+
+
 def test_close_position_now_live_option_finalizes_terminal_complete_fill() -> None:
     now = datetime.utcnow()
     t = _option_trade_stub()

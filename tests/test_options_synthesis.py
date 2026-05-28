@@ -81,6 +81,9 @@ def test_synthesize_option_meta_selects_affordable_quality_contract(monkeypatch)
     assert meta is not None
     assert meta["strike"] == 105.0
     assert meta["quantity"] == 2
+    assert meta["contract_key"] == f"XYZ:{meta['expiration']}:call:105.000"
+    assert meta["price_domain"] == "option_premium"
+    assert meta["quote_snapshot_recorded"] is False
     assert meta["synthesis_contract_notional_usd"] == 150.0
     assert meta["synthesis_reject_counts"]["contract_cost_above_budget"] == 2
     assert meta["entry_quality"]["option_reward_risk"] > 1.0
@@ -161,3 +164,52 @@ def test_synthesize_option_meta_caches_recent_no_survivor_context(monkeypatch):
     assert synthesize_option_meta(**kwargs) is None
     assert synthesize_option_meta(**kwargs) is None
     assert chain_calls["count"] == 1
+
+
+def test_synthesize_option_meta_records_quote_snapshots_when_db_available(monkeypatch):
+    from app.services.trading.options import quote_store
+
+    recorded = {"chains": 0, "quotes": 0}
+
+    _wire_synthesis_fakes(
+        monkeypatch,
+        {
+            105.0: {
+                "bid_price": "1.45",
+                "ask_price": "1.50",
+                "mark_price": "1.48",
+                "delta": "0.40",
+            },
+        },
+    )
+
+    def _create_chain_snapshot(*_args, **kwargs):
+        recorded["chains"] += 1
+        assert kwargs["underlying"] == "XYZ"
+        assert kwargs["venue"] == "robinhood"
+        return 77
+
+    def _record_quote_snapshot(*_args, **kwargs):
+        recorded["quotes"] += 1
+        assert kwargs["chain_id"] == 77
+        assert kwargs["option_meta"]["contract_key"].endswith(":call:105.000")
+        assert kwargs["quote"]["ask_price"] == "1.50"
+        return True
+
+    monkeypatch.setattr(quote_store, "create_chain_snapshot", _create_chain_snapshot)
+    monkeypatch.setattr(quote_store, "record_quote_snapshot", _record_quote_snapshot)
+
+    meta = synthesize_option_meta(
+        db=object(),
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=300.0,
+        underlying_target=112.0,
+        underlying_stop=96.0,
+        confidence=0.9,
+    )
+
+    assert meta is not None
+    assert recorded == {"chains": 1, "quotes": 1}
+    assert meta["chain_snapshot_id"] == 77
+    assert meta["quote_snapshot_recorded"] is True

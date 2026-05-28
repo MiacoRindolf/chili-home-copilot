@@ -10,12 +10,15 @@ from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, text
+from sqlalchemy import case, or_, text
 from sqlalchemy.orm import Session, aliased
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
     AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
+    AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED,
+    AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH,
     AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
@@ -77,6 +80,11 @@ from .auto_trader_synergy import (
     find_open_autotrader_trade,
     maybe_scale_in,
     used_scale_in_pattern_ids,
+)
+from .options.contracts import (
+    normalize_option_meta,
+    option_price_domains_snapshot,
+    parse_contract_quantity,
 )
 from .coinbase_maker_pricing import plan_post_only_buy_limit
 from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
@@ -255,6 +263,19 @@ def _float_or_none(value: Any) -> float | None:
     return out if out > 0 else None
 
 
+def _normalize_option_meta_for_alert(
+    alert: BreakoutAlert,
+    meta: dict[str, Any],
+    *,
+    underlying_price: float | None = None,
+) -> dict[str, Any]:
+    return normalize_option_meta(
+        meta,
+        underlying=getattr(alert, "ticker", None),
+        current_underlying_price=underlying_price,
+    )
+
+
 def _paper_entry_context_for_alert(
     alert: BreakoutAlert,
     *,
@@ -266,6 +287,7 @@ def _paper_entry_context_for_alert(
     option_meta = snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
     if not (snap.get("options_path") and option_meta):
         return float(px), {}
+    option_meta = _normalize_option_meta_for_alert(alert, option_meta, underlying_price=px)
     premium = (
         _float_or_none(option_meta.get("limit_price"))
         or _float_or_none(alert.entry_price)
@@ -273,8 +295,11 @@ def _paper_entry_context_for_alert(
     )
     return float(premium), {
         "asset_type": "options",
+        "asset_kind": "option",
         "options_path": True,
-        "option_meta": dict(option_meta),
+        "option_meta": option_meta,
+        "option_contract_key": option_meta.get("contract_key"),
+        "price_domains": option_price_domains_snapshot(),
         "underlying_price_at_entry": float(px),
         "paper_entry_price_source": "option_premium",
     }
@@ -406,6 +431,8 @@ def _entry_lifecycle_from_response(
             if filled + 1e-9 < qty:
                 return "open", "partially_filled_cancelled", filled, 0.0
             return "open", "filled", filled, 0.0
+        if state in _OPTION_ENTRY_TERMINAL_STATES:
+            return "cancelled", state or "cancelled", 0.0, 0.0
         return "working", state or "accepted", 0.0, qty
 
     return "open", None, None, None
@@ -427,6 +454,56 @@ def _entry_quantity_for_trade(
     ):
         return float(entry_filled_qty)
     return float(requested_qty)
+
+
+def _detach_mismatched_option_position_link(db: Session, trade: Trade) -> bool:
+    """Remove a trigger-created link from an option trade to an equity position.
+
+    The current trading_positions natural key does not include option contract
+    identity. Until the position schema grows an instrument dimension, the
+    safer behavior is no position_id for option trades rather than a false link
+    to the underlying equity row.
+    """
+    try:
+        pos_id = getattr(trade, "position_id", None)
+        if pos_id is None:
+            return False
+        row = db.execute(
+            text("SELECT asset_kind FROM trading_positions WHERE id = :pid"),
+            {"pid": int(pos_id)},
+        ).first()
+        asset_kind = str((row[0] if row else "") or "").strip().lower()
+        if asset_kind in {"option", "options"}:
+            return False
+        db.execute(
+            text(
+                "UPDATE trading_trades "
+                "SET position_id = NULL "
+                "WHERE id = :tid AND position_id = :pid"
+            ),
+            {"tid": int(getattr(trade, "id")), "pid": int(pos_id)},
+        )
+        trade.position_id = None
+        db.commit()
+        logger.warning(
+            "[autotrader_options] detached option trade_id=%s from non-option "
+            "position_id=%s asset_kind=%s",
+            getattr(trade, "id", None),
+            pos_id,
+            asset_kind or "unknown",
+        )
+        return True
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            "[autotrader_options] position-link detach failed for trade_id=%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+        return False
 
 
 def _autotrader_tick_note(
@@ -599,6 +676,219 @@ def _autotrader_tick_soft_budget_seconds() -> int:
         lower=AUTOTRADER_MIN_TICK_MAX_SECONDS,
         upper=AUTOTRADER_MAX_TICK_MAX_SECONDS,
     )
+
+
+def _fresh_candidate_fastlane_state(
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    enabled = bool(
+        getattr(
+            settings,
+            "chili_autotrader_fresh_candidate_fastlane_enabled",
+            False,
+        )
+    )
+    max_age_seconds = _settings_int_clamped(
+        "chili_autotrader_fresh_candidate_fastlane_max_age_seconds",
+        AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
+        lower=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+        upper=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS * 30,
+    )
+    now_utc = now or datetime.utcnow()
+    return {
+        "enabled": enabled,
+        "max_age_seconds": max_age_seconds,
+        "cutoff": now_utc - timedelta(seconds=max_age_seconds),
+    }
+
+
+def _candidate_order_by_clauses(
+    fastlane_state: dict[str, Any],
+) -> list[Any]:
+    if not bool(fastlane_state.get("enabled")):
+        return [BreakoutAlert.id.asc()]
+    cutoff = fastlane_state.get("cutoff")
+    if not isinstance(cutoff, datetime):
+        return [BreakoutAlert.id.asc()]
+    return [
+        case((BreakoutAlert.alerted_at >= cutoff, 0), else_=1).asc(),
+        BreakoutAlert.alerted_at.desc(),
+        BreakoutAlert.id.desc(),
+    ]
+
+
+def _fresh_candidate_burst_batch_size(
+    *,
+    base_limit: int,
+    fresh_fastlane_state: dict[str, Any],
+    fresh_candidate_count: int,
+) -> tuple[int, dict[str, Any]]:
+    enabled = bool(
+        getattr(
+            settings,
+            "chili_autotrader_fresh_candidate_burst_enabled",
+            AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED,
+        )
+    )
+    meta: dict[str, Any] = {
+        "enabled": enabled,
+        "base_limit": int(base_limit),
+        "effective_limit": int(base_limit),
+        "fresh_candidate_count": max(0, int(fresh_candidate_count or 0)),
+        "fresh_window_count": 1,
+    }
+    if (
+        not enabled
+        or not bool(fresh_fastlane_state.get("enabled"))
+        or fresh_candidate_count <= base_limit
+    ):
+        return int(base_limit), meta
+
+    tick_interval = _settings_int_clamped(
+        "chili_autotrader_tick_interval_seconds",
+        AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+        lower=5,
+        upper=120,
+    )
+    try:
+        max_age_seconds = int(fresh_fastlane_state.get("max_age_seconds") or 0)
+    except (TypeError, ValueError):
+        max_age_seconds = AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS
+    if max_age_seconds <= 0:
+        max_age_seconds = AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS
+
+    fresh_window_count = max(1, (max_age_seconds + tick_interval - 1) // tick_interval)
+    window_capacity = min(
+        AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+        int(base_limit) * fresh_window_count,
+    )
+    effective_limit = max(
+        int(base_limit),
+        min(int(fresh_candidate_count), window_capacity),
+    )
+    meta.update(
+        {
+            "effective_limit": int(effective_limit),
+            "fresh_window_count": int(fresh_window_count),
+            "tick_interval_seconds": int(tick_interval),
+            "fresh_window_seconds": int(max_age_seconds),
+            "window_capacity": int(window_capacity),
+        }
+    )
+    return int(effective_limit), meta
+
+
+def _candidate_price_prefetch_enabled() -> bool:
+    return bool(
+        getattr(
+            settings,
+            "chili_autotrader_candidate_price_prefetch_enabled",
+            False,
+        )
+    )
+
+
+def _quote_price_from_snapshot(snapshot: Any) -> float | None:
+    if not isinstance(snapshot, dict):
+        return None
+    for key in ("price", "last_price", "mid"):
+        raw = snapshot.get(key)
+        try:
+            price = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            price = None
+        if price is not None and price > 0:
+            return price
+    return None
+
+
+def _prefetch_candidate_prices(
+    candidates: list[BreakoutAlert],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    meta: dict[str, Any] = {
+        "enabled": _candidate_price_prefetch_enabled(),
+        "requested": 0,
+        "hits": 0,
+        "price_bus_hits": 0,
+        "batch_requested": 0,
+        "batch_hits": 0,
+        "elapsed_seconds": 0.0,
+        "error": None,
+    }
+    if not meta["enabled"] or not candidates:
+        return {}, meta
+    tickers = sorted({
+        str(getattr(alert, "ticker", "") or "").strip().upper()
+        for alert in candidates
+        if str(getattr(alert, "ticker", "") or "").strip()
+    })
+    meta["requested"] = len(tickers)
+    if not tickers:
+        return {}, meta
+    started = time.monotonic()
+    prices: dict[str, float] = {}
+    try:
+        try:
+            from .price_bus import get_live_quote
+        except Exception:
+            get_live_quote = None  # type: ignore[assignment]
+        if get_live_quote is not None:
+            for ticker in tickers:
+                quote = get_live_quote(ticker)
+                price = _quote_price_from_snapshot(quote)
+                if price is not None:
+                    prices[ticker] = price
+        meta["price_bus_hits"] = len(prices)
+        missing = [ticker for ticker in tickers if ticker not in prices]
+        if not missing:
+            meta["hits"] = len(prices)
+            return prices, meta
+        from .market_data import fetch_quotes_batch
+
+        meta["batch_requested"] = len(missing)
+        quotes = fetch_quotes_batch(missing, allow_provider_fallback=False) or {}
+        batch_hits = 0
+        for ticker in missing:
+            quote = quotes.get(ticker) or quotes.get(ticker.upper())
+            price = _quote_price_from_snapshot(quote)
+            if price is not None:
+                prices[ticker] = price
+                batch_hits += 1
+        meta["batch_hits"] = batch_hits
+    except Exception as exc:
+        meta["error"] = f"{type(exc).__name__}: {exc}"[:240]
+        logger.debug("[autotrader] candidate price prefetch failed", exc_info=True)
+    finally:
+        meta["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    meta["hits"] = len(prices)
+    return prices, meta
+
+
+def _attach_prefetched_prices(
+    candidates: list[BreakoutAlert],
+    prices: dict[str, float],
+) -> None:
+    if not prices:
+        return
+    for alert in candidates:
+        key = str(getattr(alert, "ticker", "") or "").strip().upper()
+        price = prices.get(key)
+        if price is None:
+            continue
+        setattr(alert, "_chili_prefetched_current_price", float(price))
+
+
+def _current_price_for_alert(alert: BreakoutAlert) -> float | None:
+    prefetched = getattr(alert, "_chili_prefetched_current_price", None)
+    try:
+        prefetched_price = float(prefetched) if prefetched is not None else None
+    except (TypeError, ValueError):
+        prefetched_price = None
+    if prefetched_price is not None and prefetched_price > 0:
+        setattr(alert, "_chili_current_price_source", "batch_prefetch")
+        return prefetched_price
+    setattr(alert, "_chili_current_price_source", "single_fetch")
+    return _current_price(alert.ticker)
 
 
 def _stock_session_defer_state(now: datetime | None = None) -> dict[str, Any]:
@@ -2411,7 +2701,19 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             candidate_base = candidate_base.filter(non_stock_asset_filter)
     batch_limit = _autotrader_candidate_batch_size()
     tick_budget_s = _autotrader_tick_soft_budget_seconds()
-    fresh_candidate_pool = int(candidate_base.count())
+    fresh_fastlane = _fresh_candidate_fastlane_state()
+    candidate_pool_base = int(candidate_base.count())
+    fresh_candidate_pool = candidate_pool_base
+    fresh_cutoff = fresh_fastlane.get("cutoff")
+    if bool(fresh_fastlane.get("enabled")) and isinstance(fresh_cutoff, datetime):
+        fresh_candidate_pool = int(
+            candidate_base.filter(BreakoutAlert.alerted_at >= fresh_cutoff).count()
+        )
+    effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
+        base_limit=batch_limit,
+        fresh_fastlane_state=fresh_fastlane,
+        fresh_candidate_count=fresh_candidate_pool,
+    )
     stock_deferred_pool = 0
     stock_stale_unprocessed = 0
     if stock_defer.get("enabled"):
@@ -2437,11 +2739,13 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             ).count()
         )
     candidates = (
-        candidate_base.order_by(BreakoutAlert.id.asc()).limit(batch_limit).all()
+        candidate_base.order_by(
+            *_candidate_order_by_clauses(fresh_fastlane)
+        ).limit(effective_batch_limit).all()
     )
     retry_pool = 0
     retry_candidates: list[BreakoutAlert] = []
-    spare_slots = batch_limit - len(candidates)
+    spare_slots = max(0, batch_limit - len(candidates))
     if spare_slots > 0:
         retry_pool, retry_candidates = _synergy_retry_candidates(
             db,
@@ -2449,14 +2753,46 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             limit=spare_slots,
         )
         candidates.extend(retry_candidates)
-    candidate_pool = fresh_candidate_pool + retry_pool
+    candidate_pool = candidate_pool_base + retry_pool
+    prefetched_prices, price_prefetch_meta = _prefetch_candidate_prices(candidates)
+    _attach_prefetched_prices(candidates, prefetched_prices)
 
     out: dict[str, Any] = {
         "processed": 0,
         "placed": 0,
         "scaled_in": 0,
         "skipped": 0,
+        "candidate_pool": candidate_pool,
+        "candidate_batch_base_size": batch_limit,
+        "candidate_batch_effective_size": effective_batch_limit,
         "fresh_candidate_pool": fresh_candidate_pool,
+        "fresh_candidate_fastlane_enabled": bool(fresh_fastlane.get("enabled")),
+        "fresh_candidate_fastlane_max_age_seconds": fresh_fastlane.get("max_age_seconds"),
+        "fresh_candidate_burst_enabled": bool(fresh_burst_meta.get("enabled")),
+        "fresh_candidate_burst_window_count": int(
+            fresh_burst_meta.get("fresh_window_count") or 1
+        ),
+        "fresh_candidate_burst_window_capacity": int(
+            fresh_burst_meta.get("window_capacity") or batch_limit
+        ),
+        "candidate_price_prefetch_enabled": bool(price_prefetch_meta.get("enabled")),
+        "candidate_price_prefetch_requested": int(
+            price_prefetch_meta.get("requested") or 0
+        ),
+        "candidate_price_prefetch_hits": int(price_prefetch_meta.get("hits") or 0),
+        "candidate_price_prefetch_price_bus_hits": int(
+            price_prefetch_meta.get("price_bus_hits") or 0
+        ),
+        "candidate_price_prefetch_batch_requested": int(
+            price_prefetch_meta.get("batch_requested") or 0
+        ),
+        "candidate_price_prefetch_batch_hits": int(
+            price_prefetch_meta.get("batch_hits") or 0
+        ),
+        "candidate_price_prefetch_elapsed_seconds": price_prefetch_meta.get(
+            "elapsed_seconds"
+        ),
+        "candidate_price_prefetch_error": price_prefetch_meta.get("error"),
         "stock_session_defer_active": bool(stock_defer.get("active")),
         "stock_session_defer_reason": stock_defer.get("reason"),
         "stock_session_defer_max_age_hours": stock_defer.get("max_age_hours"),
@@ -2554,15 +2890,20 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     out["tick_elapsed_seconds"] = round(time.monotonic() - tick_started, 3)
 
     logger.info(
-        "[autotrader] tick uid=%s candidate_pool=%d batch=%d processed=%d placed=%d "
+        "[autotrader] tick uid=%s candidate_pool=%d batch=%d base_batch=%d "
+        "effective_batch=%d processed=%d placed=%d "
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
         "synergy_retry_batch=%d stock_defer_active=%s stock_deferred_pool=%d "
         "stock_stale_unprocessed=%d tick_budget_s=%s tick_deferred=%d "
+        "fresh_fastlane=%s fresh_burst=%s price_prefetch_hits=%s/%s "
+        "price_prefetch_elapsed_s=%s "
         "tick_elapsed_s=%.3f last_kind=%s last_reason=%s last_alert_id=%s "
         "last_ticker=%s",
         uid,
         candidate_pool,
         len(candidates),
+        batch_limit,
+        effective_batch_limit,
         out["processed"],
         out["placed"],
         out["scaled_in"],
@@ -2575,6 +2916,11 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out.get("stock_session_stale_unprocessed"),
         out.get("tick_budget_seconds"),
         out.get("tick_budget_deferred"),
+        out.get("fresh_candidate_fastlane_enabled"),
+        out.get("fresh_candidate_burst_enabled"),
+        out.get("candidate_price_prefetch_hits"),
+        out.get("candidate_price_prefetch_requested"),
+        out.get("candidate_price_prefetch_elapsed_seconds"),
         out.get("tick_elapsed_seconds"),
         out.get("tick_last_kind") or "-",
         out.get("tick_last_reason") or "-",
@@ -2683,10 +3029,20 @@ def _maybe_substitute_with_options(
         )
         if not opt_meta:
             return
+        opt_meta = _normalize_option_meta_for_alert(
+            alert,
+            opt_meta,
+            underlying_price=float(spot),
+        )
 
         snap = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
         snap = dict(snap)  # copy so we don't mutate ORM state inadvertently
+        snap["asset_type"] = "options"
+        snap["asset_kind"] = "option"
+        snap["options_path"] = True
         snap["option_meta"] = opt_meta
+        snap["option_contract_key"] = opt_meta.get("contract_key")
+        snap["price_domains"] = option_price_domains_snapshot()
         snap["original_asset_type"] = alert.asset_type
         alert.indicator_snapshot = snap
         alert.asset_type = "options"
@@ -3178,9 +3534,22 @@ def _process_one_alert(
         # an alert. The gate is an additive safety, not a critical path.
         logger.debug("[regime_gate] eval skipped due to error: %s", _rg_exc)
 
-    px = _current_price(alert.ticker)
+    px = _current_price_for_alert(alert)
     if px is None:
-        _audit(db, user_id=uid, alert=alert, decision="skipped", reason="no_quote")
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="skipped",
+            reason="no_quote",
+            rule_snapshot={
+                "entry_quote_source": getattr(
+                    alert,
+                    "_chili_current_price_source",
+                    "single_fetch",
+                ),
+            },
+        )
         out["skipped"] += 1
         _autotrader_tick_note(out, kind="skipped", reason="no_quote", alert=alert)
         return
@@ -3392,6 +3761,12 @@ def _process_one_alert(
     ok, reason, snap = passes_rule_gate(
         db, alert, settings=settings, ctx=ctx, for_new_entry=for_new, fallback_user_id=uid,
     )
+    snap["entry_quote_source"] = getattr(
+        alert,
+        "_chili_current_price_source",
+        "single_fetch",
+    )
+    snap["entry_quote_prefetch_used"] = snap["entry_quote_source"] == "batch_prefetch"
     if not ok:
         if (
             bool(getattr(alert, "_chili_shadow_observation_only", False))
@@ -3694,7 +4069,16 @@ def _execute_broker_buy(
     # extract it and call place_option_buy. snap['option_meta'] is set
     # by the gate when options_path=True.
     if snap.get("options_path") and snap.get("option_meta"):
-        opt_meta = snap["option_meta"]
+        opt_meta = _normalize_option_meta_for_alert(
+            alert,
+            snap["option_meta"],
+            underlying_price=px,
+        )
+        snap["option_meta"] = opt_meta
+        snap["asset_type"] = "options"
+        snap["asset_kind"] = "option"
+        snap["option_contract_key"] = opt_meta.get("contract_key")
+        snap["price_domains"] = option_price_domains_snapshot()
         venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
         if venue_reason is not None:
             _block_live_order(
@@ -5017,12 +5401,25 @@ def _execute_new_entry(
     # the venue supports it.
     if snap.get("options_path") and snap.get("option_meta"):
         _opt_meta = snap["option_meta"]
-        try:
-            qty = int(_opt_meta.get("quantity") or 1)
-            if qty < 1:
-                qty = 1
-        except Exception:
-            qty = 1
+        qty = parse_contract_quantity(_opt_meta.get("quantity"))
+        if qty is None:
+            snap["options_quantity_error"] = "invalid_contract_quantity"
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="skipped",
+                reason="options_meta_invalid_quantity",
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="skipped",
+                reason="options_meta_invalid_quantity",
+                alert=alert,
+            )
+            return
         try:
             _premium = float(_opt_meta.get("limit_price") or alert.entry_price or 0)
         except Exception:
@@ -5278,6 +5675,29 @@ def _execute_new_entry(
             entry_broker_status=_entry_broker_status,
             entry_filled_qty=_entry_filled_qty,
         )
+        if (
+            _is_option_entry
+            and _entry_status == "cancelled"
+            and float(_entry_filled_qty or 0.0) <= 0.0
+        ):
+            snap["option_entry_terminal_state"] = _entry_broker_status
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=f"broker:option_entry_no_fill:{_entry_broker_status or 'terminal'}",
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="blocked",
+                reason="broker:option_entry_no_fill",
+                alert=alert,
+            )
+            return
         _option_terminal_partial_entry = (
             _is_option_entry
             and _entry_broker_status == "partially_filled_cancelled"
@@ -5289,6 +5709,15 @@ def _execute_new_entry(
         _entry_is_async = _is_coinbase_entry or _is_option_entry
         _trade_stop, _trade_target, _managed_exit_execution = (
             _managed_edge_execution_levels(alert, px=px, snap=snap)
+        )
+        _option_meta_for_trade = (
+            _normalize_option_meta_for_alert(
+                alert,
+                snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {},
+                underlying_price=px,
+            )
+            if _is_option_entry
+            else {}
         )
         _entry_execution_snapshot = {
             "broker_source": _broker_source_for_trade,
@@ -5315,6 +5744,23 @@ def _execute_new_entry(
             ),
             "option_order_state": res.get("_chili_option_order_state"),
             "option_position_verified": bool(res.get("_chili_option_position_verified")),
+            "option_contract_key": _option_meta_for_trade.get("contract_key"),
+            "option_occ_symbol": _option_meta_for_trade.get("occ_symbol"),
+            "option_underlying": _option_meta_for_trade.get("underlying"),
+            "option_price_domain": (
+                "option_premium" if _is_option_entry else None
+            ),
+            "option_contract_multiplier": (
+                _option_meta_for_trade.get("contract_multiplier")
+                if _is_option_entry
+                else None
+            ),
+            "underlying_price_at_entry": px if _is_option_entry else None,
+            "option_limit_price": (
+                _option_meta_for_trade.get("limit_price")
+                if _is_option_entry
+                else None
+            ),
             "coinbase_maker_only": bool(res.get("_chili_maker_only")),
             "maker_limit_price": res.get("_chili_maker_limit_price") or res.get("limit_price"),
             "maker_best_bid": res.get("_chili_maker_bid"),
@@ -5354,6 +5800,22 @@ def _execute_new_entry(
             "cost_gate_tca_cost_bps": snap.get("cost_gate_tca_cost_bps"),
             "managed_exit_execution": _managed_exit_execution,
         }
+        _trade_indicator_snapshot = {
+            "breakout_alert": alert.indicator_snapshot,
+            "signals": alert.signals_snapshot,
+            "entry_execution": _entry_execution_snapshot,
+        }
+        if _is_option_entry:
+            _trade_indicator_snapshot.update(
+                {
+                    "asset_type": "options",
+                    "asset_kind": "option",
+                    "options_path": True,
+                    "option_meta": _option_meta_for_trade,
+                    "option_contract_key": _option_meta_for_trade.get("contract_key"),
+                    "price_domains": option_price_domains_snapshot(),
+                }
+            )
         # f-tca-writer-wiring (2026-05-18): capture the entry-side TCA
         # reference in the same price domain as the fill: underlying spot for
         # equities/crypto, option premium for options. The difference is the
@@ -5380,12 +5842,8 @@ def _execute_new_entry(
             management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
             broker_order_id=str(order_id_raw).strip(),
             asset_kind="option" if _is_option_entry else None,
-            indicator_snapshot={
-                "breakout_alert": alert.indicator_snapshot,
-                "signals": alert.signals_snapshot,
-                "entry_execution": _entry_execution_snapshot,
-            },
-            tags="autotrader_v1",
+            indicator_snapshot=_trade_indicator_snapshot,
+            tags="autotrader_v1 options" if _is_option_entry else "autotrader_v1",
             auto_trader_version=AUTOTRADER_VERSION,
             scale_in_count=0,
             tca_reference_entry_price=_tca_ref_entry,
@@ -5393,6 +5851,8 @@ def _execute_new_entry(
         db.add(tr)
         db.commit()
         db.refresh(tr)
+        if _is_option_entry:
+            _detach_mismatched_option_position_link(db, tr)
         # f-tca-writer-wiring (2026-05-18): compute entry slippage NOW, using
         # the same-domain reference and the broker's actual fill price.
         # Without this,

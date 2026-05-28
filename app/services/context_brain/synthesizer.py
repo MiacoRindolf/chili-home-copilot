@@ -21,7 +21,7 @@ import logging
 import time
 from typing import Optional
 
-from .. import openai_client
+from ... import openai_client
 from .purpose_policy import default_synthesizer
 
 logger = logging.getLogger(__name__)

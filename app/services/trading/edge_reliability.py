@@ -26,6 +26,13 @@ from ...models.trading import (
     Trade,
 )
 from .brain_work.ledger import enqueue_outcome_event, enqueue_work_event
+from .return_math import (
+    OPTION_CONTRACT_MULTIPLIER,
+    paper_trade_contract_multiplier,
+    paper_trade_return_pct as _realized_paper_return_pct,
+    trade_contract_multiplier,
+    trade_return_pct as _realized_trade_return_pct,
+)
 
 EDGE_RELIABILITY_REFRESH = "edge_reliability_refresh"
 RECERT_RESCUE_REFRESH = "recert_rescue_refresh"
@@ -242,6 +249,10 @@ def _recert_reasons(pattern: ScanPattern | None) -> set[str]:
 
 
 def _paper_return_pct(row: PaperTrade) -> float | None:
+    if paper_trade_contract_multiplier(row) == OPTION_CONTRACT_MULTIPLIER:
+        realized = _realized_paper_return_pct(row)
+        if realized is not None:
+            return realized
     pct = _safe_float(getattr(row, "pnl_pct", None))
     if pct is not None:
         return pct
@@ -255,6 +266,10 @@ def _paper_return_pct(row: PaperTrade) -> float | None:
 
 
 def _live_return_pct(row: Trade) -> float | None:
+    if trade_contract_multiplier(row) == OPTION_CONTRACT_MULTIPLIER:
+        realized = _realized_trade_return_pct(row)
+        if realized is not None:
+            return realized
     pnl = _safe_float(getattr(row, "pnl", None))
     entry = (
         _safe_float(getattr(row, "avg_fill_price", None))

@@ -35,6 +35,7 @@ def resolve_position_id(
     ticker: str | None = None,
     broker_source: str | None = None,
     direction: str | None = None,
+    account_type: str | None = None,
 ) -> int | None:
     """Resolve a ``trading_positions.id`` from event/intent context.
 
@@ -63,17 +64,35 @@ def resolve_position_id(
             )
             tkr = getattr(trade, "ticker", None) or ticker
             dir_ = getattr(trade, "direction", None) or direction or "long"
+            acct = getattr(trade, "account_type", None) or account_type
+            try:
+                from .autopilot_scope import is_option_trade
+                is_option = bool(is_option_trade(trade))
+            except Exception:
+                is_option = str(getattr(trade, "asset_kind", "") or "").lower() in {
+                    "option",
+                    "options",
+                }
         else:
             uid = user_id
             broker = broker_source or ""
             tkr = ticker
             dir_ = direction or "long"
+            acct = account_type
+            is_option = False
 
         broker = (broker or "").strip().lower()
         dir_ = (dir_ or "long").strip().lower()
         tkr = (tkr or "").strip()
+        acct = (acct or ("spot" if broker == "coinbase" else "cash")).strip().lower()
 
         if not (broker and tkr):
+            return None
+
+        # trading_positions is keyed by the underlying ticker today, not by
+        # option contract identity. A NULL position_id is safer than linking a
+        # SPY 729C management envelope to the SPY equity inventory row.
+        if is_option:
             return None
 
         row = db.execute(text(
@@ -81,6 +100,7 @@ def resolve_position_id(
             SELECT id FROM trading_positions
             WHERE COALESCE(user_id, -1) = COALESCE(:uid, -1)
               AND broker_source = :broker
+              AND account_type = :account_type
               AND ticker = :tkr
               AND direction = :direction
             ORDER BY
@@ -88,7 +108,13 @@ def resolve_position_id(
               id DESC
             LIMIT 1
             """
-        ), {"uid": uid, "broker": broker, "tkr": tkr, "direction": dir_}).first()
+        ), {
+            "uid": uid,
+            "broker": broker,
+            "account_type": acct,
+            "tkr": tkr,
+            "direction": dir_,
+        }).first()
         return int(row[0]) if row else None
     except Exception:
         return None

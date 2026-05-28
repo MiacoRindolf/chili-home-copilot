@@ -19448,6 +19448,200 @@ def _migration_278_project_autonomy_chat_plan_mode(conn) -> None:
     logger.info("[mig278] project autonomy chat/plan mode installed")
 
 
+def _migration_281_llm_cost_observability(conn) -> None:
+    """Add provider/cost fields and seed trading LLM gateway purposes."""
+
+    tables = _tables(conn)
+
+    if "llm_call_log" in tables:
+        cols = _columns(conn, "llm_call_log")
+        additions = {
+            "provider_base_url": "TEXT",
+            "prompt_tokens": "INTEGER",
+            "completion_tokens": "INTEGER",
+            "cached_tokens": "INTEGER",
+            "reasoning_tokens": "INTEGER",
+            "total_tokens": "INTEGER",
+            "service_tier": "TEXT",
+            "cache_status": "TEXT",
+            "estimated_cost_usd": "NUMERIC(10, 6) DEFAULT 0",
+        }
+        for col, ddl in additions.items():
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE llm_call_log ADD COLUMN {col} {ddl}"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS llm_call_log_provider_model_created_idx "
+            "ON llm_call_log (provider, model, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS llm_call_log_purpose_created_idx "
+            "ON llm_call_log (purpose, created_at DESC)"
+        ))
+
+    if "llm_gateway_log" in tables:
+        cols = _columns(conn, "llm_gateway_log")
+        additions = {
+            "provider": "TEXT",
+            "provider_base_url": "TEXT",
+            "prompt_tokens": "INTEGER",
+            "completion_tokens": "INTEGER",
+            "cached_tokens": "INTEGER",
+            "reasoning_tokens": "INTEGER",
+            "total_tokens": "INTEGER",
+            "service_tier": "TEXT",
+            "cache_status": "TEXT",
+            "estimated_cost_usd": "NUMERIC(10, 6) DEFAULT 0",
+        }
+        for col, ddl in additions.items():
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE llm_gateway_log ADD COLUMN {col} {ddl}"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS llm_gateway_log_provider_created_idx "
+            "ON llm_gateway_log (provider, started_at DESC)"
+        ))
+
+    if "llm_purpose_policy" in tables:
+        seeds = [
+            (
+                "trading_analyze",
+                "Trading analyze non-stream request",
+                "passthrough",
+                False,
+                False,
+                True,
+                False,
+            ),
+            (
+                "autotrader_revalidation",
+                "AutoTrader LLM revalidation gate",
+                "passthrough",
+                False,
+                False,
+                False,
+                True,
+            ),
+            (
+                "pattern_adjustment",
+                "Pattern position adjustment JSON advisor",
+                "passthrough",
+                False,
+                False,
+                False,
+                True,
+            ),
+            (
+                "trade_plan_extract",
+                "Pattern trade plan JSON extraction",
+                "passthrough",
+                False,
+                False,
+                False,
+                True,
+            ),
+            (
+                "trading_analyze_stream",
+                "Trading analyze SSE stream",
+                "passthrough",
+                False,
+                False,
+                True,
+                False,
+            ),
+            (
+                "smart_pick_stream",
+                "Smart Pick SSE stream",
+                "passthrough",
+                False,
+                False,
+                True,
+                False,
+            ),
+            (
+                "trading_smart_pick",
+                "Trading Smart Pick non-stream recommendation",
+                "passthrough",
+                False,
+                False,
+                True,
+                False,
+            ),
+            (
+                "trading_pattern_mine",
+                "Post-close pattern mining",
+                "passthrough",
+                False,
+                False,
+                False,
+                False,
+            ),
+            (
+                "trading_reflect",
+                "Offline trading hypothesis reflection",
+                "passthrough",
+                False,
+                False,
+                False,
+                False,
+            ),
+            (
+                "trading_brain_assistant",
+                "Trading Brain Assistant chat turns",
+                "passthrough",
+                False,
+                False,
+                True,
+                False,
+            ),
+            (
+                "position_plan_generator",
+                "Portfolio position plan JSON generator",
+                "passthrough",
+                False,
+                False,
+                False,
+                True,
+            ),
+            (
+                "pattern_research_extract",
+                "Offline web research pattern extraction",
+                "passthrough",
+                False,
+                False,
+                False,
+                False,
+            ),
+            (
+                "pattern_suggest",
+                "User-supplied pattern JSON suggestion",
+                "passthrough",
+                False,
+                False,
+                False,
+                True,
+            ),
+        ]
+        for purpose, desc, strategy, decompose, cross, prem_synth, high_stakes in seeds:
+            conn.execute(text(
+                "INSERT INTO llm_purpose_policy "
+                "(purpose, description, routing_strategy, decompose, "
+                " cross_examine, use_premium_synthesis, high_stakes) "
+                "VALUES (:p, :d, :s, :de, :ce, :ps, :hs) "
+                "ON CONFLICT (purpose) DO NOTHING"
+            ), {
+                "p": purpose,
+                "d": desc,
+                "s": strategy,
+                "de": decompose,
+                "ce": cross,
+                "ps": prem_synth,
+                "hs": high_stakes,
+            })
+
+    conn.commit()
+    logger.info("[mig281] LLM cost observability fields and trading policies installed")
+
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19786,6 +19980,8 @@ MIGRATIONS = [
      _migration_277_project_autonomy_tables),
     ("278_project_autonomy_chat_plan_mode",
      _migration_278_project_autonomy_chat_plan_mode),
+    ("281_llm_cost_observability",
+     _migration_281_llm_cost_observability),
 ]
 
 

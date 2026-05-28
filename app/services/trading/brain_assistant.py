@@ -206,6 +206,8 @@ def chat(
         full_messages,
         max_tokens=MAX_TOKENS,
         trace_id="trading-brain-assistant",
+        purpose="trading_brain_assistant",
+        user_id=user_id,
     )
 
     if not reply:

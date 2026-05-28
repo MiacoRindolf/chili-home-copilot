@@ -2196,8 +2196,16 @@ def passes_rule_gate(
     # dedicated options entry-quality model handles payoff/EV in the
     # correct price domain.
     if options_path:
+        from .options.contracts import (
+            normalize_option_meta,
+            option_price_domains_snapshot,
+            validate_single_leg_option_meta,
+        )
+
         snap_meta = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
         opt_meta = snap_meta.get("option_meta") or {}
+        if not isinstance(opt_meta, dict):
+            return False, "options_meta_missing:option_meta", snap
         # Phase 4 — accept either single-leg metadata or a multi-leg
         # ``legs`` list. Single-leg requires (strike, expiration,
         # option_type); multi-leg requires `legs` to be a non-empty
@@ -2207,17 +2215,33 @@ def passes_rule_gate(
         # place_option_buy.
         legs = opt_meta.get("legs")
         if isinstance(legs, list) and len(legs) >= 2:
+            normalized_legs: list[dict[str, Any]] = []
             for i, leg in enumerate(legs):
                 miss = [k for k in ("strike", "expiration", "option_type", "action")
                         if not (isinstance(leg, dict) and leg.get(k))]
                 if miss:
                     return False, f"options_meta_leg_{i}_missing:{','.join(miss)}", snap
+                normalized_legs.append(
+                    normalize_option_meta(
+                        leg,
+                        underlying=getattr(alert, "ticker", None),
+                        current_underlying_price=getattr(ctx, "current_price", None),
+                    )
+                )
+            opt_meta = dict(opt_meta)
+            opt_meta["legs"] = normalized_legs
         else:
-            required = ("strike", "expiration", "option_type")
-            missing = [k for k in required if not opt_meta.get(k)]
+            opt_meta = normalize_option_meta(
+                opt_meta,
+                underlying=getattr(alert, "ticker", None),
+                current_underlying_price=getattr(ctx, "current_price", None),
+            )
+            missing = validate_single_leg_option_meta(opt_meta)
             if missing:
                 return False, f"options_meta_missing:{','.join(missing)}", snap
         snap["option_meta"] = opt_meta
+        snap["option_contract_key"] = opt_meta.get("contract_key")
+        snap["price_domains"] = option_price_domains_snapshot()
 
     # Phase 3: pull learned per-pattern signal quality from the M.1 ledger.
     # When the pattern has confident cells we can derive confidence and
@@ -2315,6 +2339,61 @@ def passes_rule_gate(
         snap["option_entry_quality"] = option_entry.snapshot
         if not option_entry.accepted:
             return False, f"options_entry_quality:{option_entry.reason}", snap
+        try:
+            from .options.contracts import missing_greeks
+            from .options.portfolio_budget import (
+                check_proposal_against_budget,
+                options_budget_bypass_enabled,
+                single_leg_proposal_from_option_meta,
+            )
+
+            missing = missing_greeks(opt_meta)
+            if missing:
+                reasons = ["missing_complete_greeks:" + ",".join(missing)]
+                if options_budget_bypass_enabled():
+                    snap["options_budget_check"] = {
+                        "ok": True,
+                        "reasons": [
+                            "BYPASS_VIA_CHILI_OPTIONS_BUDGET_BYPASS",
+                            *reasons,
+                        ],
+                    }
+                else:
+                    snap["options_budget_check"] = {
+                        "ok": False,
+                        "reasons": reasons,
+                    }
+                    return False, "options_budget:missing_complete_greeks", snap
+            elif db is not None:
+                proposal = single_leg_proposal_from_option_meta(
+                    opt_meta,
+                    confidence=conf,
+                )
+                budget_check = check_proposal_against_budget(
+                    db,
+                    alert.user_id if alert.user_id is not None else fallback_user_id,
+                    proposal,
+                )
+                snap["options_budget_check"] = {
+                    "ok": budget_check.accepted,
+                    "reasons": budget_check.reasons,
+                    "current_portfolio": budget_check.current_portfolio,
+                    "after_proposal": budget_check.after_proposal,
+                    "budget": budget_check.budget,
+                }
+                if not budget_check.accepted:
+                    return False, "options_budget:" + ",".join(budget_check.reasons), snap
+            else:
+                snap["options_budget_check"] = {
+                    "ok": None,
+                    "reason": "no_db",
+                }
+        except Exception as exc:
+            snap["options_budget_check"] = {
+                "ok": None,
+                "reason": "error",
+                "error": type(exc).__name__,
+            }
     else:
         ppp = projected_profit_pct(entry, target)
         snap["projected_profit_pct"] = ppp

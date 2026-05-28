@@ -1376,7 +1376,6 @@ def _closed_trade_journal_template(
 def analyze_closed_trade(db: Session, trade: Trade) -> str | None:
     """Post-close: structured rule reinforcement + template journal; optional LLM on large moves."""
     from ...prompts import load_prompt
-    from ... import openai_client
     from ...logger import log_info, new_trace_id
     from .journal import add_journal_entry
 
@@ -1434,27 +1433,17 @@ def analyze_closed_trade(db: Session, trade: Trade) -> str | None:
         )
         try:
             system_prompt = load_prompt("trading_analyst")
-            try:
-                from ..context_brain.llm_gateway import gateway_chat
-                result = gateway_chat(
-                    messages=[{"role": "user", "content": user_msg}],
-                    purpose='trading_pattern_mine',
-                    system_prompt=system_prompt,
-                    trace_id=trace_id,
-                    user_message=user_msg,
-                    max_tokens=2048,
-                    user_id=trade.user_id,
-                    db=db,
-                )
-            except Exception as _ge:
-                log_info(trace_id, f"[trading] gateway pattern-mine fallback: {_ge}")
-                result = openai_client.chat(
-                    messages=[{"role": "user", "content": user_msg}],
-                    system_prompt=system_prompt,
-                    trace_id=trace_id,
-                    user_message=user_msg,
-                    max_tokens=2048,
-                )
+            from ..context_brain.llm_gateway import gateway_chat
+            result = gateway_chat(
+                messages=[{"role": "user", "content": user_msg}],
+                purpose='trading_pattern_mine',
+                system_prompt=system_prompt,
+                trace_id=trace_id,
+                user_message=user_msg,
+                max_tokens=2048,
+                user_id=trade.user_id,
+                db=db,
+            )
             llm_reply = (result.get("reply") or "").strip()
             # F.5 — record trade outcome against the pattern_mine call so the
             # distiller can learn which mining strategies correlate with wins.
@@ -7050,25 +7039,15 @@ Keep it conversational and honest. Use actual numbers from the patterns above.""
 
         system_prompt = load_prompt("trading_analyst")
         trace_id = new_trace_id()
-        try:
-            from ..context_brain.llm_gateway import gateway_chat
-            result = gateway_chat(
-                messages=[{"role": "user", "content": reflection_prompt}],
-                purpose='trading_reflect',
-                system_prompt=system_prompt,
-                trace_id=trace_id,
-                user_message=reflection_prompt,
-                max_tokens=3000,
-            )
-        except Exception as _ge:
-            from ... import openai_client
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": reflection_prompt}],
-                system_prompt=system_prompt,
-                trace_id=trace_id,
-                user_message=reflection_prompt,
-                max_tokens=3000,
-            )
+        from ..context_brain.llm_gateway import gateway_chat
+        result = gateway_chat(
+            messages=[{"role": "user", "content": reflection_prompt}],
+            purpose='trading_reflect',
+            system_prompt=system_prompt,
+            trace_id=trace_id,
+            user_message=reflection_prompt,
+            max_tokens=3000,
+        )
         reflection = result.get("reply", "Could not generate reflection.")
     except Exception as e:
         reflection = f"Reflection unavailable: {e}"

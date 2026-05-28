@@ -32,7 +32,8 @@ from .edge_reliability import (
     latest_edge_reliability_snapshot_slices,
     null_lineage_short_paper_candidates,
 )
-from .portfolio_risk import get_risk_limits
+from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
+from .return_math import trade_return_pct as _realized_trade_return_pct
 
 LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
 RECERT_BLOCKERS = frozenset({"recert_blocked", "hard_recert_blocked"})
@@ -188,6 +189,10 @@ def _trade_asset_class(trade: Any) -> str:
 def _trade_heat_pct(trade: Any, *, capital: float) -> float:
     if capital <= 0.0:
         return 0.0
+    if _trade_asset_class(trade) == "options":
+        risk = _option_premium_risk_dollars(trade)
+        if risk is not None:
+            return max(0.0, risk / capital * 100.0)
     entry = _safe_float(getattr(trade, "entry_price", None), 0.0) or 0.0
     qty = _safe_float(getattr(trade, "quantity", None), 0.0) or 0.0
     stop = _safe_float(getattr(trade, "stop_loss", None))
@@ -199,6 +204,8 @@ def _trade_heat_pct(trade: Any, *, capital: float) -> float:
 
 
 def _trade_return_pct(trade: Any) -> float | None:
+    if _trade_asset_class(trade) == "options":
+        return _realized_trade_return_pct(trade)
     pnl = _safe_float(getattr(trade, "pnl", None))
     entry = (
         _safe_float(getattr(trade, "avg_fill_price", None))

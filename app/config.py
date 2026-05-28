@@ -54,6 +54,12 @@ AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
 AUTOTRADER_DEFAULT_TICK_MAX_SECONDS = 45
 AUTOTRADER_MIN_TICK_MAX_SECONDS = 5
 AUTOTRADER_MAX_TICK_MAX_SECONDS = 300
+AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_ENABLED = True
+AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS = (
+    AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS * 3
+)
+AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED = True
+AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED = True
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_MINUTES = 5
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_MINUTES = 60
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_SECONDS = (
@@ -284,7 +290,18 @@ class Settings(BaseSettings):
     # Groq / OpenAI-compat primary stack (tiers 2–3 in app.openai_client after OpenAI official).
     llm_api_key: str = ""
     # OpenAI official API (api.openai.com) — tried first when set. Also fills primary_api_key if llm_api_key empty.
-    openai_api_key: str = ""
+    openai_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("OPENAI_API_KEY", "PAID_OPENAI_API_KEY"),
+    )
+    openai_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("OPENAI_MODEL", "PAID_OPENAI_MODEL"),
+    )
+    openai_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias=AliasChoices("OPENAI_BASE_URL", "PAID_OPENAI_BASE_URL"),
+    )
     llm_model: str = "llama-3.3-70b-versatile"
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
@@ -310,6 +327,14 @@ class Settings(BaseSettings):
     # Groq bucket keeps its historical 85K preemptive threshold.
     openai_daily_token_limit: int = 0
     premium_daily_token_limit: int = 0
+
+    # Paid LLM cost controls. ``shadow`` records spend only; ``enforce``
+    # preemptively skips paid OpenAI calls after the daily budget is reached.
+    chili_llm_premium_daily_budget_usd: float = 0.0
+    chili_llm_cost_mode: str = "shadow"
+    chili_llm_default_cheap_model: str = "gpt-5.4-mini"
+    chili_llm_escalation_model: str = "gpt-5.5"
+    chili_llm_purpose_model_overrides_json: str = "{}"
 
     # Vision fallback (often same as premium)
     openai_vision_model: str = "gpt-4o-mini"
@@ -2736,6 +2761,52 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_CANDIDATE_BATCH_SIZE"),
         description="Maximum AutoTrader alerts processed in one tick.",
     )
+    chili_autotrader_fresh_candidate_fastlane_enabled: bool = Field(
+        default=AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FRESH_CANDIDATE_FASTLANE_ENABLED"
+        ),
+        description=(
+            "When true, very fresh imminent alerts are pulled to the front of "
+            "the AutoTrader batch so execution-sensitive candidates do not sit "
+            "behind older, likely-stale alerts."
+        ),
+    )
+    chili_autotrader_fresh_candidate_fastlane_max_age_seconds: int = Field(
+        default=AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
+        ge=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+        le=SECONDS_PER_MINUTE * 5,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FRESH_CANDIDATE_FASTLANE_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "Freshness window used by the AutoTrader candidate fast lane. "
+            "Older unprocessed alerts remain eligible after the fresh queue."
+        ),
+    )
+    chili_autotrader_fresh_candidate_burst_enabled: bool = Field(
+        default=AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_FRESH_CANDIDATE_BURST_ENABLED"
+        ),
+        description=(
+            "When true, AutoTrader expands the selected batch only for the "
+            "fresh-candidate fast lane, sized from the freshness window and "
+            "scheduler cadence, so alert bursts are evaluated before they age "
+            "into slippage without increasing live-trading eligibility."
+        ),
+    )
+    chili_autotrader_candidate_price_prefetch_enabled: bool = Field(
+        default=AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_CANDIDATE_PRICE_PREFETCH_ENABLED"
+        ),
+        description=(
+            "When true, AutoTrader batch-prefetches current quotes for selected "
+            "candidates and reuses them inside the rule gate, reducing per-alert "
+            "market-data latency without weakening execution gates."
+        ),
+    )
     chili_autotrader_stock_session_defer_enabled: bool = Field(
         default=AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_STOCK_SESSION_DEFER_ENABLED"),
@@ -5064,6 +5135,14 @@ class Settings(BaseSettings):
                 "STAGING_DATABASE_URL must be a PostgreSQL URL or empty. See docs/STAGING_DATABASE.md."
             )
         return url
+
+    @field_validator("chili_llm_cost_mode")
+    @classmethod
+    def _llm_cost_mode(cls, v: str) -> str:
+        mode = (v or "shadow").strip().lower()
+        if mode not in {"shadow", "enforce"}:
+            raise ValueError("CHILI_LLM_COST_MODE must be 'shadow' or 'enforce'")
+        return mode
 
     @property
     def primary_api_key(self) -> str:

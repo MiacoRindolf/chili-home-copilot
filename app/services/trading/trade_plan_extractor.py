@@ -123,13 +123,17 @@ Based on the pattern conditions, the current indicator state, and the alert leve
 produce the structured monitoring plan JSON.
 """
 
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
-    ]
+    messages = [{"role": "user", "content": user_msg}]
 
     try:
-        raw = call_llm(messages=messages, max_tokens=600, trace_id=f"trade-plan-{ticker}", cacheable=True)
+        raw = call_llm(
+            messages=messages,
+            max_tokens=600,
+            trace_id=f"trade-plan-{ticker}",
+            cacheable=True,
+            purpose="trade_plan_extract",
+            system_prompt=_SYSTEM_PROMPT,
+        )
         raw = (raw or "").strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()

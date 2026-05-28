@@ -306,6 +306,190 @@ def test_stale_deferred_stock_alerts_do_not_block_fresh_session_open(db, monkeyp
     )
 
 
+def test_fresh_candidate_fastlane_prioritizes_new_alerts(db, monkeypatch):
+    user = models.User(name="fresh_fastlane")
+    db.add(user)
+    db.flush()
+    now = datetime.utcnow()
+    old_alert = BreakoutAlert(
+        ticker="OLDFAST",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=user.id,
+        alerted_at=now - timedelta(minutes=5),
+    )
+    fresh_alert = BreakoutAlert(
+        ticker="NEWFAST",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=user.id,
+        alerted_at=now,
+    )
+    db.add_all([old_alert, fresh_alert])
+    db.commit()
+
+    settings = _minimal_settings(user.id)
+    settings.chili_autotrader_candidate_batch_size = 1
+    settings.chili_autotrader_fresh_candidate_fastlane_enabled = True
+    settings.chili_autotrader_fresh_candidate_fastlane_max_age_seconds = 30
+    settings.chili_autotrader_candidate_price_prefetch_enabled = False
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        at_mod,
+        "effective_autotrader_runtime",
+        lambda _db: _live_runtime(),
+    )
+    from app.services.trading import governance
+
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    processed: list[str] = []
+
+    def _record_only(_db, _uid, alert, out, _runtime):
+        processed.append(alert.ticker)
+        out["skipped"] += 1
+
+    monkeypatch.setattr(at_mod, "_process_one_alert", _record_only)
+
+    out = at_mod.run_auto_trader_tick(db)
+
+    assert out["ok"] is True
+    assert out["fresh_candidate_fastlane_enabled"] is True
+    assert processed == ["NEWFAST"]
+
+
+def test_fresh_candidate_fastlane_bursts_across_one_fresh_window(db, monkeypatch):
+    user = models.User(name="fresh_burst")
+    db.add(user)
+    db.flush()
+    now = datetime.utcnow()
+    old_alert = BreakoutAlert(
+        ticker="OLDBURST",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=user.id,
+        alerted_at=now - timedelta(minutes=5),
+    )
+    fresh_alerts = [
+        BreakoutAlert(
+            ticker=f"FRESH{i}",
+            asset_type="crypto",
+            alert_tier="pattern_imminent",
+            score_at_alert=0.8,
+            price_at_alert=10.0,
+            entry_price=10.0,
+            stop_loss=9.0,
+            target_price=12.0,
+            user_id=user.id,
+            alerted_at=now + timedelta(milliseconds=i),
+        )
+        for i in range(5)
+    ]
+    db.add_all([old_alert, *fresh_alerts])
+    db.commit()
+
+    settings = _minimal_settings(user.id)
+    settings.chili_autotrader_candidate_batch_size = 2
+    settings.chili_autotrader_tick_interval_seconds = 10
+    settings.chili_autotrader_fresh_candidate_fastlane_enabled = True
+    settings.chili_autotrader_fresh_candidate_fastlane_max_age_seconds = 30
+    settings.chili_autotrader_fresh_candidate_burst_enabled = True
+    settings.chili_autotrader_candidate_price_prefetch_enabled = False
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        at_mod,
+        "effective_autotrader_runtime",
+        lambda _db: _live_runtime(),
+    )
+    from app.services.trading import governance
+
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    processed: list[str] = []
+    monkeypatch.setattr(at_mod, "_process_one_alert", _audit_only_process(processed))
+
+    out = at_mod.run_auto_trader_tick(db)
+
+    assert out["ok"] is True
+    assert out["candidate_batch_base_size"] == 2
+    assert out["candidate_batch_effective_size"] == 5
+    assert out["fresh_candidate_burst_window_count"] == 3
+    assert set(processed) == {f"FRESH{i}" for i in range(5)}
+    assert "OLDBURST" not in processed
+
+
+def test_candidate_price_prefetch_attaches_batch_quote(db, monkeypatch):
+    user = models.User(name="price_prefetch")
+    db.add(user)
+    db.flush()
+    alert = BreakoutAlert(
+        ticker="PREF-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=user.id,
+    )
+    db.add(alert)
+    db.commit()
+
+    settings = _minimal_settings(user.id)
+    settings.chili_autotrader_candidate_batch_size = 1
+    settings.chili_autotrader_fresh_candidate_fastlane_enabled = False
+    settings.chili_autotrader_candidate_price_prefetch_enabled = True
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        at_mod,
+        "effective_autotrader_runtime",
+        lambda _db: _live_runtime(),
+    )
+    from app.services.trading import governance, market_data
+
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        market_data,
+        "fetch_quotes_batch",
+        lambda tickers, **_kwargs: {"PREF-USD": {"price": "10.25"}},
+    )
+    seen: list[float | None] = []
+
+    def _fake_process(db_, uid_, candidate, out, _runtime):
+        seen.append(getattr(candidate, "_chili_prefetched_current_price", None))
+        at_mod._audit(
+            db_,
+            user_id=uid_,
+            alert=candidate,
+            decision="skipped",
+            reason="test_processed",
+        )
+        out["skipped"] += 1
+
+    monkeypatch.setattr(at_mod, "_process_one_alert", _fake_process)
+
+    out = at_mod.run_auto_trader_tick(db)
+
+    assert out["ok"] is True
+    assert out["candidate_price_prefetch_requested"] == 1
+    assert out["candidate_price_prefetch_hits"] == 1
+    assert seen == [10.25]
+
+
 def test_try_claim_alert_same_session_releases_cleanly(db):
     """The advisory lock is the primitive behind the TOCTOU fix. Acquire,
     release, then re-acquire in the same session to prove it's not sticky."""

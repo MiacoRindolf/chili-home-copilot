@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -13,11 +14,85 @@ from sqlalchemy.orm import Session
 from ...models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade
 from ..llm_caller import call_llm
 from .market_data import fetch_quotes_batch, get_market_regime
+from .options.contracts import (
+    OPTION_CONTRACT_MULTIPLIER,
+    PRICE_DOMAIN_OPTION_PREMIUM,
+    PRICE_DOMAIN_UNDERLYING_SPOT,
+    parse_contract_quantity,
+)
 
 logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "position_plan.txt"
 PLAN_STALE_HOURS = 4
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or out <= 0:
+        return None
+    return out
+
+
+def _context_quantity(trade: Trade, *, trade_is_option: bool) -> float | None:
+    if trade_is_option:
+        qty = parse_contract_quantity(getattr(trade, "quantity", None))
+        return float(qty) if qty is not None else None
+    return _positive_float_or_none(getattr(trade, "quantity", None))
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, Mapping) else None
+    return None
+
+
+def _nested_mapping(source: Mapping[str, Any] | None, key: str) -> Mapping[str, Any] | None:
+    if not isinstance(source, Mapping):
+        return None
+    return _as_mapping(source.get(key))
+
+
+def _trade_price_domains(trade: Trade) -> dict[str, str]:
+    snap = _as_mapping(getattr(trade, "indicator_snapshot", None))
+    domains = _nested_mapping(snap, "price_domains")
+    if not domains:
+        breakout = _nested_mapping(snap, "breakout_alert")
+        domains = _nested_mapping(breakout, "price_domains")
+    if not domains:
+        return {}
+    return {
+        str(k): str(v).strip().lower()
+        for k, v in domains.items()
+        if str(k or "").strip() and str(v or "").strip()
+    }
+
+
+def _signed_price_pnl(
+    *,
+    entry: float | None,
+    current: float | None,
+    quantity: float | None,
+    direction: Any,
+    multiplier: float,
+) -> float | None:
+    if entry is None or current is None or quantity is None:
+        return None
+    if entry <= 0.0 or current <= 0.0 or quantity <= 0.0 or multiplier <= 0.0:
+        return None
+    per_unit = current - entry
+    if str(direction or "").strip().lower() == "short":
+        per_unit = -per_unit
+    return round(per_unit * quantity * multiplier, 2)
 
 
 def _load_system_prompt() -> str:
@@ -197,6 +272,33 @@ def _build_position_context(
         pat = patterns_by_id.get(trade.scan_pattern_id) if trade.scan_pattern_id else None
         alert = alerts_by_id.get(trade.related_alert_id) if trade.related_alert_id else None
         dec = latest_decisions.get(trade.id)
+        quantity = _context_quantity(trade, trade_is_option=trade_is_option)
+        multiplier = OPTION_CONTRACT_MULTIPLIER if trade_is_option else 1.0
+        entry_value_usd = (
+            round(entry * quantity * multiplier, 2)
+            if entry > 0.0 and quantity is not None and quantity > 0.0
+            else None
+        )
+        current_value_usd = (
+            round(cur_price * quantity * multiplier, 2)
+            if cur_price is not None
+            and cur_price > 0.0
+            and quantity is not None
+            and quantity > 0.0
+            else None
+        )
+        unrealized_pnl_usd = _signed_price_pnl(
+            entry=entry,
+            current=cur_price,
+            quantity=quantity,
+            direction=trade.direction,
+            multiplier=multiplier,
+        )
+        raw_stop_loss = _positive_float_or_none(getattr(trade, "stop_loss", None))
+        raw_take_profit = _positive_float_or_none(getattr(trade, "take_profit", None))
+        price_domains = _trade_price_domains(trade)
+        stop_loss = raw_stop_loss
+        take_profit = raw_take_profit
 
         # Migration 227: bars-held is unit-aware via the pattern's
         # timeframe. Pre-fix this was wall-clock ``.days``, which lied
@@ -223,20 +325,54 @@ def _build_position_context(
             "entry_price": entry,
             "current_price": cur_price,
             "pnl_pct": pnl_pct,
-            "quantity": float(trade.quantity) if trade.quantity else 1.0,
-            "stop_loss": float(trade.stop_loss) if trade.stop_loss else None,
-            "take_profit": float(trade.take_profit) if trade.take_profit else None,
+            "quantity": quantity,
+            "entry_value_usd": entry_value_usd,
+            "current_value_usd": current_value_usd,
+            "unrealized_pnl_usd": unrealized_pnl_usd,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
             "entry_date": trade.entry_date.isoformat() if trade.entry_date else None,
             "bars_held": bars_held,
             "sector": trade.sector,
             "trade_type": trade.trade_type,
             "notes": (trade.notes or "")[:200],
         }
+        if q.get("source"):
+            pos["quote_source"] = q.get("source")
+        if q.get("quote_ts"):
+            pos["quote_ts"] = q.get("quote_ts")
 
         if trade_is_option:
             opt_meta = _opt_meta(trade)
-            pos["contract_multiplier"] = 100
-            pos["price_domain"] = "option_premium"
+            stop_domain = price_domains.get("stop_loss")
+            target_domain = price_domains.get("take_profit")
+            if stop_domain == PRICE_DOMAIN_UNDERLYING_SPOT:
+                pos["stop_loss"] = None
+                pos["underlying_stop_loss"] = raw_stop_loss
+            elif stop_domain == PRICE_DOMAIN_OPTION_PREMIUM:
+                pos["premium_stop_loss"] = raw_stop_loss
+            elif raw_stop_loss is not None:
+                pos["untrusted_stop_loss"] = raw_stop_loss
+                pos["stop_loss"] = None
+            if target_domain == PRICE_DOMAIN_UNDERLYING_SPOT:
+                pos["take_profit"] = None
+                pos["underlying_take_profit"] = raw_take_profit
+            elif target_domain == PRICE_DOMAIN_OPTION_PREMIUM:
+                pos["premium_take_profit"] = raw_take_profit
+            elif raw_take_profit is not None:
+                pos["untrusted_take_profit"] = raw_take_profit
+                pos["take_profit"] = None
+            pos["contract_multiplier"] = OPTION_CONTRACT_MULTIPLIER
+            pos["price_domain"] = PRICE_DOMAIN_OPTION_PREMIUM
+            pos["price_domains"] = {
+                "entry_price": PRICE_DOMAIN_OPTION_PREMIUM,
+                "current_price": PRICE_DOMAIN_OPTION_PREMIUM,
+                "stop_loss": stop_domain or "unknown",
+                "take_profit": target_domain or "unknown",
+            }
+            pos["max_premium_at_risk_usd"] = entry_value_usd
+            if quantity is None:
+                pos["quantity_error"] = "invalid_option_contract_quantity"
             pos["option_meta"] = {
                 "underlying": opt_meta.get("underlying") or trade.ticker,
                 "expiration": opt_meta.get("expiration"),
@@ -379,13 +515,16 @@ def generate_position_plans(
     }, default=str, separators=(",", ":"))
 
     system_prompt = _load_system_prompt()
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_msg},
-    ]
+    messages = [{"role": "user", "content": user_msg}]
 
     max_tokens = min(8192, 400 * len(trades) + 600)
-    raw = call_llm(messages, max_tokens=max_tokens, trace_id="position-plan-generator")
+    raw = call_llm(
+        messages,
+        max_tokens=max_tokens,
+        trace_id="position-plan-generator",
+        purpose="position_plan_generator",
+        system_prompt=system_prompt,
+    )
 
     if not raw:
         logger.error("[position_plan] LLM returned empty response")

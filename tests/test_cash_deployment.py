@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,12 +23,20 @@ from app.services.trading.cash_deployment import (
 )
 
 
-def _pattern(db, *, name: str, lifecycle: str = "promoted", recert: bool = False, recert_reason: str | None = None):
+def _pattern(
+    db,
+    *,
+    name: str,
+    lifecycle: str = "promoted",
+    recert: bool = False,
+    recert_reason: str | None = None,
+    asset_class: str = "stock",
+):
     pat = ScanPattern(
         name=name,
         rules_json={},
         origin="test",
-        asset_class="stock",
+        asset_class=asset_class,
         timeframe="1d",
         active=True,
         lifecycle_stage=lifecycle,
@@ -39,11 +48,11 @@ def _pattern(db, *, name: str, lifecycle: str = "promoted", recert: bool = False
     return pat
 
 
-def _alert(db, pat: ScanPattern, *, ticker: str):
+def _alert(db, pat: ScanPattern, *, ticker: str, asset_type: str = "stock"):
     alert = BreakoutAlert(
         scan_pattern_id=pat.id,
         ticker=ticker,
-        asset_type="stock",
+        asset_type=asset_type,
         alert_tier="pattern_imminent",
         outcome="pending",
         score_at_alert=85.0,
@@ -120,6 +129,7 @@ def _closed_live(
     asset_kind: str = "equity",
     entry_price: float = 100.0,
     quantity: float = 1.0,
+    indicator_snapshot: dict | None = None,
 ):
     db.add(
         Trade(
@@ -134,6 +144,7 @@ def _closed_live(
             exit_price=entry_price + (pnl / quantity),
             pnl=pnl,
             asset_kind=asset_kind,
+            indicator_snapshot=indicator_snapshot,
         )
     )
 
@@ -259,6 +270,40 @@ def test_cash_deployment_exposure_cap_blocks_sizing(db, monkeypatch):
     assert row["live_deployable"] is False
 
 
+def test_cash_deployment_option_heat_uses_premium_risk_not_underlying_stop(
+    monkeypatch,
+):
+    from app.services.trading.cash_deployment import _trade_heat_pct
+
+    monkeypatch.setattr(
+        settings,
+        "chili_autotrader_options_exit_stop_pct",
+        50.0,
+        raising=False,
+    )
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        stop_loss=700.0,
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot={
+            "asset_type": "options",
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+                "price_domain": "option_premium",
+            },
+        },
+    )
+
+    assert _trade_heat_pct(trade, capital=10_000.0) == pytest.approx(1.25)
+
+
 def test_cash_deployment_zero_ranks_stale_broker_local_open(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
@@ -339,6 +384,52 @@ def test_cash_deployment_exposes_live_asset_slice_performance(db, monkeypatch):
     assert row["live_realized_asset_avg_return_pct"] == pytest.approx(4.0)
     assert row["live_realized_asset_win_rate"] == pytest.approx(1.0)
     assert row["live_realized_asset_last_exit_at"] is not None
+
+
+def test_cash_deployment_options_returns_use_contract_multiplier(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_autotrader_options_enabled", True)
+    monkeypatch.setattr(settings, "chili_options_venue_robinhood_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_options_cost_pct", 1.0)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+
+    pat = _pattern(db, name="cash option live perf", asset_class="options")
+    alert = _alert(db, pat, ticker="SPY", asset_type="options")
+    _run(db, pat, alert, expected=3.0)
+    _closed_paper(db, pat, alert)
+    _closed_live(
+        db,
+        pat,
+        ticker="SPY",
+        pnl=40.0,
+        asset_kind="option",
+        entry_price=1.25,
+        quantity=2.0,
+        indicator_snapshot={
+            "asset_type": "options",
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+                "price_domain": "option_premium",
+            },
+            "price_domains": {
+                "entry_price": "option_premium",
+                "exit_price": "option_premium",
+            },
+        },
+    )
+    db.commit()
+
+    rows = cash_deployment_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+
+    assert row["asset_class"] == "options"
+    assert row["live_realized_ev_pct"] == pytest.approx(16.0)
+    assert row["live_realized_asset_avg_return_pct"] == pytest.approx(16.0)
+    assert row["live_realized_asset_avg_return_pct"] < 100.0
 
 
 def test_cash_deployment_blocks_live_deployable_on_negative_live_asset_perf(db, monkeypatch):

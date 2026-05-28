@@ -38,7 +38,12 @@ def _cache_config() -> tuple[int, int]:
     return max_entries, ttl_seconds
 
 
-def _cache_key(messages: list[dict[str, Any]], max_tokens: int, system_prompt: str | None) -> str:
+def _cache_key(
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    system_prompt: str | None,
+    purpose: str | None = None,
+) -> str:
     """Deterministic content hash; prompt text drives the key, not the model name.
 
     (We intentionally don't include trace_id.)
@@ -57,6 +62,7 @@ def _cache_key(messages: list[dict[str, Any]], max_tokens: int, system_prompt: s
 
     payload = {
         "m": primary_model,
+        "p": purpose or "",
         "t": int(max_tokens or 0),
         "s": system_prompt or "",
         "u": json.dumps(messages, sort_keys=True, default=str),
@@ -162,7 +168,7 @@ def call_llm(
     cache_key = None
     if cacheable:
         try:
-            cache_key = _cache_key(messages, max_tokens, system_prompt)
+            cache_key = _cache_key(messages, max_tokens, system_prompt, purpose)
             cached = _cache_get(cache_key)
             if cached is not None:
                 logger.debug("[llm_caller] cache_hit trace=%s key=%s", trace_id, cache_key[:12])

@@ -30,6 +30,7 @@ from .management_scope import (
     infer_trade_management_scope_from_fields,
 )
 from .autopilot_scope import is_live_autopilot_trade, is_option_trade
+from .options.contracts import parse_contract_quantity
 
 logger = logging.getLogger(__name__)
 
@@ -281,16 +282,20 @@ def _close_option_trade_now(
             "pending_exit_status": t.pending_exit_status,
         }
 
-    adapter = RobinhoodOptionsAdapter()
-    if not adapter.is_enabled():
-        return {"ok": False, "error": "rh_options_adapter_off"}
-
     meta = _opt_meta(t)
     expiration = str(meta.get("expiration") or "")
     strike = meta.get("strike")
     option_type = str(meta.get("option_type") or "").lower()
     if not (expiration and strike and option_type in ("call", "put")):
         return {"ok": False, "error": "missing_option_meta"}
+
+    qty = parse_contract_quantity(getattr(t, "quantity", None))
+    if qty is None:
+        return {"ok": False, "error": "bad_option_contract_quantity"}
+
+    adapter = RobinhoodOptionsAdapter()
+    if not adapter.is_enabled():
+        return {"ok": False, "error": "rh_options_adapter_off"}
 
     underlying = str(meta.get("underlying") or t.ticker or "").upper()
     contract = adapter.find_contract(underlying, expiration, float(strike), option_type)
@@ -312,10 +317,6 @@ def _close_option_trade_now(
     limit_price = bid if bid > 0 else (mark if mark > 0 else None)
     if limit_price is None or limit_price <= 0:
         return {"ok": False, "error": "no_executable_option_price"}
-
-    qty = int(float(t.quantity or 0))
-    if qty <= 0:
-        return {"ok": False, "error": "bad_qty"}
 
     res = adapter.place_option_sell(
         underlying=underlying,
