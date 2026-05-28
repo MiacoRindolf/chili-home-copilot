@@ -29,6 +29,7 @@ _DEAD_RECOVERY_ERROR_MARKERS = (
 _DEAD_RECOVERY_DEFAULT_LIMIT = 8
 _DEAD_RECOVERY_DEFAULT_MAX_PER_EVENT = 1
 _DEAD_RECOVERY_DEFAULT_DELAY_SECONDS = 10
+_DEAD_DEDUPE_SUPPRESSED = object()
 
 
 def brain_work_ledger_enabled() -> bool:
@@ -71,11 +72,24 @@ def enqueue_work_event(
     )
     if open_exists:
         return None
+    payload_dict = dict(payload or {})
+    recovered_dead_id = _reuse_retryable_dead_dedupe(
+        db,
+        event_type=event_type,
+        dedupe_key=dedupe_key,
+        payload=payload_dict,
+        lease_scope=lease_scope,
+        max_attempts=ma,
+    )
+    if recovered_dead_id is _DEAD_DEDUPE_SUPPRESSED:
+        return None
+    if recovered_dead_id is not None:
+        return int(recovered_dead_id)
     ev = BrainWorkEvent(
         domain="trading",
         event_type=event_type,
         event_kind="work",
-        payload=dict(payload or {}),
+        payload=payload_dict,
         dedupe_key=dedupe_key,
         lease_scope=(lease_scope or "general")[:32],
         status="pending",
@@ -367,6 +381,137 @@ def _payload_int(payload: dict[str, Any], key: str) -> int:
         return int(payload.get(key) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _dead_recovery_max_per_event(value: int | None = None) -> int:
+    return int(
+        value
+        if value is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_max_per_event",
+            _DEAD_RECOVERY_DEFAULT_MAX_PER_EVENT,
+        )
+    )
+
+
+def _dead_recovery_delay_seconds(value: int | None = None) -> int:
+    return int(
+        value
+        if value is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_delay_seconds",
+            _DEAD_RECOVERY_DEFAULT_DELAY_SECONDS,
+        )
+    )
+
+
+def _recover_retryable_dead_row(
+    row: BrainWorkEvent,
+    *,
+    now: datetime,
+    marker: str,
+    recovery_count: int,
+    max_recoveries: int,
+    delay_seconds: int,
+    payload_updates: dict[str, Any] | None = None,
+    lease_scope: str | None = None,
+    max_attempts: int | None = None,
+) -> bool:
+    if recovery_count >= max(0, max_recoveries):
+        return False
+    effective_max_attempts = max(
+        1,
+        int(max_attempts if max_attempts is not None else row.max_attempts or 1),
+    )
+    payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
+    if payload_updates:
+        payload.update(payload_updates)
+    payload[_DEAD_RECOVERY_PAYLOAD_KEY] = recovery_count + 1
+    payload["transient_dead_recovered_at"] = now.isoformat()
+    payload["transient_dead_recovery_marker"] = marker
+    row.payload = payload
+    row.status = "retry_wait"
+    row.attempts = min(int(row.attempts or 0), effective_max_attempts - 1)
+    row.max_attempts = effective_max_attempts
+    if lease_scope:
+        row.lease_scope = (lease_scope or "general")[:32]
+    row.lease_holder = None
+    row.lease_expires_at = None
+    row.processed_at = None
+    row.next_run_at = now + timedelta(seconds=max(0, delay_seconds))
+    row.updated_at = now
+    return True
+
+
+def _reuse_retryable_dead_dedupe(
+    db: Session,
+    *,
+    event_type: str,
+    dedupe_key: str,
+    payload: dict[str, Any],
+    lease_scope: str,
+    max_attempts: int,
+) -> int | object | None:
+    if not bool(getattr(settings, "brain_work_dead_letter_reuse_dedupe_enabled", True)):
+        return None
+    row = (
+        db.query(BrainWorkEvent)
+        .filter(
+            BrainWorkEvent.dedupe_key == dedupe_key,
+            BrainWorkEvent.event_type == event_type,
+            BrainWorkEvent.event_kind == "work",
+            BrainWorkEvent.status == "dead",
+        )
+        .order_by(
+            BrainWorkEvent.updated_at.desc().nullslast(),
+            BrainWorkEvent.id.desc(),
+        )
+        .first()
+    )
+    if row is None:
+        return None
+    marker = _dead_recovery_marker(row.last_error)
+    if marker is None:
+        return None
+
+    row_payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
+    recovery_count = _payload_int(row_payload, _DEAD_RECOVERY_PAYLOAD_KEY)
+    now = datetime.utcnow()
+    recovered = _recover_retryable_dead_row(
+        row,
+        now=now,
+        marker=marker,
+        recovery_count=recovery_count,
+        max_recoveries=_dead_recovery_max_per_event(),
+        delay_seconds=_dead_recovery_delay_seconds(),
+        payload_updates=payload,
+        lease_scope=lease_scope,
+        max_attempts=max_attempts,
+    )
+    if recovered:
+        logger.info(
+            "%s recovered dead dedupe type=%s id=%s dedupe=%s marker=%s",
+            LOG_PREFIX,
+            event_type,
+            row.id,
+            dedupe_key,
+            marker,
+        )
+        db.flush()
+        return int(row.id)
+
+    logger.info(
+        "%s suppressed duplicate retryable-dead dedupe type=%s id=%s dedupe=%s "
+        "recovery_count=%s",
+        LOG_PREFIX,
+        event_type,
+        row.id,
+        dedupe_key,
+        recovery_count,
+    )
+    return _DEAD_DEDUPE_SUPPRESSED
 
 
 def recover_retryable_dead_work(

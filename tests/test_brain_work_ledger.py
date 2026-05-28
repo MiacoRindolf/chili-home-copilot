@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.models.trading import BrainWorkEvent
+from app.services.trading.brain_work import ledger as ledger_mod
 from app.services.trading.brain_work.ledger import (
     claim_work_batch,
     enqueue_or_refresh_debounced_work,
@@ -239,6 +241,121 @@ def test_retryable_dead_work_recovery_requeues_once(db) -> None:
 
     assert second["recovered"] == 0
     assert second["skipped_max_recoveries"] >= 1
+
+
+def test_enqueue_work_reuses_retryable_dead_dedupe(db, monkeypatch) -> None:
+    monkeypatch.setattr(
+        ledger_mod,
+        "_dead_recovery_max_per_event",
+        lambda value=None: 1,
+    )
+    dedupe_key = "bt_req:retryable-dead-dedupe-reuse"
+    eid = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=dedupe_key,
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+        max_attempts=1,
+    )
+    db.commit()
+    assert eid is not None
+
+    rows = claim_work_batch(
+        db,
+        limit=1,
+        lease_seconds=60,
+        holder_id="pytest:dead-dedupe",
+        event_type="backtest_requested",
+    )
+    db.commit()
+    mark_work_retry_or_dead(
+        db,
+        int(rows[0].id),
+        "Can't reconnect until invalid transaction is rolled back.",
+    )
+    db.commit()
+
+    reused = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=dedupe_key,
+        payload={"scan_pattern_id": 537, "source": "operator_boost_again"},
+        lease_scope="backtest",
+        max_attempts=2,
+    )
+    db.commit()
+
+    assert reused == eid
+    all_rows = db.query(BrainWorkEvent).filter(BrainWorkEvent.dedupe_key == dedupe_key).all()
+    assert [int(row.id) for row in all_rows] == [eid]
+    row = all_rows[0]
+    assert row.status == "retry_wait"
+    assert row.attempts == 1
+    assert row.max_attempts == 2
+    assert row.payload["source"] == "operator_boost_again"
+    assert row.payload["transient_dead_recovery_count"] == 1
+    assert (
+        row.payload["transient_dead_recovery_marker"]
+        == "can't reconnect until invalid transaction is rolled back"
+    )
+
+
+def test_enqueue_work_suppresses_retryable_dead_dedupe_after_recovery_cap(
+    db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        ledger_mod,
+        "_dead_recovery_max_per_event",
+        lambda value=None: 1,
+    )
+    dedupe_key = "bt_req:retryable-dead-dedupe-cap"
+    eid = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=dedupe_key,
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+        max_attempts=1,
+    )
+    db.commit()
+    assert eid is not None
+
+    rows = claim_work_batch(
+        db,
+        limit=1,
+        lease_seconds=60,
+        holder_id="pytest:dead-dedupe-cap",
+        event_type="backtest_requested",
+    )
+    db.commit()
+    mark_work_retry_or_dead(
+        db,
+        int(rows[0].id),
+        "Can't reconnect until invalid transaction is rolled back.",
+    )
+    row = db.get(BrainWorkEvent, eid)
+    row.payload = {
+        **(row.payload or {}),
+        "transient_dead_recovery_count": 1,
+    }
+    db.commit()
+
+    duplicate = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=dedupe_key,
+        payload={"scan_pattern_id": 537, "source": "operator_boost_again"},
+        lease_scope="backtest",
+        max_attempts=2,
+    )
+    db.commit()
+
+    assert duplicate is None
+    all_rows = db.query(BrainWorkEvent).filter(BrainWorkEvent.dedupe_key == dedupe_key).all()
+    assert [int(row.id) for row in all_rows] == [eid]
+    assert all_rows[0].status == "dead"
 
 
 def test_enqueue_or_refresh_debounced_merges_payload(db) -> None:
