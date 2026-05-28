@@ -232,6 +232,33 @@ class TestStreamingEndpoint:
         assert gateway_stream.call_args.kwargs["purpose"] == "chat_search"
         assert gateway_stream.call_args.kwargs["strict_escalation"] is False
 
+    def test_stream_gateway_helper_failure_skips_direct_openai_stream(self, monkeypatch):
+        from app.routers import chat as chat_router
+
+        gateway_stream = MagicMock(side_effect=RuntimeError("gateway unavailable"))
+        direct_stream = MagicMock(side_effect=AssertionError("direct OpenAI stream bypassed gateway"))
+        monkeypatch.setattr(
+            "app.services.context_brain.llm_gateway.gateway_chat_stream",
+            gateway_stream,
+        )
+        monkeypatch.setattr(chat_router.openai_client, "chat_stream", direct_stream)
+
+        out = list(
+            chat_router._stream_gateway_chat_tokens(
+                messages=[{"role": "user", "content": "hello"}],
+                system_prompt="system",
+                action_type="general_chat",
+                trace_id="stream-gateway-failure-test",
+                user_message="hello",
+                user_id=12,
+                db=object(),
+            )
+        )
+
+        assert out == []
+        assert gateway_stream.call_count == 1
+        direct_stream.assert_not_called()
+
 
 class TestExecuteTool:
     """Tests for the _execute_tool helper."""

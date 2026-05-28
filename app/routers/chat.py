@@ -60,7 +60,7 @@ def _stream_gateway_chat_tokens(
     user_id: int | None,
     db: Session,
 ):
-    """Route chat SSE through the LLM gateway; preserve direct streaming fallback."""
+    """Route chat SSE through the LLM gateway without a direct paid bypass."""
     purpose = _chat_stream_purpose(action_type)
     gateway_yielded = False
     try:
@@ -83,15 +83,8 @@ def _stream_gateway_chat_tokens(
         if gateway_yielded:
             log_info(trace_id, f"gateway_chat_stream failed after tokens: {exc}")
             raise
-        log_info(trace_id, f"gateway_chat_stream failed, falling back: {exc}")
-
-    for tok, model in openai_client.chat_stream(
-        messages=messages,
-        system_prompt=system_prompt,
-        trace_id=trace_id,
-        user_message=user_message,
-    ):
-        yield tok, model
+        log_info(trace_id, f"gateway_chat_stream failed; direct_openai_stream_bypass_disabled: {exc}")
+        return
 
 
 @router.get("/chat")
