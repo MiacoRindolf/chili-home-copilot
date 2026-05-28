@@ -41,6 +41,12 @@ class ChiliApiClient {
   /// Current server root; applied immediately when changed in Settings (see [AppConfig.setBaseUrl]).
   static String get baseUrl => AppConfig.instance.apiBaseUrl;
   static const projectAutonomyPlanApprovalMode = 'plan_approval';
+  static const int _connectionTimeoutSeconds = 30;
+  static const int _requestTimeoutSeconds = 45;
+  static const Duration _connectionTimeout =
+      Duration(seconds: _connectionTimeoutSeconds);
+  static const Duration _requestTimeout =
+      Duration(seconds: _requestTimeoutSeconds);
 
   String? _token;
 
@@ -56,7 +62,7 @@ class ChiliApiClient {
       ..badCertificateCallback = (cert, host, port) {
         return true;
       }
-      ..connectionTimeout = const Duration(seconds: 30);
+      ..connectionTimeout = _connectionTimeout;
     return IOClient(httpClient);
   }
 
@@ -69,13 +75,30 @@ class ChiliApiClient {
     return h;
   }
 
+  Future<http.Response> _get(
+    Uri uri, {
+    Map<String, String>? headers,
+  }) {
+    return _client.get(uri, headers: headers).timeout(_requestTimeout);
+  }
+
+  Future<http.Response> _post(
+    Uri uri, {
+    Map<String, String>? headers,
+    Object? body,
+  }) {
+    return _client
+        .post(uri, headers: headers, body: body)
+        .timeout(_requestTimeout);
+  }
+
   static const Map<String, String> _pairingJsonHeaders = {
     'Content-Type': 'application/json',
   };
 
   /// POST /api/pair/request — same as the Chat web UI; unauthenticated; no Bearer.
   Future<Map<String, dynamic>> pairRequest({required String email}) async {
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/pair/request'),
       headers: _pairingJsonHeaders,
       body: jsonEncode({'email': email.trim()}),
@@ -88,7 +111,7 @@ class ChiliApiClient {
     required String code,
     String label = 'CHILI Desktop Companion',
   }) async {
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/pair/verify'),
       headers: _pairingJsonHeaders,
       body: jsonEncode({
@@ -134,7 +157,7 @@ class ChiliApiClient {
 
   Future<ChatResponse> sendMessage(String message) async {
     final uri = Uri.parse('$baseUrl/api/mobile/chat');
-    final response = await _client.post(
+    final response = await _post(
       uri,
       headers: _headers(),
       body: jsonEncode({'message': message}),
@@ -311,7 +334,7 @@ class ChiliApiClient {
   // ── Dashboard helpers ──
 
   Future<List<dynamic>> fetchChores() async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/chores'),
       headers: _headers(json: false),
     );
@@ -320,7 +343,7 @@ class ChiliApiClient {
   }
 
   Future<List<dynamic>> fetchBirthdays() async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/birthdays'),
       headers: _headers(json: false),
     );
@@ -329,7 +352,7 @@ class ChiliApiClient {
   }
 
   Future<List<dynamic>> fetchActivity({int limit = 15}) async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/activity?limit=$limit'),
       headers: _headers(json: false),
     );
@@ -338,7 +361,7 @@ class ChiliApiClient {
   }
 
   Future<Map<String, dynamic>?> fetchIntercomStatus() async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/intercom/status'),
       headers: _headers(json: false),
     );
@@ -347,7 +370,7 @@ class ChiliApiClient {
   }
 
   Future<void> setIntercomStatus(String status) async {
-    await _client.post(
+    await _post(
       Uri.parse('$baseUrl/api/intercom/status'),
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: 'status=$status',
@@ -484,7 +507,7 @@ class ChiliApiClient {
   }
 
   Future<Map<String, dynamic>> getDispatchStatus() async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/brain/dispatch/status'),
       headers: _headers(json: false),
     );
@@ -501,7 +524,7 @@ class ChiliApiClient {
 
   // ── Phase F — Context Brain endpoints ───────────────────────────────
   Future<Map<String, dynamic>> getContextBrainStatus() async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/brain/context/status'),
       headers: _headers(json: false),
     );
@@ -518,7 +541,7 @@ class ChiliApiClient {
 
   Future<List<Map<String, dynamic>>> getContextBrainAssemblies(
       {int limit = 50}) async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/brain/context/assemblies?limit=$limit'),
       headers: _headers(json: false),
     );
@@ -532,7 +555,7 @@ class ChiliApiClient {
   }
 
   Future<List<Map<String, dynamic>>> getContextBrainSources() async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/brain/context/sources'),
       headers: _headers(json: false),
     );
@@ -555,7 +578,7 @@ class ChiliApiClient {
     }
     final uri = Uri.parse('$baseUrl/api/brain/dispatch/runs')
         .replace(queryParameters: q);
-    final res = await _client.get(uri, headers: _headers(json: false));
+    final res = await _get(uri, headers: _headers(json: false));
     Map<String, dynamic>? decoded;
     try {
       decoded = jsonDecode(res.body) as Map<String, dynamic>?;
@@ -585,7 +608,7 @@ class ChiliApiClient {
       if (sourceInput != null && sourceInput.trim().isNotEmpty)
         'source_input': sourceInput.trim(),
     };
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/brain/dispatch/queue'),
       headers: _headers(),
       body: jsonEncode(body),
@@ -606,7 +629,7 @@ class ChiliApiClient {
   }) async {
     final uri = Uri.parse('$baseUrl/api/brain/project/autonomy/runs')
         .replace(queryParameters: {'limit': '$limit'});
-    final res = await _client.get(uri, headers: _headers(json: false));
+    final res = await _get(uri, headers: _headers(json: false));
     Map<String, dynamic>? decoded;
     try {
       decoded = jsonDecode(res.body) as Map<String, dynamic>?;
@@ -623,7 +646,7 @@ class ChiliApiClient {
   }
 
   Future<Map<String, dynamic>> getProjectAutonomyRun(String runId) async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId'),
       headers: _headers(json: false),
     );
@@ -655,7 +678,7 @@ class ChiliApiClient {
       'start_planning': startPlanning,
       if (attachments.isNotEmpty) 'attachments': attachments,
     };
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs'),
       headers: _headers(),
       body: jsonEncode(body),
@@ -675,7 +698,7 @@ class ChiliApiClient {
   }
 
   Future<Map<String, dynamic>> startProjectAutonomyPlan(String runId) async {
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/plan/start'),
       headers: _headers(),
     );
@@ -702,7 +725,7 @@ class ChiliApiClient {
       'content': content.trim(),
       if (attachments.isNotEmpty) 'attachments': attachments,
     };
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/messages'),
       headers: _headers(),
       body: jsonEncode(body),
@@ -722,7 +745,7 @@ class ChiliApiClient {
   }
 
   Future<Map<String, dynamic>> approveProjectAutonomyPlan(String runId) async {
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/plan/approve'),
       headers: _headers(),
     );
@@ -753,7 +776,7 @@ class ChiliApiClient {
       if (url != null && url.trim().isNotEmpty) 'url': url.trim(),
       if (note != null && note.trim().isNotEmpty) 'note': note.trim(),
     };
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse(
           '$baseUrl/api/brain/project/autonomy/runs/$runId/visual-validation'),
       headers: _headers(),
@@ -774,7 +797,7 @@ class ChiliApiClient {
   }
 
   Future<List<Map<String, dynamic>>> getCodeBrainRepos() async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/brain/code/repos'),
       headers: _headers(json: false),
     );
@@ -794,7 +817,7 @@ class ChiliApiClient {
   }
 
   Future<Map<String, dynamic>> cancelProjectAutonomyRun(String runId) async {
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/cancel'),
       headers: _headers(),
     );
@@ -813,7 +836,7 @@ class ChiliApiClient {
   }
 
   Future<Map<String, dynamic>> mergeProjectAutonomyRun(String runId) async {
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/merge'),
       headers: _headers(),
     );
@@ -835,7 +858,7 @@ class ChiliApiClient {
     required bool active,
     String? reason,
   }) async {
-    final res = await _client.post(
+    final res = await _post(
       Uri.parse('$baseUrl/api/brain/dispatch/kill-switch'),
       headers: _headers(),
       body: jsonEncode({'active': active, 'reason': reason}),
@@ -852,7 +875,7 @@ class ChiliApiClient {
   }
 
   Future<List<Map<String, dynamic>>> listProjects() async {
-    final res = await _client.get(
+    final res = await _get(
       Uri.parse('$baseUrl/api/brain/dispatch/projects'),
       headers: _headers(json: false),
     );

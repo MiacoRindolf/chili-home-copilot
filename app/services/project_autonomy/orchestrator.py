@@ -401,12 +401,25 @@ def _operator_safe_plan_text(text: str | None) -> str:
     if not clean:
         return ""
     lower = clean.lower()
-    if any(marker in lower for marker in _RAW_MODEL_ERROR_MARKERS):
+    if "vague small request" in lower or any(
+        marker in lower for marker in _RAW_MODEL_ERROR_MARKERS
+    ):
         return _friendly_model_issue(clean)
     return _clip(clean, OPERATOR_SAFE_PLAN_TEXT_LIMIT)
 
 
+def _operator_safe_plan_payload(plan: dict[str, Any]) -> dict[str, Any]:
+    if not plan:
+        return {}
+    safe = dict(plan)
+    for key in ("analysis", "notes"):
+        if key in safe:
+            safe[key] = _operator_safe_plan_text(safe.get(key))
+    return safe
+
+
 def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
+    plan = _json_load(row.plan_json, {})
     return {
         "id": row.id,
         "run_id": row.run_id,
@@ -428,7 +441,7 @@ def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
         "worktree_path": row.worktree_path,
         "merge_status": row.merge_status,
         "merge_message": row.merge_message,
-        "plan": _json_load(row.plan_json, {}),
+        "plan": _operator_safe_plan_payload(plan),
         "agents": _json_load(row.agents_json, []),
         "files": _json_load(row.files_json, []),
         "commands": _json_load(row.commands_json, []),

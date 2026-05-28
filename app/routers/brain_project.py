@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -37,6 +38,8 @@ from ..services.project_brain import learning as pb_learning
 from ..services.project_brain import registry as pb_registry
 from ..services.coding_task.workspaces import select_runtime_workspace_repo_for_task
 from .chat_streaming import sse_done, sse_error, sse_event
+
+AUTONOMY_EVENTS_POLL_SECONDS = 1.0
 
 router = APIRouter(
     tags=["brain"],
@@ -1084,16 +1087,28 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
     from ..db import SessionLocal
 
     async def _gen():
-        sdb = SessionLocal()
         after_message_id = 0
         after_step_id = 0
         after_artifact_id = 0
+        user_id: int | None = None
         try:
-            ctx = get_identity_ctx(request, sdb)
-            if ctx.get("is_guest") or ctx.get("user_id") is None:
-                yield sse_error("Pair this device to use Project Autopilot.")
+            initial_error: str | None = None
+            run: dict[str, Any] | None = None
+            with SessionLocal() as sdb:
+                ctx = get_identity_ctx(request, sdb)
+                if ctx.get("is_guest") or ctx.get("user_id") is None:
+                    initial_error = "Pair this device to use Project Autopilot."
+                else:
+                    user_id = int(ctx["user_id"])
+                    run = project_autonomy.get_run(
+                        sdb,
+                        run_id,
+                        user_id=user_id,
+                        include_events=True,
+                    )
+            if initial_error is not None:
+                yield sse_error(initial_error)
                 return
-            run = project_autonomy.get_run(sdb, run_id, user_id=ctx["user_id"], include_events=True)
             if run is None:
                 yield sse_error("Autopilot run not found")
                 return
@@ -1107,28 +1122,32 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
             while True:
                 if await request.is_disconnected():
                     return
-                events = project_autonomy.events_after(
-                    sdb,
-                    run_id,
-                    after_message_id=after_message_id,
-                    after_step_id=after_step_id,
-                    after_artifact_id=after_artifact_id,
-                )
+                with SessionLocal() as sdb:
+                    events = project_autonomy.events_after(
+                        sdb,
+                        run_id,
+                        after_message_id=after_message_id,
+                        after_step_id=after_step_id,
+                        after_artifact_id=after_artifact_id,
+                    )
+                    latest = project_autonomy.get_run(
+                        sdb,
+                        run_id,
+                        user_id=user_id,
+                        include_events=False,
+                    )
                 after_message_id = int(events.get("after_message_id") or after_message_id)
                 after_step_id = int(events.get("after_step_id") or after_step_id)
                 after_artifact_id = int(events.get("after_artifact_id") or after_artifact_id)
                 if events["messages"] or events["steps"] or events["artifacts"]:
                     yield sse_event({"type": "events", **events})
-                latest = project_autonomy.get_run(sdb, run_id, user_id=ctx["user_id"], include_events=False)
                 if latest and latest.get("status") in project_autonomy.TERMINAL_STATUSES | project_autonomy.IDLE_STATUSES:
                     yield sse_event({"type": "complete", "run": latest})
                     yield sse_done()
                     return
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(AUTONOMY_EVENTS_POLL_SECONDS)
         except Exception as exc:
             yield sse_error(str(exc))
-        finally:
-            sdb.close()
 
     return StreamingResponse(_gen(), media_type="text/event-stream")
 

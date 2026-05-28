@@ -85,12 +85,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotStartPlanLabel = 'Start plan';
   static const _autopilotAttachedImagePromptLabel =
       'Describe the attached image(s)';
+  static const int _statusPollIntervalSeconds = 30;
+  static const int _autopilotPollIntervalSeconds = 5;
   List<Map<String, dynamic>> _codeRepos = [];
   int? _autonomyRepoId;
   List<Map<String, dynamic>> _autonomyRuns = [];
   Map<String, dynamic>? _activeAutonomyRun;
   bool _autonomyLoading = false;
   bool _autonomyBusy = false;
+  bool _autonomyListInFlight = false;
+  bool _autonomyRefreshInFlight = false;
+  bool _statusRefreshInFlight = false;
   String? _autonomyError;
   Timer? _autonomyTimer;
 
@@ -183,11 +188,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     await _refreshStatus();
     await _loadAutonomyRuns(silent: true);
     _statusTimer?.cancel();
-    _statusTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    _statusTimer = Timer.periodic(
+        const Duration(seconds: _statusPollIntervalSeconds), (_) {
       if (mounted && _paired) unawaited(_refreshStatus());
     });
     _autonomyTimer?.cancel();
-    _autonomyTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _autonomyTimer = Timer.periodic(
+        const Duration(seconds: _autopilotPollIntervalSeconds), (_) {
       if (mounted && _paired && _tabs.index == 1) {
         unawaited(_refreshActiveAutonomyRun());
       }
@@ -353,6 +360,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Future<void> _refreshStatus() async {
+    if (_statusRefreshInFlight) return;
+    _statusRefreshInFlight = true;
     try {
       final data = await _api.getDispatchStatus();
       if (mounted) {
@@ -365,6 +374,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       if (mounted) {
         setState(() => _statusError = '$e');
       }
+    } finally {
+      _statusRefreshInFlight = false;
     }
   }
 
@@ -482,6 +493,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
 
   Future<void> _loadAutonomyRuns({bool silent = false}) async {
     if (!mounted) return;
+    if (_autonomyListInFlight) return;
+    _autonomyListInFlight = true;
     if (!silent) {
       setState(() {
         _autonomyLoading = true;
@@ -512,6 +525,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         _autonomyError = userVisibleNetworkError(e);
         _autonomyLoading = false;
       });
+    } finally {
+      _autonomyListInFlight = false;
     }
   }
 
@@ -522,6 +537,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final runId = _activeAutonomyRun?['run_id']?.toString();
     if (runId == null || runId.isEmpty) return;
     if (_autonomyTerminal(_activeAutonomyRun) && silent && !force) return;
+    if (_autonomyRefreshInFlight) return;
+    _autonomyRefreshInFlight = true;
     try {
       final run = await _api.getProjectAutonomyRun(runId);
       if (!mounted) return;
@@ -532,6 +549,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     } catch (e) {
       if (!mounted || silent) return;
       setState(() => _autonomyError = userVisibleNetworkError(e));
+    } finally {
+      _autonomyRefreshInFlight = false;
     }
   }
 

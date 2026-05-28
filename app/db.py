@@ -7,6 +7,10 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from .config import settings
 
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes"})
+_PG_KEEPALIVES_ENABLED = 1
+_PG_KEEPALIVE_IDLE_SECONDS = 30
+_PG_KEEPALIVE_INTERVAL_SECONDS = 5
+_PG_KEEPALIVE_COUNT = 5
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -89,6 +93,26 @@ _pool_size, _max_overflow, _pool_timeout = _resolve_pool_config(
     mp_child=_mp_child,
     pytest_process=_pytest_process,
 )
+_connect_options: list[str] = []
+_idle_xact_timeout_ms = int(settings.database_idle_in_transaction_timeout_ms)
+if _idle_xact_timeout_ms > 0:
+    _connect_options.extend(
+        [
+            "-c",
+            f"idle_in_transaction_session_timeout={_idle_xact_timeout_ms}",
+        ]
+    )
+_connect_args = {
+    "keepalives": _PG_KEEPALIVES_ENABLED,
+    "keepalives_idle": _PG_KEEPALIVE_IDLE_SECONDS,
+    "keepalives_interval": _PG_KEEPALIVE_INTERVAL_SECONDS,
+    "keepalives_count": _PG_KEEPALIVE_COUNT,
+    # FIX 32: tag every connection with our application_name so
+    # db_watchdog can apply per-app kill thresholds.
+    "application_name": _app_name,
+}
+if _connect_options:
+    _connect_args["options"] = " ".join(_connect_options)
 
 engine = create_engine(
     DATABASE_URL,
@@ -108,19 +132,9 @@ engine = create_engine(
     # to emit ('Promoted prediction cache at cycle end failed'), and the
     # next consumer reads cached_result_count=0.
     #
-    # 30s keepalive_idle is well below typical net.ipv4.tcp_keepalive_time
-    # (default 7200s on Linux) so we don't depend on OS defaults; 5s
-    # keepalives_interval gives 6 keepalives before tcp_keepalives_count
-    # gives up — the connection stays alive even when fully idle.
-    connect_args={
-        "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 5,
-        "keepalives_count": 5,
-        # FIX 32: tag every connection with our application_name so
-        # db_watchdog can apply per-app kill thresholds.
-        "application_name": _app_name,
-    },
+    # The keepalive constants above are well below typical OS defaults, so
+    # long-running background work does not depend on host TCP settings.
+    connect_args=_connect_args,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

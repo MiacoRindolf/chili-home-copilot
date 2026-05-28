@@ -14,6 +14,19 @@ from ..metrics import (
 from .. import openai_client
 
 router = APIRouter()
+_HEALTHZ_STATUS = {"ok": True, "service": "chili"}
+
+
+@router.get("/healthz", response_class=JSONResponse)
+def healthz():
+    """Lightweight liveness probe that never consumes a database connection."""
+    return _HEALTHZ_STATUS
+
+
+@router.get("/api/health", response_class=JSONResponse)
+def api_healthz():
+    """Compatibility liveness probe for desktop/bootstrap diagnostics."""
+    return _HEALTHZ_STATUS
 
 
 @router.get("/health", response_class=JSONResponse)

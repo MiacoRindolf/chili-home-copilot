@@ -480,6 +480,35 @@ def test_plan_message_hides_raw_local_model_errors():
     assert "brain_dispatch_screen.dart" in message
 
 
+def test_run_payload_hides_raw_local_model_plan_errors():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_safe_plan",
+            prompt="plan a small UI fix",
+            status="awaiting_approval",
+            current_stage="plan",
+            plan_json=(
+                '{"analysis":"Local model planning was unavailable '
+                '(http://ollama:11434: TimeoutError: timed out).",'
+                '"files":[{"path":"chili_mobile/lib/src/brain/'
+                'brain_dispatch_screen.dart"}],'
+                '"notes":"URLError: <urlopen error [Errno 111] Connection refused>"}'
+            ),
+        )
+        db.add(run)
+        db.commit()
+
+        payload = orchestrator.run_payload(db, run)
+
+        plan_text = f"{payload['plan']['analysis']} {payload['plan']['notes']}"
+        assert "http://" not in plan_text
+        assert "URLError" not in plan_text
+        assert "local planning model" in plan_text.lower()
+    finally:
+        db.close()
+
+
 def test_start_plan_transitions_chat_to_queued_plan(tmp_path):
     db = _sqlite_autonomy_session()
     try:

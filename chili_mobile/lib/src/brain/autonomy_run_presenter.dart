@@ -13,6 +13,7 @@ class AutonomyRunPresenter {
     'errno',
     'traceback',
     'ollama:',
+    'vague small request',
   ];
 
   static const interruptedWorkerMessage =
@@ -340,6 +341,9 @@ class AutonomyRunPresenter {
     final trimmed = error.trim();
     if (trimmed.isEmpty) return '';
     final lower = trimmed.toLowerCase();
+    if (lower.contains('vague small request')) {
+      return 'this was broad enough for a conservative local planning path';
+    }
     if (lower.contains('timed out') || lower.contains('timeouterror')) {
       return 'the local model timed out';
     }
