@@ -115,6 +115,7 @@ from .project_brain import (
     QATestRun,
 )
 from .project_domain import (
+    ProjectAutonomyArchitectReview,
     ProjectAnalysisSnapshot,
     ProjectAutonomyArtifact,
     ProjectAutonomyLearningSample,
@@ -253,6 +254,7 @@ __all__ = [
     "ProjectAutonomyMessage",
     "ProjectAutonomyStep",
     "ProjectAutonomyArtifact",
+    "ProjectAutonomyArchitectReview",
     "ProjectAutonomyLease",
     "ProjectAutonomyLearningSample",
     "BrainLearningCycleRun",

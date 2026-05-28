@@ -166,6 +166,7 @@ _PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
         "project_autonomy_messages",
         "project_autonomy_steps",
         "project_autonomy_artifacts",
+        "project_autonomy_architect_reviews",
         "project_autonomy_leases",
         "project_autonomy_learning_samples",
     }
