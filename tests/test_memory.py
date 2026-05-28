@@ -34,6 +34,12 @@ class TestShouldExtract:
         assert _should_extract("general_chat", "ok") is False
         assert _should_extract(None, "yes") is False
 
+    def test_skips_messages_without_personal_memory_signal(self):
+        assert _should_extract("general_chat", "Analyze AAPL on the daily timeframe") is False
+        assert _should_extract(None, "What is BTC doing today?") is False
+        assert _should_extract("general_chat", "Show me the project status") is False
+        assert _should_extract("general_chat", "What is the order id for AAPL?") is False
+
     def test_allows_general_chat(self):
         assert _should_extract("general_chat", "I really enjoy cooking Italian food") is True
         assert _should_extract(None, "I've been working as a nurse for five years") is True

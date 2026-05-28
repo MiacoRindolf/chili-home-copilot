@@ -4,6 +4,7 @@ Extracts personal facts from each conversation turn and stores them
 in the UserMemory table. Provides memory context for LLM prompt injection.
 """
 import json
+import re
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -23,6 +24,19 @@ SKIP_ACTION_TYPES = frozenset({
     "crisis_support", "llm_offline", "guest_blocked",
     "pair_device",
 })
+
+MEMORY_SIGNAL_RE = re.compile(
+    r"\b("
+    r"i|i'm|im|i've|ive|i'd|i'll|ill|my|mine|myself|"
+    r"we|we're|we've|our|ours|"
+    r"favorite|favourite|prefer|preference|like|love|enjoy|hate|"
+    r"allerg(?:y|ic|ies)|diet|vegetarian|vegan|gluten|"
+    r"work|job|career|school|class|study|goal|habit|routine|"
+    r"birthday|anniversary|family|mom|mother|dad|father|"
+    r"wife|husband|partner|son|daughter|friend|personal"
+    r")\b",
+    re.IGNORECASE,
+)
 
 EXTRACTION_PROMPT = (
     "From this conversation exchange, extract any personal facts about the user. "
@@ -48,7 +62,7 @@ def _should_extract(action_type: str | None, user_message: str) -> bool:
     msg = user_message.strip().lower()
     if len(msg) < 8:
         return False
-    return True
+    return bool(MEMORY_SIGNAL_RE.search(msg))
 
 
 def extract_facts(

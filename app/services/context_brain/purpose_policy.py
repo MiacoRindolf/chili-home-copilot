@@ -86,6 +86,7 @@ _PURPOSE_DEFAULTS: dict[str, PurposePolicy] = {
     "code_search": _offline_passthrough_policy("code_search"),
     "desktop_normalize_app": _offline_passthrough_policy("desktop_normalize_app"),
     "desktop_refine_speech": _offline_passthrough_policy("desktop_refine_speech"),
+    "memory_extract": _offline_passthrough_policy("memory_extract"),
     "project_playwright": _offline_passthrough_policy("project_playwright"),
     "project_web_research": _offline_passthrough_policy("project_web_research"),
     "trading_reasoning": _offline_passthrough_policy("trading_reasoning"),
