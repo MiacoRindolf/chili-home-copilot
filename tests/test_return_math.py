@@ -29,6 +29,63 @@ def test_trade_return_pct_option_uses_contract_multiplier() -> None:
     assert trade_return_pct(trade) == pytest.approx(16.0)
 
 
+def test_trade_return_pct_option_price_fallback_requires_premium_domain() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=None,
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot={
+            "option_meta": {"price_domain": "option_premium"},
+            "price_domains": {
+                "entry_price": "option_premium",
+                "exit_price": "option_premium",
+            },
+        },
+    )
+
+    assert trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_trade_return_pct_option_rejects_ambiguous_price_fallback() -> None:
+    trade = SimpleNamespace(
+        entry_price=4.01,
+        exit_price=716.0,
+        quantity=1.0,
+        pnl=None,
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot=None,
+    )
+
+    assert trade_return_pct(trade) is None
+
+
+def test_trade_return_pct_option_rejects_implausible_premium_fallback() -> None:
+    trade = SimpleNamespace(
+        entry_price=4.01,
+        exit_price=716.0,
+        quantity=1.0,
+        pnl=None,
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot={
+            "option_meta": {"price_domain": "option_premium"},
+            "price_domains": {
+                "entry_price": "option_premium",
+                "exit_price": "option_premium",
+            },
+        },
+    )
+
+    assert trade_return_pct(trade) is None
+
+
 def test_paper_trade_return_pct_option_uses_contract_multiplier() -> None:
     trade = SimpleNamespace(
         entry_price=1.25,
@@ -41,3 +98,17 @@ def test_paper_trade_return_pct_option_uses_contract_multiplier() -> None:
     )
 
     assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_option_rejects_ambiguous_price_fallback() -> None:
+    trade = SimpleNamespace(
+        entry_price=4.01,
+        exit_price=716.0,
+        quantity=1.0,
+        pnl=None,
+        pnl_pct=None,
+        direction="long",
+        signal_json={"asset_type": "options"},
+    )
+
+    assert paper_trade_return_pct(trade) is None

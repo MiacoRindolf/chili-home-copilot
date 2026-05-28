@@ -6,11 +6,22 @@ by entry premium * contracts * contract multiplier whenever P&L is available.
 """
 from __future__ import annotations
 
+import json
 import math
-from typing import Any
+from typing import Any, Mapping
 
 
-OPTION_CONTRACT_MULTIPLIER = 100.0
+try:
+    from .options.contracts import (
+        OPTION_CONTRACT_MULTIPLIER,
+        PRICE_DOMAIN_OPTION_PREMIUM,
+    )
+except Exception:  # pragma: no cover - import guard for partial bootstrap paths
+    OPTION_CONTRACT_MULTIPLIER = 100.0
+    PRICE_DOMAIN_OPTION_PREMIUM = "option_premium"
+
+
+_OPTION_PRICE_FALLBACK_MAX_RATIO = 50.0
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -31,6 +42,85 @@ def _is_short(direction: Any) -> bool:
 
 def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, Mapping) else None
+    return None
+
+
+def _nested_mapping(source: Mapping[str, Any] | None, key: str) -> Mapping[str, Any] | None:
+    if not isinstance(source, Mapping):
+        return None
+    return _as_mapping(source.get(key))
+
+
+def _price_domain_is_option_premium(value: Any) -> bool:
+    return str(value or "").strip().lower() == PRICE_DOMAIN_OPTION_PREMIUM
+
+
+def _option_price_domain_confirmed(source: Any, price_field: str) -> bool:
+    """True only when option price fallback is explicitly in premium space."""
+    snap = _as_mapping(source)
+    if not snap:
+        return False
+
+    price_domains = _nested_mapping(snap, "price_domains")
+    if _price_domain_is_option_premium(
+        price_domains.get(price_field) if price_domains else None
+    ):
+        return True
+
+    option_meta = _nested_mapping(snap, "option_meta")
+    if _price_domain_is_option_premium(
+        option_meta.get("price_domain") if option_meta else None
+    ):
+        return True
+
+    entry_execution = _nested_mapping(snap, "entry_execution")
+    if _price_domain_is_option_premium(
+        entry_execution.get("option_price_domain") if entry_execution else None
+    ):
+        return True
+
+    breakout = _nested_mapping(snap, "breakout_alert")
+    return bool(breakout and _option_price_domain_confirmed(breakout, price_field))
+
+
+def _price_ratio_is_plausible(entry_price: Any, exit_price: Any) -> bool:
+    entry = _float_or_none(entry_price)
+    exit_ = _float_or_none(exit_price)
+    if entry is None or entry <= 0 or exit_ is None or exit_ <= 0:
+        return False
+    ratio = exit_ / entry
+    return (
+        ratio <= _OPTION_PRICE_FALLBACK_MAX_RATIO
+        and ratio >= 1.0 / _OPTION_PRICE_FALLBACK_MAX_RATIO
+    )
+
+
+def _option_price_return_pct(
+    entry_price: Any,
+    exit_price: Any,
+    direction: Any,
+    *,
+    source: Any,
+) -> float | None:
+    if not (
+        _option_price_domain_confirmed(source, "entry_price")
+        and _option_price_domain_confirmed(source, "exit_price")
+    ):
+        return None
+    if not _price_ratio_is_plausible(entry_price, exit_price):
+        return None
+    return price_return_pct(entry_price, exit_price, direction)
 
 
 def price_return_pct(
@@ -125,6 +215,16 @@ def trade_return_pct(trade: Any) -> float | None:
     )
     if pnl_ret is not None:
         return pnl_ret
+    try:
+        if trade_contract_multiplier(trade) == OPTION_CONTRACT_MULTIPLIER:
+            return _option_price_return_pct(
+                getattr(trade, "entry_price", None),
+                getattr(trade, "exit_price", None),
+                getattr(trade, "direction", "long"),
+                source=getattr(trade, "indicator_snapshot", None),
+            )
+    except Exception:
+        return None
     return price_return_pct(
         getattr(trade, "entry_price", None),
         getattr(trade, "exit_price", None),
@@ -145,6 +245,14 @@ def paper_trade_return_pct(paper_trade: Any) -> float | None:
     stored_pct = _float_or_none(getattr(paper_trade, "pnl_pct", None))
     if stored_pct is not None:
         return stored_pct
+    signal_json = getattr(paper_trade, "signal_json", None)
+    if paper_trade_contract_multiplier(paper_trade) == OPTION_CONTRACT_MULTIPLIER:
+        return _option_price_return_pct(
+            getattr(paper_trade, "entry_price", None),
+            getattr(paper_trade, "exit_price", None),
+            getattr(paper_trade, "direction", "long"),
+            source=signal_json,
+        )
     return price_return_pct(
         getattr(paper_trade, "entry_price", None),
         getattr(paper_trade, "exit_price", None),

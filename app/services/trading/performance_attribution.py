@@ -13,11 +13,35 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from ...models.trading import Trade
-from .return_math import price_return_pct
+from .return_math import trade_return_pct
 
 logger = logging.getLogger(__name__)
 
 _BENCHMARK_TICKER = "SPY"
+
+
+def _is_option_trade_safe(trade: Any) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return str(getattr(trade, "asset_kind", "") or "").strip().lower() in {
+            "option",
+            "options",
+        }
+
+
+def _estimated_cost_pct(trade: Any) -> float | None:
+    entry_slip = float(getattr(trade, "tca_entry_slippage_bps", None) or 0) / 100
+    exit_slip = float(getattr(trade, "tca_exit_slippage_bps", None) or 0) / 100
+    estimated_cost = entry_slip + exit_slip
+    if estimated_cost > 0:
+        return estimated_cost
+    if _is_option_trade_safe(trade):
+        return None
+    is_crypto = (getattr(trade, "ticker", "") or "").upper().endswith("-USD")
+    return 0.04 if is_crypto else 0.02
 
 
 def _fetch_benchmark_return(
@@ -73,9 +97,10 @@ def attribute_trade(trade: Trade) -> dict[str, Any]:
         result["error"] = "missing_entry_price"
         return result
 
-    gross_return_pct = (
-        price_return_pct(trade.entry_price, trade.exit_price, trade.direction) or 0.0
-    )
+    gross_return_pct = trade_return_pct(trade)
+    if gross_return_pct is None:
+        result["error"] = "missing_return_basis"
+        return result
     result["gross_return_pct"] = round(gross_return_pct, 4)
 
     benchmark_ret = _fetch_benchmark_return(trade.entry_date, trade.exit_date)
@@ -87,16 +112,15 @@ def attribute_trade(trade: Trade) -> dict[str, Any]:
     else:
         result["alpha_pct"] = None
 
-    # Estimate transaction costs from TCA fields or defaults
-    entry_slip = float(trade.tca_entry_slippage_bps or 0) / 100
-    exit_slip = float(trade.tca_exit_slippage_bps or 0) / 100
-    estimated_cost = entry_slip + exit_slip
-    if estimated_cost == 0:
-        is_crypto = (trade.ticker or "").upper().endswith("-USD")
-        estimated_cost = 0.04 if is_crypto else 0.02  # default cost estimate in %
-    result["estimated_cost_pct"] = round(estimated_cost, 4)
+    # Estimate transaction costs from TCA fields or conservative defaults.
+    # For options, an equity-style default materially understates spread cost;
+    # if TCA is absent, keep net alpha unknown instead of faking precision.
+    estimated_cost = _estimated_cost_pct(trade)
+    result["estimated_cost_pct"] = (
+        round(estimated_cost, 4) if estimated_cost is not None else None
+    )
 
-    if result["alpha_pct"] is not None:
+    if result["alpha_pct"] is not None and estimated_cost is not None:
         result["net_alpha_pct"] = round(result["alpha_pct"] - estimated_cost, 4)
     else:
         result["net_alpha_pct"] = None
