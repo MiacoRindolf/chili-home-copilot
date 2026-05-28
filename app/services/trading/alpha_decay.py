@@ -38,6 +38,40 @@ def _settings_get(name: str, default: Any) -> Any:
         return default
 
 
+def _finite_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _return_evidence_record(
+    *,
+    pnl_pct: Any,
+    pnl: Any,
+    source: str,
+) -> dict[str, Any] | None:
+    ret = _finite_float(pnl_pct)
+    if ret is None:
+        return None
+    return {
+        "pnl": _finite_float(pnl),
+        "pnl_pct": ret,
+        "win": ret > 0.0,
+        "source": source,
+    }
+
+
+def _mean_known_pnl(evidence: list[dict[str, Any]]) -> float | None:
+    values = [float(e["pnl"]) for e in evidence if e.get("pnl") is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def _payoff_ratio_protects_from_wr_decay(pattern: Any) -> bool:
     """Return True when realized payoff evidence should block WR-only decay.
 
@@ -137,18 +171,24 @@ def check_alpha_decay(
     evidence_by_sp: dict[int, list[dict]] = {}
     for t in recent_trades:
         pnl_pct = trade_return_pct(t)
-        if pnl_pct is None:
-            continue
-        evidence_by_sp.setdefault(t.scan_pattern_id, []).append(
-            {"pnl": t.pnl or 0, "pnl_pct": pnl_pct, "source": "live"}
+        rec = _return_evidence_record(
+            pnl_pct=pnl_pct,
+            pnl=getattr(t, "pnl", None),
+            source="live",
         )
+        if rec is None:
+            continue
+        evidence_by_sp.setdefault(t.scan_pattern_id, []).append(rec)
     for pt in recent_paper:
         pnl_pct = paper_trade_return_pct(pt)
-        if pnl_pct is None:
-            continue
-        evidence_by_sp.setdefault(pt.scan_pattern_id, []).append(
-            {"pnl": pt.pnl or 0, "pnl_pct": pnl_pct, "source": "paper"}
+        rec = _return_evidence_record(
+            pnl_pct=pnl_pct,
+            pnl=getattr(pt, "pnl", None),
+            source="paper",
         )
+        if rec is None:
+            continue
+        evidence_by_sp.setdefault(pt.scan_pattern_id, []).append(rec)
 
     decayed: list[dict[str, Any]] = []
     healthy: list[int] = []
@@ -158,11 +198,11 @@ def check_alpha_decay(
         if len(evidence) < MIN_TRADES_FOR_DECAY_CHECK:
             continue
 
-        live_wins = sum(1 for e in evidence if e["pnl"] > 0)
+        live_wins = sum(1 for e in evidence if e["win"])
         live_wr = live_wins / len(evidence)
         # Use percent returns for decay comparison (dollar PnL varies with position size)
         live_avg_ret_pct = sum(e["pnl_pct"] for e in evidence) / len(evidence)
-        live_avg_ret_dollar = sum(e["pnl"] for e in evidence) / len(evidence)
+        live_avg_ret_dollar = _mean_known_pnl(evidence)
 
         # FIX E-1 (2026-04-29 audit): no hardcoded 0.50 fallback. Prefer
         # OOS WR if known, else realized WR. If both are None, fall back to
@@ -236,7 +276,11 @@ def check_alpha_decay(
                 "live_wr": round(live_wr, 3),
                 "oos_wr": round(oos_wr, 3),
                 "live_avg_return_pct": round(live_avg_ret_pct, 2),
-                "live_avg_return_dollar": round(live_avg_ret_dollar, 2),
+                "live_avg_return_dollar": (
+                    round(live_avg_ret_dollar, 2)
+                    if live_avg_ret_dollar is not None
+                    else None
+                ),
                 "trades": len(evidence),
                 "reason": reason,
             })
@@ -302,9 +346,15 @@ def estimate_half_life(
     # Merge and sort by exit date
     all_evidence = []
     for t in live_trades:
-        all_evidence.append({"exit_date": t.exit_date, "pnl": t.pnl or 0})
+        pnl_pct = trade_return_pct(t)
+        if pnl_pct is None:
+            continue
+        all_evidence.append({"exit_date": t.exit_date, "return_pct": pnl_pct})
     for pt in paper_trades:
-        all_evidence.append({"exit_date": pt.exit_date, "pnl": pt.pnl or 0})
+        pnl_pct = paper_trade_return_pct(pt)
+        if pnl_pct is None:
+            continue
+        all_evidence.append({"exit_date": pt.exit_date, "return_pct": pnl_pct})
     all_evidence.sort(key=lambda x: x["exit_date"])
     trades = all_evidence
 
@@ -317,7 +367,7 @@ def estimate_half_life(
 
     for i in range(window, len(trades)):
         chunk = trades[i - window:i]
-        wins = sum(1 for t in chunk if (t["pnl"] or 0) > 0)
+        wins = sum(1 for t in chunk if t["return_pct"] > 0.0)
         wr = wins / window
         days_elapsed = (chunk[-1]["exit_date"] - first_date).total_seconds() / 86400
         if wr > 0:
