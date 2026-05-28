@@ -186,6 +186,29 @@ def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     assert cfg["total_edge_rejects"] == 5
 
 
+def test_edge_learned_exit_child_name_fits_scan_pattern_limit(db):
+    parent_name = ("Long edge pattern " * 7).strip()[:110]
+    assert len(parent_name) <= 120
+
+    pat = _make_pattern(
+        db,
+        name=parent_name,
+    )
+    now = datetime.utcnow().replace(microsecond=0)
+    for i in range(5):
+        _add_edge_reject(db, pattern_id=pat.id, created_at=now - timedelta(minutes=i))
+    db.commit()
+    report = _edge_debt_loss_reports(db, now=now, lookback_days=1)[pat.id]
+
+    ids = fork_edge_learned_exit_variants(db, pat.id, edge_loss_report=report)
+
+    assert len(ids) == 1
+    child = db.get(ScanPattern, ids[0])
+    assert child is not None
+    assert len(child.name) <= 120
+    assert child.name.endswith(f" [{child.variant_label}]")
+
+
 def test_edge_learned_exit_allows_mild_negative_with_strong_payoff(db):
     pat = _make_pattern(db)
     now = datetime.utcnow().replace(microsecond=0)

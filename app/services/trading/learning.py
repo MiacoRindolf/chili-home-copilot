@@ -9629,6 +9629,16 @@ def _parent_eligible_for_variant_spawn(
     return True, ""
 
 
+_SCAN_PATTERN_NAME_MAX_LEN = 120
+
+
+def _variant_child_name(parent_name: Any, variant_label: str) -> str:
+    suffix = f" [{variant_label}]"
+    base = str(parent_name or "Pattern").strip() or "Pattern"
+    max_base_len = max(1, _SCAN_PATTERN_NAME_MAX_LEN - len(suffix))
+    return f"{base[:max_base_len].rstrip()}{suffix}"
+
+
 def _create_variant_child(
     db: "Session",
     parent: "ScanPattern",
@@ -9660,7 +9670,7 @@ def _create_variant_child(
         return None
     from ...models.trading import ScanPattern, TradingInsight
 
-    child_name = f"{parent.name} [{variant_label}]"
+    child_name = _variant_child_name(parent.name, variant_label)
     child_rules_json = _variant_json_value(
         rules_json if rules_json is not None else parent.rules_json
     )
