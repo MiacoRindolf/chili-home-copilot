@@ -29,6 +29,25 @@ def _settings_subset() -> dict[str, Any]:
     }
 
 
+def _global_candidates_by_ticker_norm(
+    db: Session,
+    ticker_norms: set[str],
+) -> dict[str, PrescreenCandidate]:
+    if not ticker_norms:
+        return {}
+
+    rows = (
+        db.query(PrescreenCandidate)
+        .filter(PrescreenCandidate.user_id.is_(None))
+        .filter(PrescreenCandidate.ticker_norm.in_(sorted(ticker_norms)))
+        .all()
+    )
+    candidates: dict[str, PrescreenCandidate] = {}
+    for row in rows:
+        candidates.setdefault(row.ticker_norm, row)
+    return candidates
+
+
 def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
     """Collect external + internal tickers, write snapshot row, upsert global candidates."""
     job_id = brain_batch_job_begin(db, "daily_prescreen")
@@ -88,6 +107,12 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
 
         now = datetime.utcnow()
         todays_norms: set[str] = set()
+        normalized_tickers = {
+            tn
+            for t in all_tickers
+            if (tn := normalize_prescreen_ticker(t))
+        }
+        existing_candidates = _global_candidates_by_ticker_norm(db, normalized_tickers)
 
         for t in all_tickers:
             tn = normalize_prescreen_ticker(t)
@@ -98,28 +123,23 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
             sources_payload = {"tags": ticker_sources.get(tn, ticker_sources.get(t, []))}
             asset_u = "crypto" if is_crypto(tn) else "stock"
 
-            row = (
-                db.query(PrescreenCandidate)
-                .filter(PrescreenCandidate.user_id.is_(None))
-                .filter(PrescreenCandidate.ticker_norm == tn)
-                .first()
-            )
+            row = existing_candidates.get(tn)
             if row is None:
-                db.add(
-                    PrescreenCandidate(
-                        snapshot_id=snap.id,
-                        user_id=None,
-                        ticker=tn,
-                        ticker_norm=tn,
-                        asset_universe=asset_u,
-                        active=True,
-                        first_seen_at=now,
-                        last_seen_at=now,
-                        modified_at=now,
-                        entry_reasons=reasons,
-                        sources_json=sources_payload,
-                    )
+                row = PrescreenCandidate(
+                    snapshot_id=snap.id,
+                    user_id=None,
+                    ticker=tn,
+                    ticker_norm=tn,
+                    asset_universe=asset_u,
+                    active=True,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    modified_at=now,
+                    entry_reasons=reasons,
+                    sources_json=sources_payload,
                 )
+                db.add(row)
+                existing_candidates[tn] = row
             else:
                 row.snapshot_id = snap.id
                 row.ticker = tn
