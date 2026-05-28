@@ -761,6 +761,10 @@ def api_monitor_imminent_alerts(
                 "exposure_blocker": supply.get("exposure_blocker"),
                 "execution_blocker": supply.get("execution_blocker"),
                 "recert_blocker": supply.get("recert_blocker"),
+                "broker_truth_status": supply.get("broker_truth_status"),
+                "broker_truth_reason": supply.get("broker_truth_reason"),
+                "stale_broker_position": supply.get("stale_broker_position"),
+                "stale_reconciled_at": supply.get("stale_reconciled_at"),
                 "trade_plan": a.trade_plan,
             }
         )

@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from app.models.trading import ScanPattern, Trade, TradingPosition
+
+
+def _stale_rh_trade(db, *, ticker: str = "ACMR") -> Trade:
+    pat = ScanPattern(
+        name=f"stale {ticker}",
+        rules_json={},
+        origin="test",
+        asset_class="stock",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add(pat)
+    db.flush()
+    pos = TradingPosition(
+        user_id=None,
+        broker_source="robinhood",
+        account_type="cash",
+        ticker=ticker,
+        direction="long",
+        asset_kind="equity",
+        current_quantity=0.0,
+        current_avg_price=67.4,
+        state="closed",
+        last_observed_at=datetime.utcnow() - timedelta(days=1),
+        last_state_transition_at=datetime.utcnow() - timedelta(days=1),
+    )
+    db.add(pos)
+    db.flush()
+    trade = Trade(
+        user_id=None,
+        ticker=ticker,
+        direction="long",
+        entry_price=67.4,
+        quantity=6.0,
+        status="open",
+        broker_source="robinhood",
+        broker_order_id="filled-entry-order",
+        broker_status="filled",
+        position_id=pos.id,
+        scan_pattern_id=pat.id,
+        stop_loss=89.25,
+        take_profit=90.78,
+        entry_date=datetime.utcnow() - timedelta(days=3),
+        filled_at=datetime.utcnow() - timedelta(days=3),
+        submitted_at=datetime.utcnow() - timedelta(days=3),
+        last_broker_sync=datetime.utcnow() - timedelta(minutes=1),
+        broker_sync_missing_streak=12,
+    )
+    db.add(trade)
+    db.flush()
+    pos.current_envelope_id = trade.id
+    db.flush()
+    return trade
+
+
+def test_stop_engine_reconciles_stale_robinhood_trade_before_alerting(db):
+    from app.services.trading.stop_engine import evaluate_all
+
+    trade = _stale_rh_trade(db)
+    db.commit()
+
+    with patch(
+        "app.services.trading.stop_engine._fetch_market_context",
+        side_effect=AssertionError("stale RH trade must not fetch market data"),
+    ), patch(
+        "app.services.trading.stop_engine.evaluate_trade",
+        side_effect=AssertionError("stale RH trade must not be stop-evaluated"),
+    ), patch(
+        "app.services.trading.stop_engine.get_adaptive_cooldowns",
+        return_value={},
+    ):
+        out = evaluate_all(db, user_id=None)
+
+    db.refresh(trade)
+    assert out["total_checked"] == 0
+    assert out["alerts"] == []
+    assert out["skipped_stale_broker_positions"][0]["id"] == trade.id
+    assert out["reconciled_stale_broker_positions"][0]["id"] == trade.id
+    assert trade.status == "closed"
+    assert trade.exit_reason == "broker_reconcile_no_exit_price"
+    assert trade.exit_price is None
+    assert trade.pnl is None
+    assert trade.pending_exit_status is None
+
+
+def test_mesh_critical_dispatch_suppresses_stale_robinhood_trade(db):
+    from app.services.trading.brain_neural_mesh.action_handlers import (
+        handle_action_signals,
+    )
+
+    trade = _stale_rh_trade(db, ticker="MESH")
+    db.commit()
+    state = SimpleNamespace(local_state={}, updated_at=None)
+
+    with patch(
+        "app.services.trading.alerts.dispatch_alert",
+        side_effect=AssertionError("stale critical mesh signal must not dispatch"),
+    ):
+        decision = handle_action_signals(
+            db,
+            "nm_action_signals",
+            state,
+            {
+                "children_state": {
+                    "nm_stop_eval": {
+                        "trade_id": trade.id,
+                        "ticker": trade.ticker,
+                        "action": "STOP_HIT",
+                        "urgency": "critical",
+                        "price": 88.0,
+                        "stop_level": 89.25,
+                    }
+                }
+            },
+        )
+
+    assert decision["action"] == "suppressed_stale_broker_position"
+    assert decision["dispatched"] is False
+    assert decision["broker_truth"]["reason"] == "position_identity_closed"
+
+
+def test_sync_orders_does_not_refresh_already_filled_entry_clock(db, monkeypatch):
+    from app.services import broker_service
+
+    old_sync = datetime.utcnow() - timedelta(hours=4)
+    trade = Trade(
+        user_id=None,
+        ticker="CLOCK",
+        direction="long",
+        entry_price=10.0,
+        quantity=1.0,
+        status="open",
+        broker_source="robinhood",
+        broker_order_id="entry-filled",
+        broker_status="filled",
+        entry_date=datetime.utcnow() - timedelta(days=1),
+        last_broker_sync=old_sync,
+    )
+    db.add(trade)
+    db.commit()
+
+    monkeypatch.setattr(broker_service, "is_connected", lambda: True)
+    monkeypatch.setattr(
+        broker_service,
+        "get_order_by_id",
+        lambda _order_id: {
+            "id": "entry-filled",
+            "state": "filled",
+            "side": "buy",
+            "cumulative_quantity": "1",
+            "average_price": "10.00",
+        },
+    )
+
+    out = broker_service.sync_orders_to_db(db, user_id=None)
+
+    db.refresh(trade)
+    assert out["synced"] >= 1
+    assert trade.last_broker_sync == old_sync
+
+
+def test_fresh_robinhood_fill_inside_grace_is_not_marked_stale(db):
+    from app.services.trading.broker_position_truth import broker_stale_open_trade_snapshot
+
+    pos = TradingPosition(
+        user_id=None,
+        broker_source="robinhood",
+        account_type="cash",
+        ticker="FRESH",
+        direction="long",
+        asset_kind="equity",
+        current_quantity=0.0,
+        current_avg_price=10.0,
+        state="closed",
+        last_observed_at=datetime.utcnow(),
+        last_state_transition_at=datetime.utcnow(),
+    )
+    db.add(pos)
+    db.flush()
+    trade = Trade(
+        user_id=None,
+        ticker="FRESH",
+        direction="long",
+        entry_price=10.0,
+        quantity=1.0,
+        status="open",
+        broker_source="robinhood",
+        broker_order_id="fresh-filled-entry",
+        broker_status="filled",
+        position_id=pos.id,
+        entry_date=datetime.utcnow(),
+        filled_at=datetime.utcnow(),
+        submitted_at=datetime.utcnow(),
+    )
+    db.add(trade)
+    db.commit()
+
+    assert broker_stale_open_trade_snapshot(db, trade) is None
+
+
+def test_portfolio_risk_excludes_stale_robinhood_open_trade(db):
+    from app.services.trading.portfolio_risk import get_portfolio_risk_snapshot
+
+    _stale_rh_trade(db, ticker="RISK")
+    db.commit()
+
+    budget = get_portfolio_risk_snapshot(db, user_id=None, capital=25_000.0)
+
+    assert budget.open_positions == 0
+    assert budget.stock_positions == 0
+    assert budget.total_heat_pct == 0.0
+    assert budget.can_open_new is True

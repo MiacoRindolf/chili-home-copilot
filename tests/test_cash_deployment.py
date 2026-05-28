@@ -5,7 +5,14 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.config import settings
-from app.models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
+from app.models.trading import (
+    AutoTraderRun,
+    BreakoutAlert,
+    PaperTrade,
+    ScanPattern,
+    Trade,
+    TradingPosition,
+)
 from app.services.trading.cash_deployment import cash_deployment_rows, cash_deployment_summary
 
 
@@ -193,3 +200,59 @@ def test_cash_deployment_exposure_cap_blocks_sizing(db, monkeypatch):
     assert row["exposure_blocker"]
     assert row["max_safe_notional"] == 0.0
     assert row["live_deployable"] is False
+
+
+def test_cash_deployment_zero_ranks_stale_broker_local_open(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+
+    pat = _pattern(db, name="cash stale broker")
+    alert = _alert(db, pat, ticker="STAL")
+    _run(db, pat, alert, expected=2.0)
+    _closed_paper(db, pat, alert)
+    pos = TradingPosition(
+        user_id=None,
+        broker_source="robinhood",
+        account_type="cash",
+        ticker="STAL",
+        direction="long",
+        asset_kind="equity",
+        current_quantity=0.0,
+        current_avg_price=100.0,
+        state="closed",
+        last_observed_at=datetime.utcnow() - timedelta(days=1),
+        last_state_transition_at=datetime.utcnow() - timedelta(days=1),
+    )
+    db.add(pos)
+    db.flush()
+    db.add(
+        Trade(
+            ticker="STAL",
+            direction="long",
+            entry_price=100.0,
+            quantity=1.0,
+            status="open",
+            broker_source="robinhood",
+            broker_status="filled",
+            broker_order_id="stale-entry",
+            position_id=pos.id,
+            entry_date=datetime.utcnow() - timedelta(days=2),
+            stop_loss=95.0,
+        )
+    )
+    db.commit()
+
+    rows = cash_deployment_rows(db, window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+    summary = cash_deployment_summary(rows)
+
+    assert row["cash_deployment_category"] == "stale_broker_local_open"
+    assert row["broker_truth_status"] == "stale"
+    assert row["broker_truth_reason"] == "position_identity_closed"
+    assert row["stale_broker_position"] is True
+    assert row["live_deployable"] is False
+    assert row["cash_deployment_rank"] is None
+    assert row["max_safe_notional"] == 0.0
+    assert summary["stale_broker_local_open"] >= 1

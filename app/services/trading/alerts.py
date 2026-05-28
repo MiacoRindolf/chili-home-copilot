@@ -1568,7 +1568,7 @@ def run_price_monitor(db: Session, user_id: int | None) -> dict[str, Any]:
     return results
 
 
-def _check_open_positions(db: Session, user_id: int | None) -> dict[str, int]:
+def _check_open_positions(db: Session, user_id: int | None) -> dict[str, Any]:
     """Check open trades against current prices for stop/target alerts."""
     from ...models.trading import Trade
     from .market_data import fetch_quote
@@ -1580,6 +1580,30 @@ def _check_open_positions(db: Session, user_id: int | None) -> dict[str, int]:
         Trade.user_id == user_id,
         Trade.status == "open",
     ).all()
+    skipped_stale: list[dict[str, Any]] = []
+    reconciled_stale: list[dict[str, Any]] = []
+    try:
+        from .broker_position_truth import (
+            filter_broker_stale_open_trades,
+            reconcile_stale_robinhood_open_trade,
+        )
+
+        trade_by_id = {int(t.id): t for t in open_trades if getattr(t, "id", None)}
+        open_trades, skipped_stale = filter_broker_stale_open_trades(db, open_trades)
+        for snap in skipped_stale:
+            stale_trade = trade_by_id.get(int(snap.get("id") or 0))
+            if stale_trade is None:
+                continue
+            reconciled = reconcile_stale_robinhood_open_trade(
+                db,
+                stale_trade,
+                snapshot=snap,
+                source="legacy_price_monitor_broker_truth_gate",
+            )
+            if reconciled:
+                reconciled_stale.append(reconciled)
+    except Exception:
+        logger.debug("[alerts] broker-truth stale filter failed", exc_info=True)
 
     for trade in open_trades:
         try:
@@ -1643,7 +1667,12 @@ def _check_open_positions(db: Session, user_id: int | None) -> dict[str, int]:
         except Exception as e:
             logger.debug(f"[alerts] Error checking {trade.ticker}: {e}")
 
-    return {"targets_hit": targets_hit, "stops_hit": stops_hit}
+    return {
+        "targets_hit": targets_hit,
+        "stops_hit": stops_hit,
+        "skipped_stale_broker_positions": skipped_stale,
+        "reconciled_stale_broker_positions": reconciled_stale,
+    }
 
 
 def _check_breakout_candidates(db: Session, user_id: int | None) -> int:

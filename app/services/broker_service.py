@@ -2460,6 +2460,45 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         logger.debug("[broker_sync] MMM filter failed", exc_info=True)
 
     for trade in stale:
+        try:
+            from .trading.broker_position_truth import (
+                broker_stale_open_trade_snapshot,
+                reconcile_stale_robinhood_open_trade,
+            )
+
+            identity_snap = broker_stale_open_trade_snapshot(db, trade)
+            if identity_snap and identity_snap.get("reason") in {
+                "position_identity_closed",
+                "position_identity_zero_qty",
+            }:
+                reconciled = reconcile_stale_robinhood_open_trade(
+                    db,
+                    trade,
+                    snapshot=identity_snap,
+                    source="sync_positions_to_db",
+                    exit_price_resolver=lambda tr: _resolve_close_exit_price(tr.ticker),
+                )
+                if reconciled:
+                    logger.warning(
+                        "[broker_sync] RECONCILE_CLOSE: ticker=%s trade_id=%s "
+                        "exit_reason=%s rh_tickers_size=%d broker_truth_reason=%s",
+                        trade.ticker,
+                        trade.id,
+                        trade.exit_reason,
+                        len(rh_tickers),
+                        identity_snap.get("reason"),
+                    )
+                    if trade.exit_reason == "broker_reconcile_position_gone":
+                        _record_reconcile_close_burst(trade.ticker, trade.id)
+                    closed += 1
+                    continue
+        except Exception:
+            logger.debug(
+                "[broker_sync] position-identity stale reconcile skipped for trade#%s",
+                getattr(trade, "id", None),
+                exc_info=True,
+            )
+
         # f-equity-reconcile-partial-list-guard (2026-05-08): require
         # the per-trade consecutive-missing streak to have reached
         # ``_RECONCILE_PARTIAL_LIST_STREAK_MIN`` before allowing the
@@ -5067,6 +5106,12 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             if not rh_order:
                 continue
             rh_state = (rh_order.get("state") or "").lower()
+            if rh_state == "filled" and (trade.broker_status or "").lower() == "filled":
+                # The entry order is already reflected locally. Re-polling it
+                # should not refresh ``last_broker_sync`` forever; position
+                # sync owns the open-position liveness clock after fill.
+                synced += 1
+                continue
             trade.last_broker_sync = datetime.utcnow()
             normalized = normalize_robinhood_order_event(
                 order={**rh_order, "id": trade.broker_order_id},

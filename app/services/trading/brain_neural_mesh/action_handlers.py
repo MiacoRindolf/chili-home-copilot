@@ -27,6 +27,76 @@ _INFO_ACTIONS = frozenset({
     "hold", "BREAKEVEN_REACHED", "breakeven_reached",
     "loosen_target",
 })
+DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS = 15 * 60
+_LAST_CRITICAL_DISPATCH_AT: dict[str, datetime] = {}
+
+
+def _critical_trade_broker_live(
+    db: Session,
+    child_state: dict[str, Any],
+) -> tuple[bool, dict[str, Any] | None]:
+    trade_id = child_state.get("trade_id")
+    if not trade_id:
+        return True, None
+    try:
+        from ....models.trading import Trade
+        from ..broker_position_truth import broker_stale_open_trade_snapshot
+
+        trade = db.get(Trade, int(trade_id))
+        if trade is None:
+            return False, {
+                "id": int(trade_id),
+                "reason": "local_trade_missing",
+                "broker_truth_status": "stale",
+                "stale_broker_position": True,
+            }
+        if getattr(trade, "status", None) != "open":
+            return False, {
+                "id": int(trade_id),
+                "ticker": getattr(trade, "ticker", None),
+                "reason": "local_trade_not_open",
+                "broker_truth_status": "stale",
+                "stale_broker_position": True,
+            }
+        stale = broker_stale_open_trade_snapshot(db, trade)
+        if stale:
+            return False, stale
+        return True, None
+    except Exception:
+        _log.debug("%s critical broker-live revalidation failed", LOG_PREFIX, exc_info=True)
+        return True, None
+
+
+def _critical_dispatch_signature(action: str, child_state: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(child_state.get("trade_id") or ""),
+            str(child_state.get("ticker") or "").upper(),
+            str(action or ""),
+            str(child_state.get("stop_level") or child_state.get("new_stop") or ""),
+            str(child_state.get("price") or child_state.get("current_price") or ""),
+        ]
+    )
+
+
+def _critical_dispatch_in_cooldown(signature: str, now: datetime) -> bool:
+    try:
+        from ....config import settings
+
+        cooldown = int(
+            getattr(
+                settings,
+                "chili_mesh_critical_alert_cooldown_seconds",
+                DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS,
+            )
+            or DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS
+        )
+    except Exception:
+        cooldown = DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS
+    last = _LAST_CRITICAL_DISPATCH_AT.get(signature)
+    if last is None:
+        return False
+    return (now - last).total_seconds() < max(0, cooldown)
 
 
 def _classify_urgency(children: dict[str, dict[str, Any]]) -> tuple[str, str, dict[str, Any]]:
@@ -140,10 +210,41 @@ def handle_action_signals(
     state.updated_at = datetime.now(timezone.utc)
 
     if urgency == "critical":
+        broker_live, stale_snapshot = _critical_trade_broker_live(db, best_child)
+        if not broker_live:
+            decision.update(
+                {
+                    "urgency": "none",
+                    "action": "suppressed_stale_broker_position",
+                    "dispatched": False,
+                    "suppressed_reason": "stale_broker_position",
+                    "broker_truth": stale_snapshot,
+                }
+            )
+            state.local_state = decision
+            _log.warning(
+                "%s critical alert suppressed for stale broker position: %s",
+                LOG_PREFIX,
+                stale_snapshot,
+            )
+            return decision
+
         ticker = best_child.get("ticker")
         user_id = best_child.get("user_id")
         alert_type = _map_action_to_alert_type(action)
         msg = _format_mesh_alert_message(urgency, action, best_child, children)
+        now = datetime.now(timezone.utc)
+        dispatch_sig = _critical_dispatch_signature(action, best_child)
+        if _critical_dispatch_in_cooldown(dispatch_sig, now):
+            decision.update(
+                {
+                    "dispatched": False,
+                    "suppressed_reason": "critical_dispatch_cooldown",
+                    "dispatch_signature": dispatch_sig,
+                }
+            )
+            state.local_state = decision
+            return decision
 
         try:
             from ..alerts import dispatch_alert
@@ -157,6 +258,8 @@ def handle_action_signals(
             )
             decision["dispatched"] = True
             decision["alert_type"] = alert_type
+            decision["dispatch_signature"] = dispatch_sig
+            _LAST_CRITICAL_DISPATCH_AT[dispatch_sig] = now
             state.local_state = decision
         except Exception:
             _log.exception("%s alert dispatch failed for %s", LOG_PREFIX, ticker)

@@ -198,6 +198,35 @@ def _trade_risk_dollars(trade: Any) -> float:
     return 0.0
 
 
+def _open_trade_query(db: Session, user_id: int | None):
+    return db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "open",
+    )
+
+
+def _broker_live_open_trades(
+    db: Session,
+    user_id: int | None,
+    *,
+    query: Any | None = None,
+) -> list[Trade]:
+    rows = (query or _open_trade_query(db, user_id)).all()
+    try:
+        from .broker_position_truth import filter_broker_stale_open_trades
+
+        live, stale = filter_broker_stale_open_trades(db, rows)
+        if stale:
+            logger.info(
+                "[risk] excluded %d stale broker-local open trade(s) from exposure",
+                len(stale),
+            )
+        return live
+    except Exception:
+        logger.debug("[risk] broker-truth exposure filter failed", exc_info=True)
+        return rows
+
+
 def get_portfolio_risk_snapshot(
     db: Session,
     user_id: int | None,
@@ -208,10 +237,7 @@ def get_portfolio_risk_snapshot(
     if limits is None:
         limits = get_risk_limits()
 
-    open_trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "open",
-    ).all()
+    open_trades = _broker_live_open_trades(db, user_id)
 
     budget = RiskBudget()
     budget.open_positions = len(open_trades)
@@ -296,11 +322,11 @@ def check_new_trade_allowed(
     if asset_kind == "equity" and budget.stock_positions >= limits.max_stock_positions:
         return False, f"Stock cap ({limits.max_stock_positions}) reached"
 
-    same_ticker_count = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.ticker == ticker.upper(),
-        Trade.status == "open",
-    ).count()
+    same_ticker_count = sum(
+        1
+        for row in _broker_live_open_trades(db, user_id)
+        if str(row.ticker or "").upper() == ticker.upper()
+    )
     if same_ticker_count >= limits.max_same_ticker:
         return False, f"Already {same_ticker_count} open positions in {ticker}"
 
@@ -578,10 +604,7 @@ def compute_sector_exposure(
     Uses the ``Trade.sector`` column.  Tickers with no sector assigned
     are grouped under "unknown".
     """
-    open_trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "open",
-    ).all()
+    open_trades = _broker_live_open_trades(db, user_id)
 
     if not open_trades:
         return {}
@@ -661,10 +684,7 @@ def check_correlation_risk(
     if limits is None:
         limits = get_risk_limits()
 
-    open_trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "open",
-    ).all()
+    open_trades = _broker_live_open_trades(db, user_id)
 
     existing_tickers = list({t.ticker for t in open_trades})
     if len(existing_tickers) < 2:
@@ -714,10 +734,7 @@ def check_sector_concentration(
 
     sector = (new_ticker_sector or "unknown").strip().lower()
 
-    open_trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "open",
-    ).all()
+    open_trades = _broker_live_open_trades(db, user_id)
 
     if not open_trades:
         return True, "ok"
@@ -763,10 +780,7 @@ def estimate_portfolio_var(
     import numpy as np
     from scipy.stats import norm
 
-    open_trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "open",
-    ).all()
+    open_trades = _broker_live_open_trades(db, user_id)
 
     if not open_trades or capital <= 0:
         return None
@@ -821,10 +835,7 @@ def estimate_portfolio_cvar(
     import numpy as np
     from .market_data import fetch_ohlcv_df
 
-    open_trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "open",
-    ).all()
+    open_trades = _broker_live_open_trades(db, user_id)
     if not open_trades or capital <= 0:
         return None
 
@@ -1001,12 +1012,9 @@ def _compute_unrealized_pnl(db: Session, user_id: int | None) -> float:
     positions are excluded because the breaker should measure CHILI's
     risk, not the user's overall portfolio.
     """
-    q = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "open",
-    )
+    q = _open_trade_query(db, user_id)
     q = _breaker_trade_filter(q)
-    open_trades = q.all()
+    open_trades = _broker_live_open_trades(db, user_id, query=q)
     if not open_trades:
         return 0.0
 
@@ -1872,11 +1880,11 @@ def unified_risk_check(
         return False, f"Stock cap ({limits.max_stock_positions}) reached", detail
 
     # 5. Same-ticker limit
-    same_count = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.ticker == ticker.upper(),
-        Trade.status == "open",
-    ).count()
+    same_count = sum(
+        1
+        for row in _broker_live_open_trades(db, user_id)
+        if str(row.ticker or "").upper() == ticker.upper()
+    )
     if same_count >= limits.max_same_ticker:
         return False, f"Already {same_count} open in {ticker}", detail
 

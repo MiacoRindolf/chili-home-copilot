@@ -53,4 +53,7 @@ def test_legacy_price_monitor_skips_option_trades() -> None:
     ):
         out = _check_open_positions(_FakeDb([option_trade]), user_id=None)
 
-    assert out == {"targets_hit": 0, "stops_hit": 0}
+    assert out["targets_hit"] == 0
+    assert out["stops_hit"] == 0
+    assert out["skipped_stale_broker_positions"] == []
+    assert out["reconciled_stale_broker_positions"] == []

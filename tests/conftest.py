@@ -203,6 +203,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_autotrader_pdt_soft_warn.py",
     "test_autotrader_position_overrides.py",
     "test_broker_sync.py",
+    "test_broker_truth_safety.py",
     "test_bracket_reconciler_hardening.py",
     "test_brain_work_ledger.py",
     "test_canonical_outcome_layer.py",

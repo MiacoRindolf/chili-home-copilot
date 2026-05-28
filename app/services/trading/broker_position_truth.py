@@ -7,10 +7,11 @@ or act on the stale envelope after the short post-fill grace window.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from ...models.trading import Trade, TradingPosition
@@ -67,6 +68,7 @@ def _snapshot(
     *,
     reason: str,
     position: TradingPosition | None = None,
+    reconciled_at: datetime | None = None,
 ) -> dict[str, Any]:
     return {
         "kind": "trade",
@@ -86,6 +88,12 @@ def _snapshot(
             else None
         ),
         "reason": reason,
+        "broker_truth_status": "stale",
+        "broker_truth_reason": reason,
+        "stale_broker_position": True,
+        "stale_reconciled_at": (
+            reconciled_at.isoformat() if reconciled_at is not None else None
+        ),
         "broker_sync_missing_streak": int(
             getattr(trade, "broker_sync_missing_streak", 0) or 0
         ),
@@ -164,8 +172,12 @@ def broker_stale_open_trade_snapshot(
                 return None
             return _snapshot(trade, reason="position_identity_missing", position=None)
         if (pos.state or "").lower() != "open":
+            if _within_grace(trade, now=now, grace_seconds=grace_seconds):
+                return None
             return _snapshot(trade, reason="position_identity_closed", position=pos)
         if not _positive_qty(pos):
+            if _within_grace(trade, now=now, grace_seconds=grace_seconds):
+                return None
             return _snapshot(trade, reason="position_identity_zero_qty", position=pos)
         return None
 
@@ -199,3 +211,146 @@ def filter_broker_stale_open_trades(
         else:
             stale.append(snap)
     return live, stale
+
+
+def reconcile_stale_robinhood_open_trade(
+    db: Session,
+    trade: Trade,
+    *,
+    snapshot: dict[str, Any] | None = None,
+    source: str = "broker_position_truth",
+    exit_price_resolver: Callable[[Trade], float | None] | None = None,
+) -> dict[str, Any] | None:
+    """Close a stale Robinhood local management envelope without trading.
+
+    Robinhood's position identity table is the inventory authority for stock
+    positions. If the broker-side position is closed/zero/missing past the
+    grace window, the local ``Trade`` row must stop participating in stop
+    alerts, risk exposure, and cash allocation. This helper performs only local
+    reconciliation; it never submits a broker order and it never fabricates PnL.
+    """
+    snap = snapshot or broker_stale_open_trade_snapshot(db, trade)
+    if not snap:
+        return None
+    if _source(trade) != "robinhood":
+        return None
+    if getattr(trade, "status", None) != "open":
+        return None
+
+    now = datetime.utcnow()
+    trade.status = "closed"
+    trade.exit_date = now
+    trade.pending_exit_order_id = None
+    trade.pending_exit_status = None
+    trade.pending_exit_requested_at = None
+    trade.pending_exit_reason = None
+    trade.pending_exit_limit_price = None
+    trade.last_broker_sync = now
+    trade.broker_status = "no_position"
+    if not getattr(trade, "management_scope", None) and "sync" in source:
+        try:
+            from .management_scope import MANAGEMENT_SCOPE_BROKER_SYNC
+
+            trade.management_scope = MANAGEMENT_SCOPE_BROKER_SYNC
+        except Exception:
+            pass
+
+    resolved_exit: float | None = None
+    if exit_price_resolver is not None:
+        try:
+            candidate = exit_price_resolver(trade)
+            resolved_exit = float(candidate) if candidate and candidate > 0 else None
+        except Exception:
+            resolved_exit = None
+
+    if resolved_exit is not None:
+        trade.exit_price = float(resolved_exit)
+        entry = float(getattr(trade, "entry_price", 0.0) or 0.0)
+        qty = float(getattr(trade, "quantity", 0.0) or 0.0)
+        if entry > 0.0 and qty > 0.0:
+            if (getattr(trade, "direction", "long") or "long").lower() == "short":
+                trade.pnl = round((entry - resolved_exit) * qty, 2)
+            else:
+                trade.pnl = round((resolved_exit - entry) * qty, 2)
+        if not getattr(trade, "exit_reason", None):
+            trade.exit_reason = "broker_reconcile_position_gone"
+    else:
+        trade.exit_price = None
+        trade.pnl = None
+        if not getattr(trade, "exit_reason", None):
+            trade.exit_reason = "broker_reconcile_no_exit_price"
+
+    note = (
+        f"\nAuto-closed local envelope: Robinhood position truth is stale "
+        f"({snap.get('reason')}) via {source} at {now.strftime('%Y-%m-%d %H:%M')} UTC. "
+    )
+    if resolved_exit is not None:
+        note += f"Exit ${resolved_exit:.4f} resolved from broker/order history."
+    else:
+        note += "Exit price unknown; PnL left NULL."
+    trade.notes = (getattr(trade, "notes", None) or "") + note
+    db.add(trade)
+
+    try:
+        from .brain_work.execution_hooks import on_broker_reconciled_close
+
+        on_broker_reconciled_close(db, trade, source=source)
+    except Exception:
+        pass
+
+    try:
+        from .execution_audit import record_execution_event
+
+        record_execution_event(
+            db,
+            user_id=trade.user_id,
+            ticker=trade.ticker,
+            trade=trade,
+            scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+            broker_source="robinhood",
+            event_type="broker_reconcile_gone_close",
+            status="filled",
+            average_fill_price=trade.exit_price,
+            cumulative_filled_quantity=float(getattr(trade, "quantity", 0.0) or 0.0),
+            payload_json={
+                "side": "sell",
+                "source": source,
+                "synthetic": True,
+                "trade_id": int(getattr(trade, "id", 0) or 0),
+                "exit_reason": trade.exit_reason,
+                "broker_truth_reason": snap.get("reason"),
+            },
+        )
+    except Exception:
+        pass
+
+    try:
+        from .bracket_intent_writer import mark_closed
+
+        ids = db.execute(
+            text(
+                "SELECT id FROM trading_bracket_intents "
+                "WHERE trade_id = :tid AND intent_state <> 'closed'"
+            ),
+            {"tid": int(getattr(trade, "id", 0) or 0)},
+        ).scalars().all()
+        for intent_id in ids:
+            mark_closed(
+                db,
+                int(intent_id),
+                reason=str(trade.exit_reason or "broker_reconcile_close")[:128],
+            )
+    except Exception:
+        pass
+
+    db.flush()
+    out = dict(snap)
+    out.update(
+        {
+            "broker_truth_status": "reconciled_stale",
+            "stale_reconciled_at": now.isoformat(),
+            "exit_reason": trade.exit_reason,
+            "exit_price": trade.exit_price,
+        }
+    )
+    return out

@@ -534,6 +534,32 @@ def _run_for_trades(
     evaluated = 0
     actions_taken = 0
     skipped = 0
+    stale_broker_rows: list[dict[str, Any]] = []
+    reconciled_stale_rows: list[dict[str, Any]] = []
+
+    try:
+        from .broker_position_truth import (
+            filter_broker_stale_open_trades,
+            reconcile_stale_robinhood_open_trade,
+        )
+
+        trade_by_id = {int(t.id): t for t in trades if getattr(t, "id", None)}
+        trades, stale_broker_rows = filter_broker_stale_open_trades(db, trades)
+        if stale_broker_rows and not dry_run:
+            for snap in stale_broker_rows:
+                stale_trade = trade_by_id.get(int(snap.get("id") or 0))
+                if stale_trade is None:
+                    continue
+                reconciled = reconcile_stale_robinhood_open_trade(
+                    db,
+                    stale_trade,
+                    snapshot=snap,
+                    source="pattern_position_monitor_broker_truth_gate",
+                )
+                if reconciled:
+                    reconciled_stale_rows.append(reconciled)
+    except Exception:
+        logger.warning("[pattern_monitor] broker-truth stale filter failed", exc_info=True)
 
     for trade in trades:
         try:
@@ -572,6 +598,8 @@ def _run_for_trades(
         "evaluated": evaluated,
         "actions": actions_taken,
         "skipped": skipped,
+        "skipped_stale_broker_positions": stale_broker_rows,
+        "reconciled_stale_broker_positions": reconciled_stale_rows,
         "elapsed_s": round(elapsed, 2),
     }
     if evaluated:

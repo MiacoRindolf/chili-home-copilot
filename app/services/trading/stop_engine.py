@@ -1633,9 +1633,36 @@ def evaluate_all(
         "suppressed": 0,
         "skipped_options": 0,
         "delegated_to_options_exit_monitor": [],
+        "skipped_stale_broker_positions": [],
+        "reconciled_stale_broker_positions": [],
         "regime": "cautious",
         "alerts": [],
     }
+
+    try:
+        from .broker_position_truth import (
+            filter_broker_stale_open_trades,
+            reconcile_stale_robinhood_open_trade,
+        )
+
+        trade_by_id = {int(t.id): t for t in trades if getattr(t, "id", None)}
+        trades, stale_rows = filter_broker_stale_open_trades(db, trades)
+        if stale_rows:
+            summary["skipped_stale_broker_positions"] = stale_rows
+            for snap in stale_rows:
+                stale_trade = trade_by_id.get(int(snap.get("id") or 0))
+                if stale_trade is None:
+                    continue
+                reconciled = reconcile_stale_robinhood_open_trade(
+                    db,
+                    stale_trade,
+                    snapshot=snap,
+                    source="stop_engine_broker_truth_gate",
+                )
+                if reconciled:
+                    summary["reconciled_stale_broker_positions"].append(reconciled)
+    except Exception:
+        logger.warning("[stop_engine] broker-truth stale filter failed", exc_info=True)
 
     batch_regime = "cautious"
     try:

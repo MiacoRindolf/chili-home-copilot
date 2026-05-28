@@ -205,6 +205,14 @@ def _exposure_and_notional(
         .filter(Trade.user_id == user_id, Trade.status == "open")
         .all()
     )
+    stale_broker_rows: list[dict[str, Any]] = []
+    try:
+        from .broker_position_truth import filter_broker_stale_open_trades
+
+        open_trades, stale_broker_rows = filter_broker_stale_open_trades(db, open_trades)
+    except Exception:
+        stale_broker_rows = []
+
     counts: Counter[str] = Counter(_trade_asset_class(row) for row in open_trades)
     total_heat = sum(_trade_heat_pct(row, capital=capital) for row in open_trades)
     available_heat = max(0.0, limits.max_portfolio_heat_pct - total_heat)
@@ -250,6 +258,15 @@ def _exposure_and_notional(
         "max_stock_positions": limits.max_stock_positions,
         "max_crypto_positions": limits.max_crypto_positions,
         "max_risk_per_trade_pct": limits.max_risk_per_trade_pct,
+        "stale_broker_open_positions": len(stale_broker_rows),
+        "stale_broker_positions": stale_broker_rows,
+        "stale_broker_symbols": sorted(
+            {
+                str(row.get("ticker") or "").strip().upper()
+                for row in stale_broker_rows
+                if row.get("ticker")
+            }
+        ),
     }
     return blocker, round(max_safe, 6), exposure
 
@@ -271,6 +288,8 @@ def _cash_category(
         or _safe_int(row.get("positive_expected_edge_count")) > 0
     )
 
+    if bool(row.get("stale_broker_position")):
+        return "stale_broker_local_open"
     if calibrated_ev_after_cost is None or calibrated_ev_after_cost <= 0.0:
         return "negative_ev"
     if blocker in RECERT_BLOCKERS or bool(row.get("recert_required")):
@@ -308,6 +327,8 @@ def _cash_category(
 def _recommended_work_event(row: dict[str, Any], category: str) -> str:
     if category == "needs_provenance":
         return PROVENANCE_BACKFILL
+    if category == "stale_broker_local_open":
+        return EDGE_RELIABILITY_REFRESH
     if category == "positive_ev_recert":
         return RECERT_RESCUE_REFRESH
     if category == "positive_ev_shadow":
@@ -375,6 +396,34 @@ def annotate_cash_deployment_row(
         asset_class=asset_class,
     )
     execution_blocker = venue_blocker
+    stale_symbols = set(exposure.get("stale_broker_symbols") or [])
+    stale_match = bool(symbol and symbol in stale_symbols)
+    if stale_match:
+        stale_detail = next(
+            (
+                item
+                for item in exposure.get("stale_broker_positions", [])
+                if str(item.get("ticker") or "").strip().upper() == symbol
+            ),
+            None,
+        )
+        out.update(
+            {
+                "broker_truth_status": "stale",
+                "broker_truth_reason": (
+                    stale_detail.get("reason") if stale_detail else "stale_broker_position"
+                ),
+                "stale_broker_position": True,
+                "stale_reconciled_at": (
+                    stale_detail.get("stale_reconciled_at") if stale_detail else None
+                ),
+            }
+        )
+    else:
+        out.setdefault("broker_truth_status", "live_or_not_applicable")
+        out.setdefault("broker_truth_reason", None)
+        out.setdefault("stale_broker_position", False)
+        out.setdefault("stale_reconciled_at", None)
     category = _cash_category(
         out,
         calibrated_ev_after_cost=after_cost,
@@ -471,6 +520,7 @@ def cash_deployment_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "positive_ev_recert": int(categories.get("positive_ev_recert", 0)),
         "positive_ev_execution_blocked": int(categories.get("positive_ev_execution_blocked", 0)),
         "negative_ev": int(categories.get("negative_ev", 0)),
+        "stale_broker_local_open": int(categories.get("stale_broker_local_open", 0)),
         "needs_provenance": int(categories.get("needs_provenance", 0)),
         "needs_calibration": int(categories.get("needs_calibration", 0)),
         "deployable_cash_notional": round(

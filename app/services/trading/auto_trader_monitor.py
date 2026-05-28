@@ -589,11 +589,31 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         )
         .all()
     )
-    from .broker_position_truth import filter_broker_stale_open_trades
+    from .broker_position_truth import (
+        filter_broker_stale_open_trades,
+        reconcile_stale_robinhood_open_trade,
+    )
 
+    _open_by_id = {int(t.id): t for t in open_rows if getattr(t, "id", None)}
     open_rows, stale_broker_rows = filter_broker_stale_open_trades(db, open_rows)
     if stale_broker_rows:
         summary["skipped_stale_broker_positions"] = stale_broker_rows
+        reconciled_rows = []
+        for snap in stale_broker_rows:
+            stale_trade = _open_by_id.get(int(snap.get("id") or 0))
+            if stale_trade is None:
+                continue
+            reconciled = reconcile_stale_robinhood_open_trade(
+                db,
+                stale_trade,
+                snapshot=snap,
+                source="auto_trader_monitor_broker_truth_gate",
+            )
+            if reconciled:
+                reconciled_rows.append(reconciled)
+        if reconciled_rows:
+            summary["reconciled_stale_broker_positions"] = reconciled_rows
+            db.commit()
 
     from .auto_trader_position_overrides import list_position_overrides
     from .robinhood_exit_execution import (
