@@ -7,6 +7,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
@@ -26,6 +27,10 @@ from ...config import (
     AUTOTRADER_FRACTIONAL_EQUITY_DEFAULT_ENABLED,
     AUTOTRADER_LEGACY_MAX_SYMBOL_PRICE_DEFAULT_USD,
     AUTOTRADER_MAX_ENTRY_SLIPPAGE_DEFAULT_PCT,
+    AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ASSET_TYPES,
+    AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ENABLED,
+    AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_MINUTES,
+    AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_THRESHOLD,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_ADVERSE_BUFFER,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_ASSET_TYPES,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_CAPTURE_FRACTION,
@@ -1784,6 +1789,90 @@ def _positive_reprice_entry_enabled_for(settings: Any, asset_type: str) -> bool:
     return "all" in allowed_assets or asset in allowed_assets
 
 
+def _slippage_reprice_cooldown_enabled_for(settings: Any, asset_type: str) -> bool:
+    if not _settings_bool(
+        settings,
+        "chili_autotrader_slippage_reprice_cooldown_enabled",
+        AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ENABLED,
+    ):
+        return False
+    allowed_assets = _settings_csv_set(
+        settings,
+        "chili_autotrader_slippage_reprice_cooldown_asset_types",
+        AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ASSET_TYPES,
+    )
+    asset = str(asset_type or "stock").strip().lower()
+    return "all" in allowed_assets or asset in allowed_assets
+
+
+def _non_positive_reprice_marker(snapshot: Any) -> bool:
+    snap = snapshot if isinstance(snapshot, dict) else {}
+    positive = snap.get("slippage_reprice_positive_edge")
+    if positive is False:
+        return True
+    expected = _safe_float(snap.get("slippage_reprice_expected_net_pct"))
+    if expected is not None and expected <= 0.0:
+        return True
+    reason = str(snap.get("slippage_reprice_edge_reason") or "").strip().lower()
+    return reason == "non_positive_expected_edge"
+
+
+def _slippage_reprice_cooldown_snapshot(
+    db: Session | None,
+    alert: BreakoutAlert,
+    *,
+    settings: Any,
+    asset_type: str,
+) -> dict[str, Any] | None:
+    if db is None or not _slippage_reprice_cooldown_enabled_for(settings, asset_type):
+        return None
+    minutes = _settings_int(
+        settings,
+        "chili_autotrader_slippage_reprice_cooldown_minutes",
+        AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_MINUTES,
+        minimum=1,
+    )
+    threshold = _settings_int(
+        settings,
+        "chili_autotrader_slippage_reprice_cooldown_threshold",
+        AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_THRESHOLD,
+        minimum=1,
+    )
+    ticker = str(getattr(alert, "ticker", "") or "").strip()
+    if not ticker:
+        return None
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    try:
+        q = (
+            db.query(AutoTraderRun)
+            .filter(AutoTraderRun.reason == "missed_entry_slippage")
+            .filter(AutoTraderRun.ticker == ticker)
+            .filter(AutoTraderRun.created_at >= cutoff)
+        )
+        pid = getattr(alert, "scan_pattern_id", None)
+        if pid is not None:
+            q = q.filter(AutoTraderRun.scan_pattern_id == int(pid))
+        q = q.order_by(AutoTraderRun.created_at.desc()).limit(max(threshold * 3, threshold))
+        rows = list(q.all() or [])
+    except Exception:
+        logger.debug("[autotrader] slippage cooldown lookup failed", exc_info=True)
+        return None
+
+    bad_rows = [row for row in rows if _non_positive_reprice_marker(getattr(row, "rule_snapshot", None))]
+    if len(bad_rows) < threshold:
+        return None
+    latest = max((getattr(row, "created_at", None) for row in bad_rows), default=None)
+    until = latest + timedelta(minutes=minutes) if isinstance(latest, datetime) else None
+    return {
+        "slippage_reprice_cooldown_active": True,
+        "slippage_reprice_cooldown_count": len(bad_rows),
+        "slippage_reprice_cooldown_threshold": threshold,
+        "slippage_reprice_cooldown_minutes": minutes,
+        "slippage_reprice_cooldown_until": until.isoformat() if until else None,
+        "slippage_reprice_cooldown_reason": "repeated_non_positive_reprice_edge",
+    }
+
+
 def evaluate_entry_edge(
     db: Session,
     alert: BreakoutAlert,
@@ -2326,6 +2415,21 @@ def passes_rule_gate(
                 else:
                     return False, "missed_entry_slippage", snap
             else:
+                reprice_enabled = _positive_reprice_entry_enabled_for(
+                    settings,
+                    alert.asset_type or "stock",
+                )
+                snap["slippage_reprice_positive_edge_enabled"] = reprice_enabled
+                snap["slippage_reprice_max_pct"] = round(favorable_limit, 4)
+                cooldown = _slippage_reprice_cooldown_snapshot(
+                    db,
+                    alert,
+                    settings=settings,
+                    asset_type=alert.asset_type or "stock",
+                )
+                if cooldown:
+                    snap.update(cooldown)
+                    return False, "slippage_reprice_cooldown", snap
                 try:
                     adjusted_alert = _entry_price_adjusted_alert(alert, px)
                     adjusted_edge = evaluate_entry_edge(
@@ -2343,12 +2447,6 @@ def passes_rule_gate(
                         adjusted_edge.snapshot.get("expected_net_pct")
                     )
                     snap["slippage_reprice_positive_edge"] = bool(adjusted_edge.allowed)
-                    reprice_enabled = _positive_reprice_entry_enabled_for(
-                        settings,
-                        alert.asset_type or "stock",
-                    )
-                    snap["slippage_reprice_positive_edge_enabled"] = reprice_enabled
-                    snap["slippage_reprice_max_pct"] = round(favorable_limit, 4)
                     if adjusted_edge.allowed and reprice_enabled and slip <= favorable_limit:
                         snap["entry_edge"] = adjusted_edge.snapshot
                         snap["entry_edge_reason"] = adjusted_edge.reason

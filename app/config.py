@@ -77,6 +77,10 @@ AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MIN_SLIPPAGE_MULTIPLE = 1.0
 AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_SLIPPAGE_MULTIPLE = 5.0
 AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_MAX_PCT = 5.0
 AUTOTRADER_FAVORABLE_ENTRY_DRIFT_CONFIG_LIMIT_PCT = 20.0
+AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ENABLED = True
+AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_MINUTES = 20
+AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_THRESHOLD = 3
+AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ASSET_TYPES = "stock,crypto"
 AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES = 15
 PATTERN_DIRECTIONAL_DEFAULT_THRESHOLD_PCT = 1.5
 PATTERN_DIRECTIONAL_DEFAULT_HOLD_HOURS = 24
@@ -2947,6 +2951,39 @@ class Settings(BaseSettings):
         le=AUTOTRADER_FAVORABLE_ENTRY_DRIFT_CONFIG_LIMIT_PCT,
         validation_alias=AliasChoices(
             "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_PCT"
+        ),
+    )
+    chili_autotrader_slippage_reprice_cooldown_enabled: bool = Field(
+        default=AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_ENABLED"
+        ),
+        description=(
+            "When repeated missed-entry reprices for the same pattern/ticker "
+            "are non-positive EV, temporarily suppress duplicate reprice work "
+            "instead of repeatedly chasing an uneconomic quote."
+        ),
+    )
+    chili_autotrader_slippage_reprice_cooldown_minutes: int = Field(
+        default=AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_MINUTES,
+        ge=1,
+        le=240,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_MINUTES"
+        ),
+    )
+    chili_autotrader_slippage_reprice_cooldown_threshold: int = Field(
+        default=AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_THRESHOLD,
+        ge=1,
+        le=25,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_THRESHOLD"
+        ),
+    )
+    chili_autotrader_slippage_reprice_cooldown_asset_types: str = Field(
+        default=AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ASSET_TYPES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_ASSET_TYPES"
         ),
     )
     chili_autotrader_monitor_interval_seconds: int = Field(

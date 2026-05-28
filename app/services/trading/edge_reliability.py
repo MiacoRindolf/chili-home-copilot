@@ -221,7 +221,7 @@ def _reason_bucket(reason: str) -> str:
     r = str(reason or "").strip().lower()
     if r == "non_positive_expected_edge":
         return "negative_expected_edge"
-    if r == "missed_entry_slippage":
+    if r in {"missed_entry_slippage", "slippage_reprice_cooldown"}:
         return "missed_entry_slippage"
     if r.startswith("broker:") or "adapter" in r or r.startswith("venue_"):
         return "broker_execution_reject"

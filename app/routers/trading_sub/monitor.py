@@ -235,8 +235,10 @@ def _edge_float(edge: dict[str, Any], key: str) -> float | None:
 
 def _slippage_reprice_next_action(run: AutoTraderRun | None) -> str | None:
     reason = str(getattr(run, "reason", "") or "").strip().lower() if run else ""
-    if reason != "missed_entry_slippage":
+    if reason not in {"missed_entry_slippage", "slippage_reprice_cooldown"}:
         return None
+    if reason == "slippage_reprice_cooldown":
+        return "wait_for_reprice_cooldown_or_fresh_quote"
     positive = _snapshot_bool(run, "slippage_reprice_positive_edge")
     if positive is True:
         return "retry_if_current_quote_still_positive_after_costs"
@@ -275,7 +277,7 @@ def _imminent_blocker_category(
         return "autotrader_execution_error"
     if reason == "non_positive_expected_edge":
         return "negative_expected_edge"
-    if reason == "missed_entry_slippage":
+    if reason in {"missed_entry_slippage", "slippage_reprice_cooldown"}:
         return "missed_entry_slippage"
     if reason == "llm_unavailable":
         return "llm_provider_unavailable"
@@ -848,6 +850,27 @@ def api_monitor_imminent_alerts(
                 "slippage_reprice_error": _snapshot_text(
                     run,
                     "slippage_reprice_error",
+                ),
+                "slippage_reprice_cooldown_active": _snapshot_bool(
+                    run,
+                    "slippage_reprice_cooldown_active",
+                ),
+                "slippage_reprice_cooldown_count": json_safe(
+                    _snapshot_float(run, "slippage_reprice_cooldown_count")
+                ),
+                "slippage_reprice_cooldown_threshold": json_safe(
+                    _snapshot_float(run, "slippage_reprice_cooldown_threshold")
+                ),
+                "slippage_reprice_cooldown_minutes": json_safe(
+                    _snapshot_float(run, "slippage_reprice_cooldown_minutes")
+                ),
+                "slippage_reprice_cooldown_until": _snapshot_text(
+                    run,
+                    "slippage_reprice_cooldown_until",
+                ),
+                "slippage_reprice_cooldown_reason": _snapshot_text(
+                    run,
+                    "slippage_reprice_cooldown_reason",
                 ),
                 "slippage_reprice_next_action": _slippage_reprice_next_action(run),
                 "autotrader_error_type": _snapshot_text(run, "error_type"),

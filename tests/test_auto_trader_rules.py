@@ -1,12 +1,13 @@
 """Unit tests for AutoTrader v1 rule gate helpers."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.models.trading import BreakoutAlert
+from app.models.trading import AutoTraderRun, BreakoutAlert
 from app.services.trading.auto_trader_rules import (
     EntryEdgeDecision,
     RuleGateContext,
@@ -528,6 +529,115 @@ def test_passes_rule_gate_accepts_bounded_positive_reprice_after_edge_recheck():
     assert snap["slippage_reprice_accepted"] is True
     assert snap["entry_reference_price_adjusted"] is True
     assert snap["entry_edge_expected_net_pct"] == 0.31
+
+
+def test_passes_rule_gate_cools_down_repeated_non_positive_reprice():
+    db = MagicMock()
+    query = db.query.return_value
+    query.filter.return_value = query
+    query.order_by.return_value = query
+    query.limit.return_value = query
+    query.all.return_value = [
+        AutoTraderRun(
+            ticker="EDGE-USD",
+            scan_pattern_id=77,
+            reason="missed_entry_slippage",
+            created_at=datetime.utcnow() - timedelta(minutes=2),
+            rule_snapshot={
+                "slippage_reprice_positive_edge": False,
+                "slippage_reprice_expected_net_pct": -0.21,
+                "slippage_reprice_edge_reason": "non_positive_expected_edge",
+            },
+        ),
+        AutoTraderRun(
+            ticker="EDGE-USD",
+            scan_pattern_id=77,
+            reason="missed_entry_slippage",
+            created_at=datetime.utcnow() - timedelta(minutes=4),
+            rule_snapshot={
+                "slippage_reprice_positive_edge": False,
+                "slippage_reprice_expected_net_pct": -0.08,
+            },
+        ),
+    ]
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_allow_extended_hours=False,
+        chili_autotrader_crypto_enabled=True,
+        chili_autotrader_options_enabled=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=0.0,
+        chili_autotrader_max_symbol_price_usd=500.0,
+        chili_autotrader_fractional_equity_enabled=True,
+        chili_autotrader_max_entry_slippage_pct=1.0,
+        chili_autotrader_favorable_entry_drift_enabled=True,
+        chili_autotrader_favorable_entry_drift_asset_types="stock",
+        chili_autotrader_favorable_entry_drift_slippage_multiple=2.5,
+        chili_autotrader_favorable_entry_drift_max_pct=5.0,
+        chili_autotrader_positive_reprice_entry_enabled=True,
+        chili_autotrader_positive_reprice_entry_asset_types="stock,crypto",
+        chili_autotrader_slippage_reprice_cooldown_enabled=True,
+        chili_autotrader_slippage_reprice_cooldown_minutes=20,
+        chili_autotrader_slippage_reprice_cooldown_threshold=2,
+        chili_autotrader_slippage_reprice_cooldown_asset_types="crypto",
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=0.0,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=20,
+        chili_autotrader_max_concurrent_crypto=20,
+        chili_autotrader_max_concurrent_options=20,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+        chili_autotrader_broker_equity_cache_ttl_seconds=300,
+        chili_autotrader_broker_equity_cache_max_stale_seconds=900,
+    )
+    alert = BreakoutAlert(
+        ticker="EDGE-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=77,
+        score_at_alert=0.72,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=120.0,
+        user_id=1,
+    )
+    ctx = RuleGateContext(
+        current_price=102.4,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+    initial_edge = EntryEdgeDecision(
+        True,
+        "positive_expected_edge",
+        {"expected_net_pct": 0.65},
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            return_value=initial_edge,
+        ) as edge_mock,
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_slippage_pct",
+            return_value=(1.0, "test"),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db, alert, settings=settings, ctx=ctx, for_new_entry=True
+        )
+
+    assert not ok
+    assert reason == "slippage_reprice_cooldown"
+    assert edge_mock.call_count == 1
+    assert snap["slippage_reprice_positive_edge_enabled"] is True
+    assert snap["slippage_reprice_cooldown_active"] is True
+    assert snap["slippage_reprice_cooldown_count"] == 2
+    assert snap["slippage_reprice_cooldown_threshold"] == 2
+    assert snap["slippage_reprice_cooldown_reason"] == "repeated_non_positive_reprice_edge"
+    assert "slippage_reprice_expected_net_pct" not in snap
 
 
 def test_evaluate_entry_edge_uses_dynamic_exit_payoff_distribution():
