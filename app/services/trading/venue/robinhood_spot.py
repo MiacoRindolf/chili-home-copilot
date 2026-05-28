@@ -79,6 +79,8 @@ def _is_crypto_product(product_id: str) -> bool:
     crypto pair.
     """
     s = (product_id or "").strip().upper()
+    if s in _KNOWN_NUMERIC_CRYPTO_BASES:
+        return True
     if not s.endswith("-USD"):
         return False
     base = s[:-4]
@@ -320,6 +322,8 @@ class RobinhoodSpotAdapter(VenueAdapter):
     def get_product(self, product_id: str) -> tuple[Optional[NormalizedProduct], FreshnessMeta]:
         ticker = _to_ticker(product_id)
         fresh = _now_freshness()
+        if _is_crypto_product(product_id):
+            return None, fresh
         try:
             import robin_stocks.robinhood as rh
 

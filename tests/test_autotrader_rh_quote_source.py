@@ -337,6 +337,43 @@ def test_get_quote_prices_batch_treats_known_numeric_crypto_as_crypto() -> None:
     assert out["00"] == pytest.approx(0.0041)
 
 
+def test_get_quote_price_treats_bare_known_numeric_crypto_as_crypto() -> None:
+    import robin_stocks.robinhood as _rh
+
+    from app.services.trading.venue.robinhood_spot import RobinhoodSpotAdapter
+
+    adapter = RobinhoodSpotAdapter()
+    fake_stocks = MagicMock()
+    with (
+        patch.object(_rh, "stocks", fake_stocks),
+        patch(
+            "app.services.broker_service.get_crypto_quote",
+            return_value={
+                "bid_price": "0.0040",
+                "ask_price": "0.0042",
+                "mark_price": "0.0041",
+            },
+        ),
+    ):
+        assert adapter.get_quote_price("00") == pytest.approx(0.0041)
+
+    fake_stocks.get_quotes.assert_not_called()
+
+
+def test_get_product_does_not_lookup_bare_known_numeric_crypto_as_stock() -> None:
+    import robin_stocks.robinhood as _rh
+
+    from app.services.trading.venue.robinhood_spot import RobinhoodSpotAdapter
+
+    adapter = RobinhoodSpotAdapter()
+    fake_stocks = MagicMock()
+    with patch.object(_rh, "stocks", fake_stocks):
+        product, _fresh = adapter.get_product("00")
+
+    assert product is None
+    fake_stocks.get_instruments_by_symbols.assert_not_called()
+
+
 # ── Monitor integration ───────────────────────────────────────────────────
 
 
