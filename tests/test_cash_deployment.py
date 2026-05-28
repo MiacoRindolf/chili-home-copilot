@@ -472,3 +472,48 @@ def test_cash_deployment_skips_structural_noop_exit_variant_with_new_fingerprint
         .count()
         == 0
     )
+
+
+def test_cash_deployment_skips_too_negative_exit_debt_with_new_fingerprint(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    shadow = _pattern(db, name="cash work too negative debt noop", lifecycle="shadow_promoted")
+    alert = _alert(db, shadow, ticker="WDEBT")
+    _run(db, shadow, alert, expected=2.5)
+    _closed_paper(db, shadow, alert)
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="exit_variant_diagnostic",
+            event_kind="outcome",
+            dedupe_key=f"too-negative-exit-debt:{shadow.id}",
+            status="done",
+            payload={
+                "scan_pattern_id": shadow.id,
+                "evidence_fingerprint": "older-fingerprint",
+                "created_count": 0,
+                "skip_reason": "edge_debt_too_negative_for_exit_child:-0.793",
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    out = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    db.commit()
+
+    assert out["created"] == 0
+    assert out["skipped_noop_cooldown"] == 1
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == "exit_variant_refresh")
+        .count()
+        == 0
+    )

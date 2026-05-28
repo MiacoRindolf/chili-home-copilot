@@ -669,6 +669,7 @@ _STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
     }
 )
 _STRUCTURAL_EXIT_NOOP_PREFIXES = (
+    "edge_debt_too_negative_for_exit_child:",
     "insufficient_parent_payoff_samples:",
     "reward_risk_below_floor:",
 )
