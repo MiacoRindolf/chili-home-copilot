@@ -278,7 +278,9 @@ def _quote_prices(quote: dict[str, Any]) -> Optional[tuple[float, float, float, 
         ask = float(quote.get("ask_price") or 0)
     except (TypeError, ValueError):
         return None
-    if ask <= 0:
+    if bid < 0 or ask <= 0:
+        return None
+    if bid > 0 and bid > ask:
         return None
     mid = (bid + ask) / 2.0 if bid > 0 else ask
     spread_pct = (

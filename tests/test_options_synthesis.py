@@ -112,6 +112,29 @@ def test_synthesize_option_meta_rejects_when_contract_exceeds_budget(monkeypatch
     assert meta is None
 
 
+def test_synthesize_option_meta_rejects_crossed_option_quotes(monkeypatch):
+    _wire_synthesis_fakes(
+        monkeypatch,
+        {
+            100.0: {"bid_price": "8.10", "ask_price": "8.00"},
+            95.0: {"bid_price": "9.10", "ask_price": "9.00"},
+            105.0: {"bid_price": "1.55", "ask_price": "1.50"},
+        },
+    )
+
+    meta = synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=300.0,
+        underlying_target=112.0,
+        underlying_stop=96.0,
+        confidence=0.9,
+    )
+
+    assert meta is None
+
+
 def test_synthesize_option_meta_caches_recent_no_survivor_context(monkeypatch):
     from app.services import broker_service
     from app.services.trading import strategy_parameter

@@ -54,6 +54,25 @@ def _quote_int(quote: Mapping[str, Any], *keys: str) -> int | None:
     return None
 
 
+def _premium_quote_is_persistable(quote: Mapping[str, Any]) -> bool:
+    bid = _quote_float(quote, "bid_price", "bid")
+    ask = _quote_float(quote, "ask_price", "ask")
+    last = _quote_float(
+        quote,
+        "last_trade_price",
+        "last_price",
+        "mark_price",
+        "adjusted_mark_price",
+        "mark",
+    )
+    prices = (bid, ask, last)
+    if any(value is not None and value < 0 for value in prices):
+        return False
+    if bid is not None and ask is not None and bid > 0 and ask > 0 and bid > ask:
+        return False
+    return any(value is not None and value > 0 for value in prices)
+
+
 def _best_effort_write_scope(db: Session):
     begin_nested = getattr(db, "begin_nested", None)
     if callable(begin_nested):
@@ -122,6 +141,8 @@ def record_quote_snapshot(
     as telemetry loss, not as a trading signal.
     """
     if db is None or not isinstance(quote, Mapping):
+        return False
+    if not _premium_quote_is_persistable(quote):
         return False
     meta = normalize_option_meta(option_meta, quote=quote)
     required = (

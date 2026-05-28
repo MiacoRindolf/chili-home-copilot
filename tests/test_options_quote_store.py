@@ -154,6 +154,44 @@ def test_record_quote_snapshot_persists_nested_broker_greeks() -> None:
     assert params["rho"] == 0.02
 
 
+def test_record_quote_snapshot_rejects_crossed_premium_quote() -> None:
+    db = _FakeDb()
+
+    ok = record_quote_snapshot(
+        db,
+        chain_id=123,
+        option_meta={
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+        },
+        quote={"bid_price": "4.10", "ask_price": "4.00", "mark_price": "4.05"},
+    )
+
+    assert ok is False
+    assert db.calls == []
+
+
+def test_record_quote_snapshot_rejects_quote_without_positive_premium() -> None:
+    db = _FakeDb()
+
+    ok = record_quote_snapshot(
+        db,
+        chain_id=123,
+        option_meta={
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+        },
+        quote={"bid_price": "0", "ask_price": "0", "mark_price": "0"},
+    )
+
+    assert ok is False
+    assert db.calls == []
+
+
 def test_record_quote_snapshot_is_best_effort_for_incomplete_meta() -> None:
     db = _FakeDb()
 
