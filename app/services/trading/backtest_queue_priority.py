@@ -14,7 +14,7 @@ most-needed patterns first.
 Scoring (higher = test sooner):
 
     +60  pattern is promoted (currently being traded - any bug here is live risk)
-    +50  pattern is challenged (recently demoted - re-prove or stay demoted)
+    +50  pattern is challenged, unless it already has hard negative EV evidence
     +40  no realized stats AND active candidate (the 442 NULL-arp patterns)
     +30  has been promoted but trade_count < 5 (insufficient evidence)
     +20  last_backtest_at older than 7 days (stale)
@@ -22,6 +22,7 @@ Scoring (higher = test sooner):
     + 5  active=True but never tested
        0 (default - no urgency signal)
     -50  pattern lifecycle is retired or decayed (de-prioritize)
+    -40  pattern is demoted_evidence_gap
     -100 inactive
 
 Score is clamped to [0, 100] so the existing queue ordering still works.
@@ -53,6 +54,7 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
 
         {
           "scored": int,            # total patterns updated
+          "prescreened": int,       # thin or hard-negative rows routed to cheap tier
           "high_priority":  int,    # final score >= 50
           "med_priority":   int,    # final score in [10, 50)
           "low_priority":   int,    # final score in (0, 10)
@@ -67,7 +69,22 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
         FROM (
             SELECT id,
                 CASE WHEN lifecycle_stage = 'promoted'   THEN 60 ELSE 0 END
-              + CASE WHEN lifecycle_stage = 'challenged' THEN 50 ELSE 0 END
+              + CASE
+                    WHEN lifecycle_stage = 'challenged'
+                         AND COALESCE(promotion_status, '') <> 'demoted_evidence_gap'
+                         AND NOT (
+                             (
+                                COALESCE(promotion_status, '') LIKE 'challenged_cpcv_ev:%'
+                                OR COALESCE(promotion_status, '') LIKE 'challenged_ev_%'
+                             )
+                             AND COALESCE(backtest_count, 0) >= 50
+                             AND (
+                                (avg_return_pct IS NOT NULL AND avg_return_pct < 0.0)
+                                OR (win_rate IS NOT NULL AND win_rate < 0.35)
+                             )
+                         )
+                    THEN 50 ELSE 0
+                END
               + CASE
                     WHEN avg_return_pct IS NULL
                          AND lifecycle_stage IN ('candidate', 'backtested')
@@ -93,6 +110,7 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
                          AND last_backtest_at < NOW() - INTERVAL '14 days'
                     THEN 10 ELSE 0
                 END
+              - CASE WHEN COALESCE(promotion_status, '') = 'demoted_evidence_gap' THEN 40 ELSE 0 END
               - CASE WHEN lifecycle_stage IN ('retired', 'decayed') THEN 50 ELSE 0 END
               - CASE WHEN active = FALSE THEN 100 ELSE 0 END
               AS score
@@ -104,6 +122,44 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
         """
     ))
     rows = res.fetchall()
+    prescreen_res = db.execute(text(
+        """
+        UPDATE scan_patterns
+        SET queue_tier = 'prescreen',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE active = TRUE
+          AND COALESCE(queue_tier, 'full') <> 'prescreen'
+          AND COALESCE(recert_required, FALSE) = FALSE
+          AND (
+                (
+                    lifecycle_stage IN ('candidate', 'backtested')
+                    AND (
+                        COALESCE(backtest_count, 0) = 0
+                        OR avg_return_pct IS NULL
+                        OR win_rate IS NULL
+                    )
+                )
+                OR (
+                    lifecycle_stage = 'challenged'
+                    AND COALESCE(promotion_status, '') = 'demoted_evidence_gap'
+                )
+                OR (
+                    lifecycle_stage = 'challenged'
+                    AND COALESCE(backtest_count, 0) >= 50
+                    AND (
+                        COALESCE(promotion_status, '') LIKE 'challenged_cpcv_ev:%'
+                        OR COALESCE(promotion_status, '') LIKE 'challenged_ev_%'
+                    )
+                    AND (
+                        (avg_return_pct IS NOT NULL AND avg_return_pct < 0.0)
+                        OR (win_rate IS NOT NULL AND win_rate < 0.35)
+                    )
+                )
+          )
+        RETURNING id
+        """
+    ))
+    prescreen_rows = prescreen_res.fetchall()
     db.commit()
 
     scored = len(rows)
@@ -114,6 +170,7 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
 
     summary = {
         "scored": scored,
+        "prescreened": len(prescreen_rows),
         "high_priority": hi,
         "med_priority": md,
         "low_priority": lo,

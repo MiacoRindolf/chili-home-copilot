@@ -3344,7 +3344,7 @@ def mine_patterns(
     # Maintenance: decay / demote stale trading insights (confidence), not a standalone “cycle step”.
     existing = get_insights(db, user_id, limit=50)
     now = datetime.utcnow()
-    _PROTECTED_ORIGINS = {"user_seeded", "seed", "user", "exit_variant", "entry_variant", "combo_variant", "tf_variant", "scope_variant"}
+    _PROTECTED_ORIGINS = {"user_seeded", "seed", "user", *_VARIANT_ORIGINS}
     for ins in existing:
         sp = None
         if getattr(ins, "scan_pattern_id", None):
@@ -3773,6 +3773,27 @@ def _apply_market_hours_stock_lane(
     return filtered, kept_stock, deferred_stock
 
 
+def _queue_exploration_cap(settings_obj: object, *, market_hours_active: bool) -> int:
+    try:
+        cap = int(getattr(settings_obj, "brain_queue_exploration_max", 40))
+    except (TypeError, ValueError):
+        cap = 40
+    cap = max(0, cap)
+    if not market_hours_active:
+        return cap
+    try:
+        raw_market_cap = int(
+            getattr(settings_obj, "chili_brain_queue_market_hours_exploration_max", 0)
+        )
+    except (TypeError, ValueError):
+        raw_market_cap = 0
+    market_cap = max(
+        0,
+        raw_market_cap,
+    )
+    return min(cap, market_cap)
+
+
 def _read_cgroup_memory_limit_bytes(
     paths: tuple[str, ...] = CGROUP_MEMORY_LIMIT_PATHS,
 ) -> int | None:
@@ -3822,18 +3843,72 @@ def _process_memory_guard_worker_cap(
     return max(min_workers, usable_mb // worker_mb)
 
 
+def _release_queue_parent_session(db: Session, *, reason: str) -> None:
+    """End queue-selection read transactions before long-running backtest work."""
+    try:
+        db.rollback()
+    except Exception as exc:
+        logger.warning(
+            "[learning] Queue backtest: DB rollback failed while %s; closing session: %s",
+            reason,
+            exc,
+        )
+        try:
+            db.close()
+        except Exception:
+            logger.debug(
+                "[learning] Queue backtest: DB close failed after rollback failure",
+                exc_info=True,
+            )
+
+
+def _degraded_queue_status(exc: Exception) -> dict[str, Any]:
+    return {
+        "queue_empty": False,
+        "pending": None,
+        "boosted": None,
+        "queue_status_degraded": True,
+        "queue_status_error": str(exc)[:240],
+    }
+
+
+def _get_queue_status_after_batch(db: Session, get_queue_status_fn: Any) -> dict[str, Any]:
+    """Read queue status after a long batch, recycling the session on stale sockets."""
+    try:
+        return get_queue_status_fn(db, use_cache=False)
+    except Exception as exc:
+        logger.warning(
+            "[learning] Queue backtest: status read failed after batch; "
+            "recycling DB session and retrying once: %s",
+            exc,
+        )
+        _release_queue_parent_session(db, reason="status retry")
+        try:
+            return get_queue_status_fn(db, use_cache=False)
+        except Exception as retry_exc:
+            logger.warning(
+                "[learning] Queue backtest: status retry failed; returning degraded "
+                "status so completed backtests are preserved: %s",
+                retry_exc,
+            )
+            return _degraded_queue_status(retry_exc)
+
+
 def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int | None = None) -> dict[str, Any]:
     """Process ScanPatterns from the priority queue (parallel when configured).
     
     Uses BRAIN_BACKTEST_PARALLEL workers and BRAIN_QUEUE_BATCH_SIZE (or batch_size)
     to run multiple pattern backtests concurrently, each with its own DB session.
     """
+    batch_started = time.monotonic()
     from ...config import settings
     from .backtest_queue import (
         get_exploration_pattern_ids,
         get_pending_patterns,
         get_queue_status,
+        get_queue_lineage_cap_policy,
         get_retest_interval_days,
+        summarize_queue_batch,
     )
 
     # Round-12 FIX #3 + Round-13 FIX (2026-04-30): asset-aware soft pause
@@ -3925,7 +4000,10 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
             }
 
     if getattr(settings, "brain_queue_exploration_enabled", True):
-        explore_cap = max(0, int(getattr(settings, "brain_queue_exploration_max", 40)))
+        explore_cap = _queue_exploration_cap(
+            settings,
+            market_hours_active=bool(_market_hours_active),
+        )
         slots = min(batch_size - len(pattern_ids), explore_cap)
         if slots > 0:
             extra = get_exploration_pattern_ids(db, set(pattern_ids), slots)
@@ -3953,14 +4031,40 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
             **status,
         }
 
+    lineage_policy = get_queue_lineage_cap_policy(batch_size)
     logger.info(
-        "[learning] Queue backtest: starting batch | pattern_ids=%s (count=%s) batch_size=%s "
-        "exploration_added=%s",
+        "[learning] Queue backtest: starting batch | pattern_ids=%s (count=%s) "
+        "batch_size=%s exploration_added=%s lineage_policy=%s lineage_cap=%s",
         pattern_ids[:50],
         len(pattern_ids),
         batch_size,
         exploration_added,
+        lineage_policy.get("mode"),
+        lineage_policy.get("cap"),
     )
+    batch_summary: dict[str, Any] = {}
+    try:
+        from ...models.trading import ScanPattern as _ScanPattern
+
+        batch_patterns = (
+            db.query(_ScanPattern)
+            .filter(_ScanPattern.id.in_(pattern_ids))
+            .all()
+        )
+        batch_summary = summarize_queue_batch(batch_patterns)
+        logger.info(
+            "[learning] Queue backtest: batch_mix lanes=%s tiers=%s lifecycles=%s "
+            "observed_max_lineage_count=%s top_lineages=%s",
+            batch_summary.get("lanes"),
+            batch_summary.get("tiers"),
+            batch_summary.get("lifecycles"),
+            batch_summary.get("max_lineage_count"),
+            batch_summary.get("top_lineages"),
+        )
+    except Exception:
+        logger.debug("[learning] Queue backtest batch summary failed", exc_info=True)
+
+    _release_queue_parent_session(db, reason="dispatching long-running queue workers")
 
     max_workers = settings.brain_backtest_parallel
     if settings.brain_max_cpu_pct is not None and _CPU_COUNT:
@@ -4061,12 +4165,19 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
                     logger.warning("[backtest_queue] Worker error: %s", e)
                     patterns_processed += 1
 
-    status = get_queue_status(db, use_cache=False)
+    status = _get_queue_status_after_batch(db, get_queue_status)
+    elapsed_s = max(0.001, time.monotonic() - batch_started)
+    patterns_per_min = round((patterns_processed / elapsed_s) * 60.0, 2)
+    backtests_per_min = round((backtests_run / elapsed_s) * 60.0, 2)
     logger.info(
-        "[learning] Queue backtest: done | backtests_run=%s patterns_processed=%s | "
+        "[learning] Queue backtest: done | backtests_run=%s patterns_processed=%s "
+        "elapsed_s=%.2f patterns_per_min=%.2f backtests_per_min=%.2f | "
         "queue_pending=%s queue_empty=%s boosted=%s",
         backtests_run,
         patterns_processed,
+        elapsed_s,
+        patterns_per_min,
+        backtests_per_min,
         status.get("pending"),
         status.get("queue_empty"),
         status.get("boosted"),
@@ -4076,7 +4187,11 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         "patterns_processed": patterns_processed,
         "queue_empty": status["queue_empty"],
         "queue_exploration_added": exploration_added,
+        "queue_batch_summary": batch_summary,
         "queue_executor": "process" if use_process else "threads",
+        "queue_elapsed_s": round(elapsed_s, 3),
+        "queue_patterns_per_min": patterns_per_min,
+        "queue_backtests_per_min": backtests_per_min,
         **status,
     }
 
@@ -8561,8 +8676,7 @@ def evolve_patterns(db: Session, min_evidence: int = 5, min_confidence: float = 
     from ...models.trading import ScanPattern
 
     _PROTECTED_ORIGINS = {
-        "builtin", "user_seeded", "seed", "user",
-        "exit_variant", "entry_variant", "combo_variant", "tf_variant", "scope_variant",
+        "builtin", "user_seeded", "seed", "user", *_VARIANT_ORIGINS,
     }
 
     patterns = db.query(ScanPattern).filter_by(active=True).all()
@@ -8807,6 +8921,23 @@ def _pick_complementary_condition(
     return picked
 
 
+def _variant_json_value(value: Any) -> Any:
+    """Coerce JSON strings from legacy callers into JSONB-native objects."""
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    return value
+
+
+def _variant_json_dict(value: Any) -> dict[str, Any] | None:
+    parsed = _variant_json_value(value)
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _cross_breed_condition(
     db: "Session",
     existing: list[dict[str, Any]],
@@ -8834,11 +8965,10 @@ def _cross_breed_condition(
         donor = random.choice(top_patterns)
         if donor.id == exclude_pattern_id:
             continue
-        try:
-            rules = json.loads(donor.rules_json)
-            donor_conds = rules.get("conditions", [])
-        except (json.JSONDecodeError, TypeError):
+        rules = _variant_json_dict(getattr(donor, "rules_json", None))
+        if rules is None:
             continue
+        donor_conds = rules.get("conditions", [])
         novel = [c for c in donor_conds if c.get("indicator") not in existing_inds]
         if novel:
             return dict(random.choice(novel))
@@ -8927,6 +9057,475 @@ def _mutate_entry_conditions(
 
 # ── Pattern evolution ──────────────────────────────────────────────
 
+EDGE_EXIT_VARIANT_ORIGIN = "edge_exit_variant"
+EDGE_EXIT_CONFIG_SOURCE = "autotrader_edge_debt_v1"
+EDGE_EXIT_PROMOTION_STATUS = "edge_shadow_collecting_ev"
+EDGE_DEBT_REJECT_REASON = "non_positive_expected_edge"
+
+_EDGE_EVOLUTION_DEFAULT_LOOKBACK_DAYS = 7
+_EDGE_EVOLUTION_DEFAULT_MIN_REJECTS = 5
+_EDGE_EVOLUTION_DEFAULT_SEVERE_MIN_REJECTS = 20
+_EDGE_EVOLUTION_DEFAULT_SEVERE_AVG_NET_PCT = -1.0
+_EDGE_EVOLUTION_DEFAULT_MAX_AVG_NET_FOR_CHILD_PCT = -0.25
+_EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MAX_AVG_NET_PCT = -0.75
+_EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MIN_REWARD_RISK = 2.0
+_EDGE_EVOLUTION_DEFAULT_MIN_REWARD_RISK = 1.25
+_EDGE_EVOLUTION_DEFAULT_MIN_DIRECTIONAL_SAMPLE_N = 5.0
+
+_VARIANT_ORIGINS = frozenset({
+    "exit_variant",
+    "entry_variant",
+    "combo_variant",
+    "tf_variant",
+    "scope_variant",
+    EDGE_EXIT_VARIANT_ORIGIN,
+})
+
+_EDGE_PAYOFF_RESCUE_ROOT_CAUSES = frozenset({
+    "shadow_near_miss_noise",
+    "managed_reward_risk_below_floor",
+    "static_geometry_or_probability_mismatch",
+})
+
+
+def _variant_origin_list() -> list[str]:
+    return sorted(_VARIANT_ORIGINS)
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _payoff_pair_to_fractions(winner_value: Any, loser_value: Any) -> tuple[float | None, float | None]:
+    winner = _finite_number(winner_value)
+    loser = _finite_number(loser_value)
+    if winner is None or loser is None:
+        return None, None
+    if (abs(winner) > 1.0 and abs(winner) <= 100.0) or (abs(loser) > 1.0 and abs(loser) <= 100.0):
+        winner = winner / 100.0
+        loser = loser / 100.0
+    return winner, loser
+
+
+def _mean(values: list[float]) -> float | None:
+    vals = [float(v) for v in values if math.isfinite(float(v))]
+    if not vals:
+        return None
+    return sum(vals) / len(vals)
+
+
+def _settings_edge_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        from ...config import settings as _settings
+
+        raw = getattr(_settings, name, default)
+    except Exception:
+        raw = default
+    try:
+        out = int(raw)
+    except (TypeError, ValueError):
+        out = default
+    return max(minimum, out)
+
+
+def _settings_edge_float(name: str, default: float) -> float:
+    try:
+        from ...config import settings as _settings
+
+        raw = getattr(_settings, name, default)
+    except Exception:
+        raw = default
+    out = _finite_number(raw)
+    return float(default) if out is None else float(out)
+
+
+def _settings_edge_enabled() -> bool:
+    try:
+        from ...config import settings as _settings
+
+        return bool(getattr(_settings, "chili_edge_evolution_enabled", True))
+    except Exception:
+        return True
+
+
+def _counter_increment(counter: dict[str, int], value: Any, *, fallback: str = "unknown") -> None:
+    key = str(value or fallback).strip().lower() or fallback
+    counter[key] = counter.get(key, 0) + 1
+
+
+def _counter_share(counter: dict[str, int], key: str, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return float(counter.get(key, 0) or 0) / float(denominator)
+
+
+def _edge_snapshot_from_run(row: Any) -> dict[str, Any]:
+    snap = _json_dict(getattr(row, "rule_snapshot", None))
+    edge = snap.get("entry_edge")
+    return edge if isinstance(edge, dict) else snap
+
+
+def _edge_signal_lane(alert: Any, snapshot: dict[str, Any]) -> str:
+    lane = snapshot.get("paper_observation_signal_lane")
+    if lane:
+        return str(lane).strip().lower()
+    ind = _json_dict(getattr(alert, "indicator_snapshot", None))
+    scorecard = ind.get("imminent_scorecard")
+    if isinstance(scorecard, dict):
+        lane = scorecard.get("signal_lane")
+    return str(lane or "standard").strip().lower() or "standard"
+
+
+def _edge_report_root_cause(report: dict[str, Any]) -> str:
+    lanes = report.get("signal_lanes") or {}
+    managed_reasons = report.get("managed_geometry_reasons") or {}
+    avg_net = float(report.get("avg_expected_net_pct") or 0.0)
+    n = int(report.get("total_rejects") or 0)
+    near_miss_n = int(lanes.get("shadow_near_miss") or 0)
+    min_directional_n = _settings_edge_float(
+        "chili_edge_evolution_min_directional_sample_n",
+        _EDGE_EVOLUTION_DEFAULT_MIN_DIRECTIONAL_SAMPLE_N,
+    )
+    avg_directional_n = _finite_number(report.get("avg_probability_sample_n"))
+    if avg_net <= _settings_edge_float(
+        "chili_edge_evolution_severe_avg_net_pct",
+        _EDGE_EVOLUTION_DEFAULT_SEVERE_AVG_NET_PCT,
+    ):
+        return "deep_negative_expected_edge"
+    if n > 0 and near_miss_n / n >= 0.6:
+        return "shadow_near_miss_noise"
+    if (
+        managed_reasons.get("insufficient_directional_samples")
+        and (
+            _counter_share(managed_reasons, "insufficient_directional_samples", n) >= 0.6
+            or (avg_directional_n is not None and avg_directional_n < min_directional_n)
+        )
+    ):
+        return "insufficient_directional_evidence"
+    if _counter_share(managed_reasons, "managed_reward_risk_below_floor", n) >= 0.4:
+        return "managed_reward_risk_below_floor"
+    if _counter_share(managed_reasons, "managed_stop_not_tighter_than_base", n) >= 0.4:
+        return "managed_stop_not_tighter_than_base"
+    return "static_geometry_or_probability_mismatch"
+
+
+def _is_edge_debt_report(report: dict[str, Any] | None) -> bool:
+    if not report or report.get("source") != EDGE_EXIT_CONFIG_SOURCE:
+        return False
+    try:
+        return int(report.get("total_rejects") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _edge_debt_loss_reports(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    lookback_days: int | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Group recent AutoTrader non-positive-edge rejects into evolution loss reports."""
+    if not _settings_edge_enabled():
+        return {}
+    from ...models.trading import AutoTraderRun, BreakoutAlert
+
+    days = lookback_days
+    if days is None:
+        days = _settings_edge_int(
+            "chili_edge_evolution_lookback_days",
+            _EDGE_EVOLUTION_DEFAULT_LOOKBACK_DAYS,
+            minimum=1,
+        )
+    cutoff = (now or datetime.utcnow()) - timedelta(days=max(1, int(days)))
+    try:
+        rows = (
+            db.query(AutoTraderRun, BreakoutAlert)
+            .outerjoin(BreakoutAlert, BreakoutAlert.id == AutoTraderRun.breakout_alert_id)
+            .filter(
+                AutoTraderRun.created_at >= cutoff,
+                AutoTraderRun.reason == EDGE_DEBT_REJECT_REASON,
+            )
+            .all()
+        )
+    except Exception:
+        logger.debug("[learning] edge debt report query failed", exc_info=True)
+        return {}
+
+    buckets: dict[int, dict[str, Any]] = {}
+    for run, alert in rows:
+        pattern_id_raw = getattr(run, "scan_pattern_id", None) or getattr(alert, "scan_pattern_id", None)
+        try:
+            pattern_id = int(pattern_id_raw)
+        except (TypeError, ValueError):
+            continue
+        if pattern_id <= 0:
+            continue
+        report = buckets.setdefault(
+            pattern_id,
+            {
+                "source": EDGE_EXIT_CONFIG_SOURCE,
+                "scan_pattern_id": pattern_id,
+                "total_rejects": 0,
+                "expected_net_values": [],
+                "reward_values": [],
+                "loss_values": [],
+                "tickers": {},
+                "asset_types": {},
+                "signal_lanes": {},
+                "managed_geometry_reasons": {},
+                "probability_sources": {},
+                "sample_ns": [],
+            },
+        )
+        edge = _edge_snapshot_from_run(run)
+        report["total_rejects"] += 1
+        _counter_increment(report["tickers"], getattr(run, "ticker", None) or getattr(alert, "ticker", None))
+        _counter_increment(report["asset_types"], getattr(alert, "asset_type", None))
+        _counter_increment(report["signal_lanes"], _edge_signal_lane(alert, edge), fallback="standard")
+        _counter_increment(report["probability_sources"], edge.get("probability_source"))
+
+        managed = edge.get("managed_exit_edge") if isinstance(edge.get("managed_exit_edge"), dict) else {}
+        geometry = managed.get("geometry") if isinstance(managed.get("geometry"), dict) else {}
+        _counter_increment(
+            report["managed_geometry_reasons"],
+            geometry.get("reason") or managed.get("selection_reason") or managed.get("reason"),
+            fallback="none",
+        )
+
+        expected_net = _finite_number(edge.get("expected_net_pct"))
+        if expected_net is not None:
+            report["expected_net_values"].append(expected_net)
+        reward = _finite_number(edge.get("target_reward_fraction") or edge.get("reward_fraction"))
+        loss = _finite_number(edge.get("hard_stop_loss_fraction") or edge.get("stop_loss_fraction"))
+        entry = _finite_number(getattr(alert, "entry_price", None) or getattr(alert, "price_at_alert", None))
+        target = _finite_number(getattr(alert, "target_price", None))
+        stop = _finite_number(getattr(alert, "stop_loss", None))
+        if reward is None and entry and target and entry > 0.0 and target > entry:
+            reward = (target - entry) / entry
+        if loss is None and entry and stop and entry > 0.0 and 0.0 < stop < entry:
+            loss = (entry - stop) / entry
+        if reward is not None and reward > 0.0:
+            report["reward_values"].append(reward)
+        if loss is not None and loss > 0.0:
+            report["loss_values"].append(loss)
+        sample_n = _finite_number(edge.get("probability_sample_n"))
+        if sample_n is not None and sample_n >= 0:
+            report["sample_ns"].append(sample_n)
+
+    finalized: dict[int, dict[str, Any]] = {}
+    min_rejects = _settings_edge_int(
+        "chili_edge_evolution_min_rejects",
+        _EDGE_EVOLUTION_DEFAULT_MIN_REJECTS,
+        minimum=1,
+    )
+    for pattern_id, report in buckets.items():
+        expected_vals = list(report.pop("expected_net_values", []))
+        reward_vals = list(report.pop("reward_values", []))
+        loss_vals = list(report.pop("loss_values", []))
+        sample_ns = list(report.pop("sample_ns", []))
+        avg_expected = _mean(expected_vals)
+        avg_reward = _mean(reward_vals)
+        avg_loss = _mean(loss_vals)
+        report.update(
+            min_rejects_for_variant=min_rejects,
+            thin_sample=bool(int(report["total_rejects"]) < min_rejects),
+            avg_expected_net_pct=round(avg_expected, 6) if avg_expected is not None else None,
+            min_expected_net_pct=round(min(expected_vals), 6) if expected_vals else None,
+            max_expected_net_pct=round(max(expected_vals), 6) if expected_vals else None,
+            avg_static_reward_fraction=round(avg_reward, 8) if avg_reward is not None else None,
+            avg_static_stop_loss_fraction=round(avg_loss, 8) if avg_loss is not None else None,
+            avg_static_reward_risk=(
+                round(avg_reward / avg_loss, 6)
+                if avg_reward is not None and avg_loss is not None and avg_loss > 0.0
+                else None
+            ),
+            avg_probability_sample_n=round(_mean(sample_ns), 3) if sample_ns else None,
+        )
+        report["root_cause"] = _edge_report_root_cause(report)
+        finalized[pattern_id] = report
+    return finalized
+
+
+def _edge_debt_blocks_variant_spawn(parent: "ScanPattern", report: dict[str, Any] | None) -> tuple[bool, str]:
+    if not _is_edge_debt_report(report) or bool(report.get("thin_sample")):
+        return False, ""
+    severe_n = _settings_edge_int(
+        "chili_edge_evolution_severe_min_rejects",
+        _EDGE_EVOLUTION_DEFAULT_SEVERE_MIN_REJECTS,
+        minimum=1,
+    )
+    n = int(report.get("total_rejects") or 0)
+    avg_net = _finite_number(report.get("avg_expected_net_pct"))
+    severe_avg = _settings_edge_float(
+        "chili_edge_evolution_severe_avg_net_pct",
+        _EDGE_EVOLUTION_DEFAULT_SEVERE_AVG_NET_PCT,
+    )
+    if n >= severe_n and avg_net is not None and avg_net <= severe_avg:
+        return True, f"edge_debt_deep_negative:{avg_net:.3f}_on_{n}_rejects"
+    if str(report.get("root_cause") or "").strip().lower() == "insufficient_directional_evidence":
+        avg_directional_n = _finite_number(report.get("avg_probability_sample_n"))
+        min_directional_n = _settings_edge_float(
+            "chili_edge_evolution_min_directional_sample_n",
+            _EDGE_EVOLUTION_DEFAULT_MIN_DIRECTIONAL_SAMPLE_N,
+        )
+        if avg_directional_n is not None and avg_directional_n < min_directional_n:
+            return True, (
+                "edge_debt_insufficient_directional_evidence:"
+                f"avg_sample_n={avg_directional_n:.3f}"
+            )
+
+    corrected_n = int(getattr(parent, "corrected_trade_count", None) or getattr(parent, "trade_count", None) or 0)
+    corrected_avg = _finite_number(
+        getattr(parent, "corrected_avg_return_pct", None)
+        if getattr(parent, "corrected_avg_return_pct", None) is not None
+        else getattr(parent, "avg_return_pct", None)
+    )
+    corrected_wr = _finite_number(
+        getattr(parent, "corrected_win_rate", None)
+        if getattr(parent, "corrected_win_rate", None) is not None
+        else getattr(parent, "win_rate", None)
+    )
+    if corrected_n >= 5 and corrected_avg is not None and corrected_avg <= 0.0:
+        return True, f"edge_debt_parent_non_positive_realized_avg:{corrected_avg:.3f}"
+    if corrected_n >= 5 and corrected_wr is not None and corrected_wr <= 0.10:
+        return True, f"edge_debt_parent_low_realized_wr:{corrected_wr:.3f}"
+    return False, ""
+
+
+def _learned_exit_config_from_edge_report(
+    parent: "ScanPattern",
+    report: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    if not _is_edge_debt_report(report):
+        return None, "missing_edge_debt_report"
+    if bool(report.get("thin_sample")):
+        return None, "insufficient_edge_rejects"
+    avg_net = _finite_number(report.get("avg_expected_net_pct"))
+    max_avg_net = _settings_edge_float(
+        "chili_edge_evolution_max_avg_net_for_child_pct",
+        _EDGE_EVOLUTION_DEFAULT_MAX_AVG_NET_FOR_CHILD_PCT,
+    )
+
+    avg_return = _finite_number(
+        getattr(parent, "corrected_avg_return_pct", None)
+        if getattr(parent, "corrected_avg_return_pct", None) is not None
+        else getattr(parent, "avg_return_pct", None)
+    )
+    if avg_return is not None and avg_return <= 0.0:
+        return None, "non_positive_parent_realized_avg"
+
+    reward, loss_raw = _payoff_pair_to_fractions(
+        getattr(parent, "avg_winner_pct", None),
+        getattr(parent, "avg_loser_pct", None),
+    )
+    loss = abs(loss_raw) if loss_raw is not None and loss_raw < 0.0 else None
+    if reward is None or loss is None or reward <= 0.0 or loss <= 0.0:
+        return None, "missing_parent_payoff_geometry"
+
+    corrected_n = int(getattr(parent, "corrected_trade_count", None) or getattr(parent, "trade_count", None) or 0)
+    payoff_n = int(getattr(parent, "payoff_ratio_n", None) or 0)
+    sample_candidates = [n for n in (corrected_n, payoff_n) if n > 0]
+    sample_n = min(sample_candidates) if sample_candidates else 0
+    min_samples = _settings_edge_int(
+        "chili_edge_evolution_min_payoff_samples",
+        5,
+        minimum=1,
+    )
+    if sample_n < min_samples:
+        return None, f"insufficient_parent_payoff_samples:{sample_n}"
+
+    min_rr = _settings_edge_float(
+        "chili_edge_evolution_min_reward_risk",
+        _EDGE_EVOLUTION_DEFAULT_MIN_REWARD_RISK,
+    )
+    reward_risk = reward / loss if loss > 0.0 else 0.0
+    if reward_risk < min_rr:
+        return None, f"reward_risk_below_floor:{reward_risk:.3f}"
+
+    payoff_rescue_used = False
+    if avg_net is not None and avg_net < max_avg_net:
+        rescue_floor = _settings_edge_float(
+            "chili_edge_evolution_payoff_rescue_max_avg_net_pct",
+            _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MAX_AVG_NET_PCT,
+        )
+        rescue_min_rr = _settings_edge_float(
+            "chili_edge_evolution_payoff_rescue_min_reward_risk",
+            _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MIN_REWARD_RISK,
+        )
+        root_cause = str(report.get("root_cause") or "").strip().lower()
+        payoff_rescue_used = (
+            avg_net >= rescue_floor
+            and reward_risk >= rescue_min_rr
+            and root_cause in _EDGE_PAYOFF_RESCUE_ROOT_CAUSES
+        )
+        if not payoff_rescue_used:
+            return None, f"edge_debt_too_negative_for_exit_child:{avg_net:.3f}"
+
+    static_reward = _finite_number(report.get("avg_static_reward_fraction"))
+    static_loss = _finite_number(report.get("avg_static_stop_loss_fraction"))
+    if static_reward is not None and reward >= static_reward * 0.98:
+        return None, "learned_target_not_tighter_than_static"
+    if static_loss is not None and loss >= static_loss * 0.98:
+        return None, "learned_stop_not_tighter_than_static"
+
+    payload = {
+        "source": EDGE_EXIT_CONFIG_SOURCE,
+        "edge_learned_exit_v1": True,
+        "basis": "realized_parent_payoff_after_edge_debt",
+        "parent_pattern_id": int(parent.id),
+        "target_reward_fraction": round(float(reward), 8),
+        "stop_loss_fraction": round(float(loss), 8),
+        "target_pct": round(float(reward) * 100.0, 4),
+        "stop_pct": round(float(loss) * 100.0, 4),
+        "reward_risk": round(float(reward_risk), 6),
+        "sample_n": int(sample_n),
+        "corrected_trade_count": int(corrected_n),
+        "payoff_ratio_n": int(payoff_n),
+        "avg_rejected_expected_net_pct": report.get("avg_expected_net_pct"),
+        "total_edge_rejects": int(report.get("total_rejects") or 0),
+        "root_cause": report.get("root_cause"),
+        "avg_net_child_threshold_pct": round(float(max_avg_net), 6),
+        "payoff_rescue_used": bool(payoff_rescue_used),
+        "created_at_utc": datetime.utcnow().isoformat(),
+    }
+    if payoff_rescue_used:
+        payload.update(
+            payoff_rescue_floor_pct=round(
+                _settings_edge_float(
+                    "chili_edge_evolution_payoff_rescue_max_avg_net_pct",
+                    _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MAX_AVG_NET_PCT,
+                ),
+                6,
+            ),
+            payoff_rescue_min_reward_risk=round(
+                _settings_edge_float(
+                    "chili_edge_evolution_payoff_rescue_min_reward_risk",
+                    _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MIN_REWARD_RISK,
+                ),
+                6,
+            ),
+        )
+    return payload, "ok"
+
+
 _EXIT_VARIANTS: list[dict[str, Any]] = [
     {
         "label": "No-BOS-breakout",
@@ -8972,7 +9571,10 @@ _VARIANT_GATE_MIN_WR = 0.35
 _VARIANT_GATE_BLOCKED_STAGES = frozenset({"challenged", "retired", "decayed"})
 
 
-def _parent_eligible_for_variant_spawn(parent: "ScanPattern") -> tuple[bool, str]:
+def _parent_eligible_for_variant_spawn(
+    parent: "ScanPattern",
+    edge_loss_report: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     """Returns (eligible, reason). reason is empty when eligible=True.
 
     Disqualifications (any one fails the gate):
@@ -8988,6 +9590,9 @@ def _parent_eligible_for_variant_spawn(parent: "ScanPattern") -> tuple[bool, str
         return False, f"parent_lifecycle_blocked:{stage}"
     if (getattr(parent, "promotion_status", "") or "").strip().lower() == "demoted_evidence_gap":
         return False, "parent_evidence_demoted"
+    blocked, edge_reason = _edge_debt_blocks_variant_spawn(parent, edge_loss_report)
+    if blocked:
+        return False, edge_reason
     bt = int(getattr(parent, "backtest_count", 0) or 0)
     wr = getattr(parent, "win_rate", None)
     if bt >= _VARIANT_GATE_MIN_TRADES and wr is not None and float(wr) < _VARIANT_GATE_MIN_WR:
@@ -9001,11 +9606,15 @@ def _create_variant_child(
     *,
     origin: str,
     variant_label: str,
-    rules_json: str | None = None,
-    exit_config_json: str | None = None,
+    rules_json: Any | None = None,
+    exit_config_json: Any | None = None,
     timeframe: str | None = None,
     ticker_scope: str | None = None,
     scope_tickers_json: str | None = None,
+    lifecycle_stage: str | None = None,
+    promotion_status: str | None = None,
+    backtest_priority: int | None = None,
+    edge_loss_report: dict[str, Any] | None = None,
 ) -> "ScanPattern | None":
     """Low-level helper: create a child ScanPattern + linked TradingInsight.
 
@@ -9013,7 +9622,7 @@ def _create_variant_child(
     is in a demoted lifecycle stage). Caller code should handle None as
     "skip this fork".
     """
-    eligible, reason = _parent_eligible_for_variant_spawn(parent)
+    eligible, reason = _parent_eligible_for_variant_spawn(parent, edge_loss_report=edge_loss_report)
     if not eligible:
         logger.info(
             "[variant_spawn_gate] refused parent_id=%s name=%s origin=%s reason=%s",
@@ -9023,10 +9632,16 @@ def _create_variant_child(
     from ...models.trading import ScanPattern, TradingInsight
 
     child_name = f"{parent.name} [{variant_label}]"
+    child_rules_json = _variant_json_value(
+        rules_json if rules_json is not None else parent.rules_json
+    )
+    child_exit_config = _variant_json_value(
+        exit_config_json if exit_config_json is not None else parent.exit_config
+    )
     child = ScanPattern(
         name=child_name,
         description=parent.description,
-        rules_json=rules_json or parent.rules_json,
+        rules_json=child_rules_json,
         origin=origin,
         asset_class=parent.asset_class,
         timeframe=timeframe or getattr(parent, "timeframe", "1d") or "1d",
@@ -9037,12 +9652,20 @@ def _create_variant_child(
         min_base_score=parent.min_base_score,
         active=True,
         parent_id=parent.id,
-        exit_config=exit_config_json or parent.exit_config,
+        exit_config=child_exit_config,
         variant_label=variant_label,
         generation=(parent.generation or 0) + 1,
         ticker_scope=ticker_scope or getattr(parent, "ticker_scope", "universal") or "universal",
         scope_tickers=scope_tickers_json if scope_tickers_json is not None else getattr(parent, "scope_tickers", None),
         hypothesis_family=getattr(parent, "hypothesis_family", None),
+        lifecycle_stage=lifecycle_stage or "candidate",
+        lifecycle_changed_at=datetime.utcnow() if lifecycle_stage else None,
+        promotion_status=promotion_status or "legacy",
+        backtest_priority=(
+            int(backtest_priority)
+            if backtest_priority is not None
+            else int(getattr(parent, "backtest_priority", 0) or 0)
+        ),
     )
     db.add(child)
     db.flush()
@@ -9077,7 +9700,7 @@ def fork_exit_variants(db: Session, pattern_id: int) -> list[int]:
     """Clone *pattern_id* into exit-strategy variant children."""
     from ...models.trading import ScanPattern
 
-    parent = db.query(ScanPattern).get(pattern_id)
+    parent = db.get(ScanPattern, pattern_id)
     if not parent or not parent.active:
         return []
 
@@ -9108,6 +9731,8 @@ def fork_exit_variants(db: Session, pattern_id: int) -> list[int]:
             variant_label=variant["label"],
             exit_config_json=json.dumps(variant["config"]),
         )
+        if child is None:
+            continue
         created_ids.append(child.id)
         logger.info(
             "[learning] Forked exit variant: %s (parent=%d, gen=%d)",
@@ -9140,11 +9765,10 @@ def fork_entry_variants(
     if existing_children >= _MAX_ACTIVE_VARIANTS:
         return []
 
-    try:
-        rules = json.loads(parent.rules_json)
-        conditions = rules.get("conditions", [])
-    except (json.JSONDecodeError, TypeError):
+    rules = _variant_json_dict(parent.rules_json)
+    if rules is None:
         return []
+    conditions = rules.get("conditions", [])
     if not conditions:
         return []
 
@@ -9175,6 +9799,8 @@ def fork_entry_variants(
             variant_label=short_label,
             rules_json=new_rules,
         )
+        if child is None:
+            continue
         existing_labels.add(short_label)
         created_ids.append(child.id)
         logger.info(
@@ -9203,11 +9829,10 @@ def fork_combo_variants(db: Session, pattern_id: int) -> list[int]:
     if existing_children >= _MAX_ACTIVE_VARIANTS:
         return []
 
-    try:
-        rules = json.loads(parent.rules_json)
-        conditions = rules.get("conditions", [])
-    except (json.JSONDecodeError, TypeError):
+    rules = _variant_json_dict(parent.rules_json)
+    if rules is None:
         return []
+    conditions = rules.get("conditions", [])
 
     donor_cond = _cross_breed_condition(db, conditions, exclude_pattern_id=pattern_id)
     if not donor_cond:
@@ -9230,6 +9855,8 @@ def fork_combo_variants(db: Session, pattern_id: int) -> list[int]:
         variant_label=label,
         rules_json=new_rules,
     )
+    if child is None:
+        return []
     db.commit()
     logger.info(
         "[learning] Forked combo variant: %s (parent=%d, gen=%d)",
@@ -9303,6 +9930,8 @@ def fork_timeframe_variants(
             variant_label=label,
             timeframe=tf,
         )
+        if child is None:
+            continue
         existing_labels.add(label)
         created_ids.append(child.id)
         logger.info(
@@ -9392,12 +10021,13 @@ def fork_scope_variants(
                     ticker_scope="sector",
                     scope_tickers_json=json.dumps([top_sector]),
                 )
-                existing_labels.add(label)
-                created_ids.append(child.id)
-                logger.info(
-                    "[learning] Forked scope variant: %s (universal->sector:%s, parent=%d)",
-                    child.name, top_sector, parent.id,
-                )
+                if child is not None:
+                    existing_labels.add(label)
+                    created_ids.append(child.id)
+                    logger.info(
+                        "[learning] Forked scope variant: %s (universal->sector:%s, parent=%d)",
+                        child.name, top_sector, parent.id,
+                    )
 
         if ticker_counts and len(created_ids) < slots:
             top_tickers = sorted(ticker_counts, key=ticker_counts.get, reverse=True)[:5]
@@ -9410,12 +10040,13 @@ def fork_scope_variants(
                     ticker_scope="ticker_specific",
                     scope_tickers_json=json.dumps(top_tickers),
                 )
-                existing_labels.add(label)
-                created_ids.append(child.id)
-                logger.info(
-                    "[learning] Forked scope variant: %s (universal->tickers:%s, parent=%d)",
-                    child.name, top_tickers, parent.id,
-                )
+                if child is not None:
+                    existing_labels.add(label)
+                    created_ids.append(child.id)
+                    logger.info(
+                        "[learning] Forked scope variant: %s (universal->tickers:%s, parent=%d)",
+                        child.name, top_tickers, parent.id,
+                    )
 
     elif parent_scope in ("ticker_specific", "sector") and len(created_ids) < slots:
         label = "scope-universal"
@@ -9427,6 +10058,8 @@ def fork_scope_variants(
                 ticker_scope="universal",
                 scope_tickers_json=None,
             )
+            if child is None:
+                return created_ids
             existing_labels.add(label)
             created_ids.append(child.id)
             logger.info(
@@ -9439,6 +10072,78 @@ def fork_scope_variants(
     return created_ids
 
 
+def fork_edge_learned_exit_variants(
+    db: Session,
+    pattern_id: int,
+    *,
+    edge_loss_report: dict[str, Any] | None = None,
+) -> list[int]:
+    """Create one learned-exit child from AutoTrader non-positive-edge evidence."""
+    from ...models.trading import ScanPattern
+
+    parent = db.get(ScanPattern, pattern_id)
+    if not parent or not parent.active:
+        return []
+
+    existing_children = (
+        db.query(ScanPattern)
+        .filter(ScanPattern.parent_id == pattern_id, ScanPattern.active.is_(True))
+        .count()
+    )
+    if existing_children >= _MAX_ACTIVE_VARIANTS:
+        return []
+
+    report = edge_loss_report
+    if report is None:
+        report = _edge_debt_loss_reports(db).get(int(pattern_id))
+    cfg, reason = _learned_exit_config_from_edge_report(parent, report)
+    if cfg is None:
+        logger.info(
+            "[edge_evolution] skip learned exit child parent_id=%s reason=%s",
+            pattern_id,
+            reason,
+        )
+        return []
+
+    label = (
+        f"edge-exit-r{float(cfg['target_pct']):.2f}-s{float(cfg['stop_pct']):.2f}"
+    )[:40]
+    existing = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.parent_id == pattern_id,
+            ScanPattern.variant_label == label,
+        )
+        .first()
+    )
+    if existing:
+        return []
+
+    child = _create_variant_child(
+        db,
+        parent,
+        origin=EDGE_EXIT_VARIANT_ORIGIN,
+        variant_label=label,
+        exit_config_json=json.dumps(cfg),
+        lifecycle_stage="challenged",
+        promotion_status=EDGE_EXIT_PROMOTION_STATUS,
+        backtest_priority=max(50, int(getattr(parent, "backtest_priority", 0) or 0)),
+        edge_loss_report=report,
+    )
+    if child is None:
+        return []
+    logger.info(
+        "[edge_evolution] forked learned exit child=%s parent=%s label=%s rr=%s rejects=%s",
+        child.id,
+        pattern_id,
+        label,
+        cfg.get("reward_risk"),
+        cfg.get("total_edge_rejects"),
+    )
+    db.commit()
+    return [int(child.id)]
+
+
 def fork_pattern_variants(
     db: Session,
     pattern_id: int,
@@ -9449,7 +10154,14 @@ def fork_pattern_variants(
     Orchestrates all five axes of evolution.
     """
     created: list[int] = []
-    created.extend(fork_exit_variants(db, pattern_id))
+    edge_ids = fork_edge_learned_exit_variants(
+        db,
+        pattern_id,
+        edge_loss_report=loss_report,
+    )
+    created.extend(edge_ids)
+    if not edge_ids:
+        created.extend(fork_exit_variants(db, pattern_id))
     created.extend(fork_entry_variants(db, pattern_id, loss_report=loss_report))
     created.extend(fork_combo_variants(db, pattern_id))
     created.extend(fork_timeframe_variants(db, pattern_id))
@@ -9668,6 +10380,10 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         "mutated_exit": 0, "mutated_entry": 0,
         "loss_reports": 0,
         "insights_consumed": 0,
+        "edge_reports": 0,
+        "edge_learned_exit": 0,
+        "edge_spawn_blocked": 0,
+        "edge_shadow_winners": 0,
     }
 
     # Gather insights from specialized mining to guide evolution
@@ -9675,6 +10391,8 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
     fakeout_patterns = {i["description"][:100].lower() for i in evo_insights.get("fakeouts", [])}
     synergy_combos = evo_insights.get("synergies", [])
     preferred_timeframes = evo_insights.get("timeframe_perf", {})
+    edge_reports_by_parent = _edge_debt_loss_reports(db)
+    stats["edge_reports"] = len(edge_reports_by_parent)
 
     # ── 1. Fork phase ────────────────────────────────────────────────
     root_patterns = (
@@ -9682,7 +10400,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         .filter(
             ScanPattern.active.is_(True),
             ScanPattern.parent_id.is_(None),
-            ScanPattern.origin.notin_(["exit_variant", "entry_variant", "combo_variant", "tf_variant", "scope_variant"]),
+            ScanPattern.origin.notin_(_variant_origin_list()),
         )
         .all()
     )
@@ -9699,9 +10417,28 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
     for rp in root_patterns:
         child_count = _child_count_map.get(rp.id, 0)
         if child_count == 0:
-            exit_ids = fork_exit_variants(db, rp.id)
+            edge_report = edge_reports_by_parent.get(int(rp.id))
+            edge_blocked, edge_block_reason = _edge_debt_blocks_variant_spawn(rp, edge_report)
+            if edge_blocked:
+                stats["edge_spawn_blocked"] += 1
+                logger.info(
+                    "[edge_evolution] blocked generic spawn parent_id=%s reason=%s",
+                    rp.id,
+                    edge_block_reason,
+                )
+                continue
+            edge_ids = fork_edge_learned_exit_variants(
+                db,
+                rp.id,
+                edge_loss_report=edge_report,
+            )
+            stats["edge_learned_exit"] += len(edge_ids)
+            if edge_ids:
+                exit_ids = []
+            else:
+                exit_ids = fork_exit_variants(db, rp.id)
             stats["forked_exit"] += len(exit_ids)
-            entry_ids = fork_entry_variants(db, rp.id, max_variants=2)
+            entry_ids = fork_entry_variants(db, rp.id, loss_report=edge_report, max_variants=2)
             stats["forked_entry"] += len(entry_ids)
             combo_ids = fork_combo_variants(db, rp.id)
             stats["forked_combo"] += len(combo_ids)
@@ -9810,7 +10547,14 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         winner_sharpe = variant_scores[0][2]
         winner_wr = variant_scores[0][3]
 
-        if winner.origin == "exit_variant" and winner.exit_config:
+        if winner.origin == EDGE_EXIT_VARIANT_ORIGIN:
+            stats["edge_shadow_winners"] += 1
+            logger.info(
+                "[edge_evolution] learned exit child won shadow compare parent=%s child=%s; parent left unchanged",
+                parent.id,
+                winner.id,
+            )
+        elif winner.origin == "exit_variant" and winner.exit_config:
             parent.exit_config = winner.exit_config
             parent.updated_at = datetime.utcnow()
             stats["promoted"] += 1
@@ -9828,12 +10572,13 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
             parent.updated_at = datetime.utcnow()
             stats["promoted"] += 1
 
-        logger.info(
-            "[learning] Promoted variant '%s' (%s) → parent '%s' "
-            "(sharpe=%.2f, wr=%.0f%%)",
-            winner.variant_label, winner.origin, parent.name,
-            winner_sharpe, winner_wr * 100,
-        )
+        if winner.origin != EDGE_EXIT_VARIANT_ORIGIN:
+            logger.info(
+                "[learning] Promoted variant '%s' (%s) -> parent '%s' "
+                "(sharpe=%.2f, wr=%.0f%%)",
+                winner.variant_label, winner.origin, parent.name,
+                winner_sharpe, winner_wr * 100,
+            )
 
         # ── 3. Loss analysis for worst variant ───────────────────────
         worst = variant_scores[-1][0]
@@ -9841,7 +10586,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         worst_wr = variant_scores[-1][3]
         loss_report = None
         if worst_wr < 0.5:
-            loss_report = _analyze_variant_losses(db, worst.id)
+            loss_report = edge_reports_by_parent.get(int(parent_id)) or _analyze_variant_losses(db, worst.id)
             if loss_report:
                 loss_reports_by_parent[parent_id] = loss_report
                 stats["loss_reports"] += 1
@@ -9868,7 +10613,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
                     f"Evolution for '{parent.name}': winner={winner.variant_label} "
                     f"({winner.origin}, sharpe={winner_sharpe:.2f}, wr={winner_wr:.0%}). "
                     f"Compared {len(variant_scores)} variants across exit/entry/combo/timeframe/scope axes."
-                    + (f" Loss report: avg_losing_return={loss_report['avg_losing_return']}%, "
+                    + (f" Loss report: avg_losing_return={loss_report.get('avg_losing_return', 'n/a')}%, "
                        f"sectors={loss_report.get('sector_losses', {})}"
                        if loss_report else "")
                 ),
@@ -9888,12 +10633,29 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         mutations_to_spawn = min(2, _MAX_ACTIVE_VARIANTS - active_children)
 
         if mutations_to_spawn > 0:
-            parent_loss = loss_reports_by_parent.get(parent_id)
+            parent_loss = edge_reports_by_parent.get(int(parent_id)) or loss_reports_by_parent.get(parent_id)
 
             # Exit mutation (if winner was exit-type or parent has exit_config)
-            if winner.exit_config:
+            edge_ids = fork_edge_learned_exit_variants(
+                db,
+                parent_id,
+                edge_loss_report=parent_loss,
+            )
+            if edge_ids:
+                stats["edge_learned_exit"] += len(edge_ids)
+                mutations_to_spawn -= len(edge_ids)
+
+            if (
+                mutations_to_spawn > 0
+                and winner.exit_config
+                and winner.origin != EDGE_EXIT_VARIANT_ORIGIN
+            ):
                 try:
-                    base_config = json.loads(winner.exit_config)
+                    base_config = (
+                        dict(winner.exit_config)
+                        if isinstance(winner.exit_config, dict)
+                        else json.loads(winner.exit_config)
+                    )
                 except (json.JSONDecodeError, TypeError):
                     base_config = None
                 if base_config:
@@ -9907,14 +10669,15 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
                         ScanPattern.variant_label == mut_label,
                     ).first()
                     if not existing:
-                        _create_variant_child(
+                        child = _create_variant_child(
                             db, parent,
                             origin="exit_variant",
                             variant_label=mut_label,
                             exit_config_json=json.dumps(mutated),
                         )
-                        stats["mutated_exit"] += 1
-                        mutations_to_spawn -= 1
+                        if child is not None:
+                            stats["mutated_exit"] += 1
+                            mutations_to_spawn -= 1
 
             # Entry mutation guided by loss report
             if mutations_to_spawn > 0 and winner.rules_json:
@@ -9935,19 +10698,20 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
                             ScanPattern.variant_label == ent_label,
                         ).first()
                         if not existing:
-                            _create_variant_child(
+                            child = _create_variant_child(
                                 db, parent,
                                 origin="entry_variant",
                                 variant_label=ent_label,
                                 rules_json=json.dumps({"conditions": new_conds}),
                             )
-                            stats["mutated_entry"] += 1
-                            logger.info(
-                                "[learning] Guided entry mutation: '%s' for '%s' "
-                                "(loss_report=%s)",
-                                ent_label, parent.name,
-                                "yes" if parent_loss else "random",
-                            )
+                            if child is not None:
+                                stats["mutated_entry"] += 1
+                                logger.info(
+                                    "[learning] Guided entry mutation: '%s' for '%s' "
+                                    "(loss_report=%s)",
+                                    ent_label, parent.name,
+                                    "yes" if parent_loss else "random",
+                                )
 
     db.commit()
     logger.info("[learning] Pattern evolution complete: %s", stats)

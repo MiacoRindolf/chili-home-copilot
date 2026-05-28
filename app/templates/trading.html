@@ -8930,6 +8930,13 @@ function _monitorActionClass(act) {
   return 'mon-badge-action-hold';
 }
 
+function _monitorDecisionSourceLabel(src) {
+  var s = String(src || '').toLowerCase();
+  if (s === 'llm_unavailable') return 'rules-only';
+  if (s === 'parse_failed') return 'rules-only';
+  return String(src || '').replace(/_/g, ' ');
+}
+
 function _monitorExecutionClass(state) {
   var s = String(state || '').toLowerCase();
   if (s === 'exit_order_working') return 'mon-badge-exec-working';
@@ -9031,7 +9038,7 @@ function renderMonitorCards(setups) {
     var deltaStr = deltaPts == null ? '' : (deltaPts >= 0 ? '+' + deltaPts.toFixed(1) : deltaPts.toFixed(1));
     var deltaColor = deltaPts == null ? 'var(--text-muted)' : (deltaPts >= 0 ? '#22c55e' : '#ef4444');
     var act = ld ? ld.action : '—';
-    var src = ld && ld.decision_source ? ld.decision_source : '—';
+    var src = ld && ld.decision_source ? _monitorDecisionSourceLabel(ld.decision_source) : '—';
     var when = ld && ld.created_at ? ld.created_at : 'never';
     var healthLabel = ld && ld.health_label ? ld.health_label : 'Pattern health';
     var healthHint = ld && ld.health_hint ? ld.health_hint : 'Share of pattern conditions still satisfied';
@@ -9321,7 +9328,26 @@ function loadImminentAlerts() {
       list.innerHTML = '<div class="mon-imm-empty">No imminent alerts pending action right now.</div>';
       return;
     }
+    var summary = d.summary || {};
     var html = '';
+    if (summary.total) {
+      var bits = [
+        ['Neg EV', summary.negative_expected_edge || 0, '#f87171'],
+        ['Shadow +EV', summary.positive_edge_shadow_only || 0, '#fbbf24'],
+        ['Recert +EV', summary.positive_edge_recert_debt || 0, '#fb923c'],
+        ['Slippage', summary.missed_entry_slippage || 0, '#93c5fd'],
+        ['Broker', summary.broker_execution_rejects || 0, '#fca5a5'],
+        ['Live-ready', summary.live_eligible_candidates || 0, '#86efac']
+      ];
+      html += '<div class="mon-imm-card" style="cursor:default;border-color:rgba(148,163,184,0.28);">';
+      html += '<div style="width:100%;">';
+      html += '<div style="font-size:10px;font-weight:800;color:var(--text-secondary);margin-bottom:5px;">Edge funnel</div>';
+      html += '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+      bits.forEach(function(b) {
+        html += '<span style="font-size:9px;color:' + b[2] + ';border:1px solid rgba(148,163,184,0.25);border-radius:999px;padding:2px 7px;">' + escHtml(b[0]) + ' <b>' + Number(b[1] || 0).toFixed(0) + '</b></span>';
+      });
+      html += '</div></div></div>';
+    }
     alerts.forEach(function(a) {
       var scoreClass = 'mon-imm-score-low';
       if (a.score != null && a.score >= 75) scoreClass = 'mon-imm-score-high';
@@ -9353,10 +9379,28 @@ function loadImminentAlerts() {
       if (a.entry_price != null) html += '<div>Entry<b>$' + sp(a.entry_price) + '</b></div>';
       if (a.stop_loss != null) html += '<div>Stop<b style="color:#f87171;">$' + sp(a.stop_loss) + '</b></div>';
       if (a.target_price != null) html += '<div>Target<b style="color:#86efac;">$' + sp(a.target_price) + '</b></div>';
+      if (a.entry_edge_expected_net_pct != null) {
+        var ev = Number(a.entry_edge_expected_net_pct);
+        var evColor = ev > 0 ? '#86efac' : '#f87171';
+        html += '<div>EV<b style="color:' + evColor + ';">' + ev.toFixed(2) + '%</b></div>';
+      }
+      if (a.calibrated_ev_pct != null) {
+        var cev = Number(a.calibrated_ev_pct);
+        html += '<div>Cal EV<b style="color:' + (cev > 0 ? '#86efac' : '#f87171') + ';">' + cev.toFixed(2) + '%</b></div>';
+      }
+      if (a.closed_evidence_count != null) {
+        html += '<div>Closed<b>' + Number(a.closed_evidence_count || 0).toFixed(0) + '</b></div>';
+      }
       html += '</div>';
       if (a.regime) html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">Regime: ' + escHtml(a.regime) + '</div>';
       if (a.autotrader_decision) {
         html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">AutoTrader: ' + escHtml(a.autotrader_decision) + (a.autotrader_reason ? ' / ' + escHtml(a.autotrader_reason) : '') + '</div>';
+      }
+      if (a.autotrader_blocker_category) {
+        html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">' + escHtml(a.autotrader_blocker_category) + (a.autotrader_next_action ? ' -> ' + escHtml(a.autotrader_next_action) : '') + '</div>';
+      }
+      if (a.graduation_blocker || a.recommended_work_event) {
+        html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">Reliability: ' + escHtml(a.graduation_blocker || 'pending') + (a.recommended_work_event ? ' -> ' + escHtml(a.recommended_work_event) : '') + '</div>';
       }
       html += '</div>';
       html += '<div style="text-align:right;">';
@@ -9519,7 +9563,7 @@ function drawMonitorAnnotations(setup, ohlcData) {
 
   if (ld && ld.action) {
     var actLabel = ld.action.replace(/_/g, ' ');
-    var srcLabel = ld.decision_source || '';
+    var srcLabel = ld.decision_source ? _monitorDecisionSourceLabel(ld.decision_source) : '';
     legendItems.push({ color: actionColors[ld.action] || '#6b7280', label: 'Latest: ' + actLabel + (srcLabel ? ' (' + srcLabel + ')' : '') });
   }
 

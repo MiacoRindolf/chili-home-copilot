@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import math
 import threading
 import time
@@ -1453,6 +1454,78 @@ def _pattern_probability(
     return p, source, n, details
 
 
+def _exit_config_dict(pattern: ScanPattern | None) -> dict[str, Any]:
+    if pattern is None:
+        return {}
+    raw = getattr(pattern, "exit_config", None)
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _edge_learned_exit_config_geometry(
+    *,
+    pattern: ScanPattern | None,
+    static_reward: float,
+    static_loss: float,
+) -> tuple[float, float, dict[str, Any]]:
+    snap: dict[str, Any] = {
+        "used": False,
+        "reason": "missing_edge_learned_exit_config",
+        "static_reward_fraction": round(static_reward, 8),
+        "static_stop_loss_fraction": round(static_loss, 8),
+    }
+    cfg = _exit_config_dict(pattern)
+    if not cfg:
+        return static_reward, static_loss, snap
+    payload = cfg.get("edge_learned_exit_v1")
+    if isinstance(payload, dict):
+        learned = payload
+    elif payload is True or cfg.get("source") == "autotrader_edge_debt_v1":
+        learned = cfg
+    else:
+        return static_reward, static_loss, snap
+
+    reward = _finite_float(
+        learned.get("target_reward_fraction")
+        or learned.get("reward_fraction")
+        or learned.get("target_fraction")
+    )
+    loss = _finite_float(
+        learned.get("stop_loss_fraction")
+        or learned.get("loss_fraction")
+        or learned.get("stop_fraction")
+    )
+    if reward is None or loss is None or reward <= 0.0 or loss <= 0.0:
+        snap["reason"] = "invalid_edge_learned_geometry"
+        return static_reward, static_loss, snap
+    if reward >= static_reward and loss >= static_loss:
+        snap["reason"] = "edge_learned_geometry_not_tighter_than_static"
+        snap["target_reward_fraction"] = round(float(reward), 8)
+        snap["stop_loss_fraction"] = round(float(loss), 8)
+        return static_reward, static_loss, snap
+
+    snap.update(
+        used=True,
+        reason="scan_pattern_edge_learned_exit_config",
+        source=learned.get("source") or cfg.get("source") or "autotrader_edge_debt_v1",
+        basis=learned.get("basis"),
+        target_reward_fraction=round(float(reward), 8),
+        stop_loss_fraction=round(float(loss), 8),
+        reward_risk=round(float(reward / loss), 6),
+        sample_n=learned.get("sample_n"),
+        total_edge_rejects=learned.get("total_edge_rejects"),
+        parent_pattern_id=learned.get("parent_pattern_id"),
+    )
+    return float(reward), float(loss), snap
+
+
 def _realized_exit_geometry(
     *,
     pattern: ScanPattern | None,
@@ -1477,14 +1550,22 @@ def _realized_exit_geometry(
     if pattern is None:
         return static_reward, static_loss, snap
 
+    cfg_reward, cfg_loss, cfg_snap = _edge_learned_exit_config_geometry(
+        pattern=pattern,
+        static_reward=static_reward,
+        static_loss=static_loss,
+    )
+    if cfg_snap.get("used"):
+        return cfg_reward, cfg_loss, cfg_snap
+    snap["edge_learned_exit_config"] = cfg_snap
+
     winner = _finite_float(getattr(pattern, "avg_winner_pct", None))
     loser = _finite_float(getattr(pattern, "avg_loser_pct", None))
     if winner is None or loser is None:
         snap["reason"] = "missing_realized_winner_loser"
         return static_reward, static_loss, snap
-    if winner > 1.0 and winner <= 100.0:
+    if (abs(winner) > 1.0 and abs(winner) <= 100.0) or (abs(loser) > 1.0 and abs(loser) <= 100.0):
         winner = winner / 100.0
-    if abs(loser) > 1.0 and abs(loser) <= 100.0:
         loser = loser / 100.0
     realized_reward = winner if winner > 0.0 else None
     realized_loss = abs(loser) if loser < 0.0 else None
@@ -2227,6 +2308,25 @@ def passes_rule_gate(
                 else:
                     return False, "missed_entry_slippage", snap
             else:
+                try:
+                    adjusted_alert = _entry_price_adjusted_alert(alert, px)
+                    adjusted_edge = evaluate_entry_edge(
+                        db,
+                        adjusted_alert,
+                        settings=settings,
+                        pat_ctx=pat_ctx,
+                        confidence=conf,
+                    )
+                    snap["slippage_reprice_edge"] = adjusted_edge.snapshot
+                    snap["slippage_reprice_edge_reason"] = adjusted_edge.reason
+                    snap["slippage_reprice_original_entry_price"] = round(ref, 8)
+                    snap["slippage_reprice_current_price"] = round(px, 8)
+                    snap["slippage_reprice_expected_net_pct"] = (
+                        adjusted_edge.snapshot.get("expected_net_pct")
+                    )
+                    snap["slippage_reprice_positive_edge"] = bool(adjusted_edge.allowed)
+                except Exception as exc:
+                    snap["slippage_reprice_error"] = type(exc).__name__
                 return False, "missed_entry_slippage", snap
     else:
         snap["entry_slippage_pct"] = None

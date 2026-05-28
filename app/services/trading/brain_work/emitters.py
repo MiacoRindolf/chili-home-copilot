@@ -27,6 +27,52 @@ def emit_backtest_requested_for_pattern(
     )
 
 
+def emit_edge_reliability_refresh_requested(
+    db: Session,
+    scan_pattern_id: int,
+    *,
+    source: str,
+    window_days: int = 30,
+    evidence_fingerprint: str | None = None,
+) -> int | None:
+    """Emit edge reliability work for one ScanPattern.
+
+    The handler writes aggregate diagnostics only; it never promotes or
+    submits broker orders.
+    """
+    from ..edge_reliability import emit_edge_reliability_refresh_requested as _emit
+
+    return _emit(
+        db,
+        int(scan_pattern_id),
+        source=source,
+        window_days=window_days,
+        evidence_fingerprint=evidence_fingerprint,
+    )
+
+
+def emit_profitability_followup_requested(
+    db: Session,
+    *,
+    event_type: str,
+    scan_pattern_id: int | None,
+    source: str,
+    evidence_fingerprint: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> int | None:
+    """Emit targeted profitability work using the shared edge lease scope."""
+    from ..edge_reliability import emit_targeted_profitability_work
+
+    return emit_targeted_profitability_work(
+        db,
+        event_type=event_type,
+        scan_pattern_id=scan_pattern_id,
+        source=source,
+        evidence_fingerprint=evidence_fingerprint,
+        payload=payload,
+    )
+
+
 def emit_promotion_changed_outcome(
     db: Session,
     *,

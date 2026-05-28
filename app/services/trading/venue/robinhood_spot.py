@@ -624,6 +624,33 @@ class RobinhoodSpotAdapter(VenueAdapter):
         is_crypto = _is_crypto_product(product_id)
         ticker = _to_ticker(product_id)
         qty = float(base_size)
+        if not is_crypto:
+            try:
+                from ..tick_normalizer import normalize_quantity
+
+                normalized_qty = float(normalize_quantity(qty, ticker))
+            except Exception as exc:
+                logger.warning(
+                    "[rh_adapter] quantity normalization failed ticker=%s qty=%s err=%s",
+                    ticker,
+                    base_size,
+                    exc,
+                )
+                normalized_qty = qty
+            if normalized_qty <= 0.0:
+                return {
+                    "ok": False,
+                    "error": f"invalid normalized equity quantity: {base_size!r}",
+                    "client_order_id": client_order_id,
+                }
+            if abs(normalized_qty - qty) > 1e-12:
+                logger.info(
+                    "[rh_adapter] normalized equity quantity ticker=%s raw=%s normalized=%s",
+                    ticker,
+                    base_size,
+                    normalized_qty,
+                )
+            qty = normalized_qty
 
         # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
         # tier blocks every entry path when live + tripped; pass-through when

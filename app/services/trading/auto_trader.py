@@ -1,6 +1,8 @@
 """AutoTrader v1 orchestrator: pattern-imminent alerts → gates → paper or RH live."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from datetime import datetime, time as datetime_time, timedelta, timezone
@@ -18,6 +20,9 @@ from ...config import (
     AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_MAX_TICK_MAX_SECONDS,
     AUTOTRADER_MIN_TICK_MAX_SECONDS,
+    AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_ENABLED,
+    AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_MINUTES,
+    AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_ENABLED,
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
     AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED,
@@ -1824,6 +1829,149 @@ def _audit(
         logger.debug("[autotrader] shadow_consume failed; ignored", exc_info=True)
 
 
+def _broker_reject_action_fingerprint(
+    alert: BreakoutAlert,
+    *,
+    venue: str,
+    side: str,
+    qty: float,
+    snap: dict[str, Any] | None,
+    order_hint: str | None = None,
+) -> str:
+    """Stable key for a broker submission shape, excluding transient prices."""
+    meta = {}
+    if isinstance(snap, dict):
+        opt = snap.get("option_meta")
+        if isinstance(opt, dict):
+            meta = {
+                "expiration": opt.get("expiration"),
+                "strike": opt.get("strike"),
+                "option_type": opt.get("option_type"),
+                "legs": opt.get("legs") if isinstance(opt.get("legs"), list) else None,
+            }
+    payload = {
+        "venue": str(venue or "unknown").strip().lower(),
+        "side": str(side or "buy").strip().lower(),
+        "ticker": str(getattr(alert, "ticker", "") or "").upper(),
+        "asset_type": str(getattr(alert, "asset_type", "") or "").lower(),
+        "scan_pattern_id": getattr(alert, "scan_pattern_id", None),
+        "qty": round(float(qty or 0.0), QUANTITY_ROUND_DIGITS),
+        "order_hint": str(order_hint or "market").strip().lower(),
+        "options_path": (
+            bool((snap or {}).get("options_path")) if isinstance(snap, dict) else False
+        ),
+        "option_meta": meta,
+    }
+    blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
+
+
+def _broker_reject_suppression(
+    db: Session,
+    alert: BreakoutAlert,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    if not bool(
+        getattr(
+            settings,
+            "chili_autotrader_broker_reject_suppression_enabled",
+            AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_ENABLED,
+        )
+    ):
+        return None
+    minutes = int(
+        getattr(
+            settings,
+            "chili_autotrader_broker_reject_suppression_minutes",
+            AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_MINUTES,
+        )
+        or 0
+    )
+    if minutes <= 0:
+        return None
+    threshold = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "chili_autotrader_broker_reject_suppression_threshold",
+                AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD,
+            )
+            or AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD
+        ),
+    )
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    ticker = str(getattr(alert, "ticker", "") or "").upper()
+    q = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.ticker == ticker)
+        .filter(AutoTraderRun.created_at >= cutoff)
+        .filter(AutoTraderRun.reason.like("broker:%"))
+    )
+    if getattr(alert, "scan_pattern_id", None) is not None:
+        q = q.filter(AutoTraderRun.scan_pattern_id == alert.scan_pattern_id)
+    q = q.order_by(AutoTraderRun.created_at.desc()).limit(max(10, threshold * 5))
+    matches = []
+    for row in q.all():
+        row_snap = row.rule_snapshot if isinstance(row.rule_snapshot, dict) else {}
+        if str(row_snap.get("broker_reject_fingerprint") or "") == fingerprint:
+            matches.append(row)
+            if len(matches) >= threshold:
+                break
+    if len(matches) < threshold:
+        return None
+    last = matches[0]
+    last_reason = str(last.reason or "broker:unknown")
+    return {
+        "fingerprint": fingerprint,
+        "recent_reject_count": len(matches),
+        "window_minutes": minutes,
+        "last_reject_run_id": int(last.id),
+        "last_reject_reason": last_reason,
+    }
+
+
+def _annotate_broker_reject(
+    snap: dict[str, Any],
+    *,
+    fingerprint: str,
+    venue: str,
+    error: Any,
+) -> None:
+    snap["broker_reject_fingerprint"] = fingerprint
+    snap["broker_reject_venue"] = str(venue or "unknown").strip().lower()
+    snap["broker_reject_error"] = str(error or "unknown")[:500]
+
+
+def _maybe_block_repeated_broker_reject(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    fingerprint: str,
+    snap: dict[str, Any],
+    llm_snap: dict[str, Any] | None,
+    out: dict[str, Any],
+) -> bool:
+    suppression = _broker_reject_suppression(db, alert, fingerprint)
+    if suppression is None:
+        return False
+    snap["broker_reject_suppression"] = suppression
+    reason_tail = str(suppression.get("last_reject_reason") or "broker:unknown")
+    if reason_tail.startswith("broker:"):
+        reason_tail = reason_tail[len("broker:"):]
+    _block_live_order(
+        db,
+        uid=uid,
+        alert=alert,
+        reason=f"broker_reject_suppressed:{reason_tail}"[:255],
+        snap=snap,
+        llm_snap=llm_snap,
+        out=out,
+    )
+    return True
+
+
 def _block_live_order(
     db: Session,
     *,
@@ -3228,6 +3376,29 @@ def _process_one_alert(
     _emit_netedge_shadow_score(db, alert, float(px))
     _maybe_emit_regime_diagnostic(db)
 
+    if scale_plan is not None and bool(
+        getattr(alert, "_chili_shadow_observation_only", False)
+    ):
+        shadow_snap = dict(snap or {})
+        shadow_snap["shadow_scale_in_blocked"] = True
+        shadow_snap["shadow_scale_in_existing_trade_id"] = getattr(
+            getattr(scale_plan, "trade", None), "id", None
+        )
+        shadow_snap["shadow_scale_in_policy"] = "observation_only_no_live_mutation"
+        qty = _normalized_scale_in_quantity(alert, scale_plan, shadow_snap)
+        _record_shadow_observation_entry(
+            db,
+            uid=uid,
+            alert=alert,
+            qty=qty,
+            px=px,
+            snap=shadow_snap,
+            llm_snap=llm_snap,
+            live=live,
+            out=out,
+        )
+        return
+
     if scale_plan is not None:
         _execute_scale_in(db, uid, alert, scale_plan, px, snap, llm_snap, live, out)
         return
@@ -3419,6 +3590,29 @@ def _execute_broker_buy(
         # The strategy layer (Q2.T1 vertical_spread / iron_condor /
         # etc.) emits the legs + direction; the autotrader just routes.
         legs = opt_meta.get("legs")
+        option_order_hint = (
+            "option_spread"
+            if isinstance(legs, list) and len(legs) > 1
+            else "option_limit"
+        )
+        reject_fp = _broker_reject_action_fingerprint(
+            alert,
+            venue="robinhood_options",
+            side="buy",
+            qty=float(qty),
+            snap=snap,
+            order_hint=option_order_hint,
+        )
+        if _maybe_block_repeated_broker_reject(
+            db,
+            uid=uid,
+            alert=alert,
+            fingerprint=reject_fp,
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        ):
+            return None
         try:
             if isinstance(legs, list) and len(legs) > 1:
                 res = opt_ad.place_spread(
@@ -3443,6 +3637,12 @@ def _execute_broker_buy(
         except Exception as exc:
             res = {"ok": False, "error": f"options_adapter_exception:{exc}"}
         if not res.get("ok"):
+            _annotate_broker_reject(
+                snap,
+                fingerprint=reject_fp,
+                venue="robinhood_options",
+                error=res.get("error"),
+            )
             _audit(
                 db, user_id=uid, alert=alert,
                 decision="blocked", reason=f"broker:{res.get('error')}",
@@ -3784,6 +3984,24 @@ def _execute_broker_buy(
                         )
                         cb_res = None
                     else:
+                        cb_reject_fp = _broker_reject_action_fingerprint(
+                            alert,
+                            venue="coinbase",
+                            side="buy",
+                            qty=float(qty),
+                            snap=snap,
+                            order_hint="limit_post_only",
+                        )
+                        if _maybe_block_repeated_broker_reject(
+                            db,
+                            uid=uid,
+                            alert=alert,
+                            fingerprint=cb_reject_fp,
+                            snap=snap,
+                            llm_snap=llm_snap,
+                            out=out,
+                        ):
+                            return None
                         cb_res = cb_ad.place_limit_order_gtc(
                             product_id=alert.ticker,
                             side="buy",
@@ -3830,6 +4048,24 @@ def _execute_broker_buy(
                 cb_res = None
 
         if cb_res is None:
+            cb_reject_fp = _broker_reject_action_fingerprint(
+                alert,
+                venue="coinbase",
+                side="buy",
+                qty=float(qty),
+                snap=snap,
+                order_hint="market",
+            )
+            if _maybe_block_repeated_broker_reject(
+                db,
+                uid=uid,
+                alert=alert,
+                fingerprint=cb_reject_fp,
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            ):
+                return None
             cb_res = cb_ad.place_market_order(
                 product_id=alert.ticker,
                 side="buy",
@@ -3837,6 +4073,12 @@ def _execute_broker_buy(
                 client_order_id=client_order_id,
             )
         if not cb_res.get("ok"):
+            _annotate_broker_reject(
+                snap,
+                fingerprint=cb_reject_fp,
+                venue="coinbase",
+                error=cb_res.get("error"),
+            )
             _audit(
                 db, user_id=uid, alert=alert,
                 decision="blocked",
@@ -3943,6 +4185,25 @@ def _execute_broker_buy(
                 _ticker, exc_info=True,
             )
 
+    rh_reject_fp = _broker_reject_action_fingerprint(
+        alert,
+        venue="robinhood",
+        side="buy",
+        qty=float(qty),
+        snap=snap,
+        order_hint="market",
+    )
+    if _maybe_block_repeated_broker_reject(
+        db,
+        uid=uid,
+        alert=alert,
+        fingerprint=rh_reject_fp,
+        snap=snap,
+        llm_snap=llm_snap,
+        out=out,
+    ):
+        return None
+
     res = ad.place_market_order(
         product_id=alert.ticker,
         side="buy",
@@ -3950,6 +4211,12 @@ def _execute_broker_buy(
         client_order_id=client_order_id,
     )
     if not res.get("ok"):
+        _annotate_broker_reject(
+            snap,
+            fingerprint=rh_reject_fp,
+            venue="robinhood",
+            error=res.get("error"),
+        )
         _audit(
             db,
             user_id=uid,
@@ -3982,7 +4249,24 @@ def _execute_scale_in(
     out: dict[str, Any],
 ) -> None:
     t = plan.trade
-    add_q = float(plan.added_quantity)
+    add_q = _normalized_scale_in_quantity(alert, plan, snap)
+    if add_q <= 0.0:
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="skipped",
+            reason="scale_in_notional_below_trade_unit",
+            rule_snapshot=snap,
+        )
+        out["skipped"] = out.get("skipped", 0) + 1
+        _autotrader_tick_note(
+            out,
+            kind="skipped",
+            reason="scale_in_notional_below_trade_unit",
+            alert=alert,
+        )
+        return
     if live:
         if bool(getattr(settings, "chili_autotrader_block_live_on_capital_fallback", True)):
             try:
@@ -4066,6 +4350,31 @@ def _execute_scale_in(
     _autotrader_tick_note(out, kind="scaled_in", reason="ok", alert=alert)
 
 
+def _normalized_scale_in_quantity(
+    alert: BreakoutAlert,
+    plan: Any,
+    snap: dict[str, Any],
+) -> float:
+    """Return broker-safe scale-in quantity and persist the normalization audit."""
+    try:
+        raw_add_q = float(getattr(plan, "added_quantity", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        raw_add_q = 0.0
+    try:
+        from .tick_normalizer import normalize_quantity
+
+        normalized = float(normalize_quantity(raw_add_q, alert.ticker))
+        source = "tick_normalizer"
+    except Exception:
+        normalized = raw_add_q
+        source = "raw_fallback"
+        snap["scale_in_qty_normalization_error"] = "tick_normalizer_failed"
+    snap["scale_in_qty_raw"] = round(raw_add_q, QUANTITY_ROUND_DIGITS)
+    snap["scale_in_qty_normalized"] = round(normalized, QUANTITY_ROUND_DIGITS)
+    snap["scale_in_qty_source"] = source
+    return normalized if normalized > 0.0 else 0.0
+
+
 def _record_shadow_observation_entry(
     db: Session,
     *,
@@ -4094,15 +4403,31 @@ def _record_shadow_observation_entry(
             "_chili_shadow_observation_signal_lane",
             None,
         )
+    pattern = _pattern_row(db, alert.scan_pattern_id)
     _shadow_stock_fastlane = _queue_shadow_stock_fastlane_for_observation(
         db,
         alert=alert,
-        pattern=_pattern_row(db, alert.scan_pattern_id),
+        pattern=pattern,
         reason=_reason,
         snap=snap,
     )
     if _shadow_stock_fastlane is not None:
         snap["shadow_stock_fastlane"] = _shadow_stock_fastlane
+    _signal_lane = str(
+        getattr(alert, "_chili_shadow_observation_signal_lane", "") or ""
+    ).strip().lower()
+    if (
+        _signal_lane == HARD_RECERT_SHADOW_SIGNAL_LANE
+        or bool(getattr(pattern, "recert_required", False))
+    ):
+        _recert_fastlane = _queue_recert_for_blocked_signal(
+            db,
+            alert=alert,
+            pattern=pattern,
+            reason=_reason,
+        )
+        if _recert_fastlane is not None:
+            snap["recert_signal_fastlane"] = _recert_fastlane
     _audit(
         db,
         user_id=uid,

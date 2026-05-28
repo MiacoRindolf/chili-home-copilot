@@ -20,6 +20,7 @@ _INACTIVE_EQUITY_SYMBOLS = frozenset({
 })
 
 _COMPACT_PREFERRED_SYMBOL_RE = re.compile(r"^[A-Z]{3,5}P[A-Z]$")
+_COMPACT_SPAC_DERIVATIVE_RE = re.compile(r"^[A-Z]{4}[RUW]$")
 _UNSUPPORTED_LISTED_EQUITY_SUFFIXES = (
     ".WS",
     ".W",
@@ -49,6 +50,7 @@ def _is_unsupported_common_stock_symbol(symbol: str) -> bool:
     """Return True for non-common equity forms scanners should not trade."""
     return (
         bool(_COMPACT_PREFERRED_SYMBOL_RE.fullmatch(symbol))
+        or bool(_COMPACT_SPAC_DERIVATIVE_RE.fullmatch(symbol))
         or symbol.endswith(_UNSUPPORTED_LISTED_EQUITY_SUFFIXES)
     )
 

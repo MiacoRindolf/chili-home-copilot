@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import os
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -19,7 +20,9 @@ from sqlalchemy import text
 
 from app.services.trading.pattern_quality_score import (
     compute_quality_composite_score,
+    _composite_weight_sum,
     _load_realized_pnl_map,
+    _resolve_weights,
     realized_pnl_score,
     realized_evidence_score,
 )
@@ -135,6 +138,25 @@ _NEW_WEIGHTS = {
     "decay_inverse": 0.10,
     "realized": 0.35,
 }
+
+
+def test_composite_weight_sum_ignores_non_weight_settings():
+    settings = SimpleNamespace(
+        chili_cohort_score_weight_cpcv_sharpe=0.10,
+        chili_cohort_score_weight_deflated_sharpe=0.05,
+        chili_cohort_score_weight_pbo_inverse=0.05,
+        chili_cohort_score_weight_directional_wr=0.35,
+        chili_cohort_score_weight_decay_inverse=0.10,
+        chili_cohort_score_weight_realized=0.35,
+        chili_cohort_score_realized_pnl_normalizer_pct=0.01,
+        chili_cohort_score_realized_evidence_tau=30.0,
+        chili_cohort_score_realized_window_days=90,
+    )
+
+    weights = _resolve_weights(settings)
+
+    assert sum(weights.values()) == pytest.approx(121.01)
+    assert _composite_weight_sum(weights) == pytest.approx(1.0)
 
 
 def _build_anti_corr_dataset():

@@ -27,6 +27,10 @@ from ..symbol_hygiene import clean_equity_universe, normalize_equity_symbol
 logger = logging.getLogger(__name__)
 
 _MIN_PROVIDER_WORKERS = 1
+_OHLCV_QUALITY_REJECT_LOG_TTL = 300.0
+_OHLCV_QUALITY_REJECT_CACHE_ATTR = "quality_rejected"
+_ohlcv_quality_reject_log_cache: dict[str, float] = {}
+_ohlcv_quality_reject_log_lock = threading.Lock()
 
 
 def _is_crypto_ticker(ticker: str) -> bool:
@@ -56,6 +60,52 @@ def _log_ohlcv_outcome(
     )
 
 
+def _quality_rejected_df(
+    *,
+    ticker: str,
+    interval: str,
+    provider: str,
+    integrity: dict[str, Any],
+) -> pd.DataFrame:
+    out = pd.DataFrame()
+    out.attrs["integrity_ok"] = False
+    out.attrs[_OHLCV_QUALITY_REJECT_CACHE_ATTR] = True
+    out.attrs["provider"] = provider
+    out.attrs["ticker"] = ticker.upper()
+    out.attrs["interval"] = interval
+    out.attrs["quality_issues"] = list(integrity.get("issues") or [])
+    out.attrs["fetched_at_utc"] = datetime.utcnow().isoformat() + "Z"
+    return out
+
+
+def _is_quality_rejected_df(df: pd.DataFrame) -> bool:
+    return bool(df is not None and df.empty and df.attrs.get(_OHLCV_QUALITY_REJECT_CACHE_ATTR))
+
+
+def _log_ohlcv_integrity_failure(
+    *,
+    ticker: str,
+    interval: str,
+    provider: str,
+    integrity: dict[str, Any],
+) -> None:
+    issues = ",".join(str(x) for x in (integrity.get("issues") or []))
+    key = f"{ticker.upper()}|{interval}|{provider}|{issues}"
+    now = _time.monotonic()
+    with _ohlcv_quality_reject_log_lock:
+        last = _ohlcv_quality_reject_log_cache.get(key)
+        if last is not None and now - last < _OHLCV_QUALITY_REJECT_LOG_TTL:
+            return
+        _ohlcv_quality_reject_log_cache[key] = now
+    logger.warning(
+        "[market_data] OHLCV integrity failed ticker=%s interval=%s provider=%s: %s",
+        ticker,
+        interval,
+        provider,
+        integrity,
+    )
+
+
 def _finalize_ohlcv_df(df: pd.DataFrame, *, ticker: str, interval: str, provider: str) -> pd.DataFrame:
     """Clean, validate, and annotate OHLCV data with provenance metadata."""
     if df is None or df.empty:
@@ -67,16 +117,20 @@ def _finalize_ohlcv_df(df: pd.DataFrame, *, ticker: str, interval: str, provider
         # Round-21 FIX (2026-04-30): pass ticker so clean_ohlcv can skip
         # zero-volume rejection for index series (^VIX, ^GSPC, I:VIX).
         out = clean_ohlcv(out, symbol=ticker)
-        integrity = validate_ohlcv_integrity(out)
+        integrity = validate_ohlcv_integrity(out, symbol=ticker, interval=interval)
         if not integrity.get("clean", False):
-            logger.warning(
-                "[market_data] OHLCV integrity failed ticker=%s interval=%s provider=%s: %s",
-                ticker,
-                interval,
-                provider,
-                integrity,
+            _log_ohlcv_integrity_failure(
+                ticker=ticker,
+                interval=interval,
+                provider=provider,
+                integrity=integrity,
             )
-            return pd.DataFrame()
+            return _quality_rejected_df(
+                ticker=ticker,
+                interval=interval,
+                provider=provider,
+                integrity=integrity,
+            )
         out.attrs["integrity_ok"] = True
     except Exception:
         out.attrs["integrity_ok"] = False
@@ -397,6 +451,8 @@ def clear_ohlcv_cache() -> None:
     """Drop the in-memory OHLCV DataFrame cache."""
     with _ohlcv_df_lock:
         _ohlcv_df_cache.clear()
+    with _ohlcv_quality_reject_log_lock:
+        _ohlcv_quality_reject_log_cache.clear()
 
 
 def invalidate_ohlcv_cache_for_ticker(ticker: str) -> int:
@@ -447,7 +503,7 @@ def fetch_ohlcv_df(
     _end_str = str(end)[:10] if end else None
 
     def _store_and_return(result: pd.DataFrame) -> pd.DataFrame:
-        if not result.empty:
+        if not result.empty or _is_quality_rejected_df(result):
             with _ohlcv_df_lock:
                 if len(_ohlcv_df_cache) >= _OHLCV_DF_MAX:
                     _ohlcv_df_cache.clear()
@@ -462,16 +518,30 @@ def fetch_ohlcv_df(
                 ticker, interval=interval, period=period,
                 start=_start_str, end=_end_str,
             )
+            quality_rejected = False
             if not df.empty:
                 _log_ohlcv_outcome(
                     ticker, interval, provider="massive", reason="ok", row_count=len(df),
                 )
-                return _store_and_return(
-                    _finalize_ohlcv_df(df, ticker=ticker, interval=interval, provider="massive")
+                finalized = _finalize_ohlcv_df(
+                    df, ticker=ticker, interval=interval, provider="massive"
                 )
+                if not finalized.empty:
+                    return _store_and_return(finalized)
+                if _is_quality_rejected_df(finalized):
+                    _log_ohlcv_outcome(
+                        ticker,
+                        interval,
+                        provider="massive",
+                        reason="quality_rejected_try_fallback" if fb else "quality_rejected_no_fallback",
+                        row_count=0,
+                    )
+                    if not fb:
+                        return _store_and_return(finalized)
+                    quality_rejected = True
             if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
-            else:
+            elif not quality_rejected:
                 _log_ohlcv_outcome(
                     ticker, interval, provider="massive", reason="empty_try_fallback", row_count=0,
                 )
@@ -534,16 +604,29 @@ def fetch_ohlcv_df(
                 ticker, interval=interval, period=period,
                 start=_start_str, end=_end_str,
             )
+            quality_rejected = False
             if not df.empty:
                 _log_ohlcv_outcome(
                     ticker, interval, provider="polygon", reason="ok", row_count=len(df),
                 )
-                return _store_and_return(
-                    _finalize_ohlcv_df(df, ticker=ticker, interval=interval, provider="polygon")
+                finalized = _finalize_ohlcv_df(
+                    df, ticker=ticker, interval=interval, provider="polygon"
                 )
-            _log_ohlcv_outcome(
-                ticker, interval, provider="polygon", reason="empty_try_fallback", row_count=0,
-            )
+                if not finalized.empty:
+                    return _store_and_return(finalized)
+                if _is_quality_rejected_df(finalized):
+                    _log_ohlcv_outcome(
+                        ticker,
+                        interval,
+                        provider="polygon",
+                        reason="quality_rejected_try_fallback",
+                        row_count=0,
+                    )
+                    quality_rejected = True
+            if not quality_rejected:
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="polygon", reason="empty_try_fallback", row_count=0,
+                )
         except Exception as e:
             logger.warning(f"[market_data] Polygon DF failed for {ticker}: {e}")
             _log_ohlcv_outcome(

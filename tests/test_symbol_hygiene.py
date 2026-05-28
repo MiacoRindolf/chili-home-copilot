@@ -14,6 +14,7 @@ ACTIVE_CONTROL_TICKER = "AAPL"
 COMPACT_PREFERRED_TICKERS = ["BACPM", "COFPJ", "ARESPB"]
 COMMON_INTERNAL_P_TICKER = "APPS"
 WARRANT_TICKERS = ["LVWR.WS", "BKSY.WS", "TE.WS", "NPWR.WS"]
+COMPACT_SPAC_DERIVATIVE_TICKERS = ["BRUNW", "SPACU", "SPACR"]
 LISTED_UNIT_TICKER = "SPAC.U"
 LISTED_RIGHT_TICKER = "SPAC.R"
 CLASS_SHARE_CONTROL_TICKER = "BRK.B"
@@ -33,7 +34,12 @@ def test_equity_symbol_hygiene_drops_compact_preferred_symbols() -> None:
 
 
 def test_equity_symbol_hygiene_drops_warrants_units_and_rights() -> None:
-    for ticker in [*WARRANT_TICKERS, LISTED_UNIT_TICKER, LISTED_RIGHT_TICKER]:
+    for ticker in [
+        *WARRANT_TICKERS,
+        *COMPACT_SPAC_DERIVATIVE_TICKERS,
+        LISTED_UNIT_TICKER,
+        LISTED_RIGHT_TICKER,
+    ]:
         assert normalize_equity_symbol(ticker) == ""
     assert normalize_equity_symbol(CLASS_SHARE_CONTROL_TICKER) == CLASS_SHARE_CONTROL_TICKER
 

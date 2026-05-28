@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import logging
 import os
 import signal
+import time
 from collections.abc import Mapping
 from types import FrameType
 
@@ -29,7 +30,11 @@ PRESCREEN_FULL_TIER_PRIORITY_FLOOR = 50
 STORED_REFRESH_STALE_TRADE_CAP_FALLBACK = 2
 STORED_REFRESH_STALE_DAYS_FALLBACK = 14
 QUEUE_PATTERN_WALLTIME_SECONDS_ENV = "CHILI_BACKTEST_QUEUE_PATTERN_WALLTIME_SECONDS"
+QUEUE_PATTERN_SOFT_DEADLINE_FRACTION_ENV = (
+    "CHILI_BACKTEST_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION"
+)
 DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS = 900.0
+DEFAULT_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION = 0.85
 DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS = 0.0
 
 
@@ -51,6 +56,22 @@ def _non_negative_float(value: object, fallback: float) -> float:
     except (TypeError, ValueError):
         parsed = float(fallback)
     return max(DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS, parsed)
+
+
+def _non_negative_int(value: object, fallback: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = int(fallback)
+    return max(0, parsed)
+
+
+def _bounded_fraction(value: object, fallback: float) -> float:
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        parsed = float(fallback)
+    return max(0.10, min(0.98, parsed))
 
 
 def queue_pattern_walltime_seconds(
@@ -75,6 +96,38 @@ def queue_pattern_walltime_seconds(
         ),
         DEFAULT_QUEUE_PATTERN_WALLTIME_SECONDS,
     )
+
+
+def queue_pattern_soft_runtime_seconds(
+    settings_obj: object | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> float | None:
+    """Soft queue budget passed into smart backtests before the hard kill."""
+    hard_seconds = queue_pattern_walltime_seconds(settings_obj=settings_obj, environ=environ)
+    if hard_seconds <= DISABLED_QUEUE_PATTERN_WALLTIME_SECONDS:
+        return None
+    env = environ if environ is not None else os.environ
+    raw_env = env.get(QUEUE_PATTERN_SOFT_DEADLINE_FRACTION_ENV)
+    if raw_env is not None and str(raw_env).strip():
+        fraction = _bounded_fraction(
+            raw_env,
+            DEFAULT_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION,
+        )
+    else:
+        if settings_obj is None:
+            try:
+                from ...config import settings as settings_obj
+            except Exception:
+                settings_obj = None
+        fraction = _bounded_fraction(
+            getattr(
+                settings_obj,
+                "brain_queue_pattern_soft_deadline_fraction",
+                DEFAULT_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION,
+            ),
+            DEFAULT_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION,
+        )
+    return hard_seconds * fraction
 
 
 @contextmanager
@@ -134,11 +187,27 @@ def _operational_refresh_lane(settings: object, pattern: object) -> bool:
     return lifecycle in allowed
 
 
+def _intraday_queue_lane(settings: object, pattern: object) -> bool:
+    timeframe = str(getattr(pattern, "timeframe", "") or "").strip().lower()
+    if not timeframe:
+        return False
+    intraday_timeframes = _csv_tokens(
+        getattr(settings, "brain_queue_intraday_timeframes", "1m,5m,15m")
+    )
+    return timeframe in intraday_timeframes
+
+
 def queue_target_tickers_for_pattern(settings: object, pattern: object) -> int:
     full_target = _positive_int(
         getattr(settings, "brain_queue_target_tickers", None),
         MIN_QUEUE_TICKER_COUNT,
     )
+    if _intraday_queue_lane(settings, pattern):
+        intraday_target = _positive_int(
+            getattr(settings, "brain_queue_intraday_target_tickers", None),
+            full_target,
+        )
+        full_target = min(full_target, intraday_target)
     if not _operational_refresh_lane(settings, pattern):
         return full_target
     operational_target = _positive_int(
@@ -146,6 +215,15 @@ def queue_target_tickers_for_pattern(settings: object, pattern: object) -> int:
         full_target,
     )
     return min(full_target, operational_target)
+
+
+def queue_backtest_can_certify_result(result: Mapping[str, object]) -> bool:
+    """Return whether a queue result is complete enough to certify gates."""
+    if not bool(result.get("soft_deadline_hit")):
+        return True
+    selected = _non_negative_int(result.get("tickers_selected"))
+    attempted = _non_negative_int(result.get("backtests_run"))
+    return selected <= 0 or attempted >= selected
 
 
 def queue_stored_refresh_max_tickers_for_pattern(settings: object, pattern: object) -> int:
@@ -162,6 +240,48 @@ def queue_stored_refresh_max_tickers_for_pattern(settings: object, pattern: obje
     return min(full_target, operational_target)
 
 
+def mark_walltime_timeout_pattern(db, pattern, *, timeout_seconds: float) -> None:
+    """Record a walltime timeout and move non-operational rows to cheap prescreen."""
+    from datetime import datetime
+
+    from .backtest_queue import (
+        QUEUE_TIER_FULL,
+        QUEUE_TIER_PRESCREEN,
+        ZERO_TRADE_DEMOTE_PROTECTED_LIFECYCLES,
+        invalidate_queue_status_cache,
+    )
+
+    pattern.last_backtest_at = datetime.utcnow()
+    pattern.backtest_priority = 0
+    cur = max(0, int(getattr(pattern, "consecutive_zero_trade_runs", 0) or 0))
+    pattern.consecutive_zero_trade_runs = cur + 1
+    lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
+    protected = lifecycle in ZERO_TRADE_DEMOTE_PROTECTED_LIFECYCLES
+    old_tier = str(getattr(pattern, "queue_tier", None) or QUEUE_TIER_FULL)
+    if not protected and old_tier != QUEUE_TIER_PRESCREEN:
+        pattern.queue_tier = QUEUE_TIER_PRESCREEN
+        logger.warning(
+            "[backtest_queue] walltime_demote pattern_id=%s lifecycle=%s "
+            "timeout_s=%.1f queue_tier %s -> %s",
+            getattr(pattern, "id", None),
+            lifecycle,
+            timeout_seconds,
+            old_tier,
+            QUEUE_TIER_PRESCREEN,
+        )
+    elif protected:
+        logger.info(
+            "[backtest_queue] walltime_protected pattern_id=%s lifecycle=%s "
+            "timeout_s=%.1f consecutive_zero_trade_runs=%s",
+            getattr(pattern, "id", None),
+            lifecycle,
+            timeout_seconds,
+            pattern.consecutive_zero_trade_runs,
+        )
+    db.commit()
+    invalidate_queue_status_cache()
+
+
 def configure_multiprocess_child_db_env(pool_size: int, max_overflow: int) -> None:
     """Run in pool initializer: small SQLAlchemy pool per child process."""
     os.environ[CHILD_ENV_FLAG] = "1"
@@ -174,7 +294,11 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
     from ...config import settings
     from ...db import SessionLocal
     from ...models.trading import ScanPattern, TradingInsight
-    from .backtest_queue import mark_pattern_tested
+    from .backtest_queue import (
+        mark_pattern_tested,
+        release_pattern_backtest_lock,
+        try_acquire_pattern_backtest_lock,
+    )
     from .backtest_engine import hydrate_scan_pattern_rules_json, smart_backtest_insight
     from .learning_events import log_learning_event
     from datetime import datetime
@@ -206,8 +330,27 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 exc_info=True,
             )
 
+    def _defer_recert_for_partial_result(result: Mapping[str, object]) -> None:
+        logger.info(
+            "[backtest_queue] recert completion deferred pattern_id=%s "
+            "soft_deadline_hit=%s backtests_run=%s selected_tickers=%s",
+            getattr(pattern, "id", None),
+            bool(result.get("soft_deadline_hit")),
+            result.get("backtests_run"),
+            result.get("tickers_selected"),
+        )
+
     db = SessionLocal()
+    lock_acquired = False
+    pattern_started = time.monotonic()
     try:
+        if not try_acquire_pattern_backtest_lock(db, int(pattern_id)):
+            logger.info(
+                "[backtest_queue] pattern_id=%s already leased by another worker; skipping",
+                pattern_id,
+            )
+            return (0, 0)
+        lock_acquired = True
         pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
         if not pattern:
             return (0, 0)
@@ -264,6 +407,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 target_tickers,
                 stored_refresh_max_tickers,
             )
+        soft_runtime_seconds = queue_pattern_soft_runtime_seconds(settings)
 
         prio: list[str] = []
         if getattr(settings, "brain_queue_priority_stored_refresh", True):
@@ -318,10 +462,12 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 update_confidence=True,
                 period=getattr(settings, "brain_queue_prescreen_period", "3mo"),
                 priority_tickers=prio if prio else None,
+                max_runtime_seconds=soft_runtime_seconds,
             )
             total = result.get("total", 0)
             wins = result.get("wins", 0)
             backtests_run = result.get("backtests_run", 0)
+            certification_complete = queue_backtest_can_certify_result(result)
             wr_pct = (wins / total * 100.0) if total > 0 else 0.0
             min_pre = float(
                 getattr(
@@ -340,15 +486,18 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 backtests_run=backtests_run,
                 trade_bearing_tickers=total,
             )
-            _complete_recert_if_open(
-                total=total,
-                wins=wins,
-                win_rate=win_rate,
-                avg_return=avg_return,
-                backtests_run=backtests_run,
-            )
+            if certification_complete:
+                _complete_recert_if_open(
+                    total=total,
+                    wins=wins,
+                    win_rate=win_rate,
+                    avg_return=avg_return,
+                    backtests_run=backtests_run,
+                )
+            else:
+                _defer_recert_for_partial_result(result)
             pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
-            if pattern and total >= 2 and wr_pct >= min_pre:
+            if certification_complete and pattern and total >= 2 and wr_pct >= min_pre:
                 pattern.queue_tier = "full"
                 pattern.backtest_priority = max(
                     int(pattern.backtest_priority or 0),
@@ -365,7 +514,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     f"Prescreen pass: '{pattern.name}' ({wins}/{total}, {wr_pct:.0f}% wr) → full tier",
                     related_insight_id=insight.id,
                 )
-            elif pattern and total >= 2:
+            elif certification_complete and pattern and total >= 2:
                 _op = (pattern.promotion_status or "").strip()
                 _ol = (pattern.lifecycle_stage or "").strip()
                 pattern.active = False
@@ -397,7 +546,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     f"Prescreen reject: '{pattern.name}' ({wins}/{total}, {wr_pct:.0f}% wr)",
                     related_insight_id=insight.id,
                 )
-            else:
+            elif certification_complete:
                 _complete_recert_if_open(
                     total=total,
                     wins=wins,
@@ -405,6 +554,30 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     avg_return=avg_return,
                     backtests_run=backtests_run,
                 )
+            logger.info(
+                "[backtest_queue] pattern_done pattern_id=%s tier=prescreen "
+                "target_tickers=%s priority_tickers=%s backtests_run=%s "
+                "selected_tickers=%s soft_deadline_hit=%s "
+                "trade_bearing_tickers=%s wins=%s elapsed_s=%.2f",
+                pattern.id,
+                max(
+                    PRESCREEN_MIN_TICKERS_FALLBACK,
+                    int(
+                        getattr(
+                            settings,
+                            "brain_queue_prescreen_tickers",
+                            PRESCREEN_TICKERS_FALLBACK,
+                        )
+                    ),
+                ),
+                len(prio),
+                backtests_run,
+                result.get("tickers_selected"),
+                bool(result.get("soft_deadline_hit")),
+                total,
+                wins,
+                time.monotonic() - pattern_started,
+            )
             return (backtests_run, 1)
 
         result = smart_backtest_insight(
@@ -413,10 +586,12 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             target_tickers=target_tickers,
             update_confidence=True,
             priority_tickers=prio if prio else None,
+            max_runtime_seconds=soft_runtime_seconds,
         )
         total = result.get("total", 0)
         wins = result.get("wins", 0)
         backtests_run = result.get("backtests_run", 0)
+        certification_complete = queue_backtest_can_certify_result(result)
         win_rate = wins / total if total >= 3 else None
         avg_return = result.get("avg_return")
         mark_pattern_tested(
@@ -427,13 +602,16 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             backtests_run=backtests_run,
             trade_bearing_tickers=total,
         )
-        _complete_recert_if_open(
-            total=total,
-            wins=wins,
-            win_rate=win_rate,
-            avg_return=avg_return,
-            backtests_run=backtests_run,
-        )
+        if certification_complete:
+            _complete_recert_if_open(
+                total=total,
+                wins=wins,
+                win_rate=win_rate,
+                avg_return=avg_return,
+                backtests_run=backtests_run,
+            )
+        else:
+            _defer_recert_for_partial_result(result)
         if total >= 3:
             log_learning_event(
                 db,
@@ -447,27 +625,68 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         # cpcv_gate handler runs the CPCV promotion gate. Pre-fix the
         # FIX 34 loop bypassed the event path entirely. Per-call
         # try/except so a broken emit can't block the backtest return.
-        try:
-            from .brain_work.emitters import emit_backtest_completed_outcome
-            emit_backtest_completed_outcome(
-                db,
-                scan_pattern_id=int(pattern.id),
-                user_id=user_id,
-                backtests_run=int(backtests_run),
-                win_rate=win_rate,
-                avg_return=avg_return,
-            )
-            db.commit()
-        except Exception:
-            logger.warning(
-                "[backtest_queue] emit_backtest_completed failed pattern_id=%s",
-                pattern.id, exc_info=True,
-            )
+        if certification_complete:
             try:
-                db.rollback()
+                from .brain_work.emitters import emit_backtest_completed_outcome
+                emit_backtest_completed_outcome(
+                    db,
+                    scan_pattern_id=int(pattern.id),
+                    user_id=user_id,
+                    backtests_run=int(backtests_run),
+                    win_rate=win_rate,
+                    avg_return=avg_return,
+                )
+                db.commit()
             except Exception:
-                pass
+                logger.warning(
+                    "[backtest_queue] emit_backtest_completed failed pattern_id=%s",
+                    pattern.id, exc_info=True,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        else:
+            logger.info(
+                "[backtest_queue] emit_backtest_completed skipped for partial "
+                "result pattern_id=%s backtests_run=%s selected_tickers=%s",
+                pattern.id,
+                backtests_run,
+                result.get("tickers_selected"),
+            )
+        logger.info(
+            "[backtest_queue] pattern_done pattern_id=%s tier=full "
+            "target_tickers=%s priority_tickers=%s backtests_run=%s "
+            "selected_tickers=%s soft_deadline_hit=%s "
+            "trade_bearing_tickers=%s wins=%s elapsed_s=%.2f",
+            pattern.id,
+            target_tickers,
+            len(prio),
+            backtests_run,
+            result.get("tickers_selected"),
+            bool(result.get("soft_deadline_hit")),
+            total,
+            wins,
+            time.monotonic() - pattern_started,
+        )
         return (backtests_run, 1)
+    except QueuePatternWalltimeExceeded as e:
+        logger.warning("[backtest_queue] Failed to backtest pattern %s: %s", pattern_id, e)
+        try:
+            pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
+            if pattern:
+                mark_walltime_timeout_pattern(
+                    db,
+                    pattern,
+                    timeout_seconds=queue_pattern_walltime_seconds(settings),
+                )
+        except Exception:
+            logger.debug(
+                "[backtest_queue] walltime timeout marking failed pattern_id=%s",
+                pattern_id,
+                exc_info=True,
+            )
+        return (0, 1)
     except Exception as e:
         logger.warning("[backtest_queue] Failed to backtest pattern %s: %s", pattern_id, e)
         try:
@@ -478,6 +697,12 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             pass
         return (0, 1)
     finally:
+        if lock_acquired:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            release_pattern_backtest_lock(db, int(pattern_id))
         # FIX 46 pattern (rollback before close).
         try:
             db.rollback()

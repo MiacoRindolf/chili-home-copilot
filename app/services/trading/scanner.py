@@ -5211,6 +5211,14 @@ def run_full_market_scan(
         if t not in scan_list:
             scan_list.append(t)
 
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "[trading] Full market scan pre-score rollback failed; continuing",
+            exc_info=True,
+        )
+
     _scan_status["tickers_total"] = len(scan_list)
     _scan_status["tickers_scanned"] = 0
     _scan_status["tickers_scored"] = 0

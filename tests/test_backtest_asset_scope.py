@@ -8,9 +8,9 @@ from app.services.trading.backtest_engine import (
     effective_backtest_asset_universe,
 )
 
-_MARKET_STRUCTURE_TOKENS = {"BOS", "FVG", "HTF", "LTF", "MSS"}
-_PRICE_ACTION_TOKENS = {"HOD", "LOD", "HH", "LL"}
-_INDICATOR_ONLY_TOKENS = {"IBS"}
+_MARKET_STRUCTURE_TOKENS = {"BOS", "CHOCH", "FVG", "HTF", "LTF", "MSS", "POI", "VCP"}
+_PRICE_ACTION_TOKENS = {"HOD", "LOD", "HH", "LL", "ORB"}
+_INDICATOR_ONLY_TOKENS = {"AVWAP", "IBS", "RVOL"}
 _NON_TICKER_CONTEXT_TOKENS = (
     _MARKET_STRUCTURE_TOKENS | _PRICE_ACTION_TOKENS | _INDICATOR_ONLY_TOKENS
 )
@@ -103,6 +103,7 @@ def test_extract_context_ignores_strategy_abbreviations_as_tickers():
     ctx = _extract_context(
         "Stock pullback uses FVG with BOS confirmation across HTF/LTF plus MSS; "
         "HOD reclaim forms after HH/LL liquidity language; "
+        "VCP compression tags POI after CHOCH, ORB and AVWAP/RVOL filters; "
         "IBS mean reversion validates "
         f"on {_REAL_STOCK_MENTION} and {_REAL_CRYPTO_MENTION}."
     )

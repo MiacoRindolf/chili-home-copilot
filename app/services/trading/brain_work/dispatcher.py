@@ -208,6 +208,10 @@ def _dispatch_limits(
     *,
     max_backtest: int | None = None,
     max_exec_feedback: int | None = None,
+    max_edge_reliability: int | None = None,
+    max_recert_rescue: int | None = None,
+    max_exit_variant: int | None = None,
+    max_provenance: int | None = None,
     max_mine: int | None = None,
     max_cpcv_gate: int | None = None,
     max_promote: int | None = None,
@@ -219,6 +223,26 @@ def _dispatch_limits(
         max_exec_feedback
         if max_exec_feedback is not None
         else getattr(settings, "brain_work_exec_feedback_batch_size", 3)
+    )
+    er = int(
+        max_edge_reliability
+        if max_edge_reliability is not None
+        else getattr(settings, "brain_work_edge_reliability_batch_size", 4)
+    )
+    rr = int(
+        max_recert_rescue
+        if max_recert_rescue is not None
+        else getattr(settings, "brain_work_recert_rescue_batch_size", 2)
+    )
+    xv = int(
+        max_exit_variant
+        if max_exit_variant is not None
+        else getattr(settings, "brain_work_exit_variant_batch_size", 2)
+    )
+    pb = int(
+        max_provenance
+        if max_provenance is not None
+        else getattr(settings, "brain_work_provenance_batch_size", 1)
     )
     # FIX 36 (Phase 2, 2026-04-29): cap mine to 1 per dispatch round — mining
     # is heavy and there's no value in running the same handler twice in a
@@ -256,6 +280,10 @@ def _dispatch_limits(
     )
     return [
         ("execution_feedback_digest", max(0, ex)),
+        ("edge_reliability_refresh", max(0, er)),
+        ("recert_rescue_refresh", max(0, rr)),
+        ("exit_variant_refresh", max(0, xv)),
+        ("provenance_backfill", max(0, pb)),
         ("market_snapshots_batch", max(0, mn)),
         ("backtest_requested", max(0, bt)),
         ("backtest_completed", max(0, cg)),
@@ -272,6 +300,10 @@ def run_brain_work_dispatch_round(
     user_id: int | None = None,
     max_backtest: int | None = None,
     max_exec_feedback: int | None = None,
+    max_edge_reliability: int | None = None,
+    max_recert_rescue: int | None = None,
+    max_exit_variant: int | None = None,
+    max_provenance: int | None = None,
     max_mine: int | None = None,
     max_cpcv_gate: int | None = None,
     max_promote: int | None = None,
@@ -297,6 +329,10 @@ def run_brain_work_dispatch_round(
     for event_type, lim in _dispatch_limits(
         max_backtest=max_backtest,
         max_exec_feedback=max_exec_feedback,
+        max_edge_reliability=max_edge_reliability,
+        max_recert_rescue=max_recert_rescue,
+        max_exit_variant=max_exit_variant,
+        max_provenance=max_provenance,
         max_mine=max_mine,
         max_cpcv_gate=max_cpcv_gate,
         max_promote=max_promote,
@@ -316,6 +352,18 @@ def run_brain_work_dispatch_round(
                     _handle_backtest_requested(db, ev, user_id)
                 elif event_type == "execution_feedback_digest":
                     _handle_execution_feedback_digest(db, ev, user_id)
+                elif event_type == "edge_reliability_refresh":
+                    from .handlers.profitability import handle_edge_reliability_refresh
+                    handle_edge_reliability_refresh(db, ev, user_id)
+                elif event_type == "recert_rescue_refresh":
+                    from .handlers.profitability import handle_recert_rescue_refresh
+                    handle_recert_rescue_refresh(db, ev, user_id)
+                elif event_type == "exit_variant_refresh":
+                    from .handlers.profitability import handle_exit_variant_refresh
+                    handle_exit_variant_refresh(db, ev, user_id)
+                elif event_type == "provenance_backfill":
+                    from .handlers.profitability import handle_provenance_backfill
+                    handle_provenance_backfill(db, ev, user_id)
                 elif event_type == "market_snapshots_batch":
                     # FIX 36 (Phase 2, 2026-04-29): event-driven mine handler.
                     # Replaces Step 1 of run_learning_cycle.

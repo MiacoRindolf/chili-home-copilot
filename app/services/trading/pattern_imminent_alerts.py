@@ -40,6 +40,7 @@ from ...config import (
     PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES,
     PATTERN_IMMINENT_SCORE_DEFAULT_TIME_BUDGET_SECONDS,
     PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS,
+    PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_EXPECTED_NET_PCT,
     PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT,
     PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS,
     settings,
@@ -981,21 +982,35 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _expected_net_pct_from_rule_snapshot(snapshot: Any) -> float | None:
+    if isinstance(snapshot, str):
+        try:
+            snapshot = json.loads(snapshot)
+        except (TypeError, json.JSONDecodeError):
+            return None
+    if not isinstance(snapshot, dict):
+        return None
+    edge = snapshot.get("entry_edge")
+    if isinstance(edge, dict):
+        return _float_or_none(edge.get("expected_net_pct"))
+    return _float_or_none(snapshot.get("expected_net_pct"))
+
+
 def _shadow_poor_edge_pattern_ids(
     db: Session,
     patterns: list[ScanPattern],
     user_id: int | None,
-) -> tuple[set[int], dict[int, int]]:
+) -> tuple[set[int], dict[int, int], dict[int, dict[str, Any]]]:
     """Shadow-promoted patterns to pause because recent edge rejects dominate.
 
-    This is scanner-slot hygiene, not a promotion/demotion decision. It only
-    applies when the pattern's stored average return is already non-positive
-    and AutoTrader has recently rejected it repeatedly for expected-edge math.
+    This is scanner-slot hygiene, not a promotion/demotion decision. It applies
+    when stored return is already non-positive, or when recent AutoTrader
+    expected-edge rejects show that the live edge has deteriorated.
     """
     if not bool(
         getattr(settings, "pattern_imminent_shadow_poor_edge_cooldown_enabled", True)
     ):
-        return set(), {}
+        return set(), {}, {}
 
     lookback_h = max(
         0.0,
@@ -1009,7 +1024,7 @@ def _shadow_poor_edge_pattern_ids(
         or 0.0,
     )
     if lookback_h <= 0.0:
-        return set(), {}
+        return set(), {}, {}
 
     min_rejects = max(
         1,
@@ -1032,44 +1047,93 @@ def _shadow_poor_edge_pattern_ids(
         )
         or PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT
     )
+    expected_net_enabled = bool(
+        getattr(settings, "pattern_imminent_shadow_poor_edge_expected_net_enabled", True)
+    )
+    max_avg_expected_net = _float_or_none(
+        getattr(
+            settings,
+            "pattern_imminent_shadow_poor_edge_max_avg_expected_net_pct",
+            PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_EXPECTED_NET_PCT,
+        )
+    )
+    if max_avg_expected_net is None:
+        max_avg_expected_net = PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_EXPECTED_NET_PCT
 
     candidate_ids: list[int] = []
+    avg_return_by_pattern: dict[int, float | None] = {}
     for pat in patterns:
         stage = (getattr(pat, "lifecycle_stage", "") or "").strip().lower()
         if stage != SHADOW_PROMOTED_STAGE:
             continue
         avg_return = _float_or_none(getattr(pat, "avg_return_pct", None))
-        if avg_return is None or avg_return > max_avg_return:
-            continue
         try:
-            candidate_ids.append(int(pat.id))
+            pattern_id = int(pat.id)
         except (TypeError, ValueError):
             continue
+        avg_return_by_pattern[pattern_id] = avg_return
+        if (
+            (avg_return is not None and avg_return <= max_avg_return)
+            or expected_net_enabled
+        ):
+            candidate_ids.append(pattern_id)
 
+    candidate_ids = sorted(set(candidate_ids))
     if not candidate_ids:
-        return set(), {}
+        return set(), {}, {}
 
     cutoff = datetime.utcnow() - timedelta(hours=lookback_h)
     q = (
         db.query(
             AutoTraderRun.scan_pattern_id,
-            func.count(AutoTraderRun.id),
+            AutoTraderRun.rule_snapshot,
         )
         .filter(
             AutoTraderRun.scan_pattern_id.in_(candidate_ids),
             AutoTraderRun.reason == POOR_EDGE_REJECT_REASON,
             AutoTraderRun.created_at >= cutoff,
         )
-        .group_by(AutoTraderRun.scan_pattern_id)
     )
     if user_id is not None:
         q = q.filter(AutoTraderRun.user_id == user_id)
-    counts = {
-        int(pattern_id): int(count)
-        for pattern_id, count in q.all()
-        if pattern_id is not None
-    }
-    return {pid for pid, count in counts.items() if count >= min_rejects}, counts
+
+    counts: dict[int, int] = {}
+    expected_net_values: dict[int, list[float]] = {}
+    for pattern_id_raw, rule_snapshot in q.all():
+        if pattern_id_raw is None:
+            continue
+        pattern_id = int(pattern_id_raw)
+        counts[pattern_id] = counts.get(pattern_id, 0) + 1
+        expected_net = _expected_net_pct_from_rule_snapshot(rule_snapshot)
+        if expected_net is not None:
+            expected_net_values.setdefault(pattern_id, []).append(expected_net)
+
+    cooled: set[int] = set()
+    details: dict[int, dict[str, Any]] = {}
+    for pattern_id, count in counts.items():
+        if count < min_rejects:
+            continue
+        avg_return = avg_return_by_pattern.get(pattern_id)
+        if avg_return is not None and avg_return <= max_avg_return:
+            cooled.add(pattern_id)
+            details[pattern_id] = {
+                "cooldown_basis": "stored_avg_return",
+                "max_avg_return_pct": max_avg_return,
+            }
+            continue
+        vals = expected_net_values.get(pattern_id) or []
+        if not expected_net_enabled or not vals:
+            continue
+        avg_expected_net = sum(vals) / len(vals)
+        if avg_expected_net <= max_avg_expected_net:
+            cooled.add(pattern_id)
+            details[pattern_id] = {
+                "cooldown_basis": "recent_expected_net",
+                "avg_expected_net_pct": avg_expected_net,
+                "expected_net_sample_n": len(vals),
+                "max_avg_expected_net_pct": max_avg_expected_net,
+            }
+    return cooled, counts, details
 
 
 def _insert_imminent_breakout_alert(
@@ -1280,7 +1344,11 @@ def gather_imminent_candidate_rows(
         db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all(),
         key=_imminent_scan_priority_key,
     )
-    poor_shadow_ids, poor_shadow_counts = _shadow_poor_edge_pattern_ids(
+    (
+        poor_shadow_ids,
+        poor_shadow_counts,
+        poor_shadow_details,
+    ) = _shadow_poor_edge_pattern_ids(
         db,
         patterns,
         user_id,
@@ -1576,7 +1644,7 @@ def gather_imminent_candidate_rows(
             and int(getattr(pat, "id", 0) or 0) in poor_shadow_ids
         ):
             skip["shadow_poor_edge_cooldown"] += 1
-            _append_suppressed({
+            suppressed_row = {
                 "pattern_id": pat.id,
                 "reason": "shadow_poor_edge_cooldown",
                 "recent_non_positive_rejects": poor_shadow_counts.get(
@@ -1585,7 +1653,9 @@ def gather_imminent_candidate_rows(
                 "avg_return_pct": _float_or_none(
                     getattr(pat, "avg_return_pct", None)
                 ),
-            })
+            }
+            suppressed_row.update(poor_shadow_details.get(int(pat.id), {}))
+            _append_suppressed(suppressed_row)
             continue
 
         hard_recert_reasons_for_pat = _hard_recert_shadow_reasons_for_pattern(

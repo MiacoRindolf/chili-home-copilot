@@ -8,6 +8,23 @@ ROLE_ALL = "all"
 HEARTBEAT_JOB_ID = "scheduler_worker_heartbeat"
 
 
+class _FakeBatchSession:
+    def __init__(self, name: str):
+        self.name = name
+        self.rollbacks = 0
+        self.commits = 0
+        self.closed = False
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_scheduler_excludes_web_pattern_research_job(monkeypatch):
     """Web pattern research runs inside run_learning_cycle; it must not be a separate cron job."""
     from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
@@ -50,6 +67,96 @@ def test_brain_learning_cycle_config_defaults():
     assert int(getattr(settings, "chili_realized_sync_interval_minutes", 0)) == 30
     assert getattr(settings, "brain_recert_queue_mode", None) == "shadow"
     assert int(getattr(settings, "brain_recert_queue_dispatch_interval_minutes", 0)) == 60
+
+
+def test_scheduler_failure_recording_falls_back_after_broken_primary_session():
+    from app.services.trading_scheduler import _record_batch_job_failure_resilient
+
+    primary = _FakeBatchSession("primary")
+    fresh = _FakeBatchSession("fresh")
+    calls: list[tuple[str, str, bool, str]] = []
+
+    def _session_factory():
+        return fresh
+
+    def _finish_fn(db, job_id, *, ok, error, **_kwargs):
+        calls.append((db.name, job_id, ok, error))
+        if db is primary:
+            raise RuntimeError("pending rollback")
+
+    mode = _record_batch_job_failure_resilient(
+        primary,
+        session_factory=_session_factory,
+        finish_fn=_finish_fn,
+        job_id="job-1",
+        error=RuntimeError("server closed the connection unexpectedly"),
+        log_label="unit_job",
+    )
+
+    assert mode == "fresh_session"
+    assert calls == [
+        ("primary", "job-1", False, "server closed the connection unexpectedly"),
+        ("fresh", "job-1", False, "server closed the connection unexpectedly"),
+    ]
+    assert primary.rollbacks >= 2
+    assert fresh.commits == 1
+    assert fresh.closed is True
+
+
+def test_daily_market_scan_failure_uses_fresh_session_and_surfaces_to_guard(monkeypatch):
+    import app.db as app_db
+    from app.services import trading_scheduler
+    from app.services.trading import brain_batch_job_log, scanner
+
+    primary = _FakeBatchSession("primary")
+    fresh = _FakeBatchSession("fresh")
+    sessions = [primary, fresh]
+    finish_calls: list[tuple[str, str, bool, str | None]] = []
+    captured: dict[str, object] = {}
+    cleared: list[bool] = []
+
+    monkeypatch.setattr(settings, "brain_daily_market_scan_scheduler_enabled", True)
+    monkeypatch.setattr(settings, "brain_default_user_id", 7)
+    monkeypatch.setattr(app_db, "SessionLocal", lambda: sessions.pop(0))
+    monkeypatch.setattr(
+        brain_batch_job_log,
+        "brain_batch_job_begin",
+        lambda db, job_type, user_id=None: "scan-job-1",
+    )
+
+    def _finish_fn(db, job_id, *, ok, error=None, **_kwargs):
+        finish_calls.append((db.name, job_id, ok, error))
+        if db is primary:
+            raise RuntimeError("pending rollback")
+
+    def _raise_scan(*_args, **_kwargs):
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    def _guard(job_id, fn):
+        captured["job_id"] = job_id
+        try:
+            fn()
+        except Exception as exc:  # matches run_scheduler_job_guarded visibility path
+            captured["exc"] = exc
+
+    monkeypatch.setattr(brain_batch_job_log, "brain_batch_job_finish", _finish_fn)
+    monkeypatch.setattr(scanner, "run_full_market_scan", _raise_scan)
+    monkeypatch.setattr(scanner, "clear_scanner_caches", lambda: cleared.append(True))
+    monkeypatch.setattr(trading_scheduler, "run_scheduler_job_guarded", _guard)
+
+    trading_scheduler._run_daily_market_scan_job()
+
+    assert captured["job_id"] == "daily_market_scan"
+    assert "server closed" in str(captured["exc"])
+    assert finish_calls == [
+        ("primary", "scan-job-1", False, "server closed the connection unexpectedly"),
+        ("fresh", "scan-job-1", False, "server closed the connection unexpectedly"),
+    ]
+    assert primary.rollbacks >= 2
+    assert primary.closed is True
+    assert fresh.commits == 1
+    assert fresh.closed is True
+    assert cleared == [True]
 
 
 def test_scheduler_web_role_omits_crypto_breakout(monkeypatch):

@@ -19,6 +19,9 @@ BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED = True
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_RESERVE_MB = 1536
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_WORKER_MB = 768
 BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_MIN_WORKERS = 1
+BRAIN_QUEUE_LINEAGE_FIXED_CAP_DISABLED = 0
+BRAIN_QUEUE_LINEAGE_DIVERSIFICATION_SHARE_DEFAULT = 0.10
+BRAIN_QUEUE_LINEAGE_MIN_PER_BATCH_DEFAULT = 1
 BRAIN_QUEUE_MARKET_HOURS_STOCK_LANE_DEFAULT = 2
 BACKTEST_PRIORITY_SCORE_MAX = 100
 BACKTEST_PRIORITY_DEFAULT_BYPASS_RETEST_FLOOR = BACKTEST_PRIORITY_SCORE_MAX
@@ -145,6 +148,11 @@ AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_SAME_ALERT_REASON_FAMILY = True
 AUTOTRADER_PAPER_SHADOW_DEFAULT_DEDUPE_RECENT_REASON_FAMILY_MINUTES = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
 )
+AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_ENABLED = True
+AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 2
+)
+AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD = 1
 AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION = True
 AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_OPTIONS_PATH = True
 AUTOTRADER_SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_DEFAULT_ENABLED = False
@@ -191,6 +199,7 @@ AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_REBOOST_COOLDOWN_MINUTES = (
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_LOOKBACK_HOURS = 2.0
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MIN_REJECTS = 6
 PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT = 0.0
+PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_EXPECTED_NET_PCT = -0.75
 PATTERN_IMMINENT_COINBASE_SPOT_FILTER_DEFAULT_TTL_SECONDS = 3600
 PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_COOLDOWN_MINUTES = 30.0
 PATTERN_IMMINENT_SCORE_FAILURE_DEFAULT_MIN_FAILURES = 1
@@ -1124,6 +1133,12 @@ class Settings(BaseSettings):
             return "process"
         return "threads"
     brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
+    # Intraday full-tier patterns are materially more expensive per ticker
+    # than daily patterns. Keep each pass bounded and let evidence accumulate
+    # across queue cycles; promotion/EV/CPCV gates still consume the persisted
+    # evidence count and are not relaxed by this cap.
+    brain_queue_intraday_timeframes: str = "1m,5m,15m"
+    brain_queue_intraday_target_tickers: int = 24
     # Operational recert/debt lane: keep promoted/pilot/shadow evidence fresh
     # without allowing one pattern to monopolize the queue for an hour.
     brain_queue_operational_refresh_enabled: bool = True
@@ -1139,6 +1154,37 @@ class Settings(BaseSettings):
 
     # Pattern backtest queue: how soon a pattern is eligible again (was hardcoded 7).
     brain_retest_interval_days: int = 7
+    # Lane-aware queue planner: preserve safety/recert lanes, fast-track
+    # edge-evidence variants, and avoid one parent lineage consuming an
+    # entire batch of expensive backtests.
+    brain_queue_lane_planner_enabled: bool = True
+    # Legacy fixed cap override. Keep at 0 for adaptive lineage diversification.
+    brain_queue_max_per_lineage_per_batch: int = BRAIN_QUEUE_LINEAGE_FIXED_CAP_DISABLED
+    brain_queue_lineage_max_batch_share: float = Field(
+        default=BRAIN_QUEUE_LINEAGE_DIVERSIFICATION_SHARE_DEFAULT,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("BRAIN_QUEUE_LINEAGE_MAX_BATCH_SHARE"),
+    )
+    brain_queue_lineage_min_per_batch: int = Field(
+        default=BRAIN_QUEUE_LINEAGE_MIN_PER_BATCH_DEFAULT,
+        ge=0,
+        validation_alias=AliasChoices("BRAIN_QUEUE_LINEAGE_MIN_PER_BATCH"),
+    )
+    brain_queue_lane_fetch_multiplier: int = 4
+    brain_queue_edge_evidence_max_per_batch: int = 12
+    brain_queue_prescreen_max_per_batch: int = 20
+    # Near-promoted shadow/pilot patterns stay protected from demotion, but
+    # repeated zero-trade queue runs should cool down so they do not monopolize
+    # the high-priority lane every cycle.
+    brain_queue_sparse_promotion_debt_cooldown_enabled: bool = True
+    brain_queue_sparse_promotion_debt_zero_runs: int = 5
+    brain_queue_sparse_promotion_debt_cooldown_minutes: int = 360
+    # Promoted/live recert debt still blocks live trading, but an unresolved
+    # recert should not be retested every batch after a fresh attempt unless
+    # an explicit recert/manual boost bypasses the normal retest floor.
+    brain_queue_recert_cooldown_enabled: bool = True
+    brain_queue_recert_cooldown_minutes: int = 360
     # When the retest queue is thin, add oldest-tested active patterns up to this many per cycle.
     brain_queue_exploration_enabled: bool = True
     brain_queue_exploration_max: int = 40
@@ -1283,6 +1329,13 @@ class Settings(BaseSettings):
         ge=0,
         validation_alias=AliasChoices(
             "CHILI_BRAIN_QUEUE_MARKET_HOURS_STOCK_LANE_MAX_PATTERNS"
+        ),
+    )
+    chili_brain_queue_market_hours_exploration_max: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_BRAIN_QUEUE_MARKET_HOURS_EXPLORATION_MAX"
         ),
     )
     # 4. zero-trade pattern demote: after N consecutive 0-trade backtest
@@ -2523,6 +2576,30 @@ class Settings(BaseSettings):
             "CHILI_AUTOTRADER_PAPER_SHADOW_DEDUPE_RECENT_REASON_FAMILY_MINUTES"
         ),
     )
+    chili_autotrader_broker_reject_suppression_enabled: bool = Field(
+        default=AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_BROKER_REJECT_SUPPRESSION_ENABLED"
+        ),
+    )
+    chili_autotrader_broker_reject_suppression_minutes: int = Field(
+        default=AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_MINUTES,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_BROKER_REJECT_SUPPRESSION_MINUTES"
+        ),
+        description=(
+            "Cooldown window for suppressing repeated broker submissions with "
+            "the same action fingerprint after a broker reject."
+        ),
+    )
+    chili_autotrader_broker_reject_suppression_threshold: int = Field(
+        default=AUTOTRADER_BROKER_REJECT_SUPPRESSION_DEFAULT_THRESHOLD,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_BROKER_REJECT_SUPPRESSION_THRESHOLD"
+        ),
+    )
     # Paper-shadow evidence should be scored against the same kind of dynamic
     # position management used live, not only against the original stop/target.
     # This lightweight overlay lets autotrader-tagged PaperTrade rows react to
@@ -3028,6 +3105,70 @@ class Settings(BaseSettings):
     chili_variant_spawn_gate_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_VARIANT_SPAWN_GATE_ENABLED"),
+    )
+    chili_edge_evolution_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_ENABLED"),
+    )
+    chili_edge_evolution_lookback_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_LOOKBACK_DAYS"),
+    )
+    chili_edge_evolution_min_rejects: int = Field(
+        default=5,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_REJECTS"),
+    )
+    chili_edge_evolution_severe_min_rejects: int = Field(
+        default=20,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_SEVERE_MIN_REJECTS"),
+    )
+    chili_edge_evolution_severe_avg_net_pct: float = Field(
+        default=-1.0,
+        ge=-100.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_SEVERE_AVG_NET_PCT"),
+    )
+    chili_edge_evolution_max_avg_net_for_child_pct: float = Field(
+        default=-0.25,
+        ge=-100.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MAX_AVG_NET_FOR_CHILD_PCT"),
+    )
+    chili_edge_evolution_payoff_rescue_max_avg_net_pct: float = Field(
+        default=-0.75,
+        ge=-100.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_PAYOFF_RESCUE_MAX_AVG_NET_PCT"),
+    )
+    chili_edge_evolution_payoff_rescue_min_reward_risk: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_PAYOFF_RESCUE_MIN_REWARD_RISK"),
+    )
+    chili_edge_evolution_min_payoff_samples: int = Field(
+        default=5,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_PAYOFF_SAMPLES"),
+    )
+    chili_edge_evolution_min_reward_risk: float = Field(
+        default=1.25,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_REWARD_RISK"),
+    )
+    chili_edge_evolution_min_directional_sample_n: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=10_000.0,
+        validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_DIRECTIONAL_SAMPLE_N"),
     )
 
     chili_pattern_evidence_audit_enabled: bool = Field(
@@ -4659,6 +4800,10 @@ class Settings(BaseSettings):
     )
     pattern_imminent_shadow_poor_edge_max_avg_return_pct: float = (
         PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_RETURN_PCT
+    )
+    pattern_imminent_shadow_poor_edge_expected_net_enabled: bool = True
+    pattern_imminent_shadow_poor_edge_max_avg_expected_net_pct: float = (
+        PATTERN_IMMINENT_SHADOW_POOR_EDGE_DEFAULT_MAX_AVG_EXPECTED_NET_PCT
     )
     # Activity throughput: for crypto imminent scans, spend latency on symbols
     # that the live Coinbase spot venue can actually execute. If Coinbase

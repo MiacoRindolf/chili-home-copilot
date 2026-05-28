@@ -20,6 +20,11 @@ from ...models.trading import (
 )
 from ...services import trading_service as ts
 from ...services.trading.broker_position_truth import filter_broker_stale_open_trades
+from ...services.trading.edge_reliability import (
+    edge_supply_rows,
+    edge_supply_summary,
+    null_lineage_short_paper_candidates,
+)
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
 from ._utils import json_safe
@@ -103,6 +108,17 @@ def _quote_price(q: dict[str, Any] | None) -> float | None:
 def _serialize_decision(d: PatternMonitorDecision) -> dict[str, Any]:
     snap = d.conditions_snapshot if isinstance(d.conditions_snapshot, dict) else {}
     health_source = snap.get("monitor_health_source") if snap else None
+    decision_source = d.decision_source
+    llm_reasoning = d.llm_reasoning
+    llm_unavailable = False
+    if (
+        str(llm_reasoning or "").strip().lower() in {"llm unavailable", "llm unavailable."}
+        and (d.llm_confidence is None or float(d.llm_confidence or 0.0) == 0.0)
+    ):
+        llm_reasoning = None
+        llm_unavailable = True
+        if decision_source == "llm":
+            decision_source = "llm_unavailable"
     if health_source and health_source != "static_conditions":
         health_label = "Setup health"
         health_hint = "Using live trade-plan and setup-vitals health; entry-condition retention is in details"
@@ -128,17 +144,164 @@ def _serialize_decision(d: PatternMonitorDecision) -> dict[str, Any]:
         "old_target": json_safe(d.old_target) if d.old_target is not None else None,
         "new_target": json_safe(d.new_target) if d.new_target is not None else None,
         "llm_confidence": json_safe(d.llm_confidence) if d.llm_confidence is not None else None,
-        "llm_reasoning": d.llm_reasoning,
+        "llm_reasoning": llm_reasoning,
+        "llm_unavailable": llm_unavailable or decision_source == "llm_unavailable",
         "mechanical_action": d.mechanical_action,
         "mechanical_stop": json_safe(d.mechanical_stop) if d.mechanical_stop is not None else None,
         "mechanical_target": json_safe(d.mechanical_target) if d.mechanical_target is not None else None,
-        "decision_source": d.decision_source,
+        "decision_source": decision_source,
         "price_at_decision": json_safe(d.price_at_decision) if d.price_at_decision is not None else None,
         "price_after_1h": json_safe(d.price_after_1h) if d.price_after_1h is not None else None,
         "price_after_4h": json_safe(d.price_after_4h) if d.price_after_4h is not None else None,
         "was_beneficial": d.was_beneficial,
         "created_at": d.created_at.isoformat() if d.created_at else None,
     }
+
+
+IMMINENT_SHADOW_OBSERVATION_SIGNAL_LANES = frozenset({
+    "shadow_near_miss",
+    "hard_recert_shadow",
+    "equity_session_shadow",
+})
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out:
+        return None
+    return out
+
+
+def _autotrader_snapshot(run: AutoTraderRun | None) -> dict[str, Any]:
+    snap = getattr(run, "rule_snapshot", None) if run is not None else None
+    return snap if isinstance(snap, dict) else {}
+
+
+def _entry_edge_snapshot(run: AutoTraderRun | None) -> dict[str, Any]:
+    snap = _autotrader_snapshot(run)
+    edge = snap.get("entry_edge")
+    return edge if isinstance(edge, dict) else {}
+
+
+def _alert_signal_lane(alert: BreakoutAlert) -> str | None:
+    snap = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+    scorecard = snap.get("imminent_scorecard") if isinstance(snap, dict) else {}
+    if not isinstance(scorecard, dict):
+        return None
+    lane = str(scorecard.get("signal_lane") or "").strip().lower()
+    return lane or None
+
+
+def _snapshot_text(run: AutoTraderRun | None, key: str) -> str | None:
+    value = _autotrader_snapshot(run).get(key)
+    text = str(value or "").strip()
+    return text or None
+
+
+def _edge_float(edge: dict[str, Any], key: str) -> float | None:
+    return _safe_float(edge.get(key))
+
+
+def _imminent_blocker_category(
+    run: AutoTraderRun | None,
+    pat: ScanPattern | None,
+    signal_lane: str | None,
+) -> str:
+    lifecycle = (getattr(pat, "lifecycle_stage", None) or "").strip().lower()
+    recert_required = bool(getattr(pat, "recert_required", False))
+    if run is None:
+        if (
+            lifecycle in {"live", "promoted", "pilot_promoted"}
+            and not recert_required
+            and signal_lane not in IMMINENT_SHADOW_OBSERVATION_SIGNAL_LANES
+        ):
+            return "live_eligible_candidate"
+        return "pending_autotrader"
+
+    reason = str(getattr(run, "reason", "") or "").strip().lower()
+    decision = str(getattr(run, "decision", "") or "").strip().lower()
+    edge = _entry_edge_snapshot(run)
+    expected_net = _edge_float(edge, "expected_net_pct")
+    positive_edge = expected_net is not None and expected_net > 0.0
+
+    if decision == "placed":
+        return "placed"
+    if reason == "non_positive_expected_edge":
+        return "negative_expected_edge"
+    if reason == "missed_entry_slippage":
+        return "missed_entry_slippage"
+    if (
+        signal_lane == "hard_recert_shadow"
+        or reason == "pattern_recert_required"
+        or (recert_required and reason == "selector:shadow_observation_signal_lane")
+    ):
+        return "positive_edge_recert_debt" if positive_edge else "recert_required"
+    if (
+        signal_lane in IMMINENT_SHADOW_OBSERVATION_SIGNAL_LANES
+        or reason in {
+            "selector:shadow_observation_signal_lane",
+            "selector:shadow_promoted_pattern_eval",
+        }
+    ):
+        return "positive_edge_shadow_only" if positive_edge else "shadow_observation"
+    if reason.startswith("broker:") or "adapter" in reason or "venue_" in reason:
+        return "broker_execution_reject"
+    if positive_edge and lifecycle in {"live", "promoted", "pilot_promoted"}:
+        return "positive_edge_other_block"
+    return "other"
+
+
+def _imminent_next_action(category: str) -> str:
+    return {
+        "negative_expected_edge": "collect_shadow_evidence_and_evolve_pattern",
+        "positive_edge_shadow_only": "shadow_collecting_ev_before_live",
+        "shadow_observation": "continue_observation_only",
+        "positive_edge_recert_debt": "complete_recert_before_live",
+        "recert_required": "complete_recert_before_live",
+        "missed_entry_slippage": "wait_for_fresh_entry_or_reprice",
+        "broker_execution_reject": "fix_execution_lane",
+        "live_eligible_candidate": "await_autotrader_processing",
+        "placed": "already_placed",
+        "pending_autotrader": "await_autotrader_processing",
+        "positive_edge_other_block": "inspect_secondary_gate",
+    }.get(category, "inspect_secondary_gate")
+
+
+def _empty_imminent_summary() -> dict[str, int]:
+    return {
+        "total": 0,
+        "negative_expected_edge": 0,
+        "positive_edge_shadow_only": 0,
+        "positive_edge_recert_debt": 0,
+        "missed_entry_slippage": 0,
+        "broker_execution_rejects": 0,
+        "live_eligible_candidates": 0,
+        "other": 0,
+    }
+
+
+def _bump_imminent_summary(summary: dict[str, int], category: str) -> None:
+    summary["total"] = int(summary.get("total", 0)) + 1
+    if category in {
+        "negative_expected_edge",
+        "positive_edge_shadow_only",
+        "positive_edge_recert_debt",
+        "missed_entry_slippage",
+    }:
+        summary[category] = int(summary.get(category, 0)) + 1
+    elif category == "broker_execution_reject":
+        summary["broker_execution_rejects"] = (
+            int(summary.get("broker_execution_rejects", 0)) + 1
+        )
+    elif category == "live_eligible_candidate":
+        summary["live_eligible_candidates"] = (
+            int(summary.get("live_eligible_candidates", 0)) + 1
+        )
+    else:
+        summary["other"] = int(summary.get("other", 0)) + 1
 
 
 @router.get("/monitor/active")
@@ -487,6 +650,21 @@ def api_monitor_imminent_alerts(
     if pat_ids:
         for p in db.query(ScanPattern).filter(ScanPattern.id.in_(pat_ids)).all():
             patterns[p.id] = p
+    edge_supply_by_pattern: dict[int, dict[str, Any]] = {}
+    if pat_ids:
+        try:
+            edge_supply_by_pattern = {
+                int(row["scan_pattern_id"]): row
+                for row in edge_supply_rows(
+                    db,
+                    pattern_ids=pat_ids,
+                    window_days=max(1, int(hours / 24) or 1),
+                    limit=max(30, len(pat_ids)),
+                )
+                if row.get("scan_pattern_id") is not None
+            }
+        except Exception:
+            logger.debug("[monitor] edge supply diagnostics failed", exc_info=True)
     alert_ids = [int(a.id) for a in alerts]
     runs_by_alert: dict[int, AutoTraderRun] = {}
     if alert_ids:
@@ -502,10 +680,23 @@ def api_monitor_imminent_alerts(
                 runs_by_alert[aid] = run
 
     items: list[dict[str, Any]] = []
+    summary = _empty_imminent_summary()
     for a in alerts:
         pat = patterns.get(a.scan_pattern_id) if a.scan_pattern_id else None
         run = runs_by_alert.get(int(a.id))
         lifecycle = (pat.lifecycle_stage if pat else None) or None
+        edge = _entry_edge_snapshot(run)
+        signal_lane = (
+            _snapshot_text(run, "paper_observation_signal_lane")
+            or _alert_signal_lane(a)
+        )
+        blocker_category = _imminent_blocker_category(run, pat, signal_lane)
+        _bump_imminent_summary(summary, blocker_category)
+        supply = (
+            edge_supply_by_pattern.get(int(a.scan_pattern_id))
+            if a.scan_pattern_id
+            else {}
+        ) or {}
         items.append(
             {
                 "id": a.id,
@@ -523,13 +714,81 @@ def api_monitor_imminent_alerts(
                 "pattern_name": pat.name if pat else None,
                 "lifecycle_stage": lifecycle,
                 "broker_eligible": lifecycle in ("live", "promoted", "pilot_promoted"),
+                "recert_required": (
+                    bool(getattr(pat, "recert_required", False)) if pat else False
+                ),
+                "recert_reason": getattr(pat, "recert_reason", None) if pat else None,
                 "autotrader_decision": run.decision if run else None,
                 "autotrader_reason": run.reason if run else None,
                 "autotrader_processed_at": (
                     run.created_at.isoformat() if run and run.created_at else None
                 ),
+                "entry_edge_expected_net_pct": json_safe(
+                    _edge_float(edge, "expected_net_pct")
+                ),
+                "entry_edge_probability": json_safe(
+                    _edge_float(edge, "probability")
+                ),
+                "entry_edge_breakeven_probability": json_safe(
+                    _edge_float(edge, "breakeven_probability")
+                ),
+                "entry_edge_probability_source": edge.get("probability_source"),
+                "paper_observation_signal_lane": signal_lane,
+                "autotrader_blocker_category": blocker_category,
+                "autotrader_next_action": _imminent_next_action(blocker_category),
+                "calibrated_ev_pct": json_safe(supply.get("calibrated_ev_pct")),
+                "realized_ev_pct": json_safe(supply.get("realized_ev_pct")),
+                "ev_calibration_error": json_safe(supply.get("ev_calibration_error")),
+                "brier_score": json_safe(supply.get("brier_score")),
+                "closed_evidence_count": supply.get("closed_evidence_count"),
+                "paper_live_gap_pct": json_safe(supply.get("paper_live_gap_pct")),
+                "graduation_blocker": supply.get("graduation_blocker"),
+                "recommended_work_event": supply.get("recommended_work_event"),
+                "cash_deployment_rank": supply.get("cash_deployment_rank"),
                 "trade_plan": a.trade_plan,
             }
         )
 
-    return JSONResponse({"ok": True, "alerts": json_safe(items), "total": len(items)})
+    return JSONResponse(
+        {
+            "ok": True,
+            "alerts": json_safe(items),
+            "total": len(items),
+            "summary": summary,
+        }
+    )
+
+
+@router.get("/monitor/edge-supply")
+def api_monitor_edge_supply(
+    request: Request,
+    db: Session = Depends(get_db),
+    window_days: int = Query(30, ge=1, le=120),
+    limit: int = Query(25, ge=1, le=100),
+):
+    """Pattern-level edge reliability and live-candidate supply diagnostics."""
+    get_identity_ctx(request, db)
+    try:
+        rows = edge_supply_rows(
+            db,
+            window_days=window_days,
+            limit=limit,
+        )
+        null_lineage = null_lineage_short_paper_candidates(
+            db,
+            window_days=window_days,
+            limit=10,
+        )
+    except Exception as exc:
+        logger.exception("[monitor] edge supply failed")
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "window_days": window_days,
+            "rows": json_safe(rows),
+            "summary": json_safe(edge_supply_summary(rows)),
+            "null_lineage_research_candidates": json_safe(null_lineage),
+        }
+    )
