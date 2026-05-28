@@ -6,6 +6,7 @@ import pytest
 from app.services import yf_session
 
 GOOD_EQUITY = "AAPL"
+SECOND_GOOD_EQUITY = "MSFT"
 MISSING_EQUITY = "BADX"
 MISSING_CRYPTO = "MISSING-USD"
 FAST_INFO_EMPTY_ERROR = "'PriceHistory' object has no attribute '_dividends'"
@@ -161,6 +162,52 @@ def test_batch_download_negative_caches_single_missing_equity_after_threshold(
     calls_before_dead_skip = len(calls)
     yf_session.batch_download([MISSING_EQUITY], period="5d")
     assert len(calls) == calls_before_dead_skip
+
+
+def test_batch_download_warms_get_history_cache_for_batch_members(monkeypatch):
+    download_calls: list[tuple[str, ...]] = []
+    ticker_calls: list[str] = []
+
+    def _download(symbols, **_kwargs):
+        symbols = tuple(symbols)
+        download_calls.append(symbols)
+        assert _kwargs["actions"] is True
+        assert _kwargs["auto_adjust"] is True
+        assert _kwargs["prepost"] is False
+        columns = pd.MultiIndex.from_product([
+            list(symbols),
+            ["Open", "High", "Low", "Close", "Volume"],
+        ])
+        row = []
+        for _symbol in symbols:
+            row.extend([
+                HISTORY_OPEN,
+                HISTORY_HIGH,
+                HISTORY_LOW,
+                HISTORY_CLOSE,
+                HISTORY_VOLUME,
+            ])
+        return pd.DataFrame([row], columns=columns)
+
+    def _ticker(symbol, **_kwargs):
+        ticker_calls.append(symbol)
+        return _HistoryTicker(_history_frame())
+
+    monkeypatch.setattr(yf_session.yf, "download", _download)
+    monkeypatch.setattr(yf_session.yf, "Ticker", _ticker)
+
+    result = yf_session.batch_download(
+        [GOOD_EQUITY, SECOND_GOOD_EQUITY],
+        period=FIRST_HISTORY_PERIOD,
+    )
+
+    assert set(result) == {GOOD_EQUITY, SECOND_GOOD_EQUITY}
+    assert not yf_session.get_history(
+        GOOD_EQUITY,
+        period=FIRST_HISTORY_PERIOD,
+    ).empty
+    assert download_calls == [(GOOD_EQUITY, SECOND_GOOD_EQUITY)]
+    assert ticker_calls == []
 
 
 def test_batch_download_single_missing_crypto_short_caches_yahoo_miss(

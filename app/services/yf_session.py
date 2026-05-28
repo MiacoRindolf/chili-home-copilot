@@ -459,6 +459,23 @@ def _get_ttl(key: str) -> float:
     return _TTL_HISTORY
 
 
+def _history_cache_key(
+    symbol: str,
+    *,
+    period: Any = "6mo",
+    interval: Any = "1d",
+    start: Any = None,
+    end: Any = None,
+    prepost: Any = False,
+    auto_adjust: Any = True,
+    actions: Any = True,
+) -> str:
+    return (
+        f"hist:{symbol}:{period}:{interval}:{start}:{end}"
+        f":pp={prepost}:aa={auto_adjust}:ac={actions}"
+    )
+
+
 def _is_dead(symbol: str) -> bool:
     """Check if a ticker is in the negative cache (known bad)."""
     with _dead_lock:
@@ -534,9 +551,15 @@ def get_history(symbol: str, **kwargs) -> Any:
     prepost = kwargs.get("prepost", False)
     auto_adjust = kwargs.get("auto_adjust", True)
     actions = kwargs.get("actions", True)
-    cache_key = (
-        f"hist:{symbol}:{period}:{interval}:{start}:{end}"
-        f":pp={prepost}:aa={auto_adjust}:ac={actions}"
+    cache_key = _history_cache_key(
+        symbol,
+        period=period,
+        interval=interval,
+        start=start,
+        end=end,
+        prepost=prepost,
+        auto_adjust=auto_adjust,
+        actions=actions,
     )
 
     cached = _cache_get(cache_key)
@@ -807,6 +830,9 @@ def batch_download(
     result: dict[str, Any] = {}
     mixed_request = len(symbols) > 1
     batch_miss_cooldown_skips = 0
+    prepost = False
+    auto_adjust = True
+    actions = True
     for sym in symbols:
         if _is_dead(sym):
             continue
@@ -820,7 +846,14 @@ def batch_download(
         if mixed_request and _cache_get(_batch_miss_key(sym)) is not None:
             batch_miss_cooldown_skips += 1
             continue
-        key = f"hist:{sym}:{period}:{interval}:None"
+        key = _history_cache_key(
+            sym,
+            period=period,
+            interval=interval,
+            prepost=prepost,
+            auto_adjust=auto_adjust,
+            actions=actions,
+        )
         cached = _cache_get(key)
         if cached is not None:
             result[sym] = cached
@@ -848,8 +881,18 @@ def batch_download(
         # outage that's N leaked Thread closures per call. The shared
         # session pools connections; threads=False keeps the call
         # synchronous on the caller thread.
-        df = yf.download(uncached, period=period, interval=interval, group_by="ticker",
-                         threads=False, session=_SHARED_SESSION, progress=False)
+        df = yf.download(
+            uncached,
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            threads=False,
+            session=_SHARED_SESSION,
+            progress=False,
+            prepost=prepost,
+            auto_adjust=auto_adjust,
+            actions=actions,
+        )
     except Exception as e:
         logger.warning(f"[yf_session] batch_download failed: {e}")
         _breaker_on_failure()
@@ -868,7 +911,14 @@ def batch_download(
     found_symbols: set[str] = set()
     if len(uncached) == 1:
         sym = uncached[0]
-        key = f"hist:{sym}:{period}:{interval}:None"
+        key = _history_cache_key(
+            sym,
+            period=period,
+            interval=interval,
+            prepost=prepost,
+            auto_adjust=auto_adjust,
+            actions=actions,
+        )
         _cache_set(key, df)
         result[sym] = df
         found_symbols.add(sym)
@@ -896,7 +946,14 @@ def batch_download(
                 if sym in df.columns.get_level_values(0):
                     ticker_df = df[sym].dropna(how="all")
                     if not ticker_df.empty:
-                        key = f"hist:{sym}:{period}:{interval}:None"
+                        key = _history_cache_key(
+                            sym,
+                            period=period,
+                            interval=interval,
+                            prepost=prepost,
+                            auto_adjust=auto_adjust,
+                            actions=actions,
+                        )
                         _cache_set(key, ticker_df)
                         result[sym] = ticker_df
                         found_symbols.add(sym)
