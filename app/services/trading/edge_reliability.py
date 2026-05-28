@@ -787,6 +787,89 @@ def latest_edge_reliability_snapshot_slices(
     return out
 
 
+def _rank_edge_supply_rows(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    out = [dict(row) for row in rows]
+
+    def score(row: dict[str, Any]) -> float:
+        if row.get("graduation_blocker") != "graduation_ready":
+            return -1e9
+        ev = _safe_float(row.get("calibrated_ev_pct")) or -999.0
+        rejects = _safe_float(row.get("broker_reject_count")) or 0.0
+        return ev - rejects
+
+    out.sort(
+        key=lambda row: (
+            score(row),
+            _safe_float(row.get("calibrated_ev_pct")) or -999.0,
+            int(row.get("closed_evidence_count") or 0),
+            row.get("snapshot_created_at") or "",
+        ),
+        reverse=True,
+    )
+    rank = 0
+    for row in out:
+        if row.get("graduation_blocker") == "graduation_ready":
+            rank += 1
+            row["cash_deployment_rank"] = rank
+        else:
+            row["cash_deployment_rank"] = None
+    return out[: max(1, int(limit))]
+
+
+def edge_supply_snapshot_rows(
+    db: Session,
+    *,
+    pattern_ids: list[int] | set[int] | tuple[int, ...] | None = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    limit: int = DEFAULT_TOP_LIMIT,
+) -> list[dict[str, Any]]:
+    """Read materialized edge-reliability rows without recomputing evidence.
+
+    The expensive compute path remains in ``edge_supply_rows``. Dashboard/API
+    request paths should prefer this snapshot reader so alert and cash views do
+    not stall while CPCV/recert/evidence jobs are doing the deeper work.
+    """
+    q = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_SNAPSHOT)
+        .filter(BrainWorkEvent.event_kind == "outcome")
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+    )
+    if pattern_ids is not None:
+        ids = [int(x) for x in pattern_ids if x is not None]
+        if not ids:
+            return []
+        q = q.filter(BrainWorkEvent.payload["scan_pattern_id"].astext.in_([str(x) for x in ids]))
+    rows = q.all()
+
+    requested_window = max(1, int(window_days))
+    exact: dict[tuple[int, str], dict[str, Any]] = {}
+    fallback: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in rows:
+        payload = _json_dict(row.payload)
+        pid = _safe_int(payload.get("scan_pattern_id"))
+        if pid is None:
+            continue
+        slice_key = (
+            _canonical_asset_class(payload.get("slice_asset_class"))
+            or _canonical_asset_class(payload.get("asset_class"))
+            or "all"
+        )
+        key = (pid, slice_key)
+        payload["snapshot_event_id"] = int(row.id)
+        payload["snapshot_created_at"] = row.created_at.isoformat() if row.created_at else None
+        payload["snapshot_window_days"] = _safe_int(payload.get("window_days"))
+        payload["snapshot_data_source"] = EDGE_RELIABILITY_SNAPSHOT
+        if key not in fallback:
+            fallback[key] = payload
+        if payload["snapshot_window_days"] == requested_window and key not in exact:
+            exact[key] = payload
+
+    selected = dict(fallback)
+    selected.update(exact)
+    return _rank_edge_supply_rows(list(selected.values()), limit=limit)
+
+
 def _candidate_pattern_ids_from_recent_runs(
     db: Session,
     *,
@@ -972,29 +1055,7 @@ def edge_supply_rows(
             except Exception:
                 continue
 
-    def score(row: dict[str, Any]) -> float:
-        if row.get("graduation_blocker") != "graduation_ready":
-            return -1e9
-        ev = _safe_float(row.get("calibrated_ev_pct")) or -999.0
-        rejects = _safe_float(row.get("broker_reject_count")) or 0.0
-        return ev - rejects
-
-    out.sort(
-        key=lambda row: (
-            score(row),
-            _safe_float(row.get("calibrated_ev_pct")) or -999.0,
-            int(row.get("closed_evidence_count") or 0),
-        ),
-        reverse=True,
-    )
-    rank = 0
-    for row in out:
-        if row.get("graduation_blocker") == "graduation_ready":
-            rank += 1
-            row["cash_deployment_rank"] = rank
-        else:
-            row["cash_deployment_rank"] = None
-    return out[: max(1, int(limit))]
+    return _rank_edge_supply_rows(out, limit=limit)
 
 
 def edge_supply_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:

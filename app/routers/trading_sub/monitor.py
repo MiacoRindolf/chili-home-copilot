@@ -24,10 +24,12 @@ from ...services.trading.cash_deployment import (
     annotate_cash_deployment_row,
     cash_deployment_null_lineage_candidates,
     cash_deployment_rows,
+    cash_deployment_snapshot_rows,
     cash_deployment_summary,
 )
 from ...services.trading.edge_reliability import (
     edge_supply_rows,
+    edge_supply_snapshot_rows,
     edge_supply_summary,
     latest_edge_reliability_snapshot_slices,
 )
@@ -902,15 +904,14 @@ def api_monitor_edge_supply(
     db: Session = Depends(get_db),
     window_days: int = Query(30, ge=1, le=120),
     limit: int = Query(25, ge=1, le=100),
+    fresh: bool = Query(False, description="Recompute diagnostics instead of reading cached snapshots"),
 ):
     """Pattern-level edge reliability and live-candidate supply diagnostics."""
     ctx = get_identity_ctx(request, db)
     try:
-        edge_rows = edge_supply_rows(
-            db,
-            window_days=window_days,
-            limit=limit,
-        )
+        source = "computed" if fresh else "edge_reliability_snapshot"
+        edge_reader = edge_supply_rows if fresh else edge_supply_snapshot_rows
+        edge_rows = edge_reader(db, window_days=window_days, limit=limit)
         rows = [
             annotate_cash_deployment_row(db, row, user_id=ctx["user_id"])
             for row in edge_rows
@@ -928,6 +929,7 @@ def api_monitor_edge_supply(
         {
             "ok": True,
             "window_days": window_days,
+            "data_source": source,
             "rows": json_safe(rows),
             "summary": json_safe(edge_supply_summary(rows)),
             "cash_deployment_summary": json_safe(cash_deployment_summary(rows)),
@@ -942,11 +944,14 @@ def api_monitor_cash_deployment(
     db: Session = Depends(get_db),
     window_days: int = Query(30, ge=1, le=120),
     limit: int = Query(25, ge=1, le=100),
+    fresh: bool = Query(False, description="Recompute diagnostics instead of reading cached snapshots"),
 ):
     """All-asset cash-deployment funnel: deployable candidates vs safe work."""
     ctx = get_identity_ctx(request, db)
     try:
-        rows = cash_deployment_rows(
+        source = "computed" if fresh else "edge_reliability_snapshot"
+        row_reader = cash_deployment_rows if fresh else cash_deployment_snapshot_rows
+        rows = row_reader(
             db,
             user_id=ctx["user_id"],
             window_days=window_days,
@@ -972,6 +977,7 @@ def api_monitor_cash_deployment(
         {
             "ok": True,
             "window_days": window_days,
+            "data_source": source,
             "rows": json_safe(rows),
             "summary": json_safe(summary),
             "null_lineage_research_candidates": json_safe(null_lineage),

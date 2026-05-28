@@ -25,6 +25,7 @@ from .edge_reliability import (
     PROVENANCE_BACKFILL,
     RECERT_RESCUE_REFRESH,
     edge_supply_rows,
+    edge_supply_snapshot_rows,
     emit_edge_reliability_refresh_requested,
     emit_targeted_profitability_work,
     null_lineage_short_paper_candidates,
@@ -592,6 +593,45 @@ def cash_deployment_rows(
             _safe_float(row.get("calibrated_ev_after_cost_pct"), -999.0) or -999.0,
             _safe_int(row.get("closed_evidence_count")),
             _safe_float(row.get("expected_evidence_value"), 0.0) or 0.0,
+        ),
+        reverse=True,
+    )
+    rank = 0
+    for row in rows:
+        if row.get("live_deployable"):
+            rank += 1
+            row["cash_deployment_rank"] = rank
+        else:
+            row["cash_deployment_rank"] = None
+    return rows[: max(1, int(limit))]
+
+
+def cash_deployment_snapshot_rows(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    pattern_ids: list[int] | set[int] | tuple[int, ...] | None = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    limit: int = DEFAULT_TOP_LIMIT,
+) -> list[dict[str, Any]]:
+    base = edge_supply_snapshot_rows(
+        db,
+        pattern_ids=pattern_ids,
+        window_days=window_days,
+        limit=max(1, int(limit) * 4),
+    )
+    rows = [
+        annotate_cash_deployment_row(db, row, user_id=user_id)
+        for row in base
+    ]
+    rows.sort(
+        key=lambda row: (
+            1 if row.get("live_deployable") else 0,
+            _safe_float(row.get("allocation_score"), 0.0) or 0.0,
+            _safe_float(row.get("calibrated_ev_after_cost_pct"), -999.0) or -999.0,
+            _safe_int(row.get("closed_evidence_count")),
+            _safe_float(row.get("expected_evidence_value"), 0.0) or 0.0,
+            str(row.get("snapshot_created_at") or ""),
         ),
         reverse=True,
     )

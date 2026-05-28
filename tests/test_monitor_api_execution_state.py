@@ -586,12 +586,44 @@ def test_edge_supply_endpoint_exposes_profitability_diagnostics(db, paired_clien
                 signal_json={"paper_shadow": True},
             )
         )
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="edge_reliability_snapshot",
+            event_kind="outcome",
+            dedupe_key=f"edge-supply-endpoint-snapshot:{pat.id}:stock",
+            status="done",
+            payload={
+                "scan_pattern_id": pat.id,
+                "asset_class": "stock",
+                "slice_asset_class": "stock",
+                "lifecycle_stage": "promoted",
+                "expected_ev_pct": 2.0,
+                "calibrated_ev_pct": 2.5,
+                "realized_ev_pct": 4.0,
+                "ev_calibration_error": 2.0,
+                "brier_score": 0.1444,
+                "closed_evidence_count": 5,
+                "graduation_blocker": "graduation_ready",
+                "recommended_work_event": "edge_reliability_refresh",
+                "edge_eval_count": 1,
+                "primary_symbol": "READY",
+                "window_days": 7,
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
     db.commit()
 
-    resp = client.get("/api/trading/monitor/edge-supply?window_days=7&limit=10")
+    with patch(
+        "app.routers.trading_sub.monitor.edge_supply_rows",
+        side_effect=AssertionError("edge-supply default must read snapshots"),
+    ):
+        resp = client.get("/api/trading/monitor/edge-supply?window_days=7&limit=10")
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["data_source"] == "edge_reliability_snapshot"
     row = next(x for x in body["rows"] if x["scan_pattern_id"] == pat.id)
     assert row["calibrated_ev_pct"] == pytest.approx(2.5)
     assert row["realized_ev_pct"] == pytest.approx(4.0)
@@ -679,6 +711,33 @@ def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired
             )
         )
     db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="edge_reliability_snapshot",
+            event_kind="outcome",
+            dedupe_key=f"cash-deployment-endpoint-snapshot:{pat.id}:stock",
+            status="done",
+            payload={
+                "scan_pattern_id": pat.id,
+                "asset_class": "stock",
+                "slice_asset_class": "stock",
+                "lifecycle_stage": "promoted",
+                "expected_ev_pct": 2.0,
+                "calibrated_ev_pct": 2.5,
+                "realized_ev_pct": 4.0,
+                "ev_calibration_error": 2.0,
+                "brier_score": 0.1444,
+                "closed_evidence_count": 5,
+                "graduation_blocker": "graduation_ready",
+                "recommended_work_event": "edge_reliability_refresh",
+                "edge_eval_count": 1,
+                "primary_symbol": "CASHR",
+                "window_days": 7,
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.add(
         PaperTrade(
             scan_pattern_id=None,
             ticker="NULLW",
@@ -698,10 +757,15 @@ def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired
     )
     db.commit()
 
-    resp = client.get("/api/trading/monitor/cash-deployment?window_days=7&limit=10")
+    with patch(
+        "app.routers.trading_sub.monitor.cash_deployment_rows",
+        side_effect=AssertionError("cash-deployment default must read snapshots"),
+    ):
+        resp = client.get("/api/trading/monitor/cash-deployment?window_days=7&limit=10")
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["data_source"] == "edge_reliability_snapshot"
     row = next(x for x in body["rows"] if x["scan_pattern_id"] == pat.id)
     assert row["live_deployable"] is True
     assert row["cash_deployment_rank"] == 1
