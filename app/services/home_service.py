@@ -241,6 +241,13 @@ def _user_statuses_by_id(db: Session, user_ids: list[int]) -> dict[int, UserStat
     return {int(row.user_id): row for row in rows}
 
 
+def _users_by_id(db: Session, user_ids: list[int]) -> dict[int, User]:
+    if not user_ids:
+        return {}
+    rows = db.query(User).filter(User.id.in_(user_ids)).all()
+    return {int(row.id): row for row in rows}
+
+
 def get_dashboard_data(db: Session, identity: dict) -> dict:
     chores = db.query(Chore).order_by(Chore.id.desc()).all()
     pending_chores = sum(1 for c in chores if not c.done)
@@ -264,10 +271,16 @@ def get_dashboard_data(db: Session, identity: dict) -> dict:
     upcoming_bdays = sum(1 for b in bday_list if b["days_until"] <= 7)
 
     chore_list = []
+    assignee_by_id = _users_by_id(
+        db,
+        sorted({int(c.assigned_to) for c in chores if c.assigned_to}),
+    )
     for c in chores:
         assignee_name = ""
-        if c.assigned_to and c.assignee:
-            assignee_name = c.assignee.name
+        if c.assigned_to:
+            assignee = assignee_by_id.get(int(c.assigned_to))
+            if assignee:
+                assignee_name = assignee.name
         chore_list.append({
             "id": c.id, "title": c.title, "done": c.done,
             "priority": c.priority or "medium",

@@ -41,6 +41,17 @@ class _StatusSession:
         return _FakeQuery(self._rows)
 
 
+class _UserLookupSession:
+    def __init__(self, rows):
+        self._rows = rows
+        self.query_calls = 0
+
+    def query(self, model):
+        assert model is User
+        self.query_calls += 1
+        return _FakeQuery(self._rows)
+
+
 # ── Chore model tests ────────────────────────────────────────────────────────
 
 class TestChoreModel:
@@ -226,6 +237,19 @@ class TestDashboardAPI:
 
         assert result[1].status == "available"
         assert result[2].status == "dnd"
+        assert db.query_calls == 1
+
+    def test_chore_assignee_lookup_batches_for_dashboard(self):
+        rows = [
+            User(id=1, name="Alice"),
+            User(id=2, name="Bob"),
+        ]
+        db = _UserLookupSession(rows)
+
+        result = home_service._users_by_id(db, [1, 2])
+
+        assert result[1].name == "Alice"
+        assert result[2].name == "Bob"
         assert db.query_calls == 1
 
 
