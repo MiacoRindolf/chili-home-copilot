@@ -75,11 +75,14 @@ _MODEL_PREFERENCE = (
 )
 
 _PLAN_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_TIMEOUT_SEC") or "90")
-_PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "500")
+_PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "120")
+_PLAN_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_CTX") or "2048")
 _PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "9000")
 _EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_SEC") or "150")
 _EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
+_EDIT_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_CTX") or "4096")
 _EDIT_MAX_FILE_LINES = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_MAX_FILE_LINES") or "260")
+_OLLAMA_KEEP_ALIVE = os.environ.get("CHILI_PROJECT_AUTOPILOT_OLLAMA_KEEP_ALIVE") or "15m"
 
 _STAGE_ORDER = (
     "classify",
@@ -723,8 +726,9 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
     request = str(context.get("operator_request") or "")
     candidates = _plan_candidate_files(context, repo_path, request)
     parts = [
-        "Produce compact JSON only for a safe local autonomous code run.",
-        "Choose concrete files, keep scope small, and avoid speculative rewrites.",
+        "Return one compact JSON object for a safe local autonomous code run.",
+        "No markdown. No prose outside JSON. Keep strings short.",
+        "Choose one or two concrete files and avoid speculative rewrites.",
         "",
         "Operator request:",
         request,
@@ -757,9 +761,9 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
     parts.extend(
         [
             "",
-            "Return this JSON shape only:",
-            '{"analysis":"one short paragraph","files":[{"path":"relative/path","action":"modify|create","description":"specific change"}],"notes":"caveats"}',
-            "Rules: max 4 files, prefer existing candidate files, include only repo-relative paths.",
+            "JSON shape:",
+            '{"analysis":"<=18 words","files":[{"path":"candidate/path","action":"modify","description":"<=12 words"}],"notes":"<=12 words"}',
+            "Rules: max 2 files, prefer existing candidate files exactly, include only repo-relative paths.",
         ]
     )
     return _clip("\n".join(parts), _PLAN_PROMPT_CHAR_LIMIT)
@@ -865,7 +869,16 @@ def _fallback_plan_from_context(
     prompt: str,
     reason: str,
 ) -> dict[str, Any]:
-    files = _rank_fallback_files(_plan_candidate_files(context, repo_path, prompt), repo_path, prompt)[:1]
+    ranked_files = _rank_fallback_files(_plan_candidate_files(context, repo_path, prompt), repo_path, prompt)
+    if _is_vague_small_request(prompt) and repo_path is not None:
+        deterministic_files: list[str] = []
+        for rel in ranked_files:
+            content = _read_file_content(str(repo_path), rel, max_lines=_EDIT_MAX_FILE_LINES)
+            if _deterministic_small_desktop_diff(rel, content or "", prompt):
+                deterministic_files.append(rel)
+        if deterministic_files:
+            ranked_files = deterministic_files
+    files = ranked_files[:1]
     if not files:
         return {
             "analysis": f"Local model planning was unavailable ({reason}); no safe candidate files were identified.",
@@ -899,12 +912,22 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
     context = _gather_context(db, int(repo.id), run.prompt, user_id=run.user_id)
     context["operator_request"] = run.prompt
     repo_path = resolve_repo_runtime_path(repo)
+    if _is_vague_small_request(run.prompt):
+        fallback = _fallback_plan_from_context(
+            context,
+            repo_path,
+            run.prompt,
+            "vague small request routed to heuristic fast path",
+        )
+        if fallback.get("files"):
+            _add_artifact(db, run.run_id, "plan", "heuristic_plan_fast_path", content_json=fallback)
+            return fallback
     prompt = _build_autonomy_plan_prompt(context, repo_path)
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a senior coding architect. Produce compact JSON only. "
+                "You are a senior coding architect. Output one compact JSON object only. "
                 "Plan for safe autonomous implementation in a git worktree."
             ),
         },
@@ -915,7 +938,11 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
         str(model_info["model"]),
         temperature=0.15,
         timeout_sec=_PLAN_TIMEOUT_SEC,
-        options={"num_predict": _PLAN_NUM_PREDICT},
+        options={
+            "num_predict": _PLAN_NUM_PREDICT,
+            "num_ctx": _PLAN_NUM_CTX,
+            "keep_alive": _OLLAMA_KEEP_ALIVE,
+        },
     )
     _add_artifact(
         db,
@@ -929,6 +956,10 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
             "error": result.error,
             "installed_models": model_info.get("installed_models"),
             "prompt_chars": len(prompt),
+            "timeout_sec": _PLAN_TIMEOUT_SEC,
+            "num_predict": _PLAN_NUM_PREDICT,
+            "num_ctx": _PLAN_NUM_CTX,
+            "keep_alive": _OLLAMA_KEEP_ALIVE,
         },
     )
     if not result.ok:
@@ -1209,7 +1240,11 @@ def generate_diffs_from_plan(
             str(model_info["model"]),
             temperature=0.1,
             timeout_sec=_EDIT_TIMEOUT_SEC,
-            options={"num_predict": _EDIT_NUM_PREDICT},
+            options={
+                "num_predict": _EDIT_NUM_PREDICT,
+                "num_ctx": _EDIT_NUM_CTX,
+                "keep_alive": _OLLAMA_KEEP_ALIVE,
+            },
         )
         _add_artifact(
             db,
@@ -1223,6 +1258,10 @@ def generate_diffs_from_plan(
                 "latency_ms": result.latency_ms,
                 "error": result.error,
                 "prompt_chars": len(prompt),
+                "timeout_sec": _EDIT_TIMEOUT_SEC,
+                "num_predict": _EDIT_NUM_PREDICT,
+                "num_ctx": _EDIT_NUM_CTX,
+                "keep_alive": _OLLAMA_KEEP_ALIVE,
             },
         )
         _check_cancel(db, run)
@@ -1278,10 +1317,27 @@ def generate_diffs_from_plan(
 
 
 def _deterministic_small_desktop_diff(rel: str, content: str, prompt: str) -> str | None:
-    if rel != "chili_mobile/lib/src/network/network_error_message.dart":
-        return None
     prompt_lower = (prompt or "").lower()
     if not _is_vague_small_request(prompt) or not any(token in prompt_lower for token in ("desktop", "app", "ui")):
+        return None
+    if rel == "chili_mobile/lib/src/network/chili_api_client.dart":
+        updated = content
+        pattern = re.compile(
+            r"(?m)^(?P<indent>\s*)final err = decoded\?\['error'\] \?\? "
+            r"decoded\?\['detail'\] \?\? response\.body;"
+        )
+        if not pattern.search(updated):
+            return None
+        updated = pattern.sub(
+            lambda match: (
+                f"{match.group('indent')}final err = decoded?['error'] ?? decoded?['detail'] ?? "
+                "userMessageForHttpStatus(response.statusCode);"
+            ),
+            updated,
+            count=1,
+        )
+        return _unified_diff(rel, content, updated)
+    if rel != "chili_mobile/lib/src/network/network_error_message.dart":
         return None
     updated = content
     if "case 403:" not in updated and "Access denied (403)" not in updated:

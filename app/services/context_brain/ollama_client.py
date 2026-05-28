@@ -76,19 +76,26 @@ def chat(
     ``messages`` is a list of {"role": "system"|"user"|"assistant",
     "content": "..."} just like OpenAI. Ollama supports this shape natively.
     """
+    request_options: dict[str, Any] = {"temperature": temperature}
+    if options:
+        for key, value in options.items():
+            if key in {"keep_alive", "format"} or value is None:
+                continue
+            request_options[key] = value
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "stream": False,
-        "options": {
-            "temperature": temperature,
-            **({"num_predict": int(options["num_predict"])} if options and "num_predict" in options else {}),
-        },
+        "options": request_options,
     }
+    if options and options.get("keep_alive"):
+        payload["keep_alive"] = str(options["keep_alive"])
+    if options and options.get("format"):
+        payload["format"] = str(options["format"])
     bases = [base_url or _DEFAULT_OLLAMA_HOST]
     if base_url is None:
         bases.extend(host for host in _FALLBACK_OLLAMA_HOSTS if host not in bases)
-    last_error: str | None = None
+    errors: list[str] = []
     t0 = time.monotonic()
     for raw_base in bases:
         base = raw_base.rstrip("/")
@@ -101,13 +108,13 @@ def chat(
                 err_body = e.read().decode("utf-8", errors="replace")[:600]
             except Exception:
                 err_body = str(e)
-            last_error = f"http_{e.code}: {err_body}"
+            errors.append(f"{base}: http_{e.code}: {err_body}")
             logger.warning(
                 "[context_brain.ollama] HTTP %s for model=%s at %s: %s",
                 e.code, model, base, err_body,
             )
         except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError) as e:
-            last_error = f"{type(e).__name__}: {e}"
+            errors.append(f"{base}: {type(e).__name__}: {e}")
             logger.warning(
                 "[context_brain.ollama] call failed model=%s at %s: %s", model, base, e,
             )
@@ -117,7 +124,7 @@ def chat(
             ok=False,
             model=model,
             latency_ms=latency_ms,
-            error=last_error or "Ollama call failed",
+            error="; ".join(errors) or "Ollama call failed",
         )
 
     latency_ms = int((time.monotonic() - t0) * 1000)

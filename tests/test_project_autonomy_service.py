@@ -76,6 +76,100 @@ def test_select_local_model_recommends_coder_model_when_empty(monkeypatch):
     assert "qwen2.5-coder:7b" in selected["recommendation"]
 
 
+def test_build_local_plan_uses_bounded_warm_ollama_options(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        target = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+        target.parent.mkdir(parents=True)
+        target.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_plan_options",
+            repo_id=repo.id,
+            prompt="Improve certificate failure messaging in the desktop app",
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        captured = {}
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {"repos": [], "insights": [], "hotspots": [], "relevant_files": []},
+        )
+
+        def fake_chat(*args, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                ok=True,
+                text=(
+                    '{"analysis":"ok","files":[{"path":"chili_mobile/lib/src/network/'
+                    'network_error_message.dart","action":"modify"}],"notes":""}'
+                ),
+                latency_ms=1,
+                error=None,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        plan = orchestrator.build_local_plan(db, run, repo)
+
+        assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+        assert captured["timeout_sec"] == orchestrator._PLAN_TIMEOUT_SEC
+        assert captured["options"]["num_predict"] == orchestrator._PLAN_NUM_PREDICT
+        assert captured["options"]["num_ctx"] == orchestrator._PLAN_NUM_CTX
+        assert captured["options"]["keep_alive"] == orchestrator._OLLAMA_KEEP_ALIVE
+    finally:
+        db.close()
+
+
+def test_build_local_plan_uses_heuristic_fast_path_for_vague_small_request(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        target = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+        target.parent.mkdir(parents=True)
+        target.write_text("String userVisibleNetworkError(Object error) => '$error';\n", encoding="utf-8")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_fast_plan",
+            repo_id=repo.id,
+            prompt="find a small enhancement for the desktop app",
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {"repos": [], "insights": [], "hotspots": [], "relevant_files": []},
+        )
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: pytest.fail("vague small requests should not call the planner model"),
+        )
+
+        plan = orchestrator.build_local_plan(db, run, repo)
+
+        assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(ProjectAutonomyArtifact.run_id == run.run_id, ProjectAutonomyArtifact.name == "heuristic_plan_fast_path")
+            .one()
+        )
+        assert "vague small request" in (artifact.content_json or "")
+    finally:
+        db.close()
+
+
 def test_command_policy_allows_repo_scripts_and_blocks_installs(tmp_path):
     (tmp_path / "package.json").write_text(
         '{"scripts":{"lint":"eslint .","test":"vitest","build":"vite build"}}',
@@ -205,6 +299,48 @@ def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):
     assert plan["files"]
     assert len(plan["files"]) == 1
     assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+
+
+def test_heuristic_plan_fallback_prefers_available_deterministic_desktop_patch(tmp_path):
+    error_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+    api_file = tmp_path / "chili_mobile/lib/src/network/chili_api_client.dart"
+    error_file.parent.mkdir(parents=True)
+    error_file.write_text(
+        "String userVisibleNetworkError(Object error) {\n"
+        "  final s = error.toString();\n"
+        "  if (s.contains('HandshakeException') || s.contains('CERTIFICATE_VERIFY_FAILED')) {}\n"
+        "  if (s.contains('FormatException') || s.contains('Unexpected character')) {}\n"
+        "  return s;\n"
+        "}\n"
+        "String userMessageForHttpStatus(int statusCode) {\n"
+        "  switch (statusCode) {\n"
+        "    case 401:\n"
+        "    case 403:\n"
+        "    case 502:\n"
+        "      return 'handled';\n"
+        "    default:\n"
+        "      return 'Unexpected HTTP $statusCode from server.';\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    api_file.write_text(
+        "Map<String, dynamic> parseResponse(response, decoded) {\n"
+        "  final err = decoded?['error'] ?? decoded?['detail'] ?? response.body;\n"
+        "  return {'ok': false, 'error': err};\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    context = {"repos": [], "insights": [], "hotspots": [], "relevant_files": []}
+
+    plan = orchestrator._fallback_plan_from_context(
+        context,
+        tmp_path,
+        "find a small enhancement for the desktop app",
+        "fast path",
+    )
+
+    assert plan["files"][0]["path"] == "chili_mobile/lib/src/network/chili_api_client.dart"
 
 
 def test_vague_small_plan_is_narrowed_away_from_large_desktop_file(tmp_path):
@@ -532,3 +668,29 @@ def test_small_desktop_fallback_finds_third_network_enhancement(monkeypatch, tmp
         assert "login page or proxy error page" in diffs[0]
     finally:
         db.close()
+
+
+def test_small_desktop_fallback_handles_non_json_chat_response(tmp_path):
+    rel = "chili_mobile/lib/src/network/chili_api_client.dart"
+    before = (
+        "import 'network_error_message.dart' show userMessageForHttpStatus;\n"
+        "void handle(response, decoded) {\n"
+        "  final err = decoded?['error'] ?? decoded?['detail'] ?? response.body;\n"
+        "  throw Exception(err is String ? err : 'HTTP ${response.statusCode}');\n"
+        "}\n"
+    )
+    repo_file = tmp_path / rel
+    repo_file.parent.mkdir(parents=True)
+    repo_file.write_text(before, encoding="utf-8", newline="\n")
+    orchestrator._git(tmp_path, ["init"], timeout=60)
+
+    diff = orchestrator._deterministic_small_desktop_diff(
+        rel,
+        before,
+        "find a small enhancement for the desktop app",
+    )
+
+    assert diff is not None
+    assert "userMessageForHttpStatus(response.statusCode)" in diff
+    proc = orchestrator._git(tmp_path, ["apply", "--check"], input_text=diff, timeout=60)
+    assert proc.returncode == 0, proc.stderr
