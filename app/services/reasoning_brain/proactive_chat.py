@@ -15,6 +15,31 @@ from ...models import ReasoningLearningGoal, ReasoningUserModel
 _pending_openers: dict[int, dict] = {}
 
 
+def _opener_payload(goal: ReasoningLearningGoal, message: str) -> dict:
+    return {"message": message, "goal_id": goal.id, "goal_description": goal.description}
+
+
+def _mechanical_opening_message(goal: ReasoningLearningGoal) -> str | None:
+    """Template common Insight Chat openers so routine goals do not need an LLM."""
+    dimension = str(getattr(goal, "dimension", "") or "").strip().lower()
+    description = str(getattr(goal, "description", "") or "").strip().lower()
+    signal = f"{dimension} {description}"
+
+    if "communication" in signal or "tone" in signal or "reply" in signal:
+        return "When you ask me for help, do you usually want the quick version first or the deeper context right away?"
+    if "risk" in signal:
+        return "When something has real upside but a bit of uncertainty, what usually helps you decide whether it is worth taking on?"
+    if "decision" in signal or "choice" in signal:
+        return "When you have a tricky choice in front of you, do you usually compare a few options or look for the clearest next step?"
+    if "schedule" in signal or "routine" in signal or "work" in signal:
+        return "How has your day-to-day rhythm been lately, and is there a part of it you wish felt smoother?"
+    if "preference" in signal or "personality" in signal or "interest" in signal or dimension in {"general", "general_personality"}:
+        return "What have you been getting into lately, outside the usual day-to-day stuff?"
+    if "goal" in signal or "priorit" in signal:
+        return "What is one thing you would like to make easier or more consistent over the next few weeks?"
+    return None
+
+
 def _ensure_goal(db: Session, user_id: int) -> Optional[ReasoningLearningGoal]:
     goal = (
         db.query(ReasoningLearningGoal)
@@ -51,10 +76,7 @@ def pick_learning_goal(db: Session, user_id: int) -> Optional[ReasoningLearningG
 
 
 def generate_opening_message(db: Session, user_id: int, goal: ReasoningLearningGoal) -> Optional[dict]:
-    """Use LLM to craft a subtle, engaging opener for Insight Chat."""
-    if not openai_client.is_configured():
-        return None
-
+    """Craft a subtle, engaging opener for Insight Chat."""
     um = (
         db.query(ReasoningUserModel)
         .filter(ReasoningUserModel.user_id == user_id, ReasoningUserModel.active.is_(True))
@@ -72,6 +94,19 @@ def generate_opening_message(db: Session, user_id: int, goal: ReasoningLearningG
         if comm:
             profile_bits.append(f"communication_prefs={json.dumps(comm)}")
     profile_summary = ", ".join(profile_bits) if profile_bits else "(no profile yet)"
+
+    mechanical_msg = _mechanical_opening_message(goal)
+    if mechanical_msg:
+        data = _opener_payload(goal, mechanical_msg)
+        _pending_openers[user_id] = data
+        log_info(
+            "reasoning_insight_opening",
+            f"mechanical_opener user_id={user_id} goal_id={getattr(goal, 'id', None)} dimension={getattr(goal, 'dimension', None)!r}",
+        )
+        return data
+
+    if not openai_client.is_configured():
+        return None
 
     prompt = (
         "You are Chili, an AI housemate. You want to better understand the user, but you must NEVER say that explicitly.\n"
@@ -105,7 +140,7 @@ def generate_opening_message(db: Session, user_id: int, goal: ReasoningLearningG
     if not msg:
         return None
 
-    data = {"message": msg, "goal_id": goal.id, "goal_description": goal.description}
+    data = _opener_payload(goal, msg)
     _pending_openers[user_id] = data
     return data
 
@@ -177,4 +212,3 @@ def process_insight_reply(
 
     _pending_openers.pop(user_id, None)
     return {"ok": True, "stored_facts": new_facts, "goal": {"id": goal.id, "status": goal.status, "evidence_count": goal.evidence_count}}
-
