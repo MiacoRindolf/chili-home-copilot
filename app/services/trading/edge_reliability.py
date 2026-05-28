@@ -192,6 +192,15 @@ def _entry_edge_snapshot(run: AutoTraderRun) -> dict[str, Any]:
     return edge if isinstance(edge, dict) else {}
 
 
+def _expected_net_pct_from_run(run: AutoTraderRun) -> float | None:
+    edge = _entry_edge_snapshot(run)
+    expected = _safe_float(edge.get("expected_net_pct"))
+    if expected is not None:
+        return expected
+    snap = _json_dict(getattr(run, "rule_snapshot", None))
+    return _safe_float(snap.get("entry_edge_expected_net_pct"))
+
+
 def _signal_lane_for(alert: BreakoutAlert | None, run: AutoTraderRun | None) -> str:
     if run is not None:
         snap = _json_dict(getattr(run, "rule_snapshot", None))
@@ -746,6 +755,77 @@ def latest_edge_reliability_snapshots(
     return out
 
 
+def _candidate_pattern_ids_from_recent_runs(
+    db: Session,
+    *,
+    cutoff: datetime,
+    limit: int,
+) -> list[int]:
+    """Rank candidate patterns by recent evidence value instead of DB row order."""
+    fetch_limit = min(10_000, max(1_000, int(limit) * 500))
+    rows = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.scan_pattern_id.isnot(None))
+        .filter(AutoTraderRun.created_at >= cutoff)
+        .order_by(AutoTraderRun.created_at.desc())
+        .limit(fetch_limit)
+        .all()
+    )
+    buckets: dict[int, dict[str, Any]] = {}
+    for run in rows:
+        pid = getattr(run, "scan_pattern_id", None)
+        if pid is None:
+            continue
+        bucket = buckets.setdefault(
+            int(pid),
+            {
+                "edge_eval_count": 0,
+                "positive_expected_edge_count": 0,
+                "shadow_block_count": 0,
+                "execution_block_count": 0,
+                "max_expected_ev_pct": None,
+                "latest_created_at": None,
+            },
+        )
+        bucket["edge_eval_count"] += 1
+        expected = _expected_net_pct_from_run(run)
+        if expected is not None:
+            current = _safe_float(bucket.get("max_expected_ev_pct"))
+            bucket["max_expected_ev_pct"] = expected if current is None else max(current, expected)
+            if expected > 0.0:
+                bucket["positive_expected_edge_count"] += 1
+        reason = _reason_bucket(str(getattr(run, "reason", "") or ""))
+        if reason == "shadow_observation":
+            bucket["shadow_block_count"] += 1
+        elif reason == "broker_execution_reject":
+            bucket["execution_block_count"] += 1
+        created_at = getattr(run, "created_at", None)
+        if isinstance(created_at, datetime):
+            latest = bucket.get("latest_created_at")
+            bucket["latest_created_at"] = max(latest, created_at) if latest else created_at
+
+    def score(item: tuple[int, dict[str, Any]]) -> tuple[float, float, int]:
+        pid, bucket = item
+        positive_n = int(bucket.get("positive_expected_edge_count") or 0)
+        shadow_n = int(bucket.get("shadow_block_count") or 0)
+        execution_n = int(bucket.get("execution_block_count") or 0)
+        edge_n = int(bucket.get("edge_eval_count") or 0)
+        max_ev = _safe_float(bucket.get("max_expected_ev_pct")) or 0.0
+        evidence_score = (
+            positive_n * 100.0
+            + max(0.0, max_ev) * 10.0
+            + shadow_n * 5.0
+            + execution_n * 2.0
+            + math.log1p(max(0, edge_n))
+        )
+        latest = bucket.get("latest_created_at")
+        latest_ts = latest.timestamp() if isinstance(latest, datetime) else 0.0
+        return evidence_score, latest_ts, -pid
+
+    ranked = sorted(buckets.items(), key=score, reverse=True)
+    return [pid for pid, _bucket in ranked[: max(1, int(limit))]]
+
+
 def _observed_asset_slices_for_pattern(
     db: Session,
     scan_pattern_id: int,
@@ -818,15 +898,11 @@ def edge_supply_rows(
 ) -> list[dict[str, Any]]:
     if pattern_ids is None:
         cutoff = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
-        rows = (
-            db.query(AutoTraderRun.scan_pattern_id)
-            .filter(AutoTraderRun.scan_pattern_id.isnot(None))
-            .filter(AutoTraderRun.created_at >= cutoff)
-            .distinct()
-            .limit(max(1, int(limit) * 4))
-            .all()
+        ids = _candidate_pattern_ids_from_recent_runs(
+            db,
+            cutoff=cutoff,
+            limit=max(1, int(limit) * 4),
         )
-        ids = [int(r[0]) for r in rows if r[0] is not None]
     else:
         ids = [int(x) for x in pattern_ids if x is not None]
 

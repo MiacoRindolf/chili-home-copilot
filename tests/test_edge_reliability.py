@@ -214,6 +214,24 @@ def test_edge_reliability_slices_all_asset_patterns_by_asset(db):
     assert by_asset["crypto"]["primary_symbol"] == "BTC-USD"
 
 
+def test_edge_supply_prefers_recent_positive_edge_over_arbitrary_distinct_order(db):
+    for idx in range(12):
+        pat = _pattern(db, name=f"low value pattern {idx}")
+        alert = _alert(db, pat, f"LOW{idx}")
+        _run(db, pat, alert, expected=-1.0)
+
+    target = _pattern(db, name="high value edge pattern")
+    target_alert = _alert(db, target, "HIGH")
+    _run(db, target, target_alert, expected=7.5)
+    db.commit()
+
+    rows = edge_supply_rows(db, window_days=7, limit=2)
+    ids = [row["scan_pattern_id"] for row in rows]
+
+    assert target.id in ids
+    assert ids[0] == target.id
+
+
 def test_recert_rescue_diagnostic_never_clears_hard_recert(db):
     pat = _pattern(
         db,
