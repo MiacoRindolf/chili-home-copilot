@@ -141,6 +141,47 @@ def test_call_llm_cache_key_includes_purpose_model_policy(_cfg, monkeypatch):
     assert stats["hits"] == 0
 
 
+def test_call_llm_with_purpose_gateway_failure_skips_direct_openai(monkeypatch):
+    gateway = MagicMock(side_effect=RuntimeError("gateway unavailable"))
+    direct = MagicMock(side_effect=AssertionError("direct OpenAI bypassed gateway"))
+
+    monkeypatch.setattr("app.openai_client.is_configured", lambda: True)
+    monkeypatch.setattr("app.openai_client.chat", direct)
+    monkeypatch.setattr("app.services.context_brain.llm_gateway.gateway_chat", gateway)
+
+    reply = llm_caller.call_llm(
+        messages=[{"role": "user", "content": "deterministic extraction"}],
+        max_tokens=100,
+        purpose="trade_plan_extract",
+        trace_id="llm-caller-cost-test",
+    )
+
+    assert reply == ""
+    assert gateway.call_count == 1
+    direct.assert_not_called()
+
+
+def test_call_llm_with_purpose_gateway_failure_return_meta_skips_direct_openai(monkeypatch):
+    gateway = MagicMock(side_effect=RuntimeError("gateway unavailable"))
+    direct = MagicMock(side_effect=AssertionError("direct OpenAI bypassed gateway"))
+
+    monkeypatch.setattr("app.openai_client.is_configured", lambda: True)
+    monkeypatch.setattr("app.openai_client.chat", direct)
+    monkeypatch.setattr("app.services.context_brain.llm_gateway.gateway_chat", gateway)
+
+    result = llm_caller.call_llm(
+        messages=[{"role": "user", "content": "autotrader revalidation"}],
+        max_tokens=100,
+        purpose="autotrader_revalidation",
+        trace_id="llm-caller-cost-test",
+        return_meta=True,
+    )
+
+    assert result == {"reply": "", "gateway_log_id": None}
+    assert gateway.call_count == 1
+    direct.assert_not_called()
+
+
 @patch("app.services.llm_caller._cache_config", return_value=(256, 600))
 def test_call_llm_cacheable_false_never_caches(_cfg):
     mock_chat = MagicMock(return_value={"reply": "ok", "model": "m1"})

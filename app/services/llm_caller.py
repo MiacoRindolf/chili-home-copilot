@@ -295,8 +295,11 @@ def call_llm(
                     gw_kwargs["system_prompt"] = system_prompt
                 result = gateway_chat(**gw_kwargs)
             except Exception as _ge:
-                logger.debug("[llm_caller] gateway_chat failed (%s); falling back", _ge)
-                result = None
+                logger.debug(
+                    "[llm_caller] gateway_chat failed (%s); direct_openai_bypass_disabled",
+                    _ge,
+                )
+                result = {"reply": "", "gateway_log_id": None}
         else:
             result = None
 
