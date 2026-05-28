@@ -234,6 +234,13 @@ def get_calendar_events(db: Session, year: int, month: int) -> list[dict]:
 
 # ── Dashboard Summary ─────────────────────────────────────────────────────────
 
+def _user_statuses_by_id(db: Session, user_ids: list[int]) -> dict[int, UserStatus]:
+    if not user_ids:
+        return {}
+    rows = db.query(UserStatus).filter(UserStatus.user_id.in_(user_ids)).all()
+    return {int(row.user_id): row for row in rows}
+
+
 def get_dashboard_data(db: Session, identity: dict) -> dict:
     chores = db.query(Chore).order_by(Chore.id.desc()).all()
     pending_chores = sum(1 for c in chores if not c.done)
@@ -278,10 +285,11 @@ def get_dashboard_data(db: Session, identity: dict) -> dict:
     if not identity["is_guest"]:
         users = db.query(User).all()
         users_list = [{"id": u.id, "name": u.name} for u in users]
+        status_by_user = _user_statuses_by_id(db, [u.id for u in users])
         for u in users:
             if u.id == identity.get("user_id"):
                 continue
-            st = db.query(UserStatus).filter(UserStatus.user_id == u.id).first()
+            st = status_by_user.get(u.id)
             status = "available"
             if st:
                 if st.status == "dnd" and st.dnd_until and datetime.utcnow() > st.dnd_until:

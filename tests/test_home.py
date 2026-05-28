@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock
 
 import pytest
-from app.models import Chore, Birthday, User, Device, ActivityLog
+from app.models import Chore, Birthday, User, Device, ActivityLog, UserStatus
 from app.services import home_service
 from app.pairing import DEVICE_COOKIE_NAME
 
@@ -17,6 +17,28 @@ def _make_paired(db):
     db.add(Device(token=token, user_id=user.id, label="test", client_ip_last="127.0.0.1"))
     db.commit()
     return user, token
+
+
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _StatusSession:
+    def __init__(self, rows):
+        self._rows = rows
+        self.query_calls = 0
+
+    def query(self, model):
+        assert model is UserStatus
+        self.query_calls += 1
+        return _FakeQuery(self._rows)
 
 
 # ── Chore model tests ────────────────────────────────────────────────────────
@@ -192,6 +214,19 @@ class TestDashboardAPI:
         resp = client.get("/api/dashboard")
         data = resp.json()
         assert data["pending_chores"] >= 2
+
+    def test_user_status_lookup_batches_for_dashboard(self):
+        rows = [
+            UserStatus(user_id=1, status="available"),
+            UserStatus(user_id=2, status="dnd"),
+        ]
+        db = _StatusSession(rows)
+
+        result = home_service._user_statuses_by_id(db, [1, 2])
+
+        assert result[1].status == "available"
+        assert result[2].status == "dnd"
+        assert db.query_calls == 1
 
 
 # ── Activity API tests ───────────────────────────────────────────────────────
