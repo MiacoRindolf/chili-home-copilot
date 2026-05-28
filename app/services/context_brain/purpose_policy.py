@@ -82,6 +82,7 @@ def _offline_passthrough_policy(purpose: str) -> PurposePolicy:
 
 
 _PURPOSE_DEFAULTS: dict[str, PurposePolicy] = {
+    "chat_search": _offline_passthrough_policy("chat_search"),
     "code_review": _offline_passthrough_policy("code_review"),
     "code_search": _offline_passthrough_policy("code_search"),
     "desktop_normalize_app": _offline_passthrough_policy("desktop_normalize_app"),

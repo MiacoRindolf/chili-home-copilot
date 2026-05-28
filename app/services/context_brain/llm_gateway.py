@@ -46,6 +46,7 @@ from .tree_types import GatewayCallResult, PurposePolicy
 logger = logging.getLogger(__name__)
 
 _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
+    "chat_search",
     "code_review",
     "code_search",
     "desktop_normalize_app",

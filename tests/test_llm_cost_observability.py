@@ -287,6 +287,7 @@ def test_reasoning_background_purpose_has_offline_code_default_when_db_seed_miss
 @pytest.mark.parametrize(
     "purpose",
     [
+        "chat_search",
         "code_review",
         "code_search",
         "desktop_normalize_app",
@@ -683,6 +684,44 @@ def test_gateway_exact_cache_uses_planner_intent_default_when_db_seed_missing(mo
     messages = [{"role": "user", "content": 'For a project called "Research obscure idea", suggest tasks.'}]
     gateway_chat(messages, purpose="planner_intent", system_prompt="json array only", db=EmptyDb())
     gateway_chat(messages, purpose="planner_intent", system_prompt="json array only", db=EmptyDb())
+
+    assert chat.call_count == 1
+    assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
+    assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
+    assert finalize.call_args_list[1].kwargs["provider"] == "cache"
+    assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
+
+
+def test_gateway_exact_cache_uses_chat_search_default_when_db_seed_missing(monkeypatch):
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def execute(self, *_args, **_kwargs):
+            return EmptyResult()
+
+    chat = MagicMock(
+        return_value={
+            "reply": '{"answer":"stable","sources":[{"title":"A","url":"https://example.com"}]}',
+            "model": "gpt-5.5",
+            "provider": "openai",
+            "tokens_used": 45,
+        }
+    )
+    finalize = MagicMock()
+    log_ids = iter([971, 972])
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        lambda *a, **k: next(log_ids),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "Use these search results to answer: stable query"}]
+    gateway_chat(messages, purpose="chat_search", system_prompt="search synthesis json only", db=EmptyDb())
+    gateway_chat(messages, purpose="chat_search", system_prompt="search synthesis json only", db=EmptyDb())
 
     assert chat.call_count == 1
     assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
