@@ -57,22 +57,89 @@ _REASONING_BACKGROUND_PURPOSES = frozenset({
 })
 
 
-def _offline_passthrough_policy(purpose: str) -> PurposePolicy:
+def _passthrough_policy(
+    purpose: str,
+    *,
+    use_premium_synthesis: bool,
+    high_stakes: bool,
+) -> PurposePolicy:
     return PurposePolicy(
         purpose=purpose,
         routing_strategy="passthrough",
         decompose=False,
         cross_examine=False,
+        use_premium_synthesis=use_premium_synthesis,
+        high_stakes=high_stakes,
+    )
+
+
+def _offline_passthrough_policy(purpose: str) -> PurposePolicy:
+    return _passthrough_policy(
+        purpose,
         use_premium_synthesis=False,
         high_stakes=False,
     )
 
 
-_CODE_DEFAULTS: dict[str, PurposePolicy] = {
+_PURPOSE_DEFAULTS: dict[str, PurposePolicy] = {
     "code_review": _offline_passthrough_policy("code_review"),
     "code_search": _offline_passthrough_policy("code_search"),
     "project_playwright": _offline_passthrough_policy("project_playwright"),
     "project_web_research": _offline_passthrough_policy("project_web_research"),
+    "trading_reasoning": _offline_passthrough_policy("trading_reasoning"),
+    "trading_pattern_mine": _offline_passthrough_policy("trading_pattern_mine"),
+    "trading_reflect": _offline_passthrough_policy("trading_reflect"),
+    "pattern_research_extract": _offline_passthrough_policy("pattern_research_extract"),
+    "trading_analyze": _passthrough_policy(
+        "trading_analyze",
+        use_premium_synthesis=True,
+        high_stakes=False,
+    ),
+    "trading_analyze_stream": _passthrough_policy(
+        "trading_analyze_stream",
+        use_premium_synthesis=True,
+        high_stakes=False,
+    ),
+    "smart_pick_stream": _passthrough_policy(
+        "smart_pick_stream",
+        use_premium_synthesis=True,
+        high_stakes=False,
+    ),
+    "trading_smart_pick": _passthrough_policy(
+        "trading_smart_pick",
+        use_premium_synthesis=True,
+        high_stakes=False,
+    ),
+    "trading_brain_assistant": _passthrough_policy(
+        "trading_brain_assistant",
+        use_premium_synthesis=True,
+        high_stakes=False,
+    ),
+    "autotrader_revalidation": _passthrough_policy(
+        "autotrader_revalidation",
+        use_premium_synthesis=False,
+        high_stakes=True,
+    ),
+    "pattern_adjustment": _passthrough_policy(
+        "pattern_adjustment",
+        use_premium_synthesis=False,
+        high_stakes=True,
+    ),
+    "trade_plan_extract": _passthrough_policy(
+        "trade_plan_extract",
+        use_premium_synthesis=False,
+        high_stakes=True,
+    ),
+    "position_plan_generator": _passthrough_policy(
+        "position_plan_generator",
+        use_premium_synthesis=False,
+        high_stakes=True,
+    ),
+    "pattern_suggest": _passthrough_policy(
+        "pattern_suggest",
+        use_premium_synthesis=False,
+        high_stakes=True,
+    ),
     **{
         purpose: _offline_passthrough_policy(purpose)
         for purpose in _PROJECT_AGENT_PURPOSES
@@ -103,9 +170,9 @@ def get_policy(db: Session, purpose: str) -> PurposePolicy:
         row = None
 
     if row is None:
-        code_default = _CODE_DEFAULTS.get(purpose)
-        if code_default is not None:
-            return _clone_policy(code_default, purpose)
+        purpose_default = _PURPOSE_DEFAULTS.get(purpose)
+        if purpose_default is not None:
+            return _clone_policy(purpose_default, purpose)
 
         # Fall back to llm_default if the specific purpose row is missing
         if purpose != "llm_default":

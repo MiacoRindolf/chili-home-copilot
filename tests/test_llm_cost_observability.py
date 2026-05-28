@@ -194,7 +194,10 @@ def test_gateway_exact_cache_replays_offline_passthrough_without_paid_call(monke
             high_stakes=False,
         ),
     )
-    monkeypatch.setattr("app.services.context_brain.llm_gateway._write_gateway_log_start", lambda *a, **k: next(log_ids))
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        lambda *a, **k: next(log_ids),
+    )
     monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
     monkeypatch.setattr(oc, "chat", chat)
 
@@ -331,6 +334,53 @@ def test_project_playwright_has_offline_code_default_when_db_seed_missing():
 
 
 @pytest.mark.parametrize(
+    ("purpose", "use_premium_synthesis", "high_stakes"),
+    [
+        ("trading_reasoning", False, False),
+        ("trading_pattern_mine", False, False),
+        ("trading_reflect", False, False),
+        ("pattern_research_extract", False, False),
+        ("trading_analyze", True, False),
+        ("trading_analyze_stream", True, False),
+        ("smart_pick_stream", True, False),
+        ("trading_smart_pick", True, False),
+        ("trading_brain_assistant", True, False),
+        ("autotrader_revalidation", False, True),
+        ("pattern_adjustment", False, True),
+        ("trade_plan_extract", False, True),
+        ("position_plan_generator", False, True),
+        ("pattern_suggest", False, True),
+    ],
+)
+def test_trading_purpose_has_seed_equivalent_default_when_db_seed_missing(
+    purpose,
+    use_premium_synthesis,
+    high_stakes,
+):
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, *_args, **_kwargs):
+            self.calls += 1
+            return EmptyResult()
+
+    db = EmptyDb()
+
+    policy = policy_mod.get_policy(db, purpose)
+
+    assert policy.purpose == purpose
+    assert policy.routing_strategy == "passthrough"
+    assert policy.use_premium_synthesis is use_premium_synthesis
+    assert policy.high_stakes is high_stakes
+    assert db.calls == 1
+
+
+@pytest.mark.parametrize(
     "purpose",
     [
         "project_ai_engineer",
@@ -389,7 +439,10 @@ def test_gateway_exact_cache_uses_web_research_code_default(monkeypatch):
     finalize = MagicMock()
     log_ids = iter([301, 302])
 
-    monkeypatch.setattr("app.services.context_brain.llm_gateway._write_gateway_log_start", lambda *a, **k: next(log_ids))
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        lambda *a, **k: next(log_ids),
+    )
     monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
     monkeypatch.setattr(oc, "chat", chat)
 
@@ -468,6 +521,44 @@ def test_gateway_exact_cache_uses_project_agent_code_default(monkeypatch):
 
     assert chat.call_count == 1
     assert log_start.call_args_list[0].kwargs["purpose"] == "project_backend_engineer"
+    assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
+    assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
+    assert finalize.call_args_list[1].kwargs["provider"] == "cache"
+    assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
+
+
+def test_gateway_exact_cache_uses_trading_reflect_default_when_db_seed_missing(monkeypatch):
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def execute(self, *_args, **_kwargs):
+            return EmptyResult()
+
+    chat = MagicMock(
+        return_value={
+            "reply": '{"reflection":"stable"}',
+            "model": "gpt-5.5",
+            "provider": "openai",
+            "tokens_used": 42,
+        }
+    )
+    finalize = MagicMock()
+    log_ids = iter([601, 602])
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        lambda *a, **k: next(log_ids),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "reflect from a stable market snapshot"}]
+    gateway_chat(messages, purpose="trading_reflect", system_prompt="json only", db=EmptyDb())
+    gateway_chat(messages, purpose="trading_reflect", system_prompt="json only", db=EmptyDb())
+
+    assert chat.call_count == 1
     assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
     assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
     assert finalize.call_args_list[1].kwargs["provider"] == "cache"
