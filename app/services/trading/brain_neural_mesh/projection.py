@@ -63,6 +63,14 @@ def operational_clusters_registry() -> list[dict[str, Any]]:
     ]
 
 
+def _brain_graph_nodes_by_id(db: Session, node_ids: set[str]) -> dict[str, BrainGraphNode]:
+    ids = sorted({str(node_id) for node_id in node_ids if str(node_id or "").strip()})
+    if not ids:
+        return {}
+    rows = db.query(BrainGraphNode).filter(BrainGraphNode.id.in_(ids)).all()
+    return {str(row.id): row for row in rows if row.id}
+
+
 def neural_layer_labels_meta() -> dict[str, str]:
     """String keys for JSON (layer number as str)."""
     return {str(k): v for k, v in sorted(NEURAL_LAYER_LABELS.items())}
@@ -404,8 +412,9 @@ def build_edge_detail(db: Session, edge_id: int) -> Optional[dict[str, Any]]:
     e = db.query(BrainGraphEdge).filter(BrainGraphEdge.id == edge_id).one_or_none()
     if not e:
         return None
-    src = db.query(BrainGraphNode).filter(BrainGraphNode.id == e.source_node_id).one_or_none()
-    tgt = db.query(BrainGraphNode).filter(BrainGraphNode.id == e.target_node_id).one_or_none()
+    nodes_by_id = _brain_graph_nodes_by_id(db, {e.source_node_id, e.target_node_id})
+    src = nodes_by_id.get(e.source_node_id)
+    tgt = nodes_by_id.get(e.target_node_id)
     return {
         "id": e.id,
         "source_node_id": e.source_node_id,
