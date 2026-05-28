@@ -1999,6 +1999,55 @@ def _annotate_broker_reject(
     snap["broker_reject_error"] = str(error or "unknown")[:500]
 
 
+def _broker_response_reject_venue_and_hint(
+    res: dict[str, Any],
+    snap: dict[str, Any],
+) -> tuple[str, str]:
+    """Recover the broker boundary shape for post-call failures."""
+    if bool(res.get("_chili_options_path")) or bool(snap.get("options_path")):
+        meta = snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
+        legs = meta.get("legs") if isinstance(meta, dict) else None
+        return "robinhood_options", "option_spread" if isinstance(legs, list) and len(legs) > 1 else "option_limit"
+    source = str(res.get("_chili_broker_source") or "").strip().lower()
+    if source == "coinbase":
+        return "coinbase", "limit_post_only" if bool(res.get("_chili_maker_only")) else "market"
+    return "robinhood", "market"
+
+
+def _annotate_missing_order_id_broker_reject(
+    alert: BreakoutAlert,
+    *,
+    qty: float,
+    snap: dict[str, Any],
+    res: dict[str, Any],
+) -> str:
+    venue, order_hint = _broker_response_reject_venue_and_hint(res, snap)
+    try:
+        reject_qty = float(res.get("base_size") or qty or 0.0)
+    except (TypeError, ValueError):
+        reject_qty = float(qty or 0.0)
+    fingerprint = _broker_reject_action_fingerprint(
+        alert,
+        venue=venue,
+        side="buy",
+        qty=reject_qty,
+        snap=snap,
+        order_hint=order_hint,
+    )
+    _annotate_broker_reject(
+        snap,
+        fingerprint=fingerprint,
+        venue=venue,
+        error="place_no_order_id",
+    )
+    snap["broker_reject_missing_order_id"] = True
+    snap["broker_reject_order_hint"] = order_hint
+    client_order_id = str(res.get("client_order_id") or "").strip()
+    if client_order_id:
+        snap["broker_reject_client_order_id"] = client_order_id[:128]
+    return fingerprint
+
+
 def _maybe_block_repeated_broker_reject(
     db: Session | None,
     *,
@@ -5145,6 +5194,12 @@ def _execute_new_entry(
         # broker failure even when ``ok=True``.
         order_id_raw = res.get("order_id") or ""
         if not str(order_id_raw).strip():
+            _annotate_missing_order_id_broker_reject(
+                alert,
+                qty=float(qty),
+                snap=snap,
+                res=res,
+            )
             _audit(
                 db, user_id=uid, alert=alert,
                 decision="blocked",
