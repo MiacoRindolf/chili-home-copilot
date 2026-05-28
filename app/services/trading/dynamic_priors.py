@@ -90,9 +90,14 @@ def population_win_rate(db: Session, *, lookback_days: int = 90) -> float | None
             text("""
                 SELECT
                   COUNT(*) AS n,
-                  AVG(CASE WHEN COALESCE(pnl, 0) > 0 THEN 1.0 ELSE 0.0 END) AS wr
+                  AVG(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END) AS wr
                 FROM trading_trades
                 WHERE status = 'closed'
+                  AND pnl IS NOT NULL
+                  AND entry_price IS NOT NULL
+                  AND entry_price > 0
+                  AND quantity IS NOT NULL
+                  AND quantity > 0
                   AND exit_date IS NOT NULL
                   AND exit_date > NOW() - make_interval(days => :ld)
             """),
