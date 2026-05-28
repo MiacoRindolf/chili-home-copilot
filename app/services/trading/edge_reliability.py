@@ -783,6 +783,7 @@ def latest_edge_reliability_snapshot_slices(
             continue
         payload["snapshot_event_id"] = int(row.id)
         payload["snapshot_created_at"] = row.created_at.isoformat() if row.created_at else None
+        payload["snapshot_window_days"] = _safe_int(payload.get("window_days"))
         out[key] = payload
     return out
 

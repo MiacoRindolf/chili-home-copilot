@@ -18,6 +18,7 @@ from app.services.trading.cash_deployment import (
     cash_deployment_rows,
     cash_deployment_summary,
     enqueue_cash_deployment_work,
+    enqueue_imminent_edge_snapshot_coverage_work,
 )
 
 
@@ -360,9 +361,21 @@ def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkey
     _closed_paper(db, shadow, shadow_alert)
     db.commit()
 
-    first = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    first = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
     db.commit()
-    second = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    second = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
     db.commit()
 
     rows = (
@@ -380,6 +393,49 @@ def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkey
     assert by_type["recert_rescue_refresh"].payload["asset_class"] == "stock"
     assert by_type["exit_variant_refresh"].payload["scan_pattern_id"] == shadow.id
     assert by_type["exit_variant_refresh"].payload["cash_deployment_category"] == "positive_ev_shadow"
+
+
+def test_imminent_snapshot_coverage_enqueues_missing_asset_slices(db):
+    mixed = _pattern(db, name="cash coverage mixed")
+    mixed.asset_class = "all"
+    stock_alert = _alert(db, mixed, ticker="COVS")
+    crypto_alert = _alert(db, mixed, ticker="COVC-USD")
+    crypto_alert.asset_type = "crypto"
+    db.commit()
+
+    first = enqueue_imminent_edge_snapshot_coverage_work(
+        db,
+        window_days=7,
+        limit=10,
+        lookback_minutes=120,
+        max_snapshot_age_minutes=60,
+    )
+    db.commit()
+    second = enqueue_imminent_edge_snapshot_coverage_work(
+        db,
+        window_days=7,
+        limit=10,
+        lookback_minutes=120,
+        max_snapshot_age_minutes=60,
+    )
+    db.commit()
+
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == "edge_reliability_refresh")
+        .all()
+    )
+    assets = {row.payload["asset_class"] for row in rows}
+
+    assert first["considered_slices"] == 2
+    assert first["created"] == 2
+    assert first["missing_snapshot"] == 2
+    assert second["created"] == 0
+    assert second["skipped_deduped"] == 2
+    assert assets == {"stock", "crypto"}
+    assert all(row.payload["scan_pattern_id"] == mixed.id for row in rows)
+    assert all(row.payload["source"] == "imminent_snapshot_coverage" for row in rows)
 
 
 def test_cash_deployment_skips_recent_noop_exit_variant_same_evidence(db, monkeypatch):
@@ -415,7 +471,13 @@ def test_cash_deployment_skips_recent_noop_exit_variant_same_evidence(db, monkey
     )
     db.commit()
 
-    out = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    out = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
     db.commit()
 
     assert out["created"] == 0
@@ -460,7 +522,13 @@ def test_cash_deployment_skips_structural_noop_exit_variant_with_new_fingerprint
     )
     db.commit()
 
-    out = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    out = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
     db.commit()
 
     assert out["created"] == 0
@@ -505,7 +573,13 @@ def test_cash_deployment_skips_too_negative_exit_debt_with_new_fingerprint(
     )
     db.commit()
 
-    out = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    out = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
     db.commit()
 
     assert out["created"] == 0
@@ -551,7 +625,13 @@ def test_cash_deployment_skips_duplicate_exit_child_with_new_fingerprint(
     )
     db.commit()
 
-    out = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    out = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
     db.commit()
 
     assert out["created"] == 0

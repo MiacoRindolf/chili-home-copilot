@@ -16,6 +16,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from ...models.trading import BrainWorkEvent, BreakoutAlert
 from .edge_reliability import (
     DEFAULT_TOP_LIMIT,
     DEFAULT_WINDOW_DAYS,
@@ -28,6 +29,7 @@ from .edge_reliability import (
     edge_supply_snapshot_rows,
     emit_edge_reliability_refresh_requested,
     emit_targeted_profitability_work,
+    latest_edge_reliability_snapshot_slices,
     null_lineage_short_paper_candidates,
 )
 from .portfolio_risk import get_risk_limits
@@ -763,6 +765,156 @@ def _recent_noop_profitability_work(
     return False
 
 
+def _snapshot_created_at(row: dict[str, Any] | None) -> datetime | None:
+    raw = (row or {}).get("snapshot_created_at")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def enqueue_imminent_edge_snapshot_coverage_work(
+    db: Session,
+    *,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    limit: int = DEFAULT_TOP_LIMIT,
+    lookback_minutes: int | None = None,
+    max_snapshot_age_minutes: int | None = None,
+) -> dict[str, Any]:
+    """Queue snapshot refreshes for recent imminent alert pattern/asset slices.
+
+    Cached edge/cash endpoints are only useful if the materialized snapshot
+    ledger covers the current candidate surface. This producer pass is cheap:
+    it looks at recent pending imminent alerts and enqueues deduped
+    ``edge_reliability_refresh`` work for missing/stale slices, leaving the
+    heavy reliability computation to the brain-work dispatcher.
+    """
+    producer_interval = max(
+        1,
+        _safe_int(
+            getattr(settings, "brain_work_cash_deployment_producer_interval_minutes", 30),
+            30,
+        ),
+    )
+    lookback = max(1, int(lookback_minutes or producer_interval * 4))
+    max_age = max(1, int(max_snapshot_age_minutes or producer_interval * 2))
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=lookback)
+    stale_cutoff = now - timedelta(minutes=max_age)
+
+    alerts = (
+        db.query(BreakoutAlert)
+        .filter(BreakoutAlert.alert_tier == "pattern_imminent")
+        .filter(BreakoutAlert.outcome == "pending")
+        .filter(BreakoutAlert.scan_pattern_id.isnot(None))
+        .filter(BreakoutAlert.alerted_at >= cutoff)
+        .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())
+        .all()
+    )
+    buckets: dict[tuple[int, str], dict[str, Any]] = {}
+    for alert in alerts:
+        pid = _safe_int(getattr(alert, "scan_pattern_id", None))
+        if pid <= 0:
+            continue
+        asset = _canonical_asset_class(getattr(alert, "asset_type", None)) or _asset_class_for_row(
+            {"primary_symbol": getattr(alert, "ticker", None)}
+        )
+        key = (pid, asset)
+        bucket = buckets.setdefault(
+            key,
+            {
+                "scan_pattern_id": pid,
+                "asset_class": asset,
+                "alert_count": 0,
+                "latest_alerted_at": None,
+                "latest_alert_id": None,
+            },
+        )
+        bucket["alert_count"] += 1
+        alerted_at = getattr(alert, "alerted_at", None)
+        latest_at = bucket.get("latest_alerted_at")
+        if latest_at is None or (alerted_at is not None and alerted_at > latest_at):
+            bucket["latest_alerted_at"] = alerted_at
+            bucket["latest_alert_id"] = int(alert.id)
+
+    snapshots = latest_edge_reliability_snapshot_slices(
+        db,
+        scan_pattern_ids={pid for pid, _asset in buckets},
+    )
+    created: list[int] = []
+    skipped_fresh = 0
+    skipped_deduped = 0
+    missing = 0
+    stale = 0
+    wrong_window = 0
+    for (pid, asset), bucket in sorted(buckets.items()):
+        snapshot = snapshots.get((pid, asset)) or snapshots.get((pid, "all"))
+        snap_at = _snapshot_created_at(snapshot)
+        snap_window = _safe_int(
+            (snapshot or {}).get("snapshot_window_days")
+            or (snapshot or {}).get("window_days"),
+            0,
+        )
+        if snapshot is None:
+            missing += 1
+        elif snap_window != int(window_days):
+            wrong_window += 1
+        elif snap_at is None or snap_at < stale_cutoff:
+            stale += 1
+        else:
+            skipped_fresh += 1
+            continue
+
+        latest_at = bucket.get("latest_alerted_at")
+        fingerprint = (
+            f"imminent_snapshot:{asset}:"
+            f"{bucket.get('alert_count')}:"
+            f"{latest_at.isoformat() if isinstance(latest_at, datetime) else 'unknown'}"
+        )
+        recent_refresh = (
+            db.query(BrainWorkEvent.id)
+            .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_REFRESH)
+            .filter(BrainWorkEvent.created_at >= stale_cutoff)
+            .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(pid)))
+            .filter(BrainWorkEvent.payload["asset_class"].astext == asset)
+            .filter(BrainWorkEvent.payload["window_days"].astext == str(int(window_days)))
+            .filter(BrainWorkEvent.payload["source"].astext == "imminent_snapshot_coverage")
+            .first()
+        )
+        if recent_refresh:
+            skipped_deduped += 1
+            continue
+        event_id = emit_edge_reliability_refresh_requested(
+            db,
+            int(pid),
+            source="imminent_snapshot_coverage",
+            asset_class=asset,
+            window_days=window_days,
+            evidence_fingerprint=fingerprint,
+        )
+        if event_id is None:
+            skipped_deduped += 1
+            continue
+        created.append(int(event_id))
+        if created and len(created) >= max(1, int(limit)):
+            break
+
+    return {
+        "lookback_minutes": lookback,
+        "max_snapshot_age_minutes": max_age,
+        "considered_slices": len(buckets),
+        "created": len(created),
+        "event_ids": created,
+        "missing_snapshot": missing,
+        "stale_snapshot": stale,
+        "window_mismatch": wrong_window,
+        "skipped_fresh": skipped_fresh,
+        "skipped_deduped": skipped_deduped,
+    }
+
+
 def enqueue_cash_deployment_work(
     db: Session,
     *,
@@ -770,6 +922,7 @@ def enqueue_cash_deployment_work(
     window_days: int = DEFAULT_WINDOW_DAYS,
     limit: int = DEFAULT_TOP_LIMIT,
     include_null_lineage: bool = True,
+    include_snapshot_coverage: bool = True,
 ) -> dict[str, Any]:
     """Turn cash-deployment diagnostics into deduped brain work.
 
@@ -777,6 +930,20 @@ def enqueue_cash_deployment_work(
     recert rescue, learned-variant refresh, and provenance work. It never
     promotes a pattern or routes an order.
     """
+    snapshot_coverage = (
+        enqueue_imminent_edge_snapshot_coverage_work(
+            db,
+            window_days=window_days,
+            limit=limit,
+        )
+        if include_snapshot_coverage
+        else {
+            "considered_slices": 0,
+            "created": 0,
+            "event_ids": [],
+            "skipped_disabled": True,
+        }
+    )
     rows = cash_deployment_rows(
         db,
         user_id=user_id,
@@ -788,6 +955,8 @@ def enqueue_cash_deployment_work(
     skipped = 0
     skipped_noop_cooldown = 0
     by_event: Counter[str] = Counter()
+    if int(snapshot_coverage.get("created") or 0) > 0:
+        by_event[EDGE_RELIABILITY_REFRESH] += int(snapshot_coverage.get("created") or 0)
     for row in rows:
         event_type = str(row.get("recommended_work_event") or "").strip()
         pid = row.get("scan_pattern_id")
@@ -874,9 +1043,10 @@ def enqueue_cash_deployment_work(
         "ok": True,
         "window_days": int(window_days),
         "considered": considered,
-        "created": len(created) + len(null_created),
+        "created": len(created) + len(null_created) + int(snapshot_coverage.get("created") or 0),
         "skipped": skipped,
         "skipped_noop_cooldown": skipped_noop_cooldown,
-        "event_ids": created + null_created,
+        "event_ids": created + null_created + list(snapshot_coverage.get("event_ids") or []),
         "event_types": dict(by_event),
+        "snapshot_coverage": snapshot_coverage,
     }
