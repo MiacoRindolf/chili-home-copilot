@@ -7,6 +7,11 @@ from app.routers.trading_sub.patterns import (
     _mechanical_pattern_suggestion,
     api_suggest_pattern,
 )
+from app.services.trading.mechanical_pattern_parser import mechanical_pattern_suggestion
+
+
+def test_pattern_endpoint_uses_shared_mechanical_parser():
+    assert patterns._mechanical_pattern_suggestion is mechanical_pattern_suggestion
 
 
 def test_mechanical_pattern_suggestion_parses_numeric_and_ref_conditions():

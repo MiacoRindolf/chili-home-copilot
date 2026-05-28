@@ -16,6 +16,9 @@ from sqlalchemy.orm import Session
 
 from ...deps import get_db, get_identity_ctx
 from ...schemas.trading import PatternBacktestRequest
+from ...services.trading.mechanical_pattern_parser import (
+    mechanical_pattern_suggestion as _shared_mechanical_pattern_suggestion,
+)
 from ._utils import json_safe
 
 logger = logging.getLogger(__name__)
@@ -238,6 +241,9 @@ def _mechanical_pattern_suggestion(description: str) -> dict[str, Any] | None:
 
 
 # ── Pattern CRUD ─────────────────────────────────────────────────────────────
+
+_mechanical_pattern_suggestion = _shared_mechanical_pattern_suggestion
+
 
 @router.get("/patterns")
 def api_list_patterns(
