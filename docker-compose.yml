@@ -14,6 +14,10 @@
 # this prevents a Docker Desktop crash loop from auto-starting the full fleet
 # before Postgres and the web/API have stabilized.
 #
+# Bind-mounted app/worker services default to restart=no. This keeps a dirty
+# local checkout from auto-resurrecting live code after an operator stops it;
+# set CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY=unless-stopped to opt back in.
+#
 # Persistent data: Postgres, Ollama, and /app/data bind to D:/CHILI-Docker/{postgres,ollama,chili-data} so large state
 # lives off C:. Change these paths if your drive letter or folder differs.
 services:
@@ -155,7 +159,7 @@ services:
       - D:/dev:/host_dev
       # Brain Worker UI controls the separate ``brain-worker`` service — needs engine access
       - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
+    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
     logging:
       driver: json-file
       options:
@@ -354,7 +358,7 @@ services:
   # Continuous pattern mining worker. Discovers new ScanPatterns and feeds the backtest queue.
   mining-worker:
     image: chili-app:local
-    restart: unless-stopped
+    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
     command: ["python", "scripts/brain_worker.py", "--mode", "mining"]
     env_file:
       - path: .env
@@ -444,7 +448,7 @@ services:
   # Fast scan worker. 1-5 min breakout/momentum detection on promoted patterns, fires alerts.
   fast-scan-worker:
     image: chili-app:local
-    restart: unless-stopped
+    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
     command: ["python", "scripts/brain_worker.py", "--mode", "fast-scan", "--interval", "${CHILI_FAST_SCAN_INTERVAL_MINUTES:-1}"]
     env_file:
       - path: .env
@@ -627,7 +631,7 @@ services:
   #     in the broker-sync code path; isolated bisection.
   broker-sync-worker:
     image: chili-app:local
-    restart: unless-stopped
+    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
     labels:
       com.chili.service: broker-sync-worker
       com.chili.entrypoint: scheduler_worker
@@ -730,7 +734,7 @@ services:
   #     OOMs, only autotrader is affected and Compose auto-restarts.
   autotrader-worker:
     image: chili-app:local
-    restart: unless-stopped
+    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
     labels:
       com.chili.service: autotrader-worker
       com.chili.entrypoint: scheduler_worker
