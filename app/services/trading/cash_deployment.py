@@ -662,6 +662,7 @@ _STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
     {
         "parent_missing_or_inactive",
         "max_active_variants",
+        "duplicate_learned_exit_label",
         "non_positive_parent_realized_avg",
         "missing_parent_payoff_geometry",
         "learned_target_not_tighter_than_static",
