@@ -255,6 +255,8 @@ def search_with_llm(
             ],
             max_tokens=600,
             trace_id="code-search",
+            cacheable=True,
+            purpose="code_search",
         )
         if not answer:
             answer = "Could not generate LLM answer."

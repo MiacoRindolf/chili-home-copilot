@@ -272,7 +272,8 @@ def test_web_research_purpose_has_offline_code_default_when_db_seed_missing():
     assert db.calls == 1
 
 
-def test_code_review_purpose_has_offline_code_default_when_db_seed_missing():
+@pytest.mark.parametrize("purpose", ["code_review", "code_search"])
+def test_code_purpose_has_offline_code_default_when_db_seed_missing(purpose):
     class EmptyResult:
         def fetchone(self):
             return None
@@ -287,9 +288,9 @@ def test_code_review_purpose_has_offline_code_default_when_db_seed_missing():
 
     db = EmptyDb()
 
-    policy = policy_mod.get_policy(db, "code_review")
+    policy = policy_mod.get_policy(db, purpose)
 
-    assert policy.purpose == "code_review"
+    assert policy.purpose == purpose
     assert policy.routing_strategy == "passthrough"
     assert policy.use_premium_synthesis is False
     assert policy.high_stakes is False

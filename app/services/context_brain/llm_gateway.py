@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
     "code_review",
+    "code_search",
     "project_ai_engineer",
     "project_architect",
     "project_backend_engineer",

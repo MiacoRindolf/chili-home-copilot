@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 from app.services.code_brain import reviewer
+from app.services.code_brain import search as code_search
 
 
 def test_code_reviewer_routes_llm_through_code_review_purpose(monkeypatch):
@@ -23,4 +24,43 @@ def test_code_reviewer_routes_llm_through_code_review_purpose(monkeypatch):
     assert result["score"] == 8.0
     assert result["findings"][0]["file"] == "x.py"
     assert llm.call_args.kwargs["purpose"] == "code_review"
+    assert llm.call_args.kwargs["cacheable"] is True
+
+
+def test_code_search_routes_llm_through_cacheable_code_search_purpose(monkeypatch):
+    llm = MagicMock(return_value="Use app/services/code_brain/search.py:153.")
+    monkeypatch.setattr("app.services.llm_caller.call_llm", llm)
+    monkeypatch.setattr(
+        code_search,
+        "search_code",
+        lambda *_args, **_kwargs: [
+            {
+                "type": "function",
+                "symbol": "search_code",
+                "file": "app/services/code_brain/search.py",
+                "line": 153,
+                "signature": "def search_code(db, query, repo_id=None, repo_ids=None, limit=20)",
+            }
+        ],
+    )
+
+    class Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return []
+
+    class Db:
+        def query(self, *_args, **_kwargs):
+            return Query()
+
+    result = code_search.search_with_llm(Db(), "where is search_code", repo_id=1)
+
+    assert result["answer"] == "Use app/services/code_brain/search.py:153."
+    assert result["results"][0]["symbol"] == "search_code"
+    assert llm.call_args.kwargs["purpose"] == "code_search"
     assert llm.call_args.kwargs["cacheable"] is True
