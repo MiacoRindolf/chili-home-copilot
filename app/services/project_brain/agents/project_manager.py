@@ -31,6 +31,35 @@ _PM_ROLE_PROMPT = (
 )
 
 
+def _mark_requirements_in_planner(db: Session, unplanned: List[dict]) -> int:
+    req_ids: list[int] = []
+    for row in unplanned[:5]:
+        try:
+            req_ids.append(int(row["id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not req_ids:
+        return 0
+
+    requirements = {
+        int(req.id): req
+        for req in (
+            db.query(PORequirement)
+            .filter(PORequirement.id.in_(req_ids))
+            .all()
+        )
+    }
+    updated = 0
+    for req_id in req_ids:
+        req = requirements.get(req_id)
+        if req and req.status in ("draft", "refined", "ready"):
+            req.status = "in_planner"
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
 class ProjectManagerAgent(AgentBase):
     name = "project_manager"
     label = "PM"
@@ -297,11 +326,7 @@ class ProjectManagerAgent(AgentBase):
             except Exception as e:
                 logger.warning("[pm] create_task failed: %s", e)
 
-        for r in unplanned[:5]:
-            req = db.query(PORequirement).get(r["id"])
-            if req and req.status in ("draft", "refined", "ready"):
-                req.status = "in_planner"
-                db.commit()
+        _mark_requirements_in_planner(db, unplanned)
 
         return created
 
