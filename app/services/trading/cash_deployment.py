@@ -20,6 +20,7 @@ from .edge_reliability import (
     DEFAULT_TOP_LIMIT,
     DEFAULT_WINDOW_DAYS,
     EDGE_RELIABILITY_REFRESH,
+    EXIT_VARIANT_DIAGNOSTIC,
     EXIT_VARIANT_REFRESH,
     PROVENANCE_BACKFILL,
     RECERT_RESCUE_REFRESH,
@@ -657,6 +658,38 @@ def cash_deployment_null_lineage_candidates(
     return out
 
 
+def _recent_noop_profitability_work(
+    db: Session,
+    *,
+    event_type: str,
+    scan_pattern_id: int,
+    evidence_fingerprint: str,
+) -> bool:
+    if event_type != EXIT_VARIANT_REFRESH or not evidence_fingerprint:
+        return False
+    minutes = _safe_int(
+        getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360),
+        360,
+    )
+    if minutes <= 0:
+        return False
+
+    from ...models.trading import BrainWorkEvent
+
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    return (
+        db.query(BrainWorkEvent.id)
+        .filter(BrainWorkEvent.event_kind == "outcome")
+        .filter(BrainWorkEvent.event_type == EXIT_VARIANT_DIAGNOSTIC)
+        .filter(BrainWorkEvent.created_at >= cutoff)
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
+        .filter(BrainWorkEvent.payload["evidence_fingerprint"].astext == evidence_fingerprint)
+        .filter(BrainWorkEvent.payload["created_count"].astext == "0")
+        .first()
+        is not None
+    )
+
+
 def enqueue_cash_deployment_work(
     db: Session,
     *,
@@ -680,6 +713,7 @@ def enqueue_cash_deployment_work(
     created: list[int] = []
     considered = 0
     skipped = 0
+    skipped_noop_cooldown = 0
     by_event: Counter[str] = Counter()
     for row in rows:
         event_type = str(row.get("recommended_work_event") or "").strip()
@@ -698,6 +732,16 @@ def enqueue_cash_deployment_work(
             "expected_evidence_value": row.get("expected_evidence_value"),
             "graduation_blocker": row.get("graduation_blocker"),
         }
+        evidence_fingerprint = str(row.get("evidence_fingerprint") or "")
+        if _recent_noop_profitability_work(
+            db,
+            event_type=event_type,
+            scan_pattern_id=int(pid),
+            evidence_fingerprint=evidence_fingerprint,
+        ):
+            skipped += 1
+            skipped_noop_cooldown += 1
+            continue
         if event_type == EDGE_RELIABILITY_REFRESH:
             event_id = emit_edge_reliability_refresh_requested(
                 db,
@@ -705,7 +749,7 @@ def enqueue_cash_deployment_work(
                 source="cash_deployment",
                 asset_class=row.get("asset_class"),
                 window_days=window_days,
-                evidence_fingerprint=str(row.get("evidence_fingerprint") or ""),
+                evidence_fingerprint=evidence_fingerprint,
             )
         else:
             event_id = emit_targeted_profitability_work(
@@ -714,7 +758,7 @@ def enqueue_cash_deployment_work(
                 scan_pattern_id=int(pid),
                 source="cash_deployment",
                 asset_class=row.get("asset_class"),
-                evidence_fingerprint=str(row.get("evidence_fingerprint") or ""),
+                evidence_fingerprint=evidence_fingerprint,
                 payload=payload,
             )
         if event_id is None:
@@ -759,6 +803,7 @@ def enqueue_cash_deployment_work(
         "considered": considered,
         "created": len(created) + len(null_created),
         "skipped": skipped,
+        "skipped_noop_cooldown": skipped_noop_cooldown,
         "event_ids": created + null_created,
         "event_types": dict(by_event),
     }

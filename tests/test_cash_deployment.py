@@ -380,3 +380,50 @@ def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkey
     assert by_type["recert_rescue_refresh"].payload["asset_class"] == "stock"
     assert by_type["exit_variant_refresh"].payload["scan_pattern_id"] == shadow.id
     assert by_type["exit_variant_refresh"].payload["cash_deployment_category"] == "positive_ev_shadow"
+
+
+def test_cash_deployment_skips_recent_noop_exit_variant_same_evidence(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    shadow = _pattern(db, name="cash work noop shadow", lifecycle="shadow_promoted")
+    alert = _alert(db, shadow, ticker="WNOOP")
+    _run(db, shadow, alert, expected=2.5)
+    _closed_paper(db, shadow, alert)
+    db.commit()
+
+    row = cash_deployment_rows(db, window_days=7, limit=10)[0]
+    assert row["scan_pattern_id"] == shadow.id
+    assert row["recommended_work_event"] == "exit_variant_refresh"
+    fingerprint = str(row["evidence_fingerprint"])
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="exit_variant_diagnostic",
+            event_kind="outcome",
+            dedupe_key=f"noop-exit-variant:{shadow.id}:{fingerprint}",
+            status="done",
+            payload={
+                "scan_pattern_id": shadow.id,
+                "evidence_fingerprint": fingerprint,
+                "created_count": 0,
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    out = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    db.commit()
+
+    assert out["created"] == 0
+    assert out["skipped_noop_cooldown"] == 1
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == "exit_variant_refresh")
+        .count()
+        == 0
+    )

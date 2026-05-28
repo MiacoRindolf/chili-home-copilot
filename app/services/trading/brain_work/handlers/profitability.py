@@ -188,6 +188,10 @@ def handle_exit_variant_refresh(
     payload = {
         "scan_pattern_id": pid,
         "source": "exit_variant_refresh",
+        "asset_class": _payload(ev).get("asset_class"),
+        "cash_deployment_category": _payload(ev).get("cash_deployment_category"),
+        "evidence_fingerprint": _payload(ev).get("evidence_fingerprint"),
+        "graduation_blocker": _payload(ev).get("graduation_blocker"),
         "created_child_ids": created_ids,
         "created_count": len(created_ids),
         "loss_report": report,

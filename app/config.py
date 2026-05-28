@@ -495,6 +495,7 @@ class Settings(BaseSettings):
     brain_work_cash_deployment_producer_interval_minutes: int = 30
     brain_work_cash_deployment_producer_window_days: int = 30
     brain_work_cash_deployment_producer_limit: int = 25
+    brain_work_cash_deployment_noop_cooldown_minutes: int = 360
     # Emit ``market_snapshots_batch`` outcome when scheduler snapshot job finishes.
     brain_work_snapshots_outcome_enabled: bool = True
     # Phase 1b of f-adaptive-promotion-architecture (2026-05-11).
