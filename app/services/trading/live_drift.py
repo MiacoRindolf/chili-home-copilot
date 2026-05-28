@@ -11,6 +11,13 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .pattern_validation_projection import write_validation_contract
+from .return_math import (
+    OPTION_CONTRACT_MULTIPLIER,
+    paper_trade_contract_multiplier,
+    paper_trade_return_pct,
+    trade_contract_multiplier,
+    trade_return_pct,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +52,28 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
-def _outcome_pct_from_trade(trade: Any) -> float | None:
+def _outcome_pct_from_trade(
+    trade: Any, *, source: str | None = None
+) -> float | None:
+    source_key = source
+    if source_key is None and hasattr(trade, "signal_json"):
+        source_key = "paper"
+    try:
+        if source_key == "paper":
+            normalized = paper_trade_return_pct(trade)
+            if normalized is not None:
+                return normalized
+            if paper_trade_contract_multiplier(trade) == OPTION_CONTRACT_MULTIPLIER:
+                return None
+        else:
+            normalized = trade_return_pct(trade)
+            if normalized is not None:
+                return normalized
+            if trade_contract_multiplier(trade) == OPTION_CONTRACT_MULTIPLIER:
+                return None
+    except Exception:
+        pass
+
     direct = _safe_float(getattr(trade, "pnl_pct", None))
     if direct is not None:
         return direct
@@ -229,7 +257,11 @@ def aggregate_runtime_samples(
 def _scorecard(rows: list[Any], *, source: str) -> dict[str, Any] | None:
     if not rows:
         return None
-    outcomes = [v for row in rows if (v := _outcome_pct_from_trade(row)) is not None]
+    outcomes = [
+        v
+        for row in rows
+        if (v := _outcome_pct_from_trade(row, source=source)) is not None
+    ]
     winners = [v for v in outcomes if v > 0]
     losers = [v for v in outcomes if v < 0]
     gross_wins = sum(winners)
@@ -886,4 +918,3 @@ def check_feature_drift(
         )
 
     return result
-

@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.trading.live_drift import (
+    _outcome_pct_from_trade,
+    _scorecard,
     apply_live_drift_to_pattern,
     baseline_degenerate,
     binomial_two_sided_p_value,
@@ -226,3 +228,64 @@ def test_v2_falls_back_to_paper_when_live_is_sparse():
     c = compute_live_drift_v2_contract(pattern=pattern, oos_val={}, scorecards=scorecards, settings=_settings())
     assert c["primary_runtime_source"] == "paper"
     assert c["fallback_used"] is True
+
+
+def test_live_drift_live_option_outcome_uses_contract_notional() -> None:
+    row = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot=None,
+    )
+
+    assert _outcome_pct_from_trade(row, source="live") == pytest.approx(16.0)
+
+
+def test_live_drift_paper_option_rejects_ambiguous_legacy_pct() -> None:
+    row = SimpleNamespace(
+        entry_price=4.01,
+        exit_price=716.0,
+        quantity=1.0,
+        pnl=None,
+        pnl_pct=17755.61,
+        direction="long",
+        signal_json={"asset_type": "options"},
+    )
+
+    assert _outcome_pct_from_trade(row, source="paper") is None
+
+
+def test_live_drift_scorecard_excludes_unpriced_option_outcomes() -> None:
+    rows = [
+        SimpleNamespace(
+            entry_price=4.01,
+            exit_price=716.0,
+            quantity=1.0,
+            pnl=None,
+            pnl_pct=17755.61,
+            direction="long",
+            signal_json={"asset_type": "options"},
+            exit_date=None,
+        ),
+        SimpleNamespace(
+            entry_price=100.0,
+            exit_price=None,
+            quantity=1.0,
+            pnl=None,
+            pnl_pct=2.0,
+            direction="long",
+            signal_json={"asset_type": "stock"},
+            exit_date=None,
+        ),
+    ]
+
+    scorecard = _scorecard(rows, source="paper")
+
+    assert scorecard is not None
+    assert scorecard["sample_count"] == 1
+    assert scorecard["expectancy_per_trade_pct"] == pytest.approx(2.0)

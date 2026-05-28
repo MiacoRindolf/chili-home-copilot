@@ -112,3 +112,52 @@ def test_paper_trade_return_pct_option_rejects_ambiguous_price_fallback() -> Non
     )
 
     assert paper_trade_return_pct(trade) is None
+
+
+def test_paper_trade_return_pct_option_ignores_legacy_stored_pct_without_pnl() -> None:
+    trade = SimpleNamespace(
+        entry_price=4.01,
+        exit_price=716.0,
+        quantity=1.0,
+        pnl=None,
+        pnl_pct=17755.61,
+        direction="long",
+        signal_json={"asset_type": "options", "option_meta": {"strike": 700.0}},
+    )
+
+    assert paper_trade_return_pct(trade) is None
+
+
+def test_paper_trade_return_pct_option_prefers_confirmed_premium_prices() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=None,
+        pnl_pct=999.0,
+        direction="long",
+        signal_json={
+            "asset_type": "options",
+            "option_meta": {"price_domain": "option_premium"},
+            "price_domains": {
+                "entry_price": "option_premium",
+                "exit_price": "option_premium",
+            },
+        },
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_stock_keeps_legacy_stored_pct() -> None:
+    trade = SimpleNamespace(
+        entry_price=None,
+        exit_price=None,
+        quantity=1.0,
+        pnl=None,
+        pnl_pct=3.5,
+        direction="long",
+        signal_json={"asset_type": "stock"},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(3.5)

@@ -234,25 +234,31 @@ def trade_return_pct(trade: Any) -> float | None:
 
 def paper_trade_return_pct(paper_trade: Any) -> float | None:
     """Realized signed return for a paper trade."""
+    is_option = (
+        paper_trade_contract_multiplier(paper_trade)
+        == OPTION_CONTRACT_MULTIPLIER
+    )
     pnl_ret = notional_return_pct(
         getattr(paper_trade, "pnl", None),
         getattr(paper_trade, "entry_price", None),
         getattr(paper_trade, "quantity", None),
-        contract_multiplier=paper_trade_contract_multiplier(paper_trade),
+        contract_multiplier=(
+            OPTION_CONTRACT_MULTIPLIER if is_option else 1.0
+        ),
     )
     if pnl_ret is not None:
         return pnl_ret
-    stored_pct = _float_or_none(getattr(paper_trade, "pnl_pct", None))
-    if stored_pct is not None:
-        return stored_pct
     signal_json = getattr(paper_trade, "signal_json", None)
-    if paper_trade_contract_multiplier(paper_trade) == OPTION_CONTRACT_MULTIPLIER:
+    if is_option:
         return _option_price_return_pct(
             getattr(paper_trade, "entry_price", None),
             getattr(paper_trade, "exit_price", None),
             getattr(paper_trade, "direction", "long"),
             source=signal_json,
         )
+    stored_pct = _float_or_none(getattr(paper_trade, "pnl_pct", None))
+    if stored_pct is not None:
+        return stored_pct
     return price_return_pct(
         getattr(paper_trade, "entry_price", None),
         getattr(paper_trade, "exit_price", None),
