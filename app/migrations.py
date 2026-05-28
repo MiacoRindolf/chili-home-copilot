@@ -19698,6 +19698,63 @@ def _migration_282_autotrader_imminent_selector_indexes(conn) -> None:
     logger.info("[mig282] AutoTrader imminent selector indexes installed")
 
 
+def _migration_283_position_identity_phase5h_physical_rename(conn) -> None:
+    """Physically rename Trade rows to management envelopes with compatibility view.
+
+    Phase 5A-5G proved the decision/envelope/position read model and the
+    compatibility strategy. This migration performs only the physical relation
+    swap:
+
+    * old base table ``trading_trades`` -> ``trading_management_envelopes``
+    * new simple updatable compatibility view ``trading_trades``
+
+    Keep the Python ``Trade`` ORM class and every ``trade_id``/close-reason
+    field unchanged in this phase.
+    """
+    rows = conn.execute(text("""
+        SELECT c.relname, c.relkind
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = ANY(current_schemas(false))
+           AND c.relname IN ('trading_trades', 'trading_management_envelopes')
+    """)).fetchall()
+    kinds = {str(row[0]): str(row[1]) for row in rows}
+    trades_kind = kinds.get("trading_trades")
+    envelopes_kind = kinds.get("trading_management_envelopes")
+
+    if trades_kind == "v" and envelopes_kind == "r":
+        logger.info("[mig283] physical envelope rename already installed")
+        conn.commit()
+        return
+
+    if trades_kind != "r":
+        raise RuntimeError(
+            "mig283 expected trading_trades to be a table or compatibility view; "
+            f"got relkind={trades_kind!r}"
+        )
+    if envelopes_kind not in {None, "v", "m"}:
+        raise RuntimeError(
+            "mig283 expected trading_management_envelopes to be absent/view/materialized view; "
+            f"got relkind={envelopes_kind!r}"
+        )
+
+    if envelopes_kind == "m":
+        conn.execute(text("DROP MATERIALIZED VIEW IF EXISTS trading_management_envelopes"))
+    else:
+        conn.execute(text("DROP VIEW IF EXISTS trading_management_envelopes"))
+    conn.execute(text("ALTER TABLE trading_trades RENAME TO trading_management_envelopes"))
+    conn.execute(text("""
+        CREATE VIEW trading_trades AS
+        SELECT * FROM trading_management_envelopes
+    """))
+
+    conn.commit()
+    logger.info(
+        "[mig283] trading_trades physically renamed to trading_management_envelopes "
+        "with trading_trades compatibility view"
+    )
+
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20043,6 +20100,8 @@ MIGRATIONS = [
      _migration_281_llm_cost_observability),
     ("282_autotrader_imminent_selector_indexes",
      _migration_282_autotrader_imminent_selector_indexes),
+    ("283_position_identity_phase5h_physical_rename",
+     _migration_283_position_identity_phase5h_physical_rename),
 ]
 
 

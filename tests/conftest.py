@@ -360,6 +360,35 @@ def _terminate_stale_truncate_peers(max_age_s: int = 90) -> None:
         pass
 
 
+def _truncate_relation_names(conn, logical_names: list[str]) -> list[str]:
+    """Map ORM logical names to physical relations for TRUNCATE.
+
+    Position-identity Phase 5H turns ``trading_trades`` into a simple
+    compatibility view over the physical ``trading_management_envelopes`` table.
+    PostgreSQL can DELETE through that view, but cannot TRUNCATE it. Full pytest
+    cleanup therefore truncates the physical table when the rename is present.
+    """
+    if "trading_trades" not in logical_names:
+        return logical_names
+    try:
+        rows = conn.execute(text("""
+            SELECT c.relname, c.relkind
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = ANY(current_schemas(false))
+               AND c.relname IN ('trading_trades', 'trading_management_envelopes')
+        """)).fetchall()
+        kinds = {str(row[0]): str(row[1]) for row in rows}
+    except Exception:
+        return logical_names
+    if kinds.get("trading_trades") == "v" and kinds.get("trading_management_envelopes") == "r":
+        return [
+            "trading_management_envelopes" if name == "trading_trades" else name
+            for name in logical_names
+        ]
+    return logical_names
+
+
 def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
     """Remove row data between tests; keep schema_version so migrations are not re-run."""
     # Static neural mesh topology is seeded by migration 086; keep nodes/edges so tests
@@ -374,14 +403,13 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
                     continue
                 conn.execute(text(f'DELETE FROM "{table.name}"'))
         return
-    names = [
-        f'"{t.name}"'
+    logical_names = [
+        t.name
         for t in Base.metadata.sorted_tables
         if t.name not in _skip_truncate and (table_names is None or t.name in table_names)
     ]
-    if not names:
+    if not logical_names:
         return
-    stmt = text(f"TRUNCATE {', '.join(names)} RESTART IDENTITY CASCADE")
     attempts = max(1, int(os.environ.get("CHILI_PYTEST_TRUNCATE_ATTEMPTS", "6")))
     lock_s = max(30, int(os.environ.get("CHILI_PYTEST_LOCK_TIMEOUT_S", "120")))
     for attempt in range(attempts):
@@ -390,6 +418,8 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
         try:
             with engine.begin() as conn:
                 conn.execute(text(f"SET LOCAL lock_timeout = '{lock_s}s'"))
+                names = [f'"{name}"' for name in _truncate_relation_names(conn, logical_names)]
+                stmt = text(f"TRUNCATE {', '.join(names)} RESTART IDENTITY CASCADE")
                 conn.execute(stmt)
             # #region agent log
             if attempt:

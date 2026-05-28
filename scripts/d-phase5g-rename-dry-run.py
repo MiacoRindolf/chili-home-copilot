@@ -165,32 +165,44 @@ def _run(url: str) -> dict[str, Any]:
             "phase5b_hard_issues": _phase5b_hard_issues(conn),
         }
         payload["before"] = before
-        if before["trading_trades"] != "r":
+        pre_rename_shape = (
+            before["trading_trades"] == "r"
+            and before["trading_management_envelopes"] in {None, "v"}
+        )
+        renamed_shape = (
+            before["trading_trades"] == "v"
+            and before["trading_management_envelopes"] == "r"
+        )
+        if not (pre_rename_shape or renamed_shape):
             raise RuntimeError(
-                f"Expected trading_trades to be a table before dry-run, got {before['trading_trades']!r}"
-            )
-        if before["trading_management_envelopes"] not in {None, "v"}:
-            raise RuntimeError(
-                "Expected trading_management_envelopes to be absent or a view before dry-run, "
-                f"got {before['trading_management_envelopes']!r}"
+                "Expected either pre-rename shape "
+                "(trading_trades=table, trading_management_envelopes=view/absent) "
+                "or renamed compatibility shape "
+                "(trading_trades=view, trading_management_envelopes=table); got "
+                f"trading_trades={before['trading_trades']!r}, "
+                f"trading_management_envelopes={before['trading_management_envelopes']!r}"
             )
 
         conn.rollback()
         tx = conn.begin()
         orm_session: Session | None = None
         try:
-            conn.execute(text("DROP VIEW IF EXISTS trading_management_envelopes"))
-            conn.execute(
-                text("ALTER TABLE trading_trades RENAME TO trading_management_envelopes")
-            )
-            conn.execute(
-                text(
-                    """
-                    CREATE VIEW trading_trades AS
-                    SELECT * FROM trading_management_envelopes
-                    """
+            if pre_rename_shape:
+                payload["mode"] = "transactional_rename_dry_run"
+                conn.execute(text("DROP VIEW IF EXISTS trading_management_envelopes"))
+                conn.execute(
+                    text("ALTER TABLE trading_trades RENAME TO trading_management_envelopes")
                 )
-            )
+                conn.execute(
+                    text(
+                        """
+                        CREATE VIEW trading_trades AS
+                        SELECT * FROM trading_management_envelopes
+                        """
+                    )
+                )
+            else:
+                payload["mode"] = "already_renamed_compatibility_smoke"
 
             after_rename = {
                 "trading_trades": _relkind(conn, "trading_trades"),
@@ -240,12 +252,33 @@ def _run(url: str) -> dict[str, Any]:
                 "SELECT COUNT(*) FROM trading_management_envelopes WHERE id = :id",
                 {"id": orm_id},
             )
+            decision_rows = _count(
+                conn,
+                """
+                SELECT COUNT(*)
+                  FROM trading_decisions
+                 WHERE source_trade_id IN (:old_id, :new_id, :orm_id)
+                """,
+                {"old_id": old_sql_id, "new_id": new_sql_id, "orm_id": orm_id},
+            )
+            envelope_decision_links = _count(
+                conn,
+                """
+                SELECT COUNT(*)
+                  FROM trading_trades
+                 WHERE id IN (:old_id, :new_id, :orm_id)
+                   AND decision_id IS NOT NULL
+                """,
+                {"old_id": old_sql_id, "new_id": new_sql_id, "orm_id": orm_id},
+            )
             orm_session.rollback()
 
             payload["checks"] = {
                 "old_sql_inserted_through_trading_trades_view": old_visible_new == 1,
                 "new_sql_inserted_through_management_envelopes_table": new_visible_old == 1,
                 "orm_trade_flush_through_trading_trades_view": orm_visible_new == 1,
+                "phase5a_trigger_created_decisions": decision_rows == 3,
+                "phase5a_trigger_linked_envelopes": envelope_decision_links == 3,
                 "phase5b_view_survived": after_rename["phase5b_view"] in {"v", "m"},
                 "phase5b_hard_issues_unchanged": (
                     before["phase5b_hard_issues"] == after_rename["phase5b_hard_issues"]
