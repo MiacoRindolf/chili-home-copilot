@@ -1,6 +1,7 @@
 """Bulk position plan generator: LLM-powered evaluation of all open positions."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "position_plan.txt"
 PLAN_STALE_HOURS = 4
+MATERIAL_SIGNATURE_VERSION = 1
 
 
 def _positive_float_or_none(value: Any) -> float | None:
@@ -35,6 +37,49 @@ def _positive_float_or_none(value: Any) -> float | None:
     if not math.isfinite(out) or out <= 0:
         return None
     return out
+
+
+def _bucket_number(value: Any, *, step: float, digits: int = 4) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    if step <= 0:
+        return round(number, digits)
+    return round(round(number / step) * step, digits)
+
+
+def _bucket_price(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    abs_number = abs(number)
+    if abs_number >= 100:
+        step = 0.25
+    elif abs_number >= 20:
+        step = 0.1
+    elif abs_number >= 5:
+        step = 0.05
+    else:
+        step = 0.01
+    return _bucket_number(number, step=step)
+
+
+def _bucket_bars(value: Any) -> int | None:
+    try:
+        bars = int(value)
+    except (TypeError, ValueError):
+        return None
+    if bars < 0:
+        return None
+    if bars < 20:
+        return bars
+    return int(round(bars / 5) * 5)
 
 
 def _context_quantity(trade: Trade, *, trade_is_option: bool) -> float | None:
@@ -406,6 +451,66 @@ def _build_position_context(
     return positions
 
 
+def _position_plan_material_signature(
+    portfolio_ctx: Mapping[str, Any],
+    positions: list[dict[str, Any]],
+) -> str:
+    """Hash the material state that should drive a position-plan advisory.
+
+    The signature ignores quote timestamps and prose while bucketing prices
+    and PnL, so forced refreshes can reuse an advisory when the portfolio has
+    not materially changed.
+    """
+    normalized_positions = []
+    for pos in sorted(
+        positions,
+        key=lambda p: (str(p.get("ticker") or ""), int(p.get("trade_id") or 0)),
+    ):
+        latest_monitor = pos.get("latest_monitor") if isinstance(pos.get("latest_monitor"), Mapping) else {}
+        option_meta = pos.get("option_meta") if isinstance(pos.get("option_meta"), Mapping) else {}
+        normalized_positions.append({
+            "trade_id": pos.get("trade_id"),
+            "ticker": str(pos.get("ticker") or "").upper(),
+            "asset_type": pos.get("asset_type"),
+            "direction": pos.get("direction"),
+            "entry_price": _bucket_price(pos.get("entry_price")),
+            "current_price": _bucket_price(pos.get("current_price")),
+            "pnl_pct": _bucket_number(pos.get("pnl_pct"), step=0.5),
+            "quantity": _bucket_number(pos.get("quantity"), step=0.01),
+            "stop_loss": _bucket_price(pos.get("stop_loss")),
+            "take_profit": _bucket_price(pos.get("take_profit")),
+            "premium_stop_loss": _bucket_price(pos.get("premium_stop_loss")),
+            "premium_take_profit": _bucket_price(pos.get("premium_take_profit")),
+            "underlying_stop_loss": _bucket_price(pos.get("underlying_stop_loss")),
+            "underlying_take_profit": _bucket_price(pos.get("underlying_take_profit")),
+            "bars_held": _bucket_bars(pos.get("bars_held")),
+            "pattern_name": pos.get("pattern_name"),
+            "pattern_timeframe": pos.get("pattern_timeframe"),
+            "latest_monitor_action": latest_monitor.get("action"),
+            "option_expiration": option_meta.get("expiration"),
+            "option_strike": _bucket_price(option_meta.get("strike")),
+            "option_type": option_meta.get("option_type"),
+        })
+
+    material = {
+        "version": MATERIAL_SIGNATURE_VERSION,
+        "portfolio": {
+            "total_positions": portfolio_ctx.get("total_positions"),
+            "regime": portfolio_ctx.get("regime"),
+            "spy_direction": portfolio_ctx.get("spy_direction"),
+            "vix": _bucket_number(portfolio_ctx.get("vix"), step=0.5),
+            "vix_regime": portfolio_ctx.get("vix_regime"),
+            "avg_pnl_pct": _bucket_number(portfolio_ctx.get("avg_pnl_pct"), step=0.5),
+            "winning_count": portfolio_ctx.get("winning_count"),
+            "losing_count": portfolio_ctx.get("losing_count"),
+            "sector_breakdown": portfolio_ctx.get("sector_breakdown") or {},
+        },
+        "positions": normalized_positions,
+    }
+    payload = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _build_portfolio_context(
     positions: list[dict[str, Any]],
     regime: dict[str, Any],
@@ -526,6 +631,15 @@ def generate_position_plans(
 
     positions = _build_position_context(db, trades, quotes, trade_quotes)
     portfolio_ctx = _build_portfolio_context(positions, regime)
+    material_signature = _position_plan_material_signature(portfolio_ctx, positions)
+    material_cached = _get_cached_plans_by_material_signature(
+        db,
+        user_id,
+        [t.id for t in trades],
+        material_signature,
+    )
+    if material_cached is not None:
+        return material_cached
 
     user_msg = json.dumps({
         "portfolio": portfolio_ctx,
@@ -576,7 +690,12 @@ def generate_position_plans(
             if matched_id:
                 p["trade_id"] = matched_id
 
-    _persist_plans(db, user_id, [t.id for t in trades], result, generated_at)
+    result_for_persist = dict(result)
+    result_for_persist["_chili_material_state"] = {
+        "signature": material_signature,
+        "version": MATERIAL_SIGNATURE_VERSION,
+    }
+    _persist_plans(db, user_id, [t.id for t in trades], result_for_persist, generated_at)
 
     return {
         "ok": True,
@@ -607,6 +726,39 @@ def _backfill_trade_ids_on_plans(db: Session, plans: list[dict], user_id: int | 
             p["trade_id"] = tid
 
 
+def _cached_plan_from_row(
+    db: Session,
+    row: Any,
+    user_id: int | None,
+    *,
+    cached_reason: str,
+) -> dict[str, Any] | None:
+    if not row:
+        return None
+    plan_json, gen_at, cached_tids = row
+    if isinstance(plan_json, str):
+        plan_json = json.loads(plan_json)
+    if isinstance(cached_tids, str):
+        cached_tids = json.loads(cached_tids)
+    if not isinstance(plan_json, Mapping):
+        return None
+
+    plans = plan_json.get("position_plans", [])
+    if not isinstance(plans, list):
+        plans = []
+    _backfill_trade_ids_on_plans(db, plans, user_id)
+
+    return {
+        "ok": True,
+        "portfolio_summary": plan_json.get("portfolio_summary", {}),
+        "position_plans": plans,
+        "generated_at": gen_at.isoformat() if hasattr(gen_at, "isoformat") else str(gen_at),
+        "trade_ids": cached_tids,
+        "cached": True,
+        "cache_reason": cached_reason,
+    }
+
+
 def _get_cached_plans(
     db: Session,
     user_id: int | None,
@@ -630,7 +782,7 @@ def _get_cached_plans(
     if not row:
         return None
 
-    plan_json, gen_at, cached_tids = row
+    plan_json, _gen_at, cached_tids = row
     if isinstance(plan_json, str):
         plan_json = json.loads(plan_json)
     if isinstance(cached_tids, str):
@@ -639,17 +791,50 @@ def _get_cached_plans(
     if set(cached_tids or []) != set(trade_ids):
         return None
 
-    plans = plan_json.get("position_plans", [])
-    _backfill_trade_ids_on_plans(db, plans, user_id)
+    return _cached_plan_from_row(db, row, user_id, cached_reason="fresh_trade_set")
 
-    return {
-        "ok": True,
-        "portfolio_summary": plan_json.get("portfolio_summary", {}),
-        "position_plans": plans,
-        "generated_at": gen_at.isoformat() if hasattr(gen_at, "isoformat") else str(gen_at),
-        "trade_ids": cached_tids,
-        "cached": True,
-    }
+
+def _get_cached_plans_by_material_signature(
+    db: Session,
+    user_id: int | None,
+    trade_ids: list[int],
+    material_signature: str,
+) -> dict[str, Any] | None:
+    """Return cached plans when a forced refresh sees unchanged material state."""
+    if not material_signature:
+        return None
+    cutoff = datetime.utcnow() - timedelta(hours=PLAN_STALE_HOURS)
+    try:
+        uid_clause = "user_id = :uid" if user_id is not None else "user_id IS NULL"
+        row = db.execute(
+            text(
+                f"SELECT plan_json, generated_at, trade_ids FROM trading_position_plans "
+                f"WHERE {uid_clause} AND generated_at > :cutoff "
+                f"ORDER BY generated_at DESC LIMIT 1"
+            ),
+            {"uid": user_id, "cutoff": cutoff},
+        ).fetchone()
+    except Exception:
+        return None
+
+    if not row:
+        return None
+
+    plan_json, _gen_at, cached_tids = row
+    if isinstance(plan_json, str):
+        plan_json = json.loads(plan_json)
+    if isinstance(cached_tids, str):
+        cached_tids = json.loads(cached_tids)
+    if set(cached_tids or []) != set(trade_ids):
+        return None
+
+    meta = plan_json.get("_chili_material_state") if isinstance(plan_json, Mapping) else None
+    if not isinstance(meta, Mapping):
+        return None
+    if meta.get("signature") != material_signature:
+        return None
+
+    return _cached_plan_from_row(db, row, user_id, cached_reason="material_state_unchanged")
 
 
 def _persist_plans(

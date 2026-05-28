@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -20,6 +21,22 @@ class _FakeQuery:
 class _FakeDb:
     def query(self, _model):
         return _FakeQuery()
+
+
+class _FakeResult:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _MaterialCacheDb(_FakeDb):
+    def __init__(self, row):
+        self.row = row
+
+    def execute(self, *_args, **_kwargs):
+        return _FakeResult(self.row)
 
 
 def _option_trade_stub(**overrides):
@@ -183,3 +200,81 @@ def test_position_plan_llm_call_opts_into_cache_and_singleflight(monkeypatch) ->
     assert captured["trace_id"] == "position-plan-generator"
     assert captured["max_tokens"] == 900
     assert captured["system_prompt"] == "system"
+
+
+def test_position_plan_material_signature_ignores_quote_noise_and_tiny_moves() -> None:
+    from app.services.trading.position_plan_generator import _position_plan_material_signature
+
+    portfolio = {
+        "total_positions": 1,
+        "regime": "risk_on",
+        "spy_direction": "up",
+        "vix": 15.1,
+        "vix_regime": "normal",
+        "avg_pnl_pct": 2.1,
+        "winning_count": 1,
+        "losing_count": 0,
+        "sector_breakdown": {"Tech": 1},
+    }
+    base = [{
+        "trade_id": 1,
+        "ticker": "AAPL",
+        "asset_type": "stock",
+        "direction": "long",
+        "entry_price": 100.0,
+        "current_price": 102.0,
+        "pnl_pct": 2.0,
+        "quantity": 5,
+        "stop_loss": 96.0,
+        "take_profit": 110.0,
+        "bars_held": 7,
+        "quote_ts": "2026-05-28T10:00:00Z",
+    }]
+    tiny_move = [dict(base[0], current_price=102.01, quote_ts="2026-05-28T10:01:00Z")]
+    large_move = [dict(base[0], current_price=104.0, pnl_pct=4.0)]
+
+    assert _position_plan_material_signature(portfolio, base) == (
+        _position_plan_material_signature(portfolio, tiny_move)
+    )
+    assert _position_plan_material_signature(portfolio, base) != (
+        _position_plan_material_signature(portfolio, large_move)
+    )
+
+
+def test_position_plan_material_cache_reuses_matching_signature() -> None:
+    from app.services.trading.position_plan_generator import (
+        MATERIAL_SIGNATURE_VERSION,
+        _get_cached_plans_by_material_signature,
+    )
+
+    sig = "same-material-state"
+    row = (
+        json.dumps({
+            "portfolio_summary": {"total_positions": 1},
+            "position_plans": [{"ticker": "AAPL", "action": "hold"}],
+            "_chili_material_state": {
+                "signature": sig,
+                "version": MATERIAL_SIGNATURE_VERSION,
+            },
+        }),
+        datetime.utcnow(),
+        json.dumps([1]),
+    )
+
+    cached = _get_cached_plans_by_material_signature(
+        _MaterialCacheDb(row),
+        user_id=7,
+        trade_ids=[1],
+        material_signature=sig,
+    )
+
+    assert cached is not None
+    assert cached["cached"] is True
+    assert cached["cache_reason"] == "material_state_unchanged"
+    assert cached["position_plans"][0]["action"] == "hold"
+    assert _get_cached_plans_by_material_signature(
+        _MaterialCacheDb(row),
+        user_id=7,
+        trade_ids=[1],
+        material_signature="changed",
+    ) is None
