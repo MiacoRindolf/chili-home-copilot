@@ -246,6 +246,134 @@ def _recert_rescue_backtest_refresh(
     return out
 
 
+def _recert_rescue_parent_payload(
+    db: "Session",
+    ev: Any,
+) -> tuple[dict[str, Any], int | None]:
+    parent_id = (
+        _safe_int(_payload(ev).get("parent_work_event_id"))
+        or _safe_int(getattr(ev, "parent_event_id", None))
+    )
+    if parent_id is None:
+        return {}, None
+    try:
+        from app.models.trading import BrainWorkEvent
+
+        parent = db.get(BrainWorkEvent, parent_id)
+    except Exception:
+        logger.debug(
+            "%s recert post-backtest parent lookup failed id=%s",
+            LOG_PREFIX,
+            parent_id,
+            exc_info=True,
+        )
+        return {}, parent_id
+    parent_payload = getattr(parent, "payload", None) if parent is not None else None
+    return parent_payload if isinstance(parent_payload, dict) else {}, parent_id
+
+
+def handle_recert_rescue_post_backtest(
+    db: "Session",
+    ev: Any,
+    user_id: int | None,
+) -> bool:
+    """Reconcile recert flags after a recert-rescue backtest completes.
+
+    This is intentionally a reconciliation-only leg. If fresh OOS/quality
+    evidence clears stale recert debt, the pattern can move forward through the
+    existing gates; if hard debt remains, live stays blocked. It never queues
+    another backtest, which avoids a rescue loop.
+    """
+    from app.models.trading import ScanPattern
+    from app.services.trading.brain_work.ledger import enqueue_outcome_event
+    from app.services.trading.edge_reliability import (
+        HARD_RECERT_REASONS,
+        RECERT_RESCUE_DIAGNOSTIC,
+        compute_pattern_edge_reliability,
+    )
+
+    payload = _payload(ev)
+    parent_payload, parent_id = _recert_rescue_parent_payload(db, ev)
+    source = str(payload.get("source") or parent_payload.get("source") or "").strip()
+    refresh_reason = str(
+        payload.get("recert_refresh_reason")
+        or parent_payload.get("recert_refresh_reason")
+        or ""
+    ).strip()
+    if source != "recert_rescue_refresh" and not refresh_reason:
+        return False
+
+    pid = _pattern_id(ev) or _safe_int(parent_payload.get("scan_pattern_id"))
+    if pid is None:
+        raise ValueError("recert rescue post-backtest missing scan_pattern_id")
+    pattern = db.get(ScanPattern, pid)
+    if pattern is None:
+        raise ValueError(f"scan_pattern_id={pid} not found")
+
+    recert_reconcile = _refresh_pattern_recert_state(pattern, set(HARD_RECERT_REASONS))
+    db.flush()
+
+    asset_class = payload.get("asset_class") or parent_payload.get("asset_class")
+    window_days = _safe_int(payload.get("window_days") or parent_payload.get("window_days")) or _window_days(ev)
+    reliability = compute_pattern_edge_reliability(
+        db,
+        pid,
+        asset_class=asset_class,
+        window_days=window_days,
+    )
+    reasons = reliability.get("recert_reason")
+    reason_set = _recert_reason_set(reasons)
+    hard_reasons = sorted(reason_set & HARD_RECERT_REASONS)
+    soft_reasons = sorted(reason_set - set(hard_reasons))
+    recert_required = bool(getattr(pattern, "recert_required", False))
+    rescue_status, next_action = _recert_rescue_diagnostic_status(
+        recert_required=recert_required,
+        recert_reason=reasons,
+        graduation_blocker=reliability.get("graduation_blocker"),
+        hard_recert_reasons=set(HARD_RECERT_REASONS),
+    )
+    payload_out = {
+        "scan_pattern_id": pid,
+        "source": "recert_rescue_post_backtest",
+        "recert_required": recert_required,
+        "recert_reason": reasons,
+        "recert_rescue_status": rescue_status,
+        "hard_recert_reasons": hard_reasons,
+        "soft_recert_reasons": soft_reasons,
+        "recommended_next_action": next_action,
+        "graduation_blocker": reliability.get("graduation_blocker"),
+        "recert_reconcile": recert_reconcile,
+        "recert_backtest_refresh": {
+            "requested": False,
+            "event_id": None,
+            "reason": "post_backtest_reconcile_only",
+            "asset_class": reliability.get("slice_asset_class") or asset_class,
+            "evidence_fingerprint": reliability.get("evidence_fingerprint"),
+        },
+        "parent_backtest_event_id": int(getattr(ev, "id", 0) or 0),
+        "parent_recert_request_event_id": parent_id,
+        "recert_refresh_reason": refresh_reason or None,
+        "safe_to_bypass_live": False,
+        "uses_existing_probation_only": True,
+        "calibrated_ev_pct": reliability.get("calibrated_ev_pct"),
+        "realized_ev_pct": reliability.get("realized_ev_pct"),
+        "observed_at": datetime.utcnow().isoformat(),
+    }
+    enqueue_outcome_event(
+        db,
+        event_type=RECERT_RESCUE_DIAGNOSTIC,
+        dedupe_key=(
+            f"{RECERT_RESCUE_DIAGNOSTIC}:post_bt:p{pid}:"
+            f"ev{int(getattr(ev, 'id', 0) or 0)}:"
+            f"{reliability.get('evidence_fingerprint')}"
+        ),
+        payload=payload_out,
+        parent_event_id=int(getattr(ev, "id", 0) or 0),
+        claimable=False,
+    )
+    return True
+
+
 def handle_edge_reliability_refresh(
     db: "Session",
     ev: Any,

@@ -13,6 +13,7 @@ from app.models.trading import (
 )
 from app.services.trading.brain_work.dispatcher import run_brain_work_dispatch_round
 from app.services.trading.brain_work.handlers.profitability import (
+    handle_recert_rescue_post_backtest,
     handle_recert_rescue_refresh,
 )
 from app.services.trading.brain_work.ledger import enqueue_work_event
@@ -401,6 +402,78 @@ def test_recert_rescue_hard_oos_positive_edge_enqueues_backtest_refresh(db):
     assert queued.payload["source"] == "recert_rescue_refresh"
     assert queued.payload["scan_pattern_id"] == pat.id
     assert queued.lease_scope == "backtest"
+
+
+def test_recert_rescue_post_backtest_reconciles_without_requeue(db):
+    pat = _pattern(
+        db,
+        recert_required=True,
+        recert_reason="missing_oos_recert,missing_quality_composite_score,thin_realized_ev",
+        cpcv_median_sharpe=2.0,
+        promotion_gate_passed=True,
+        quality_composite_score=0.72,
+        oos_evaluated_at=datetime.utcnow(),
+        oos_trade_count=35,
+        oos_win_rate=0.58,
+        oos_avg_return_pct=1.2,
+        raw_realized_trade_count=9,
+        raw_realized_avg_return_pct=1.1,
+    )
+    alert = _alert(db, pat, "REPOST")
+    _run(db, pat, alert, expected=1.5)
+    parent_id = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=f"test:post-bt-parent:{pat.id}",
+        payload={
+            "scan_pattern_id": pat.id,
+            "source": "recert_rescue_refresh",
+            "asset_class": "stock",
+            "window_days": 7,
+            "recert_refresh_reason": "soft_recert_needs_oos_quality_refresh",
+        },
+        lease_scope="backtest",
+    )
+    db.commit()
+    ev = BrainWorkEvent(
+        event_type="backtest_completed",
+        event_kind="outcome",
+        status="processing",
+        domain="trading",
+        dedupe_key=f"test:post-bt-done:{pat.id}",
+        payload={
+            "scan_pattern_id": pat.id,
+            "parent_work_event_id": parent_id,
+            "backtests_run": 1,
+        },
+        parent_event_id=parent_id,
+    )
+    db.add(ev)
+    db.commit()
+
+    assert handle_recert_rescue_post_backtest(db, ev, user_id=None) is True
+    db.commit()
+    db.refresh(pat)
+
+    assert pat.recert_required is False
+    assert pat.recert_reason is None
+    outcome = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .one()
+    )
+    assert outcome.payload["recert_rescue_status"] == "not_recert_required"
+    assert outcome.payload["safe_to_bypass_live"] is False
+    assert outcome.payload["recert_backtest_refresh"]["requested"] is False
+    assert outcome.payload["recert_backtest_refresh"]["reason"] == (
+        "post_backtest_reconcile_only"
+    )
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == "backtest_requested")
+        .count()
+        == 1
+    )
 
 
 def test_recert_rescue_refresh_removes_stale_soft_reason_but_preserves_hard_oos(

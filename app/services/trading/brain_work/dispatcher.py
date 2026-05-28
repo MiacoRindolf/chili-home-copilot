@@ -411,6 +411,18 @@ def run_brain_work_dispatch_round(
                             LOG_PREFIX, ev_id, _qs_err,
                         )
                         _recover_dispatch_session(db, "backtest quality_score")
+                    try:
+                        from .handlers.profitability import (
+                            handle_recert_rescue_post_backtest,
+                        )
+                        handle_recert_rescue_post_backtest(db, ev, user_id)
+                    except Exception as _rr_err:
+                        logger.warning(
+                            "%s recert rescue post-backtest handler "
+                            "failed ev_id=%s: %s",
+                            LOG_PREFIX, ev_id, _rr_err,
+                        )
+                        _recover_dispatch_session(db, "recert rescue post-backtest")
                 elif event_type == "pattern_eligible_promotion":
                     # FIX 38 (Phase 2 #3, 2026-04-29): promote handler.
                     # Sole authority for flipping lifecycle to 'promoted'.
