@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
 
@@ -23,11 +24,63 @@ from app.services.trading.momentum_neural.persistence import (
     default_session_binding,
     ensure_momentum_strategy_variants,
     persist_neural_momentum_tick,
+    _strategy_variants_by_key,
     upsert_trading_automation_runtime_snapshot,
     upsert_trading_automation_session_binding,
 )
 from app.services.trading.momentum_neural.viability import score_viability
 from app.services.trading.momentum_neural.variants import get_family
+
+
+class _FakeQuery:
+    def __init__(self, rows: list[MomentumStrategyVariant]) -> None:
+        self.rows = rows
+        self.filter_calls = 0
+
+    def filter(self, *args: object) -> "_FakeQuery":
+        self.filter_calls += 1
+        return self
+
+    def all(self) -> list[MomentumStrategyVariant]:
+        return self.rows
+
+
+class _FakeSession:
+    def __init__(self, rows: list[MomentumStrategyVariant]) -> None:
+        self.rows = rows
+        self.query_calls = 0
+        self.last_query: _FakeQuery | None = None
+
+    def query(self, model: object) -> _FakeQuery:
+        assert model is MomentumStrategyVariant
+        self.query_calls += 1
+        self.last_query = _FakeQuery(self.rows)
+        return self.last_query
+
+
+def test_strategy_variants_by_key_batches_registry_lookup() -> None:
+    row = MomentumStrategyVariant(family="impulse_breakout", variant_key="impulse_breakout", version=1)
+    db = _FakeSession([row])
+
+    result = _strategy_variants_by_key(
+        db,  # type: ignore[arg-type]
+        [
+            SimpleNamespace(family_id="impulse_breakout", version=1),
+            SimpleNamespace(family_id="pullback_reversal", version=2),
+        ],
+    )
+
+    assert result[("impulse_breakout", "impulse_breakout", 1)] is row
+    assert db.query_calls == 1
+    assert db.last_query is not None
+    assert db.last_query.filter_calls == 1
+
+
+def test_strategy_variants_by_key_skips_empty_registry_lookup() -> None:
+    db = _FakeSession([])
+
+    assert _strategy_variants_by_key(db, []) == {}  # type: ignore[arg-type]
+    assert db.query_calls == 0
 
 
 def test_models_and_migration_tables_exist(db: Session) -> None:

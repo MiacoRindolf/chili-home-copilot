@@ -30,6 +30,31 @@ KEY_PAPER_EXEC = "momentum_paper_execution"
 KEY_LIVE_EXEC = "momentum_live_execution"
 
 
+def _strategy_variant_key(family_id: str, version: int) -> tuple[str, str, int]:
+    return (family_id, family_id, int(version))
+
+
+def _strategy_variants_by_key(db: Session, families: list[Any]) -> dict[tuple[str, str, int], MomentumStrategyVariant]:
+    if not families:
+        return {}
+
+    family_ids = sorted({str(fam.family_id) for fam in families})
+    versions = sorted({int(fam.version) for fam in families})
+    rows = (
+        db.query(MomentumStrategyVariant)
+        .filter(
+            MomentumStrategyVariant.family.in_(family_ids),
+            MomentumStrategyVariant.variant_key.in_(family_ids),
+            MomentumStrategyVariant.version.in_(versions),
+        )
+        .all()
+    )
+    return {
+        (str(row.family), str(row.variant_key), int(row.version)): row
+        for row in rows
+    }
+
+
 def _momentum_tables_present(db: Session) -> bool:
     try:
         bind = db.get_bind()
@@ -41,16 +66,10 @@ def _momentum_tables_present(db: Session) -> bool:
 
 def ensure_momentum_strategy_variants(db: Session) -> None:
     """Ensure seed registry rows exist and carry runner-consumable params."""
-    for fam in iter_momentum_families():
-        row = (
-            db.query(MomentumStrategyVariant)
-            .filter(
-                MomentumStrategyVariant.family == fam.family_id,
-                MomentumStrategyVariant.variant_key == fam.family_id,
-                MomentumStrategyVariant.version == int(fam.version),
-            )
-            .one_or_none()
-        )
+    families = list(iter_momentum_families())
+    variants_by_key = _strategy_variants_by_key(db, families)
+    for fam in families:
+        row = variants_by_key.get(_strategy_variant_key(fam.family_id, int(fam.version)))
         if row is None:
             db.add(
                 MomentumStrategyVariant(
