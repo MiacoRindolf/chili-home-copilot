@@ -164,9 +164,13 @@ def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     db.commit()
     report = _edge_debt_loss_reports(db, now=now, lookback_days=1)[pat.id]
 
-    ids = fork_edge_learned_exit_variants(db, pat.id, edge_loss_report=report)
+    diag: dict = {}
+    ids = fork_edge_learned_exit_variants(db, pat.id, edge_loss_report=report, diagnostics=diag)
 
     assert len(ids) == 1
+    assert diag["skip_reason"] is None
+    assert diag["created_child_ids"] == ids
+    assert diag["created_count"] == 1
     child = db.get(ScanPattern, ids[0])
     assert child is not None
     assert child.parent_id == pat.id
@@ -229,13 +233,16 @@ def test_edge_learned_exit_ignores_legacy_loss_report(db):
     pat = _make_pattern(db)
     db.commit()
 
+    diag: dict = {}
     ids = fork_edge_learned_exit_variants(
         db,
         pat.id,
         edge_loss_report={"avg_losing_return": -0.8, "loss_count": 12},
+        diagnostics=diag,
     )
 
     assert ids == []
+    assert diag["skip_reason"] == "missing_edge_debt_report"
 
 
 def test_entry_variant_accepts_jsonb_rules_and_stores_child_jsonb(db):

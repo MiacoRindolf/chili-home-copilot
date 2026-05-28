@@ -658,6 +658,29 @@ def cash_deployment_null_lineage_candidates(
     return out
 
 
+_STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
+    {
+        "parent_missing_or_inactive",
+        "max_active_variants",
+        "non_positive_parent_realized_avg",
+        "missing_parent_payoff_geometry",
+        "learned_target_not_tighter_than_static",
+        "learned_stop_not_tighter_than_static",
+    }
+)
+_STRUCTURAL_EXIT_NOOP_PREFIXES = (
+    "insufficient_parent_payoff_samples:",
+    "reward_risk_below_floor:",
+)
+
+
+def _structural_exit_noop_reason(reason: Any) -> bool:
+    value = str(reason or "").strip().lower()
+    return value in _STRUCTURAL_EXIT_NOOP_REASONS or any(
+        value.startswith(prefix) for prefix in _STRUCTURAL_EXIT_NOOP_PREFIXES
+    )
+
+
 def _recent_noop_profitability_work(
     db: Session,
     *,
@@ -677,17 +700,25 @@ def _recent_noop_profitability_work(
     from ...models.trading import BrainWorkEvent
 
     cutoff = datetime.utcnow() - timedelta(minutes=minutes)
-    return (
-        db.query(BrainWorkEvent.id)
+    rows = (
+        db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.event_kind == "outcome")
         .filter(BrainWorkEvent.event_type == EXIT_VARIANT_DIAGNOSTIC)
         .filter(BrainWorkEvent.created_at >= cutoff)
         .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
-        .filter(BrainWorkEvent.payload["evidence_fingerprint"].astext == evidence_fingerprint)
-        .filter(BrainWorkEvent.payload["created_count"].astext == "0")
-        .first()
-        is not None
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+        .limit(20)
+        .all()
     )
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        if _safe_int(payload.get("created_count"), -1) != 0:
+            continue
+        if str(payload.get("evidence_fingerprint") or "") == evidence_fingerprint:
+            return True
+        if _structural_exit_noop_reason(payload.get("skip_reason")):
+            return True
+    return False
 
 
 def enqueue_cash_deployment_work(

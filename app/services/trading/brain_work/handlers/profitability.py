@@ -180,10 +180,12 @@ def handle_exit_variant_refresh(
     if pid is None:
         raise ValueError("exit_variant_refresh missing scan_pattern_id")
     report = _edge_debt_loss_reports(db, lookback_days=_window_days(ev)).get(pid)
+    variant_diag: dict[str, Any] = {}
     created_ids = fork_edge_learned_exit_variants(
         db,
         pid,
         edge_loss_report=report,
+        diagnostics=variant_diag,
     )
     payload = {
         "scan_pattern_id": pid,
@@ -192,6 +194,8 @@ def handle_exit_variant_refresh(
         "cash_deployment_category": _payload(ev).get("cash_deployment_category"),
         "evidence_fingerprint": _payload(ev).get("evidence_fingerprint"),
         "graduation_blocker": _payload(ev).get("graduation_blocker"),
+        "skip_reason": variant_diag.get("skip_reason"),
+        "variant_label": variant_diag.get("variant_label"),
         "created_child_ids": created_ids,
         "created_count": len(created_ids),
         "loss_report": report,

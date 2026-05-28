@@ -10077,12 +10077,25 @@ def fork_edge_learned_exit_variants(
     pattern_id: int,
     *,
     edge_loss_report: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[int]:
     """Create one learned-exit child from AutoTrader non-positive-edge evidence."""
     from ...models.trading import ScanPattern
 
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics.update(
+            {
+                "skip_reason": None,
+                "created_child_ids": [],
+                "created_count": 0,
+            }
+        )
+
     parent = db.get(ScanPattern, pattern_id)
     if not parent or not parent.active:
+        if diagnostics is not None:
+            diagnostics["skip_reason"] = "parent_missing_or_inactive"
         return []
 
     existing_children = (
@@ -10091,11 +10104,16 @@ def fork_edge_learned_exit_variants(
         .count()
     )
     if existing_children >= _MAX_ACTIVE_VARIANTS:
+        if diagnostics is not None:
+            diagnostics["skip_reason"] = "max_active_variants"
+            diagnostics["active_child_count"] = int(existing_children)
         return []
 
     report = edge_loss_report
     if report is None:
         report = _edge_debt_loss_reports(db).get(int(pattern_id))
+    if diagnostics is not None:
+        diagnostics["has_edge_loss_report"] = bool(report)
     cfg, reason = _learned_exit_config_from_edge_report(parent, report)
     if cfg is None:
         logger.info(
@@ -10103,6 +10121,8 @@ def fork_edge_learned_exit_variants(
             pattern_id,
             reason,
         )
+        if diagnostics is not None:
+            diagnostics["skip_reason"] = reason
         return []
 
     label = (
@@ -10117,6 +10137,10 @@ def fork_edge_learned_exit_variants(
         .first()
     )
     if existing:
+        if diagnostics is not None:
+            diagnostics["skip_reason"] = "duplicate_learned_exit_label"
+            diagnostics["variant_label"] = label
+            diagnostics["existing_child_id"] = int(existing.id)
         return []
 
     child = _create_variant_child(
@@ -10131,6 +10155,9 @@ def fork_edge_learned_exit_variants(
         edge_loss_report=report,
     )
     if child is None:
+        if diagnostics is not None:
+            diagnostics["skip_reason"] = "child_create_failed"
+            diagnostics["variant_label"] = label
         return []
     logger.info(
         "[edge_evolution] forked learned exit child=%s parent=%s label=%s rr=%s rejects=%s",
@@ -10141,7 +10168,13 @@ def fork_edge_learned_exit_variants(
         cfg.get("total_edge_rejects"),
     )
     db.commit()
-    return [int(child.id)]
+    created_ids = [int(child.id)]
+    if diagnostics is not None:
+        diagnostics["skip_reason"] = None
+        diagnostics["variant_label"] = label
+        diagnostics["created_child_ids"] = created_ids
+        diagnostics["created_count"] = len(created_ids)
+    return created_ids
 
 
 def fork_pattern_variants(
